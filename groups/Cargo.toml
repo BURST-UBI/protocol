@@ -1,0 +1,14 @@
+[package]
+name = "burst-groups"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Group Trust Layer — off-chain social verification groups"
+
+[dependencies]
+burst-types = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }

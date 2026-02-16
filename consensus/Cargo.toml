@@ -1,0 +1,13 @@
+[package]
+name = "burst-consensus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Consensus — double-spend resolution via Open Representative Voting (ORV)"
+
+[dependencies]
+burst-types = { workspace = true }
+burst-transactions = { workspace = true }
+burst-messages = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }

@@ -1,0 +1,14 @@
+[package]
+name = "burst-verification"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Unique Humanity Verification — endorsers, verifiers, challenges, modular verification"
+
+[dependencies]
+burst-types = { workspace = true }
+burst-brn = { workspace = true }
+burst-vrf = { workspace = true }
+burst-transactions = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }

@@ -1,0 +1,11 @@
+[package]
+name = "burst-work"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Anti-spam proof-of-work generation and validation"
+
+[dependencies]
+burst-types = { workspace = true }
+burst-crypto = { workspace = true }
+thiserror = { workspace = true }

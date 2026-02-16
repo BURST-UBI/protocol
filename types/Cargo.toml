@@ -1,0 +1,10 @@
+[package]
+name = "burst-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Fundamental types for the BURST protocol"
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }

@@ -1,0 +1,12 @@
+[package]
+name = "burst-brn"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "BRN computation engine — accrual, burning, staking, rate-change splitting"
+
+[dependencies]
+burst-types = { workspace = true }
+burst-crypto = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }

@@ -1,0 +1,15 @@
+[package]
+name = "burst-crypto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Cryptographic primitives for the BURST protocol (Ed25519, Blake2b)"
+
+[dependencies]
+burst-types = { workspace = true }
+ed25519-dalek = { workspace = true }
+blake2 = { workspace = true }
+rand = { workspace = true }
+x25519-dalek = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }

@@ -1,0 +1,13 @@
+[package]
+name = "burst-utils"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared utilities for the BURST protocol"
+
+[dependencies]
+burst-types = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }

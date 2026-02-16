@@ -1,0 +1,15 @@
+[package]
+name = "burst-transactions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "All BURST transaction types: burn, send, split, merge, endorse, challenge, governance, delegation"
+
+[dependencies]
+burst-types = { workspace = true }
+burst-crypto = { workspace = true }
+burst-brn = { workspace = true }
+burst-trst = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

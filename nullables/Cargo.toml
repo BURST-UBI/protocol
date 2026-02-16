@@ -1,0 +1,12 @@
+[package]
+name = "burst-nullables"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Nullable infrastructure for deterministic testing (clock, network, storage, random)"
+
+[dependencies]
+burst-types = { workspace = true }
+burst-store = { workspace = true }
+burst-vrf = { workspace = true }
+serde = { workspace = true }

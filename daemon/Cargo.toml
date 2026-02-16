@@ -1,0 +1,21 @@
+[package]
+name = "burst-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "BURST daemon — entry point, CLI, starts node + RPC + WebSocket servers"
+
+[[bin]]
+name = "burst-daemon"
+path = "src/main.rs"
+
+[dependencies]
+burst-node = { workspace = true }
+burst-rpc = { workspace = true }
+burst-websocket = { workspace = true }
+burst-types = { workspace = true }
+burst-utils = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }

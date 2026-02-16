@@ -1,0 +1,16 @@
+[package]
+name = "burst-rpc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "JSON-RPC server for wallet and external tool communication"
+
+[dependencies]
+burst-node = { workspace = true }
+burst-types = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }

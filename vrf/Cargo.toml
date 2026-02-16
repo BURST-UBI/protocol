@@ -1,0 +1,14 @@
+[package]
+name = "burst-vrf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Verifiable Random Function — phased approach: drand, commit-reveal, threshold VRF"
+
+[dependencies]
+burst-types = { workspace = true }
+burst-crypto = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }

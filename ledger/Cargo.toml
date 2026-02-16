@@ -1,0 +1,13 @@
+[package]
+name = "burst-ledger"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DAG block-lattice ledger — account chains, state blocks, pruning"
+
+[dependencies]
+burst-types = { workspace = true }
+burst-store = { workspace = true }
+burst-transactions = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }

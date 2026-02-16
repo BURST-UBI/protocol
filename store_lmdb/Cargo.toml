@@ -1,0 +1,12 @@
+[package]
+name = "burst-store-lmdb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LMDB storage backend for the BURST protocol"
+
+[dependencies]
+burst-types = { workspace = true }
+burst-store = { workspace = true }
+heed = { workspace = true }
+thiserror = { workspace = true }

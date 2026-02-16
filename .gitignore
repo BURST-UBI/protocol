@@ -1,0 +1,11 @@
+/target
+**/*.rs.bk
+Cargo.lock
+*.swp
+*.swo
+*~
+.env
+.idea/
+.vscode/
+*.log
+/references/

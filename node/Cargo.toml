@@ -1,0 +1,27 @@
+[package]
+name = "burst-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "BURST full node — orchestrates all protocol engines"
+
+[dependencies]
+burst-types = { workspace = true }
+burst-crypto = { workspace = true }
+burst-brn = { workspace = true }
+burst-trst = { workspace = true }
+burst-transactions = { workspace = true }
+burst-store = { workspace = true }
+burst-ledger = { workspace = true }
+burst-verification = { workspace = true }
+burst-vrf = { workspace = true }
+burst-consensus = { workspace = true }
+burst-work = { workspace = true }
+burst-governance = { workspace = true }
+burst-consti = { workspace = true }
+burst-messages = { workspace = true }
+burst-network = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }

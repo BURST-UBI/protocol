@@ -1,0 +1,15 @@
+[package]
+name = "burst-network"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "P2P networking — peer discovery, connections, sync, clock synchronization"
+
+[dependencies]
+burst-types = { workspace = true }
+burst-protocol = { workspace = true }
+burst-messages = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

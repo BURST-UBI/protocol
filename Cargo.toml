@@ -1,0 +1,89 @@
+[workspace]
+resolver = "2"
+members = [
+    "types",
+    "crypto",
+    "utils",
+    "brn",
+    "trst",
+    "transactions",
+    "store",
+    "store_lmdb",
+    "ledger",
+    "verification",
+    "vrf",
+    "consensus",
+    "work",
+    "governance",
+    "consti",
+    "messages",
+    "protocol",
+    "network",
+    "node",
+    "daemon",
+    "rpc",
+    "websocket",
+    "wallet_core",
+    "groups",
+    "nullables",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/BURST-UBI/burst-protocol"
+authors = ["Nitesh Gautam"]
+
+[workspace.dependencies]
+# Foundation
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1", features = ["full"] }
+
+# Crypto
+ed25519-dalek = { version = "2", features = ["serde", "rand_core"] }
+blake2 = "0.10"
+rand = "0.8"
+x25519-dalek = { version = "2", features = ["serde"] }
+
+# Storage
+heed = "0.20"
+
+# Networking
+axum = { version = "0.7", features = ["ws"] }
+tower = "0.5"
+reqwest = { version = "0.12", features = ["json"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Internal crates
+burst-types = { path = "types" }
+burst-crypto = { path = "crypto" }
+burst-utils = { path = "utils" }
+burst-brn = { path = "brn" }
+burst-trst = { path = "trst" }
+burst-transactions = { path = "transactions" }
+burst-store = { path = "store" }
+burst-store-lmdb = { path = "store_lmdb" }
+burst-ledger = { path = "ledger" }
+burst-verification = { path = "verification" }
+burst-vrf = { path = "vrf" }
+burst-consensus = { path = "consensus" }
+burst-work = { path = "work" }
+burst-governance = { path = "governance" }
+burst-consti = { path = "consti" }
+burst-messages = { path = "messages" }
+burst-protocol = { path = "protocol" }
+burst-network = { path = "network" }
+burst-node = { path = "node" }
+burst-rpc = { path = "rpc" }
+burst-websocket = { path = "websocket" }
+burst-wallet-core = { path = "wallet_core" }
+burst-groups = { path = "groups" }
+burst-nullables = { path = "nullables" }

@@ -1,0 +1,13 @@
+[package]
+name = "burst-trst"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "TRST lifecycle engine — minting, transfer, split, merge, expiry, revocation, merger graph"
+
+[dependencies]
+burst-types = { workspace = true }
+burst-crypto = { workspace = true }
+burst-brn = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }

@@ -1,0 +1,13 @@
+[package]
+name = "burst-governance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Democratic governance — 4-phase proposals, voting, delegation, parameter amendments"
+
+[dependencies]
+burst-types = { workspace = true }
+burst-brn = { workspace = true }
+burst-transactions = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }

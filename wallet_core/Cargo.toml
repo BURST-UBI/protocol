@@ -1,0 +1,15 @@
+[package]
+name = "burst-wallet-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Wallet core library — key management, BRN display, TRST portfolio, tx building, delegation"
+
+[dependencies]
+burst-types = { workspace = true }
+burst-crypto = { workspace = true }
+burst-transactions = { workspace = true }
+burst-groups = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

@@ -1,0 +1,10 @@
+[package]
+name = "burst-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Abstract storage traits for the BURST protocol"
+
+[dependencies]
+burst-types = { workspace = true }
+thiserror = { workspace = true }
