@@ -7,9 +7,13 @@ description = "P2P networking — peer discovery, connections, sync, clock synch
 
 [dependencies]
 burst-types = { workspace = true }
+burst-crypto = { workspace = true }
 burst-protocol = { workspace = true }
 burst-messages = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
+bincode = { workspace = true }
+rand = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+getrandom = { workspace = true }

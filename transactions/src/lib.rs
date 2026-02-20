@@ -20,10 +20,13 @@ pub mod endorse;
 pub mod error;
 pub mod governance;
 pub mod merge;
+pub mod receive;
+pub mod reject_receive;
 pub mod representative;
 pub mod send;
 pub mod split;
 pub mod validation;
+pub mod verification_vote;
 
 use burst_types::{Signature, Timestamp, TxHash, WalletAddress};
 use serde::{Deserialize, Serialize};
@@ -41,7 +44,10 @@ pub enum Transaction {
     GovernanceVote(governance::GovernanceVoteTx),
     Delegate(delegate::DelegateTx),
     RevokeDelegation(delegate::RevokeDelegationTx),
+    Receive(receive::ReceiveTx),
     ChangeRepresentative(representative::ChangeRepresentativeTx),
+    RejectReceive(reject_receive::RejectReceiveTx),
+    VerificationVote(verification_vote::VerificationVoteTx),
 }
 
 impl Transaction {
@@ -58,7 +64,10 @@ impl Transaction {
             Self::GovernanceVote(tx) => &tx.hash,
             Self::Delegate(tx) => &tx.hash,
             Self::RevokeDelegation(tx) => &tx.hash,
+            Self::Receive(tx) => &tx.hash,
             Self::ChangeRepresentative(tx) => &tx.hash,
+            Self::RejectReceive(tx) => &tx.hash,
+            Self::VerificationVote(tx) => &tx.hash,
         }
     }
 
@@ -75,7 +84,10 @@ impl Transaction {
             Self::GovernanceVote(tx) => &tx.voter,
             Self::Delegate(tx) => &tx.delegator,
             Self::RevokeDelegation(tx) => &tx.delegator,
+            Self::Receive(tx) => &tx.receiver,
             Self::ChangeRepresentative(tx) => &tx.account,
+            Self::RejectReceive(tx) => &tx.rejecter,
+            Self::VerificationVote(tx) => &tx.voter,
         }
     }
 
@@ -92,7 +104,30 @@ impl Transaction {
             Self::GovernanceVote(tx) => tx.timestamp,
             Self::Delegate(tx) => tx.timestamp,
             Self::RevokeDelegation(tx) => tx.timestamp,
+            Self::Receive(tx) => tx.timestamp,
             Self::ChangeRepresentative(tx) => tx.timestamp,
+            Self::RejectReceive(tx) => tx.timestamp,
+            Self::VerificationVote(tx) => tx.timestamp,
+        }
+    }
+
+    /// Get the PoW nonce.
+    pub fn work(&self) -> u64 {
+        match self {
+            Self::Burn(tx) => tx.work,
+            Self::Send(tx) => tx.work,
+            Self::Split(tx) => tx.work,
+            Self::Merge(tx) => tx.work,
+            Self::Endorse(tx) => tx.work,
+            Self::Challenge(tx) => tx.work,
+            Self::GovernanceProposal(tx) => tx.work,
+            Self::GovernanceVote(tx) => tx.work,
+            Self::Delegate(tx) => tx.work,
+            Self::RevokeDelegation(tx) => tx.work,
+            Self::Receive(tx) => tx.work,
+            Self::ChangeRepresentative(tx) => tx.work,
+            Self::RejectReceive(tx) => tx.work,
+            Self::VerificationVote(tx) => tx.work,
         }
     }
 
@@ -109,7 +144,10 @@ impl Transaction {
             Self::GovernanceVote(tx) => &tx.signature,
             Self::Delegate(tx) => &tx.signature,
             Self::RevokeDelegation(tx) => &tx.signature,
+            Self::Receive(tx) => &tx.signature,
             Self::ChangeRepresentative(tx) => &tx.signature,
+            Self::RejectReceive(tx) => &tx.signature,
+            Self::VerificationVote(tx) => &tx.signature,
         }
     }
 }

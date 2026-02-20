@@ -9,3 +9,11 @@ description = "Anti-spam proof-of-work generation and validation"
 burst-types = { workspace = true }
 burst-crypto = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+proptest = { workspace = true }
+
+[[bench]]
+name = "work_bench"
+harness = false

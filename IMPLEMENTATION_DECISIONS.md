@@ -1,0 +1,2770 @@
+# BURST Implementation Decisions
+
+Fill in your answers below each question. Where a default is suggested in **bold**, you can just write "default" or leave blank to accept it.
+
+---
+
+## 1. MVP Scope & Implementation Order
+
+### 1.1 What is the MVP?
+What's the minimum set of features to call it a working prototype? My suggested order:
+
+1. `types` + `crypto` (foundation — everything depends on these)
+2. `brn` (BRN computation — core of the protocol)
+3. `trst` + merger graph (TRST lifecycle)
+4. `transactions` (all tx types, validation)
+5. `store` + `store_lmdb` (persistence)
+6. `ledger` (DAG block-lattice)
+7. `work` (anti-spam PoW)
+8. `consensus` (double-spend resolution)
+9. `verification` (endorsers, verifiers, challenges)
+10. `vrf` (drand client — Phase 1 only)
+11. `governance` + `consti`
+12. `messages` + `protocol` + `network` (P2P)
+13. `node` + `daemon` (orchestration)
+14. `rpc` + `websocket` (APIs)
+15. `wallet_core`
+16. `groups`
+
+**Does this order work, or do you want to reshuffle?**
+
+Your answer:
+yes it works
+
+### 1.2 Should the MVP include networking (P2P), or start as a single-node local prototype?
+- **(a) Single-node first** — get all engines working locally, add networking later
+- (b) Multi-node from the start — build networking alongside core
+
+Your answer:
+a
+
+### 1.3 Should the MVP include governance, or defer it?
+- (a) Include governance in MVP
+- **(b) Defer governance** — hardcode initial parameters, add governance later
+
+Your answer:
+b
+
+---
+
+## 2. Performance & Hardware Targets
+
+### 2.1 Target confirmation latency
+How fast should a transaction confirm (from publish to cemented)?
+- **(a) Sub-second** for non-conflicting transactions (like Nano)
+- (b) 1-3 seconds
+- (c) Under 10 seconds
+- (d) No specific target for MVP
+
+Your answer:
+a
+
+### 2.2 Target throughput
+How many transactions per second should the network handle?
+- **(a) 100+ TPS** for MVP (Nano does ~1000 TPS theoretical)
+- (b) 1000+ TPS
+- (c) No specific target for MVP — optimize later
+
+Your answer:
+a
+
+### 2.3 Node memory budget
+How much RAM should a node require?
+- **(a) Under 1 GB** for MVP
+- (b) Under 4 GB
+- (c) No target — depends on network size
+
+Your answer:
+a
+
+### 2.4 Minimum hardware requirements
+- **(a) Raspberry Pi 4** level (4 GB RAM, ARM, SSD recommended)
+- (b) Standard VPS (2 vCPU, 4 GB RAM, SSD)
+- (c) No target for MVP
+
+Your answer:
+a
+
+### 2.5 Disk requirements
+- **(a) SSD recommended**, HDD supported but slower
+- (b) SSD required (LMDB random I/O patterns perform poorly on HDD)
+- (c) No requirement
+
+Your answer:
+a
+
+---
+
+## 3. Licensing & Legal
+
+### 3.1 Open source license
+- **(a) MIT** — permissive, maximum adoption
+- (b) Apache 2.0 — permissive with patent protection
+- (c) GPL v3 — copyleft, forces derivatives to be open source
+- (d) Dual license — MIT + Apache 2.0 (like most Rust projects)
+
+Your answer:
+a
+
+### 3.2 Is TRST legally a currency, commodity, security, or utility token?
+This affects regulatory compliance. For the code:
+- **(a) Build it as a general-purpose protocol** — no compliance features baked in. Legal classification is jurisdiction-dependent and not our problem.
+- (b) Include optional compliance hooks (address blacklisting, transaction limits)
+- (c) Include OFAC/sanctions checking capability (configurable)
+
+Your answer:
+a
+
+---
+
+## 4. Cryptography, Keys & Addresses
+
+### 4.1 Key generation: from seed or raw?
+- **(a) BIP39 mnemonic** (24-word recovery phrase) → derive Ed25519 keypair. User-friendly, standard.
+- (b) Raw Ed25519 keypair generation (no mnemonic). Simpler but no recovery phrase.
+- (c) Both — support mnemonic but also allow raw key import.
+
+Your answer:
+a
+
+### 4.2 BIP44 coin type number
+Every cryptocurrency registers a coin type for HD wallet derivation (BIP44 path: `m/44'/coin_type'/account'/change/index`). Bitcoin is 0, Ethereum is 60, Nano is 165.
+- **(a) Use an unregistered high number for now** (e.g., `m/44'/9999'/0'/0/0`) — register officially later via SLIP-0044
+- (b) Use Nano's coin type (165) since we're DAG-inspired
+- (c) Pick a specific number now:
+
+Your answer:
+a
+
+### 4.3 Seed entropy
+- **(a) 256 bits** (24-word mnemonic, BIP39 standard)
+- (b) 128 bits (12-word mnemonic)
+- (c) Support both
+
+Your answer:
+a
+
+### 4.4 Key derivation for encrypted keystore
+What KDF for password-protecting the wallet file?
+- **(a) Argon2id** — memory-hard, state-of-the-art
+- (b) scrypt — well-established, used by Ethereum
+- (c) PBKDF2 — simplest, widely supported
+
+Your answer:
+a
+
+### 4.5 Address encoding
+The whitepaper says `brst_` prefix. What encoding for the public key portion?
+- (a) Base32 (like Nano's `nano_` addresses) — e.g., `brst_1a2b3c4d...`
+- **(b) Base58Check** (like Bitcoin) — e.g., `brst_5HueCGU8rMjxEXxiPuD5BDku4MkFqeZyd4dZ1jvhTVqvbTLvyTJ`
+- (c) Hex — e.g., `brst_0x1a2b3c4d...`
+- (d) Something else
+
+Your answer:
+a
+
+### 4.6 Address checksum
+How to detect typos in addresses?
+- **(a) Built into Base58Check** — last 4 bytes are a checksum (if using Base58Check encoding)
+- (b) Separate checksum bytes appended
+- (c) Blake2b of the public key, take first 5 bytes as checksum, encode as part of the address
+
+Your answer:
+c
+whatever is the best
+
+### 4.7 Hash function output size
+Blake2b supports variable output. Nano uses 256-bit (32 bytes).
+- **(a) 256-bit / 32 bytes** (same as Nano)
+- (b) 512-bit / 64 bytes
+
+Your answer:
+a
+
+### 4.8 Signature malleability protection
+Ed25519 signatures can be malleable (same message, different valid signatures). Should the protocol canonicalize signatures?
+- **(a) Yes** — reject non-canonical signatures (check that S < L, where L is the group order). Standard in modern Ed25519 implementations.
+- (b) No — accept any valid signature
+
+Your answer:
+a
+
+### 4.9 Hash of which fields constitutes the block hash?
+- **(a) All fields except signature and work** — hash the "signable" portion of the block. Signature signs this hash. Work is computed on this hash.
+- (b) All fields except work only — signature IS part of the hash
+- (c) All fields — work and signature included in the hash
+
+Your answer:
+a
+
+---
+
+## 5. BRN Engine
+
+### 5.1 Time precision
+BRN accrual is a function of time. What precision?
+- (a) Seconds (Unix timestamp) — **default**
+- (b) Milliseconds
+- (c) Ticks (abstract unit, not wall-clock)
+
+Your answer:
+a
+
+### 5.2 BRN amount representation
+How to represent BRN amounts internally?
+- **(a) u128 integer** representing the smallest unit (like satoshis or raw in Nano). Define a "raw" unit where e.g. 1 BRN = 10^18 raw.
+- (b) f64 floating point
+- (c) Fixed-point decimal (e.g., rust_decimal)
+
+Your answer:
+a
+mbrn and mtrst
+
+### 5.3 Initial BRN accrual rate (launch default)
+The whitepaper says this is democratically adjustable. But what's the starting value?
+- Suggestion: **1 BRN per hour per verified wallet** (= 24 BRN/day). This is just a placeholder — governance can change it.
+- Or specify your preferred rate:
+
+Your answer:
+1 BRN per hour per verified wallet (default)
+
+### 5.4 Does BRN accrual start from verification time, or from a global epoch?
+The whitepaper says `verified_at`. Just confirming:
+- **(a) From the moment the wallet is verified** (each wallet has different start time)
+- (b) From a global epoch (all wallets accrue from the same start time, but only after verification)
+
+Your answer:
+a
+
+### 5.5 Can you have outstanding BRN staked AND burn BRN at the same time?
+Example: Alice has 100 BRN, stakes 20 for verification. Can she burn the remaining 80?
+- **(a) Yes** — available BRN = accrued - burned - staked. You can burn anything not staked.
+- (b) No — staking locks the entire wallet from burns until the stake resolves
+
+Your answer:
+a
+
+### 5.6 Is there a maximum BRN balance?
+- **(a) No cap** — BRN accrues indefinitely (u128 is large enough for millennia)
+- (b) Cap at some amount (stops accruing once reached)
+- (c) Governance-configurable cap
+
+Your answer:
+a
+
+### 5.7 BRN rate change history — how many changes to store per wallet?
+Each rate change creates a new accrual segment. Over decades, this could grow.
+- **(a) Store all rate changes globally** (not per-wallet — all wallets use the same rate history)
+- (b) Store per-wallet (allows different rates per wallet — but this contradicts "equal for everyone")
+
+Your answer:
+a
+
+### 5.8 BRN staking lock period
+How long is BRN staked for during verification voting?
+- **(a) Until the verification process completes** (vote → outcome → stakes returned/forfeited)
+- (b) Fixed time period (e.g., 7 days)
+- (c) Until the cooldown after verification completes
+
+Your answer:
+a
+
+### 5.9 Can staked BRN be used for other stakes simultaneously?
+Alice stakes 20 BRN for verifying Bob. While that stake is active, can she stake another 20 BRN for verifying Charlie?
+- **(a) Yes** — multiple concurrent stakes allowed, as long as total staked ≤ available BRN
+- (b) No — one active stake at a time
+
+Your answer:
+a
+
+### 5.10 Should BRN balance be cached or always computed on-the-fly?
+BRN = rate × (now - verified_at) - burned - staked. This is a function of time, so it changes every second.
+- **(a) Compute on read** — no caching, calculate from (verified_at, rate_history, burned, staked) each time
+- (b) Cache with TTL — recompute every N seconds
+- (c) Cache the "last computed" balance and time, then add the delta
+
+Your answer:
+a
+however node doesnt have much use of calculating it often, just the wallet and for the wallet they can cache it yes
+
+### 5.11 BRN balance in RPC responses
+When the RPC returns account info, should it include the current BRN balance?
+- **(a) Yes** — compute and include it in the response (convenient for clients)
+- (b) No — return the components (verified_at, rate, burned, staked) and let the client compute
+
+Your answer:
+b
+
+### 5.12 BRN overflow protection
+A verified wallet accruing 1 BRN/hour = 10^18 raw/hour. After 1 million years that's ~8.76 × 10^27 raw. u128 max is ~3.4 × 10^38, so safe. But should we add explicit overflow checks?
+- **(a) Yes** — use `checked_mul` / `checked_add` everywhere. Return error on overflow.
+- (b) No — rely on u128 being large enough (it is for any realistic timeframe)
+
+Your answer:
+a
+
+---
+
+## 6. TRST Lifecycle & Merger Graph
+
+### 6.1 TRST amount representation
+Same as BRN? Or different?
+- **(a) Same as BRN** — u128 raw units, 1 TRST = 10^18 raw
+- (b) Different scale
+
+Your answer:
+a
+
+### 6.2 Default TRST expiry period (launch default)
+The whitepaper discusses everything from days to 200 years. The bootstrapping path suggests starting as "normal money" (infinite expiry). What's the launch default?
+- **(a) Infinite (no expiry)** — launch as normal money, governance enables expiry later
+- (b) 100 years
+- (c) 50 years
+- (d) Other:
+
+Your answer:
+a
+if infinite is too much, just a very high number yk
+
+### 6.3 TRST token ID generation
+What uniquely identifies a TRST token?
+- **(a) The hash of the transaction that created/split/merged it** (the tx hash IS the token ID)
+- (b) Separate UUID
+- (c) Sequential counter
+
+Your answer:
+a
+
+### 6.4 Merger graph storage
+- **(a) On-disk in LMDB** (persistent, survives restarts)
+- (b) In-memory only (rebuilt from ledger on startup)
+
+Your answer:
+a
+
+### 6.5 When TRST is split, do we create "change" automatically?
+Example: Alice has 100 TRST and wants to send 30 to Bob.
+- **(a) Two outputs**: 30 to Bob + 70 change back to Alice (UTXO-style)
+- (b) Balance decremented: Alice's token goes from 100 to 70, Bob gets a new 30 token (account-balance-style)
+
+Your answer:
+whatever nano does
+
+### 6.6 Can you send TRST to an unverified wallet?
+- (a) No — only verified wallets can receive TRST
+- **(b) Yes** — anyone can receive, but only verified wallets can send/burn
+- (c) Other:
+
+Your answer:
+b
+not sure if the speed will be compromised if we check for only verified wallets
+
+### 6.7 Can you send TRST to yourself?
+Needed for explicit merge/split operations.
+- **(a) Yes** — self-sends are valid (used for merge/split/reorganization)
+- (b) No — merge/split are special transaction types, not self-sends
+
+Your answer:
+a
+
+### 6.8 Can expired TRST be merged or split?
+- (a) No — expired TRST is completely frozen (can't do anything with it)
+- **(b) Merge only** — you can consolidate expired tokens for cleaner bookkeeping, but can't split
+- (c) Both merge and split are allowed on expired TRST (still non-transferable to others though)
+
+Your answer:
+b
+
+### 6.9 When governance changes the TRST expiry period, what happens to existing tokens?
+- **(a) Only new TRST** — tokens already minted keep their original expiry
+- (b) All TRST — existing tokens are retroactively updated to the new expiry
+- (c) Hybrid — existing tokens get the longer of (original expiry, new expiry), never shortened
+
+Your answer:
+the expiry is calculated from the time of its inception and the governance-defined expiry period, so if there is a change in governance-defined expiry period then the untransferrable trst can become transferrable again if the governance expiry period allows it
+
+### 6.10 Minimum transfer amount?
+- **(a) 1 raw** (the smallest representable unit — no minimum beyond that)
+- (b) Higher minimum (e.g., 1000 raw) to prevent dust attacks
+- (c) Configurable via governance
+
+Your answer:
+a
+
+### 6.11 Minimum burn amount?
+- **(a) 1 raw** (same as transfer)
+- (b) Higher minimum (e.g., 1 BRN = 10^18 raw)
+- (c) Configurable via governance
+
+Your answer:
+a
+
+### 6.12 Maximum tokens per merge operation?
+- (a) No limit
+- **(b) 256 tokens per merge** (prevents excessively large transactions)
+- (c) Other:
+
+Your answer:
+b
+
+### 6.13 TRST value demurrage curve
+How does TRST's market value decline as it approaches expiry? The protocol doesn't enforce this (market does), but the wallet software needs a reference curve for display and pricing suggestions.
+- **(a) Linear** — value decreases linearly from 100% at mint to 0% at expiry
+- (b) Exponential decay — faster decline near expiry
+- (c) Step function — full value until X% of lifetime, then drops
+- (d) No reference curve — leave entirely to market/third parties
+
+Your answer:
+a
+
+### 6.14 What happens to TRST held by a wallet that gets revoked (the holder, not the originator)?
+The whitepaper covers originator revocation. But if the HOLDER's wallet is revoked:
+- **(a) TRST they hold is frozen** — can't send it, but it's not revoked (the originator was legit)
+- (b) TRST is returned to senders somehow
+- (c) TRST is destroyed
+- (d) TRST remains valid and can be claimed by whoever proves they're the real human (re-verification path)
+
+Your answer:
+d
+
+### 6.15 Can revoked TRST be "un-revoked" if the originator wallet is later re-verified?
+- **(a) No** — revocation is permanent for those tokens. If re-verified, new BRN starts fresh.
+- (b) Yes — if the wallet is re-verified, previously revoked TRST becomes valid again
+
+Your answer:
+b
+
+### 6.16 What if TRST expires between a send block and the corresponding receive block?
+Alice sends TRST to Bob, but Bob doesn't publish a receive block before the TRST expires.
+- **(a) Expired pending TRST is returned to sender** (auto-cancel after expiry)
+- (b) Expired pending TRST is destroyed (nobody gets it)
+- (c) Bob can still receive it (expiry only matters for further transfers, not for receiving)
+
+Your answer:
+a
+
+### 6.17 TRST origin tracking for merged tokens
+When tokens from different origins are merged, the merged token needs to track all origins for proportional revocation. How?
+- **(a) Origin proportions map** — merged token stores `{origin_hash: proportion}` for each constituent origin
+- (b) Pointer to merge transaction — the merge tx itself lists the inputs, so just follow the chain
+- (c) Both (redundant but faster lookups)
+
+Your answer:
+b
+i was thinking the db will be way too big if we dont do (b) as there can be a lot of merges and merges of merges
+
+### 6.18 Proportional split rounding
+When revoking a merged token, proportional math may not divide evenly. E.g., 100 TRST that was 33.3% from origin A and 66.7% from origin B — revoke A → 33.3 TRST revoked. But raw amounts are integers.
+- **(a) Round down for the revoked portion** — holder keeps any fractional remainder (1 raw rounding error in their favor)
+- (b) Round up — protocol is strict, holder loses the fractional raw
+- (c) Track proportions as exact fractions (numerator/denominator) to avoid rounding entirely
+
+Your answer:
+b
+
+---
+
+## 7. TRST Revocation
+
+### 7.1 Revocation scope — which TRST is revoked?
+When wallet X is revoked (proven sybil):
+- **(a) All TRST ever minted by X** — every token where X is the origin, regardless of current holder
+- (b) Only TRST currently held by X
+- (c) All TRST minted by X that hasn't been "spent" by an honest party yet (partial — harder to implement)
+
+Your answer:
+a
+
+### 7.2 Revocation of merged TRST
+If TRST from origin X was merged with TRST from origin Y, and X is revoked:
+- **(a) Proportional reduction** — the merged token's value is reduced by X's proportion. E.g., if merged token was 60% X + 40% Y, holder loses 60%.
+- (b) Entire merged token is revoked (harsh but simpler)
+- (c) Split the merged token — the X portion is revoked, the Y portion becomes a new token
+
+Your answer:
+c
+essentially revoking will make the revoked trst untransferrable and y will be new portion without any part of x, and proportional ofc with harsh, so it should still be a proportional split in terms of amount
+
+### 7.3 Revocation notification to holders
+When TRST in your wallet is revoked:
+- **(a) Automatic notification** — the wallet detects the revocation and shows a message: "X TRST was revoked because origin wallet Z was deemed sybil"
+- (b) Silent — the balance just decreases, user must investigate why
+- (c) Both — balance decreases + notification
+
+Your answer:
+c
+
+### 7.4 Revocation finality
+Can a revocation be reversed (e.g., if the challenge outcome was wrong)?
+- **(a) No** — revocation is final. The wallet can re-verify and start earning fresh BRN.
+- (b) Yes — through a governance proposal or special "appeal" process
+- (c) Only if a meta-challenge is filed (challenge the challenge outcome)
+
+Your answer:
+c
+
+---
+
+## 8. Transaction Architecture
+
+### 8.1 Transaction model: UTXO-like or account-balance?
+Nano uses account-balance (each block updates the account's running balance). UTXO tracks individual "coins."
+- **(a) Account-balance model** (like Nano) — each state block has the account's new balance. Simpler.
+- (b) UTXO model — track individual TRST tokens as unspent outputs. More complex but natural for TRST's per-token metadata.
+- (c) Hybrid — account balances for BRN (computed anyway), UTXO for TRST (because each token has unique origin/expiry)
+
+Your answer:
+a
+
+### 8.2 Transaction encoding (on-disk and on-wire)
+- (a) JSON — human readable, larger
+- **(b) Bincode** — compact binary, fast, Rust-native
+- (c) Protocol Buffers (protobuf) — cross-language, schema evolution
+- (d) MessagePack — compact, cross-language
+- (e) Custom binary (like Nano)
+
+Your answer:
+b
+
+### 8.3 Send/Receive: one-phase or two-phase?
+Nano uses two-phase: sender publishes a "send" block, recipient publishes a "receive" block. The TRST sits as "pending" in between.
+- **(a) Two-phase** (like Nano) — sender sends, receiver must explicitly accept. Allows receiver to reject TRST (important for the fungibility trade-off — receivers may not want TRST from unknown origins).
+- (b) One-phase — send is instant, receiver gets it immediately with no opt-in.
+
+Your answer:
+a
+
+### 8.4 Burn transaction: does the receiver need to accept?
+When Alice burns BRN and Bob receives freshly minted TRST:
+- **(a) Two-phase** — Bob must publish a receive block (consistent with send model)
+- (b) One-phase — TRST appears in Bob's account immediately (since it's freshly minted, there's no origin risk)
+
+Your answer:
+a
+
+### 8.5 Should transactions support an optional memo/message field?
+- (a) No — keep transactions minimal, memos are off-chain
+- **(b) Yes** — optional UTF-8 memo field, max 256 bytes
+- (c) Yes — optional arbitrary data field, max 1024 bytes
+
+Your answer:
+a
+
+### 8.6 If memos are supported, are they encrypted?
+- **(a) Plaintext** — visible on the DAG (like Stellar memos)
+- (b) Encrypted — only sender and receiver can read (adds complexity)
+- (c) Optional encryption — sender chooses
+
+Your answer:
+no memo, wallet can have peer-to-peer way of communicating, or through proxy but doesnt make sense for that to be in db
+
+### 8.7 Should blocks have a "subtype" field for richer categorization?
+Beyond the main block_type (Send, Receive, etc.), should there be a subtype for application-level semantics?
+- (a) No — block_type is sufficient
+- **(b) Yes** — optional `subtype: u16` field. E.g., Send could have subtypes like "payment", "donation", "refund". Protocol ignores it, but apps can use it.
+
+Your answer:
+a
+
+---
+
+## 9. Block Format & Versioning
+
+### 9.1 State block format
+Nano's state block has: account, previous, representative, balance, link, signature, work.
+BURST needs additional fields. Which of these go IN the state block vs. being derived?
+
+In-block fields I'm proposing:
+- `account` (wallet address)
+- `previous` (hash of previous block in this account's chain, zero for open block)
+- `representative` (for ORV consensus)
+- `balance_brn_burned` (cumulative BRN burned — BRN balance is derived)
+- `balance_trst` (current TRST balance — or omit if UTXO)
+- `link` (context-dependent: send destination, receive source, burn receiver, etc.)
+- `origin` (for TRST transactions — hash of original burn tx)
+- `block_type` (enum: Open, Burn, Send, Receive, Merge, Split, Endorse, Challenge, Vote, Delegate, ChangeRep)
+- `signature`
+- `work` (anti-spam PoW)
+- `timestamp`
+
+**Any fields to add or remove?**
+
+Your answer:
+balance_burnt is better, and link is for where the TRST was before it arrived there, might need for merger graph for example, what is your opinion?
+
+### 9.2 Block version field
+Should blocks have a version number for future format changes?
+- **(a) Yes** — include a `version: u8` field in every block. Start at 1.
+- (b) No — use epoch blocks for upgrades instead
+
+Your answer:
+a
+
+### 9.3 Transaction extensibility
+Should transactions have an "extensions" or "extra data" field for future use?
+- **(a) Yes** — optional `extensions: Vec<u8>` field (empty for now, available for future protocol features)
+- (b) No — keep blocks minimal, add new fields via version bumps
+
+Your answer:
+b
+
+### 9.4 Signature scheme agility
+Should the protocol support multiple signature algorithms (not just Ed25519)?
+- **(a) Yes** — include a `sig_type: u8` field. Only Ed25519 (type 0) for now, but extensible.
+- (b) No — Ed25519 only, change via hard fork if ever needed
+
+Your answer:
+b
+
+### 9.5 Maximum block size in bytes?
+- **(a) 1 KB** (1024 bytes) — sufficient for all standard block types. Limits abuse.
+- (b) 4 KB — more room for extensions/memos
+- (c) No hard limit (rely on PoW for anti-spam)
+- (d) Other:
+
+Your answer:
+a
+
+### 9.6 Maximum pending receives per account
+Should there be a limit on how many unclaimed pending sends can target one account?
+- **(a) No limit** — PoW prevents spam
+- (b) 1,000 pending receives max — reject sends to accounts with full pending queues
+- (c) 10,000
+- (d) Configurable
+
+Your answer:
+a
+
+### 9.7 Pending receive timeout
+How long can a send sit unclaimed before it's returned to the sender?
+- **(a) No timeout** — pending forever until the receiver claims it or it expires (TRST expiry handles the economic case)
+- (b) 30 days — auto-return after that
+- (c) Configurable
+
+Your answer:
+a
+
+### 9.8 Maximum account chain depth
+Is there a limit on how many blocks a single account chain can have?
+- **(a) No limit** — chains grow indefinitely
+- (b) Limit (e.g., 1 million blocks per account)
+- (c) No limit but prunable — old blocks can be pruned if the node is in pruning mode
+
+Your answer:
+a
+
+### 9.9 Timestamp representation
+- **(a) u64 Unix seconds** — supports dates up to year 584 billion. More than enough.
+- (b) i64 Unix seconds — supports dates before 1970 (not needed, but standard in some ecosystems)
+- (c) u64 milliseconds — millisecond precision, supports dates up to year 584 million
+
+Your answer:
+a
+
+### 9.10 Endianness for binary serialization
+- **(a) Little-endian** — Rust's default, most hardware is LE
+- (b) Big-endian (network byte order) — traditional for protocols
+- (c) Let the serialization library decide (bincode uses LE by default)
+
+Your answer:
+a
+
+---
+
+## 10. DAG Ledger
+
+### 10.1 Genesis block
+The very first block in the entire network. What does it contain?
+- **(a) A special genesis block** created by the protocol creator, containing initial parameters and the creator's wallet as the first verified wallet.
+- (b) No special genesis — the creator's wallet open block is just a normal open block with the first endorsement.
+
+Your answer:
+a
+
+### 10.2 Ledger pruning: when to prune?
+- **(a) Configurable** — node operator sets pruning policy (e.g., prune expired TRST older than X days)
+- (b) Automatic — prune as soon as TRST expires
+- (c) Manual — only prune on explicit command
+
+Your answer:
+a
+
+### 10.3 Epoch blocks for protocol upgrades?
+Nano uses "epoch blocks" — special blocks signed by a designated account that upgrade all accounts to a new block format.
+- **(a) Yes** — support epoch blocks for future-proofing protocol upgrades
+- (b) No — handle upgrades via governance and node software updates only
+- (c) Decide later
+
+Your answer:
+a
+
+### 10.4 Can pruned history be recovered from peers?
+- **(a) Yes** — nodes can request historical blocks from full (non-pruned) nodes
+- (b) No — once pruned, gone forever for that node
+- (c) Only from designated archival nodes
+
+Your answer:
+a
+
+### 10.5 Maximum mempool/unchecked blocks size
+How many unconfirmed blocks can a node hold in memory?
+- **(a) 65,536 blocks** (64K)
+- (b) Configurable
+- (c) No limit (rely on PoW to prevent spam)
+
+Your answer:
+a
+
+### 10.6 Account chain fork handling
+If a node receives two blocks with the same `previous` hash (a fork):
+- **(a) Start an election immediately** — use ORV to determine the winning block
+- (b) Accept the first one seen, reject the second
+- (c) Hold both until consensus resolves
+
+Your answer:
+a
+
+### 10.7 Open block (first block in an account chain)
+What triggers the creation of the first block?
+- **(a) Receiving a pending send/burn** — the receive block IS the open block (like Nano)
+- (b) Explicit "open" transaction type
+- (c) Verification — the first block is created when the wallet is verified
+
+Your answer:
+a
+
+---
+
+## 11. Snapshots & Fast Sync
+
+### 11.1 Should the node support ledger snapshots for fast syncing new nodes?
+- **(a) Yes** — periodically create a snapshot (state at block height N), new nodes download snapshot + replay blocks after N
+- (b) No — always full replay from genesis (trustless but very slow for mature networks)
+- (c) Defer to post-MVP
+
+Your answer:
+a
+
+### 11.2 Snapshot trust model
+If snapshots are supported, how does a new node trust the snapshot?
+- **(a) Snapshot hash signed by a quorum of representatives** (same trust model as consensus)
+- (b) Snapshot provided by a trusted hardcoded source (less decentralized)
+- (c) Node validates snapshot against block hashes (verify Merkle root)
+
+Your answer:
+a
+
+### 11.3 Snapshot frequency
+- **(a) Every 10,000 blocks** (approximate, per-account chains make this tricky — maybe every N hours instead)
+- (b) Every 24 hours
+- (c) On-demand only (operator triggers snapshot creation)
+
+Your answer:
+c
+
+---
+
+## 12. ORV Consensus & Elections
+
+### 12.1 Voting weight for ORV
+Nano uses balance-weighted voting. BURST's governance is one-wallet-one-vote. What about consensus (double-spend resolution)?
+- (a) One-wallet-one-vote (consistent with governance)
+- **(b) Balance-weighted** (representatives with more delegated accounts have more weight, like Nano — better for fast consensus)
+- (c) Hybrid — balance-weighted for consensus, one-wallet-one-vote for governance
+
+Your answer:
+b
+
+### 12.2 Confirmation threshold
+- **(a) 67%** of online voting weight (same as Nano)
+- (b) Higher (e.g., 80%)
+- (c) Configurable via governance
+
+Your answer:
+c
+
+### 12.3 Default representative
+When a wallet doesn't explicitly set a representative:
+- **(a) Self-representative** (the wallet represents itself, like Nano)
+- (b) Protocol-assigned default representative
+
+Your answer:
+a
+
+### 12.4 Election lifecycle states
+Nano elections go through: passive → active → confirmed → cemented. Same for BURST?
+- **(a) Same as Nano**: Passive (no conflict seen) → Active (fork detected, votes requested) → Confirmed (quorum reached) → Cemented (finalized, never rolled back)
+- (b) Simplified: Unconfirmed → Confirmed → Cemented
+- (c) Other:
+
+Your answer:
+a
+
+### 12.5 Cementing policy
+When is a confirmed block permanently cemented (can never be rolled back)?
+- **(a) After 5 minutes of stable confirmation** (no competing forks)
+- (b) Immediately upon confirmation
+- (c) After N subsequent blocks are added to the account chain
+- (d) Configurable
+
+Your answer:
+same as nano, i think it had sub-second finality
+
+### 12.6 Vote-by-hash optimization
+Nano nodes can request votes for specific block hashes rather than sending full blocks.
+- **(a) Yes** — implement vote-by-hash for bandwidth efficiency
+- (b) No — always send full blocks with vote requests (simpler)
+- (c) Add later as optimization
+
+Your answer:
+a
+
+### 12.7 Representative weight recalculation frequency
+How often should the node recalculate which representatives have how much weight?
+- **(a) Every block** — recalculate on each ChangeRep or delegation change
+- (b) Every N seconds (e.g., every 60 seconds)
+- (c) On-demand — recalculate only when an election starts
+
+Your answer:
+a
+
+### 12.8 Minimum representative weight to vote
+Should there be a minimum weight threshold for a representative's vote to count?
+- **(a) No minimum** — even a self-representative with 1 delegation counts
+- (b) Minimum 0.1% of total online weight
+- (c) Configurable
+
+Your answer:
+a
+
+### 12.9 What counts as "online weight" for the quorum denominator?
+- **(a) Representatives that have voted in the last 5 minutes** (like Nano's online weight sampling)
+- (b) All representatives that are currently connected as peers
+- (c) All verified wallets (regardless of online status)
+
+Your answer:
+a
+
+### 12.10 Confirmation height tracking
+Nano tracks a "confirmation height" per account (the height below which all blocks are cemented). Same?
+- **(a) Yes** — store `confirmation_height` per account. Background processor cements blocks in order.
+- (b) No — cement individual blocks (track per-block confirmation status)
+
+Your answer:
+a
+
+### 12.11 Confirmation height processor
+A background task that processes confirmations in causal order (if A depends on B, confirm B first):
+- **(a) Yes** — dedicated background thread, processes in topological order. Bounded to 65536 pending confirmations.
+- (b) Inline — confirm as part of block processing (simpler but blocks the pipeline)
+
+Your answer:
+a
+
+### 12.12 Election timeout
+If an election doesn't reach quorum within a time limit:
+- **(a) 5 minutes** — election expires, can be restarted on next fork observation
+- (b) 1 minute
+- (c) 15 minutes
+- (d) No timeout — elections run until resolved
+
+Your answer:
+a
+
+### 12.13 Vote replay protection
+Can old votes be replayed to influence new elections?
+- **(a) Votes are per-election** — include the election ID (block hash pair) in the vote. Old votes are invalid for new elections.
+- (b) Votes include a timestamp — reject votes older than X
+- (c) Sequence number per representative — each new vote has a higher sequence number
+
+Your answer:
+a
+
+### 12.14 Equivocation detection
+What if a representative votes for BOTH sides of a fork?
+- **(a) Detect and penalize** — if a node receives conflicting votes from the same representative, broadcast the proof. Penalize by reducing their weight to 0 for X hours.
+- (b) Detect but no penalty — just ignore the later vote
+- (c) No detection — trust representatives to be honest
+
+Your answer:
+a
+
+### 12.15 Network partition recovery
+If the network splits into two partitions and they later reconnect:
+- **(a) The partition with more online weight wins** — blocks confirmed in the minority partition may be rolled back (if not yet cemented)
+- (b) No special handling — forks are resolved by normal ORV when the partitions reconnect
+- (c) Freeze and wait for manual intervention
+
+Your answer:
+a
+
+### 12.16 Minimum online weight for consensus to function
+Below what threshold of online weight should consensus be considered non-functional?
+- **(a) 60 million delegated weight units** (Nano uses this) — below this, elections don't confirm
+- (b) Percentage-based — below 10% of total delegated weight, consensus pauses
+- (c) No minimum — consensus works with whatever weight is online (risky for small networks)
+- (d) Configurable — start with no minimum for MVP/testnet
+
+Your answer:
+a
+
+### 12.17 What if there's only one representative?
+During early bootstrap with very few nodes:
+- **(a) Single rep = 100% of weight, can confirm alone** — acceptable during bootstrap
+- (b) Minimum 3 representatives required for any confirmation
+- (c) Bootstrap mode — relaxed requirements
+
+Your answer:
+a
+
+---
+
+## 13. Representatives
+
+### 13.1 Can any wallet be a representative, or must they opt in?
+- **(a) Any wallet** — if someone sets you as their representative, you are one. No opt-in needed. (Like Nano)
+- (b) Must opt in — publish a "register as representative" block
+
+Your answer:
+a
+
+### 13.2 Representative change cooldown
+Can you change your representative every block?
+- **(a) No cooldown** — change rep as often as you want (like Nano). Each ChangeRep is just a block.
+- (b) Cooldown — max 1 rep change per 24 hours
+- (c) Configurable
+
+Your answer:
+a
+
+### 13.3 What if your representative goes offline?
+- **(a) Nothing** — your weight simply doesn't vote until you change rep or they come back. The "online weight" denominator excludes them.
+- (b) Auto-fallback to a secondary representative
+- (c) Wallet prompts user to change representative
+
+Your answer:
+a
+
+### 13.4 Principal representative threshold
+Nano distinguishes "principal representatives" (>0.1% of online weight) who actively vote, from small reps who are silent. Same?
+- **(a) Yes** — only representatives above a minimum weight threshold (e.g., 0.1% of online weight) actively broadcast votes. Others are "passive."
+- (b) No — all representatives vote (more decentralized but more network traffic)
+- (c) Configurable threshold
+
+Your answer:
+a
+
+---
+
+## 14. Proof of Work & Anti-Spam
+
+### 14.1 PoW algorithm
+- **(a) Blake2b nonce search** (like Nano — find nonce where Blake2b(nonce || block_hash) has N leading zeros)
+- (b) Argon2 (memory-hard)
+- (c) Other:
+
+Your answer:
+a
+
+### 14.2 PoW difficulty
+- **(a) Same as Nano's current difficulty** (fffffff800000000 threshold)
+- (b) Lower (easier — faster transactions)
+- (c) Configurable via governance
+- (d) Adaptive (based on network load)
+
+Your answer:
+a
+
+### 14.3 PoW priority
+Should higher PoW difficulty get faster processing?
+- **(a) Yes** — like Nano, higher difficulty = higher priority in the processing queue
+- (b) No — all valid PoW is treated equally
+
+Your answer:
+a
+
+### 14.4 Pre-computed PoW
+Can PoW be computed in advance (before the transaction is created)?
+- **(a) Yes** — PoW is computed on the previous block hash, so it can be pre-cached for the next transaction
+- (b) No — PoW must be computed on the new block hash
+
+Your answer:
+a
+
+### 14.5 Rate limiting per account
+Beyond PoW, should there be per-account rate limits?
+- **(a) No** — PoW is sufficient anti-spam
+- (b) Yes — maximum N transactions per account per second/minute
+- (c) For new wallets only — spending limits for recently verified wallets (whitepaper mentions this)
+
+Your answer:
+a
+
+If (c), what's the limit for new wallets? E.g., **max 10 transactions per day for first 30 days**
+
+Your answer:
+
+### 14.6 Different difficulty for different block types?
+Should some block types require more PoW than others?
+- **(a) Same difficulty for all** — simpler
+- (b) Higher difficulty for send/burn (state-changing), lower for receive (just accepting)
+- (c) Higher for first block (open), normal for subsequent
+
+Your answer:
+a
+
+### 14.7 Work version
+Should PoW have a version field for future algorithm changes?
+- **(a) Yes** — `work_version: u8`. Version 1 = Blake2b. Future versions can use different algorithms.
+- (b) No — change via epoch blocks
+
+Your answer:
+a
+
+### 14.8 Work server protocol
+If work delegation is supported (question 40.2), what's the protocol?
+- **(a) RPC method** — `work_generate(block_hash, difficulty)` returns `{work: nonce}`. Same as Nano.
+- (b) Separate protocol
+- (c) Decide when implementing work delegation
+
+Your answer:
+a
+
+### 14.9 Account creation spam
+Creating accounts is free (just receive a pending send). Can someone create millions of empty accounts?
+- **(a) PoW on the open/receive block is the deterrent** — each account creation requires PoW, which costs compute
+- (b) Minimum opening balance — must receive at least X TRST to open an account
+- (c) No protection needed — accounts are cheap in storage (tiny entries in LMDB)
+
+Your answer:
+a
+
+### 14.10 Dust attack protection
+Someone sends 1 raw (smallest unit) to millions of accounts, creating pending receives that clog wallets.
+- **(a) PoW is sufficient** — each dust send requires PoW, making mass dust expensive
+- (b) Minimum send amount (e.g., 1000 raw)
+- (c) Wallet-side filtering — wallet ignores pending below a threshold
+- (d) Both (a) and (c)
+
+Your answer:
+a
+
+### 14.11 PoW stockpiling
+Someone pre-computes PoW for thousands of blocks over weeks, then submits them all at once.
+- **(a) PoW difficulty is per-block, not time-limited** — stockpiling is valid. The priority queue handles bursts (higher PoW = higher priority).
+- (b) PoW must reference a recent timestamp — reject PoW computed more than X hours ago
+- (c) Rate limiting per account prevents burst submission regardless of PoW stockpile
+
+Your answer:
+a
+
+---
+
+## 15. Verification System
+
+### 15.1 Initial parameter defaults (before governance exists)
+
+| Parameter | Suggested Default | Your Value |
+|---|---|---|
+| Endorsement threshold (how many endorsers needed) | **3 endorsers** | |
+| BRN burned per endorsement | **10 BRN** (10 hours of accrual) | |
+| Number of verifiers selected | **7 verifiers** | |
+| Verification threshold | **90% (6 out of 7)** | |
+| Verifier BRN stake amount | **20 BRN** | |
+| Maximum revotes | **3** | |
+| Challenge stake amount | **50 BRN** | |
+| Challenge reward (TRST) | **100 TRST** (or: proportional to revoked amount?) | |
+
+Your answers (fill in the table or write "defaults"):
+Endorsement threshold: 3, BRN burned per endorsement: 336 (~2 weeks), Number of verifiers selected: 7, Verification threshold: 90%, Verifier BRN stake amount: 500 (~3 weeks, recoverable), Maximum revotes: 3, Challenge stake amount: 1000 (~6 weeks), Challenge reward (TRST): min(1% of total revoked TRST, 2000 TRST)
+
+### 15.2 Genesis set
+How many initial wallets does the creator endorse directly?
+- **(a) Just the creator's wallet** — and they manually endorse the first few people
+- (b) A small genesis set (e.g., 10-50 wallets of known people)
+- (c) Other:
+
+Your answer:
+a
+
+### 15.3 "Neither" vote penalty
+The whitepaper says voting Neither excessively incurs penalties. What's the threshold?
+- **(a) Penalty after voting Neither on more than 50% of assigned verifications** in a rolling window
+- (b) Flat penalty per Neither vote
+- (c) Decide later
+
+Your answer:
+a
+this makes sense because you opt-in to be a verifier
+
+### 15.4 How does a wallet opt in to be a verifier?
+- **(a) Special "opt-in" transaction** on the DAG (publishable, revocable)
+- (b) Configuration flag in wallet software (not on-chain)
+- (c) Any wallet with sufficient BRN is automatically eligible
+
+Your answer:
+a
+
+### 15.5 Minimum requirements to be a verifier
+- **(a) Must be verified for at least X days** (e.g., 30 days) and have minimum BRN balance
+- (b) Any verified wallet can verify
+- (c) Must have successfully voted in at least N previous verifications
+
+Your answer:
+a
+not just BRN balance but also TRST transactions, meaning they have encountered real people to do transactions with
+
+If (a), what minimum age? **30 days**
+If (a), what minimum BRN balance? **50 BRN**
+
+Your answer:
+30 days
+
+### 15.6 Minimum requirements to be an endorser
+- **(a) Any verified wallet** can endorse (they just need enough BRN to burn)
+- (b) Must be verified for a minimum period
+- (c) Must not have endorsed a wallet that was later revoked (reputation requirement)
+
+Your answer:
+a
+
+### 15.7 MVP verification evidence — what's the concrete first method?
+The whitepaper says modular. But for the first implementation, what do verifiers actually look at?
+- (a) Video call with the wallet holder (Proof of Humanity style)
+- (b) Social media attestation (link wallet to unique social accounts)
+- **(c) Out-of-scope for protocol code** — the protocol just tracks endorsements and votes. How verifiers assess evidence is an off-chain/application concern.
+- (d) Simple challenge-response (prove you control the wallet)
+- (e) Other:
+
+Your answer:
+c
+
+### 15.8 Verification timeout
+How long do verifiers have to cast their votes once selected?
+- **(a) 7 days** (1 week)
+- (b) 3 days
+- (c) 14 days
+- (d) Configurable:
+
+Your answer:
+d
+7 days for now
+
+### 15.9 Do wallets need periodic re-verification?
+- **(a) No** — verified once, verified forever (unless challenged)
+- (b) Yes — must re-verify every X months/years
+- (c) Configurable via governance
+
+Your answer:
+a
+
+### 15.10 Can you endorse multiple wallets simultaneously?
+- **(a) Yes** — no limit (each endorsement is an independent BRN burn)
+- (b) Limited to N active endorsements at a time
+
+Your answer:
+b
+
+### 15.11 Can you be a verifier while your own wallet is being challenged?
+- (a) Yes — innocent until proven guilty
+- **(b) No** — suspended from verifier pool while under challenge
+- (c) Yes, but with reduced weight/trust
+
+Your answer:
+a
+
+### 15.12 What happens to endorsers if the wallet they endorsed is later revoked?
+The whitepaper says they lose their burned BRN (already gone). But:
+- **(a) No additional penalty** — the BRN burn was the cost, that's it
+- (b) Reputation hit — tracked and affects their eligibility to endorse in the future
+- (c) Additional BRN penalty
+
+Your answer:
+a
+
+### 15.13 Can a verifier see who endorsed the wallet they're verifying?
+- **(a) Yes** — endorsement transactions are public on the DAG
+- (b) No — endorser identities are hidden from verifiers to prevent collusion
+
+Your answer:
+b
+idk if its possible tho
+
+### 15.14 What if a verification vote exactly ties?
+E.g., 7 verifiers: 3 Legitimate, 3 Sybil, 1 Neither. No side reaches 90%.
+- **(a) Inconclusive** — trigger a revote with new verifiers (up to max revotes). If all revotes tie, default to rejected (not verified).
+- (b) Tie goes to the wallet — verified
+- (c) Tie goes against the wallet — rejected
+
+Your answer:
+a
+
+### 15.15 What if ALL verifiers vote Neither?
+- **(a) Same as inconclusive** — trigger revote. Verifiers may be penalized if this is excessive.
+- (b) Wallet is rejected
+- (c) Verification is cancelled — wallet must re-collect endorsements
+
+Your answer:
+a
+
+### 15.16 What if a selected verifier never votes (goes offline)?
+- **(a) Wait for timeout, then proceed with votes received** — quorum calculation uses votes cast, not verifiers selected
+- (b) Replace the absent verifier with a new VRF selection
+- (c) Extend the deadline once, then proceed without them
+
+Your answer:
+a
+he defaults to vote for neither
+
+### 15.17 What if an endorser's wallet is revoked during an ongoing verification they endorsed?
+Alice endorsed Bob. While Bob's verification is in progress, Alice gets revoked.
+- **(a) Alice's endorsement is invalidated** — Bob may fall below the endorsement threshold, pausing verification until new endorsements arrive
+- (b) Endorsement stands — it was valid when submitted, and the BRN was already burned
+- (c) Verification is cancelled entirely
+
+Your answer:
+a
+
+### 15.18 Circular endorsement prevention
+Can Alice endorse Bob, and Bob endorse Alice?
+- **(a) Allowed** — endorsements are just BRN burns. The verification process (independent verifiers) prevents collusion anyway.
+- (b) Prohibited — detect and reject circular endorsements
+- (c) Allowed but flagged — verifiers see a warning
+
+Your answer:
+a
+but it also doesnt make sense because someone verified is required to endorse anyway
+
+---
+
+## 16. Endorsements
+
+### 16.1 Do endorsements expire?
+Once Alice endorses Bob (burning BRN), does that endorsement count forever?
+- **(a) Yes, forever** — the burned BRN is gone. The endorsement is a permanent record on the DAG.
+- (b) No — endorsements expire after X months. Must be re-endorsed periodically.
+
+Your answer:
+a
+
+### 16.2 Can an endorsement be revoked by the endorser?
+Alice endorsed Bob. Later Alice thinks Bob might be a sybil. Can she "un-endorse"?
+- **(a) No** — endorsements are permanent. Alice already burned the BRN. She can challenge Bob instead.
+- (b) Yes — publish a "revoke endorsement" block. Doesn't refund BRN but removes the endorsement count.
+
+Your answer:
+a
+
+### 16.3 Endorsement ordering
+Must endorsements reach the threshold before verifiers are selected, or can they happen concurrently?
+- **(a) Sequential** — all required endorsements must be confirmed before VRF selects verifiers
+- (b) Concurrent — endorsements and verifier selection happen in parallel (faster but more complex)
+
+Your answer:
+a
+
+### 16.4 Double-endorsement prevention
+Can the same endorser endorse the same wallet twice?
+- **(a) No** — one endorsement per endorser per wallet
+- (b) Yes — but each endorsement still costs BRN
+
+Your answer:
+a
+
+### 16.5 Self-endorsement
+Can a wallet endorse itself?
+- **(a) No** — must be a different verified wallet
+- (b) Yes (but it still costs BRN, so it's economically discouraged)
+
+Your answer:
+a
+
+### 16.6 Endorser-verifier conflict of interest
+Can someone who endorsed a wallet also be selected as a verifier for that same wallet?
+- **(a) No** — endorsers are excluded from the verifier pool for that wallet
+- (b) Yes — the VRF selection doesn't filter endorsers
+
+Your answer:
+a
+
+---
+
+## 17. Challenges
+
+### 17.1 Challenge evidence submission
+When someone challenges a wallet, do they need to provide evidence?
+- **(a) No** — the stake IS the commitment. The challenge triggers re-verification where new verifiers assess independently.
+- (b) Yes — challenger must submit evidence (links, screenshots, etc.) that verifiers review
+- (c) Optional — evidence can be attached but isn't required
+
+Your answer:
+c
+
+### 17.2 Challenge outcome notification
+How are affected parties notified of challenge results?
+- **(a) On-chain** — the outcome is a block (or special transaction) visible to all
+- (b) WebSocket notification to subscribed wallets
+- (c) Both
+
+Your answer:
+c
+
+### 17.3 What happens to pending transactions during a challenge?
+If wallet X is being challenged, can X still send/receive?
+- **(a) Yes** — innocent until proven guilty. All operations continue normally.
+- (b) Sends are frozen, receives still work
+- (c) Everything is frozen until challenge resolves
+
+Your answer:
+a
+
+### 17.4 Challenge resolution verifiers — same pool or different?
+Are the verifiers for a challenge selected from the same pool as original verification?
+- **(a) Same pool** — any eligible verifier, but excluding the original verifiers for that wallet
+- (b) Same pool, including original verifiers (they might have new information)
+- (c) Special "appeals" pool of more experienced verifiers
+
+Your answer:
+b
+
+### 17.5 Revocation propagation speed
+When a wallet is revoked, how quickly must all nodes invalidate the affected TRST?
+- **(a) Immediately** — revocation is treated as a high-priority consensus message
+- (b) Best-effort — propagates like a normal block (sub-second in practice)
+- (c) Within N seconds (configurable SLA)
+
+Your answer:
+a
+
+### 17.6 Challenge spam prevention
+What prevents someone from challenging every wallet they see?
+- **(a) The stake itself** — challenging costs 50 BRN. If the challenge fails, they lose it. Economic deterrent.
+- (b) Rate limit — max N challenges per wallet per time period
+- (c) Both
+
+Your answer:
+a
+
+### 17.7 Concurrent challenges on the same wallet
+Can multiple people challenge the same wallet simultaneously?
+- **(a) No** — only one active challenge per wallet at a time. Second challenger must wait.
+- (b) Yes — multiple challenges can run in parallel (wastes resources but simpler)
+
+Your answer:
+a
+
+### 17.8 Can you challenge the genesis wallet(s)?
+- **(a) Yes** — genesis wallets are not special after the bootstrap phase. Same rules apply.
+- (b) No — genesis wallets are permanently immune
+
+Your answer:
+a
+
+---
+
+## 18. Verifier Reputation
+
+### 18.1 Should verifier accuracy be tracked?
+- **(a) Yes** — track how often a verifier's vote aligned with the final outcome. Published on-chain.
+- (b) Yes, but off-chain only (wallet software or explorer tracks it)
+- (c) No — verifiers are anonymous and interchangeable
+
+Your answer:
+c
+
+### 18.2 Does verifier reputation affect future selection?
+- **(a) No** — VRF selection is purely random among eligible verifiers (reputation is informational only)
+- (b) Yes — higher-reputation verifiers are weighted more heavily in selection
+- (c) Yes — low-reputation verifiers are excluded from the pool
+
+Your answer:
+a
+
+### 18.3 Verifier history storage
+- **(a) On-chain** — each vote is a block on the verifier's account chain
+- (b) Separate database — verifier stats stored in a dedicated LMDB table
+- (c) Derived — computed from the DAG on demand (no separate storage)
+
+Your answer:
+a
+
+---
+
+## 19. VRF & Randomness
+
+### 19.1 Phase 1 drand configuration
+- Default relay URL: **`https://api.drand.sh`**
+- Default chain hash: **`8990e7a9aaed2ffed73dbd7092123d6f289930540d7651336225dc172e51b2ce`** (mainnet unchained)
+- **Good?** Or use quicknet/testnet for dev?
+
+Your answer:
+that's good
+
+### 19.2 Verifier selection algorithm
+Given a random seed from VRF and a pool of eligible verifiers, how to select N?
+- **(a) Hash(seed || verifier_address) — sort by hash, take top N** (deterministic, verifiable)
+- (b) Weighted random sampling
+- (c) Other:
+
+Your answer:
+a
+
+### 19.3 What if the drand network goes down?
+Phase 1 depends on drand for randomness. If drand is unreachable:
+- **(a) Queue all verifications** — wait for drand to come back. No verifier selection until randomness is available.
+- (b) Fallback to local randomness (less secure but functional)
+- (c) Fallback to the last known drand round — use it for all pending selections (reduced randomness quality)
+
+Your answer:
+a
+
+### 19.4 Drand round mapping
+How to map a verification request to a specific drand round?
+- **(a) Use the next available drand round after the endorsement threshold is met** — deterministic and verifiable
+- (b) Use a specific future round (e.g., "use round N+10" where N is current round)
+- (c) Any round within a window (e.g., any round within 1 hour of endorsement completion)
+
+Your answer:
+a
+
+---
+
+## 20. Governance
+
+### 20.1 Initial governance parameters
+
+| Parameter | Suggested Default | Your Value |
+|---|---|---|
+| Proposal endorsement cost | **100 BRN** | |
+| Proposal window duration | **1 week** | |
+| Voting window duration | **2 weeks** | |
+| Cooldown duration | **1 week** | |
+| Parameter supermajority | **80%** | |
+| Consti supermajority | **90%** | |
+| Quorum (% of verified wallets that must vote) | **30%** | |
+
+Your answers:
+looks good
+Proposal endorsement cost: 100, Proposal window duration: 1 week, Voting window duration: 2 weeks, Cooldown duration: 1 week, Parameter supermajority: 80%, Consti supermajority: 90%, Quorum (% of verified wallets that must vote): 30%
+
+### 20.2 Which parameters are governable at launch?
+- **(a) All of them** — BRN rate, TRST expiry, verification thresholds, governance thresholds themselves
+- (b) Only economic parameters (BRN rate, TRST expiry) — defer governance meta-parameters
+- (c) Other subset:
+
+Your answer:
+a
+
+### 20.3 Can proposals be withdrawn by the proposer?
+- **(a) Yes** — during the Proposal phase only (before voting starts)
+- (b) No — once submitted, it goes through the full process
+- (c) Yes, at any phase (but endorsers don't get BRN back)
+
+Your answer:
+a
+
+### 20.4 Can you change your vote after casting?
+- **(a) No** — votes are final once cast
+- (b) Yes — can change until the voting period ends
+- (c) Yes, but changing costs additional BRN
+
+Your answer:
+a
+
+### 20.5 What happens if quorum isn't met?
+- **(a) Proposal fails** — treated as rejected, must be resubmitted
+- (b) Voting period extends (e.g., by 1 week)
+- (c) Quorum requirement is waived after extended period
+
+Your answer:
+a
+
+### 20.6 Can multiple proposals be active simultaneously?
+- **(a) Yes** — multiple proposals can be in different phases at the same time
+- (b) No — only one active proposal at a time (prevents conflicting changes)
+- (c) Yes, but conflicting proposals (changing the same parameter) are mutually exclusive
+
+Your answer:
+a
+
+### 20.7 Can a delegate re-delegate to someone else?
+- **(a) No** — delegation is direct only (A→B, but B can't delegate A's vote to C)
+- (b) Yes — transitive delegation (liquid democracy)
+
+Your answer:
+b
+yes but ofc delegation can always at any point of time be revoked
+
+### 20.8 Delegation scope
+- **(a) Blanket delegation** — delegate votes on all proposals
+- (b) Per-proposal delegation — choose delegate per proposal
+- (c) Per-parameter-category delegation — delegate economic decisions to X, verification decisions to Y
+
+Your answer:
+b
+per proposal and per-parameter both
+
+### 20.9 Can the same parameter be changed by multiple proposals in quick succession?
+Example: Proposal A changes BRN rate from 1 to 2. Before A activates, Proposal B changes BRN rate from 1 to 3.
+- **(a) Last one wins** — if B activates after A, the rate becomes 3 regardless of A
+- (b) Proposals reference the current value — B is invalid because it references rate=1 which A already changed
+- (c) Queue — proposals for the same parameter are processed sequentially
+
+Your answer:
+a
+
+### 20.10 Can governance change the governance rules themselves?
+E.g., can a proposal change the supermajority threshold for future proposals?
+- **(a) Yes** — but with the HIGHEST supermajority threshold (e.g., 95%). This is "meta-governance."
+- (b) No — governance rules are hardcoded and can only change via hard fork
+- (c) Yes, with the same thresholds as any other proposal
+
+Your answer:
+c
+
+### 20.11 Emergency governance
+What if a critical bug is discovered that needs an immediate parameter change?
+- **(a) No emergency mechanism** — go through normal governance. If it's truly urgent, node operators can coordinate an out-of-band hard fork.
+- (b) Emergency proposal type — reduced voting period (e.g., 24 hours), higher quorum
+- (c) Creator/foundation has emergency override power (centralized but practical during early phase)
+
+Your answer:
+b
+maybe 95%
+
+### 20.12 Governance participation incentive
+Is there a reward for voting on governance proposals?
+- **(a) No** — voting is a civic duty, no reward
+- (b) Small BRN boost for participating (e.g., 1% accrual bonus for active voters)
+- (c) Penalty for NOT voting (e.g., reduced BRN accrual for inactive wallets)
+
+Your answer:
+a
+
+---
+
+## 21. Constitution (Consti)
+
+### 21.1 Maximum amendment text length?
+- **(a) 10,000 characters** (roughly 2-3 pages)
+- (b) 50,000 characters
+- (c) No limit
+- (d) Other:
+
+Your answer:
+b
+
+### 21.2 What is the initial constitution?
+- **(a) A minimal bootstrap document** defining: what constitutes fraud, what evidence is acceptable for verification, basic participant rights (e.g., right to challenge, right to re-verify)
+- (b) Empty — community writes it from scratch
+- (c) A comprehensive document written by the creator
+
+Your answer:
+a
+
+### 21.3 Amendment format
+- **(a) Full text replacement** — each amendment is a complete new version of the affected section
+- (b) Diff-based — amendments specify additions/removals to existing text
+- (c) Append-only — amendments are added as new sections, old text is never modified
+
+Your answer:
+b
+
+### 21.4 Can amendments reference or modify other amendments?
+- **(a) Yes** — an amendment can repeal or modify a previous amendment
+- (b) No — amendments are independent
+- (c) Only repeal (can remove, but not modify)
+
+Your answer:
+b
+its kinda like git yk
+
+### 21.5 Constitution text encoding
+- **(a) UTF-8** — standard, supports all languages
+- (b) ASCII only
+- (c) Markdown-formatted UTF-8
+
+Your answer:
+a
+
+### 21.6 What about emoji in constitution amendments?
+- **(a) Allowed** — UTF-8 includes emoji. People can put what they want.
+- (b) Restricted to printable ASCII + common Unicode ranges (no emoji)
+
+Your answer:
+a
+
+### 21.7 Amendment language
+- **(a) No restriction** — any language. The community decides.
+- (b) English only (for global consistency)
+- (c) Multi-language — amendments must include English translation
+
+Your answer:
+a
+
+### 21.8 Constitution versioning
+- **(a) Sequential version numbers** — v1, v2, v3... Each amendment increments the version.
+- (b) Hash-based — each version is identified by the hash of its content
+- (c) Both — version number + content hash
+
+Your answer:
+a
+
+---
+
+## 22. Group Trust Layer
+
+### 22.1 Group registration — where does the directory live?
+- **(a) Public list on IPFS/web** — any group can register by publishing their endpoint
+- (b) On-chain registry (special transactions for registering groups)
+- (c) Hardcoded initial list + community-maintained JSON file
+
+Your answer:
+a
+
+### 22.2 Group query protocol
+The wallet queries a group to check if a TRST originator is a member.
+- **(a) Simple REST API**: `GET /verify/{wallet_address}` → `{"valid": bool, "score": float, "since": timestamp}`
+- (b) More complex protocol (challenge-response, signed responses)
+- (c) GraphQL
+
+Your answer:
+a
+
+### 22.3 Group response caching
+- **(a) Cache for 1 hour** — re-query after TTL expires
+- (b) Cache for 24 hours
+- (c) No caching — always query live
+- (d) Configurable TTL
+
+Your answer:
+c
+
+### 22.4 What if a trusted group goes offline?
+- **(a) Fallback to protocol-level verification only** (accept TRST if originator is protocol-verified)
+- (b) Reject TRST from that group's members until group is back online
+- (c) Use cached responses until they expire
+
+Your answer:
+a
+you can be part of multiple groups hence you can then consider the other one you trust, if you trust none, then yes personal currencies from one you trust. idk what you mean protocol-verified thats mandatory to even get BRN to make TRST
+
+### 22.5 Group trust policy defaults
+When a new wallet is set up, what's the default trust policy?
+- **(a) Accept all** — trust protocol-level verification only (no group checking)
+- (b) Require at least one group endorsement
+- (c) Configurable during wallet setup
+
+Your answer:
+c
+
+---
+
+## 23. P2P Networking
+
+### 23.1 P2P library
+- (a) Roll our own TCP (like RsNano)
+- **(b) Use rust-libp2p** — battle-tested, provides gossipsub, Kademlia, QUIC, hole-punching
+- (c) Decide later
+
+Your answer:
+a
+
+### 23.2 Default ports
+
+| Service | Suggested Port |
+|---|---|
+| P2P | **7075** (same as Nano) or **7175** |
+| RPC | **7076** or **7176** |
+| WebSocket | **7078** or **7178** |
+
+Your answer:
+looks good
+
+### 23.3 Message format (on-wire between nodes)
+- (a) Bincode
+- **(b) Protobuf** (better for cross-language compatibility and schema evolution)
+- (c) Custom binary (like Nano)
+
+Your answer:
+b
+
+### 23.4 Maximum peer connections?
+- **(a) 64** peers (similar to Nano)
+- (b) 128 peers
+- (c) Configurable
+
+Your answer:
+a
+
+### 23.5 Peer scoring and banning
+- **(a) Score-based** — peers lose score for misbehavior (sending invalid blocks, spam), banned at threshold
+- (b) Binary — peers are either trusted or banned
+- (c) No peer scoring in MVP
+
+Your answer:
+a
+
+### 23.6 Bootstrap nodes
+How does a new node find peers?
+- **(a) Hardcoded initial peer list** (DNS seeds or IP addresses) in the code, configurable in config
+- (b) DHT only (Kademlia) — no hardcoded peers
+- (c) Both — hardcoded seeds + DHT discovery
+
+Your answer:
+a
+
+### 23.7 Clock synchronization tolerance
+How many seconds of clock drift between nodes before a block's timestamp is rejected?
+- **(a) 60 seconds** (1 minute)
+- (b) 300 seconds (5 minutes)
+- (c) 10 seconds
+- (d) Configurable
+
+Your answer:
+a
+
+### 23.8 NAT traversal
+- (a) Required for MVP (use libp2p's hole-punching)
+- **(b) Not required for MVP** — assume nodes have public IPs or manual port forwarding
+- (c) Use relay nodes as fallback
+
+Your answer:
+b
+
+### 23.9 Transaction propagation strategy
+How are new blocks/transactions spread across the network?
+- **(a) Gossipsub** (pubsub — each node gossips to a subset of peers, epidemic spread)
+- (b) Flood (send to all connected peers)
+- (c) Directed propagation (send to representatives only, they fan out)
+
+Your answer:
+whatever nano does, do that for cases where im unsure or where it makes sense
+
+### 23.10 Block propagation priority
+When the network is congested, which blocks get propagated first?
+- **(a) Higher PoW difficulty first** (like Nano — incentivizes more PoW for priority)
+- (b) FIFO (first come, first served)
+- (c) Account balance weighted (higher-balance accounts get priority)
+
+Your answer:
+a
+
+### 23.11 Handshake protocol
+When two nodes connect:
+- **(a) Version exchange → cookie challenge → node ID verification** (like Nano — proves each node controls its keypair)
+- (b) Simple version exchange only
+- (c) Full TLS handshake (encrypted channel)
+
+Your answer:
+a
+
+### 23.12 Keepalive interval
+- **(a) Every 60 seconds** — send a keepalive message with a list of known peers
+- (b) Every 30 seconds
+- (c) Every 120 seconds
+- (d) Configurable
+
+Your answer:
+a
+
+### 23.13 Peer exchange
+Should keepalive messages include peer addresses (so nodes discover new peers)?
+- **(a) Yes** — include up to 8 random peers per keepalive (like Nano)
+- (b) No — use DHT only for peer discovery
+- (c) Both — peer exchange AND DHT
+
+Your answer:
+a
+
+### 23.14 Message deduplication
+How to avoid processing the same block/vote message twice?
+- **(a) Hash-based dedup** — maintain a rolling set of recently-seen message hashes (e.g., last 65536). Skip if already seen.
+- (b) Sequence numbers per peer
+- (c) Both
+
+Your answer:
+a
+
+### 23.15 Maximum message size on wire
+- **(a) 64 KB** — larger messages are rejected
+- (b) 1 MB
+- (c) Configurable
+- (d) No limit (framing handles it)
+
+Your answer:
+a
+
+### 23.16 Bandwidth throttling per peer
+- **(a) Yes** — limit each peer to X MB/s (e.g., 5 MB/s) to prevent a single peer from saturating the connection
+- (b) No — trust peers (they're scored and banned if abusive)
+- (c) Configurable
+
+Your answer:
+a
+
+### 23.17 Connection encryption
+- **(a) No encryption for MVP** — messages are public anyway (blocks, votes). Focus on authentication via node ID signatures.
+- (b) TLS/Noise protocol for all peer connections
+- (c) Optional — configurable
+
+Your answer:
+a
+
+---
+
+## 24. Storage, LMDB & Indexing
+
+### 24.1 LMDB database layout
+How many named databases within the LMDB environment?
+
+Proposed:
+- `accounts` — wallet address → account info (verification status, representative, balance, block count)
+- `blocks` — block hash → block data
+- `pending` — (destination, source_hash) → pending receive info
+- `frontiers` — wallet address → latest block hash
+- `merger_graph` — origin hash → list of merge references
+- `verification` — wallet address → verification state
+- `governance` — proposal hash → proposal state
+- `consti` — amendment hash → amendment state
+- `meta` — protocol parameters, node config
+
+**Any to add or remove?**
+
+Your answer:
+no
+
+### 24.2 LMDB map size (max database size)
+- **(a) 1 GB** for dev/testing
+- (b) 128 GB for production
+- (c) Configurable via node config
+
+Your answer:
+a
+
+### 24.3 Should the node maintain secondary indexes?
+Beyond the primary block/account storage, should the node build indexes for efficient queries?
+- **(a) Yes** — index by: account history (ordered), TRST by origin, TRST by expiry date, pending receives per account
+- (b) Minimal — only account history index
+- (c) No indexes — queries scan the raw data (slow but simpler)
+
+Your answer:
+whatever you think is best for burst
+
+### 24.4 TRST-by-origin index
+Should you be able to efficiently query "all TRST tokens that originated from wallet X"?
+- **(a) Yes** — essential for revocation (need to find all TRST to revoke when an origin is deemed sybil)
+- (b) Build on-demand during revocation (slower but no persistent index)
+
+Your answer:
+a
+
+### 24.5 TRST-by-expiry index
+Should you be able to efficiently query "all TRST tokens expiring in the next N days"?
+- **(a) Yes** — useful for wallets and for pruning
+- (b) Not needed at node level — wallet software handles this locally
+
+Your answer:
+a
+
+### 24.6 Block-by-timestamp range queries
+Should you be able to query "all blocks between time T1 and T2"?
+- **(a) Yes** — useful for block explorers and analytics
+- (b) No — blocks are indexed by hash and account, not by time
+
+Your answer:
+b
+
+---
+
+## 25. Node Operations
+
+### 25.1 Graceful shutdown behavior
+When a node shuts down:
+- **(a) Flush all pending writes to LMDB, close peer connections, save state**
+- (b) Just kill — LMDB is transaction-safe so no data loss
+
+Your answer:
+a
+
+### 25.2 Node modes
+Should the node support different operational modes?
+- **(a) Full node** (default) — stores everything, participates in consensus
+- **(b) Light node** — stores only own account chains, relies on full nodes for verification
+- **(c) Archival node** — full node that never prunes
+- Which to implement first? **Full node only for MVP**
+
+Your answer (which modes, and which first):
+a
+
+### 25.3 RPC authentication
+- **(a) No auth for MVP** — RPC is local-only by default (bind to 127.0.0.1)
+- (b) API key authentication
+- (c) Both — no auth for local, API key for remote
+
+Your answer:
+a
+i didnt understand this
+
+### 25.4 Telemetry / metrics
+- **(a) Prometheus-compatible metrics endpoint** (block count, peer count, confirmation time, etc.)
+- (b) No metrics for MVP
+- (c) Custom stats endpoint
+
+Your answer:
+a
+
+### 25.5 Thread pool sizing
+- **(a) Auto-detect** — use `num_cpus` crate, scale thread pools to available cores
+- (b) Fixed — hardcoded thread counts (e.g., 4 workers)
+- (c) Configurable in node config
+
+Your answer:
+a
+
+### 25.6 Async runtime
+- **(a) Tokio** — industry standard for async Rust
+- (b) async-std
+- (c) Synchronous only (no async) — simpler but limits concurrency
+
+Your answer:
+a
+
+### 25.7 Block processing concurrency
+Can multiple blocks from different accounts be processed in parallel?
+- **(a) Yes** — blocks on different account chains are independent. Parallel processing with per-account locks.
+- (b) No — sequential processing (simpler but slower)
+
+Your answer:
+a
+
+### 25.8 Maximum concurrent elections
+How many double-spend elections can run simultaneously?
+- **(a) 500** (similar to Nano)
+- (b) 100
+- (c) Configurable
+- (d) No limit
+
+Your answer:
+a
+
+### 25.9 Logging level default
+- **(a) Info** for release, Debug for dev
+- (b) Warn for release
+- (c) Configurable only
+
+Your answer:
+a
+
+### 25.10 Structured logging format
+- **(a) JSON structured logs** — machine-parseable, compatible with log aggregators (ELK, Loki)
+- (b) Human-readable text logs (with optional JSON mode)
+- (c) Both — configurable
+
+Your answer:
+a
+
+### 25.11 Should the node expose a debug RPC?
+Special RPC methods for debugging (dump internal state, trigger manual election, etc.):
+- **(a) Yes, but only when compiled in debug mode** (`#[cfg(debug_assertions)]`)
+- (b) Yes, always available but behind a config flag
+- (c) No — use logging only
+
+Your answer:
+a
+
+### 25.12 Block processing trace
+Should the node support detailed tracing of how a specific block was processed?
+- **(a) Yes** — tracing spans for: receive, validate, process, write, broadcast. Compatible with OpenTelemetry.
+- (b) Logging only — detailed log lines at TRACE level
+- (c) Not for MVP
+
+Your answer:
+a
+
+---
+
+## 26. Error Handling & Recovery
+
+### 26.1 What happens if LMDB gets corrupted?
+- **(a) Detect on startup, refuse to start, log instructions for recovery** (e.g., re-sync from network)
+- (b) Attempt automatic repair
+- (c) Both — try repair, fall back to re-sync if repair fails
+
+Your answer:
+a
+
+### 26.2 What if a node receives a block it can't validate yet (missing predecessor)?
+- **(a) Hold in "unchecked" buffer** — retry when predecessor arrives, timeout after X minutes
+- (b) Request predecessor from the sending peer immediately
+- (c) Both — request predecessor AND hold in buffer
+
+Your answer:
+a
+
+If (a) or (c), unchecked timeout? **15 minutes**
+
+Your answer:
+15 mins
+
+### 26.3 What if the node falls far behind the network (e.g., offline for weeks)?
+- **(a) Bootstrap mode** — download a recent ledger snapshot from peers, then catch up with individual blocks
+- (b) Replay all blocks from peers sequentially (slow but trustless)
+- (c) Both — snapshot for fast sync (optional), full replay for maximum trust
+
+Your answer:
+a
+
+### 26.4 What if PoW computation fails or takes too long?
+- **(a) Timeout after 30 seconds**, return error to the caller
+- (b) No timeout — keep trying indefinitely
+- (c) Configurable timeout
+
+Your answer:
+a
+
+### 26.5 Double-receive prevention
+What if a node processes the same receive block twice (e.g., during bootstrap replay)?
+- **(a) Idempotent** — if the block already exists, silently skip. Detected by checking block hash existence.
+- (b) Return error on duplicate
+
+Your answer:
+a
+
+---
+
+## 27. Bootstrapping & Network Launch
+
+### 27.1 Bootstrapping the very first verified wallets
+The creator's wallet is genesis-verified. How do the first few users get verified when there aren't enough verifiers yet?
+- **(a) Creator acts as sole verifier** for the first N wallets (e.g., first 50). After that, normal verification kicks in.
+- (b) Reduced verification requirements during bootstrap (e.g., only 1 verifier needed instead of 7)
+- (c) Trust-on-first-use — first N wallets are auto-verified by endorsement alone (no verifier step)
+- (d) Other:
+
+Your answer:
+a
+
+### 27.2 Bootstrap duration / exit criteria
+When does the "bootstrap phase" end and normal rules apply?
+- **(a) After N verified wallets exist** (e.g., 100 wallets)
+- (b) After X time (e.g., 6 months)
+- (c) Manual flag — creator publishes a "bootstrap complete" transaction
+- (d) Gradual — requirements scale up as the network grows (e.g., need 1 verifier at 10 wallets, 3 at 50, 7 at 100+)
+
+Your answer:
+a
+50 wallets
+
+### 27.3 Testnet vs mainnet genesis
+- **(a) Separate genesis blocks** — testnet has its own genesis, completely independent chain
+- (b) Same genesis, different network ID byte
+- (c) Testnet is just a flag in config, same code
+
+Your answer:
+a
+
+### 27.4 Network identifier
+How to distinguish testnet from mainnet at the protocol level?
+- **(a) Network ID byte** in every message (e.g., 0x01 = mainnet, 0x02 = testnet, 0x03 = devnet)
+- (b) Different address prefix (e.g., `brst_` for mainnet, `brst_test_` for testnet)
+- (c) Both
+
+Your answer:
+a
+
+### 27.5 Testnet TRST/BRN — accelerated parameters?
+Should testnet have faster BRN accrual and shorter TRST expiry for testing?
+- **(a) Yes** — e.g., 100x faster BRN accrual, 1-hour TRST expiry
+- (b) Same as mainnet (test with real parameters)
+- (c) Configurable per-network
+
+Your answer:
+a
+
+---
+
+## 28. RPC API
+
+### 28.1 RPC style
+- (a) REST-like (HTTP verbs, resource URLs)
+- **(b) JSON-RPC** (like Nano — POST to single endpoint with `action` field)
+- (c) gRPC (Protobuf-based)
+- (d) All of the above (JSON-RPC primary, REST wrapper, gRPC optional)
+
+Your answer:
+b
+
+### 28.2 Pagination for list endpoints
+When querying account history, pending blocks, etc.:
+- **(a) Cursor-based pagination** — pass `cursor` and `count`
+- (b) Offset-based — pass `offset` and `limit`
+- (c) Head/tail only — `count` most recent, with optional `head` hash
+
+Your answer:
+a
+
+### 28.3 Should RPC support batch requests?
+- **(a) Yes** — accept array of requests, return array of responses
+- (b) No — one request per HTTP call
+
+Your answer:
+a
+
+### 28.4 RPC rate limiting
+- **(a) No rate limiting for MVP** (local-only binding is sufficient protection)
+- (b) Configurable rate limits per IP
+- (c) Token bucket rate limiting
+
+Your answer:
+a
+
+### 28.5 Which RPC methods are "dangerous" and should be restricted?
+Some methods modify state (send, receive, burn) while others are read-only (account_info, block_info).
+- **(a) Separate "safe" and "unsafe" methods** — unsafe methods can be disabled via config
+- (b) All methods available, no distinction
+- (c) Require additional auth for unsafe methods
+
+Your answer:
+a
+
+---
+
+## 29. WebSocket API
+
+### 29.1 Subscription model
+- **(a) Topic-based** — subscribe to topics like `confirmation`, `new_block`, `vote`, `verification`
+- (b) Account-based — subscribe to specific accounts
+- (c) Both — topic-based AND account-specific subscriptions
+
+Your answer:
+a
+
+### 29.2 Should WebSocket support filtered subscriptions?
+E.g., "notify me only about transactions involving account X" instead of all transactions.
+- **(a) Yes** — filter by account, block type, minimum amount
+- (b) No — clients filter locally
+- (c) Basic filters only (account filter)
+
+Your answer:
+a
+
+### 29.3 WebSocket reconnection
+If a client disconnects and reconnects, can they get missed events?
+- **(a) No** — events are fire-and-forget. Client must query RPC for missed events.
+- (b) Yes — server buffers N events per subscription, replays on reconnect
+- (c) Client sends "last_seen_id" on reconnect, server replays from there
+
+Your answer:
+a
+
+---
+
+## 30. Block Explorer & Tooling
+
+### 30.1 Is a block explorer in scope?
+- **(a) Not for MVP** — third parties can build explorers using RPC/WebSocket
+- (b) Basic built-in web UI (served by the node)
+- (c) Separate project — build after core is stable
+
+Your answer:
+a
+
+### 30.2 Should the RPC expose enough data for a block explorer?
+- **(a) Yes** — ensure RPC has: account history, block details, pending list, representative info, verification status, network stats
+- (b) Minimal — only what wallets need. Explorers need additional indexing.
+
+Your answer:
+a
+
+### 30.3 GraphQL API
+- **(a) Not for MVP** — JSON-RPC is sufficient
+- (b) Yes — GraphQL alongside JSON-RPC for flexible queries
+- (c) Instead of JSON-RPC (GraphQL as primary API)
+
+Your answer:
+a
+
+---
+
+## 31. Wallet
+
+### 31.1 Key storage
+- **(a) Encrypted keystore file** (password-protected JSON, like Ethereum keystores)
+- (b) Plain PEM files (like the current Python prototype)
+- (c) Both
+
+Your answer:
+a
+
+### 31.2 Wallet auto-merge behavior
+The whitepaper says wallets auto-merge TRST with similar expiry dates. How aggressive?
+- **(a) Merge tokens with expiry dates within 10% of each other** (e.g., tokens expiring between 90-100 days are merged)
+- (b) Never auto-merge (user controls all merges)
+- (c) Merge everything (single TRST balance, earliest expiry wins)
+
+Your answer:
+a
+auto merge with user-set limits, give option for slider from 0 to 100
+
+### 31.3 Multiple accounts per wallet?
+Nano wallets can derive multiple accounts from one seed.
+- (a) Single account per wallet (1 seed = 1 address)
+- **(b) Multiple accounts** (1 seed = many addresses via derivation path). Simpler key management.
+
+Your answer:
+i think its hard to prevent sybil like this, unless there is a mechanism to link wallets as yours
+
+### 31.4 Transaction history storage (client side)
+- **(a) Full history** — wallet stores all transactions it's ever made
+- (b) Pruned — only keep last N transactions locally (full history on-chain)
+- (c) Configurable
+
+Your answer:
+b
+
+### 31.5 Pending receive behavior
+When TRST is sent to your wallet (two-phase model), should the wallet auto-accept?
+- (a) Auto-accept everything (publish receive blocks automatically)
+- **(b) Auto-accept by default, with configurable reject rules** (e.g., reject TRST from unknown origins, require group trust check)
+- (c) Manual accept only
+
+Your answer:
+b
+
+### 31.6 Wallet backup format
+- **(a) Mnemonic phrase only** — wallet can be fully reconstructed from 24 words
+- (b) Encrypted file backup
+- (c) Both
+
+Your answer:
+a
+
+### 31.7 Can the same wallet be open on multiple devices simultaneously?
+- **(a) Yes, but read-only on all but one** — only one device can sign transactions at a time
+- (b) Yes, fully concurrent — devices must sync state (complex)
+- (c) No — wallet file is locked, second device gets an error
+- (d) Yes, but transactions from multiple devices may conflict (user's problem to manage)
+
+Your answer:
+a
+
+### 31.8 Wallet state synchronization
+If the wallet is used on device A, how does device B learn about the new transactions?
+- **(a) Query the node** — device B refreshes its state from the network
+- (b) Peer-to-peer sync between devices (encrypted channel)
+- (c) Both
+
+Your answer:
+a
+
+### 31.9 Can transactions be created offline?
+- **(a) Partially** — you can sign a transaction offline if you know your current frontier hash, but PoW and submission require connectivity
+- (b) Fully — pre-compute PoW for known frontier, sign, then submit when online
+- (c) No — must be connected to create transactions
+
+Your answer:
+b
+
+### 31.10 Work delegation
+Can PoW computation be delegated to another machine/service?
+- **(a) Yes** — wallet sends the block hash to a "work server", receives nonce back (like Nano's work_generate RPC)
+- (b) No — PoW must be computed locally
+
+Your answer:
+a
+
+### 31.11 Multi-signature support
+Should the protocol support multi-sig wallets (e.g., 2-of-3 signatures required)?
+- **(a) Not for MVP** — add later as a protocol extension
+- (b) Yes — include multi-sig as a block type from day one
+- (c) Never — multi-sig is out of scope for a UBI protocol
+
+Your answer:
+a
+
+### 31.12 Time-locked transactions
+Should the protocol support transactions that can only be claimed after a certain time?
+- **(a) Not for MVP**
+- (b) Yes — include a `lock_until` timestamp field
+- (c) Never needed
+
+Your answer:
+a
+
+### 31.13 Conditional transactions (escrow)
+Should the protocol support escrow or conditional transfers?
+- **(a) Not for MVP**
+- (b) Yes — escrow block type
+- (c) Out of scope — use off-chain escrow services
+
+Your answer:
+a
+
+---
+
+## 32. Display & UX
+
+### 32.1 Decimal places for display
+Internally everything is u128 raw. How many decimal places when displaying to users?
+- **(a) 18 decimals** (1 BRN = 10^18 raw, like ETH wei). Display "1.000000000000000000 BRN"
+- (b) 8 decimals (like BTC satoshis). 1 BRN = 10^8 raw
+- (c) 6 decimals (like USDC). 1 BRN = 10^6 raw
+- (d) Other:
+
+Your answer:
+a
+
+### 32.2 Display units — should there be named sub-units?
+Bitcoin has BTC, mBTC, μBTC, satoshi. Should BURST have named sub-units?
+- (a) No — just BRN and TRST, show decimals
+- **(b) Yes** — define e.g. "raw" (smallest), "milli" (10^-3), etc.
+- (c) Decide later — not important for protocol code
+
+Your answer:
+c
+
+### 32.3 Negative balances — how to display "you can't afford this"
+When a user tries to burn more BRN than they have available:
+- **(a) Pre-validate and show error message** before creating the transaction
+- (b) Let the transaction fail at validation and show the rejection reason
+
+Your answer:
+a
+
+### 32.4 TRST age/freshness indicator
+Should wallets show how "fresh" TRST is (time remaining until expiry)?
+- **(a) Yes** — show a colored indicator (green = >75% lifetime, yellow = 25-75%, red = <25%)
+- (b) Just show the expiry date, no color coding
+- (c) Configurable
+
+Your answer:
+c
+
+### 32.5 QR code format for addresses
+- **(a) Just the address string** — `brst_abc123...`
+- (b) URI format — `burst:brst_abc123?amount=100&label=Coffee`
+- (c) Both — plain QR for address, URI QR for payment requests
+
+Your answer:
+c
+
+### 32.6 URI scheme for payment requests
+- **(a) `burst:`** — e.g., `burst:brst_abc123?amount=100`
+- (b) `brst:` — e.g., `brst:brst_abc123?amount=100`
+- (c) Other:
+
+Your answer:
+a
+
+### 32.7 On-chain aliases/naming system?
+Should wallets be able to register human-readable names (like ENS on Ethereum)?
+- (a) Yes — on-chain name registry
+- **(b) No** — out of scope. Third-party naming services can build on top.
+- (c) Reserve the capability (include a "register name" block type) but don't implement the registry yet
+
+Your answer:
+b
+
+### 32.8 Address book
+Should the wallet software support a local address book?
+- **(a) Yes** — local-only, not on-chain. Map addresses to nicknames.
+- (b) No — users manage contacts externally
+
+Your answer:
+a
+
+---
+
+## 33. Economics, Incentives & Privacy
+
+### 33.1 What if BRN rate is voted to 0?
+The whitepaper says r=0 means "normal money" (no UBI). This is valid. But:
+- **(a) BRN accrual stops for everyone, but existing BRN remains and can still be burned**
+- (b) BRN accrual stops AND existing BRN is frozen
+- (c) Not allowed — minimum BRN rate enforced
+
+Your answer:
+a
+
+### 33.2 What if TRST expiry is voted to 0?
+The whitepaper says e=0 means "full communism" (TRST expires instantly). But practically:
+- **(a) TRST becomes non-transferable immediately after minting** (only the original receiver can hold it, as expired)
+- (b) Not allowed — minimum expiry enforced (e.g., 1 day)
+- (c) Allowed but warning — governance can set it, community deals with consequences
+
+Your answer:
+a
+
+### 33.3 What if TRST expiry is voted to infinity?
+- **(a) TRST never expires** — equivalent to "normal money." Valid configuration.
+- (b) Maximum expiry enforced (e.g., 1000 years)
+
+Your answer:
+a
+
+### 33.4 Pending TRST and expiry
+Does TRST that's "pending" (sent but not yet received) count toward the sender's or receiver's balance for expiry purposes?
+- **(a) Neither** — pending TRST is in limbo. Expiry clock still ticks based on origin timestamp.
+- (b) Still counts as sender's until received
+
+Your answer:
+b
+
+### 33.5 Why would someone run a representative node?
+Nano relies on business incentives (merchants run nodes for fast confirmation). BURST's answer:
+- **(a) Same as Nano** — altruism, business interest, philosophical alignment. No protocol-level incentive.
+- (b) Representatives earn a small TRST reward per vote
+- (c) Representatives earn "reputation" that's publicly visible (social incentive)
+- (d) Other:
+
+Your answer:
+a
+
+### 33.6 Why would someone run a full node (non-representative)?
+- **(a) Self-sovereignty** — verify your own transactions without trusting others. No protocol reward.
+- (b) Protocol reward for hosting/relaying blocks
+- (c) Same as representative — altruism and business interest
+
+Your answer:
+a
+
+### 33.7 Verifier compensation
+Verifiers stake BRN and do work (reviewing evidence). What do they get?
+- **(a) Return of their stake + proportional share of the challenger's forfeited stake** (if challenge fails) or proportional share of revoked TRST (if challenge succeeds)
+- (b) Fixed TRST reward per verification completed
+- (c) No compensation — the stake return is the "reward" (altruistic model)
+- (d) Governance-configurable reward
+
+Your answer:
+d
+majority gets rewarded in trst while minority gets punished by their stake getting distributed to majority, ofc there's threshold
+
+### 33.8 Endorser motivation
+Endorsers burn BRN permanently. Why would they do it?
+- **(a) Social obligation** — you vouch for real people you know. No protocol reward. The system only works if people endorse.
+- (b) Endorsers get a small TRST kickback when the person they endorsed earns TRST
+- (c) Endorser's own TRST is weighted higher if they have endorsed others (reputation bonus)
+
+Your answer:
+a
+
+### 33.9 Are account balances public?
+- **(a) Yes** — fully transparent, like Nano. Anyone can see any wallet's TRST and BRN.
+- (b) Hidden — only the account owner can see their balance
+- (c) Partially — TRST amounts in transactions are visible, but total balance requires summing the chain
+
+Your answer:
+a
+
+### 33.10 Is the endorsement/verification graph public?
+- **(a) Yes** — anyone can see who endorsed whom and which verifiers voted on which wallet. Full transparency.
+- (b) Partially — endorsements are public but verifier identities are hidden
+- (c) Fully private — only the verified wallet knows who verified them
+
+Your answer:
+a
+
+### 33.11 Can a wallet's full transaction history be enumerated by anyone?
+- **(a) Yes** — each account chain is a public linked list. Anyone can walk it from the frontier back to genesis.
+- (b) No — implement some form of chain obfuscation
+
+Your answer:
+a
+
+### 33.12 IP address privacy
+- **(a) No privacy at the network layer for MVP** — peers see each other's IP. Users who want privacy can use Tor/VPN.
+- (b) Built-in Tor support
+- (c) Dandelion++ protocol for transaction origin hiding (like Monero)
+
+Your answer:
+a
+
+### 33.13 Should the protocol include automated sybil detection?
+Beyond human verification, should nodes flag suspicious patterns?
+- **(a) Not at the protocol level** — sybil detection is the job of verifiers (human judgment). Protocol is neutral.
+- (b) Yes — flag accounts that show patterns like: same IP, similar transaction timing, circular TRST flows
+- (c) Optional analytics module — not consensus-affecting, just informational
+
+Your answer:
+a
+
+### 33.14 Circular flow detection
+Should the node detect and flag circular TRST transfers (A→B→C→A)?
+- **(a) No** — circular flows are not inherently fraudulent. Legitimate commerce can create loops.
+- (b) Yes — flag but don't prevent. Informational only.
+- (c) Prevent — reject transactions that would create a cycle (too restrictive)
+
+Your answer:
+a
+
+---
+
+## 34. Build, Test & Deploy
+
+### 34.1 Config file format
+- (a) TOML (Rust ecosystem standard)
+- (b) JSON
+- **(c) TOML for node config, JSON for RPC communication**
+
+Your answer:
+c
+
+### 34.2 Feature flags
+Should the Rust workspace use Cargo feature flags for optional components?
+- **(a) Yes** — e.g., `default = ["rpc", "websocket"]`, optional features like `"groups"`, `"metrics"`, `"debug-rpc"`
+- (b) No — compile everything always
+- (c) Separate binaries — `burst-node`, `burst-wallet-cli`, `burst-rpc-server`
+
+Your answer:
+a
+
+### 34.3 WASM compilation target
+Should `wallet_core` and `crypto` compile to WebAssembly for browser/mobile use?
+- **(a) Design for it** — avoid `std::fs`, `std::net` in wallet_core. Use `#[cfg(target_arch = "wasm32")]` where needed. Verify it compiles to WASM.
+- (b) Not for MVP — desktop/server only
+- (c) Never — native only
+
+Your answer:
+a
+
+### 34.4 CLI interface for the daemon
+- **(a) Subcommand-based CLI** — `burst-node start`, `burst-node status`, `burst-node wallet create`, etc. Use `clap` crate.
+- (b) No CLI — daemon starts with a config file, interact via RPC only
+- (c) Both — CLI for management, RPC for programmatic access
+
+Your answer:
+a
+
+### 34.5 Docker support
+- **(a) Provide a Dockerfile** — multi-stage build (build in rust image, run in slim image)
+- (b) Not for MVP
+- (c) Docker Compose with node + optional block explorer
+
+Your answer:
+a
+
+### 34.6 Systemd integration
+- **(a) Provide a systemd service file** in the repo
+- (b) Not for MVP
+- (c) Include sd-notify support in the daemon for readiness notification
+
+Your answer:
+a
+
+### 34.7 Test strategy
+- **(a) Unit tests per crate + integration tests in node/** — use nullables for unit tests
+- (b) Only integration tests
+- (c) Other:
+
+Your answer:
+a
+
+### 34.8 CI/CD
+- **(a) GitHub Actions** (cargo check, cargo test, cargo clippy, cargo fmt)
+- (b) Other
+- (c) Decide later
+
+Your answer:
+a
+
+### 34.9 Test network (local multi-node testing)
+- **(a) Docker Compose setup** — spin up N nodes locally that form a test network
+- (b) Single-process multi-node — run multiple node instances in one process (using nullable infrastructure)
+- (c) Both
+- (d) Defer to post-MVP
+
+Your answer:
+a
+
+### 34.10 Testnet faucet
+Should there be a faucet for the testnet (auto-verifies wallets, distributes test TRST)?
+- **(a) Yes** — simple RPC endpoint that auto-verifies a wallet and sends it TRST. Testnet only.
+- (b) No — test manually
+- (c) Defer
+
+Your answer:
+a
+
+### 34.11 Property-based testing
+Should we use property-based testing (e.g., `proptest` crate) for critical invariants?
+- **(a) Yes** — for: BRN accrual math, TRST merge/split correctness, block validation, serialization roundtrips
+- (b) Unit tests only
+- (c) Decide per-crate
+
+Your answer:
+a
+
+### 34.12 Fuzzing
+Should we set up cargo-fuzz for parsing/deserialization code?
+- **(a) Yes** — fuzz targets for: block deserialization, message parsing, PoW validation
+- (b) Not for MVP
+- (c) Decide later
+
+Your answer:
+a
+
+### 34.13 Benchmark suite
+- **(a) Yes** — use `criterion` crate. Benchmark: block processing, PoW generation, signature verification, LMDB read/write, BRN computation
+- (b) Not for MVP
+- (c) Ad-hoc benchmarks only
+
+Your answer:
+a
+
+### 34.14 Database migration strategy
+When a new version changes the database schema:
+- **(a) Versioned migrations** — store schema version in `meta` table, run migration code on startup if version mismatch
+- (b) Re-sync from network — drop old database, re-download everything (simple but slow)
+- (c) Both — try migration, fall back to re-sync if migration fails
+
+Your answer:
+a
+
+### 34.15 Protocol versioning
+How to handle nodes running different protocol versions?
+- **(a) Handshake includes protocol version** — nodes with incompatible versions disconnect. Compatible versions (minor differences) can still communicate.
+- (b) All nodes must run the same version (enforced by message format)
+- (c) Backward compatibility — new nodes understand old messages, old nodes reject new message types
+
+Your answer:
+a
+
+### 34.16 Hard fork coordination
+If a hard fork is needed (incompatible protocol change):
+- **(a) Governance-coordinated** — governance votes on activation block height/date. Nodes update before deadline.
+- (b) Flag-day — announce a date, nodes must update by then
+- (c) Miner/representative signaling — representatives signal readiness, activation at threshold
+
+Your answer:
+a
+
+---
+
+## 35. Catastrophic Scenarios
+
+### 35.1 What if Ed25519 is broken (quantum computing or cryptanalysis)?
+- **(a) Signature scheme agility** (question 30.3) handles this — migrate to a post-quantum scheme via governance + epoch blocks
+- (b) Emergency hard fork
+- (c) The protocol is doomed (start over)
+
+Your answer:
+a
+
+### 35.2 What if Blake2b is broken?
+- **(a) Work version field** (question 61.2) + block version field (question 30.1) allow migrating to a new hash. All old blocks remain valid under old rules.
+- (b) Emergency hard fork
+
+Your answer:
+a
+
+### 35.3 What if >50% of verified wallets are sybils?
+The verification system has been fundamentally compromised.
+- **(a) Governance can vote to reset** — mass revocation + re-verification mandate. Painful but recoverable.
+- (b) Emergency mechanism — creator/foundation can trigger mass re-verification
+- (c) The protocol is doomed — game over, start a new chain
+
+Your answer:
+c
+fork
+
+### 35.4 What if the creator's wallet private key is compromised?
+- **(a) Creator wallet is not special after bootstrap** — same rules as everyone else. Compromised key means attacker can spend creator's TRST, but can't do anything special to the protocol.
+- (b) Creator has special powers that should be revocable
+
+Your answer:
+a
+
+---
+
+**Instructions**: Write your answer below each question, or write "default" to accept the bolded suggestion. If you disagree with any of my suggested defaults, just override them. Leave blank = accept default.
+
+When you're done, tell me and I'll start implementing.
+
+---
+
+## 36. Open Design Questions
+
+### 36.1 What happens to BRN of unverified/revoked wallets?
+The whitepaper says BRN accrual stops. But what about accumulated BRN?
+- **(a) Frozen** — BRN remains but can't be used (wallet is locked)
+- (b) Destroyed — BRN balance resets to zero
+- (c) Other:
+
+Your answer:
+a
+
+### 36.2 Can a revoked wallet ever be re-verified?
+- (a) Never — permanently banned
+- **(b) Yes** — must go through full verification again from scratch (new endorsements, new verifiers)
+- (c) Decide via Consti
+
+Your answer:
+b
+
+### 36.3 Cross-chain / interop considerations?
+Worth thinking about now, or pure future work?
+- **(a) Ignore for now** — no bridges, no wrapped tokens
+- (b) Design bridge-compatible transaction format from the start
+
+Your answer:
+a
+
+---
+
+## 37. Comprehensive Parameter Defaults
+
+### 37.1 All initial protocol parameters in one table
+Fill in or accept defaults:
+
+| Parameter | Suggested Default | Your Value |
+|---|---|---|
+| BRN accrual rate | 1 BRN/hour (= 10^18 raw/hour) | |
+| TRST expiry | Infinite (no expiry) | |
+| PoW difficulty threshold | 0xfffffff800000000 | |
+| Endorsement count required | 3 | |
+| BRN per endorsement (burn) | 10 BRN | |
+| Verifier count | 7 | |
+| Verification threshold | 90% (6/7) | |
+| Verifier stake | 20 BRN | |
+| Max revotes | 3 | |
+| Challenge stake | 50 BRN | |
+| Verification timeout | 7 days | |
+| Neither-vote penalty threshold | 50% in rolling window | |
+| Governance proposal cost | 100 BRN | |
+| Governance proposal window | 1 week | |
+| Governance voting window | 2 weeks | |
+| Governance cooldown | 1 week | |
+| Parameter supermajority | 80% | |
+| Consti supermajority | 90% | |
+| Governance quorum | 30% | |
+| Max merge inputs | 256 | |
+| Min transfer amount | 1 raw | |
+| Min burn amount | 1 raw | |
+| Pending receive timeout | None (no timeout) | |
+| Max pending per account | No limit | |
+| Max block size | 1 KB | |
+| Max mempool size | 65,536 blocks | |
+| Max peer connections | 64 | |
+| Keepalive interval | 60 seconds | |
+| Clock drift tolerance | 60 seconds | |
+| Election timeout | 5 minutes | |
+| Max concurrent elections | 500 | |
+| Cementing delay | 5 minutes | |
+| Principal rep threshold | 0.1% online weight | |
+| Confirmation threshold (ORV) | 67% | |
+| Max message size | 64 KB | |
+| Bootstrap phase exit | 100 verified wallets | |
+| Memo max length | 256 bytes | |
+| Network ID (mainnet) | 0x01 | |
+| Network ID (testnet) | 0x02 | |
+| Unchecked block timeout | 15 minutes | |
+
+Your answers (fill in or write "defaults for all"):
+Defaults for all EXCEPT: BRN accrual=1/hour, Endorsement burn=336, Verifier stake=500, Challenge stake=1000, Challenge reward=min(1% revoked, 2000 TRST), Governance proposal cost=336, Bootstrap phase exit=50 wallets
+
+---
+
+**Instructions**: Write your answer below each question, or write "default" to accept the bolded suggestion. If you disagree with any of my suggested defaults, just override them. Leave blank = accept default.
+
+When you're done, tell me and I'll start implementing.

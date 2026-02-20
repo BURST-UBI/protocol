@@ -10,7 +10,12 @@ pub mod drand;
 pub mod error;
 pub mod threshold;
 
+pub use drand::{ChainInfo, DrandBeacon, DrandClient, DrandScheme, DrandVerifier};
 pub use error::VrfError;
+pub use threshold::{
+    filter_eligible_verifiers, is_eligible_verifier, select_verifiers, EligibilityConfig,
+    VerifierEligibility, DEFAULT_MIN_BRN_BALANCE, DEFAULT_MIN_VERIFICATION_AGE_SECS,
+};
 
 /// Trait for providing verifiable randomness.
 pub trait VrfProvider: Send + Sync {

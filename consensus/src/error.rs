@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Clone, Debug, Error)]
 pub enum ConsensusError {
     #[error("fork detected for account {account}: blocks {block_a} and {block_b}")]
     ForkDetected {
@@ -14,6 +14,18 @@ pub enum ConsensusError {
 
     #[error("representative {0} not found")]
     RepresentativeNotFound(String),
+
+    #[error("election capacity reached: maximum {0} active elections")]
+    ElectionCapacityReached(usize),
+
+    #[error("election not found: {0}")]
+    ElectionNotFound(String),
+
+    #[error("final vote already cast by {0}")]
+    FinalVoteAlreadyCast(String),
+
+    #[error("election already confirmed")]
+    ElectionAlreadyConfirmed,
 
     #[error("{0}")]
     Other(String),

@@ -17,6 +17,9 @@ pub trait GovernanceStore {
     /// Store a vote on a proposal.
     fn put_vote(&self, proposal: &TxHash, voter: &WalletAddress, data: &[u8]) -> Result<(), StoreError>;
 
+    /// Get a specific voter's vote on a proposal.
+    fn get_vote(&self, proposal: &TxHash, voter: &WalletAddress) -> Result<Vec<u8>, StoreError>;
+
     /// Get all votes for a proposal.
     fn get_votes(&self, proposal: &TxHash) -> Result<Vec<Vec<u8>>, StoreError>;
 

@@ -15,7 +15,7 @@ pub mod state;
 pub mod time;
 
 pub use address::WalletAddress;
-pub use amount::{BrnAmount, TrstAmount};
+pub use amount::{BrnAmount, TrstAmount, BRN_UNIT, MBRN_UNIT, TRST_UNIT, MTRST_UNIT};
 pub use block::BlockHash;
 pub use error::BurstError;
 pub use hash::TxHash;
@@ -24,3 +24,14 @@ pub use network::NetworkId;
 pub use params::ProtocolParams;
 pub use state::{TrstState, WalletState};
 pub use time::Timestamp;
+
+/// Tracks what fraction of a merged token came from a specific origin.
+///
+/// Used by the TRST engine, pending store, and ledger bridge to carry
+/// provenance through merges, transfers, and pending entries.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct OriginProportion {
+    pub origin: TxHash,
+    pub origin_wallet: WalletAddress,
+    pub amount: u128,
+}

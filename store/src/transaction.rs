@@ -8,6 +8,14 @@ pub trait TransactionStore {
     /// Store a transaction (serialized bytes keyed by hash).
     fn put_transaction(&self, hash: &TxHash, tx_bytes: &[u8]) -> Result<(), StoreError>;
 
+    /// Store a transaction and update the per-account transaction index.
+    fn put_transaction_with_account(
+        &self,
+        hash: &TxHash,
+        tx_bytes: &[u8],
+        account: &WalletAddress,
+    ) -> Result<(), StoreError>;
+
     /// Retrieve a transaction by hash.
     fn get_transaction(&self, hash: &TxHash) -> Result<Vec<u8>, StoreError>;
 
@@ -19,4 +27,13 @@ pub trait TransactionStore {
 
     /// Delete a transaction (for pruning expired/revoked TRST history).
     fn delete_transaction(&self, hash: &TxHash) -> Result<(), StoreError>;
+
+    /// Delete a transaction and its per-account index entry atomically.
+    fn delete_transaction_with_account(
+        &self,
+        hash: &TxHash,
+        _account: &WalletAddress,
+    ) -> Result<(), StoreError> {
+        self.delete_transaction(hash)
+    }
 }

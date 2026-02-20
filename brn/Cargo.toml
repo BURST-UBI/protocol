@@ -8,5 +8,15 @@ description = "BRN computation engine — accrual, burning, staking, rate-change
 [dependencies]
 burst-types = { workspace = true }
 burst-crypto = { workspace = true }
+burst-store = { workspace = true }
 serde = { workspace = true }
+bincode = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+proptest = { workspace = true }
+
+[[bench]]
+name = "brn_bench"
+harness = false

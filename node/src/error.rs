@@ -17,8 +17,35 @@ pub enum NodeError {
     #[error("consensus error: {0}")]
     Consensus(#[from] burst_consensus::ConsensusError),
 
+    #[error("store error: {0}")]
+    Store(#[from] burst_store::StoreError),
+
+    #[error("invalid block: {0}")]
+    InvalidBlock(String),
+
+    #[error("proof-of-work does not meet minimum difficulty")]
+    WorkInvalid,
+
+    #[error("block signature is invalid")]
+    SignatureInvalid,
+
+    #[error("config error: {0}")]
+    Config(String),
+
     #[error("node not initialized")]
     NotInitialized,
+
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("RPC server error: {0}")]
+    Rpc(String),
+
+    #[error("WebSocket server error: {0}")]
+    WebSocket(String),
+
+    #[error("shutdown timeout")]
+    ShutdownTimeout,
 
     #[error("{0}")]
     Other(String),

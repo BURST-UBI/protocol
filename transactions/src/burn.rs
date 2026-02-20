@@ -13,5 +13,6 @@ pub struct BurnTx {
     pub receiver: WalletAddress,
     pub amount: u128,
     pub timestamp: Timestamp,
+    pub work: u64,
     pub signature: Signature,
 }

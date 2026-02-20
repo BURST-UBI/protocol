@@ -12,8 +12,24 @@ pub enum LmdbError {
     Serialization(String),
 }
 
+impl From<heed::Error> for LmdbError {
+    fn from(e: heed::Error) -> Self {
+        LmdbError::Heed(e.to_string())
+    }
+}
+
+impl From<bincode::Error> for LmdbError {
+    fn from(e: bincode::Error) -> Self {
+        LmdbError::Serialization(e.to_string())
+    }
+}
+
 impl From<LmdbError> for burst_store::StoreError {
     fn from(e: LmdbError) -> Self {
-        burst_store::StoreError::Backend(e.to_string())
+        match e {
+            LmdbError::NotFound(msg) => burst_store::StoreError::NotFound(msg),
+            LmdbError::Serialization(msg) => burst_store::StoreError::Serialization(msg),
+            LmdbError::Heed(msg) => burst_store::StoreError::Backend(msg),
+        }
     }
 }

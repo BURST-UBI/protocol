@@ -6,11 +6,20 @@ license.workspace = true
 description = "JSON-RPC server for wallet and external tool communication"
 
 [dependencies]
-burst-node = { workspace = true }
 burst-types = { workspace = true }
+burst-store = { workspace = true }
+burst-brn = { workspace = true }
+burst-consensus = { workspace = true }
+burst-work = { workspace = true }
+burst-ledger = { workspace = true }
+burst-governance = { workspace = true }
+burst-crypto = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+prometheus = { workspace = true }
 thiserror = { workspace = true }
+hex = { workspace = true }
+bincode = { workspace = true }

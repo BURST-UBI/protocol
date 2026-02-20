@@ -10,4 +10,5 @@ burst-types = { workspace = true }
 burst-crypto = { workspace = true }
 burst-brn = { workspace = true }
 serde = { workspace = true }
+bincode = { workspace = true }
 thiserror = { workspace = true }

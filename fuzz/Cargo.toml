@@ -1,0 +1,55 @@
+[package]
+name = "burst-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+burst-types = { path = "../types" }
+burst-crypto = { path = "../crypto" }
+burst-protocol = { path = "../protocol" }
+burst-messages = { path = "../messages" }
+burst-work = { path = "../work" }
+burst-brn = { path = "../brn" }
+burst-transactions = { path = "../transactions" }
+burst-trst = { path = "../trst" }
+arbitrary = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1"
+
+# Prevent this from interfering with workspaces
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "fuzz_block_deserialize"
+path = "fuzz_targets/fuzz_block_deserialize.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_message_parse"
+path = "fuzz_targets/fuzz_message_parse.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_pow_validate"
+path = "fuzz_targets/fuzz_pow_validate.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_codec_decode"
+path = "fuzz_targets/fuzz_codec_decode.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_brn_computation"
+path = "fuzz_targets/fuzz_brn_computation.rs"
+doc = false
+
+[profile.release]
+debug = 1

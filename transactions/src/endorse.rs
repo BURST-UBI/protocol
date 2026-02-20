@@ -17,5 +17,6 @@ pub struct EndorseTx {
     /// Amount of BRN permanently burned for this endorsement.
     pub burn_amount: u128,
     pub timestamp: Timestamp,
+    pub work: u64,
     pub signature: Signature,
 }

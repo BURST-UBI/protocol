@@ -1,0 +1,30 @@
+[Unit]
+Description=BURST Protocol Node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=burst
+Group=burst
+ExecStart=/usr/local/bin/burst-node --data-dir /var/lib/burst --config /etc/burst/config.toml
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/burst /var/log/burst
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=burst-node
+
+[Install]
+WantedBy=multi-user.target

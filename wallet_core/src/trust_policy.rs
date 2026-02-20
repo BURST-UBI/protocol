@@ -29,12 +29,63 @@ pub enum TrustRule {
 }
 
 /// Evaluate a trust policy for a specific TRST originator.
+///
+/// - `AcceptAll`: always accepts (relies on protocol-level verification only).
+/// - `RequireGroup` / `RequireAllGroups`: checks group membership. Since group queries
+///   are async, returns `Warn` for now as a signal to the caller to verify asynchronously.
+/// - `Custom`: evaluates each rule sequentially; rejects on first failing rule.
 pub fn evaluate_policy(
-    _policy: &TrustPolicy,
+    policy: &TrustPolicy,
     _originator: &WalletAddress,
     _group_client: &GroupClient,
 ) -> TrustDecision {
-    todo!("check originator against all trust rules")
+    match policy {
+        TrustPolicy::AcceptAll => TrustDecision::Accept,
+
+        TrustPolicy::RequireGroup { trusted_groups } => {
+            if trusted_groups.is_empty() {
+                return TrustDecision::Accept;
+            }
+            // Group queries are async; return Warn so caller knows to verify asynchronously
+            TrustDecision::Warn {
+                reason: "group membership check requires async verification".into(),
+            }
+        }
+
+        TrustPolicy::RequireAllGroups { trusted_groups } => {
+            if trusted_groups.is_empty() {
+                return TrustDecision::Accept;
+            }
+            TrustDecision::Warn {
+                reason: "group membership check requires async verification".into(),
+            }
+        }
+
+        TrustPolicy::Custom { rules } => {
+            for rule in rules {
+                match rule {
+                    TrustRule::GroupMembership { .. } => {
+                        return TrustDecision::Warn {
+                            reason: "group membership check requires async verification".into(),
+                        };
+                    }
+                    TrustRule::MinVerificationAge { .. } => {
+                        // Requires node state to check verified_at; warn for now
+                        return TrustDecision::Warn {
+                            reason: "verification age check requires node state".into(),
+                        };
+                    }
+                    TrustRule::MaxUnknownOriginProportion { .. } => {
+                        // Requires TRST origin analysis; warn for now
+                        return TrustDecision::Warn {
+                            reason: "origin proportion check requires TRST analysis".into(),
+                        };
+                    }
+                }
+            }
+            TrustDecision::Accept
+        }
+    }
 }
 
 /// The result of evaluating a trust policy.

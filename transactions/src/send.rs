@@ -17,5 +17,6 @@ pub struct SendTx {
     pub link: TxHash,
     /// Hash of the original burn transaction that created this TRST.
     pub origin: TxHash,
+    pub work: u64,
     pub signature: Signature,
 }

@@ -12,6 +12,8 @@ burst-brn = { workspace = true }
 burst-trst = { workspace = true }
 burst-transactions = { workspace = true }
 burst-store = { workspace = true }
+burst-store-lmdb = { workspace = true }
+burst-nullables = { workspace = true }
 burst-ledger = { workspace = true }
 burst-verification = { workspace = true }
 burst-vrf = { workspace = true }
@@ -21,7 +23,21 @@ burst-governance = { workspace = true }
 burst-consti = { workspace = true }
 burst-messages = { workspace = true }
 burst-network = { workspace = true }
+burst-rpc = { workspace = true }
+burst-websocket = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+toml = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+prometheus = { workspace = true }
 thiserror = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+bincode = { workspace = true }
+proptest = { workspace = true }
+burst-wallet-core = { workspace = true }

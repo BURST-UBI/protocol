@@ -17,4 +17,4 @@ pub mod state;
 pub use engine::BrnEngine;
 pub use error::BrnError;
 pub use stake::{Stake, StakeId, StakeKind};
-pub use state::BrnWalletState;
+pub use state::{BrnWalletState, RateHistory, RateSegment};

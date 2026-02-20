@@ -1,0 +1,766 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>BURST — Implementation Decisions</title>
+<style>
+:root {
+  --bg:        #07070e;
+  --surface:   #0f0f1a;
+  --surface2:  #161625;
+  --surface3:  #1e1e32;
+  --border:    rgba(255,255,255,.06);
+  --border-h:  rgba(255,255,255,.12);
+  --text:      #e2e2ec;
+  --text-dim:  #6e6e88;
+  --text-sec:  #9898b0;
+  --accent:    #7c3aed;
+  --accent2:   #a78bfa;
+  --accent-bg: rgba(124,58,237,.12);
+  --success:   #10b981;
+  --success-bg:rgba(16,185,129,.12);
+  --warn:      #f59e0b;
+  --warn-bg:   rgba(245,158,11,.15);
+  --default-badge: #fbbf24;
+  --radius:    12px;
+  --radius-sm: 8px;
+  --sidebar-w: 280px;
+  --topbar-h:  64px;
+  --font: -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;
+  --mono: 'SF Mono','Cascadia Code','Fira Code',monospace;
+}
+*,*::before,*::after { margin:0;padding:0;box-sizing:border-box; }
+html { scroll-behavior:smooth; }
+body {
+  font-family: var(--font);
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.6;
+  overflow: hidden;
+  height: 100vh;
+}
+::-webkit-scrollbar { width:6px; }
+::-webkit-scrollbar-track { background:transparent; }
+::-webkit-scrollbar-thumb { background:var(--surface3);border-radius:3px; }
+::-webkit-scrollbar-thumb:hover { background:var(--text-dim); }
+
+/* ─── TOPBAR ─── */
+#topbar {
+  position:fixed;top:0;left:0;right:0;height:var(--topbar-h);
+  background:rgba(7,7,14,.85);
+  backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);
+  border-bottom:1px solid var(--border);
+  display:flex;align-items:center;gap:20px;
+  padding:0 28px;z-index:100;
+}
+.logo {
+  font-size:18px;font-weight:700;letter-spacing:2px;
+  background:linear-gradient(135deg,var(--accent),var(--accent2));
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+  flex-shrink:0;
+}
+.logo-sub { font-size:12px;color:var(--text-dim);font-weight:400;letter-spacing:0;margin-left:10px; }
+.progress-wrap {
+  flex:1;display:flex;align-items:center;gap:12px;max-width:500px;
+}
+.progress-bar {
+  flex:1;height:6px;background:var(--surface3);border-radius:3px;overflow:hidden;
+}
+.progress-fill {
+  height:100%;width:0%;border-radius:3px;
+  background:linear-gradient(90deg,var(--accent),var(--accent2));
+  transition:width .5s cubic-bezier(.22,1,.36,1);
+}
+.progress-text { font-size:13px;color:var(--text-sec);white-space:nowrap;font-variant-numeric:tabular-nums; }
+.topbar-actions { display:flex;gap:10px;flex-shrink:0; }
+.btn {
+  padding:8px 18px;border-radius:var(--radius-sm);border:1px solid var(--border);
+  background:var(--surface2);color:var(--text);font-size:13px;font-weight:500;
+  cursor:pointer;transition:all .2s;white-space:nowrap;font-family:var(--font);
+}
+.btn:hover { background:var(--surface3);border-color:var(--border-h); }
+.btn-accent {
+  background:linear-gradient(135deg,var(--accent),#6d28d9);border-color:var(--accent);color:#fff;
+}
+.btn-accent:hover { filter:brightness(1.15); }
+.btn-success { background:var(--success-bg);border-color:var(--success);color:var(--success); }
+.btn-success:hover { background:rgba(16,185,129,.2); }
+
+/* ─── SIDEBAR ─── */
+#sidebar {
+  position:fixed;top:var(--topbar-h);left:0;bottom:0;width:var(--sidebar-w);
+  background:var(--surface);border-right:1px solid var(--border);
+  overflow-y:auto;padding:16px 0;z-index:50;
+}
+.nav-section {
+  padding:6px 16px 6px 20px;cursor:pointer;display:flex;align-items:center;gap:10px;
+  transition:all .15s;border-left:3px solid transparent;
+}
+.nav-section:hover { background:var(--surface2); }
+.nav-section.active { border-left-color:var(--accent);background:var(--accent-bg); }
+.nav-id {
+  font-size:11px;font-weight:600;color:var(--text-dim);min-width:26px;
+  font-family:var(--mono);
+}
+.nav-title { font-size:13px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
+.nav-badge {
+  font-size:10px;padding:2px 6px;border-radius:10px;font-weight:600;
+  font-variant-numeric:tabular-nums;flex-shrink:0;
+}
+.nav-badge.empty { background:var(--surface3);color:var(--text-dim); }
+.nav-badge.partial { background:var(--warn-bg);color:var(--warn); }
+.nav-badge.complete { background:var(--success-bg);color:var(--success); }
+
+/* ─── MAIN ─── */
+#main {
+  margin-left:var(--sidebar-w);margin-top:var(--topbar-h);
+  height:calc(100vh - var(--topbar-h));overflow-y:auto;
+  padding:32px 40px 120px;
+}
+.section-block { margin-bottom:48px; }
+.section-header {
+  font-size:22px;font-weight:700;margin-bottom:24px;
+  padding-bottom:12px;border-bottom:1px solid var(--border);
+  display:flex;align-items:baseline;gap:12px;
+}
+.section-num {
+  font-size:14px;color:var(--accent2);font-family:var(--mono);font-weight:600;
+}
+
+/* ─── QUESTION CARD ─── */
+.q-card {
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+  padding:24px 28px;margin-bottom:16px;
+  transition:border-color .2s,box-shadow .2s;
+}
+.q-card:hover { border-color:var(--border-h); }
+.q-card.answered {
+  border-color:rgba(16,185,129,.2);
+}
+.q-head { display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:12px; }
+.q-id { font-family:var(--mono);font-size:13px;color:var(--accent2);font-weight:600;flex-shrink:0; }
+.q-title { font-size:15px;font-weight:600; }
+.q-desc {
+  font-size:13px;color:var(--text-sec);margin-bottom:16px;line-height:1.7;
+  white-space:pre-wrap;
+}
+.q-desc code, .q-desc strong {
+  color:var(--text);font-weight:600;
+}
+
+/* ─── OPTIONS ─── */
+.options { display:flex;flex-direction:column;gap:8px;margin-bottom:14px; }
+.opt {
+  display:flex;align-items:flex-start;gap:12px;
+  padding:12px 16px;border-radius:var(--radius-sm);
+  border:1px solid var(--border);background:var(--bg);
+  cursor:pointer;transition:all .2s;
+}
+.opt:hover { border-color:var(--border-h);background:var(--surface2); }
+.opt.selected {
+  border-color:var(--accent);background:var(--accent-bg);
+  box-shadow:0 0 20px rgba(124,58,237,.1);
+}
+.opt-radio {
+  width:18px;height:18px;border-radius:50%;border:2px solid var(--text-dim);
+  flex-shrink:0;margin-top:1px;transition:all .2s;
+  display:flex;align-items:center;justify-content:center;
+}
+.opt.selected .opt-radio {
+  border-color:var(--accent);
+}
+.opt.selected .opt-radio::after {
+  content:'';width:8px;height:8px;border-radius:50%;background:var(--accent);
+}
+.opt-body { flex:1; }
+.opt-letter {
+  font-family:var(--mono);font-size:12px;font-weight:700;color:var(--text-dim);
+  margin-right:4px;
+}
+.opt.selected .opt-letter { color:var(--accent2); }
+.opt-text { font-size:13.5px;line-height:1.5; }
+.opt-default-badge {
+  font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;
+  background:var(--warn-bg);color:var(--default-badge);
+  padding:2px 7px;border-radius:4px;margin-left:8px;white-space:nowrap;
+  vertical-align:middle;
+}
+
+/* ─── TABLE ─── */
+.q-table-wrap { overflow-x:auto;margin-bottom:14px; }
+.q-table {
+  width:100%;border-collapse:collapse;font-size:13px;
+}
+.q-table th {
+  text-align:left;padding:8px 12px;border-bottom:2px solid var(--surface3);
+  font-weight:600;color:var(--text-sec);font-size:12px;text-transform:uppercase;
+  letter-spacing:.5px;
+}
+.q-table td {
+  padding:8px 12px;border-bottom:1px solid var(--border);
+}
+.q-table tr:hover td { background:var(--surface2); }
+.q-table input {
+  background:var(--bg);border:1px solid var(--border);border-radius:6px;
+  color:var(--text);padding:6px 10px;font-size:13px;width:100%;
+  font-family:var(--font);transition:border-color .2s;
+}
+.q-table input:focus { outline:none;border-color:var(--accent); }
+.q-table input::placeholder { color:var(--text-dim); }
+
+/* ─── CUSTOM ANSWER ─── */
+.custom-wrap { margin-top:12px; }
+.custom-label { font-size:12px;color:var(--text-dim);margin-bottom:6px; }
+.custom-input {
+  width:100%;background:var(--bg);border:1px solid var(--border);
+  border-radius:var(--radius-sm);color:var(--text);padding:10px 14px;
+  font-size:13px;font-family:var(--font);resize:vertical;min-height:38px;
+  transition:border-color .2s;line-height:1.5;
+}
+.custom-input:focus { outline:none;border-color:var(--accent); }
+.custom-input::placeholder { color:var(--text-dim); }
+
+/* ─── ACTIONS ROW ─── */
+.q-actions { display:flex;gap:8px;margin-top:12px; }
+.btn-sm {
+  padding:5px 12px;font-size:12px;border-radius:6px;border:1px solid var(--border);
+  background:var(--surface2);color:var(--text-sec);cursor:pointer;
+  transition:all .15s;font-family:var(--font);
+}
+.btn-sm:hover { background:var(--surface3);color:var(--text); }
+.btn-sm.active { background:var(--success-bg);border-color:var(--success);color:var(--success); }
+
+/* ─── SUB-PROMPTS ─── */
+.sub-prompt {
+  font-size:13px;color:var(--text-sec);padding:8px 0 4px;
+  font-style:italic;
+}
+
+/* ─── TOAST ─── */
+#toast {
+  position:fixed;bottom:32px;right:32px;
+  padding:14px 24px;border-radius:var(--radius-sm);
+  background:var(--success);color:#fff;font-weight:600;font-size:14px;
+  transform:translateY(100px);opacity:0;
+  transition:all .4s cubic-bezier(.22,1,.36,1);
+  z-index:200;
+  box-shadow:0 8px 32px rgba(16,185,129,.3);
+}
+#toast.show { transform:translateY(0);opacity:1; }
+
+/* ─── SEARCH ─── */
+#search-wrap {
+  padding:8px 16px 12px;
+}
+#search {
+  width:100%;padding:8px 12px;border-radius:var(--radius-sm);
+  background:var(--bg);border:1px solid var(--border);
+  color:var(--text);font-size:13px;font-family:var(--font);
+  transition:border-color .2s;
+}
+#search:focus { outline:none;border-color:var(--accent); }
+#search::placeholder { color:var(--text-dim); }
+
+/* ─── EMPTY STATE ─── */
+.empty-state {
+  text-align:center;padding:80px 40px;color:var(--text-dim);
+}
+
+/* ─── RESPONSIVE ─── */
+@media(max-width:900px) {
+  :root { --sidebar-w:0px; }
+  #sidebar { display:none; }
+  #main { padding:20px 16px 100px; }
+}
+
+/* ─── ANIMATIONS ─── */
+@keyframes fadeUp {
+  from { opacity:0;transform:translateY(12px); }
+  to { opacity:1;transform:translateY(0); }
+}
+.q-card { animation:fadeUp .35s ease both; }
+.section-block:nth-child(2) .q-card { animation-delay:.03s; }
+
+/* ─── KEYBOARD HINT ─── */
+.kbd {
+  font-size:10px;background:var(--surface3);border:1px solid var(--border);
+  border-radius:4px;padding:1px 5px;font-family:var(--mono);color:var(--text-dim);
+  margin-left:4px;
+}
+</style>
+</head>
+<body>
+
+<div id="topbar">
+  <div class="logo">BURST<span class="logo-sub">Implementation Decisions</span></div>
+  <div class="progress-wrap">
+    <div class="progress-bar"><div class="progress-fill" id="pbar"></div></div>
+    <span class="progress-text" id="ptext">Loading…</span>
+  </div>
+  <div class="topbar-actions">
+    <button class="btn" id="btn-defaults" title="Accept all suggested defaults for unanswered questions">Accept All Defaults</button>
+    <button class="btn" id="btn-reset" title="Clear all answers and reset">Reset All</button>
+    <button class="btn btn-accent" id="btn-save">Save to Markdown</button>
+  </div>
+</div>
+
+<aside id="sidebar">
+  <div id="search-wrap">
+    <input id="search" type="text" placeholder="Search questions…" autocomplete="off"/>
+  </div>
+  <nav id="nav"></nav>
+</aside>
+
+<main id="main">
+  <div id="content"></div>
+</main>
+
+<div id="toast"></div>
+
+<script>
+// ─────────────── State ───────────────
+let sections = [];
+let answers = {};        // { "1.1_0": "a", "1.1_custom": "notes" }
+let totalQuestions = 0;
+const DRAFT_KEY = 'burst_decisions_v2';
+
+// ─────────────── Init ───────────────
+document.addEventListener('DOMContentLoaded', async () => {
+  try {
+    const res = await fetch('/api/questions');
+    sections = await res.json();
+  } catch {
+    document.getElementById('content').innerHTML =
+      '<div class="empty-state">Failed to load questions. Is the server running?</div>';
+    return;
+  }
+
+  // Load existing answers from parsed data
+  sections.forEach(s => s.questions.forEach(q => {
+    (q.answers || []).forEach((a, i) => {
+      if (a) answers[q.id + '_' + i] = a;
+    });
+  }));
+
+  // Load from localStorage (draft) — versioned key to avoid stale data
+  try {
+    const draft = JSON.parse(localStorage.getItem(DRAFT_KEY) || '{}');
+    Object.assign(answers, draft);
+  } catch {}
+  // Clear old stale key
+  localStorage.removeItem('burst_decisions_draft');
+
+  countQuestions();
+  render();
+  updateProgress();
+  setupEvents();
+  autoSave();
+});
+
+function countQuestions() {
+  totalQuestions = 0;
+  sections.forEach(s => { totalQuestions += s.questions.length; });
+}
+
+// ─────────────── Render ───────────────
+function render() {
+  renderNav();
+  renderContent();
+}
+
+function renderNav() {
+  const nav = document.getElementById('nav');
+  nav.innerHTML = sections.map(s => {
+    const total = s.questions.length;
+    const done = s.questions.filter(q => isAnswered(q)).length;
+    const cls = done === 0 ? 'empty' : done === total ? 'complete' : 'partial';
+    return `<div class="nav-section" data-sid="${s.id}" title="${s.title}">
+      <span class="nav-id">${s.id}</span>
+      <span class="nav-title">${esc(s.title)}</span>
+      <span class="nav-badge ${cls}">${done}/${total}</span>
+    </div>`;
+  }).join('');
+}
+
+function renderContent() {
+  const el = document.getElementById('content');
+  el.innerHTML = sections.map(s => `
+    <div class="section-block" id="sec-${s.id}">
+      <div class="section-header">
+        <span class="section-num">${s.id}.</span>${esc(s.title)}
+      </div>
+      ${s.questions.map(q => renderQuestion(q)).join('')}
+    </div>
+  `).join('');
+}
+
+function renderQuestion(q) {
+  const answered = isAnswered(q);
+  const selectedOpt = getSelectedOption(q);
+  const customKey = q.id + '_custom';
+  const customVal = answers[customKey] || '';
+
+  let html = `<div class="q-card ${answered ? 'answered' : ''}" id="q-${q.id}">
+    <div class="q-head">
+      <div>
+        <span class="q-id">${q.id}</span>
+        <span class="q-title">${esc(q.title)}</span>
+      </div>
+    </div>`;
+
+  if (q.description) {
+    html += `<div class="q-desc">${formatDesc(q.description)}</div>`;
+  }
+
+  // Options
+  if (q.options.length) {
+    html += '<div class="options">';
+    q.options.forEach(o => {
+      const sel = selectedOpt === o.id;
+      html += `<div class="opt ${sel ? 'selected' : ''}" data-qid="${q.id}" data-oid="${o.id}">
+        <div class="opt-radio"></div>
+        <div class="opt-body">
+          <span class="opt-letter">(${o.id})</span>
+          <span class="opt-text">${esc(o.text)}</span>
+          ${o.default ? '<span class="opt-default-badge">suggested</span>' : ''}
+        </div>
+      </div>`;
+    });
+    html += '</div>';
+  }
+
+  // Table
+  if (q.table) {
+    html += renderTable(q);
+  }
+
+  // Sub-prompts
+  if (q.sub_prompts && q.sub_prompts.length) {
+    q.sub_prompts.forEach((sp, i) => {
+      const spKey = q.id + '_' + (q.answers.length > 1 ? 1 + i : 1);
+      html += `<div class="sub-prompt">${esc(sp)}</div>
+        <div class="custom-wrap">
+          <input class="custom-input" data-key="${spKey}"
+            placeholder="Your answer…" value="${esc(answers[spKey] || '')}"/>
+        </div>`;
+    });
+  }
+
+  // Custom/notes
+  html += `<div class="custom-wrap">
+    <div class="custom-label">Notes or custom answer</div>
+    <textarea class="custom-input" rows="1" data-key="${customKey}"
+      placeholder="Override, notes, or 'default'…">${esc(customVal)}</textarea>
+  </div>`;
+
+  // Actions
+  const hasDefault = q.options.some(o => o.default);
+  html += `<div class="q-actions">`;
+  if (hasDefault) {
+    html += `<button class="btn-sm" data-qid="${q.id}" data-action="accept-default">Accept Suggested</button>`;
+  }
+  if (answered) {
+    html += `<button class="btn-sm" data-qid="${q.id}" data-action="clear">Clear</button>`;
+  }
+  html += `</div>`;
+
+  html += '</div>';
+  return html;
+}
+
+function renderTable(q) {
+  if (!q.table) return '';
+  const h = q.table.headers;
+  const lastCol = h.length - 1;
+  let html = '<div class="q-table-wrap"><table class="q-table"><thead><tr>';
+  h.forEach(hdr => { html += `<th>${esc(hdr)}</th>`; });
+  html += '</tr></thead><tbody>';
+
+  q.table.rows.forEach((row, ri) => {
+    html += '<tr>';
+    row.forEach((cell, ci) => {
+      if (ci === lastCol && (cell === '' || cell.trim() === '')) {
+        const key = q.id + '_tbl_' + ri;
+        const val = answers[key] || '';
+        html += `<td><input data-key="${key}" value="${esc(val)}" placeholder="your value…"/></td>`;
+      } else {
+        html += `<td>${esc(cell)}</td>`;
+      }
+    });
+    html += '</tr>';
+  });
+  html += '</tbody></table></div>';
+  return html;
+}
+
+// ─────────────── Events ───────────────
+function setupEvents() {
+  // Option click
+  document.getElementById('content').addEventListener('click', e => {
+    const opt = e.target.closest('.opt');
+    if (opt) {
+      selectOption(opt.dataset.qid, opt.dataset.oid);
+      return;
+    }
+    const action = e.target.closest('[data-action]');
+    if (action) {
+      handleAction(action.dataset.qid, action.dataset.action);
+    }
+  });
+
+  // Custom/notes input
+  document.getElementById('content').addEventListener('input', e => {
+    if (e.target.matches('[data-key]')) {
+      answers[e.target.dataset.key] = e.target.value;
+      updateProgress();
+      saveDraft();
+    }
+  });
+
+  // Auto-resize textarea
+  document.getElementById('content').addEventListener('input', e => {
+    if (e.target.tagName === 'TEXTAREA') {
+      e.target.style.height = 'auto';
+      e.target.style.height = e.target.scrollHeight + 'px';
+    }
+  });
+
+  // Nav click
+  document.getElementById('nav').addEventListener('click', e => {
+    const sec = e.target.closest('.nav-section');
+    if (sec) {
+      document.getElementById('sec-' + sec.dataset.sid)?.scrollIntoView({ behavior: 'smooth' });
+    }
+  });
+
+  // Accept all defaults
+  document.getElementById('btn-defaults').addEventListener('click', acceptAllDefaults);
+
+  // Reset all
+  document.getElementById('btn-reset').addEventListener('click', () => {
+    if (!confirm('Clear ALL answers? This cannot be undone.')) return;
+    answers = {};
+    localStorage.removeItem(DRAFT_KEY);
+    render();
+    updateProgress();
+    toast('All answers cleared');
+  });
+
+  // Save
+  document.getElementById('btn-save').addEventListener('click', saveToServer);
+
+  // Search
+  document.getElementById('search').addEventListener('input', e => {
+    filterQuestions(e.target.value.toLowerCase());
+  });
+
+  // Scroll spy for sidebar
+  const main = document.getElementById('main');
+  let ticking = false;
+  main.addEventListener('scroll', () => {
+    if (!ticking) {
+      requestAnimationFrame(() => { updateActiveNav(main); ticking = false; });
+      ticking = true;
+    }
+  });
+
+  // Keyboard: Ctrl+S to save
+  document.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+      e.preventDefault();
+      saveToServer();
+    }
+  });
+}
+
+function selectOption(qid, oid) {
+  answers[qid + '_0'] = oid;
+  updateQuestionCard(qid);
+  updateProgress();
+  saveDraft();
+}
+
+function handleAction(qid, action) {
+  if (action === 'accept-default') {
+    const q = findQuestion(qid);
+    const def = q?.options.find(o => o.default);
+    if (def) selectOption(qid, def.id);
+  } else if (action === 'clear') {
+    Object.keys(answers).forEach(k => {
+      if (k.startsWith(qid + '_')) delete answers[k];
+    });
+    updateQuestionCard(qid);
+    updateProgress();
+    saveDraft();
+  }
+}
+
+function acceptAllDefaults() {
+  sections.forEach(s => s.questions.forEach(q => {
+    const key = q.id + '_0';
+    if (!answers[key]) {
+      const def = q.options.find(o => o.default);
+      if (def) answers[key] = def.id;
+    }
+  }));
+  render();
+  updateProgress();
+  saveDraft();
+  toast('All suggested defaults accepted');
+}
+
+function filterQuestions(query) {
+  document.querySelectorAll('.q-card').forEach(card => {
+    if (!query) { card.style.display = ''; return; }
+    const text = card.textContent.toLowerCase();
+    card.style.display = text.includes(query) ? '' : 'none';
+  });
+  document.querySelectorAll('.section-block').forEach(sec => {
+    if (!query) { sec.style.display = ''; return; }
+    const visible = sec.querySelectorAll('.q-card:not([style*="display: none"])');
+    sec.style.display = visible.length ? '' : 'none';
+  });
+}
+
+// ─────────────── Updates ───────────────
+function updateQuestionCard(qid) {
+  const old = document.getElementById('q-' + qid);
+  if (!old) return;
+  const q = findQuestion(qid);
+  if (!q) return;
+  const tmp = document.createElement('div');
+  tmp.innerHTML = renderQuestion(q);
+  const newCard = tmp.firstElementChild;
+  newCard.style.animation = 'none';
+  old.replaceWith(newCard);
+  newCard.querySelectorAll('textarea').forEach(ta => {
+    ta.style.height = 'auto';
+    ta.style.height = ta.scrollHeight + 'px';
+  });
+}
+
+function updateProgress() {
+  let answered = 0;
+  sections.forEach(s => s.questions.forEach(q => { if (isAnswered(q)) answered++; }));
+  const pct = totalQuestions ? Math.round(answered / totalQuestions * 100) : 0;
+  document.getElementById('pbar').style.width = pct + '%';
+  document.getElementById('ptext').textContent = `${answered} / ${totalQuestions} answered (${pct}%)`;
+  renderNav();
+}
+
+function updateActiveNav(main) {
+  const blocks = document.querySelectorAll('.section-block');
+  let activeId = null;
+  const scrollTop = main.scrollTop + 100;
+  blocks.forEach(b => {
+    if (b.offsetTop <= scrollTop) activeId = b.id.replace('sec-', '');
+  });
+  document.querySelectorAll('.nav-section').forEach(n => {
+    n.classList.toggle('active', n.dataset.sid === activeId);
+  });
+}
+
+// ─────────────── Save ───────────────
+async function saveToServer() {
+  const btn = document.getElementById('btn-save');
+  btn.textContent = 'Saving…';
+  btn.disabled = true;
+
+  // Build server-compatible answers
+  const payload = {};
+  Object.entries(answers).forEach(([k, v]) => {
+    if (k.endsWith('_custom') || k.includes('_tbl_')) return;
+    payload[k] = v;
+  });
+  // Also include custom answers — append to main answer
+  sections.forEach(s => s.questions.forEach(q => {
+    const mainKey = q.id + '_0';
+    const customKey = q.id + '_custom';
+    let val = payload[mainKey] || '';
+    const custom = answers[customKey] || '';
+    if (custom) val = val ? val + '\n' + custom : custom;
+    if (val) payload[mainKey] = val;
+
+    // Table values
+    if (q.table) {
+      const tblVals = [];
+      q.table.rows.forEach((row, ri) => {
+        const tk = q.id + '_tbl_' + ri;
+        if (answers[tk]) tblVals.push(`${row[0]}: ${answers[tk]}`);
+      });
+      if (tblVals.length) {
+        const existing = payload[mainKey] || '';
+        payload[mainKey] = existing ? existing + '\n' + tblVals.join(', ') : tblVals.join(', ');
+      }
+    }
+
+    // Sub-question answers
+    (q.sub_prompts || []).forEach((sp, i) => {
+      const spKey = q.id + '_' + (q.answers.length > 1 ? 1 + i : 1);
+      if (answers[spKey]) payload[spKey] = answers[spKey];
+    });
+  }));
+
+  try {
+    await fetch('/api/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    toast('Saved to IMPLEMENTATION_DECISIONS.md');
+  } catch {
+    toast('Save failed — is the server running?');
+  }
+  btn.textContent = 'Save to Markdown';
+  btn.disabled = false;
+}
+
+function saveDraft() {
+  try { localStorage.setItem(DRAFT_KEY, JSON.stringify(answers)); } catch {}
+}
+
+function autoSave() {
+  setInterval(() => saveDraft(), 10000);
+}
+
+// ─────────────── Helpers ───────────────
+function isAnswered(q) {
+  return !!(answers[q.id + '_0'] || answers[q.id + '_custom']);
+}
+
+function getSelectedOption(q) {
+  return answers[q.id + '_0'] || null;
+}
+
+function findQuestion(qid) {
+  for (const s of sections)
+    for (const q of s.questions)
+      if (q.id === qid) return q;
+  return null;
+}
+
+function esc(s) {
+  if (!s) return '';
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+function formatDesc(text) {
+  return esc(text)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\n/g, '<br/>');
+}
+
+function toast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 2500);
+}
+</script>
+
+</body>
+</html>

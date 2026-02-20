@@ -8,3 +8,8 @@ description = "Fundamental types for the BURST protocol"
 [dependencies]
 serde = { workspace = true }
 thiserror = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+bincode = { workspace = true }

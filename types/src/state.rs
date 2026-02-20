@@ -17,6 +17,10 @@ pub enum WalletState {
     Challenged,
     /// Wallet was found fraudulent; all originated TRST revoked.
     Revoked,
+    /// Deactivated — formerly verified, now inactive. BRN stops accruing,
+    /// transactions blocked, but originated TRST is NOT revoked.
+    /// Used for dead wallets, extended inactivity, or voluntary deactivation.
+    Deactivated,
 }
 
 impl WalletState {
@@ -41,6 +45,8 @@ impl WalletState {
 pub enum TrstState {
     /// Active and transferable.
     Active,
+    /// Pending — sent but not yet received; non-transferable until accepted.
+    Pending,
     /// Expired — non-transferable but visible (virtue points / reputation).
     Expired,
     /// Revoked — originating wallet found fraudulent; immediately non-transferable.
@@ -51,5 +57,49 @@ impl TrstState {
     /// Whether this TRST can be transferred.
     pub fn is_transferable(&self) -> bool {
         matches!(self, Self::Active)
+    }
+
+    /// Whether this TRST is in a revoked state.
+    pub fn is_revoked(&self) -> bool {
+        matches!(self, Self::Revoked)
+    }
+
+    /// Whether this TRST is pending acceptance.
+    pub fn is_pending(&self) -> bool {
+        matches!(self, Self::Pending)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deactivated_cannot_transact() {
+        assert!(!WalletState::Deactivated.can_transact());
+    }
+
+    #[test]
+    fn deactivated_does_not_accrue_brn() {
+        assert!(!WalletState::Deactivated.accrues_brn());
+    }
+
+    #[test]
+    fn deactivated_cannot_vote() {
+        assert!(!WalletState::Deactivated.can_vote());
+    }
+
+    #[test]
+    fn verified_can_transact_and_accrue() {
+        assert!(WalletState::Verified.can_transact());
+        assert!(WalletState::Verified.accrues_brn());
+        assert!(WalletState::Verified.can_vote());
+    }
+
+    #[test]
+    fn revoked_cannot_transact() {
+        assert!(!WalletState::Revoked.can_transact());
+        assert!(!WalletState::Revoked.accrues_brn());
+        assert!(!WalletState::Revoked.can_vote());
     }
 }

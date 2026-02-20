@@ -17,5 +17,6 @@ pub struct ChallengeTx {
     /// BRN staked by the challenger (lost if challenge fails).
     pub stake_amount: u128,
     pub timestamp: Timestamp,
+    pub work: u64,
     pub signature: Signature,
 }

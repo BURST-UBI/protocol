@@ -18,7 +18,11 @@ pub struct DelegateTx {
     pub delegation_public_key: Vec<u8>,
     /// The delegation private key, encrypted with the delegate's public key.
     pub encrypted_delegation_key: Vec<u8>,
+    /// The delegator's X25519 public key (needed by delegate to decrypt).
+    #[serde(default)]
+    pub delegator_x25519_public: Vec<u8>,
     pub timestamp: Timestamp,
+    pub work: u64,
     pub signature: Signature,
 }
 
@@ -33,6 +37,7 @@ pub struct RevokeDelegationTx {
     /// New delegation public key (invalidates the old one).
     pub new_delegation_public_key: Vec<u8>,
     pub timestamp: Timestamp,
+    pub work: u64,
     /// Signed by the primary private key (proves authority to revoke).
     pub signature: Signature,
 }

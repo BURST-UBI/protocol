@@ -14,5 +14,6 @@ pub struct ChangeRepresentativeTx {
     /// The new representative to delegate consensus weight to.
     pub new_representative: WalletAddress,
     pub timestamp: Timestamp,
+    pub work: u64,
     pub signature: Signature,
 }

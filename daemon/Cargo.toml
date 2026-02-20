@@ -18,4 +18,5 @@ burst-utils = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
+toml = { workspace = true }
 anyhow = { workspace = true }

@@ -8,6 +8,10 @@ description = "Wire protocol — message encoding/decoding, handshake, versionin
 [dependencies]
 burst-types = { workspace = true }
 burst-messages = { workspace = true }
+burst-crypto = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+bincode = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }
+rand = { workspace = true }

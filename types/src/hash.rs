@@ -25,19 +25,19 @@ impl TxHash {
 
 impl fmt::Debug for TxHash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "TxHash({})", hex::encode(&self.0[..4]))
+        write!(f, "TxHash(")?;
+        for b in &self.0[..4] {
+            write!(f, "{:02x}", b)?;
+        }
+        write!(f, ")")
     }
 }
 
 impl fmt::Display for TxHash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", hex::encode(&self.0))
-    }
-}
-
-// Inline hex encoding to avoid adding the `hex` crate as a dependency of types.
-mod hex {
-    pub fn encode(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("{:02x}", b)).collect()
+        for b in &self.0 {
+            write!(f, "{:02x}", b)?;
+        }
+        Ok(())
     }
 }

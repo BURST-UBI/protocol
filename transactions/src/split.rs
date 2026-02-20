@@ -25,5 +25,6 @@ pub struct SplitTx {
     pub origin: TxHash,
     /// Individual outputs.
     pub outputs: Vec<SplitOutput>,
+    pub work: u64,
     pub signature: Signature,
 }

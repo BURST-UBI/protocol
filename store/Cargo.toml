@@ -7,4 +7,5 @@ description = "Abstract storage traits for the BURST protocol"
 
 [dependencies]
 burst-types = { workspace = true }
+serde = { workspace = true }
 thiserror = { workspace = true }

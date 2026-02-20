@@ -1,5 +1,6 @@
 //! Verification process state tracking.
 
+use std::collections::HashSet;
 use burst_types::{Timestamp, WalletAddress};
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +19,8 @@ pub struct VerificationState {
     pub votes: Vec<VerifierVote>,
     /// Number of re-votes that have occurred.
     pub revote_count: u32,
+    /// Verifiers excluded from future revote rounds (previous round participants).
+    pub excluded_verifiers: HashSet<WalletAddress>,
     /// When this verification process started.
     pub started_at: Timestamp,
 }
@@ -34,6 +37,8 @@ pub enum VerificationPhase {
     Failed,
     /// Under challenge (re-verification).
     Challenged,
+    /// Previously verified but fraud confirmed via challenge.
+    Unverified,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

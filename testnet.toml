@@ -1,0 +1,48 @@
+# BURST Testnet Configuration
+#
+# Usage:
+#   burst-daemon --config testnet.toml node run
+#
+# All values below can be overridden by CLI flags or BURST_* environment
+# variables (see `burst-daemon --help`).
+
+network = "test"
+
+# Data directory for LMDB ledger, wallets, and state.
+data_dir = "./burst_data"
+
+# P2P port — test network default is 17076.
+port = 17076
+
+# Maximum concurrent peer connections.
+max_peers = 50
+
+# RPC server for wallet and monitoring queries.
+enable_rpc = true
+rpc_port = 7077
+
+# WebSocket server for real-time event subscriptions
+# (confirmations, account updates, governance, verification).
+enable_websocket = true
+websocket_port = 7078
+
+# Bootstrap peers — set the seed node's public IP here.
+# Other nodes bootstrap from the seed and then discover more via keepalive.
+# Example: bootstrap_peers = ["seed.burst-testnet.example.com:17076"]
+bootstrap_peers = []
+
+# Logging
+log_format = "human"
+log_level = "info"
+
+# Proof-of-work validation threads.
+work_threads = 1
+
+# Expose Prometheus metrics at /metrics on the RPC port.
+enable_metrics = true
+
+# Enable the testnet faucet endpoint (test network only).
+enable_faucet = true
+
+# Opt-in to act as a verifier in the UHV process.
+enable_verification = false

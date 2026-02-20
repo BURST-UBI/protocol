@@ -42,14 +42,51 @@ impl CommitRevealVrf {
         self.commitments.push(commitment);
     }
 
-    /// Record a reveal and check it matches the commitment.
-    pub fn record_reveal(&mut self, _reveal: Reveal) -> Result<(), VrfError> {
-        todo!("verify hash(reveal.value) matches commitment, add to reveals")
+    /// Record a reveal and verify it matches the corresponding commitment.
+    ///
+    /// The reveal's value is hashed with Blake2b-256 and compared against the
+    /// commitment hash from the same representative. Rejects if no matching
+    /// commitment exists or if the hash doesn't match.
+    pub fn record_reveal(&mut self, reveal: Reveal) -> Result<(), VrfError> {
+        let matching_commitment = self
+            .commitments
+            .iter()
+            .find(|c| c.representative == reveal.representative);
+
+        match matching_commitment {
+            None => Err(VrfError::CommitReveal(format!(
+                "no commitment found for representative {}",
+                reveal.representative
+            ))),
+            Some(commitment) => {
+                let reveal_hash = burst_crypto::blake2b_256(&reveal.value);
+                if reveal_hash != commitment.hash {
+                    return Err(VrfError::CommitReveal(
+                        "reveal hash does not match commitment".into(),
+                    ));
+                }
+                self.reveals.push(reveal);
+                Ok(())
+            }
+        }
     }
 
-    /// Combine all reveals into a single random seed.
+    /// Combine all reveals into a single random seed by XOR-ing their values.
+    ///
+    /// Requires at least one reveal. The XOR combination ensures that as long as
+    /// at least one participant's value is truly random, the output is random.
     pub fn combine_reveals(&self) -> Result<[u8; 32], VrfError> {
-        todo!("XOR or hash all reveal values together")
+        if self.reveals.is_empty() {
+            return Err(VrfError::CommitReveal("no reveals to combine".into()));
+        }
+
+        let mut combined = [0u8; 32];
+        for reveal in &self.reveals {
+            for (i, byte) in reveal.value.iter().enumerate() {
+                combined[i] ^= byte;
+            }
+        }
+        Ok(combined)
     }
 }
 
@@ -60,12 +97,45 @@ impl Default for CommitRevealVrf {
 }
 
 impl VrfProvider for CommitRevealVrf {
-    fn get_randomness(&self, _context: &[u8]) -> Result<RandomOutput, VrfError> {
-        todo!("combine reveals with context")
+    /// Combine all reveals with the provided context to produce deterministic randomness.
+    ///
+    /// The output is `Blake2b(combined_reveals || context)`, ensuring the same
+    /// set of reveals with the same context always produces the same output.
+    fn get_randomness(&self, context: &[u8]) -> Result<RandomOutput, VrfError> {
+        let combined = self.combine_reveals()?;
+        let value = burst_crypto::blake2b_256_multi(&[&combined, context]);
+        Ok(RandomOutput {
+            value,
+            proof: combined.to_vec(),
+            round: 0,
+        })
     }
 
-    fn verify(&self, _context: &[u8], _output: &RandomOutput) -> Result<bool, VrfError> {
-        todo!("verify all commitments match reveals, then verify combined output")
+    /// Verify that all reveals match their commitments and that the output
+    /// was correctly derived from the combined reveals.
+    fn verify(&self, context: &[u8], output: &RandomOutput) -> Result<bool, VrfError> {
+        // Verify every reveal has a matching commitment
+        for reveal in &self.reveals {
+            let matching = self
+                .commitments
+                .iter()
+                .find(|c| c.representative == reveal.representative);
+
+            match matching {
+                None => return Ok(false),
+                Some(commitment) => {
+                    let reveal_hash = burst_crypto::blake2b_256(&reveal.value);
+                    if reveal_hash != commitment.hash {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+
+        // Verify the output value matches the combined reveals + context
+        let combined = self.combine_reveals()?;
+        let expected = burst_crypto::blake2b_256_multi(&[&combined, context]);
+        Ok(expected == output.value)
     }
 
     fn name(&self) -> &str {

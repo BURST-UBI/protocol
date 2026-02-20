@@ -1,6 +1,6 @@
 //! BRN staking for verification voting and challenges.
 
-use burst_types::Timestamp;
+use burst_types::{Timestamp, WalletAddress};
 use serde::{Deserialize, Serialize};
 
 /// Unique identifier for an active stake.
@@ -10,15 +10,16 @@ pub type StakeId = u64;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StakeKind {
     /// Staked as a verifier voting on a wallet's humanity.
-    Verification { target_wallet: String },
+    Verification { target_wallet: WalletAddress },
     /// Staked as a challenger contesting another wallet.
-    Challenge { target_wallet: String },
+    Challenge { target_wallet: WalletAddress },
 }
 
 /// An active BRN stake.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Stake {
     pub id: StakeId,
+    pub staker: WalletAddress,
     pub amount: u128,
     pub kind: StakeKind,
     pub created_at: Timestamp,

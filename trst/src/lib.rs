@@ -12,7 +12,7 @@ pub mod error;
 pub mod merger_graph;
 pub mod token;
 
-pub use engine::TrstEngine;
+pub use engine::{ConsumedProvenance, PendingReturnResult, PendingTokenInfo, TrstEngine, UnRevocationResult, WalletPortfolio};
 pub use error::TrstError;
-pub use merger_graph::MergerGraph;
+pub use merger_graph::{MergerGraph, UnRevocationEvent};
 pub use token::TrstToken;

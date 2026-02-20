@@ -14,5 +14,6 @@ pub struct MergeTx {
     pub timestamp: Timestamp,
     /// Hashes of the tokens being merged.
     pub source_hashes: Vec<TxHash>,
+    pub work: u64,
     pub signature: Signature,
 }

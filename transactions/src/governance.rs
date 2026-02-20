@@ -13,6 +13,7 @@ pub struct GovernanceProposalTx {
     pub timestamp: Timestamp,
     /// What is being proposed.
     pub proposal: ProposalContent,
+    pub work: u64,
     pub signature: Signature,
 }
 
@@ -43,6 +44,7 @@ pub struct GovernanceVoteTx {
     /// The vote.
     pub vote: GovernanceVote,
     pub timestamp: Timestamp,
+    pub work: u64,
     pub signature: Signature,
 }
 

@@ -23,6 +23,27 @@ pub enum VerificationError {
     #[error("no active challenge for wallet {0}")]
     NoChallengeActive(String),
 
+    #[error("endorser {0} has already endorsed this wallet")]
+    AlreadyEndorsed(String),
+
+    #[error("verifier {0} is penalized for excessive Neither votes")]
+    NeitherPenalty(String),
+
+    #[error("challenger {0} is not verified")]
+    ChallengerNotVerified(String),
+
+    #[error("insufficient stake: needed {needed}, provided {provided}")]
+    InsufficientStake { needed: u128, provided: u128 },
+
+    #[error("bootstrap phase has ended — normal verification rules apply")]
+    BootstrapPhaseEnded,
+
+    #[error("only the genesis creator can perform genesis endorsements")]
+    NotGenesisCreator,
+
+    #[error("self-verification is not allowed")]
+    SelfVerification,
+
     #[error("BRN error: {0}")]
     Brn(String),
 

@@ -8,8 +8,16 @@ description = "Wallet core library — key management, BRN display, TRST portfol
 [dependencies]
 burst-types = { workspace = true }
 burst-crypto = { workspace = true }
+burst-brn = { workspace = true }
 burst-transactions = { workspace = true }
+burst-ledger = { workspace = true }
 burst-groups = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+argon2 = { workspace = true }
+aes-gcm = { workspace = true }
+rand = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+x25519-dalek = { workspace = true }

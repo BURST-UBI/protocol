@@ -23,11 +23,6 @@ impl WalletAddress {
         Self(s)
     }
 
-    /// Create a wallet address from a public key.
-    pub fn from_public_key(_public_key: &crate::keys::PublicKey) -> Self {
-        todo!("derive address from public key via Blake2b + base32 encoding")
-    }
-
     /// Return the raw address string.
     pub fn as_str(&self) -> &str {
         &self.0

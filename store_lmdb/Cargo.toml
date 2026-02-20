@@ -9,4 +9,10 @@ description = "LMDB storage backend for the BURST protocol"
 burst-types = { workspace = true }
 burst-store = { workspace = true }
 heed = { workspace = true }
+serde = { workspace = true }
+bincode = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

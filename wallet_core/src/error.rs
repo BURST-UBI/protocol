@@ -11,6 +11,9 @@ pub enum WalletError {
     #[error("insufficient TRST: need {needed}, have {available}")]
     InsufficientTrst { needed: u128, available: u128 },
 
+    #[error("invalid address: {0}")]
+    InvalidAddress(String),
+
     #[error("key error: {0}")]
     Key(String),
 
@@ -19,6 +22,12 @@ pub enum WalletError {
 
     #[error("signing error: {0}")]
     Signing(String),
+
+    #[error("node RPC error: {0}")]
+    Node(String),
+
+    #[error("no node connection configured")]
+    NoNodeConnection,
 
     #[error("{0}")]
     Other(String),

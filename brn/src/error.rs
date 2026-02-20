@@ -18,4 +18,16 @@ pub enum BrnError {
 
     #[error("BRN rate must be non-negative")]
     InvalidRate,
+
+    #[error("arithmetic overflow in BRN computation")]
+    Overflow,
+
+    #[error("amount must be non-zero")]
+    ZeroAmount,
+
+    #[error("rate change timestamp must not precede current segment start")]
+    InvalidTimestamp,
+
+    #[error("{0}")]
+    Other(String),
 }

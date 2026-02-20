@@ -17,4 +17,4 @@ pub mod store;
 pub use clock::NullClock;
 pub use network::NullNetwork;
 pub use random::NullRandom;
-pub use store::NullStore;
+pub use store::{NullDelegationStore, NullStore};
