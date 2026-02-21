@@ -968,7 +968,7 @@ impl GovernanceEngine {
             return None;
         }
 
-        qualified.sort_by(|a, b| b.1.endorsement_count.cmp(&a.1.endorsement_count));
+        qualified.sort_by_key(|b| std::cmp::Reverse(b.1.endorsement_count));
 
         if qualified.len() > 1
             && qualified[0].1.endorsement_count == qualified[1].1.endorsement_count
@@ -1039,7 +1039,7 @@ impl GovernanceEngine {
                 p.phase == GovernancePhase::Proposal || p.phase == GovernancePhase::Exploration
             })
             .collect();
-        proposals.sort_by(|a, b| b.endorsement_count.cmp(&a.endorsement_count));
+        proposals.sort_by_key(|b| std::cmp::Reverse(b.endorsement_count));
         proposals
     }
 
