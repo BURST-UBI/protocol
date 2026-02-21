@@ -88,10 +88,7 @@ impl TransactionStore for LmdbTransactionStore {
         let mut upper = prefix.to_vec();
         increment_prefix(&mut upper);
 
-        let bounds = (
-            Bound::Included(prefix),
-            Bound::Excluded(upper.as_slice()),
-        );
+        let bounds = (Bound::Included(prefix), Bound::Excluded(upper.as_slice()));
         let iter = self
             .account_txs_db
             .range(&rtxn, &bounds)

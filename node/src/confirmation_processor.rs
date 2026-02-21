@@ -168,7 +168,7 @@ impl ChainWalker for LmdbChainWalker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burst_types::{BlockHash, Timestamp, WalletAddress, WalletState};
+    use burst_types::{BlockHash, WalletAddress, WalletState};
     use std::collections::HashMap;
 
     /// In-memory chain walker for testing.

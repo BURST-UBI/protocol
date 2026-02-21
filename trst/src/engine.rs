@@ -594,8 +594,7 @@ impl TrstEngine {
                         .origin_proportions
                         .iter()
                         .map(|p| {
-                            let scaled = p.amount.saturating_mul(*amount)
-                                / token.amount;
+                            let scaled = p.amount.saturating_mul(*amount) / token.amount;
                             OriginProportion {
                                 origin: p.origin,
                                 origin_wallet: p.origin_wallet.clone(),

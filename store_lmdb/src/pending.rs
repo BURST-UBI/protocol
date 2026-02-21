@@ -99,10 +99,7 @@ impl PendingStore for LmdbPendingStore {
         increment_prefix(&mut upper);
 
         let rtxn = self.env.read_txn().map_err(LmdbError::from)?;
-        let bounds = (
-            Bound::Included(prefix),
-            Bound::Excluded(upper.as_slice()),
-        );
+        let bounds = (Bound::Included(prefix), Bound::Excluded(upper.as_slice()));
         let iter = self
             .pending_db
             .range(&rtxn, &bounds)

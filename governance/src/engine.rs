@@ -658,9 +658,7 @@ impl GovernanceEngine {
         }
 
         let total_yea_nay = votes_yea + votes_nay;
-        let supermajority_actual_bps = (votes_yea * 10000)
-            .checked_div(total_yea_nay)
-            .unwrap_or(0);
+        let supermajority_actual_bps = (votes_yea * 10000).checked_div(total_yea_nay).unwrap_or(0);
 
         if supermajority_actual_bps < supermajority_bps {
             self.fail_proposal(proposal, now, params);

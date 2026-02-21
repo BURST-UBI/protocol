@@ -241,9 +241,7 @@ async fn handle_text_message(
             };
             let mut sender = ws_sender.lock().await;
             let _ = sender
-                .send(Message::Text(
-                    serde_json::to_string(&error_msg).unwrap(),
-                ))
+                .send(Message::Text(serde_json::to_string(&error_msg).unwrap()))
                 .await;
             return;
         }
