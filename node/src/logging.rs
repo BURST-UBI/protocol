@@ -26,29 +26,19 @@ pub enum LogFormat {
 /// Panics if a global subscriber has already been set (i.e. this function
 /// was called twice in the same process).
 pub fn init_logging(format: LogFormat, level: &str) {
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
 
     match format {
         LogFormat::Human => {
             tracing_subscriber::registry()
                 .with(filter)
-                .with(
-                    fmt::layer()
-                        .with_target(true)
-                        .with_thread_ids(true),
-                )
+                .with(fmt::layer().with_target(true).with_thread_ids(true))
                 .init();
         }
         LogFormat::Json => {
             tracing_subscriber::registry()
                 .with(filter)
-                .with(
-                    fmt::layer()
-                        .json()
-                        .with_target(true)
-                        .with_thread_ids(true),
-                )
+                .with(fmt::layer().json().with_target(true).with_thread_ids(true))
                 .init();
         }
     }

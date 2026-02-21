@@ -9,11 +9,7 @@ use burst_types::{BlockHash, WalletAddress};
 /// maps each account address to its latest block hash.
 pub trait FrontierStore {
     /// Set or update the frontier (head block) for an account.
-    fn put_frontier(
-        &self,
-        account: &WalletAddress,
-        head: &BlockHash,
-    ) -> Result<(), StoreError>;
+    fn put_frontier(&self, account: &WalletAddress, head: &BlockHash) -> Result<(), StoreError>;
 
     /// Get the frontier (head block) for an account.
     fn get_frontier(&self, account: &WalletAddress) -> Result<BlockHash, StoreError>;

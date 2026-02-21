@@ -72,11 +72,7 @@ impl OnlineWeightSampler {
     ///
     /// `weights` maps each representative to the total weight delegated to it
     /// (sum of balances of accounts that selected it as their representative).
-    pub fn online_weight(
-        &self,
-        now: u64,
-        weights: &HashMap<WalletAddress, u128>,
-    ) -> u128 {
+    pub fn online_weight(&self, now: u64, weights: &HashMap<WalletAddress, u128>) -> u128 {
         let cutoff = now.saturating_sub(self.window_secs);
         self.recent_voters
             .iter()
@@ -86,11 +82,7 @@ impl OnlineWeightSampler {
     }
 
     /// Compute online weight from a weight map (convenience for internal use).
-    fn compute_online_weight(
-        &self,
-        now: u64,
-        weight_map: &HashMap<WalletAddress, u128>,
-    ) -> u128 {
+    fn compute_online_weight(&self, now: u64, weight_map: &HashMap<WalletAddress, u128>) -> u128 {
         self.online_weight(now, weight_map)
     }
 
@@ -109,15 +101,9 @@ impl OnlineWeightSampler {
     ///
     /// This ensures quorum never drops below the floor, and temporary dips
     /// in online weight are smoothed by the EMA trend.
-    pub fn effective_weight(
-        &self,
-        now: u64,
-        weight_map: &HashMap<WalletAddress, u128>,
-    ) -> u128 {
+    pub fn effective_weight(&self, now: u64, weight_map: &HashMap<WalletAddress, u128>) -> u128 {
         let current = self.compute_online_weight(now, weight_map);
-        current
-            .max(self.trended_weight)
-            .max(self.min_weight)
+        current.max(self.trended_weight).max(self.min_weight)
     }
 
     /// Whether a representative is a "principal" rep (≥0.1% of online weight).
@@ -150,7 +136,8 @@ impl OnlineWeightSampler {
     /// Remove representatives that haven't voted within the window.
     pub fn prune(&mut self, now: u64) {
         let cutoff = now.saturating_sub(self.window_secs);
-        self.recent_voters.retain(|_, &mut last_vote| last_vote >= cutoff);
+        self.recent_voters
+            .retain(|_, &mut last_vote| last_vote >= cutoff);
     }
 
     /// Number of tracked representatives (including stale ones not yet pruned).

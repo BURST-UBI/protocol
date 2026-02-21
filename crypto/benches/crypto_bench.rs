@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, Criterion, black_box};
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
 fn ed25519_sign_bench(c: &mut Criterion) {
     let kp = burst_crypto::generate_keypair();

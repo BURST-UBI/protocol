@@ -77,10 +77,7 @@ impl NodeClient {
             return Err(WalletError::Node(format!("node error: {err}")));
         }
 
-        json.get("result")
-            .cloned()
-            .unwrap_or(json)
-            .pipe_ok()
+        json.get("result").cloned().unwrap_or(json).pipe_ok()
     }
 
     /// Fetch account balance (BRN + TRST).
@@ -89,10 +86,7 @@ impl NodeClient {
         account: &str,
     ) -> Result<AccountBalanceResult, WalletError> {
         let result = self
-            .rpc_call(
-                "account_balance",
-                serde_json::json!({ "account": account }),
-            )
+            .rpc_call("account_balance", serde_json::json!({ "account": account }))
             .await?;
 
         let resp: AccountBalanceResult = serde_json::from_value(result)
@@ -404,19 +398,11 @@ impl Wallet {
             _ => WalletState::Unverified,
         };
 
-        self.verified_at = info
-            .verified_at
-            .map(Timestamp::new);
+        self.verified_at = info.verified_at.map(Timestamp::new);
 
-        self.total_brn_burned = info
-            .total_brn_burned
-            .parse::<u128>()
-            .unwrap_or(0);
+        self.total_brn_burned = info.total_brn_burned.parse::<u128>().unwrap_or(0);
 
-        self.total_brn_staked = info
-            .total_brn_staked
-            .parse::<u128>()
-            .unwrap_or(0);
+        self.total_brn_staked = info.total_brn_staked.parse::<u128>().unwrap_or(0);
 
         Ok(())
     }

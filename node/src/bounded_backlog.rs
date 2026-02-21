@@ -64,13 +64,7 @@ impl BoundedBacklog {
     }
 
     /// Add an unconfirmed block to the backlog.
-    pub fn insert(
-        &mut self,
-        hash: BlockHash,
-        account: WalletAddress,
-        priority: u64,
-        now: u64,
-    ) {
+    pub fn insert(&mut self, hash: BlockHash, account: WalletAddress, priority: u64, now: u64) {
         if self.entries.contains_key(&hash) {
             return;
         }

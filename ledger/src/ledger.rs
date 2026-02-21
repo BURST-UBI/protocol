@@ -61,7 +61,9 @@ pub trait Ledger {
         }
         match self.block_store().height_of_block(block_hash)? {
             Some(height) => Ok(height <= acct.confirmation_height),
-            None => Err(StoreError::NotFound("block not found in height index".into())),
+            None => Err(StoreError::NotFound(
+                "block not found in height index".into(),
+            )),
         }
     }
 }

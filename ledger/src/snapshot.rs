@@ -72,16 +72,21 @@ impl LedgerSnapshot {
         for account in &self.accounts {
             hasher.update(account.address.as_str().as_bytes());
             hasher.update(format!("{:?}", account.state).as_bytes());
-            hasher.update(&account.verified_at.map_or(0u64, |t| t.as_secs()).to_le_bytes());
+            hasher.update(
+                account
+                    .verified_at
+                    .map_or(0u64, |t| t.as_secs())
+                    .to_le_bytes(),
+            );
             hasher.update(account.head.as_bytes());
-            hasher.update(&account.block_count.to_le_bytes());
-            hasher.update(&account.confirmation_height.to_le_bytes());
-            hasher.update(&account.brn_burned.to_le_bytes());
-            hasher.update(&account.total_brn_staked.to_le_bytes());
-            hasher.update(&account.trst_balance.to_le_bytes());
+            hasher.update(account.block_count.to_le_bytes());
+            hasher.update(account.confirmation_height.to_le_bytes());
+            hasher.update(account.brn_burned.to_le_bytes());
+            hasher.update(account.total_brn_staked.to_le_bytes());
+            hasher.update(account.trst_balance.to_le_bytes());
             hasher.update(account.representative.as_str().as_bytes());
         }
-        hasher.update(&self.block_height.to_le_bytes());
+        hasher.update(self.block_height.to_le_bytes());
 
         let result = hasher.finalize();
         let mut out = [0u8; 32];

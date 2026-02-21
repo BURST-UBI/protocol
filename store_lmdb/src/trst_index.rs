@@ -46,11 +46,7 @@ fn expiry_binary_key(expiry: Timestamp, tx_hash: &TxHash) -> [u8; 40] {
 }
 
 impl TrstIndexStore for LmdbTrstIndexStore {
-    fn put_origin_index(
-        &self,
-        origin_hash: &TxHash,
-        tx_hash: &TxHash,
-    ) -> Result<(), StoreError> {
+    fn put_origin_index(&self, origin_hash: &TxHash, tx_hash: &TxHash) -> Result<(), StoreError> {
         let mut wtxn = self.env.write_txn().map_err(LmdbError::from)?;
 
         let key = origin_composite_key(origin_hash, tx_hash);
@@ -129,11 +125,7 @@ impl TrstIndexStore for LmdbTrstIndexStore {
         Ok(())
     }
 
-    fn put_expiry_index(
-        &self,
-        expiry: Timestamp,
-        tx_hash: &TxHash,
-    ) -> Result<(), StoreError> {
+    fn put_expiry_index(&self, expiry: Timestamp, tx_hash: &TxHash) -> Result<(), StoreError> {
         let key = expiry_binary_key(expiry, tx_hash);
         let mut wtxn = self.env.write_txn().map_err(LmdbError::from)?;
         self.trst_expiry_db
@@ -163,10 +155,7 @@ impl TrstIndexStore for LmdbTrstIndexStore {
     fn get_expired_before(&self, cutoff: Timestamp) -> Result<Vec<TxHash>, StoreError> {
         let rtxn = self.env.read_txn().map_err(LmdbError::from)?;
         let upper = expiry_binary_key(cutoff, &TxHash::new([0u8; 32]));
-        let bounds = (
-            Bound::<&[u8]>::Unbounded,
-            Bound::Excluded(upper.as_ref()),
-        );
+        let bounds = (Bound::<&[u8]>::Unbounded, Bound::Excluded(upper.as_ref()));
         let iter = self
             .trst_expiry_db
             .range(&rtxn, &bounds)
@@ -183,11 +172,7 @@ impl TrstIndexStore for LmdbTrstIndexStore {
         Ok(results)
     }
 
-    fn delete_expiry_index(
-        &self,
-        expiry: Timestamp,
-        tx_hash: &TxHash,
-    ) -> Result<(), StoreError> {
+    fn delete_expiry_index(&self, expiry: Timestamp, tx_hash: &TxHash) -> Result<(), StoreError> {
         let key = expiry_binary_key(expiry, tx_hash);
         let mut wtxn = self.env.write_txn().map_err(LmdbError::from)?;
         self.trst_expiry_db
@@ -215,8 +200,7 @@ impl TrstIndexStore for LmdbTrstIndexStore {
 
                 // Delete from expiry DB — O(1).
                 if expiry_secs > 0 {
-                    let exp_key =
-                        expiry_binary_key(Timestamp::new(expiry_secs), tx_hash);
+                    let exp_key = expiry_binary_key(Timestamp::new(expiry_secs), tx_hash);
                     let _ = self
                         .trst_expiry_db
                         .delete(&mut wtxn, &exp_key[..])

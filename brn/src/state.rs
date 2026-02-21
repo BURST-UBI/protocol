@@ -42,7 +42,11 @@ impl RateHistory {
 
     /// Apply a global rate change — O(1). Just closes the current segment
     /// and appends a new one. No per-wallet iteration.
-    pub fn apply_rate_change(&mut self, new_rate: u128, change_at: Timestamp) -> Result<(), BrnError> {
+    pub fn apply_rate_change(
+        &mut self,
+        new_rate: u128,
+        change_at: Timestamp,
+    ) -> Result<(), BrnError> {
         if let Some(current) = self.segments.last() {
             if change_at.as_secs() < current.start.as_secs() {
                 return Err(BrnError::InvalidTimestamp);
@@ -82,7 +86,9 @@ impl RateHistory {
             if effective_start.as_secs() >= effective_end.as_secs() {
                 continue;
             }
-            let duration = effective_end.as_secs().saturating_sub(effective_start.as_secs());
+            let duration = effective_end
+                .as_secs()
+                .saturating_sub(effective_start.as_secs());
             let segment_accrual = seg.rate.checked_mul(duration as u128)?;
             total = total.checked_add(segment_accrual)?;
         }
@@ -199,7 +205,10 @@ mod tests {
     fn rate_history_wallet_verified_after_genesis() {
         let h = RateHistory::new(50, Timestamp::new(0));
         // Wallet verified at t=500, check at t=1000 → only 500s of accrual
-        assert_eq!(h.total_accrued(Timestamp::new(500), Timestamp::new(1000)), 25_000);
+        assert_eq!(
+            h.total_accrued(Timestamp::new(500), Timestamp::new(1000)),
+            25_000
+        );
     }
 
     #[test]
@@ -210,7 +219,10 @@ mod tests {
         assert_eq!(h.segments.len(), 2);
 
         // Wallet from t=0 to t=2000: 100*1000 + 200*1000 = 300_000
-        assert_eq!(h.total_accrued(Timestamp::new(0), Timestamp::new(2000)), 300_000);
+        assert_eq!(
+            h.total_accrued(Timestamp::new(0), Timestamp::new(2000)),
+            300_000
+        );
     }
 
     #[test]
@@ -224,7 +236,10 @@ mod tests {
         // seg2: rate=20, effective 100..200 = 100s → 2000
         // seg3: rate=30, effective 200..250 = 50s → 1500
         // total = 4000
-        assert_eq!(h.total_accrued(Timestamp::new(50), Timestamp::new(250)), 4000);
+        assert_eq!(
+            h.total_accrued(Timestamp::new(50), Timestamp::new(250)),
+            4000
+        );
     }
 
     #[test]

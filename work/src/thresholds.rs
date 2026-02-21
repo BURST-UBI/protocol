@@ -92,7 +92,10 @@ mod tests {
         let thresholds = WorkThresholds::new();
         let send = thresholds.threshold_for(WorkBlockKind::Base);
         let receive = thresholds.threshold_for(WorkBlockKind::ReceiveOrOpen);
-        assert!(receive > send, "receive threshold ({receive}) must exceed send ({send})");
+        assert!(
+            receive > send,
+            "receive threshold ({receive}) must exceed send ({send})"
+        );
     }
 
     #[test]
@@ -100,13 +103,19 @@ mod tests {
         let thresholds = WorkThresholds::new();
         let epoch = thresholds.threshold_for(WorkBlockKind::Epoch);
         let receive = thresholds.threshold_for(WorkBlockKind::ReceiveOrOpen);
-        assert!(epoch > receive, "epoch threshold ({epoch}) must exceed receive ({receive})");
+        assert!(
+            epoch > receive,
+            "epoch threshold ({epoch}) must exceed receive ({receive})"
+        );
     }
 
     #[test]
     fn base_is_unchanged() {
         let thresholds = WorkThresholds::new();
-        assert_eq!(thresholds.threshold_for(WorkBlockKind::Base), BASE_THRESHOLD);
+        assert_eq!(
+            thresholds.threshold_for(WorkBlockKind::Base),
+            BASE_THRESHOLD
+        );
     }
 
     #[test]

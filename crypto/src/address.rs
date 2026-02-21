@@ -35,7 +35,7 @@ const _CHECKSUM_CHARS: usize = 8;
 /// Encode a byte slice as base32 using the BURST alphabet.
 fn encode_base32(bytes: &[u8]) -> String {
     let total_bits = bytes.len() * 8;
-    let num_chars = (total_bits + 4) / 5; // ceil(total_bits / 5)
+    let num_chars = total_bits.div_ceil(5);
     let mut result = String::with_capacity(num_chars);
 
     let mut buffer: u64 = 0;
@@ -170,7 +170,9 @@ mod tests {
 
     #[test]
     fn invalid_prefix_rejected() {
-        assert!(!validate_address("nano_1234567890abcdefghijkmnopqrstuwxyz1234567890abcdefghijk"));
+        assert!(!validate_address(
+            "nano_1234567890abcdefghijkmnopqrstuwxyz1234567890abcdefghijk"
+        ));
     }
 
     #[test]
@@ -202,6 +204,9 @@ mod tests {
     fn different_keys_different_addresses() {
         let k1 = generate_keypair();
         let k2 = generate_keypair();
-        assert_ne!(derive_address(&k1.public).as_str(), derive_address(&k2.public).as_str());
+        assert_ne!(
+            derive_address(&k1.public).as_str(),
+            derive_address(&k2.public).as_str()
+        );
     }
 }

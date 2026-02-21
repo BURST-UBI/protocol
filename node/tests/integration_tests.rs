@@ -337,8 +337,14 @@ fn economics_burn_mints_trst_token() {
     );
 
     let prev_brn = 500;
-    let result =
-        burst_node::process_block_economics(&burn_block, &mut brn, &mut trst, now, expiry, prev_brn);
+    let result = burst_node::process_block_economics(
+        &burn_block,
+        &mut brn,
+        &mut trst,
+        now,
+        expiry,
+        prev_brn,
+    );
 
     match result {
         burst_node::EconomicResult::BurnAndMint {
@@ -442,10 +448,7 @@ fn economics_full_burn_send_receive_chain() {
 
     assert_eq!(token.amount, 200);
     assert_eq!(token.holder, bob);
-    assert_eq!(
-        trst.transferable_balance(&bob, now, expiry_secs),
-        Some(200)
-    );
+    assert_eq!(trst.transferable_balance(&bob, now, expiry_secs), Some(200));
 
     // Step 2: Bob sends 150 TRST to Carol
     let send = make_block(
@@ -482,7 +485,10 @@ fn economics_full_burn_send_receive_chain() {
     }
 
     let provenance = trst.debit_wallet_with_provenance(&bob, 150);
-    assert!(!provenance.is_empty(), "provenance should track consumed tokens");
+    assert!(
+        !provenance.is_empty(),
+        "provenance should track consumed tokens"
+    );
     assert_eq!(provenance[0].amount, 150);
     assert_eq!(provenance[0].origin_wallet, alice);
 
@@ -537,13 +543,7 @@ fn trst_merge_preserves_provenance() {
     let bob = make_address(71);
 
     let token1 = trst
-        .mint(
-            TxHash::new([1u8; 32]),
-            bob.clone(),
-            100,
-            alice.clone(),
-            now,
-        )
+        .mint(TxHash::new([1u8; 32]), bob.clone(), 100, alice.clone(), now)
         .unwrap();
     trst.track_token(token1.clone());
 
@@ -593,7 +593,13 @@ fn trst_split_preserves_total_amount() {
     let bob = make_address(81);
 
     let token = trst
-        .mint(TxHash::new([10u8; 32]), bob.clone(), 1000, alice.clone(), now)
+        .mint(
+            TxHash::new([10u8; 32]),
+            bob.clone(),
+            1000,
+            alice.clone(),
+            now,
+        )
         .unwrap();
 
     let children = trst
@@ -630,7 +636,13 @@ fn trst_revocation_by_origin_removes_all_downstream() {
     let carol = make_address(92);
 
     let t1 = trst
-        .mint(TxHash::new([20u8; 32]), bob.clone(), 500, sybil.clone(), now)
+        .mint(
+            TxHash::new([20u8; 32]),
+            bob.clone(),
+            500,
+            sybil.clone(),
+            now,
+        )
         .unwrap();
     trst.track_token(t1);
 
@@ -672,13 +684,21 @@ fn trst_expiry_zeroes_old_tokens() {
     let bob = make_address(101);
 
     let token = trst
-        .mint(TxHash::new([30u8; 32]), bob.clone(), 1000, alice.clone(), mint_time)
+        .mint(
+            TxHash::new([30u8; 32]),
+            bob.clone(),
+            1000,
+            alice.clone(),
+            mint_time,
+        )
         .unwrap();
     trst.track_token_with_expiry(token, expiry_secs);
 
     let before_expiry = Timestamp::new(5500);
     assert!(
-        trst.transferable_balance(&bob, before_expiry, expiry_secs).unwrap() > 0,
+        trst.transferable_balance(&bob, before_expiry, expiry_secs)
+            .unwrap()
+            > 0,
         "token should be active before expiry"
     );
 
@@ -896,7 +916,13 @@ fn trst_cannot_transfer_more_than_balance() {
     let bob = make_address(161);
 
     let token = trst
-        .mint(TxHash::new([40u8; 32]), bob.clone(), 100, alice.clone(), now)
+        .mint(
+            TxHash::new([40u8; 32]),
+            bob.clone(),
+            100,
+            alice.clone(),
+            now,
+        )
         .unwrap();
     trst.track_token(token);
 
@@ -923,7 +949,13 @@ fn trst_split_rejects_amount_exceeding_parent() {
     let bob = make_address(171);
 
     let token = trst
-        .mint(TxHash::new([50u8; 32]), bob.clone(), 100, alice.clone(), now)
+        .mint(
+            TxHash::new([50u8; 32]),
+            bob.clone(),
+            100,
+            alice.clone(),
+            now,
+        )
         .unwrap();
 
     let result = trst.split(
@@ -1074,31 +1106,63 @@ fn e2e_real_signatures_burn_send_receive() {
 
     // Alice opens her account
     let mut open = make_block(
-        BlockType::Open, &alice, BlockHash::ZERO, &alice,
-        1000, 0, BlockHash::ZERO, TxHash::ZERO, 1000,
+        BlockType::Open,
+        &alice,
+        BlockHash::ZERO,
+        &alice,
+        1000,
+        0,
+        BlockHash::ZERO,
+        TxHash::ZERO,
+        1000,
     );
     open.signature = sign_message(open.hash.as_bytes(), &alice_kp.private);
-    assert_eq!(proc.process(&open, &mut frontier), burst_node::ProcessResult::Accepted);
+    assert_eq!(
+        proc.process(&open, &mut frontier),
+        burst_node::ProcessResult::Accepted
+    );
 
     // Alice burns BRN → Bob gets TRST (link = bob's pubkey)
     let bob_pubkey = pubkey_bytes(&bob);
     let mut burn = make_block(
-        BlockType::Burn, &alice, open.hash, &alice,
-        500, 0, BlockHash::new(bob_pubkey), TxHash::ZERO, 2000,
+        BlockType::Burn,
+        &alice,
+        open.hash,
+        &alice,
+        500,
+        0,
+        BlockHash::new(bob_pubkey),
+        TxHash::ZERO,
+        2000,
     );
     burn.signature = sign_message(burn.hash.as_bytes(), &alice_kp.private);
-    assert_eq!(proc.process(&burn, &mut frontier), burst_node::ProcessResult::Accepted);
+    assert_eq!(
+        proc.process(&burn, &mut frontier),
+        burst_node::ProcessResult::Accepted
+    );
 
     // Process through economics
     let mut brn = BrnEngine::with_rate(100, Timestamp::new(0));
     let mut trst = TrstEngine::with_expiry(86400 * 365);
-    brn.track_wallet(alice.clone(), burst_brn::BrnWalletState::new(Timestamp::new(0)));
+    brn.track_wallet(
+        alice.clone(),
+        burst_brn::BrnWalletState::new(Timestamp::new(0)),
+    );
 
     let result = burst_node::process_block_economics(
-        &burn, &mut brn, &mut trst, Timestamp::new(2000), 86400 * 365, 1000,
+        &burn,
+        &mut brn,
+        &mut trst,
+        Timestamp::new(2000),
+        86400 * 365,
+        1000,
     );
     match &result {
-        burst_node::EconomicResult::BurnAndMint { burn_amount, mint_token, .. } => {
+        burst_node::EconomicResult::BurnAndMint {
+            burn_amount,
+            mint_token,
+            ..
+        } => {
             assert_eq!(*burn_amount, 500);
             let token = mint_token.as_ref().unwrap();
             assert_eq!(token.amount, 500);
@@ -1111,28 +1175,57 @@ fn e2e_real_signatures_burn_send_receive() {
 
     // Bob opens his account with a receive
     let mut bob_open = make_block(
-        BlockType::Open, &bob, BlockHash::ZERO, &bob,
-        0, 500, burn.hash, TxHash::ZERO, 3000,
+        BlockType::Open,
+        &bob,
+        BlockHash::ZERO,
+        &bob,
+        0,
+        500,
+        burn.hash,
+        TxHash::ZERO,
+        3000,
     );
     bob_open.signature = sign_message(bob_open.hash.as_bytes(), &bob_kp.private);
 
-    assert_eq!(proc.process(&bob_open, &mut frontier), burst_node::ProcessResult::Accepted);
+    assert_eq!(
+        proc.process(&bob_open, &mut frontier),
+        burst_node::ProcessResult::Accepted
+    );
     assert_eq!(frontier.get_head(&bob), Some(&bob_open.hash));
 
     // Bob sends 300 TRST to Carol
     let carol_pubkey = pubkey_bytes(&carol);
     let mut bob_send = make_block(
-        BlockType::Send, &bob, bob_open.hash, &bob,
-        0, 200, BlockHash::new(carol_pubkey), TxHash::ZERO, 4000,
+        BlockType::Send,
+        &bob,
+        bob_open.hash,
+        &bob,
+        0,
+        200,
+        BlockHash::new(carol_pubkey),
+        TxHash::ZERO,
+        4000,
     );
     bob_send.signature = sign_message(bob_send.hash.as_bytes(), &bob_kp.private);
-    assert_eq!(proc.process(&bob_send, &mut frontier), burst_node::ProcessResult::Accepted);
+    assert_eq!(
+        proc.process(&bob_send, &mut frontier),
+        burst_node::ProcessResult::Accepted
+    );
 
     let send_result = burst_node::process_block_economics(
-        &bob_send, &mut brn, &mut trst, Timestamp::new(4000), 86400 * 365, 0,
+        &bob_send,
+        &mut brn,
+        &mut trst,
+        Timestamp::new(4000),
+        86400 * 365,
+        0,
     );
     match &send_result {
-        burst_node::EconomicResult::Send { sender, trst_balance_after, .. } => {
+        burst_node::EconomicResult::Send {
+            sender,
+            trst_balance_after,
+            ..
+        } => {
             assert_eq!(sender, &bob);
             assert_eq!(*trst_balance_after, 200);
         }
@@ -1206,19 +1299,38 @@ fn endorsement_burns_brn_correctly() {
     let endorser = make_address(196);
     let target = make_address(197);
 
-    brn.track_wallet(endorser.clone(), burst_brn::BrnWalletState::new(Timestamp::new(0)));
+    brn.track_wallet(
+        endorser.clone(),
+        burst_brn::BrnWalletState::new(Timestamp::new(0)),
+    );
 
     let endorse_block = make_block(
-        BlockType::Endorse, &endorser, BlockHash::new([1u8; 32]), &endorser,
-        700, 0, BlockHash::new(pubkey_bytes(&target)), TxHash::ZERO, now.as_secs(),
+        BlockType::Endorse,
+        &endorser,
+        BlockHash::new([1u8; 32]),
+        &endorser,
+        700,
+        0,
+        BlockHash::new(pubkey_bytes(&target)),
+        TxHash::ZERO,
+        now.as_secs(),
     );
 
     let result = burst_node::process_block_economics(
-        &endorse_block, &mut brn, &mut trst, now, 86400 * 365, 1000,
+        &endorse_block,
+        &mut brn,
+        &mut trst,
+        now,
+        86400 * 365,
+        1000,
     );
 
     match result {
-        burst_node::EconomicResult::Endorse { burn_amount, burn_result, target: t } => {
+        burst_node::EconomicResult::Endorse {
+            burn_amount,
+            burn_result,
+            target: t,
+        } => {
             assert_eq!(burn_amount, 300);
             assert!(burn_result.is_ok());
             assert_eq!(t.unwrap(), target);
@@ -1236,19 +1348,38 @@ fn challenge_stakes_brn_correctly() {
     let challenger = make_address(198);
     let target = make_address(199);
 
-    brn.track_wallet(challenger.clone(), burst_brn::BrnWalletState::new(Timestamp::new(0)));
+    brn.track_wallet(
+        challenger.clone(),
+        burst_brn::BrnWalletState::new(Timestamp::new(0)),
+    );
 
     let challenge_block = make_block(
-        BlockType::Challenge, &challenger, BlockHash::new([1u8; 32]), &challenger,
-        200, 0, BlockHash::new(pubkey_bytes(&target)), TxHash::ZERO, now.as_secs(),
+        BlockType::Challenge,
+        &challenger,
+        BlockHash::new([1u8; 32]),
+        &challenger,
+        200,
+        0,
+        BlockHash::new(pubkey_bytes(&target)),
+        TxHash::ZERO,
+        now.as_secs(),
     );
 
     let result = burst_node::process_block_economics(
-        &challenge_block, &mut brn, &mut trst, now, 86400 * 365, 1000,
+        &challenge_block,
+        &mut brn,
+        &mut trst,
+        now,
+        86400 * 365,
+        1000,
     );
 
     match result {
-        burst_node::EconomicResult::Challenge { stake_amount, stake_result, target: t } => {
+        burst_node::EconomicResult::Challenge {
+            stake_amount,
+            stake_result,
+            target: t,
+        } => {
             assert_eq!(stake_amount, 800);
             assert!(stake_result.is_ok());
             let stake = stake_result.unwrap();
@@ -1275,8 +1406,15 @@ fn verification_vote_records_vote_value_and_stake() {
 
     // Create a VerificationVote block
     let mut vote_block = make_block(
-        BlockType::VerificationVote, &voter, BlockHash::new([1u8; 32]), &voter,
-        800, 0, BlockHash::new(pubkey_bytes(&target)), TxHash::ZERO, now.as_secs(),
+        BlockType::VerificationVote,
+        &voter,
+        BlockHash::new([1u8; 32]),
+        &voter,
+        800,
+        0,
+        BlockHash::new(pubkey_bytes(&target)),
+        TxHash::ZERO,
+        now.as_secs(),
     );
     vote_block.transaction = TxHash::new({
         let mut bytes = [0u8; 32];
@@ -1286,11 +1424,21 @@ fn verification_vote_records_vote_value_and_stake() {
     vote_block.hash = vote_block.compute_hash();
 
     let result = burst_node::process_block_economics(
-        &vote_block, &mut brn, &mut trst, now, 86400 * 365, 1000,
+        &vote_block,
+        &mut brn,
+        &mut trst,
+        now,
+        86400 * 365,
+        1000,
     );
 
     match result {
-        burst_node::EconomicResult::VerificationVoteResult { voter: v, target: t, vote, stake } => {
+        burst_node::EconomicResult::VerificationVoteResult {
+            voter: v,
+            target: t,
+            vote,
+            stake,
+        } => {
             assert_eq!(v, voter);
             assert_eq!(t.unwrap(), target);
             assert_eq!(vote, 1);
@@ -1315,17 +1463,33 @@ fn governance_proposal_and_vote_economics() {
 
     // GovernanceProposal block
     let mut proposal_block = make_block(
-        BlockType::GovernanceProposal, &proposer, BlockHash::new([1u8; 32]), &proposer,
-        1000, 500, BlockHash::ZERO, TxHash::ZERO, now.as_secs(),
+        BlockType::GovernanceProposal,
+        &proposer,
+        BlockHash::new([1u8; 32]),
+        &proposer,
+        1000,
+        500,
+        BlockHash::ZERO,
+        TxHash::ZERO,
+        now.as_secs(),
     );
     proposal_block.transaction = TxHash::new([0xAA; 32]);
     proposal_block.hash = proposal_block.compute_hash();
 
     let result = burst_node::process_block_economics(
-        &proposal_block, &mut brn, &mut trst, now, 86400 * 365, 1000,
+        &proposal_block,
+        &mut brn,
+        &mut trst,
+        now,
+        86400 * 365,
+        1000,
     );
     match result {
-        burst_node::EconomicResult::GovernanceProposal { proposer: p, proposal_hash, .. } => {
+        burst_node::EconomicResult::GovernanceProposal {
+            proposer: p,
+            proposal_hash,
+            ..
+        } => {
             assert_eq!(p, proposer);
             assert_eq!(proposal_hash, TxHash::new([0xAA; 32]));
         }
@@ -1335,8 +1499,15 @@ fn governance_proposal_and_vote_economics() {
     // GovernanceVote block (link = proposal hash, transaction[0] = vote value)
     let proposal_hash = TxHash::new([0xAA; 32]);
     let mut vote_block = make_block(
-        BlockType::GovernanceVote, &voter, BlockHash::new([2u8; 32]), &voter,
-        1000, 500, BlockHash::new(*proposal_hash.as_bytes()), TxHash::ZERO, now.as_secs() + 10,
+        BlockType::GovernanceVote,
+        &voter,
+        BlockHash::new([2u8; 32]),
+        &voter,
+        1000,
+        500,
+        BlockHash::new(*proposal_hash.as_bytes()),
+        TxHash::ZERO,
+        now.as_secs() + 10,
     );
     vote_block.transaction = TxHash::new({
         let mut bytes = [0u8; 32];
@@ -1346,10 +1517,19 @@ fn governance_proposal_and_vote_economics() {
     vote_block.hash = vote_block.compute_hash();
 
     let result = burst_node::process_block_economics(
-        &vote_block, &mut brn, &mut trst, Timestamp::new(now.as_secs() + 10), 86400 * 365, 1000,
+        &vote_block,
+        &mut brn,
+        &mut trst,
+        Timestamp::new(now.as_secs() + 10),
+        86400 * 365,
+        1000,
     );
     match result {
-        burst_node::EconomicResult::GovernanceVote { voter: v, proposal_hash: ph, vote } => {
+        burst_node::EconomicResult::GovernanceVote {
+            voter: v,
+            proposal_hash: ph,
+            vote,
+        } => {
             assert_eq!(v, voter);
             assert_eq!(ph, proposal_hash);
             assert_eq!(vote, burst_transactions::governance::GovernanceVote::Yea);
@@ -1369,8 +1549,15 @@ fn create_received_token_single_provenance() {
     let origin_wallet = make_address(206);
 
     let receive_block = make_block(
-        BlockType::Receive, &receiver, BlockHash::ZERO, &receiver,
-        0, 500, BlockHash::new([0xDD; 32]), TxHash::ZERO, 5000,
+        BlockType::Receive,
+        &receiver,
+        BlockHash::ZERO,
+        &receiver,
+        0,
+        500,
+        BlockHash::new([0xDD; 32]),
+        TxHash::ZERO,
+        5000,
     );
 
     let pending = burst_store::pending::PendingInfo {
@@ -1387,7 +1574,8 @@ fn create_received_token_single_provenance() {
         }],
     };
 
-    let token = burst_node::ledger_bridge::create_received_token(&receive_block, &pending, 86400 * 365);
+    let token =
+        burst_node::ledger_bridge::create_received_token(&receive_block, &pending, 86400 * 365);
     assert_eq!(token.amount, 500);
     assert_eq!(token.holder, receiver);
     assert_eq!(token.origin_wallet, origin_wallet);
@@ -1404,8 +1592,15 @@ fn create_received_token_multi_provenance_uses_earliest_timestamp() {
     let origin_b = make_address(210);
 
     let receive_block = make_block(
-        BlockType::Receive, &receiver, BlockHash::ZERO, &receiver,
-        0, 700, BlockHash::new([0xEE; 32]), TxHash::ZERO, 8000,
+        BlockType::Receive,
+        &receiver,
+        BlockHash::ZERO,
+        &receiver,
+        0,
+        700,
+        BlockHash::new([0xEE; 32]),
+        TxHash::ZERO,
+        8000,
     );
 
     let pending = burst_store::pending::PendingInfo {
@@ -1432,7 +1627,8 @@ fn create_received_token_multi_provenance_uses_earliest_timestamp() {
         ],
     };
 
-    let token = burst_node::ledger_bridge::create_received_token(&receive_block, &pending, 86400 * 365);
+    let token =
+        burst_node::ledger_bridge::create_received_token(&receive_block, &pending, 86400 * 365);
     assert_eq!(token.amount, 700);
     assert_eq!(token.holder, receiver);
     assert_eq!(
@@ -1451,8 +1647,15 @@ fn create_received_token_no_provenance_uses_pending_timestamp() {
     let receiver = make_address(212);
 
     let receive_block = make_block(
-        BlockType::Receive, &receiver, BlockHash::ZERO, &receiver,
-        0, 100, BlockHash::new([0xFF; 32]), TxHash::ZERO, 9000,
+        BlockType::Receive,
+        &receiver,
+        BlockHash::ZERO,
+        &receiver,
+        0,
+        100,
+        BlockHash::new([0xFF; 32]),
+        TxHash::ZERO,
+        9000,
     );
 
     let pending = burst_store::pending::PendingInfo {
@@ -1462,7 +1665,8 @@ fn create_received_token_no_provenance_uses_pending_timestamp() {
         provenance: Vec::new(),
     };
 
-    let token = burst_node::ledger_bridge::create_received_token(&receive_block, &pending, 86400 * 365);
+    let token =
+        burst_node::ledger_bridge::create_received_token(&receive_block, &pending, 86400 * 365);
     assert_eq!(token.amount, 100);
     assert_eq!(token.holder, receiver);
     assert_eq!(token.origin_wallet, sender);
@@ -1479,8 +1683,15 @@ fn balance_validation_endorse_rejects_brn_increase() {
     use burst_node::BlockProcessor;
 
     let block = make_block(
-        BlockType::Endorse, &make_address(213), BlockHash::new([1u8; 32]),
-        &make_address(214), 1100, 500, BlockHash::ZERO, TxHash::ZERO, 5000,
+        BlockType::Endorse,
+        &make_address(213),
+        BlockHash::new([1u8; 32]),
+        &make_address(214),
+        1100,
+        500,
+        BlockHash::ZERO,
+        TxHash::ZERO,
+        5000,
     );
     let result = BlockProcessor::validate_balance_transition(&block, 1000, 500);
     assert!(result.is_err());
@@ -1492,8 +1703,15 @@ fn balance_validation_challenge_rejects_trst_change() {
     use burst_node::BlockProcessor;
 
     let block = make_block(
-        BlockType::Challenge, &make_address(215), BlockHash::new([1u8; 32]),
-        &make_address(216), 500, 600, BlockHash::ZERO, TxHash::ZERO, 5000,
+        BlockType::Challenge,
+        &make_address(215),
+        BlockHash::new([1u8; 32]),
+        &make_address(216),
+        500,
+        600,
+        BlockHash::ZERO,
+        TxHash::ZERO,
+        5000,
     );
     let result = BlockProcessor::validate_balance_transition(&block, 1000, 500);
     assert!(result.is_err());
@@ -1505,14 +1723,28 @@ fn balance_validation_governance_preserves_both_balances() {
     use burst_node::BlockProcessor;
 
     let block = make_block(
-        BlockType::GovernanceVote, &make_address(217), BlockHash::new([1u8; 32]),
-        &make_address(218), 1000, 500, BlockHash::ZERO, TxHash::ZERO, 5000,
+        BlockType::GovernanceVote,
+        &make_address(217),
+        BlockHash::new([1u8; 32]),
+        &make_address(218),
+        1000,
+        500,
+        BlockHash::ZERO,
+        TxHash::ZERO,
+        5000,
     );
     assert!(BlockProcessor::validate_balance_transition(&block, 1000, 500).is_ok());
 
     let bad_block = make_block(
-        BlockType::GovernanceVote, &make_address(217), BlockHash::new([1u8; 32]),
-        &make_address(218), 999, 500, BlockHash::ZERO, TxHash::ZERO, 5000,
+        BlockType::GovernanceVote,
+        &make_address(217),
+        BlockHash::new([1u8; 32]),
+        &make_address(218),
+        999,
+        500,
+        BlockHash::ZERO,
+        TxHash::ZERO,
+        5000,
     );
     let result = BlockProcessor::validate_balance_transition(&bad_block, 1000, 500);
     assert!(result.is_err());
@@ -1523,14 +1755,28 @@ fn balance_validation_verification_vote_preserves_both() {
     use burst_node::BlockProcessor;
 
     let ok_block = make_block(
-        BlockType::VerificationVote, &make_address(219), BlockHash::new([1u8; 32]),
-        &make_address(220), 1000, 500, BlockHash::ZERO, TxHash::ZERO, 5000,
+        BlockType::VerificationVote,
+        &make_address(219),
+        BlockHash::new([1u8; 32]),
+        &make_address(220),
+        1000,
+        500,
+        BlockHash::ZERO,
+        TxHash::ZERO,
+        5000,
     );
     assert!(BlockProcessor::validate_balance_transition(&ok_block, 1000, 500).is_ok());
 
     let bad_block = make_block(
-        BlockType::VerificationVote, &make_address(219), BlockHash::new([1u8; 32]),
-        &make_address(220), 1000, 400, BlockHash::ZERO, TxHash::ZERO, 5000,
+        BlockType::VerificationVote,
+        &make_address(219),
+        BlockHash::new([1u8; 32]),
+        &make_address(220),
+        1000,
+        400,
+        BlockHash::ZERO,
+        TxHash::ZERO,
+        5000,
     );
     assert!(BlockProcessor::validate_balance_transition(&bad_block, 1000, 500).is_err());
 }
@@ -1549,8 +1795,15 @@ fn unified_path_burn_persists_account_and_pending() {
 
     // Step 1: Open block for Alice
     let open = make_block(
-        BlockType::Open, &alice, BlockHash::ZERO, &rep,
-        1000, 0, BlockHash::ZERO, TxHash::ZERO, 1000,
+        BlockType::Open,
+        &alice,
+        BlockHash::ZERO,
+        &rep,
+        1000,
+        0,
+        BlockHash::ZERO,
+        TxHash::ZERO,
+        1000,
     );
 
     let mut rw = burst_consensus::RepWeightCache::new();
@@ -1566,21 +1819,40 @@ fn unified_path_burn_persists_account_and_pending() {
 
     // Step 2: Burn block — Alice burns 500 BRN, Bob is receiver
     let burn = make_block(
-        BlockType::Burn, &alice, open.hash, &rep,
-        500, 0, BlockHash::new(pubkey_bytes(&bob)), TxHash::ZERO, 2000,
+        BlockType::Burn,
+        &alice,
+        open.hash,
+        &rep,
+        500,
+        0,
+        BlockHash::new(pubkey_bytes(&bob)),
+        TxHash::ZERO,
+        2000,
     );
 
     // Economics
     let mut brn = BrnEngine::with_rate(100, Timestamp::new(0));
     let mut trst = TrstEngine::with_expiry(86400 * 365);
-    brn.track_wallet(alice.clone(), burst_brn::BrnWalletState::new(Timestamp::new(0)));
+    brn.track_wallet(
+        alice.clone(),
+        burst_brn::BrnWalletState::new(Timestamp::new(0)),
+    );
 
     let econ = burst_node::process_block_economics(
-        &burn, &mut brn, &mut trst, Timestamp::new(2000), 86400 * 365, 1000,
+        &burn,
+        &mut brn,
+        &mut trst,
+        Timestamp::new(2000),
+        86400 * 365,
+        1000,
     );
 
     let mint_token = match &econ {
-        burst_node::EconomicResult::BurnAndMint { burn_amount, mint_token, .. } => {
+        burst_node::EconomicResult::BurnAndMint {
+            burn_amount,
+            mint_token,
+            ..
+        } => {
             assert_eq!(*burn_amount, 500);
             mint_token.clone().unwrap()
         }
@@ -1592,7 +1864,8 @@ fn unified_path_burn_persists_account_and_pending() {
     let bytes = bincode::serialize(&burn).unwrap();
     batch.put_block(&burn.hash, &bytes).unwrap();
     batch.put_frontier(&alice, &burn.hash).unwrap();
-    let info2 = burst_node::update_account_on_block(&mut batch, &burn, Some(&info), 1000, &mut rw).unwrap();
+    let info2 =
+        burst_node::update_account_on_block(&mut batch, &burn, Some(&info), 1000, &mut rw).unwrap();
     batch.commit().unwrap();
 
     assert_eq!(info2.block_count, 2);
@@ -1629,7 +1902,13 @@ fn trst_revoke_then_unrevoke() {
     let holder = make_address(225);
 
     let token = trst
-        .mint(TxHash::new([0x50; 32]), holder.clone(), 1000, origin_wallet.clone(), now)
+        .mint(
+            TxHash::new([0x50; 32]),
+            holder.clone(),
+            1000,
+            origin_wallet.clone(),
+            now,
+        )
         .unwrap();
     trst.track_token(token);
 
@@ -1637,13 +1916,19 @@ fn trst_revoke_then_unrevoke() {
 
     // Revoke all tokens from origin_wallet
     let _revoked = trst.revoke_by_origin(&origin_wallet);
-    assert_eq!(trst.transferable_balance(&holder, now, expiry), Some(0),
-        "balance should be 0 after revocation");
+    assert_eq!(
+        trst.transferable_balance(&holder, now, expiry),
+        Some(0),
+        "balance should be 0 after revocation"
+    );
 
     // Un-revoke
     let _unrevoked = trst.un_revoke_by_origin(&origin_wallet);
-    assert_eq!(trst.transferable_balance(&holder, now, expiry), Some(1000),
-        "balance should be restored after un-revocation");
+    assert_eq!(
+        trst.transferable_balance(&holder, now, expiry),
+        Some(1000),
+        "balance should be restored after un-revocation"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1698,16 +1983,31 @@ fn reject_receive_returns_no_balance_change() {
     let rejecter = make_address(229);
 
     let reject_block = make_block(
-        BlockType::RejectReceive, &rejecter, BlockHash::new([1u8; 32]), &rejecter,
-        0, 100, BlockHash::new([0xDD; 32]), TxHash::ZERO, now.as_secs(),
+        BlockType::RejectReceive,
+        &rejecter,
+        BlockHash::new([1u8; 32]),
+        &rejecter,
+        0,
+        100,
+        BlockHash::new([0xDD; 32]),
+        TxHash::ZERO,
+        now.as_secs(),
     );
 
     let result = burst_node::process_block_economics(
-        &reject_block, &mut brn, &mut trst, now, 86400 * 365, 0,
+        &reject_block,
+        &mut brn,
+        &mut trst,
+        now,
+        86400 * 365,
+        0,
     );
 
     match result {
-        burst_node::EconomicResult::RejectReceive { rejecter: r, send_block_hash } => {
+        burst_node::EconomicResult::RejectReceive {
+            rejecter: r,
+            send_block_hash,
+        } => {
             assert_eq!(r, rejecter);
             assert_eq!(send_block_hash, BlockHash::new([0xDD; 32]));
         }
@@ -1724,7 +2024,9 @@ fn brn_accrual_piecewise_rate_history() {
     use burst_brn::state::RateHistory;
 
     let mut history = RateHistory::new(100, Timestamp::new(0));
-    history.apply_rate_change(200, Timestamp::new(5000)).unwrap();
+    history
+        .apply_rate_change(200, Timestamp::new(5000))
+        .unwrap();
 
     let verified_at = Timestamp::new(1000);
     let now = Timestamp::new(8000);

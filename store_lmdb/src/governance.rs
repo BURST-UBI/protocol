@@ -102,11 +102,11 @@ impl GovernanceStore for LmdbGovernanceStore {
         let mut upper = prefix.to_vec();
         increment_prefix(&mut upper);
 
-        let bounds = (
-            Bound::Included(prefix),
-            Bound::Excluded(upper.as_slice()),
-        );
-        let iter = self.votes_db.range(&rtxn, &bounds).map_err(LmdbError::from)?;
+        let bounds = (Bound::Included(prefix), Bound::Excluded(upper.as_slice()));
+        let iter = self
+            .votes_db
+            .range(&rtxn, &bounds)
+            .map_err(LmdbError::from)?;
         let mut results = Vec::new();
         for result in iter {
             let (_key, val) = result.map_err(LmdbError::from)?;

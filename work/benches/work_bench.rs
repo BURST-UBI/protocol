@@ -16,7 +16,11 @@ fn bench_pow_generation(c: &mut Criterion) {
             &difficulty,
             |b, &diff| {
                 b.iter(|| {
-                    black_box(generator.generate(black_box(&block_hash), black_box(diff)).unwrap())
+                    black_box(
+                        generator
+                            .generate(black_box(&block_hash), black_box(diff))
+                            .unwrap(),
+                    )
                 });
             },
         );

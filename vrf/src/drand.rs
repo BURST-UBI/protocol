@@ -109,14 +109,9 @@ impl DrandVerifier {
                 Ok(hash.to_vec())
             }
             DrandScheme::Chained => {
-                let prev_sig = beacon
-                    .previous_signature
-                    .as_deref()
-                    .ok_or_else(|| {
-                        VrfError::InvalidProof(
-                            "chained scheme requires previous_signature".into(),
-                        )
-                    })?;
+                let prev_sig = beacon.previous_signature.as_deref().ok_or_else(|| {
+                    VrfError::InvalidProof("chained scheme requires previous_signature".into())
+                })?;
                 let prev_bytes = hex::decode(prev_sig)
                     .map_err(|e| VrfError::InvalidProof(format!("prev sig hex: {e}")))?;
                 let mut hasher = Sha256::new();
@@ -142,8 +137,7 @@ impl DrandVerifier {
                     VrfError::InvalidSignature(format!("G1 point deserialization: {e:?}"))
                 })?;
 
-                let result =
-                    sig.verify(true, message, DRAND_QUICKNET_DST, &[], &pk, true);
+                let result = sig.verify(true, message, DRAND_QUICKNET_DST, &[], &pk, true);
 
                 Ok(result == blst::BLST_ERROR::BLST_SUCCESS)
             }
@@ -172,8 +166,8 @@ impl DrandVerifier {
 /// or when the `blst` library is unavailable. An attacker can forge beacons
 /// that pass this check.
 pub fn verify_beacon_simple(beacon: &DrandBeacon) -> Result<bool, VrfError> {
-    let sig_bytes = hex::decode(&beacon.signature)
-        .map_err(|e| VrfError::InvalidProof(e.to_string()))?;
+    let sig_bytes =
+        hex::decode(&beacon.signature).map_err(|e| VrfError::InvalidProof(e.to_string()))?;
     let hash = Sha256::digest(&sig_bytes);
     let expected = hex::encode(hash);
     Ok(expected == beacon.randomness)
@@ -402,15 +396,15 @@ impl DrandClient {
 
     /// Convert a drand beacon into a [`RandomOutput`] for use in verifier selection.
     pub fn beacon_to_random_output(beacon: &DrandBeacon) -> Result<RandomOutput, VrfError> {
-        let randomness_bytes = hex::decode(&beacon.randomness)
-            .map_err(|e| VrfError::InvalidProof(e.to_string()))?;
+        let randomness_bytes =
+            hex::decode(&beacon.randomness).map_err(|e| VrfError::InvalidProof(e.to_string()))?;
 
         let mut value = [0u8; 32];
         let len = randomness_bytes.len().min(32);
         value[..len].copy_from_slice(&randomness_bytes[..len]);
 
-        let proof = hex::decode(&beacon.signature)
-            .map_err(|e| VrfError::InvalidProof(e.to_string()))?;
+        let proof =
+            hex::decode(&beacon.signature).map_err(|e| VrfError::InvalidProof(e.to_string()))?;
 
         Ok(RandomOutput {
             value,
@@ -609,8 +603,7 @@ mod tests {
 
     #[test]
     fn test_beacon_message_chained_requires_prev_sig() {
-        let verifier =
-            DrandVerifier::new("aabb", DrandScheme::Chained).unwrap();
+        let verifier = DrandVerifier::new("aabb", DrandScheme::Chained).unwrap();
         let beacon = DrandBeacon {
             round: 1,
             randomness: String::new(),
@@ -622,8 +615,7 @@ mod tests {
 
     #[test]
     fn test_beacon_message_chained() {
-        let verifier =
-            DrandVerifier::new("aabb", DrandScheme::Chained).unwrap();
+        let verifier = DrandVerifier::new("aabb", DrandScheme::Chained).unwrap();
         let beacon = DrandBeacon {
             round: 5,
             randomness: String::new(),

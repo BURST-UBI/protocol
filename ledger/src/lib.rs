@@ -16,7 +16,7 @@ pub mod state_block;
 pub use account_chain::AccountChain;
 pub use error::LedgerError;
 pub use frontier::DagFrontier;
-pub use genesis::{GenesisConfig, create_genesis_block, genesis_hash};
+pub use genesis::{create_genesis_block, genesis_hash, GenesisConfig};
 pub use ledger::{Ledger, LedgerSummary};
 pub use pruning::{LedgerPruner, PruneResult, PruningConfig};
 pub use snapshot::{AccountSnapshot, LedgerSnapshot};

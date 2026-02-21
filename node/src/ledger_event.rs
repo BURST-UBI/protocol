@@ -11,10 +11,7 @@ pub enum LedgerEvent {
         account: WalletAddress,
     },
     /// A block was rejected.
-    BlockRejected {
-        hash: BlockHash,
-        reason: String,
-    },
+    BlockRejected { hash: BlockHash, reason: String },
     /// A fork was detected.
     ForkDetected {
         account: WalletAddress,
@@ -27,9 +24,7 @@ pub enum LedgerEvent {
         dependency: BlockHash,
     },
     /// An account was created (first block).
-    AccountCreated {
-        address: WalletAddress,
-    },
+    AccountCreated { address: WalletAddress },
     /// A TRST transfer was processed.
     TrstTransfer {
         from: WalletAddress,
@@ -79,7 +74,10 @@ impl Default for EventBus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
 
     fn test_account() -> WalletAddress {
         WalletAddress::new(
@@ -129,16 +127,14 @@ mod tests {
 
         let sc = Arc::clone(&saw_confirmed);
         let sr = Arc::clone(&saw_rejected);
-        bus.subscribe(Box::new(move |event| {
-            match event {
-                LedgerEvent::BlockConfirmed { .. } => {
-                    sc.fetch_add(1, Ordering::SeqCst);
-                }
-                LedgerEvent::BlockRejected { .. } => {
-                    sr.fetch_add(1, Ordering::SeqCst);
-                }
-                _ => {}
+        bus.subscribe(Box::new(move |event| match event {
+            LedgerEvent::BlockConfirmed { .. } => {
+                sc.fetch_add(1, Ordering::SeqCst);
             }
+            LedgerEvent::BlockRejected { .. } => {
+                sr.fetch_add(1, Ordering::SeqCst);
+            }
+            _ => {}
         }));
 
         bus.emit(&LedgerEvent::BlockConfirmed {

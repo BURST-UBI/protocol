@@ -76,12 +76,7 @@ impl LedgerPruner {
         }
 
         // Add expired entries (up to batch_size).
-        to_prune.extend(
-            expired_hashes
-                .iter()
-                .take(self.config.batch_size)
-                .cloned(),
-        );
+        to_prune.extend(expired_hashes.iter().take(self.config.batch_size).cloned());
 
         // Add revoked entries if configured, filling remaining batch capacity.
         if self.config.prune_revoked {

@@ -129,10 +129,7 @@ pub fn build_receive_tx(
     amount: u128,
     now: Timestamp,
 ) -> Result<burst_transactions::receive::ReceiveTx, WalletError> {
-    let hash_data = format!(
-        "receive:{}:{}:{}:{}",
-        receiver, send_hash, amount, now
-    );
+    let hash_data = format!("receive:{}:{}:{}:{}", receiver, send_hash, amount, now);
     let hash = burst_crypto::hash_transaction(hash_data.as_bytes());
     Ok(burst_transactions::receive::ReceiveTx {
         hash,
@@ -151,10 +148,7 @@ pub fn build_change_rep_tx(
     new_representative: &WalletAddress,
     now: Timestamp,
 ) -> Result<burst_transactions::representative::ChangeRepresentativeTx, WalletError> {
-    let hash_data = format!(
-        "change_rep:{}:{}:{}",
-        account, new_representative, now
-    );
+    let hash_data = format!("change_rep:{}:{}:{}", account, new_representative, now);
     let hash = burst_crypto::hash_transaction(hash_data.as_bytes());
     Ok(burst_transactions::representative::ChangeRepresentativeTx {
         hash,
@@ -370,12 +364,13 @@ pub fn build_state_block(
         burst_transactions::Transaction::Burn(tx) => (
             BlockType::Burn,
             address_to_link(&tx.receiver)?,
-            account_state.brn_balance.checked_sub(tx.amount).ok_or_else(|| {
-                WalletError::InsufficientBrn {
+            account_state
+                .brn_balance
+                .checked_sub(tx.amount)
+                .ok_or_else(|| WalletError::InsufficientBrn {
                     needed: tx.amount,
                     available: account_state.brn_balance,
-                }
-            })?,
+                })?,
             account_state.trst_balance,
             None,
         ),
@@ -383,12 +378,13 @@ pub fn build_state_block(
             BlockType::Send,
             address_to_link(&tx.receiver)?,
             account_state.brn_balance,
-            account_state.trst_balance.checked_sub(tx.amount).ok_or_else(|| {
-                WalletError::InsufficientTrst {
+            account_state
+                .trst_balance
+                .checked_sub(tx.amount)
+                .ok_or_else(|| WalletError::InsufficientTrst {
                     needed: tx.amount,
                     available: account_state.trst_balance,
-                }
-            })?,
+                })?,
             None,
         ),
         burst_transactions::Transaction::Split(tx) => {
@@ -397,12 +393,13 @@ pub fn build_state_block(
                 BlockType::Split,
                 BlockHash::new(*tx.parent_hash.as_bytes()),
                 account_state.brn_balance,
-                account_state.trst_balance.checked_sub(total_output).ok_or_else(|| {
-                    WalletError::InsufficientTrst {
+                account_state
+                    .trst_balance
+                    .checked_sub(total_output)
+                    .ok_or_else(|| WalletError::InsufficientTrst {
                         needed: total_output,
                         available: account_state.trst_balance,
-                    }
-                })?,
+                    })?,
                 None,
             )
         }
@@ -416,24 +413,26 @@ pub fn build_state_block(
         burst_transactions::Transaction::Endorse(tx) => (
             BlockType::Endorse,
             address_to_link(&tx.target)?,
-            account_state.brn_balance.checked_sub(tx.burn_amount).ok_or_else(|| {
-                WalletError::InsufficientBrn {
+            account_state
+                .brn_balance
+                .checked_sub(tx.burn_amount)
+                .ok_or_else(|| WalletError::InsufficientBrn {
                     needed: tx.burn_amount,
                     available: account_state.brn_balance,
-                }
-            })?,
+                })?,
             account_state.trst_balance,
             None,
         ),
         burst_transactions::Transaction::Challenge(tx) => (
             BlockType::Challenge,
             address_to_link(&tx.target)?,
-            account_state.brn_balance.checked_sub(tx.stake_amount).ok_or_else(|| {
-                WalletError::InsufficientBrn {
+            account_state
+                .brn_balance
+                .checked_sub(tx.stake_amount)
+                .ok_or_else(|| WalletError::InsufficientBrn {
                     needed: tx.stake_amount,
                     available: account_state.brn_balance,
-                }
-            })?,
+                })?,
             account_state.trst_balance,
             None,
         ),
@@ -489,12 +488,13 @@ pub fn build_state_block(
         burst_transactions::Transaction::VerificationVote(tx) => (
             BlockType::VerificationVote,
             address_to_link(&tx.target_wallet)?,
-            account_state.brn_balance.checked_sub(tx.stake_amount).ok_or_else(|| {
-                WalletError::InsufficientBrn {
+            account_state
+                .brn_balance
+                .checked_sub(tx.stake_amount)
+                .ok_or_else(|| WalletError::InsufficientBrn {
                     needed: tx.stake_amount,
                     available: account_state.brn_balance,
-                }
-            })?,
+                })?,
             account_state.trst_balance,
             None,
         ),
@@ -560,8 +560,7 @@ mod tests {
     use burst_transactions::split::SplitOutput;
 
     fn test_address(suffix: &str) -> WalletAddress {
-        let seed: Vec<u8> = suffix.as_bytes().iter().copied()
-            .cycle().take(32).collect();
+        let seed: Vec<u8> = suffix.as_bytes().iter().copied().cycle().take(32).collect();
         let mut seed_arr = [0u8; 32];
         seed_arr.copy_from_slice(&seed);
         let kp = burst_crypto::keypair_from_seed(&seed_arr);
@@ -593,9 +592,7 @@ mod tests {
     fn build_receive_tx_creates_valid_tx() {
         let receiver = test_address("receiver1");
         let send_hash = TxHash::new([1u8; 32]);
-        let tx =
-            build_receive_tx(&receiver, send_hash, 500, Timestamp::new(2000))
-                .unwrap();
+        let tx = build_receive_tx(&receiver, send_hash, 500, Timestamp::new(2000)).unwrap();
         assert_eq!(tx.receiver.as_str(), receiver.as_str());
         assert_eq!(tx.amount, 500);
         assert!(!tx.hash.is_zero());
@@ -605,8 +602,7 @@ mod tests {
     fn build_change_rep_tx_creates_valid_tx() {
         let account = test_address("account1");
         let new_rep = test_address("newrep1");
-        let tx =
-            build_change_rep_tx(&account, &new_rep, Timestamp::new(3000)).unwrap();
+        let tx = build_change_rep_tx(&account, &new_rep, Timestamp::new(3000)).unwrap();
         assert_eq!(tx.account.as_str(), account.as_str());
         assert_eq!(tx.new_representative.as_str(), new_rep.as_str());
         assert!(!tx.hash.is_zero());
@@ -627,8 +623,7 @@ mod tests {
                 amount: 200,
             },
         ];
-        let tx =
-            build_split_tx(&sender, parent, origin, outputs, Timestamp::new(4000)).unwrap();
+        let tx = build_split_tx(&sender, parent, origin, outputs, Timestamp::new(4000)).unwrap();
         assert_eq!(tx.outputs.len(), 2);
         assert!(!tx.hash.is_zero());
     }
@@ -666,8 +661,7 @@ mod tests {
     fn build_challenge_tx_creates_valid_tx() {
         let challenger = test_address("challenger1");
         let target = test_address("target1");
-        let tx =
-            build_challenge_tx(&challenger, &target, 1000, Timestamp::new(6000)).unwrap();
+        let tx = build_challenge_tx(&challenger, &target, 1000, Timestamp::new(6000)).unwrap();
         assert_eq!(tx.challenger.as_str(), challenger.as_str());
         assert_eq!(tx.target.as_str(), target.as_str());
         assert_eq!(tx.stake_amount, 1000);
@@ -758,7 +752,10 @@ mod tests {
         let block = build_state_block(&state, &tx, TxHash::ZERO).unwrap();
 
         assert_eq!(block.block_type, BlockType::ChangeRepresentative);
-        assert_eq!(block.representative.as_str(), test_address("newrep1").as_str());
+        assert_eq!(
+            block.representative.as_str(),
+            test_address("newrep1").as_str()
+        );
     }
 
     #[test]
@@ -772,7 +769,13 @@ mod tests {
             brn_balance: 10_000,
             trst_balance: 5_000,
         };
-        let burn = build_burn_tx(&address, &test_address("receiver1"), 100, Timestamp::new(1000)).unwrap();
+        let burn = build_burn_tx(
+            &address,
+            &test_address("receiver1"),
+            100,
+            Timestamp::new(1000),
+        )
+        .unwrap();
         let tx = burst_transactions::Transaction::Burn(burn);
         let signed = build_and_sign_state_block(&state, &tx, &kp.private, TxHash::ZERO).unwrap();
         assert!(burst_crypto::verify_signature(

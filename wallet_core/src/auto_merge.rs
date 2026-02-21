@@ -50,10 +50,7 @@ pub struct MergeGroup {
 ///
 /// Only considers active (transferable) tokens. Tokens are grouped by
 /// expiry similarity based on the configured threshold.
-pub fn compute_merge_groups(
-    holdings: &[TrstHolding],
-    config: &AutoMergeConfig,
-) -> Vec<MergeGroup> {
+pub fn compute_merge_groups(holdings: &[TrstHolding], config: &AutoMergeConfig) -> Vec<MergeGroup> {
     if !config.enabled || config.similarity_pct == 0 {
         return Vec::new();
     }

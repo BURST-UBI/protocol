@@ -277,7 +277,8 @@ async fn handle_rpc(
         serde_json::to_value(responses).unwrap_or_else(|_| serde_json::json!([]))
     } else {
         let resp = dispatch_single(body, &state).await;
-        serde_json::to_value(resp).unwrap_or_else(|_| serde_json::json!({"error": "serialization failed"}))
+        serde_json::to_value(resp)
+            .unwrap_or_else(|_| serde_json::json!({"error": "serialization failed"}))
     };
 
     (StatusCode::OK, Json(response))
@@ -332,9 +333,7 @@ async fn dispatch_action(
         "faucet" => handlers::handle_faucet(params, state).await,
         other => {
             warn!("unknown RPC action: {other}");
-            Err(RpcError::InvalidRequest(format!(
-                "unknown action: {other}"
-            )))
+            Err(RpcError::InvalidRequest(format!("unknown action: {other}")))
         }
     }
 }
@@ -355,7 +354,10 @@ mod tests {
         for _ in 0..5 {
             assert!(limiter.check("127.0.0.1"));
         }
-        assert!(!limiter.check("127.0.0.1"), "6th request should be rejected");
+        assert!(
+            !limiter.check("127.0.0.1"),
+            "6th request should be rejected"
+        );
     }
 
     #[test]

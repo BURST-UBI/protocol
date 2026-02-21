@@ -94,7 +94,9 @@ mod tests {
     fn submit_single_endorsement() {
         let engine = EndorsementEngine;
         let mut state = new_state("target");
-        engine.submit_endorsement(&mut state, addr("e1"), 100, Timestamp::new(1)).unwrap();
+        engine
+            .submit_endorsement(&mut state, addr("e1"), 100, Timestamp::new(1))
+            .unwrap();
         assert_eq!(state.endorsements.len(), 1);
         assert_eq!(state.endorsements[0].endorser, addr("e1"));
         assert_eq!(state.endorsements[0].burn_amount, 100);
@@ -104,7 +106,9 @@ mod tests {
     fn duplicate_endorsement_rejected() {
         let engine = EndorsementEngine;
         let mut state = new_state("target");
-        engine.submit_endorsement(&mut state, addr("e1"), 100, Timestamp::new(1)).unwrap();
+        engine
+            .submit_endorsement(&mut state, addr("e1"), 100, Timestamp::new(1))
+            .unwrap();
         let result = engine.submit_endorsement(&mut state, addr("e1"), 200, Timestamp::new(2));
         assert!(result.is_err());
         assert_eq!(state.endorsements.len(), 1);
@@ -116,11 +120,17 @@ mod tests {
         let mut state = new_state("target");
         assert!(!engine.check_threshold(&state, 3));
 
-        engine.submit_endorsement(&mut state, addr("e1"), 10, Timestamp::new(1)).unwrap();
-        engine.submit_endorsement(&mut state, addr("e2"), 10, Timestamp::new(2)).unwrap();
+        engine
+            .submit_endorsement(&mut state, addr("e1"), 10, Timestamp::new(1))
+            .unwrap();
+        engine
+            .submit_endorsement(&mut state, addr("e2"), 10, Timestamp::new(2))
+            .unwrap();
         assert!(!engine.check_threshold(&state, 3));
 
-        engine.submit_endorsement(&mut state, addr("e3"), 10, Timestamp::new(3)).unwrap();
+        engine
+            .submit_endorsement(&mut state, addr("e3"), 10, Timestamp::new(3))
+            .unwrap();
         assert!(engine.check_threshold(&state, 3));
     }
 
@@ -128,8 +138,12 @@ mod tests {
     fn total_burned_sums_all() {
         let engine = EndorsementEngine;
         let mut state = new_state("target");
-        engine.submit_endorsement(&mut state, addr("e1"), 100, Timestamp::new(1)).unwrap();
-        engine.submit_endorsement(&mut state, addr("e2"), 250, Timestamp::new(2)).unwrap();
+        engine
+            .submit_endorsement(&mut state, addr("e1"), 100, Timestamp::new(1))
+            .unwrap();
+        engine
+            .submit_endorsement(&mut state, addr("e2"), 250, Timestamp::new(2))
+            .unwrap();
         assert_eq!(engine.total_burned(&state), 350);
     }
 
@@ -137,9 +151,15 @@ mod tests {
     fn invalidate_endorser_removes_correct_entries() {
         let engine = EndorsementEngine;
         let mut state = new_state("target");
-        engine.submit_endorsement(&mut state, addr("e1"), 100, Timestamp::new(1)).unwrap();
-        engine.submit_endorsement(&mut state, addr("e2"), 200, Timestamp::new(2)).unwrap();
-        engine.submit_endorsement(&mut state, addr("e3"), 300, Timestamp::new(3)).unwrap();
+        engine
+            .submit_endorsement(&mut state, addr("e1"), 100, Timestamp::new(1))
+            .unwrap();
+        engine
+            .submit_endorsement(&mut state, addr("e2"), 200, Timestamp::new(2))
+            .unwrap();
+        engine
+            .submit_endorsement(&mut state, addr("e3"), 300, Timestamp::new(3))
+            .unwrap();
 
         let removed = engine.invalidate_endorser(&mut state, &addr("e2"));
         assert_eq!(removed, 1);
@@ -151,7 +171,9 @@ mod tests {
     fn invalidate_nonexistent_endorser_returns_zero() {
         let engine = EndorsementEngine;
         let mut state = new_state("target");
-        engine.submit_endorsement(&mut state, addr("e1"), 100, Timestamp::new(1)).unwrap();
+        engine
+            .submit_endorsement(&mut state, addr("e1"), 100, Timestamp::new(1))
+            .unwrap();
         let removed = engine.invalidate_endorser(&mut state, &addr("nobody"));
         assert_eq!(removed, 0);
         assert_eq!(state.endorsements.len(), 1);
@@ -161,9 +183,15 @@ mod tests {
     fn find_revoked_endorsers_filters_correctly() {
         let engine = EndorsementEngine;
         let mut state = new_state("target");
-        engine.submit_endorsement(&mut state, addr("good"), 10, Timestamp::new(1)).unwrap();
-        engine.submit_endorsement(&mut state, addr("bad1"), 10, Timestamp::new(2)).unwrap();
-        engine.submit_endorsement(&mut state, addr("bad2"), 10, Timestamp::new(3)).unwrap();
+        engine
+            .submit_endorsement(&mut state, addr("good"), 10, Timestamp::new(1))
+            .unwrap();
+        engine
+            .submit_endorsement(&mut state, addr("bad1"), 10, Timestamp::new(2))
+            .unwrap();
+        engine
+            .submit_endorsement(&mut state, addr("bad2"), 10, Timestamp::new(3))
+            .unwrap();
 
         let revoked_set: HashSet<WalletAddress> =
             [addr("bad1"), addr("bad2")].into_iter().collect();

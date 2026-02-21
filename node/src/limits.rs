@@ -48,10 +48,7 @@ pub fn check_wallet_limits(
 }
 
 /// Check if a new wallet has exceeded its daily transaction limit.
-pub fn check_daily_tx_limit(
-    block_count_today: u32,
-    params: &ProtocolParams,
-) -> Result<(), String> {
+pub fn check_daily_tx_limit(block_count_today: u32, params: &ProtocolParams) -> Result<(), String> {
     if params.new_wallet_tx_limit_per_day == 0 {
         return Ok(());
     }
@@ -121,7 +118,9 @@ mod tests {
 
         let result = check_wallet_limits(&account, 6000, now, &params);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("exceeds new wallet spending limit"));
+        assert!(result
+            .unwrap_err()
+            .contains("exceeds new wallet spending limit"));
     }
 
     #[test]

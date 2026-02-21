@@ -81,10 +81,7 @@ impl Default for ConnectionRegistry {
 
 /// Write a length-prefixed frame (4-byte big-endian length + payload) to
 /// the given write half. Returns `Ok(())` on success.
-pub async fn write_framed(
-    writer: &Mutex<OwnedWriteHalf>,
-    payload: &[u8],
-) -> std::io::Result<()> {
+pub async fn write_framed(writer: &Mutex<OwnedWriteHalf>, payload: &[u8]) -> std::io::Result<()> {
     let mut w = writer.lock().await;
     let len_bytes = (payload.len() as u32).to_be_bytes();
     w.write_all(&len_bytes).await?;
@@ -397,116 +394,120 @@ async fn peer_read_loop(
                     "received keepalive"
                 );
             }
-            Ok(WireMessage::Bootstrap(msg)) => {
-                match msg {
-                    BootstrapMessage::FrontierReq { start_account, max_count } => {
-                        tracing::debug!(peer = %peer_id, "received frontier request");
-                        let frontier_entries: Vec<_> = {
-                            let f = frontier.read().await;
-                            f.iter().map(|(a, h)| (a.clone(), *h)).collect()
-                        };
-                        let resp = BootstrapServer::handle_frontier_req(
-                            &start_account, max_count, &frontier_entries,
-                        );
-                        let wire_resp = WireMessage::Bootstrap(resp);
-                        if let Ok(bytes) = bincode::serialize(&wire_resp) {
+            Ok(WireMessage::Bootstrap(msg)) => match msg {
+                BootstrapMessage::FrontierReq {
+                    start_account,
+                    max_count,
+                } => {
+                    tracing::debug!(peer = %peer_id, "received frontier request");
+                    let frontier_entries: Vec<_> = {
+                        let f = frontier.read().await;
+                        f.iter().map(|(a, h)| (a.clone(), *h)).collect()
+                    };
+                    let resp = BootstrapServer::handle_frontier_req(
+                        &start_account,
+                        max_count,
+                        &frontier_entries,
+                    );
+                    let wire_resp = WireMessage::Bootstrap(resp);
+                    if let Ok(bytes) = bincode::serialize(&wire_resp) {
+                        let registry = connection_registry.read().await;
+                        if let Some(writer) = registry.get(peer_id) {
+                            if let Err(e) = write_framed(&writer, &bytes).await {
+                                tracing::warn!(peer = %peer_id, "failed to send frontier response: {e}");
+                            }
+                        }
+                    }
+                }
+                BootstrapMessage::FrontierResp {
+                    frontiers,
+                    has_more,
+                } => {
+                    tracing::info!(
+                        peer = %peer_id,
+                        count = frontiers.len(),
+                        has_more,
+                        "received frontier response"
+                    );
+                    let local_frontiers: Vec<_> = {
+                        let f = frontier.read().await;
+                        f.iter().map(|(a, h)| (a.clone(), *h)).collect()
+                    };
+                    let mut client = BootstrapClient::new(10_000);
+                    let requests =
+                        client.process_frontier_resp(&frontiers, has_more, &local_frontiers);
+                    for req in requests {
+                        let wire_req = WireMessage::Bootstrap(req);
+                        if let Ok(bytes) = bincode::serialize(&wire_req) {
                             let registry = connection_registry.read().await;
                             if let Some(writer) = registry.get(peer_id) {
                                 if let Err(e) = write_framed(&writer, &bytes).await {
-                                    tracing::warn!(peer = %peer_id, "failed to send frontier response: {e}");
-                                }
-                            }
-                        }
-                    }
-                    BootstrapMessage::FrontierResp { frontiers, has_more } => {
-                        tracing::info!(
-                            peer = %peer_id,
-                            count = frontiers.len(),
-                            has_more,
-                            "received frontier response"
-                        );
-                        let local_frontiers: Vec<_> = {
-                            let f = frontier.read().await;
-                            f.iter().map(|(a, h)| (a.clone(), *h)).collect()
-                        };
-                        let mut client = BootstrapClient::new(10_000);
-                        let requests = client.process_frontier_resp(
-                            &frontiers, has_more, &local_frontiers,
-                        );
-                        for req in requests {
-                            let wire_req = WireMessage::Bootstrap(req);
-                            if let Ok(bytes) = bincode::serialize(&wire_req) {
-                                let registry = connection_registry.read().await;
-                                if let Some(writer) = registry.get(peer_id) {
-                                    if let Err(e) = write_framed(&writer, &bytes).await {
-                                        tracing::warn!(peer = %peer_id, "failed to send bootstrap request: {e}");
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    BootstrapMessage::BulkPullReq { account, end } => {
-                        tracing::debug!(peer = %peer_id, %account, "received bulk pull request");
-                        let block_store = store.block_store();
-                        let resp = BootstrapServer::handle_bulk_pull_req(
-                            &account,
-                            &end,
-                            |hash| block_store.get_block(hash).ok(),
-                            |acct| block_store.get_account_blocks(acct).unwrap_or_default(),
-                        );
-                        let wire_resp = WireMessage::Bootstrap(resp);
-                        if let Ok(bytes) = bincode::serialize(&wire_resp) {
-                            let registry = connection_registry.read().await;
-                            if let Some(writer) = registry.get(peer_id) {
-                                if let Err(e) = write_framed(&writer, &bytes).await {
-                                    tracing::warn!(peer = %peer_id, "failed to send bulk pull response: {e}");
-                                }
-                            }
-                        }
-                    }
-                    BootstrapMessage::BulkPullResp { blocks } => {
-                        let client = BootstrapClient::new(10_000);
-                        let deserialized = client.process_bulk_pull_resp(&blocks);
-                        tracing::info!(
-                            peer = %peer_id,
-                            count = deserialized.len(),
-                            "received bulk pull response"
-                        );
-                        for block in deserialized {
-                            if !block_queue.push(block).await {
-                                tracing::warn!(peer = %peer_id, "block queue full during bootstrap");
-                                break;
-                            }
-                        }
-                    }
-                    BootstrapMessage::BlockReq { hash } => {
-                        tracing::debug!(peer = %peer_id, %hash, "received block request");
-                        let block_store = store.block_store();
-                        let resp = BootstrapServer::handle_block_req(
-                            &hash, |h| block_store.get_block(h).ok(),
-                        );
-                        let wire_resp = WireMessage::Bootstrap(resp);
-                        if let Ok(bytes) = bincode::serialize(&wire_resp) {
-                            let registry = connection_registry.read().await;
-                            if let Some(writer) = registry.get(peer_id) {
-                                if let Err(e) = write_framed(&writer, &bytes).await {
-                                    tracing::warn!(peer = %peer_id, "failed to send block response: {e}");
-                                }
-                            }
-                        }
-                    }
-                    BootstrapMessage::BlockResp { block } => {
-                        if let Some(bytes) = block {
-                            if let Ok(blk) = bincode::deserialize::<StateBlock>(&bytes) {
-                                tracing::debug!(peer = %peer_id, hash = %blk.hash, "received block response");
-                                if !block_queue.push(blk).await {
-                                    tracing::warn!(peer = %peer_id, "block queue full during block fetch");
+                                    tracing::warn!(peer = %peer_id, "failed to send bootstrap request: {e}");
                                 }
                             }
                         }
                     }
                 }
-            }
+                BootstrapMessage::BulkPullReq { account, end } => {
+                    tracing::debug!(peer = %peer_id, %account, "received bulk pull request");
+                    let block_store = store.block_store();
+                    let resp = BootstrapServer::handle_bulk_pull_req(
+                        &account,
+                        &end,
+                        |hash| block_store.get_block(hash).ok(),
+                        |acct| block_store.get_account_blocks(acct).unwrap_or_default(),
+                    );
+                    let wire_resp = WireMessage::Bootstrap(resp);
+                    if let Ok(bytes) = bincode::serialize(&wire_resp) {
+                        let registry = connection_registry.read().await;
+                        if let Some(writer) = registry.get(peer_id) {
+                            if let Err(e) = write_framed(&writer, &bytes).await {
+                                tracing::warn!(peer = %peer_id, "failed to send bulk pull response: {e}");
+                            }
+                        }
+                    }
+                }
+                BootstrapMessage::BulkPullResp { blocks } => {
+                    let client = BootstrapClient::new(10_000);
+                    let deserialized = client.process_bulk_pull_resp(&blocks);
+                    tracing::info!(
+                        peer = %peer_id,
+                        count = deserialized.len(),
+                        "received bulk pull response"
+                    );
+                    for block in deserialized {
+                        if !block_queue.push(block).await {
+                            tracing::warn!(peer = %peer_id, "block queue full during bootstrap");
+                            break;
+                        }
+                    }
+                }
+                BootstrapMessage::BlockReq { hash } => {
+                    tracing::debug!(peer = %peer_id, %hash, "received block request");
+                    let block_store = store.block_store();
+                    let resp =
+                        BootstrapServer::handle_block_req(&hash, |h| block_store.get_block(h).ok());
+                    let wire_resp = WireMessage::Bootstrap(resp);
+                    if let Ok(bytes) = bincode::serialize(&wire_resp) {
+                        let registry = connection_registry.read().await;
+                        if let Some(writer) = registry.get(peer_id) {
+                            if let Err(e) = write_framed(&writer, &bytes).await {
+                                tracing::warn!(peer = %peer_id, "failed to send block response: {e}");
+                            }
+                        }
+                    }
+                }
+                BootstrapMessage::BlockResp { block } => {
+                    if let Some(bytes) = block {
+                        if let Ok(blk) = bincode::deserialize::<StateBlock>(&bytes) {
+                            tracing::debug!(peer = %peer_id, hash = %blk.hash, "received block response");
+                            if !block_queue.push(blk).await {
+                                tracing::warn!(peer = %peer_id, "block queue full during block fetch");
+                            }
+                        }
+                    }
+                }
+            },
             Ok(WireMessage::Handshake(hs)) => {
                 tracing::debug!(
                     peer = %peer_id,
@@ -591,18 +592,21 @@ async fn peer_read_loop(
                     "received telemetry from peer"
                 );
                 let mut pm = peer_manager.write().await;
-                pm.update_telemetry(peer_id, PeerTelemetry {
-                    block_count: msg.block_count,
-                    cemented_count: msg.cemented_count,
-                    account_count: msg.account_count,
-                    peer_count: msg.peer_count,
-                    protocol_version: msg.protocol_version,
-                    uptime: msg.uptime,
-                    major_version: msg.major_version,
-                    minor_version: msg.minor_version,
-                    patch_version: msg.patch_version,
-                    timestamp: msg.timestamp,
-                });
+                pm.update_telemetry(
+                    peer_id,
+                    PeerTelemetry {
+                        block_count: msg.block_count,
+                        cemented_count: msg.cemented_count,
+                        account_count: msg.account_count,
+                        peer_count: msg.peer_count,
+                        protocol_version: msg.protocol_version,
+                        uptime: msg.uptime,
+                        major_version: msg.major_version,
+                        minor_version: msg.minor_version,
+                        patch_version: msg.patch_version,
+                        timestamp: msg.timestamp,
+                    },
+                );
             }
             Err(_) => {
                 tracing::trace!(
@@ -656,7 +660,14 @@ async fn dispatch_vote(
     let now = Timestamp::new(unix_now_secs());
     let mut ae = active_elections.write().await;
     for block_hash in &vote.block_hashes {
-        match ae.process_vote(block_hash, &vote.voter, *block_hash, weight, vote.is_final, now) {
+        match ae.process_vote(
+            block_hash,
+            &vote.voter,
+            *block_hash,
+            weight,
+            vote.is_final,
+            now,
+        ) {
             Ok(Some(status)) => {
                 tracing::info!(
                     peer = %peer_id,

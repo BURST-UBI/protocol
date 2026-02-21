@@ -91,7 +91,11 @@ mod tests {
     fn history_balance_single_rate() {
         let history = RateHistory::new(100, Timestamp::new(0));
         let balance = compute_balance_with_history(
-            Timestamp::new(1000), Timestamp::new(2000), &history, 0, 0,
+            Timestamp::new(1000),
+            Timestamp::new(2000),
+            &history,
+            0,
+            0,
         );
         assert_eq!(balance, 100_000);
     }
@@ -99,9 +103,15 @@ mod tests {
     #[test]
     fn history_balance_two_rates() {
         let mut history = RateHistory::new(100, Timestamp::new(0));
-        history.apply_rate_change(200, Timestamp::new(5000)).unwrap();
+        history
+            .apply_rate_change(200, Timestamp::new(5000))
+            .unwrap();
         let balance = compute_balance_with_history(
-            Timestamp::new(1000), Timestamp::new(8000), &history, 0, 0,
+            Timestamp::new(1000),
+            Timestamp::new(8000),
+            &history,
+            0,
+            0,
         );
         // 100*(5000-1000) + 200*(8000-5000) = 400_000 + 600_000 = 1_000_000
         assert_eq!(balance, 1_000_000);
@@ -111,7 +121,11 @@ mod tests {
     fn history_balance_with_deductions() {
         let history = RateHistory::new(10, Timestamp::new(0));
         let balance = compute_balance_with_history(
-            Timestamp::new(0), Timestamp::new(100), &history, 500, 200,
+            Timestamp::new(0),
+            Timestamp::new(100),
+            &history,
+            500,
+            200,
         );
         assert_eq!(balance, 300); // 1000 - 500 - 200
     }
@@ -119,9 +133,8 @@ mod tests {
     #[test]
     fn history_balance_saturates_on_large_deductions() {
         let history = RateHistory::new(1, Timestamp::new(0));
-        let balance = compute_balance_with_history(
-            Timestamp::new(0), Timestamp::new(10), &history, 100, 100,
-        );
+        let balance =
+            compute_balance_with_history(Timestamp::new(0), Timestamp::new(10), &history, 100, 100);
         assert_eq!(balance, 0);
     }
 }

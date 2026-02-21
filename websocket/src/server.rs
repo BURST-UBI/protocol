@@ -75,12 +75,7 @@ impl WsState {
     }
 
     /// Publish an account update event.
-    pub fn publish_account_update(
-        &self,
-        account: &str,
-        balance: &str,
-        change_type: &str,
-    ) {
+    pub fn publish_account_update(&self, account: &str, balance: &str, change_type: &str) {
         let event = serde_json::json!({
             "topic": "account_update",
             "data": {
@@ -108,12 +103,7 @@ impl WsState {
     }
 
     /// Publish a verification event.
-    pub fn publish_verification(
-        &self,
-        event_type: &str,
-        subject: &str,
-        account: &str,
-    ) {
+    pub fn publish_verification(&self, event_type: &str, subject: &str, account: &str) {
         let event = serde_json::json!({
             "topic": "verification",
             "data": {
@@ -164,10 +154,7 @@ impl WebSocketServer {
 }
 
 /// Axum handler that upgrades an HTTP request to a WebSocket connection.
-async fn ws_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<Arc<WsState>>,
-) -> impl IntoResponse {
+async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<WsState>>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
@@ -254,7 +241,9 @@ async fn handle_text_message(
             };
             let mut sender = ws_sender.lock().await;
             let _ = sender
-                .send(Message::Text(serde_json::to_string(&error_msg).unwrap().into()))
+                .send(Message::Text(
+                    serde_json::to_string(&error_msg).unwrap(),
+                ))
                 .await;
             return;
         }
@@ -287,7 +276,7 @@ async fn handle_text_message(
             };
             let mut sender = ws_sender.lock().await;
             let _ = sender
-                .send(Message::Text(serde_json::to_string(&ack).unwrap().into()))
+                .send(Message::Text(serde_json::to_string(&ack).unwrap()))
                 .await;
 
             debug!("Client subscribed to {}", topic);
@@ -310,7 +299,7 @@ async fn handle_text_message(
             };
             let mut sender = ws_sender.lock().await;
             let _ = sender
-                .send(Message::Text(serde_json::to_string(&ack).unwrap().into()))
+                .send(Message::Text(serde_json::to_string(&ack).unwrap()))
                 .await;
 
             debug!("Client unsubscribed from {}", topic);
@@ -319,7 +308,7 @@ async fn handle_text_message(
             let pong = ServerMessage::Pong;
             let mut sender = ws_sender.lock().await;
             let _ = sender
-                .send(Message::Text(serde_json::to_string(&pong).unwrap().into()))
+                .send(Message::Text(serde_json::to_string(&pong).unwrap()))
                 .await;
         }
     }
@@ -348,7 +337,7 @@ async fn forward_events(
 
                 if should_send {
                     let mut sender = ws_sender.lock().await;
-                    if sender.send(Message::Text(event_str.into())).await.is_err() {
+                    if sender.send(Message::Text(event_str)).await.is_err() {
                         break;
                     }
                 }

@@ -103,13 +103,7 @@ mod tests {
 
     #[test]
     fn create_vote() {
-        let vote = VoteByHash::new(
-            voter("alice"),
-            vec![hash(1), hash(2)],
-            false,
-            1000,
-            1,
-        );
+        let vote = VoteByHash::new(voter("alice"), vec![hash(1), hash(2)], false, 1000, 1);
 
         assert_eq!(vote.voter, voter("alice"));
         assert_eq!(vote.hash_count(), 2);
@@ -135,13 +129,7 @@ mod tests {
 
     #[test]
     fn signing_data_deterministic() {
-        let vote = VoteByHash::new(
-            voter("alice"),
-            vec![hash(1), hash(2)],
-            true,
-            1000,
-            42,
-        );
+        let vote = VoteByHash::new(voter("alice"), vec![hash(1), hash(2)], true, 1000, 42);
 
         let data1 = vote.signing_data();
         let data2 = vote.signing_data();

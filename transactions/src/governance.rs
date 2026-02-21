@@ -27,10 +27,7 @@ pub enum ProposalContent {
         proposed_value: u128,
     },
     /// Amend the on-chain constitution (Consti).
-    ConstitutionalAmendment {
-        title: String,
-        text: String,
-    },
+    ConstitutionalAmendment { title: String, text: String },
 }
 
 /// A governance vote transaction.

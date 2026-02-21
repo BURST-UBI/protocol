@@ -98,10 +98,7 @@ impl MergerGraph {
     /// Propagate a revocation from a single origin forward through the graph.
     ///
     /// Returns all affected (wallet, amount_to_revoke) pairs for proportional splitting.
-    pub fn propagate_revocation(
-        &self,
-        revoked_origin: &TxHash,
-    ) -> Vec<RevocationEvent> {
+    pub fn propagate_revocation(&self, revoked_origin: &TxHash) -> Vec<RevocationEvent> {
         let mut affected = Vec::new();
         let mut visited = HashSet::new();
 
@@ -230,20 +227,13 @@ impl MergerGraph {
     ///
     /// Returns all merge nodes that are now fully clean (no remaining
     /// revoked origins) and can be restored to Active.
-    pub fn propagate_unrevocation(
-        &self,
-        unrevoked_origin: &TxHash,
-    ) -> Vec<UnRevocationEvent> {
+    pub fn propagate_unrevocation(&self, unrevoked_origin: &TxHash) -> Vec<UnRevocationEvent> {
         let mut restored = Vec::new();
         let mut visited = HashSet::new();
 
         if let Some(merges) = self.origin_to_merges.get(unrevoked_origin) {
             for &merge_tx in merges {
-                self.traverse_forward_unrevoke(
-                    merge_tx,
-                    &mut restored,
-                    &mut visited,
-                );
+                self.traverse_forward_unrevoke(merge_tx, &mut restored, &mut visited);
             }
         }
 
@@ -336,8 +326,14 @@ mod tests {
         graph.record_merge(MergeNode {
             merge_tx: merge1,
             source_origins: vec![
-                MergeSource { origin: origin1, amount: 50 },
-                MergeSource { origin: origin2, amount: 50 },
+                MergeSource {
+                    origin: origin1,
+                    amount: 50,
+                },
+                MergeSource {
+                    origin: origin2,
+                    amount: 50,
+                },
             ],
             total_amount: 100,
             holder: wallet("alice"),
@@ -361,8 +357,14 @@ mod tests {
         graph.record_merge(MergeNode {
             merge_tx: merge1,
             source_origins: vec![
-                MergeSource { origin: origin1, amount: 50 },
-                MergeSource { origin: origin2, amount: 50 },
+                MergeSource {
+                    origin: origin1,
+                    amount: 50,
+                },
+                MergeSource {
+                    origin: origin2,
+                    amount: 50,
+                },
             ],
             total_amount: 100,
             holder: wallet("alice"),
@@ -376,8 +378,14 @@ mod tests {
         graph.record_merge(MergeNode {
             merge_tx: merge2,
             source_origins: vec![
-                MergeSource { origin: merge1, amount: 60 },
-                MergeSource { origin: origin3, amount: 40 },
+                MergeSource {
+                    origin: merge1,
+                    amount: 60,
+                },
+                MergeSource {
+                    origin: origin3,
+                    amount: 40,
+                },
             ],
             total_amount: 100,
             holder: wallet("bob"),
@@ -401,8 +409,14 @@ mod tests {
         graph.record_merge(MergeNode {
             merge_tx: merge1,
             source_origins: vec![
-                MergeSource { origin: origin1, amount: 50 },
-                MergeSource { origin: origin2, amount: 50 },
+                MergeSource {
+                    origin: origin1,
+                    amount: 50,
+                },
+                MergeSource {
+                    origin: origin2,
+                    amount: 50,
+                },
             ],
             total_amount: 100,
             holder: wallet("alice"),
@@ -413,8 +427,14 @@ mod tests {
         graph.record_merge(MergeNode {
             merge_tx: merge2,
             source_origins: vec![
-                MergeSource { origin: merge1, amount: 60 },
-                MergeSource { origin: origin3, amount: 40 },
+                MergeSource {
+                    origin: merge1,
+                    amount: 60,
+                },
+                MergeSource {
+                    origin: origin3,
+                    amount: 40,
+                },
             ],
             total_amount: 100,
             holder: wallet("bob"),
@@ -426,8 +446,14 @@ mod tests {
         graph.record_merge(MergeNode {
             merge_tx: merge3,
             source_origins: vec![
-                MergeSource { origin: merge2, amount: 70 },
-                MergeSource { origin: origin4, amount: 30 },
+                MergeSource {
+                    origin: merge2,
+                    amount: 70,
+                },
+                MergeSource {
+                    origin: origin4,
+                    amount: 30,
+                },
             ],
             total_amount: 100,
             holder: wallet("carol"),
@@ -460,8 +486,14 @@ mod tests {
         graph.record_merge(MergeNode {
             merge_tx: merge1,
             source_origins: vec![
-                MergeSource { origin: origin1, amount: 50 },
-                MergeSource { origin: origin2, amount: 50 },
+                MergeSource {
+                    origin: origin1,
+                    amount: 50,
+                },
+                MergeSource {
+                    origin: origin2,
+                    amount: 50,
+                },
             ],
             total_amount: 100,
             holder: wallet("alice"),
@@ -483,8 +515,14 @@ mod tests {
         graph.record_merge(MergeNode {
             merge_tx: merge1,
             source_origins: vec![
-                MergeSource { origin: origin1, amount: 50 },
-                MergeSource { origin: origin2, amount: 50 },
+                MergeSource {
+                    origin: origin1,
+                    amount: 50,
+                },
+                MergeSource {
+                    origin: origin2,
+                    amount: 50,
+                },
             ],
             total_amount: 100,
             holder: wallet("alice"),
@@ -496,8 +534,14 @@ mod tests {
         graph.record_merge(MergeNode {
             merge_tx: merge2,
             source_origins: vec![
-                MergeSource { origin: merge1, amount: 60 },
-                MergeSource { origin: origin3, amount: 40 },
+                MergeSource {
+                    origin: merge1,
+                    amount: 60,
+                },
+                MergeSource {
+                    origin: origin3,
+                    amount: 40,
+                },
             ],
             total_amount: 100,
             holder: wallet("bob"),
@@ -526,8 +570,14 @@ mod tests {
         graph.record_merge(MergeNode {
             merge_tx: merge1,
             source_origins: vec![
-                MergeSource { origin: origin1, amount: 50 },
-                MergeSource { origin: origin2, amount: 50 },
+                MergeSource {
+                    origin: origin1,
+                    amount: 50,
+                },
+                MergeSource {
+                    origin: origin2,
+                    amount: 50,
+                },
             ],
             total_amount: 100,
             holder: wallet("alice"),
@@ -539,8 +589,14 @@ mod tests {
         graph.record_merge(MergeNode {
             merge_tx: merge2,
             source_origins: vec![
-                MergeSource { origin: merge1, amount: 60 },
-                MergeSource { origin: origin3, amount: 40 },
+                MergeSource {
+                    origin: merge1,
+                    amount: 60,
+                },
+                MergeSource {
+                    origin: origin3,
+                    amount: 40,
+                },
             ],
             total_amount: 100,
             holder: wallet("bob"),

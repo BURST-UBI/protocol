@@ -119,11 +119,7 @@ impl<'a> WriteBatch<'a> {
     // ── Account operations ──────────────────────────────────────────────
 
     /// Put an account info into the batch (pre-serialised bytes).
-    pub fn put_account(
-        &mut self,
-        address: &WalletAddress,
-        data: &[u8],
-    ) -> Result<(), StoreError> {
+    pub fn put_account(&mut self, address: &WalletAddress, data: &[u8]) -> Result<(), StoreError> {
         self.env
             .accounts_db
             .put(&mut self.txn, address.as_str().as_bytes(), data)
@@ -175,11 +171,7 @@ impl<'a> WriteBatch<'a> {
     // ── Transaction operations ──────────────────────────────────────────
 
     /// Put a transaction into the batch (raw bytes, keyed by tx hash).
-    pub fn put_transaction(
-        &mut self,
-        hash: &TxHash,
-        tx_bytes: &[u8],
-    ) -> Result<(), StoreError> {
+    pub fn put_transaction(&mut self, hash: &TxHash, tx_bytes: &[u8]) -> Result<(), StoreError> {
         self.env
             .transactions_db
             .put(&mut self.txn, hash.as_bytes(), tx_bytes)
@@ -348,8 +340,8 @@ mod tests {
     /// Helper: open a temporary LMDB environment.
     fn temp_env() -> (tempfile::TempDir, LmdbEnvironment) {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
-        let env = LmdbEnvironment::open(dir.path(), 30, 10 * 1024 * 1024)
-            .expect("failed to open env");
+        let env =
+            LmdbEnvironment::open(dir.path(), 30, 10 * 1024 * 1024).expect("failed to open env");
         (dir, env)
     }
 
@@ -416,9 +408,7 @@ mod tests {
 
         for (i, hash) in hashes.iter().enumerate() {
             let data = format!("block-{i}");
-            batch
-                .put_block(hash, data.as_bytes())
-                .expect("put_block");
+            batch.put_block(hash, data.as_bytes()).expect("put_block");
         }
 
         batch.commit().expect("commit");
@@ -479,7 +469,9 @@ mod tests {
         };
 
         let mut batch = env.write_batch().expect("write_batch");
-        batch.put_account_info(&info, false).expect("put_account_info");
+        batch
+            .put_account_info(&info, false)
+            .expect("put_account_info");
         batch.commit().expect("commit");
 
         // Verify via the account store
@@ -543,9 +535,7 @@ mod tests {
         let (_dir, env) = temp_env();
 
         let mut batch = env.write_batch().expect("write_batch");
-        batch
-            .put_meta("schema_version", b"42")
-            .expect("put_meta");
+        batch.put_meta("schema_version", b"42").expect("put_meta");
         batch.commit().expect("commit");
 
         let rtxn = env.env().read_txn().expect("read_txn");

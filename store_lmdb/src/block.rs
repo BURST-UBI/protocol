@@ -46,7 +46,7 @@ fn next_height_rw(
     increment_prefix(&mut upper);
 
     let bounds = (
-        Bound::Included(prefix.as_ref()),
+        Bound::Included(prefix),
         Bound::Excluded(upper.as_slice()),
     );
     let mut iter = height_db.rev_range(txn, &bounds)?;
@@ -160,10 +160,13 @@ impl BlockStore for LmdbBlockStore {
         increment_prefix(&mut upper);
 
         let bounds = (
-            Bound::Included(prefix.as_ref()),
+            Bound::Included(prefix),
             Bound::Excluded(upper.as_slice()),
         );
-        let iter = self.height_db.range(&rtxn, &bounds).map_err(LmdbError::from)?;
+        let iter = self
+            .height_db
+            .range(&rtxn, &bounds)
+            .map_err(LmdbError::from)?;
         let mut hashes = Vec::new();
         for result in iter {
             let (_key, val) = result.map_err(LmdbError::from)?;

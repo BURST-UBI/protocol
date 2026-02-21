@@ -26,8 +26,9 @@ pub use error::VerificationError;
 pub use method::VerificationMethod;
 pub use orchestrator::{OrchestratorSnapshot, VerificationEvent, VerificationOrchestrator};
 pub use outcomes::{
-    ChallengeOutcomeEvent, ChallengeResult, EndorserOutcome, VerificationOutcomeEvent,
-    VerificationResult, VerifierOutcome, compute_challenge_outcome, compute_verification_outcomes,
+    compute_challenge_outcome, compute_verification_outcomes, ChallengeOutcomeEvent,
+    ChallengeResult, EndorserOutcome, VerificationOutcomeEvent, VerificationResult,
+    VerifierOutcome,
 };
 pub use state::VerificationState;
 pub use verifier_selection::VerifierSelector;

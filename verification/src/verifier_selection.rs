@@ -42,7 +42,7 @@ impl VerifierSelector {
             })
             .collect();
 
-        scored.sort_by(|a, b| a.1.cmp(&b.1));
+        scored.sort_by_key(|a| a.1);
         scored.truncate(count);
         scored
             .iter()
@@ -88,7 +88,9 @@ mod tests {
         fn verify(&self, _context: &[u8], _output: &RandomOutput) -> Result<bool, VrfError> {
             Ok(false)
         }
-        fn name(&self) -> &str { "failing" }
+        fn name(&self) -> &str {
+            "failing"
+        }
     }
 
     #[test]
@@ -157,6 +159,9 @@ mod tests {
 
         let r1 = selector.select(&vrf1, &pool, b"ctx", 5);
         let r2 = selector.select(&vrf2, &pool, b"ctx", 5);
-        assert_ne!(r1, r2, "different seeds should generally produce different selections");
+        assert_ne!(
+            r1, r2,
+            "different seeds should generally produce different selections"
+        );
     }
 }

@@ -43,13 +43,15 @@ impl VoteSolicitor {
     /// `root` is the election root (e.g. the `previous` hash of forking blocks).
     /// `block_hash` is the specific block we're asking reps to vote on.
     pub fn add_election(&mut self, root: BlockHash, block_hash: BlockHash) {
-        self.pending.entry(root).or_insert_with(|| SolicitationState {
-            block_hash,
-            last_solicited: 0,
-            solicitation_count: 0,
-            max_solicitations: 10,
-            responded_reps: HashSet::new(),
-        });
+        self.pending
+            .entry(root)
+            .or_insert_with(|| SolicitationState {
+                block_hash,
+                last_solicited: 0,
+                solicitation_count: 0,
+                max_solicitations: 10,
+                responded_reps: HashSet::new(),
+            });
     }
 
     /// Register an election with custom max solicitations.
@@ -59,13 +61,15 @@ impl VoteSolicitor {
         block_hash: BlockHash,
         max_solicitations: u32,
     ) {
-        self.pending.entry(root).or_insert_with(|| SolicitationState {
-            block_hash,
-            last_solicited: 0,
-            solicitation_count: 0,
-            max_solicitations,
-            responded_reps: HashSet::new(),
-        });
+        self.pending
+            .entry(root)
+            .or_insert_with(|| SolicitationState {
+                block_hash,
+                last_solicited: 0,
+                solicitation_count: 0,
+                max_solicitations,
+                responded_reps: HashSet::new(),
+            });
     }
 
     /// Remove an election (confirmed or expired).
@@ -260,22 +264,13 @@ mod tests {
         let reps = vec![rep("alice")];
 
         // Round 1 at t=0
-        assert_eq!(
-            solicitor.elections_needing_solicitation(0, &reps).len(),
-            1
-        );
+        assert_eq!(solicitor.elections_needing_solicitation(0, &reps).len(), 1);
 
         // Round 2 at t=10
-        assert_eq!(
-            solicitor.elections_needing_solicitation(10, &reps).len(),
-            1
-        );
+        assert_eq!(solicitor.elections_needing_solicitation(10, &reps).len(), 1);
 
         // Round 3 — exceeded max (2), should be empty
-        assert_eq!(
-            solicitor.elections_needing_solicitation(20, &reps).len(),
-            0
-        );
+        assert_eq!(solicitor.elections_needing_solicitation(20, &reps).len(), 0);
 
         assert_eq!(solicitor.solicitation_count(&root(1)), 2);
     }

@@ -54,9 +54,9 @@ mod tests {
         let generator = WorkGenerator;
         let block_hash = BlockHash::new([0x42; 32]);
         let min_difficulty = 1000;
-        
+
         let nonce = generator.generate(&block_hash, min_difficulty).unwrap();
-        
+
         // Verify the generated nonce passes validation
         assert!(super::validate_work_inner(
             block_hash.as_bytes(),
@@ -70,14 +70,14 @@ mod tests {
         let generator = WorkGenerator;
         let block_hash = BlockHash::new([0u8; 32]);
         let min_difficulty = 0;
-        
+
         // With difficulty 0, nonce 0 should pass
         assert!(super::validate_work_inner(
             block_hash.as_bytes(),
             0,
             min_difficulty
         ));
-        
+
         // Generator should return nonce 0 immediately
         let nonce = generator.generate(&block_hash, min_difficulty).unwrap();
         assert_eq!(nonce.0, 0);
@@ -86,18 +86,18 @@ mod tests {
     #[test]
     fn test_work_difficulty_computation() {
         let block_hash = BlockHash::new([0xAA; 32]);
-        
+
         // Test that validate_work_inner correctly checks difficulty thresholds
         let nonce = 12345;
         let work_value = compute_work_value(block_hash.as_bytes(), nonce);
-        
+
         // Should pass at difficulty equal to work value
         assert!(super::validate_work_inner(
             block_hash.as_bytes(),
             nonce,
             work_value
         ));
-        
+
         // Should pass at lower difficulty
         if work_value > 0 {
             assert!(super::validate_work_inner(
@@ -106,7 +106,7 @@ mod tests {
                 work_value - 1
             ));
         }
-        
+
         // Should fail at higher difficulty
         assert!(!super::validate_work_inner(
             block_hash.as_bytes(),
@@ -122,8 +122,7 @@ mod tests {
         input[32..40].copy_from_slice(&nonce.to_le_bytes());
         let hash = blake2b_256(&input);
         u64::from_le_bytes([
-            hash[0], hash[1], hash[2], hash[3],
-            hash[4], hash[5], hash[6], hash[7],
+            hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7],
         ])
     }
 }

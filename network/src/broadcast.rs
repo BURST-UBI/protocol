@@ -36,11 +36,7 @@ impl Broadcaster {
     /// Broadcast a serialised message to **all** connected peers.
     ///
     /// Uses flood-based propagation: every connected peer receives the message.
-    pub async fn broadcast_to_all(
-        &self,
-        message: &[u8],
-        peers: &[PeerState],
-    ) -> BroadcastResult {
+    pub async fn broadcast_to_all(&self, message: &[u8], peers: &[PeerState]) -> BroadcastResult {
         let mut result = BroadcastResult::default();
 
         for peer in peers.iter().filter(|p| p.connected && !p.banned) {
@@ -64,10 +60,7 @@ impl Broadcaster {
         peers: &[PeerState],
         count: usize,
     ) -> BroadcastResult {
-        let eligible: Vec<&PeerState> = peers
-            .iter()
-            .filter(|p| p.connected && !p.banned)
-            .collect();
+        let eligible: Vec<&PeerState> = peers.iter().filter(|p| p.connected && !p.banned).collect();
 
         let mut rng = rand::thread_rng();
         let mut indices: Vec<usize> = (0..eligible.len()).collect();

@@ -240,10 +240,7 @@ impl ConstiEngine {
     }
 
     /// Get all votes for an amendment.
-    pub fn get_votes(
-        &self,
-        hash: &TxHash,
-    ) -> Option<&HashMap<WalletAddress, ConstiVote>> {
+    pub fn get_votes(&self, hash: &TxHash) -> Option<&HashMap<WalletAddress, ConstiVote>> {
         self.votes.get(hash)
     }
 
@@ -347,7 +344,9 @@ mod tests {
 
         assert_eq!(document.article_count(), 0);
 
-        engine.activate_amendment(&amendment, &mut document).unwrap();
+        engine
+            .activate_amendment(&amendment, &mut document)
+            .unwrap();
 
         assert_eq!(document.article_count(), 1);
         let article = document.get_article(1).unwrap();
@@ -368,7 +367,9 @@ mod tests {
 
         assert_eq!(document.version, 0);
 
-        engine.activate_amendment(&amendment, &mut document).unwrap();
+        engine
+            .activate_amendment(&amendment, &mut document)
+            .unwrap();
 
         assert_eq!(document.version, 1);
         let article = document.get_article(1).unwrap();
@@ -379,7 +380,9 @@ mod tests {
             "Second Article".to_string(),
             "This is the second article.".to_string(),
         );
-        engine.activate_amendment(&amendment2, &mut document).unwrap();
+        engine
+            .activate_amendment(&amendment2, &mut document)
+            .unwrap();
 
         assert_eq!(document.version, 2);
         let article2 = document.get_article(2).unwrap();
@@ -410,7 +413,9 @@ mod tests {
             }],
         );
 
-        engine.activate_amendment(&amendment, &mut document).unwrap();
+        engine
+            .activate_amendment(&amendment, &mut document)
+            .unwrap();
 
         assert_eq!(document.article_count(), 1);
         assert_eq!(document.version, 1);
@@ -437,7 +442,9 @@ mod tests {
             ],
         );
 
-        engine.activate_amendment(&amendment, &mut document).unwrap();
+        engine
+            .activate_amendment(&amendment, &mut document)
+            .unwrap();
 
         assert_eq!(document.article_count(), 2);
         assert_eq!(document.version, 1);
@@ -608,7 +615,8 @@ mod tests {
             vec![
                 AmendmentOp::ModifyArticle {
                     article_number: 1,
-                    new_text: "All verified participants have equal BRN accrual rights.".to_string(),
+                    new_text: "All verified participants have equal BRN accrual rights."
+                        .to_string(),
                 },
                 AmendmentOp::RepealArticle { article_number: 2 },
                 AmendmentOp::AddArticle {
@@ -739,9 +747,15 @@ mod tests {
         let hash = engine.submit_amendment(amendment, &document).unwrap();
 
         // Cast votes
-        engine.vote_amendment(&hash, &voter_wallet(1), ConstiVote::Yea).unwrap();
-        engine.vote_amendment(&hash, &voter_wallet(2), ConstiVote::Nay).unwrap();
-        engine.vote_amendment(&hash, &voter_wallet(3), ConstiVote::Abstain).unwrap();
+        engine
+            .vote_amendment(&hash, &voter_wallet(1), ConstiVote::Yea)
+            .unwrap();
+        engine
+            .vote_amendment(&hash, &voter_wallet(2), ConstiVote::Nay)
+            .unwrap();
+        engine
+            .vote_amendment(&hash, &voter_wallet(3), ConstiVote::Abstain)
+            .unwrap();
 
         let stored = engine.get_amendment(&hash).unwrap();
         assert_eq!(stored.votes_yea, 1);
@@ -765,7 +779,9 @@ mod tests {
         amendment.phase = GovernancePhase::Exploration;
         let hash = engine.submit_amendment(amendment, &document).unwrap();
 
-        engine.vote_amendment(&hash, &voter_wallet(1), ConstiVote::Yea).unwrap();
+        engine
+            .vote_amendment(&hash, &voter_wallet(1), ConstiVote::Yea)
+            .unwrap();
         let result = engine.vote_amendment(&hash, &voter_wallet(1), ConstiVote::Nay);
         assert!(result.is_err());
     }

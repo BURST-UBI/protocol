@@ -1,5 +1,5 @@
-use burst_types::WalletAddress;
 use crate::StoreError;
+use burst_types::WalletAddress;
 
 /// Store trait for persisting BRN engine state to durable storage.
 ///

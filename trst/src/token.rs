@@ -55,7 +55,8 @@ impl TrstToken {
     /// Uses `effective_origin_timestamp` so that merged tokens correctly expire
     /// at the earliest constituent's expiry time.
     pub fn is_expired(&self, now: Timestamp, expiry_secs: u64) -> bool {
-        self.effective_origin_timestamp.has_expired(expiry_secs, now)
+        self.effective_origin_timestamp
+            .has_expired(expiry_secs, now)
     }
 
     /// Whether this token can be transferred right now.
@@ -65,7 +66,11 @@ impl TrstToken {
 
     /// The absolute expiry timestamp for this token.
     pub fn earliest_expiry(&self, expiry_secs: u64) -> Timestamp {
-        Timestamp::new(self.effective_origin_timestamp.as_secs().saturating_add(expiry_secs))
+        Timestamp::new(
+            self.effective_origin_timestamp
+                .as_secs()
+                .saturating_add(expiry_secs),
+        )
     }
 
     /// Compute the current value of this token as a fraction of face value
@@ -83,7 +88,9 @@ impl TrstToken {
         if self.state == TrstState::Expired {
             return 0;
         }
-        let age_secs = now.as_secs().saturating_sub(self.effective_origin_timestamp.as_secs());
+        let age_secs = now
+            .as_secs()
+            .saturating_sub(self.effective_origin_timestamp.as_secs());
         if age_secs >= expiry_secs {
             return 0;
         }

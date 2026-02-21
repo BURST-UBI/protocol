@@ -71,8 +71,7 @@ impl Election {
     /// `online_weight` is the total voting weight of all online representatives.
     /// The confirmation threshold is set to 67% of that value.
     pub fn new(root: BlockHash, online_weight: u128, now: Timestamp) -> Self {
-        let confirmation_threshold =
-            online_weight.saturating_mul(QUORUM_BPS) / BPS_DENOMINATOR;
+        let confirmation_threshold = online_weight.saturating_mul(QUORUM_BPS) / BPS_DENOMINATOR;
 
         Self {
             id: root,
@@ -107,19 +106,14 @@ impl Election {
             return VoteResult::Ignored;
         }
 
-        let election_age_secs = now
-            .as_secs()
-            .saturating_sub(self.created_at.as_secs());
+        let election_age_secs = now.as_secs().saturating_sub(self.created_at.as_secs());
         if election_age_secs > MAX_ELECTION_AGE_SECS {
             return VoteResult::Ignored;
         }
 
         if let Some(existing) = self.last_votes.get(voter) {
             if existing.is_final {
-                return VoteResult::Error(format!(
-                    "final vote already cast by {}",
-                    voter.as_str()
-                ));
+                return VoteResult::Error(format!("final vote already cast by {}", voter.as_str()));
             }
 
             // Replay protection: reject votes with timestamps not strictly newer
@@ -140,14 +134,7 @@ impl Election {
             let new_sequence = existing.sequence + 1;
 
             // Record the new vote
-            let info = VoteInfo::new(
-                voter.clone(),
-                block,
-                weight,
-                is_final,
-                now,
-                new_sequence,
-            );
+            let info = VoteInfo::new(voter.clone(), block, weight, is_final, now, new_sequence);
             self.last_votes.insert(voter.clone(), info);
             *self.tally.entry(block).or_insert(0) += weight;
 
@@ -383,7 +370,7 @@ mod tests {
 
         // 30 seconds = 30_000ms timeout, now at 100 + 31 = 131
         assert!(!e.check_timeout(30_000, ts(120))); // only 20s elapsed
-        assert!(e.check_timeout(30_000, ts(131)));   // 31s elapsed >= 30s
+        assert!(e.check_timeout(30_000, ts(131))); // 31s elapsed >= 30s
         assert_eq!(e.state, ElectionState::Expired);
     }
 
@@ -489,7 +476,9 @@ mod tests {
         e.vote(&make_voter("alice"), make_hash(2), 680, true, ts(101));
         e.vote(&make_voter("bob"), make_hash(3), 200, true, ts(102));
 
-        let status = e.try_confirm(ts(103)).expect("should confirm at 68% quorum");
+        let status = e
+            .try_confirm(ts(103))
+            .expect("should confirm at 68% quorum");
         assert_eq!(status.winner, make_hash(2));
         assert_eq!(status.tally, 680);
     }
@@ -510,7 +499,9 @@ mod tests {
         let mut e = Election::new(make_hash(1), 1000, ts(100));
         e.vote(&make_voter("alice"), make_hash(2), 700, true, ts(101));
 
-        let status = e.try_confirm(ts(102)).expect("single candidate should confirm");
+        let status = e
+            .try_confirm(ts(102))
+            .expect("single candidate should confirm");
         assert_eq!(status.winner, make_hash(2));
     }
 

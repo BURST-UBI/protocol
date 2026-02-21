@@ -14,11 +14,7 @@ pub fn sign_message(message: &[u8], private_key: &PrivateKey) -> Signature {
 ///
 /// Returns `true` if the signature is valid, `false` otherwise.
 /// Also rejects non-canonical signatures (malleability protection).
-pub fn verify_signature(
-    message: &[u8],
-    signature: &Signature,
-    public_key: &PublicKey,
-) -> bool {
+pub fn verify_signature(message: &[u8], signature: &Signature, public_key: &PublicKey) -> bool {
     let Ok(verifying_key) = VerifyingKey::from_bytes(&public_key.0) else {
         return false;
     };

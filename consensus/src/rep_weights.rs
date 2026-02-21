@@ -47,12 +47,7 @@ impl RepWeightCache {
     }
 
     /// Process a ChangeRepresentative: remove weight from old rep, add to new rep.
-    pub fn change_rep(
-        &mut self,
-        old_rep: &WalletAddress,
-        new_rep: &WalletAddress,
-        weight: u128,
-    ) {
+    pub fn change_rep(&mut self, old_rep: &WalletAddress, new_rep: &WalletAddress, weight: u128) {
         self.remove_weight(old_rep, weight);
         self.add_weight(new_rep, weight);
     }

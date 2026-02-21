@@ -28,8 +28,7 @@ impl PeerAuth {
 
     /// Record a successful handshake authentication.
     pub fn authenticate(&mut self, peer_id: &str, node_id: PublicKey) {
-        self.authenticated_peers
-            .insert(peer_id.to_owned(), node_id);
+        self.authenticated_peers.insert(peer_id.to_owned(), node_id);
     }
 
     /// Check if a peer has been authenticated.
@@ -117,10 +116,7 @@ mod tests {
         auth.authenticate("peer3:8000", test_key(3));
         assert_eq!(auth.count(), 3);
 
-        assert_eq!(
-            auth.get_node_id("peer2:8000"),
-            Some(&test_key(2))
-        );
+        assert_eq!(auth.get_node_id("peer2:8000"), Some(&test_key(2)));
     }
 
     #[test]

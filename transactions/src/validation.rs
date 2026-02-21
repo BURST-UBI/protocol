@@ -154,7 +154,9 @@ pub fn validate_split(tx: &crate::split::SplitTx, _now: Timestamp) -> Result<(),
 /// Validate a merge transaction.
 pub fn validate_merge(tx: &crate::merge::MergeTx, _now: Timestamp) -> Result<(), TransactionError> {
     if tx.source_hashes.len() < 2 {
-        return Err(TransactionError::Other("merge requires at least 2 sources".into()));
+        return Err(TransactionError::Other(
+            "merge requires at least 2 sources".into(),
+        ));
     }
 
     // All source hashes must be unique (no duplicates)

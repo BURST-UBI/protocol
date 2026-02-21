@@ -214,7 +214,9 @@ mod tests {
 
     #[test]
     fn confirm_ack_roundtrip() {
-        let msg = WireMessage::ConfirmAck(ConfirmAckMsg { vote: sample_vote() });
+        let msg = WireMessage::ConfirmAck(ConfirmAckMsg {
+            vote: sample_vote(),
+        });
         let bytes = bincode::serialize(&msg).unwrap();
         let decoded: WireMessage = bincode::deserialize(&bytes).unwrap();
         match decoded {

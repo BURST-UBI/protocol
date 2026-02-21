@@ -10,8 +10,7 @@ pub const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024; // 16 MiB
 
 /// Encode a message for transmission (4-byte big-endian length prefix + bincode body).
 pub fn encode(message: &impl serde::Serialize) -> Result<Vec<u8>, ProtocolError> {
-    let body =
-        bincode::serialize(message).map_err(|e| ProtocolError::Malformed(e.to_string()))?;
+    let body = bincode::serialize(message).map_err(|e| ProtocolError::Malformed(e.to_string()))?;
     if body.len() > MAX_MESSAGE_SIZE {
         return Err(ProtocolError::MessageTooLarge {
             size: body.len(),
@@ -117,7 +116,7 @@ mod tests {
     fn test_decode_framed_insufficient_body() {
         let mut data = vec![0u8; 8];
         data[0..4].copy_from_slice(&100u32.to_be_bytes()); // length = 100
-        // but we only have 4 more bytes
+                                                           // but we only have 4 more bytes
         let result = decode_framed::<TestMessage>(&data);
         assert!(result.is_err());
         match result.unwrap_err() {

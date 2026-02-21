@@ -101,7 +101,10 @@ impl NodeMetrics {
 
         // Gauges
         let block_count = register_int_gauge_with_registry!(
-            Opts::new("burst_block_count", "Current number of blocks in the ledger"),
+            Opts::new(
+                "burst_block_count",
+                "Current number of blocks in the ledger"
+            ),
             registry
         )
         .expect("failed to register block_count gauge");

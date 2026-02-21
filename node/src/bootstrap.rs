@@ -88,7 +88,9 @@ impl BootstrapClient {
     pub fn start_frontier_scan(&mut self) -> BootstrapMessage {
         self.pending_accounts.clear();
         BootstrapMessage::FrontierReq {
-            start_account: WalletAddress::new("brst_0000000000000000000000000000000000000000000000000000000000000000000"),
+            start_account: WalletAddress::new(
+                "brst_0000000000000000000000000000000000000000000000000000000000000000000",
+            ),
             max_count: 1000,
         }
     }
@@ -211,10 +213,8 @@ impl BootstrapServer {
             .unwrap_or(frontiers.len());
 
         let end_idx = (start_idx + max).min(frontiers.len());
-        let page: Vec<(WalletAddress, BlockHash)> = frontiers[start_idx..end_idx]
-            .iter()
-            .cloned()
-            .collect();
+        let page: Vec<(WalletAddress, BlockHash)> =
+            frontiers[start_idx..end_idx].iter().cloned().collect();
         let has_more = end_idx < frontiers.len();
 
         BootstrapMessage::FrontierResp {
@@ -345,8 +345,7 @@ mod tests {
         let remote_frontiers = vec![(test_account_1(), remote_head)];
         let local_frontiers: Vec<(WalletAddress, BlockHash)> = vec![];
 
-        let requests =
-            client.process_frontier_resp(&remote_frontiers, false, &local_frontiers);
+        let requests = client.process_frontier_resp(&remote_frontiers, false, &local_frontiers);
 
         // Should request a bulk pull for the missing account
         assert_eq!(requests.len(), 1);
@@ -372,8 +371,7 @@ mod tests {
         let remote_frontiers = vec![(test_account_1(), remote_head)];
         let local_frontiers = vec![(test_account_1(), local_head)];
 
-        let requests =
-            client.process_frontier_resp(&remote_frontiers, false, &local_frontiers);
+        let requests = client.process_frontier_resp(&remote_frontiers, false, &local_frontiers);
 
         assert_eq!(requests.len(), 1);
         assert_eq!(client.pending_count(), 1);
@@ -387,8 +385,7 @@ mod tests {
         let remote_frontiers = vec![(test_account_1(), head)];
         let local_frontiers = vec![(test_account_1(), head)];
 
-        let requests =
-            client.process_frontier_resp(&remote_frontiers, false, &local_frontiers);
+        let requests = client.process_frontier_resp(&remote_frontiers, false, &local_frontiers);
 
         assert!(requests.is_empty());
         assert!(client.is_complete());
@@ -402,8 +399,7 @@ mod tests {
         let remote_frontiers = vec![(test_account_1(), head)];
         let local_frontiers: Vec<(WalletAddress, BlockHash)> = vec![];
 
-        let requests =
-            client.process_frontier_resp(&remote_frontiers, true, &local_frontiers);
+        let requests = client.process_frontier_resp(&remote_frontiers, true, &local_frontiers);
 
         // Should have a bulk pull + a frontier req for the next page
         assert_eq!(requests.len(), 2);
@@ -559,7 +555,9 @@ mod tests {
         );
 
         match resp {
-            BootstrapMessage::BulkPullResp { blocks: resp_blocks } => {
+            BootstrapMessage::BulkPullResp {
+                blocks: resp_blocks,
+            } => {
                 assert_eq!(resp_blocks.len(), 2);
             }
             _ => panic!("expected BulkPullResp"),
@@ -591,7 +589,9 @@ mod tests {
         );
 
         match resp {
-            BootstrapMessage::BulkPullResp { blocks: resp_blocks } => {
+            BootstrapMessage::BulkPullResp {
+                blocks: resp_blocks,
+            } => {
                 assert_eq!(resp_blocks.len(), 2);
             }
             _ => panic!("expected BulkPullResp"),
@@ -706,11 +706,8 @@ mod tests {
                 frontiers,
                 has_more,
             } => {
-                let pull_requests = client.process_frontier_resp(
-                    frontiers,
-                    *has_more,
-                    &local_frontiers,
-                );
+                let pull_requests =
+                    client.process_frontier_resp(frontiers, *has_more, &local_frontiers);
                 assert_eq!(pull_requests.len(), 2); // two accounts to sync
                 assert_eq!(client.pending_count(), 2);
             }
@@ -718,10 +715,7 @@ mod tests {
         }
 
         // Step 4: Client processes bulk pull responses
-        let blocks_a = vec![
-            serialize_block(&block_a1),
-            serialize_block(&block_a2),
-        ];
+        let blocks_a = vec![serialize_block(&block_a1), serialize_block(&block_a2)];
         let deserialized = client.process_bulk_pull_resp(&blocks_a);
         assert_eq!(deserialized.len(), 2);
         client.mark_synced(&test_account_1());

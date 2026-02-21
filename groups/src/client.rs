@@ -67,20 +67,15 @@ impl GroupClient {
             wallet_id
         );
 
-        let response = self
-            .http_client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| {
-                if e.is_timeout() {
-                    GroupError::Unreachable(format!("request timed out: {e}"))
-                } else if e.is_connect() {
-                    GroupError::Unreachable(format!("connection failed: {e}"))
-                } else {
-                    GroupError::RequestFailed(e.to_string())
-                }
-            })?;
+        let response = self.http_client.get(&url).send().await.map_err(|e| {
+            if e.is_timeout() {
+                GroupError::Unreachable(format!("request timed out: {e}"))
+            } else if e.is_connect() {
+                GroupError::Unreachable(format!("connection failed: {e}"))
+            } else {
+                GroupError::RequestFailed(e.to_string())
+            }
+        })?;
 
         if !response.status().is_success() {
             return Err(GroupError::RequestFailed(format!(
@@ -96,9 +91,7 @@ impl GroupClient {
         Ok(MemberStatus {
             valid: verify_resp.valid,
             score: verify_resp.score,
-            metadata: verify_resp
-                .since
-                .map(|s| serde_json::json!({ "since": s })),
+            metadata: verify_resp.since.map(|s| serde_json::json!({ "since": s })),
         })
     }
 
@@ -177,9 +170,7 @@ async fn do_verify_request(
     Ok(MemberStatus {
         valid: verify_resp.valid,
         score: verify_resp.score,
-        metadata: verify_resp
-            .since
-            .map(|s| serde_json::json!({ "since": s })),
+        metadata: verify_resp.since.map(|s| serde_json::json!({ "since": s })),
     })
 }
 

@@ -43,10 +43,7 @@ fn range_scan_values(
     let rtxn = env.read_txn()?;
     let mut upper = prefix.to_vec();
     increment_prefix(&mut upper);
-    let bounds = (
-        Bound::Included(prefix),
-        Bound::Excluded(upper.as_slice()),
-    );
+    let bounds = (Bound::Included(prefix), Bound::Excluded(upper.as_slice()));
     let iter = db.range(&rtxn, &bounds)?;
     let mut results = Vec::new();
     for result in iter {
@@ -92,10 +89,7 @@ impl VerificationStore for LmdbVerificationStore {
         Ok(())
     }
 
-    fn get_verification_votes(
-        &self,
-        target: &WalletAddress,
-    ) -> Result<Vec<Vec<u8>>, StoreError> {
+    fn get_verification_votes(&self, target: &WalletAddress) -> Result<Vec<Vec<u8>>, StoreError> {
         range_scan_values(
             &self.verification_votes_db,
             &self.env,

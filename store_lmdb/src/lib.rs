@@ -37,5 +37,6 @@ pub use rep_weights::LmdbRepWeightStore;
 pub use transaction::LmdbTransactionStore;
 pub use trst_index::LmdbTrstIndexStore;
 pub use verification::LmdbVerificationStore;
-pub use write_batch::WriteBatch;/// Convenience alias — the unified LMDB store wrapping all sub-stores.
+pub use write_batch::WriteBatch;
+/// Convenience alias — the unified LMDB store wrapping all sub-stores.
 pub type LmdbStore = LmdbEnvironment;

@@ -44,7 +44,10 @@ impl ClockSync {
             }
             Err(_) => {
                 // Graceful degradation: keep existing offset
-                tracing::warn!("NTP sync failed, keeping existing offset of {}ms", self.offset_ms);
+                tracing::warn!(
+                    "NTP sync failed, keeping existing offset of {}ms",
+                    self.offset_ms
+                );
             }
         }
         self.last_sync_secs = Timestamp::now().as_secs();
@@ -85,23 +88,23 @@ impl ClockSync {
 
         let mut response = [0u8; 48];
         let recv_future = socket.recv_from(&mut response);
-        let nbytes = match tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            recv_future,
-        )
-        .await
-        {
-            Ok(Ok((n, _addr))) => n,
-            Ok(Err(e)) => {
-                return Err(NetworkError::ConnectionFailed(format!("NTP recv failed: {e}")));
-            }
-            Err(_elapsed) => {
-                return Err(NetworkError::ConnectionFailed("NTP timeout".into()));
-            }
-        };
+        let nbytes =
+            match tokio::time::timeout(std::time::Duration::from_secs(5), recv_future).await {
+                Ok(Ok((n, _addr))) => n,
+                Ok(Err(e)) => {
+                    return Err(NetworkError::ConnectionFailed(format!(
+                        "NTP recv failed: {e}"
+                    )));
+                }
+                Err(_elapsed) => {
+                    return Err(NetworkError::ConnectionFailed("NTP timeout".into()));
+                }
+            };
 
         if nbytes < 48 {
-            return Err(NetworkError::ConnectionFailed("NTP response too short".into()));
+            return Err(NetworkError::ConnectionFailed(
+                "NTP response too short".into(),
+            ));
         }
 
         // Parse transmit timestamp (bytes 40-47): seconds since NTP epoch (big-endian u32)

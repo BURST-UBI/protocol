@@ -32,7 +32,10 @@ fn pending_key(destination: &WalletAddress, source_hash: &TxHash) -> Vec<u8> {
 }
 
 /// Build the binary composite key from raw bytes (used by WriteBatch).
-pub(crate) fn pending_key_raw(destination: &WalletAddress, source_hash_bytes: &[u8; 32]) -> Vec<u8> {
+pub(crate) fn pending_key_raw(
+    destination: &WalletAddress,
+    source_hash_bytes: &[u8; 32],
+) -> Vec<u8> {
     let dest = destination.as_str().as_bytes();
     let mut key = Vec::with_capacity(dest.len() + 32);
     key.extend_from_slice(dest);
@@ -97,10 +100,13 @@ impl PendingStore for LmdbPendingStore {
 
         let rtxn = self.env.read_txn().map_err(LmdbError::from)?;
         let bounds = (
-            Bound::Included(prefix.as_ref()),
+            Bound::Included(prefix),
             Bound::Excluded(upper.as_slice()),
         );
-        let iter = self.pending_db.range(&rtxn, &bounds).map_err(LmdbError::from)?;
+        let iter = self
+            .pending_db
+            .range(&rtxn, &bounds)
+            .map_err(LmdbError::from)?;
         let mut results = Vec::new();
         for result in iter {
             let (_key, val) = result.map_err(LmdbError::from)?;

@@ -114,7 +114,10 @@ impl ProcessingQueue {
 
 /// Block types that a delegation key is authorized to sign.
 fn is_delegation_allowed(block_type: &BlockType) -> bool {
-    matches!(block_type, BlockType::GovernanceVote | BlockType::ChangeRepresentative)
+    matches!(
+        block_type,
+        BlockType::GovernanceVote | BlockType::ChangeRepresentative
+    )
 }
 
 /// Attempt to extract a 32-byte public key from a signature.
@@ -239,11 +242,7 @@ impl BlockProcessor {
     /// 5. **Fork** — detect conflicting blocks for the same account position
     /// 6. **Open block** — validate first-block-in-chain semantics
     /// 7. **Chain append** — accept if block extends the frontier
-    pub fn process(
-        &mut self,
-        block: &StateBlock,
-        frontier: &mut DagFrontier,
-    ) -> ProcessResult {
+    pub fn process(&mut self, block: &StateBlock, frontier: &mut DagFrontier) -> ProcessResult {
         // Stage 1: Dedup check (in-memory cache + persistent store fallback)
         if self.recently_processed.contains(&block.hash) {
             return ProcessResult::Duplicate;
@@ -256,9 +255,13 @@ impl BlockProcessor {
         }
 
         // Stage 2: PoW validation — threshold varies by block type
-        let work_threshold = self.work_thresholds.threshold_for(block_type_to_work_kind(&block.block_type));
+        let work_threshold = self
+            .work_thresholds
+            .threshold_for(block_type_to_work_kind(&block.block_type));
         if !block.verify_work(work_threshold) {
-            return ProcessResult::Rejected("proof-of-work does not meet minimum difficulty".into());
+            return ProcessResult::Rejected(
+                "proof-of-work does not meet minimum difficulty".into(),
+            );
         }
 
         // Stage 2.5: Timestamp validation
@@ -289,20 +292,29 @@ impl BlockProcessor {
 
             let pubkey_bytes = match decode_address(signer.as_str()) {
                 Some(bytes) => bytes,
-                None => return ProcessResult::Rejected("unable to decode account address for signature verification".into()),
+                None => {
+                    return ProcessResult::Rejected(
+                        "unable to decode account address for signature verification".into(),
+                    )
+                }
             };
             let public_key = PublicKey(pubkey_bytes);
             if !verify_signature(block.hash.as_bytes(), &block.signature, &public_key) {
                 // Primary key verification failed — check delegation key fallback
                 if let Some(ref del_store) = self.delegation_store {
-                    let signing_pubkey = extract_signing_pubkey(&block.signature, block.hash.as_bytes());
+                    let signing_pubkey =
+                        extract_signing_pubkey(&block.signature, block.hash.as_bytes());
                     if let Some(pubkey) = signing_pubkey {
                         if let Ok(Some(record)) = del_store.get_delegation_by_pubkey(&pubkey) {
                             if record.revoked {
-                                return ProcessResult::Rejected("delegation key has been revoked".into());
+                                return ProcessResult::Rejected(
+                                    "delegation key has been revoked".into(),
+                                );
                             }
                             if !is_delegation_allowed(&block.block_type) {
-                                return ProcessResult::Rejected("delegation key cannot sign this block type".into());
+                                return ProcessResult::Rejected(
+                                    "delegation key cannot sign this block type".into(),
+                                );
                             }
                             // Delegation key is valid for this operation — proceed
                         } else {
@@ -339,8 +351,10 @@ impl BlockProcessor {
                 if block.previous == frontier_head {
                     // Stage 4.5: Gap-source — for Receive/RejectReceive/VerificationVote blocks,
                     // verify the linked source block has been seen. If not, queue as gap-source.
-                    if matches!(block.block_type, BlockType::Receive | BlockType::RejectReceive | BlockType::VerificationVote)
-                        && !block.link.is_zero()
+                    if matches!(
+                        block.block_type,
+                        BlockType::Receive | BlockType::RejectReceive | BlockType::VerificationVote
+                    ) && !block.link.is_zero()
                         && !self.source_known(&block.link)
                     {
                         self.queue_unchecked_source(block.link, block.clone());
@@ -361,9 +375,7 @@ impl BlockProcessor {
                 // Stage 4: Gap check — if previous is zero-hash (not an open block) or
                 // completely unknown, treat as gap and queue unchecked.
                 if block.previous.is_zero() {
-                    return ProcessResult::Rejected(
-                        "non-open block has zero previous hash".into(),
-                    );
+                    return ProcessResult::Rejected("non-open block has zero previous hash".into());
                 }
 
                 // The block references a previous that isn't the frontier head.
@@ -382,8 +394,10 @@ impl BlockProcessor {
                         );
                     }
                     // Gap-source check for receive-type and verification-vote open blocks
-                    if matches!(block.block_type, BlockType::Receive | BlockType::RejectReceive | BlockType::VerificationVote)
-                        && !block.link.is_zero()
+                    if matches!(
+                        block.block_type,
+                        BlockType::Receive | BlockType::RejectReceive | BlockType::VerificationVote
+                    ) && !block.link.is_zero()
                         && !self.source_known(&block.link)
                     {
                         self.queue_unchecked_source(block.link, block.clone());
@@ -535,7 +549,10 @@ impl BlockProcessor {
         for block in &chain {
             let result = self.rollback(block, frontier);
             if result != RollbackResult::Success {
-                return Err(format!("rollback of block {} failed: {:?}", block.hash, result));
+                return Err(format!(
+                    "rollback of block {} failed: {:?}",
+                    block.hash, result
+                ));
             }
             rolled_back.push(block.hash);
         }
@@ -580,11 +597,7 @@ impl BlockProcessor {
     /// - `previous` must reference the current head of the target account.
     /// - Epoch blocks don't transfer any value (balances must remain unchanged).
     /// - The epoch block is appended to the target account's chain.
-    fn process_epoch(
-        &mut self,
-        block: &StateBlock,
-        frontier: &mut DagFrontier,
-    ) -> ProcessResult {
+    fn process_epoch(&mut self, block: &StateBlock, frontier: &mut DagFrontier) -> ProcessResult {
         // Epoch blocks must be signed by the genesis account.
         // The `link` field carries the target account's head hash for epoch blocks,
         // while `account` is set to the target account being upgraded.
@@ -632,9 +645,7 @@ impl BlockProcessor {
             }
             None => {
                 // Target account doesn't exist — epoch blocks can't create accounts.
-                ProcessResult::Rejected(
-                    "epoch block targets account that does not exist".into(),
-                )
+                ProcessResult::Rejected("epoch block targets account that does not exist".into())
             }
         }
     }
@@ -729,13 +740,21 @@ impl BlockProcessor {
                     return Err("challenge block cannot change TRST balance".into());
                 }
             }
-            BlockType::GovernanceProposal | BlockType::GovernanceVote |
-            BlockType::Delegate | BlockType::RevokeDelegation => {
+            BlockType::GovernanceProposal
+            | BlockType::GovernanceVote
+            | BlockType::Delegate
+            | BlockType::RevokeDelegation => {
                 if block.brn_balance != prev_brn {
-                    return Err(format!("{:?} block cannot change BRN balance", block.block_type));
+                    return Err(format!(
+                        "{:?} block cannot change BRN balance",
+                        block.block_type
+                    ));
                 }
                 if block.trst_balance != prev_trst {
-                    return Err(format!("{:?} block cannot change TRST balance", block.block_type));
+                    return Err(format!(
+                        "{:?} block cannot change TRST balance",
+                        block.block_type
+                    ));
                 }
             }
             BlockType::ChangeRepresentative => {
@@ -904,7 +923,10 @@ mod tests {
         let mut frontier = DagFrontier::new();
 
         let open = make_open_block(0);
-        assert_eq!(processor.process(&open, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&open, &mut frontier),
+            ProcessResult::Accepted
+        );
 
         let send = make_send_block(open.hash, 0);
         let result = processor.process(&send, &mut frontier);
@@ -918,13 +940,22 @@ mod tests {
         let mut frontier = DagFrontier::new();
 
         let open = make_open_block(0);
-        assert_eq!(processor.process(&open, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&open, &mut frontier),
+            ProcessResult::Accepted
+        );
 
         let send1 = make_send_block(open.hash, 0);
-        assert_eq!(processor.process(&send1, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&send1, &mut frontier),
+            ProcessResult::Accepted
+        );
 
         let send2 = make_send_block(send1.hash, 0);
-        assert_eq!(processor.process(&send2, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&send2, &mut frontier),
+            ProcessResult::Accepted
+        );
 
         assert_eq!(frontier.get_head(&test_account()), Some(&send2.hash));
     }
@@ -937,8 +968,14 @@ mod tests {
         let mut frontier = DagFrontier::new();
         let block = make_open_block(0);
 
-        assert_eq!(processor.process(&block, &mut frontier), ProcessResult::Accepted);
-        assert_eq!(processor.process(&block, &mut frontier), ProcessResult::Duplicate);
+        assert_eq!(
+            processor.process(&block, &mut frontier),
+            ProcessResult::Accepted
+        );
+        assert_eq!(
+            processor.process(&block, &mut frontier),
+            ProcessResult::Duplicate
+        );
     }
 
     #[test]
@@ -947,7 +984,10 @@ mod tests {
         let mut frontier = DagFrontier::new();
         let block = make_open_block(0);
 
-        assert_eq!(processor.process(&block, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&block, &mut frontier),
+            ProcessResult::Accepted
+        );
         assert_eq!(processor.recently_processed_count(), 1);
 
         processor.clear_recently_processed();
@@ -978,9 +1018,9 @@ mod tests {
         let mut frontier = DagFrontier::new();
         // Open blocks use a higher threshold (receive multiplier), so generate
         // work meeting the actual threshold the processor will check.
-        let open_threshold = processor.work_thresholds().threshold_for(
-            burst_work::WorkBlockKind::ReceiveOrOpen,
-        );
+        let open_threshold = processor
+            .work_thresholds()
+            .threshold_for(burst_work::WorkBlockKind::ReceiveOrOpen);
         let block = make_open_block(open_threshold);
 
         let result = processor.process(&block, &mut frontier);
@@ -1037,7 +1077,10 @@ mod tests {
 
         // Process open block
         let open = make_open_block(0);
-        assert_eq!(processor.process(&open, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&open, &mut frontier),
+            ProcessResult::Accepted
+        );
 
         // Create a send that references the open block's hash (valid chain)
         let send = make_send_block(open.hash, 0);
@@ -1099,7 +1142,10 @@ mod tests {
         let mut frontier = DagFrontier::new();
 
         let open = make_open_block(0);
-        assert_eq!(processor.process(&open, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&open, &mut frontier),
+            ProcessResult::Accepted
+        );
 
         // A block that claims a different previous than the frontier head
         let wrong_prev = BlockHash::new([0x99; 32]);
@@ -1115,11 +1161,17 @@ mod tests {
         let mut frontier = DagFrontier::new();
 
         let open = make_open_block(0);
-        assert_eq!(processor.process(&open, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&open, &mut frontier),
+            ProcessResult::Accepted
+        );
 
         // First send (accepted, extends frontier)
         let send1 = make_send_block(open.hash, 0);
-        assert_eq!(processor.process(&send1, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&send1, &mut frontier),
+            ProcessResult::Accepted
+        );
 
         // Second block also tries to extend from open.hash (now behind frontier)
         let send2 = make_fork_block(open.hash, 0);
@@ -1135,7 +1187,10 @@ mod tests {
         let mut frontier = DagFrontier::new();
 
         let open1 = make_open_block(0);
-        assert_eq!(processor.process(&open1, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&open1, &mut frontier),
+            ProcessResult::Accepted
+        );
 
         // Create a different open block for the same account
         let mut open2 = StateBlock {
@@ -1201,7 +1256,10 @@ mod tests {
         let mut frontier = DagFrontier::new();
 
         let open = make_open_block(0);
-        assert_eq!(processor.process(&open, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&open, &mut frontier),
+            ProcessResult::Accepted
+        );
 
         let mut block = StateBlock {
             version: CURRENT_BLOCK_VERSION,
@@ -1249,7 +1307,10 @@ mod tests {
         let mut frontier = DagFrontier::new();
 
         let open = make_open_block(0);
-        assert_eq!(processor.process(&open, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&open, &mut frontier),
+            ProcessResult::Accepted
+        );
         let head_after_open = *frontier.get_head(&test_account()).unwrap();
 
         let fork = make_fork_block(BlockHash::new([0x77; 32]), 0);
@@ -1268,7 +1329,10 @@ mod tests {
 
         // Process an open block
         let open = make_open_block(0);
-        assert_eq!(processor.process(&open, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&open, &mut frontier),
+            ProcessResult::Accepted
+        );
 
         // Create send1 (chains from open) and send2 (chains from send1)
         let send1 = make_send_block(open.hash, 0);
@@ -1314,7 +1378,10 @@ mod tests {
         let mut frontier = DagFrontier::new();
 
         let open = make_open_block(0);
-        assert_eq!(processor.process(&open, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&open, &mut frontier),
+            ProcessResult::Accepted
+        );
 
         let epoch = make_epoch_block(open.hash, test_account());
         let result = processor.process(&epoch, &mut frontier);
@@ -1341,7 +1408,10 @@ mod tests {
         let mut frontier = DagFrontier::new();
 
         let open = make_open_block(0);
-        assert_eq!(processor.process(&open, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&open, &mut frontier),
+            ProcessResult::Accepted
+        );
 
         let wrong_prev = BlockHash::new([0xBB; 32]);
         let epoch = make_epoch_block(wrong_prev, test_account());
@@ -1371,10 +1441,16 @@ mod tests {
         let mut frontier = DagFrontier::new();
 
         let open = make_open_block(0);
-        assert_eq!(processor.process(&open, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&open, &mut frontier),
+            ProcessResult::Accepted
+        );
 
         let epoch = make_epoch_block(open.hash, test_account());
-        assert_eq!(processor.process(&epoch, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&epoch, &mut frontier),
+            ProcessResult::Accepted
+        );
 
         let send = make_send_block(epoch.hash, 0);
         let result = processor.process(&send, &mut frontier);
@@ -1442,10 +1518,7 @@ mod tests {
         let mut processor = BlockProcessor::new(0);
         let mut frontier = DagFrontier::new();
         let result = processor.process(&block, &mut frontier);
-        assert_eq!(
-            result,
-            ProcessResult::Rejected("invalid signature".into())
-        );
+        assert_eq!(result, ProcessResult::Rejected("invalid signature".into()));
     }
 
     #[test]
@@ -1456,8 +1529,7 @@ mod tests {
         let account_kp = generate_keypair();
         let account_address = derive_address(&account_kp.public);
 
-        let mut processor =
-            BlockProcessor::with_genesis_account(0, genesis_address.clone());
+        let mut processor = BlockProcessor::with_genesis_account(0, genesis_address.clone());
         let mut frontier = DagFrontier::new();
 
         // Open block for the account (signed by account key)
@@ -1603,10 +1675,7 @@ mod tests {
         block.hash = block.compute_hash();
 
         let result = BlockProcessor::validate_balance_transition(&block, 1000, 100);
-        assert_eq!(
-            result,
-            Err("send block cannot change BRN balance".into())
-        );
+        assert_eq!(result, Err("send block cannot change BRN balance".into()));
     }
 
     #[test]
@@ -1731,17 +1800,11 @@ mod tests {
 
         // Changed BRN → fail
         let result = BlockProcessor::validate_balance_transition(&block, 999, 100);
-        assert_eq!(
-            result,
-            Err("epoch block cannot change balances".into())
-        );
+        assert_eq!(result, Err("epoch block cannot change balances".into()));
 
         // Changed TRST → fail
         let result = BlockProcessor::validate_balance_transition(&block, 1000, 99);
-        assert_eq!(
-            result,
-            Err("epoch block cannot change balances".into())
-        );
+        assert_eq!(result, Err("epoch block cannot change balances".into()));
     }
 
     // ── Rollback tests ───────────────────────────────────────────────────
@@ -1752,10 +1815,16 @@ mod tests {
         let mut frontier = DagFrontier::new();
 
         let open = make_open_block(0);
-        assert_eq!(processor.process(&open, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&open, &mut frontier),
+            ProcessResult::Accepted
+        );
 
         let send = make_send_block(open.hash, 0);
-        assert_eq!(processor.process(&send, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&send, &mut frontier),
+            ProcessResult::Accepted
+        );
         assert_eq!(frontier.get_head(&test_account()), Some(&send.hash));
 
         let result = processor.rollback(&send, &mut frontier);
@@ -1769,7 +1838,10 @@ mod tests {
         let mut frontier = DagFrontier::new();
 
         let open = make_open_block(0);
-        assert_eq!(processor.process(&open, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&open, &mut frontier),
+            ProcessResult::Accepted
+        );
 
         let result = processor.rollback(&open, &mut frontier);
         assert_eq!(result, RollbackResult::Success);
@@ -1783,10 +1855,16 @@ mod tests {
         let mut frontier = DagFrontier::new();
 
         let open = make_open_block(0);
-        assert_eq!(processor.process(&open, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&open, &mut frontier),
+            ProcessResult::Accepted
+        );
 
         let send = make_send_block(open.hash, 0);
-        assert_eq!(processor.process(&send, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&send, &mut frontier),
+            ProcessResult::Accepted
+        );
 
         // Try to roll back the open block (not the head)
         let result = processor.rollback(&open, &mut frontier);
@@ -1811,7 +1889,10 @@ mod tests {
         let mut frontier = DagFrontier::new();
 
         let open = make_open_block(0);
-        assert_eq!(processor.process(&open, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&open, &mut frontier),
+            ProcessResult::Accepted
+        );
         assert_eq!(processor.recently_processed_count(), 1);
 
         processor.rollback(&open, &mut frontier);
@@ -1820,7 +1901,11 @@ mod tests {
 
     // ── Gap-source tests ─────────────────────────────────────────────────
 
-    fn make_receive_block_bp(previous: BlockHash, source: BlockHash, difficulty: u64) -> StateBlock {
+    fn make_receive_block_bp(
+        previous: BlockHash,
+        source: BlockHash,
+        difficulty: u64,
+    ) -> StateBlock {
         let mut block = StateBlock {
             version: CURRENT_BLOCK_VERSION,
             block_type: BlockType::Receive,
@@ -1854,7 +1939,10 @@ mod tests {
         let mut frontier = DagFrontier::new();
 
         let open = make_open_block(0);
-        assert_eq!(processor.process(&open, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&open, &mut frontier),
+            ProcessResult::Accepted
+        );
 
         // Create a receive block referencing an unknown source send block
         let unknown_source = BlockHash::new([0xAA; 32]);
@@ -1875,10 +1963,16 @@ mod tests {
 
         // Process open and send blocks to populate recently_processed
         let open = make_open_block(0);
-        assert_eq!(processor.process(&open, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&open, &mut frontier),
+            ProcessResult::Accepted
+        );
 
         let send = make_send_block(open.hash, 0);
-        assert_eq!(processor.process(&send, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&send, &mut frontier),
+            ProcessResult::Accepted
+        );
 
         // Create a receive block referencing the send block as source
         let recv = make_receive_block_bp(send.hash, open.hash, 0);
@@ -1893,13 +1987,19 @@ mod tests {
         let mut frontier = DagFrontier::new();
 
         let open = make_open_block(0);
-        assert_eq!(processor.process(&open, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&open, &mut frontier),
+            ProcessResult::Accepted
+        );
 
         // Queue a receive block waiting for an unknown source
         let unknown_source = BlockHash::new([0xBB; 32]);
         let recv = make_receive_block_bp(open.hash, unknown_source, 0);
 
-        assert_eq!(processor.process(&recv, &mut frontier), ProcessResult::GapSource);
+        assert_eq!(
+            processor.process(&recv, &mut frontier),
+            ProcessResult::GapSource
+        );
         assert_eq!(processor.unchecked_count(), 1);
 
         // Source "arrives" — drain the gap-source dependents
@@ -1915,7 +2015,10 @@ mod tests {
         let mut frontier = DagFrontier::new();
 
         let open = make_open_block(0);
-        assert_eq!(processor.process(&open, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&open, &mut frontier),
+            ProcessResult::Accepted
+        );
 
         // Receive block with zero link — no source check needed
         let recv = make_receive_block_bp(open.hash, BlockHash::ZERO, 0);
@@ -2016,15 +2119,24 @@ mod tests {
         let store = burst_nullables::NullStore::new();
 
         let open = make_open_block(0);
-        assert_eq!(processor.process(&open, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&open, &mut frontier),
+            ProcessResult::Accepted
+        );
         store_block(&store, &open);
 
         let send1 = make_send_block(open.hash, 0);
-        assert_eq!(processor.process(&send1, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&send1, &mut frontier),
+            ProcessResult::Accepted
+        );
         store_block(&store, &send1);
 
         let send2 = make_send_block(send1.hash, 0);
-        assert_eq!(processor.process(&send2, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&send2, &mut frontier),
+            ProcessResult::Accepted
+        );
         store_block(&store, &send2);
 
         assert_eq!(frontier.get_head(&test_account()), Some(&send2.hash));
@@ -2046,11 +2158,17 @@ mod tests {
         let store = burst_nullables::NullStore::new();
 
         let open = make_open_block(0);
-        assert_eq!(processor.process(&open, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&open, &mut frontier),
+            ProcessResult::Accepted
+        );
         store_block(&store, &open);
 
         let send = make_send_block(open.hash, 0);
-        assert_eq!(processor.process(&send, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&send, &mut frontier),
+            ProcessResult::Accepted
+        );
         store_block(&store, &send);
 
         // Roll back just the head (target == head)
@@ -2069,11 +2187,17 @@ mod tests {
         let store = burst_nullables::NullStore::new();
 
         let open = make_open_block(0);
-        assert_eq!(processor.process(&open, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&open, &mut frontier),
+            ProcessResult::Accepted
+        );
         store_block(&store, &open);
 
         let send = make_send_block(open.hash, 0);
-        assert_eq!(processor.process(&send, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&send, &mut frontier),
+            ProcessResult::Accepted
+        );
         store_block(&store, &send);
 
         // Roll back to (and including) the open block — account should be removed
@@ -2107,7 +2231,10 @@ mod tests {
         let store = burst_nullables::NullStore::new();
 
         let open = make_open_block(0);
-        assert_eq!(processor.process(&open, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&open, &mut frontier),
+            ProcessResult::Accepted
+        );
         store_block(&store, &open);
 
         // Target hash that's not in the chain
@@ -2127,15 +2254,24 @@ mod tests {
         let store = burst_nullables::NullStore::new();
 
         let open = make_open_block(0);
-        assert_eq!(processor.process(&open, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&open, &mut frontier),
+            ProcessResult::Accepted
+        );
         store_block(&store, &open);
 
         let send1 = make_send_block(open.hash, 0);
-        assert_eq!(processor.process(&send1, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&send1, &mut frontier),
+            ProcessResult::Accepted
+        );
         store_block(&store, &send1);
 
         let send2 = make_send_block(send1.hash, 0);
-        assert_eq!(processor.process(&send2, &mut frontier), ProcessResult::Accepted);
+        assert_eq!(
+            processor.process(&send2, &mut frontier),
+            ProcessResult::Accepted
+        );
         store_block(&store, &send2);
 
         let rolled = processor

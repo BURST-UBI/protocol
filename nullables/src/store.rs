@@ -173,7 +173,10 @@ impl DelegationStore for NullDelegationStore {
         Ok(())
     }
 
-    fn get_delegation_by_delegator(&self, delegator: &WalletAddress) -> Result<Option<DelegationRecord>, StoreError> {
+    fn get_delegation_by_delegator(
+        &self,
+        delegator: &WalletAddress,
+    ) -> Result<Option<DelegationRecord>, StoreError> {
         Ok(self
             .by_delegator
             .lock()
@@ -182,7 +185,10 @@ impl DelegationStore for NullDelegationStore {
             .cloned())
     }
 
-    fn get_delegation_by_pubkey(&self, pubkey: &[u8; 32]) -> Result<Option<DelegationRecord>, StoreError> {
+    fn get_delegation_by_pubkey(
+        &self,
+        pubkey: &[u8; 32],
+    ) -> Result<Option<DelegationRecord>, StoreError> {
         let index = self.pubkey_index.lock().unwrap();
         match index.get(pubkey) {
             Some(delegator_key) => {

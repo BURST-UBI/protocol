@@ -303,10 +303,7 @@ mod tests {
     use super::*;
 
     fn wallet(name: &str) -> WalletAddress {
-        WalletAddress::new(format!(
-            "brst_{:0>75}",
-            name
-        ))
+        WalletAddress::new(format!("brst_{:0>75}", name))
     }
 
     fn tx_hash(seed: u8) -> TxHash {
@@ -359,9 +356,7 @@ mod tests {
     #[test]
     fn test_max_depth_exceeded() {
         let mut engine = DelegationEngine::new(5);
-        let wallets: Vec<WalletAddress> = (0..7)
-            .map(|i| wallet(&format!("w{}", i)))
-            .collect();
+        let wallets: Vec<WalletAddress> = (0..7).map(|i| wallet(&format!("w{}", i))).collect();
 
         for i in 0..6 {
             engine.delegate(&wallets[i], &wallets[i + 1]).unwrap();

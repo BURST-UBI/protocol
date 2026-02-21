@@ -96,7 +96,7 @@ impl EquivocationDetector {
     pub fn is_penalized(&self, rep: &WalletAddress, now: u64) -> bool {
         self.penalties
             .get(rep)
-            .map_or(false, |&expires| now < expires)
+            .is_some_and(|&expires| now < expires)
     }
 
     /// Return all equivocation proofs collected so far.

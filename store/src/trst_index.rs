@@ -12,11 +12,7 @@ use burst_types::{Timestamp, TxHash};
 ///   range scans to find all TRST that have expired before a given cutoff time.
 pub trait TrstIndexStore {
     /// Record that `tx_hash` is derived from the given origin burn.
-    fn put_origin_index(
-        &self,
-        origin_hash: &TxHash,
-        tx_hash: &TxHash,
-    ) -> Result<(), StoreError>;
+    fn put_origin_index(&self, origin_hash: &TxHash, tx_hash: &TxHash) -> Result<(), StoreError>;
 
     /// Get all TRST transaction hashes derived from the given origin.
     fn get_by_origin(&self, origin_hash: &TxHash) -> Result<Vec<TxHash>, StoreError>;
@@ -25,21 +21,13 @@ pub trait TrstIndexStore {
     fn delete_origin_index(&self, origin_hash: &TxHash) -> Result<(), StoreError>;
 
     /// Record that `tx_hash` expires at the given timestamp.
-    fn put_expiry_index(
-        &self,
-        expiry: Timestamp,
-        tx_hash: &TxHash,
-    ) -> Result<(), StoreError>;
+    fn put_expiry_index(&self, expiry: Timestamp, tx_hash: &TxHash) -> Result<(), StoreError>;
 
     /// Get all TRST transaction hashes that expire before the given cutoff.
     fn get_expired_before(&self, cutoff: Timestamp) -> Result<Vec<TxHash>, StoreError>;
 
     /// Delete a specific expiry index entry.
-    fn delete_expiry_index(
-        &self,
-        expiry: Timestamp,
-        tx_hash: &TxHash,
-    ) -> Result<(), StoreError>;
+    fn delete_expiry_index(&self, expiry: Timestamp, tx_hash: &TxHash) -> Result<(), StoreError>;
 
     /// Delete a token from all secondary indexes (origin + expiry).
     ///

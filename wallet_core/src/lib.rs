@@ -21,7 +21,11 @@ pub mod transaction_builder;
 pub mod trust_policy;
 pub mod wallet;
 
-pub use custodianship::{Custodianship, CustodianshipError, CustodianshipRegistry, CustodianshipStatus};
+pub use custodianship::{
+    Custodianship, CustodianshipError, CustodianshipRegistry, CustodianshipStatus,
+};
 pub use error::WalletError;
-pub use keystore::{decrypt_keystore, encrypt_keystore, load_keystore, save_keystore, KeystoreFile};
+pub use keystore::{
+    decrypt_keystore, encrypt_keystore, load_keystore, save_keystore, KeystoreFile,
+};
 pub use wallet::{NodeClient, Wallet};

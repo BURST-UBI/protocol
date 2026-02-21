@@ -25,10 +25,7 @@ pub fn encrypt_delegation_key(
     let recipient_pub = X25519Public::from(*recipient_x25519_public);
     let shared = secret.diffie_hellman(&recipient_pub);
 
-    let sym_key = crate::hash::blake2b_256_multi(&[
-        shared.as_bytes(),
-        b"burst-delegation",
-    ]);
+    let sym_key = crate::hash::blake2b_256_multi(&[shared.as_bytes(), b"burst-delegation"]);
     let cipher = ChaCha20Poly1305::new_from_slice(&sym_key).expect("valid key length");
 
     let sender_pub = X25519Public::from(&secret);
@@ -54,10 +51,7 @@ pub fn decrypt_delegation_key(
     let sender_pub = X25519Public::from(*sender_x25519_public);
     let shared = secret.diffie_hellman(&sender_pub);
 
-    let sym_key = crate::hash::blake2b_256_multi(&[
-        shared.as_bytes(),
-        b"burst-delegation",
-    ]);
+    let sym_key = crate::hash::blake2b_256_multi(&[shared.as_bytes(), b"burst-delegation"]);
     let cipher = ChaCha20Poly1305::new_from_slice(&sym_key).expect("valid key length");
 
     let mut nonce_bytes = [0u8; 12];
@@ -89,22 +83,15 @@ mod tests {
         let delegate_pub = X25519Public::from(&StaticSecret::from(delegate_secret));
 
         let delegation_key = [42u8; 32];
-        let encrypted = encrypt_delegation_key(
-            &delegation_key,
-            delegate_pub.as_bytes(),
-            &sender_secret,
-        );
+        let encrypted =
+            encrypt_delegation_key(&delegation_key, delegate_pub.as_bytes(), &sender_secret);
 
         // 32 bytes plaintext + 16 bytes Poly1305 auth tag
         assert_eq!(encrypted.len(), 48);
         assert_ne!(&encrypted[..32], delegation_key.as_slice());
 
-        let decrypted = decrypt_delegation_key(
-            &encrypted,
-            sender_pub.as_bytes(),
-            &delegate_secret,
-        )
-        .unwrap();
+        let decrypted =
+            decrypt_delegation_key(&encrypted, sender_pub.as_bytes(), &delegate_secret).unwrap();
 
         assert_eq!(decrypted, delegation_key);
     }
@@ -119,19 +106,15 @@ mod tests {
         let sender_pub = X25519Public::from(&StaticSecret::from(sender_secret));
 
         let delegation_key = [42u8; 32];
-        let encrypted = encrypt_delegation_key(
-            &delegation_key,
-            delegate_pub.as_bytes(),
-            &sender_secret,
-        );
+        let encrypted =
+            encrypt_delegation_key(&delegation_key, delegate_pub.as_bytes(), &sender_secret);
 
-        let result = decrypt_delegation_key(
-            &encrypted,
-            sender_pub.as_bytes(),
-            &wrong_secret,
-        );
+        let result = decrypt_delegation_key(&encrypted, sender_pub.as_bytes(), &wrong_secret);
 
-        assert!(result.is_err(), "AEAD should reject decryption with wrong key");
+        assert!(
+            result.is_err(),
+            "AEAD should reject decryption with wrong key"
+        );
     }
 
     #[test]
@@ -143,19 +126,12 @@ mod tests {
         let sender_pub = X25519Public::from(&StaticSecret::from(sender_secret));
 
         let delegation_key = [42u8; 32];
-        let mut encrypted = encrypt_delegation_key(
-            &delegation_key,
-            delegate_pub.as_bytes(),
-            &sender_secret,
-        );
+        let mut encrypted =
+            encrypt_delegation_key(&delegation_key, delegate_pub.as_bytes(), &sender_secret);
 
         encrypted[0] ^= 0xFF;
 
-        let result = decrypt_delegation_key(
-            &encrypted,
-            sender_pub.as_bytes(),
-            &delegate_secret,
-        );
+        let result = decrypt_delegation_key(&encrypted, sender_pub.as_bytes(), &delegate_secret);
 
         assert!(result.is_err(), "AEAD should detect tampered ciphertext");
     }

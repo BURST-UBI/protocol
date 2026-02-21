@@ -17,11 +17,7 @@ pub struct LmdbFrontierStore {
 }
 
 impl FrontierStore for LmdbFrontierStore {
-    fn put_frontier(
-        &self,
-        account: &WalletAddress,
-        head: &BlockHash,
-    ) -> Result<(), StoreError> {
+    fn put_frontier(&self, account: &WalletAddress, head: &BlockHash) -> Result<(), StoreError> {
         let mut wtxn = self.env.write_txn().map_err(LmdbError::from)?;
         self.frontiers_db
             .put(&mut wtxn, account.as_str().as_bytes(), head.as_bytes())
@@ -37,7 +33,8 @@ impl FrontierStore for LmdbFrontierStore {
             .get(&rtxn, account.as_str().as_bytes())
             .map_err(LmdbError::from)?
             .ok_or_else(|| LmdbError::NotFound(format!("frontier {}", account.as_str())))?;
-        let arr: [u8; 32] = val.try_into()
+        let arr: [u8; 32] = val
+            .try_into()
             .map_err(|_| LmdbError::Serialization("invalid frontier hash length".into()))?;
         Ok(BlockHash::new(arr))
     }
@@ -57,10 +54,11 @@ impl FrontierStore for LmdbFrontierStore {
         let iter = self.frontiers_db.iter(&rtxn).map_err(LmdbError::from)?;
         for result in iter {
             let (key, val) = result.map_err(LmdbError::from)?;
-            let key_str = std::str::from_utf8(key)
-                .map_err(|e| LmdbError::Serialization(e.to_string()))?;
+            let key_str =
+                std::str::from_utf8(key).map_err(|e| LmdbError::Serialization(e.to_string()))?;
             let address = WalletAddress::new(key_str);
-            let arr: [u8; 32] = val.try_into()
+            let arr: [u8; 32] = val
+                .try_into()
                 .map_err(|_| LmdbError::Serialization("invalid frontier hash length".into()))?;
             frontiers.push((address, BlockHash::new(arr)));
         }

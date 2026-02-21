@@ -35,17 +35,23 @@ pub mod unchecked;
 pub mod verification_processor;
 pub mod wire_message;
 
-pub use block_processor::{BlockContext, BlockProcessor, BlockSource, ProcessResult, ProcessingQueue, RollbackResult};
-pub use ledger_event::{EventBus, LedgerEvent};
+pub use block_processor::{
+    BlockContext, BlockProcessor, BlockSource, ProcessResult, ProcessingQueue, RollbackResult,
+};
 pub use bootstrap::{BootstrapClient, BootstrapMessage, BootstrapServer};
 pub use bounded_backlog::BoundedBacklog;
 pub use config::NodeConfig;
-pub use confirmation_processor::{CementResult, ChainWalker, ConfirmationProcessor, LmdbChainWalker};
+pub use confirmation_processor::{
+    CementResult, ChainWalker, ConfirmationProcessor, LmdbChainWalker,
+};
 pub use confirming_set::ConfirmingSet;
 pub use connection_registry::ConnectionRegistry;
 pub use error::NodeError;
 pub use ledger_bridge::{process_block_economics, EconomicResult};
-pub use ledger_updater::{create_pending_entry, delete_pending_entry, update_account_on_block, PendingInfo};
+pub use ledger_event::{EventBus, LedgerEvent};
+pub use ledger_updater::{
+    create_pending_entry, delete_pending_entry, update_account_on_block, PendingInfo,
+};
 pub use limits::check_wallet_limits;
 pub use local_broadcaster::LocalBroadcaster;
 pub use logging::{init_logging, LogFormat};

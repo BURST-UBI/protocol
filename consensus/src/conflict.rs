@@ -37,11 +37,11 @@ mod tests {
     fn test_same_previous_different_blocks_is_fork() {
         let detector = ConflictDetector;
         let account = WalletAddress::new("brst_test_account".to_string());
-        
+
         let previous = make_hash([1u8; 32]);
         let block_a = make_hash([2u8; 32]);
         let block_b = make_hash([3u8; 32]);
-        
+
         assert!(detector.is_fork(&account, &block_a, &block_b, &previous, &previous));
     }
 
@@ -49,10 +49,10 @@ mod tests {
     fn test_same_previous_same_block_not_fork() {
         let detector = ConflictDetector;
         let account = WalletAddress::new("brst_test_account".to_string());
-        
+
         let previous = make_hash([1u8; 32]);
         let block = make_hash([2u8; 32]);
-        
+
         // Same previous, same block = duplicate, not a fork
         assert!(!detector.is_fork(&account, &block, &block, &previous, &previous));
     }
@@ -61,12 +61,12 @@ mod tests {
     fn test_different_previous_not_fork() {
         let detector = ConflictDetector;
         let account = WalletAddress::new("brst_test_account".to_string());
-        
+
         let previous_a = make_hash([1u8; 32]);
         let previous_b = make_hash([2u8; 32]);
         let block_a = make_hash([3u8; 32]);
         let block_b = make_hash([4u8; 32]);
-        
+
         // Different previous blocks = not a fork (different branches)
         assert!(!detector.is_fork(&account, &block_a, &block_b, &previous_a, &previous_b));
     }

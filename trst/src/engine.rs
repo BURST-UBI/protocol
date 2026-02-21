@@ -56,7 +56,7 @@ pub struct PendingReturnResult {
 /// Tokens are kept sorted by `origin_timestamp` (sorted invariant maintained
 /// on insert). The `cached_transferable` balance is updated incrementally on
 /// every mutation so `transferable_balance()` is O(1).
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct WalletPortfolio {
     /// Tokens sorted by `origin_timestamp` (oldest first).
     pub tokens: Vec<TrstToken>,
@@ -68,16 +68,6 @@ pub struct WalletPortfolio {
     pub earliest_expiry: Option<Timestamp>,
 }
 
-impl Default for WalletPortfolio {
-    fn default() -> Self {
-        Self {
-            tokens: Vec::new(),
-            cached_transferable: 0,
-            earliest_expiry: None,
-        }
-    }
-}
-
 impl WalletPortfolio {
     /// Insert a token maintaining the sorted-by-origin_timestamp invariant.
     ///
@@ -86,7 +76,11 @@ impl WalletPortfolio {
     /// search + insert with shift for out-of-order timestamps.
     fn insert_sorted(&mut self, token: TrstToken) {
         let ts = token.origin_timestamp;
-        if self.tokens.last().map_or(true, |last| last.origin_timestamp <= ts) {
+        if self
+            .tokens
+            .last()
+            .is_none_or(|last| last.origin_timestamp <= ts)
+        {
             self.tokens.push(token);
         } else {
             let pos = self.tokens.partition_point(|t| t.origin_timestamp <= ts);
@@ -182,10 +176,7 @@ impl TrstEngine {
     /// Also updates the `wallet_origins` index for simple tokens.
     pub fn track_token(&mut self, token: TrstToken) {
         self.index_origin(&token);
-        let portfolio = self
-            .wallets
-            .entry(token.holder.clone())
-            .or_default();
+        let portfolio = self.wallets.entry(token.holder.clone()).or_default();
         if token.state == TrstState::Active {
             portfolio.cached_transferable += token.amount;
             let tok_expiry = token.earliest_expiry(u64::MAX);
@@ -206,10 +197,7 @@ impl TrstEngine {
     /// Also updates the `wallet_origins` index for simple tokens.
     pub fn track_token_with_expiry(&mut self, token: TrstToken, expiry_secs: u64) {
         self.index_origin(&token);
-        let portfolio = self
-            .wallets
-            .entry(token.holder.clone())
-            .or_default();
+        let portfolio = self.wallets.entry(token.holder.clone()).or_default();
         if token.state == TrstState::Active {
             portfolio.cached_transferable += token.amount;
             let tok_expiry = token.earliest_expiry(expiry_secs);
@@ -322,10 +310,7 @@ impl TrstEngine {
 
     /// Read-only transferable balance (does not flush expiry).
     /// Use when you only need a snapshot and can't take `&mut self`.
-    pub fn transferable_balance_snapshot(
-        &self,
-        wallet: &WalletAddress,
-    ) -> Option<u128> {
+    pub fn transferable_balance_snapshot(&self, wallet: &WalletAddress) -> Option<u128> {
         self.wallets.get(wallet).map(|p| p.cached_transferable)
     }
 
@@ -345,8 +330,7 @@ impl TrstEngine {
         }
         let expiry_secs = self.expiry_secs;
         if let Some(portfolio) = self.wallets.get_mut(wallet) {
-            portfolio.cached_transferable =
-                portfolio.cached_transferable.saturating_sub(amount);
+            portfolio.cached_transferable = portfolio.cached_transferable.saturating_sub(amount);
 
             let mut fully_consumed = 0;
             let mut consumed_earliest = false;
@@ -371,7 +355,7 @@ impl TrstEngine {
                 if let Some(first) = portfolio.tokens.first_mut() {
                     first.amount = first.amount.saturating_sub(amount);
                 }
-                if portfolio.tokens.first().map_or(false, |t| t.amount == 0) {
+                if portfolio.tokens.first().is_some_and(|t| t.amount == 0) {
                     portfolio.tokens.remove(0);
                 }
             }
@@ -398,8 +382,7 @@ impl TrstEngine {
         }
         let expiry_secs = self.expiry_secs;
         if let Some(portfolio) = self.wallets.get_mut(wallet) {
-            portfolio.cached_transferable =
-                portfolio.cached_transferable.saturating_sub(amount);
+            portfolio.cached_transferable = portfolio.cached_transferable.saturating_sub(amount);
 
             let mut fully_consumed = 0;
             let mut consumed_earliest = false;
@@ -433,7 +416,7 @@ impl TrstEngine {
                 if let Some(first) = portfolio.tokens.first_mut() {
                     first.amount = first.amount.saturating_sub(amount);
                 }
-                if portfolio.tokens.first().map_or(false, |t| t.amount == 0) {
+                if portfolio.tokens.first().is_some_and(|t| t.amount == 0) {
                     portfolio.tokens.remove(0);
                 }
             }
@@ -486,6 +469,7 @@ impl TrstEngine {
     /// In Nano's account-balance model, the sender's balance is simply
     /// decremented. Here we model TRST tokens explicitly for provenance
     /// tracking, so a partial send produces a change token.
+    #[allow(clippy::too_many_arguments)]
     pub fn transfer(
         &self,
         token: &TrstToken,
@@ -559,6 +543,7 @@ impl TrstEngine {
     /// - `child.origin == parent.origin` (provenance preserved, not a new origin)
     /// - `child.link == parent.id` (link to the split source)
     /// - `child.origin_timestamp == parent.origin_timestamp` (expiry base preserved)
+    ///
     /// Amounts must sum to the parent.
     pub fn split(
         &self,
@@ -592,7 +577,9 @@ impl TrstEngine {
         // Reject zero-amount splits
         for (_, amt) in amounts {
             if *amt == 0 {
-                return Err(TrstError::Other("split output amount must be non-zero".into()));
+                return Err(TrstError::Other(
+                    "split output amount must be non-zero".into(),
+                ));
             }
         }
 
@@ -601,17 +588,21 @@ impl TrstEngine {
             .zip(tx_hashes.iter())
             .map(|((receiver, amount), &hash)| {
                 // Scale origin_proportions proportionally to the split fraction.
-                let scaled_proportions = if !token.origin_proportions.is_empty() && token.amount > 0 {
-                    token.origin_proportions.iter().map(|p| {
-                        let scaled = (p.amount as u128)
-                            .saturating_mul(*amount as u128)
-                            / (token.amount as u128);
-                        OriginProportion {
-                            origin: p.origin,
-                            origin_wallet: p.origin_wallet.clone(),
-                            amount: scaled,
-                        }
-                    }).collect()
+                let scaled_proportions = if !token.origin_proportions.is_empty() && token.amount > 0
+                {
+                    token
+                        .origin_proportions
+                        .iter()
+                        .map(|p| {
+                            let scaled = p.amount.saturating_mul(*amount)
+                                / token.amount;
+                            OriginProportion {
+                                origin: p.origin,
+                                origin_wallet: p.origin_wallet.clone(),
+                                amount: scaled,
+                            }
+                        })
+                        .collect()
                 } else {
                     token.origin_proportions.clone()
                 };
@@ -659,7 +650,10 @@ impl TrstEngine {
                 });
             }
             if !t.is_transferable(now, expiry_secs) {
-                return Err(TrstError::NotTransferable(format!("{:?} ({})", t.state, t.id)));
+                return Err(TrstError::NotTransferable(format!(
+                    "{:?} ({})",
+                    t.state, t.id
+                )));
             }
         }
 
@@ -706,12 +700,13 @@ impl TrstEngine {
             })
             .collect();
 
-        self.merger_graph.record_merge(crate::merger_graph::MergeNode {
-            merge_tx: merge_tx_hash,
-            source_origins: merge_sources,
-            total_amount,
-            holder: holder.clone(),
-        });
+        self.merger_graph
+            .record_merge(crate::merger_graph::MergeNode {
+                merge_tx: merge_tx_hash,
+                source_origins: merge_sources,
+                total_amount,
+                holder: holder.clone(),
+            });
 
         let earliest_origin_wallet = tokens
             .iter()
@@ -767,7 +762,11 @@ impl TrstEngine {
             let events = self.merger_graph.propagate_revocation(origin_tx);
             for event in &events {
                 if let Some(portfolio) = self.wallets.get_mut(&event.holder) {
-                    if let Some(t) = portfolio.tokens.iter_mut().find(|t| t.id == event.merge_tx && t.state == TrstState::Active) {
+                    if let Some(t) = portfolio
+                        .tokens
+                        .iter_mut()
+                        .find(|t| t.id == event.merge_tx && t.state == TrstState::Active)
+                    {
                         t.state = TrstState::Revoked;
                         portfolio.cached_transferable =
                             portfolio.cached_transferable.saturating_sub(t.amount);
@@ -831,7 +830,11 @@ impl TrstEngine {
             let events = self.merger_graph.propagate_unrevocation(origin_tx);
             for event in events {
                 if let Some(portfolio) = self.wallets.get_mut(&event.holder) {
-                    if let Some(t) = portfolio.tokens.iter_mut().find(|t| t.id == event.merge_tx && t.state == TrstState::Revoked) {
+                    if let Some(t) = portfolio
+                        .tokens
+                        .iter_mut()
+                        .find(|t| t.id == event.merge_tx && t.state == TrstState::Revoked)
+                    {
                         t.state = TrstState::Active;
                         portfolio.cached_transferable += t.amount;
                         results.push(UnRevocationResult {
@@ -887,7 +890,7 @@ impl TrstEngine {
     pub fn return_expired_pending(
         &self,
         pending_info: &[PendingTokenInfo],
-        tokens: &mut Vec<TrstToken>,
+        tokens: &mut [TrstToken],
         expiry_period: u64,
         now: Timestamp,
     ) -> Vec<PendingReturnResult> {
@@ -1043,7 +1046,15 @@ mod tests {
         let amount = 1000;
         let timestamp = test_timestamp(1000);
 
-        let token = engine.mint(burn_tx_hash, receiver.clone(), amount, origin_wallet.clone(), timestamp).unwrap();
+        let token = engine
+            .mint(
+                burn_tx_hash,
+                receiver.clone(),
+                amount,
+                origin_wallet.clone(),
+                timestamp,
+            )
+            .unwrap();
 
         assert_eq!(token.id, burn_tx_hash);
         assert_eq!(token.amount, amount);
@@ -1055,7 +1066,11 @@ mod tests {
         assert_eq!(token.origin_wallet, origin_wallet);
         assert!(token.origin_proportions.is_empty());
 
-        assert!(engine.wallet_origins.get(&origin_wallet).unwrap().contains(&burn_tx_hash));
+        assert!(engine
+            .wallet_origins
+            .get(&origin_wallet)
+            .unwrap()
+            .contains(&burn_tx_hash));
     }
 
     #[test]
@@ -1068,11 +1083,28 @@ mod tests {
         let change_tx = test_hash(3);
         let expiry_secs = 3600;
 
-        let token = engine.mint(origin_tx, sender.clone(), 1000, sender.clone(), test_timestamp(1000)).unwrap();
+        let token = engine
+            .mint(
+                origin_tx,
+                sender.clone(),
+                1000,
+                sender.clone(),
+                test_timestamp(1000),
+            )
+            .unwrap();
 
         let now = test_timestamp(1500);
         let (receiver_token, change_token) = engine
-            .transfer(&token, &sender, receiver.clone(), 600, send_tx, change_tx, now, expiry_secs)
+            .transfer(
+                &token,
+                &sender,
+                receiver.clone(),
+                600,
+                send_tx,
+                change_tx,
+                now,
+                expiry_secs,
+            )
             .unwrap();
 
         assert_eq!(receiver_token.id, send_tx);
@@ -1102,11 +1134,28 @@ mod tests {
         let change_tx = test_hash(3);
         let expiry_secs = 3600;
 
-        let token = engine.mint(origin_tx, sender.clone(), 1000, sender.clone(), test_timestamp(1000)).unwrap();
+        let token = engine
+            .mint(
+                origin_tx,
+                sender.clone(),
+                1000,
+                sender.clone(),
+                test_timestamp(1000),
+            )
+            .unwrap();
 
         let now = test_timestamp(1500);
         let (receiver_token, change_token) = engine
-            .transfer(&token, &sender, receiver.clone(), 1000, send_tx, change_tx, now, expiry_secs)
+            .transfer(
+                &token,
+                &sender,
+                receiver.clone(),
+                1000,
+                send_tx,
+                change_tx,
+                now,
+                expiry_secs,
+            )
             .unwrap();
 
         assert_eq!(receiver_token.amount, 1000);
@@ -1125,10 +1174,27 @@ mod tests {
         let change_tx = test_hash(3);
         let expiry_secs = 3600;
 
-        let token = engine.mint(origin_tx, sender.clone(), 1000, sender.clone(), test_timestamp(1000)).unwrap();
+        let token = engine
+            .mint(
+                origin_tx,
+                sender.clone(),
+                1000,
+                sender.clone(),
+                test_timestamp(1000),
+            )
+            .unwrap();
 
         let now = test_timestamp(1500);
-        let result = engine.transfer(&token, &sender, receiver, 1500, send_tx, change_tx, now, expiry_secs);
+        let result = engine.transfer(
+            &token,
+            &sender,
+            receiver,
+            1500,
+            send_tx,
+            change_tx,
+            now,
+            expiry_secs,
+        );
 
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -1151,10 +1217,21 @@ mod tests {
         let expiry_secs = 3600; // 1 hour
 
         let origin_time = test_timestamp(1000);
-        let token = engine.mint(origin_tx, sender.clone(), 1000, sender.clone(), origin_time).unwrap();
+        let token = engine
+            .mint(origin_tx, sender.clone(), 1000, sender.clone(), origin_time)
+            .unwrap();
 
         let now = test_timestamp(5000);
-        let result = engine.transfer(&token, &sender, receiver, 500, send_tx, change_tx, now, expiry_secs);
+        let result = engine.transfer(
+            &token,
+            &sender,
+            receiver,
+            500,
+            send_tx,
+            change_tx,
+            now,
+            expiry_secs,
+        );
 
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -1170,7 +1247,15 @@ mod tests {
         let holder = test_address(1);
         let expiry_secs = 3600;
 
-        let token = engine.mint(origin_tx, holder.clone(), 1000, holder.clone(), test_timestamp(1000)).unwrap();
+        let token = engine
+            .mint(
+                origin_tx,
+                holder.clone(),
+                1000,
+                holder.clone(),
+                test_timestamp(1000),
+            )
+            .unwrap();
 
         let amounts = vec![
             (test_address(2), 300),
@@ -1180,7 +1265,9 @@ mod tests {
         let tx_hashes = vec![test_hash(2), test_hash(3), test_hash(4)];
 
         let now = test_timestamp(1500);
-        let splits = engine.split(&token, &amounts, &tx_hashes, now, expiry_secs).unwrap();
+        let splits = engine
+            .split(&token, &amounts, &tx_hashes, now, expiry_secs)
+            .unwrap();
 
         assert_eq!(splits.len(), 3);
         assert_eq!(splits[0].amount, 300);
@@ -1205,7 +1292,15 @@ mod tests {
         let holder = test_address(1);
         let expiry_secs = 3600;
 
-        let token = engine.mint(origin_tx, holder.clone(), 1000, holder.clone(), test_timestamp(1000)).unwrap();
+        let token = engine
+            .mint(
+                origin_tx,
+                holder.clone(),
+                1000,
+                holder.clone(),
+                test_timestamp(1000),
+            )
+            .unwrap();
 
         let amounts = vec![
             (test_address(2), 300),
@@ -1235,14 +1330,32 @@ mod tests {
         let origin1 = test_hash(1);
         let origin2 = test_hash(2);
         let holder = test_address(5);
-        let token1 = engine.mint(origin1, holder.clone(), 500, test_address(10), test_timestamp(1000)).unwrap();
-        let token2 = engine.mint(origin2, holder.clone(), 300, test_address(11), test_timestamp(1100)).unwrap();
+        let token1 = engine
+            .mint(
+                origin1,
+                holder.clone(),
+                500,
+                test_address(10),
+                test_timestamp(1000),
+            )
+            .unwrap();
+        let token2 = engine
+            .mint(
+                origin2,
+                holder.clone(),
+                300,
+                test_address(11),
+                test_timestamp(1100),
+            )
+            .unwrap();
 
         let tokens = vec![token1, token2];
         let merge_tx = test_hash(10);
         let now = test_timestamp(1500);
 
-        let merged = engine.merge(&tokens, holder.clone(), merge_tx, now, expiry_secs).unwrap();
+        let merged = engine
+            .merge(&tokens, holder.clone(), merge_tx, now, expiry_secs)
+            .unwrap();
 
         assert_eq!(merged.amount, 800);
         assert_eq!(merged.holder, holder);
@@ -1253,8 +1366,14 @@ mod tests {
         assert_eq!(merged.effective_origin_timestamp, test_timestamp(1000)); // earliest constituent
 
         assert_eq!(merged.origin_proportions.len(), 2);
-        assert!(merged.origin_proportions.iter().any(|p| p.origin == origin1 && p.amount == 500));
-        assert!(merged.origin_proportions.iter().any(|p| p.origin == origin2 && p.amount == 300));
+        assert!(merged
+            .origin_proportions
+            .iter()
+            .any(|p| p.origin == origin1 && p.amount == 500));
+        assert!(merged
+            .origin_proportions
+            .iter()
+            .any(|p| p.origin == origin2 && p.amount == 300));
 
         let revocations = engine.revoke_by_origin(&test_address(10));
         assert!(!revocations.is_empty());
@@ -1268,7 +1387,9 @@ mod tests {
         let expiry_secs = 3600; // 1 hour
 
         let origin_time = test_timestamp(1000);
-        let mut token = engine.mint(origin_tx, holder.clone(), 1000, holder.clone(), origin_time).unwrap();
+        let mut token = engine
+            .mint(origin_tx, holder.clone(), 1000, holder.clone(), origin_time)
+            .unwrap();
 
         let now_before = test_timestamp(2000);
         engine.check_expiry(&mut token, now_before, expiry_secs);
@@ -1291,9 +1412,33 @@ mod tests {
         let holder1 = test_address(5);
         let holder2 = test_address(6);
 
-        let token1 = engine.mint(origin1, holder1.clone(), 500, origin_wallet1.clone(), test_timestamp(1000)).unwrap();
-        let token2 = engine.mint(origin2, holder1.clone(), 300, origin_wallet2.clone(), test_timestamp(1100)).unwrap();
-        let token3 = engine.mint(origin1, holder2.clone(), 200, origin_wallet1.clone(), test_timestamp(1200)).unwrap();
+        let token1 = engine
+            .mint(
+                origin1,
+                holder1.clone(),
+                500,
+                origin_wallet1.clone(),
+                test_timestamp(1000),
+            )
+            .unwrap();
+        let token2 = engine
+            .mint(
+                origin2,
+                holder1.clone(),
+                300,
+                origin_wallet2.clone(),
+                test_timestamp(1100),
+            )
+            .unwrap();
+        let token3 = engine
+            .mint(
+                origin1,
+                holder2.clone(),
+                200,
+                origin_wallet1.clone(),
+                test_timestamp(1200),
+            )
+            .unwrap();
 
         let merge1_tx = test_hash(10);
         let mut merged1 = engine
@@ -1334,9 +1479,33 @@ mod tests {
         let origin_wallet = test_address(10);
         let other_wallet = test_address(11);
 
-        let token1 = engine.mint(test_hash(1), test_address(1), 500, origin_wallet.clone(), test_timestamp(1000)).unwrap();
-        let token2 = engine.mint(test_hash(2), test_address(2), 300, origin_wallet.clone(), test_timestamp(1100)).unwrap();
-        let token3 = engine.mint(test_hash(3), test_address(3), 200, other_wallet.clone(), test_timestamp(1200)).unwrap();
+        let token1 = engine
+            .mint(
+                test_hash(1),
+                test_address(1),
+                500,
+                origin_wallet.clone(),
+                test_timestamp(1000),
+            )
+            .unwrap();
+        let token2 = engine
+            .mint(
+                test_hash(2),
+                test_address(2),
+                300,
+                origin_wallet.clone(),
+                test_timestamp(1100),
+            )
+            .unwrap();
+        let token3 = engine
+            .mint(
+                test_hash(3),
+                test_address(3),
+                200,
+                other_wallet.clone(),
+                test_timestamp(1200),
+            )
+            .unwrap();
 
         engine.track_token(token1);
         engine.track_token(token2);
@@ -1370,8 +1539,24 @@ mod tests {
         let mut engine = TrstEngine::new();
         let origin_wallet = test_address(10);
 
-        let token1 = engine.mint(test_hash(1), test_address(1), 500, origin_wallet.clone(), test_timestamp(1000)).unwrap();
-        let token2 = engine.mint(test_hash(2), test_address(1), 300, origin_wallet.clone(), test_timestamp(1100)).unwrap();
+        let token1 = engine
+            .mint(
+                test_hash(1),
+                test_address(1),
+                500,
+                origin_wallet.clone(),
+                test_timestamp(1000),
+            )
+            .unwrap();
+        let token2 = engine
+            .mint(
+                test_hash(2),
+                test_address(1),
+                300,
+                origin_wallet.clone(),
+                test_timestamp(1100),
+            )
+            .unwrap();
         engine.track_token(token1);
         engine.track_token(token2);
 
@@ -1394,8 +1579,24 @@ mod tests {
         let holder_a = test_address(1);
         let holder_b = test_address(2);
 
-        let token_a = engine.mint(test_hash(1), holder_a.clone(), 750, origin_wallet.clone(), test_timestamp(1000)).unwrap();
-        let token_b = engine.mint(test_hash(2), holder_b.clone(), 250, origin_wallet.clone(), test_timestamp(1100)).unwrap();
+        let token_a = engine
+            .mint(
+                test_hash(1),
+                holder_a.clone(),
+                750,
+                origin_wallet.clone(),
+                test_timestamp(1000),
+            )
+            .unwrap();
+        let token_b = engine
+            .mint(
+                test_hash(2),
+                holder_b.clone(),
+                250,
+                origin_wallet.clone(),
+                test_timestamp(1100),
+            )
+            .unwrap();
         engine.track_token(token_a);
         engine.track_token(token_b);
 
@@ -1415,12 +1616,34 @@ mod tests {
         let origin_wallet2 = test_address(11);
         let holder = test_address(5);
 
-        let token1 = engine.mint(test_hash(1), holder.clone(), 500, origin_wallet1.clone(), test_timestamp(1000)).unwrap();
-        let token2 = engine.mint(test_hash(2), holder.clone(), 300, origin_wallet2.clone(), test_timestamp(1100)).unwrap();
+        let token1 = engine
+            .mint(
+                test_hash(1),
+                holder.clone(),
+                500,
+                origin_wallet1.clone(),
+                test_timestamp(1000),
+            )
+            .unwrap();
+        let token2 = engine
+            .mint(
+                test_hash(2),
+                holder.clone(),
+                300,
+                origin_wallet2.clone(),
+                test_timestamp(1100),
+            )
+            .unwrap();
 
         let merge_tx = test_hash(10);
         let merged = engine
-            .merge(&[token1, token2], holder.clone(), merge_tx, test_timestamp(1500), expiry_secs)
+            .merge(
+                &[token1, token2],
+                holder.clone(),
+                merge_tx,
+                test_timestamp(1500),
+                expiry_secs,
+            )
             .unwrap();
         engine.track_token(merged);
 
@@ -1445,12 +1668,34 @@ mod tests {
         let origin_wallet2 = test_address(11);
         let holder = test_address(5);
 
-        let token1 = engine.mint(test_hash(1), holder.clone(), 500, origin_wallet1.clone(), test_timestamp(1000)).unwrap();
-        let token2 = engine.mint(test_hash(2), holder.clone(), 300, origin_wallet2.clone(), test_timestamp(1100)).unwrap();
+        let token1 = engine
+            .mint(
+                test_hash(1),
+                holder.clone(),
+                500,
+                origin_wallet1.clone(),
+                test_timestamp(1000),
+            )
+            .unwrap();
+        let token2 = engine
+            .mint(
+                test_hash(2),
+                holder.clone(),
+                300,
+                origin_wallet2.clone(),
+                test_timestamp(1100),
+            )
+            .unwrap();
 
         let merge_tx = test_hash(10);
         let merged = engine
-            .merge(&[token1, token2], holder.clone(), merge_tx, test_timestamp(1500), expiry_secs)
+            .merge(
+                &[token1, token2],
+                holder.clone(),
+                merge_tx,
+                test_timestamp(1500),
+                expiry_secs,
+            )
             .unwrap();
         engine.track_token(merged);
 
@@ -1469,7 +1714,15 @@ mod tests {
         let mut engine = TrstEngine::new();
         let origin_wallet = test_address(10);
 
-        let token = engine.mint(test_hash(1), test_address(1), 500, origin_wallet.clone(), test_timestamp(1000)).unwrap();
+        let token = engine
+            .mint(
+                test_hash(1),
+                test_address(1),
+                500,
+                origin_wallet.clone(),
+                test_timestamp(1000),
+            )
+            .unwrap();
         engine.track_token(token);
 
         let results = engine.un_revoke_by_origin(&origin_wallet);
@@ -1484,7 +1737,15 @@ mod tests {
         let mut engine = TrstEngine::new();
         let origin_wallet = test_address(10);
 
-        let token = engine.mint(test_hash(1), test_address(1), 500, origin_wallet.clone(), test_timestamp(1000)).unwrap();
+        let token = engine
+            .mint(
+                test_hash(1),
+                test_address(1),
+                500,
+                origin_wallet.clone(),
+                test_timestamp(1000),
+            )
+            .unwrap();
         engine.track_token(token);
 
         engine.revoke_by_origin(&origin_wallet);
@@ -1503,7 +1764,15 @@ mod tests {
         let receiver = test_address(2);
         let expiry_period = 3600; // 1 hour
 
-        let mut token = engine.mint(test_hash(1), receiver.clone(), 500, sender.clone(), test_timestamp(1000)).unwrap();
+        let mut token = engine
+            .mint(
+                test_hash(1),
+                receiver.clone(),
+                500,
+                sender.clone(),
+                test_timestamp(1000),
+            )
+            .unwrap();
         token.state = TrstState::Pending;
 
         let pending_info = vec![PendingTokenInfo {
@@ -1532,7 +1801,15 @@ mod tests {
         let receiver = test_address(2);
         let expiry_period = 3600;
 
-        let mut token = engine.mint(test_hash(1), receiver.clone(), 500, sender.clone(), test_timestamp(1000)).unwrap();
+        let mut token = engine
+            .mint(
+                test_hash(1),
+                receiver.clone(),
+                500,
+                sender.clone(),
+                test_timestamp(1000),
+            )
+            .unwrap();
         token.state = TrstState::Pending;
 
         let pending_info = vec![PendingTokenInfo {
@@ -1557,13 +1834,37 @@ mod tests {
         let receiver = test_address(2);
         let expiry_period = 3600;
 
-        let mut token1 = engine.mint(test_hash(1), receiver.clone(), 500, sender.clone(), test_timestamp(1000)).unwrap();
+        let mut token1 = engine
+            .mint(
+                test_hash(1),
+                receiver.clone(),
+                500,
+                sender.clone(),
+                test_timestamp(1000),
+            )
+            .unwrap();
         token1.state = TrstState::Pending;
 
-        let mut token2 = engine.mint(test_hash(2), receiver.clone(), 300, sender.clone(), test_timestamp(4000)).unwrap();
+        let mut token2 = engine
+            .mint(
+                test_hash(2),
+                receiver.clone(),
+                300,
+                sender.clone(),
+                test_timestamp(4000),
+            )
+            .unwrap();
         token2.state = TrstState::Pending;
 
-        let token3 = engine.mint(test_hash(3), receiver.clone(), 200, sender.clone(), test_timestamp(1000)).unwrap();
+        let token3 = engine
+            .mint(
+                test_hash(3),
+                receiver.clone(),
+                200,
+                sender.clone(),
+                test_timestamp(1000),
+            )
+            .unwrap();
 
         let pending_info = vec![
             PendingTokenInfo {
@@ -1599,7 +1900,15 @@ mod tests {
         let mut engine = TrstEngine::new();
         let sender = test_address(1);
 
-        let token = engine.mint(test_hash(1), test_address(2), 500, sender.clone(), test_timestamp(1000)).unwrap();
+        let token = engine
+            .mint(
+                test_hash(1),
+                test_address(2),
+                500,
+                sender.clone(),
+                test_timestamp(1000),
+            )
+            .unwrap();
 
         let pending_info = vec![];
         let now = test_timestamp(5000);
@@ -1617,7 +1926,15 @@ mod tests {
         let receiver = test_address(2);
         let expiry_period = 3600;
 
-        let mut token = engine.mint(test_hash(1), receiver.clone(), 500, sender.clone(), test_timestamp(1000)).unwrap();
+        let mut token = engine
+            .mint(
+                test_hash(1),
+                receiver.clone(),
+                500,
+                sender.clone(),
+                test_timestamp(1000),
+            )
+            .unwrap();
         token.state = TrstState::Pending;
 
         let pending_info = vec![PendingTokenInfo {
@@ -1643,10 +1960,26 @@ mod tests {
         let receiver = test_address(3);
         let expiry_period = 3600;
 
-        let mut token1 = engine.mint(test_hash(1), receiver.clone(), 500, sender_a.clone(), test_timestamp(1000)).unwrap();
+        let mut token1 = engine
+            .mint(
+                test_hash(1),
+                receiver.clone(),
+                500,
+                sender_a.clone(),
+                test_timestamp(1000),
+            )
+            .unwrap();
         token1.state = TrstState::Pending;
 
-        let mut token2 = engine.mint(test_hash(2), receiver.clone(), 300, sender_b.clone(), test_timestamp(1000)).unwrap();
+        let mut token2 = engine
+            .mint(
+                test_hash(2),
+                receiver.clone(),
+                300,
+                sender_b.clone(),
+                test_timestamp(1000),
+            )
+            .unwrap();
         token2.state = TrstState::Pending;
 
         let pending_info = vec![
@@ -1684,24 +2017,43 @@ mod tests {
         let expiry_secs = 3600;
 
         let token = engine
-            .mint(original_burn_tx, holder.clone(), 1000, holder.clone(), test_timestamp(500))
+            .mint(
+                original_burn_tx,
+                holder.clone(),
+                1000,
+                holder.clone(),
+                test_timestamp(500),
+            )
             .unwrap();
 
-        let amounts = vec![
-            (test_address(2), 600),
-            (test_address(3), 400),
-        ];
+        let amounts = vec![(test_address(2), 600), (test_address(3), 400)];
         let tx_hashes = vec![test_hash(10), test_hash(11)];
 
         let splits = engine
-            .split(&token, &amounts, &tx_hashes, test_timestamp(1500), expiry_secs)
+            .split(
+                &token,
+                &amounts,
+                &tx_hashes,
+                test_timestamp(1500),
+                expiry_secs,
+            )
             .unwrap();
 
         for split in &splits {
-            assert_eq!(split.origin, original_burn_tx, "split must preserve parent's origin");
+            assert_eq!(
+                split.origin, original_burn_tx,
+                "split must preserve parent's origin"
+            );
             assert_eq!(split.link, token.id, "split must link to parent token");
-            assert_eq!(split.origin_timestamp, test_timestamp(500), "split must preserve origin_timestamp");
-            assert_eq!(split.origin_wallet, holder, "split must preserve origin_wallet");
+            assert_eq!(
+                split.origin_timestamp,
+                test_timestamp(500),
+                "split must preserve origin_timestamp"
+            );
+            assert_eq!(
+                split.origin_wallet, holder,
+                "split must preserve origin_wallet"
+            );
         }
     }
 
@@ -1714,29 +2066,57 @@ mod tests {
         let expiry_secs = 7200;
 
         let token = engine
-            .mint(original_burn_tx, minter.clone(), 1000, minter.clone(), test_timestamp(100))
+            .mint(
+                original_burn_tx,
+                minter.clone(),
+                1000,
+                minter.clone(),
+                test_timestamp(100),
+            )
             .unwrap();
 
         let (transferred, _) = engine
-            .transfer(&token, &minter, recipient.clone(), 1000, test_hash(5), test_hash(6), test_timestamp(200), expiry_secs)
+            .transfer(
+                &token,
+                &minter,
+                recipient.clone(),
+                1000,
+                test_hash(5),
+                test_hash(6),
+                test_timestamp(200),
+                expiry_secs,
+            )
             .unwrap();
 
         assert_eq!(transferred.origin, original_burn_tx);
 
-        let amounts = vec![
-            (test_address(3), 700),
-            (test_address(4), 300),
-        ];
+        let amounts = vec![(test_address(3), 700), (test_address(4), 300)];
         let tx_hashes = vec![test_hash(20), test_hash(21)];
 
         let splits = engine
-            .split(&transferred, &amounts, &tx_hashes, test_timestamp(300), expiry_secs)
+            .split(
+                &transferred,
+                &amounts,
+                &tx_hashes,
+                test_timestamp(300),
+                expiry_secs,
+            )
             .unwrap();
 
         for split in &splits {
-            assert_eq!(split.origin, original_burn_tx, "split of transferred token must trace back to original burn");
-            assert_eq!(split.link, transferred.id, "split must link to the transferred token");
-            assert_eq!(split.origin_timestamp, test_timestamp(100), "origin_timestamp must be from original mint");
+            assert_eq!(
+                split.origin, original_burn_tx,
+                "split of transferred token must trace back to original burn"
+            );
+            assert_eq!(
+                split.link, transferred.id,
+                "split must link to the transferred token"
+            );
+            assert_eq!(
+                split.origin_timestamp,
+                test_timestamp(100),
+                "origin_timestamp must be from original mint"
+            );
         }
     }
 
@@ -1747,39 +2127,77 @@ mod tests {
         let holder = test_address(1);
         let origin_wallet = test_address(10);
 
-        let t1 = engine.mint(test_hash(1), holder.clone(), 1000, origin_wallet.clone(), test_timestamp(100)).unwrap();
+        let t1 = engine
+            .mint(
+                test_hash(1),
+                holder.clone(),
+                1000,
+                origin_wallet.clone(),
+                test_timestamp(100),
+            )
+            .unwrap();
         engine.track_token_with_expiry(t1.clone(), expiry_secs);
-        let t2 = engine.mint(test_hash(2), holder.clone(), 500, origin_wallet.clone(), test_timestamp(200)).unwrap();
+        let t2 = engine
+            .mint(
+                test_hash(2),
+                holder.clone(),
+                500,
+                origin_wallet.clone(),
+                test_timestamp(200),
+            )
+            .unwrap();
         engine.track_token_with_expiry(t2.clone(), expiry_secs);
-        let t3 = engine.mint(test_hash(3), holder.clone(), 300, origin_wallet.clone(), test_timestamp(300)).unwrap();
+        let t3 = engine
+            .mint(
+                test_hash(3),
+                holder.clone(),
+                300,
+                origin_wallet.clone(),
+                test_timestamp(300),
+            )
+            .unwrap();
         engine.track_token_with_expiry(t3, expiry_secs);
 
         let now = test_timestamp(400);
         let p = engine.wallets.get_mut(&holder).unwrap();
         let cached = p.cached_transferable;
         p.recompute_transferable(now, expiry_secs);
-        assert_eq!(p.cached_transferable, cached, "after track_token, recompute must match incremental");
+        assert_eq!(
+            p.cached_transferable, cached,
+            "after track_token, recompute must match incremental"
+        );
         assert_eq!(cached, 1800);
 
         engine.debit_wallet(&holder, 400);
         let p = engine.wallets.get_mut(&holder).unwrap();
         let cached = p.cached_transferable;
         p.recompute_transferable(now, expiry_secs);
-        assert_eq!(p.cached_transferable, cached, "after debit, recompute must match incremental");
+        assert_eq!(
+            p.cached_transferable, cached,
+            "after debit, recompute must match incremental"
+        );
 
-        let merged = engine.merge(&[t1, t2], holder.clone(), test_hash(20), now, expiry_secs).unwrap();
+        let merged = engine
+            .merge(&[t1, t2], holder.clone(), test_hash(20), now, expiry_secs)
+            .unwrap();
         engine.track_token_with_expiry(merged.clone(), expiry_secs);
         let p = engine.wallets.get_mut(&holder).unwrap();
         let cached = p.cached_transferable;
         p.recompute_transferable(now, expiry_secs);
-        assert_eq!(p.cached_transferable, cached, "after merge+track, recompute must match incremental");
+        assert_eq!(
+            p.cached_transferable, cached,
+            "after merge+track, recompute must match incremental"
+        );
 
         let far_future = test_timestamp(100 + expiry_secs + 1);
         let p = engine.wallets.get_mut(&holder).unwrap();
         p.flush_expired(far_future, expiry_secs);
         let cached = p.cached_transferable;
         p.recompute_transferable(far_future, expiry_secs);
-        assert_eq!(p.cached_transferable, cached, "after expiry flush, recompute must match incremental");
+        assert_eq!(
+            p.cached_transferable, cached,
+            "after expiry flush, recompute must match incremental"
+        );
 
         let _ = merged;
     }

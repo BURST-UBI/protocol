@@ -183,10 +183,7 @@ async fn main() -> anyhow::Result<()> {
                     },
                 );
                 if !config.bootstrap_peers.is_empty() {
-                    tracing::info!(
-                        "Bootstrap peers: {}",
-                        config.bootstrap_peers.join(", ")
-                    );
+                    tracing::info!("Bootstrap peers: {}", config.bootstrap_peers.join(", "));
                 }
 
                 let mut node = burst_node::BurstNode::new(config).await?;

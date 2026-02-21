@@ -10,7 +10,10 @@ pub enum AmendmentOp {
     /// Add a new article with the given title and text.
     AddArticle { title: String, text: String },
     /// Modify an existing article's text (by number).
-    ModifyArticle { article_number: u64, new_text: String },
+    ModifyArticle {
+        article_number: u64,
+        new_text: String,
+    },
     /// Repeal an existing article (by number).
     RepealArticle { article_number: u64 },
 }

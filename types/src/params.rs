@@ -146,31 +146,31 @@ impl ProtocolParams {
             endorsement_threshold: 3,
             endorsement_burn_amount: 336 * BRN_UNIT,
             num_verifiers: 7,
-            verification_threshold_bps: 9000,     // 90%
+            verification_threshold_bps: 9000, // 90%
             verifier_stake_amount: 500 * BRN_UNIT,
             max_revotes: 3,
 
             challenge_stake_amount: 1000 * BRN_UNIT,
             neither_penalty_cooldown_secs: 7 * 24 * 3600, // 7 days
 
-            governance_proposal_duration_secs: 7 * 24 * 3600,       // 1 week
-            governance_exploration_duration_secs: 14 * 24 * 3600,  // 2 weeks
-            governance_cooldown_duration_secs: 7 * 24 * 3600,      // 1 week
-            governance_promotion_duration_secs: 14 * 24 * 3600,    // 2 weeks
-            governance_supermajority_bps: 8000,                     // 80%
-            governance_quorum_bps: 3000,                            // 30%
+            governance_proposal_duration_secs: 7 * 24 * 3600, // 1 week
+            governance_exploration_duration_secs: 14 * 24 * 3600, // 2 weeks
+            governance_cooldown_duration_secs: 7 * 24 * 3600, // 1 week
+            governance_promotion_duration_secs: 14 * 24 * 3600, // 2 weeks
+            governance_supermajority_bps: 8000,               // 80%
+            governance_quorum_bps: 3000,                      // 30%
             governance_proposal_endorsements: 10,
-            governance_ema_participation_bps: 5000,                 // 50% initial assumption
+            governance_ema_participation_bps: 5000, // 50% initial assumption
             governance_proposal_cost: 336 * BRN_UNIT,
             governance_max_rounds: 3,
             governance_proposal_window_secs: 7 * 24 * 3600, // 7 days
-            governance_propagation_buffer_secs: 3600,             // 1 hour
+            governance_propagation_buffer_secs: 3600,       // 1 hour
 
-            consti_supermajority_bps: 9000, // 90%
-            consti_quorum_bps: 3000,        // 30%
+            consti_supermajority_bps: 9000,           // 90%
+            consti_quorum_bps: 3000,                  // 30%
             verification_timeout_secs: 7 * 24 * 3600, // 1 week
-            challenge_duration_secs: 7 * 24 * 3600,    // 1 week
-            endorser_reward_bps: 1000,                 // 10%
+            challenge_duration_secs: 7 * 24 * 3600,   // 1 week
+            endorser_reward_bps: 1000,                // 10%
 
             new_wallet_spending_limit: 0,
             new_wallet_limit_duration_secs: 0,

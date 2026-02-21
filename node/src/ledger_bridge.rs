@@ -54,16 +54,14 @@ pub fn process_block_economics(
                         };
                     }
                 };
-                let burn_result =
-                    record_brn_burn(brn_engine, &block.account, burn_amount, now);
+                let burn_result = record_brn_burn(brn_engine, &block.account, burn_amount, now);
                 EconomicResult::BurnAndMint {
                     burn_amount,
                     burn_result,
                     mint_token,
                 }
             } else {
-                let burn_result =
-                    record_brn_burn(brn_engine, &block.account, burn_amount, now);
+                let burn_result = record_brn_burn(brn_engine, &block.account, burn_amount, now);
                 EconomicResult::BurnOnly {
                     burn_amount,
                     burn_result,
@@ -91,13 +89,11 @@ pub fn process_block_economics(
                 trst_balance_after: block.trst_balance,
             }
         }
-        BlockType::Receive => {
-            EconomicResult::Receive {
-                receiver: block.account.clone(),
-                send_block_hash: block.link,
-                trst_balance_after: block.trst_balance,
-            }
-        }
+        BlockType::Receive => EconomicResult::Receive {
+            receiver: block.account.clone(),
+            send_block_hash: block.link,
+            trst_balance_after: block.trst_balance,
+        },
         BlockType::Split => {
             // TRST split — one token becomes multiple tokens.
             // Expiry: the child tokens inherit the parent's origin_timestamp,
@@ -177,20 +173,16 @@ pub fn process_block_economics(
                 target,
             }
         }
-        BlockType::RejectReceive => {
-            EconomicResult::RejectReceive {
-                rejecter: block.account.clone(),
-                send_block_hash: block.link,
-            }
-        }
-        BlockType::ChangeRepresentative => {
-            EconomicResult::RepChange {
-                account: block.account.clone(),
-                old_rep: None,
-                new_rep: block.representative.clone(),
-                balance: block.trst_balance,
-            }
-        }
+        BlockType::RejectReceive => EconomicResult::RejectReceive {
+            rejecter: block.account.clone(),
+            send_block_hash: block.link,
+        },
+        BlockType::ChangeRepresentative => EconomicResult::RepChange {
+            account: block.account.clone(),
+            old_rep: None,
+            new_rep: block.representative.clone(),
+            balance: block.trst_balance,
+        },
         BlockType::GovernanceProposal => {
             let proposal_hash = block.transaction;
             let content = decode_proposal_content_from_link(&block.link);
@@ -344,15 +336,21 @@ pub fn create_received_token(
             origin_proportions: p.origin_proportions.clone(),
         }
     } else if pending.provenance.len() > 1 {
-        let effective_ts = pending.provenance.iter()
+        let effective_ts = pending
+            .provenance
+            .iter()
             .map(|p| p.effective_origin_timestamp)
             .min_by_key(|ts| ts.as_secs())
             .unwrap_or(pending.timestamp);
-        let origin_ts = pending.provenance.iter()
+        let origin_ts = pending
+            .provenance
+            .iter()
             .map(|p| p.origin_timestamp)
             .min_by_key(|ts| ts.as_secs())
             .unwrap_or(pending.timestamp);
-        let proportions: Vec<OriginProportion> = pending.provenance.iter()
+        let proportions: Vec<OriginProportion> = pending
+            .provenance
+            .iter()
             .flat_map(|p| {
                 if p.origin_proportions.is_empty() {
                     vec![OriginProportion {
@@ -422,13 +420,9 @@ pub enum EconomicResult {
         trst_balance_after: u128,
     },
     /// TRST split into multiple tokens.
-    Split {
-        account: WalletAddress,
-    },
+    Split { account: WalletAddress },
     /// TRST merge from multiple tokens.
-    Merge {
-        account: WalletAddress,
-    },
+    Merge { account: WalletAddress },
     /// Endorsement — BRN burned to vouch for another wallet's humanity.
     Endorse {
         burn_amount: u128,
@@ -473,9 +467,7 @@ pub enum EconomicResult {
         stake: u128,
     },
     /// Block rejected due to economic invariant violation.
-    Rejected {
-        reason: String,
-    },
+    Rejected { reason: String },
     /// No economic effect (e.g. epoch, delegation).
     NoEconomicEffect,
 }
@@ -642,10 +634,19 @@ mod tests {
         let prev_brn_balance: u128 = 1000;
 
         let result = process_block_economics(
-            &block, &mut brn_engine, &mut trst_engine, now, 3600, prev_brn_balance,
+            &block,
+            &mut brn_engine,
+            &mut trst_engine,
+            now,
+            3600,
+            prev_brn_balance,
         );
         match result {
-            EconomicResult::BurnAndMint { burn_amount, burn_result, mint_token } => {
+            EconomicResult::BurnAndMint {
+                burn_amount,
+                burn_result,
+                mint_token,
+            } => {
                 assert_eq!(burn_amount, 500); // 1000 - 500
                 assert!(burn_result.is_ok());
                 assert!(mint_token.is_some());
@@ -686,10 +687,18 @@ mod tests {
 
         let prev_brn_balance: u128 = 1000;
         let result = process_block_economics(
-            &block, &mut brn_engine, &mut trst_engine, now, 3600, prev_brn_balance,
+            &block,
+            &mut brn_engine,
+            &mut trst_engine,
+            now,
+            3600,
+            prev_brn_balance,
         );
         match result {
-            EconomicResult::BurnOnly { burn_amount, burn_result } => {
+            EconomicResult::BurnOnly {
+                burn_amount,
+                burn_result,
+            } => {
                 assert_eq!(burn_amount, 500);
                 assert!(burn_result.is_ok());
             }
@@ -704,11 +713,14 @@ mod tests {
         let now = Timestamp::new(1_000_000);
         let block = make_send_block();
 
-        let result = process_block_economics(
-            &block, &mut brn_engine, &mut trst_engine, now, 3600, 1000,
-        );
+        let result =
+            process_block_economics(&block, &mut brn_engine, &mut trst_engine, now, 3600, 1000);
         match result {
-            EconomicResult::Send { sender, trst_balance_after, .. } => {
+            EconomicResult::Send {
+                sender,
+                trst_balance_after,
+                ..
+            } => {
                 assert_eq!(sender, test_account());
                 assert_eq!(trst_balance_after, 50);
             }
@@ -723,11 +735,15 @@ mod tests {
         let now = Timestamp::new(1_000_000);
         let block = make_rep_change_block();
 
-        let result = process_block_economics(
-            &block, &mut brn_engine, &mut trst_engine, now, 3600, 1000,
-        );
+        let result =
+            process_block_economics(&block, &mut brn_engine, &mut trst_engine, now, 3600, 1000);
         match result {
-            EconomicResult::RepChange { account, old_rep, new_rep, balance } => {
+            EconomicResult::RepChange {
+                account,
+                old_rep,
+                new_rep,
+                balance,
+            } => {
                 assert_eq!(account, test_account());
                 assert!(old_rep.is_none());
                 assert_eq!(
@@ -764,9 +780,8 @@ mod tests {
         };
         block.hash = block.compute_hash();
 
-        let result = process_block_economics(
-            &block, &mut brn_engine, &mut trst_engine, now, 3600, 1000,
-        );
+        let result =
+            process_block_economics(&block, &mut brn_engine, &mut trst_engine, now, 3600, 1000);
         assert!(matches!(result, EconomicResult::NoEconomicEffect));
     }
 
@@ -784,10 +799,19 @@ mod tests {
         let prev_brn_balance: u128 = 1000;
 
         let result = process_block_economics(
-            &block, &mut brn_engine, &mut trst_engine, now, 3600, prev_brn_balance,
+            &block,
+            &mut brn_engine,
+            &mut trst_engine,
+            now,
+            3600,
+            prev_brn_balance,
         );
         match result {
-            EconomicResult::Endorse { burn_amount, burn_result, target } => {
+            EconomicResult::Endorse {
+                burn_amount,
+                burn_result,
+                target,
+            } => {
                 assert_eq!(burn_amount, 336); // 1000 - 664
                 assert!(burn_result.is_ok());
                 assert!(target.is_some());
@@ -811,10 +835,19 @@ mod tests {
         let prev_brn_balance: u128 = 1000;
 
         let result = process_block_economics(
-            &block, &mut brn_engine, &mut trst_engine, now, 3600, prev_brn_balance,
+            &block,
+            &mut brn_engine,
+            &mut trst_engine,
+            now,
+            3600,
+            prev_brn_balance,
         );
         match result {
-            EconomicResult::Challenge { stake_amount, stake_result, target } => {
+            EconomicResult::Challenge {
+                stake_amount,
+                stake_result,
+                target,
+            } => {
                 assert_eq!(stake_amount, 1000); // 1000 - 0
                 assert!(stake_result.is_ok());
                 let stake = stake_result.unwrap();

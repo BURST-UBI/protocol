@@ -74,7 +74,11 @@ pub fn compute_verification_outcomes(
     verifiers: &[(WalletAddress, u128, bool)],
 ) -> VerificationOutcomeEvent {
     compute_verification_outcomes_with_reward(
-        wallet, result, endorsers, verifiers, DEFAULT_ENDORSER_REWARD_BPS,
+        wallet,
+        result,
+        endorsers,
+        verifiers,
+        DEFAULT_ENDORSER_REWARD_BPS,
     )
 }
 
@@ -98,11 +102,9 @@ pub fn compute_verification_outcomes_with_reward(
         .iter()
         .filter(|(_, staked, correct)| *correct && *staked > 0)
         .count() as u128;
-    let reward_per_correct = if staked_correct_count > 0 {
-        total_dissenter_stakes / staked_correct_count
-    } else {
-        0
-    };
+    let reward_per_correct = total_dissenter_stakes
+        .checked_div(staked_correct_count)
+        .unwrap_or(0);
 
     let endorser_outcomes: Vec<EndorserOutcome> = endorsers
         .iter()
@@ -210,11 +212,9 @@ pub fn compute_challenge_outcome(
         .iter()
         .filter(|(_, staked, correct)| *correct && *staked > 0)
         .count() as u128;
-    let reward_per_correct = if staked_correct_count > 0 {
-        total_dissenter_stakes / staked_correct_count
-    } else {
-        0
-    };
+    let reward_per_correct = total_dissenter_stakes
+        .checked_div(staked_correct_count)
+        .unwrap_or(0);
 
     let verifier_outcomes: Vec<VerifierOutcome> = verifiers
         .iter()
@@ -288,17 +288,18 @@ mod tests {
     #[test]
     fn verified_endorsers_get_10_percent_trst_reward() {
         let wallet = test_address(1);
-        let endorsers = vec![
-            (test_address(10), 1000u128),
-            (test_address(11), 2000u128),
-        ];
+        let endorsers = vec![(test_address(10), 1000u128), (test_address(11), 2000u128)];
         let verifiers = vec![
             (test_address(20), 500u128, true),
             (test_address(21), 500u128, true),
         ];
 
-        let outcome =
-            compute_verification_outcomes(&wallet, VerificationResult::Verified, &endorsers, &verifiers);
+        let outcome = compute_verification_outcomes(
+            &wallet,
+            VerificationResult::Verified,
+            &endorsers,
+            &verifiers,
+        );
 
         assert_eq!(outcome.result, VerificationResult::Verified);
         assert_eq!(outcome.endorsers.len(), 2);
@@ -312,8 +313,12 @@ mod tests {
         let endorsers = vec![(test_address(10), 1000u128)];
         let verifiers = vec![(test_address(20), 500u128, true)];
 
-        let outcome =
-            compute_verification_outcomes(&wallet, VerificationResult::Failed, &endorsers, &verifiers);
+        let outcome = compute_verification_outcomes(
+            &wallet,
+            VerificationResult::Failed,
+            &endorsers,
+            &verifiers,
+        );
 
         assert_eq!(outcome.result, VerificationResult::Failed);
         assert_eq!(outcome.endorsers[0].trst_reward, 0);
@@ -331,8 +336,12 @@ mod tests {
             (test_address(23), 400u128, false), // dissenter
         ];
 
-        let outcome =
-            compute_verification_outcomes(&wallet, VerificationResult::Verified, &endorsers, &verifiers);
+        let outcome = compute_verification_outcomes(
+            &wallet,
+            VerificationResult::Verified,
+            &endorsers,
+            &verifiers,
+        );
 
         // Total dissenter stakes: 600 + 400 = 1000
         // 2 correct verifiers: each gets 1000 / 2 = 500
@@ -357,8 +366,12 @@ mod tests {
             (test_address(21), 500u128, true),
         ];
 
-        let outcome =
-            compute_verification_outcomes(&wallet, VerificationResult::Verified, &endorsers, &verifiers);
+        let outcome = compute_verification_outcomes(
+            &wallet,
+            VerificationResult::Verified,
+            &endorsers,
+            &verifiers,
+        );
 
         // No dissenters — reward equals only the stake itself
         assert_eq!(outcome.verifiers[0].reward, 500);
@@ -374,8 +387,12 @@ mod tests {
             (test_address(21), 500u128, false),
         ];
 
-        let outcome =
-            compute_verification_outcomes(&wallet, VerificationResult::Failed, &endorsers, &verifiers);
+        let outcome = compute_verification_outcomes(
+            &wallet,
+            VerificationResult::Failed,
+            &endorsers,
+            &verifiers,
+        );
 
         // No correct verifiers — all stakes forfeited
         assert_eq!(outcome.verifiers[0].reward, 0);
@@ -389,14 +406,18 @@ mod tests {
         let wallet = test_address(1);
         let endorsers = vec![];
         let verifiers = vec![
-            (test_address(20), 500u128, true),   // only correct
+            (test_address(20), 500u128, true), // only correct
             (test_address(21), 300u128, false),
             (test_address(22), 400u128, false),
             (test_address(23), 300u128, false),
         ];
 
-        let outcome =
-            compute_verification_outcomes(&wallet, VerificationResult::Verified, &endorsers, &verifiers);
+        let outcome = compute_verification_outcomes(
+            &wallet,
+            VerificationResult::Verified,
+            &endorsers,
+            &verifiers,
+        );
 
         // Total dissenter: 300 + 400 + 300 = 1000
         // 1 correct verifier gets all 1000
@@ -407,12 +428,8 @@ mod tests {
     #[test]
     fn empty_verifiers_and_endorsers() {
         let wallet = test_address(1);
-        let outcome = compute_verification_outcomes(
-            &wallet,
-            VerificationResult::Verified,
-            &[],
-            &[],
-        );
+        let outcome =
+            compute_verification_outcomes(&wallet, VerificationResult::Verified, &[], &[]);
 
         assert_eq!(outcome.wallet, wallet);
         assert_eq!(outcome.result, VerificationResult::Verified);
@@ -423,12 +440,7 @@ mod tests {
     #[test]
     fn verification_outcome_preserves_wallet() {
         let wallet = test_address(42);
-        let outcome = compute_verification_outcomes(
-            &wallet,
-            VerificationResult::Failed,
-            &[],
-            &[],
-        );
+        let outcome = compute_verification_outcomes(&wallet, VerificationResult::Failed, &[], &[]);
         assert_eq!(outcome.wallet, wallet);
     }
 
@@ -444,8 +456,13 @@ mod tests {
             (test_address(31), 500u128, false),
         ];
 
-        let outcome =
-            compute_challenge_outcome(&challenged, &challenger, ChallengeResult::FraudConfirmed, stake, &verifiers);
+        let outcome = compute_challenge_outcome(
+            &challenged,
+            &challenger,
+            ChallengeResult::FraudConfirmed,
+            stake,
+            &verifiers,
+        );
 
         assert_eq!(outcome.outcome, ChallengeResult::FraudConfirmed);
         assert_eq!(outcome.challenger_stake, 1000);
@@ -465,8 +482,13 @@ mod tests {
         let challenger = test_address(2);
         let stake = 1000u128;
 
-        let outcome =
-            compute_challenge_outcome(&challenged, &challenger, ChallengeResult::ChallengeRejected, stake, &[]);
+        let outcome = compute_challenge_outcome(
+            &challenged,
+            &challenger,
+            ChallengeResult::ChallengeRejected,
+            stake,
+            &[],
+        );
 
         assert_eq!(outcome.outcome, ChallengeResult::ChallengeRejected);
         assert_eq!(outcome.challenger_stake, 1000);
@@ -479,8 +501,13 @@ mod tests {
         let challenged = test_address(1);
         let challenger = test_address(2);
 
-        let outcome =
-            compute_challenge_outcome(&challenged, &challenger, ChallengeResult::FraudConfirmed, 0, &[]);
+        let outcome = compute_challenge_outcome(
+            &challenged,
+            &challenger,
+            ChallengeResult::FraudConfirmed,
+            0,
+            &[],
+        );
 
         assert_eq!(outcome.challenger_stake, 0);
         assert_eq!(outcome.challenger_reward, 0);
@@ -491,8 +518,13 @@ mod tests {
         let challenged = test_address(10);
         let challenger = test_address(20);
 
-        let outcome =
-            compute_challenge_outcome(&challenged, &challenger, ChallengeResult::FraudConfirmed, 500, &[]);
+        let outcome = compute_challenge_outcome(
+            &challenged,
+            &challenger,
+            ChallengeResult::FraudConfirmed,
+            500,
+            &[],
+        );
 
         assert_eq!(outcome.challenged_wallet, challenged);
         assert_eq!(outcome.challenger, challenger);

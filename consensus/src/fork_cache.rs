@@ -19,13 +19,19 @@ pub struct ForkCache {
     insertion_order: VecDeque<BlockHash>,
 }
 
-impl ForkCache {
-    pub fn new() -> Self {
+impl Default for ForkCache {
+    fn default() -> Self {
         Self {
             entries: HashMap::new(),
             total_count: 0,
             insertion_order: VecDeque::new(),
         }
+    }
+}
+
+impl ForkCache {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Cache a fork block.
@@ -35,7 +41,7 @@ impl ForkCache {
         }
 
         let is_new = !self.entries.contains_key(&root);
-        let entry = self.entries.entry(root).or_insert_with(Vec::new);
+        let entry = self.entries.entry(root).or_default();
         if is_new {
             self.insertion_order.push_back(root);
         }

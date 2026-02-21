@@ -82,17 +82,14 @@ impl TransactionStore for LmdbTransactionStore {
         Ok(exists)
     }
 
-    fn get_account_transactions(
-        &self,
-        address: &WalletAddress,
-    ) -> Result<Vec<TxHash>, StoreError> {
+    fn get_account_transactions(&self, address: &WalletAddress) -> Result<Vec<TxHash>, StoreError> {
         let rtxn = self.env.read_txn().map_err(LmdbError::from)?;
         let prefix = address.as_str().as_bytes();
         let mut upper = prefix.to_vec();
         increment_prefix(&mut upper);
 
         let bounds = (
-            Bound::Included(prefix.as_ref()),
+            Bound::Included(prefix),
             Bound::Excluded(upper.as_slice()),
         );
         let iter = self

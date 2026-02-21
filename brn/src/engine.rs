@@ -246,15 +246,14 @@ impl BrnEngine {
             .put_meta(b"next_stake_id", &id_bytes)
             .map_err(|e| BrnError::Other(e.to_string()))?;
 
-        let rate_bytes = bincode::serialize(&self.rate_history)
-            .map_err(|e| BrnError::Other(e.to_string()))?;
+        let rate_bytes =
+            bincode::serialize(&self.rate_history).map_err(|e| BrnError::Other(e.to_string()))?;
         store
             .put_meta(b"rate_history", &rate_bytes)
             .map_err(|e| BrnError::Other(e.to_string()))?;
 
         for (addr, state) in &self.wallets {
-            let bytes =
-                bincode::serialize(state).map_err(|e| BrnError::Other(e.to_string()))?;
+            let bytes = bincode::serialize(state).map_err(|e| BrnError::Other(e.to_string()))?;
             store
                 .put_wallet_state(addr, &bytes)
                 .map_err(|e| BrnError::Other(e.to_string()))?;
@@ -272,8 +271,9 @@ impl BrnEngine {
         };
 
         let rate_history = match store.get_meta(b"rate_history") {
-            Ok(Some(bytes)) => bincode::deserialize(&bytes)
-                .map_err(|e| BrnError::Other(e.to_string()))?,
+            Ok(Some(bytes)) => {
+                bincode::deserialize(&bytes).map_err(|e| BrnError::Other(e.to_string()))?
+            }
             _ => RateHistory::default(),
         };
 
@@ -406,7 +406,9 @@ mod tests {
             )
             .unwrap();
         assert_eq!(engine.compute_balance(&state, now), 600);
-        engine.return_stake(&staker, &mut state, &mut stake).unwrap();
+        engine
+            .return_stake(&staker, &mut state, &mut stake)
+            .unwrap();
         assert_eq!(engine.compute_balance(&state, now), 1000);
         assert!(stake.resolved);
     }
@@ -432,7 +434,9 @@ mod tests {
             .unwrap();
         assert_eq!(engine.compute_balance(&state, now), 600);
         assert_eq!(state.total_burned, 0);
-        engine.forfeit_stake(&staker, &mut state, &mut stake).unwrap();
+        engine
+            .forfeit_stake(&staker, &mut state, &mut stake)
+            .unwrap();
         assert_eq!(engine.compute_balance(&state, now), 600);
         assert_eq!(state.total_burned, 400);
         assert_eq!(state.total_staked, 0);
@@ -470,9 +474,7 @@ mod tests {
         }
 
         // Rate change should be O(1) — no wallet iteration
-        engine
-            .apply_rate_change(20, test_timestamp(2000))
-            .unwrap();
+        engine.apply_rate_change(20, test_timestamp(2000)).unwrap();
 
         // Verify it works correctly for any wallet
         let addr = WalletAddress::new(format!("brst_{:0>60}", 42));
@@ -501,7 +503,9 @@ mod tests {
             )
             .unwrap();
 
-        engine.return_stake(&staker, &mut state, &mut stake).unwrap();
+        engine
+            .return_stake(&staker, &mut state, &mut stake)
+            .unwrap();
         assert!(stake.resolved);
 
         let result = engine.return_stake(&staker, &mut state, &mut stake);
@@ -528,15 +532,17 @@ mod tests {
         engine.track_wallet(addr.clone(), state);
 
         // 500s at rate 10 = 5000
-        let bal_before = engine
-            .compute_balance(engine.get_wallet(&addr).unwrap(), test_timestamp(1500));
+        let bal_before =
+            engine.compute_balance(engine.get_wallet(&addr).unwrap(), test_timestamp(1500));
         assert_eq!(bal_before, 5000);
 
-        engine.deactivate_wallet(&addr, test_timestamp(1500)).unwrap();
+        engine
+            .deactivate_wallet(&addr, test_timestamp(1500))
+            .unwrap();
 
         // After deactivation, balance stays frozen at 5000
-        let bal_after = engine
-            .compute_balance(engine.get_wallet(&addr).unwrap(), test_timestamp(2000));
+        let bal_after =
+            engine.compute_balance(engine.get_wallet(&addr).unwrap(), test_timestamp(2000));
         assert_eq!(bal_after, 5000);
     }
 }

@@ -7,7 +7,9 @@
 
 use crate::state_block::{BlockType, StateBlock, CURRENT_BLOCK_VERSION};
 use burst_crypto::blake2b_256;
-use burst_types::{BlockHash, NetworkId, ProtocolParams, Signature, Timestamp, TxHash, WalletAddress};
+use burst_types::{
+    BlockHash, NetworkId, ProtocolParams, Signature, Timestamp, TxHash, WalletAddress,
+};
 
 /// Configuration for creating a genesis block.
 pub struct GenesisConfig {

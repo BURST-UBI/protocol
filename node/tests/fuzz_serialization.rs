@@ -7,13 +7,12 @@
 
 use proptest::prelude::*;
 
+use burst_brn::state::{BrnWalletState, RateHistory, RateSegment};
 use burst_ledger::{BlockType, StateBlock, CURRENT_BLOCK_VERSION};
 use burst_store::account::AccountInfo;
 use burst_store::pending::{PendingInfo, PendingProvenance};
-use burst_brn::state::{BrnWalletState, RateHistory, RateSegment};
 use burst_types::{
-    BlockHash, OriginProportion, Signature, Timestamp, TxHash, WalletAddress,
-    WalletState,
+    BlockHash, OriginProportion, Signature, Timestamp, TxHash, WalletAddress, WalletState,
 };
 
 // ---------------------------------------------------------------------------
@@ -164,7 +163,10 @@ fn arb_account_info() -> impl Strategy<Value = AccountInfo> {
         ),
     )
         .prop_map(
-            |((addr, state, verified_at, head, bc, ch, rep), (burned, staked, trst, expired, revoked, epoch))| {
+            |(
+                (addr, state, verified_at, head, bc, ch, rep),
+                (burned, staked, trst, expired, revoked, epoch),
+            )| {
                 AccountInfo {
                     address: addr,
                     state,
@@ -211,14 +213,16 @@ fn arb_pending_provenance() -> impl Strategy<Value = PendingProvenance> {
         arb_timestamp(),
         proptest::collection::vec(arb_origin_proportion(), 0..3),
     )
-        .prop_map(|(amt, origin, wallet, ots, eots, props)| PendingProvenance {
-            amount: amt,
-            origin,
-            origin_wallet: wallet,
-            origin_timestamp: ots,
-            effective_origin_timestamp: eots,
-            origin_proportions: props,
-        })
+        .prop_map(
+            |(amt, origin, wallet, ots, eots, props)| PendingProvenance {
+                amount: amt,
+                origin,
+                origin_wallet: wallet,
+                origin_timestamp: ots,
+                effective_origin_timestamp: eots,
+                origin_proportions: props,
+            },
+        )
 }
 
 fn arb_pending_info() -> impl Strategy<Value = PendingInfo> {
@@ -260,13 +264,15 @@ fn arb_brn_wallet_state() -> impl Strategy<Value = BrnWalletState> {
         any::<bool>(),
         proptest::option::of(arb_timestamp()),
     )
-        .prop_map(|(verified_at, burned, staked, active, stopped)| BrnWalletState {
-            verified_at,
-            total_burned: burned,
-            total_staked: staked,
-            accrual_active: active,
-            accrual_stopped_at: stopped,
-        })
+        .prop_map(
+            |(verified_at, burned, staked, active, stopped)| BrnWalletState {
+                verified_at,
+                total_burned: burned,
+                total_staked: staked,
+                accrual_active: active,
+                accrual_stopped_at: stopped,
+            },
+        )
 }
 
 proptest! {
@@ -287,9 +293,12 @@ proptest! {
 // ---------------------------------------------------------------------------
 
 fn arb_rate_segment() -> impl Strategy<Value = RateSegment> {
-    (any::<u128>(), arb_timestamp(), proptest::option::of(arb_timestamp())).prop_map(
-        |(rate, start, end)| RateSegment { rate, start, end },
+    (
+        any::<u128>(),
+        arb_timestamp(),
+        proptest::option::of(arb_timestamp()),
     )
+        .prop_map(|(rate, start, end)| RateSegment { rate, start, end })
 }
 
 fn arb_rate_history() -> impl Strategy<Value = RateHistory> {
@@ -405,8 +414,16 @@ fn stress_lmdb_1000_accounts() {
             let addr = WalletAddress::new(&format!("brst_{i:05}_{:032x}", i as u128));
             AccountInfo {
                 address: addr.clone(),
-                state: if i % 3 == 0 { WalletState::Verified } else { WalletState::Unverified },
-                verified_at: if i % 3 == 0 { Some(Timestamp::new(i as u64 * 100)) } else { None },
+                state: if i % 3 == 0 {
+                    WalletState::Verified
+                } else {
+                    WalletState::Unverified
+                },
+                verified_at: if i % 3 == 0 {
+                    Some(Timestamp::new(i as u64 * 100))
+                } else {
+                    None
+                },
                 head: BlockHash::new([(i % 256) as u8; 32]),
                 block_count: i as u64,
                 confirmation_height: i as u64 / 2,
@@ -541,10 +558,16 @@ fn write_batch_partial_failure_does_not_corrupt() {
 
     {
         let mut batch = env.write_batch().unwrap();
-        batch.put_block(&BlockHash::new([3u8; 32]), &[0xCC; 64]).unwrap();
+        batch
+            .put_block(&BlockHash::new([3u8; 32]), &[0xCC; 64])
+            .unwrap();
         drop(batch);
     }
 
-    assert!(env.block_store().get_block(&BlockHash::new([3u8; 32])).is_err(),
-        "dropped batch should not persist");
+    assert!(
+        env.block_store()
+            .get_block(&BlockHash::new([3u8; 32]))
+            .is_err(),
+        "dropped batch should not persist"
+    );
 }

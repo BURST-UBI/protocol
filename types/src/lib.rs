@@ -15,7 +15,7 @@ pub mod state;
 pub mod time;
 
 pub use address::WalletAddress;
-pub use amount::{BrnAmount, TrstAmount, BRN_UNIT, MBRN_UNIT, TRST_UNIT, MTRST_UNIT};
+pub use amount::{BrnAmount, TrstAmount, BRN_UNIT, MBRN_UNIT, MTRST_UNIT, TRST_UNIT};
 pub use block::BlockHash;
 pub use error::BurstError;
 pub use hash::TxHash;

@@ -80,9 +80,7 @@ impl ActiveElections {
         let vote_result = election.vote(voter, block, weight, is_final, now);
 
         match vote_result {
-            VoteResult::Error(msg) => {
-                Err(ConsensusError::FinalVoteAlreadyCast(msg))
-            }
+            VoteResult::Error(msg) => Err(ConsensusError::FinalVoteAlreadyCast(msg)),
             _ => {
                 let status = election.try_confirm(now);
                 Ok(status)
@@ -93,11 +91,7 @@ impl ActiveElections {
     /// Remove all elections that have timed out.
     ///
     /// Returns the root hashes of expired elections.
-    pub fn cleanup_expired(
-        &mut self,
-        timeout_ms: u64,
-        now: Timestamp,
-    ) -> Vec<BlockHash> {
+    pub fn cleanup_expired(&mut self, timeout_ms: u64, now: Timestamp) -> Vec<BlockHash> {
         let mut expired = Vec::new();
 
         for (root, election) in &mut self.elections {
@@ -348,7 +342,10 @@ mod tests {
             false,
             ts(102),
         );
-        assert!(matches!(result, Err(ConsensusError::ElectionAlreadyConfirmed)));
+        assert!(matches!(
+            result,
+            Err(ConsensusError::ElectionAlreadyConfirmed)
+        ));
     }
 
     #[test]
@@ -374,7 +371,10 @@ mod tests {
             false,
             ts(102),
         );
-        assert!(matches!(result, Err(ConsensusError::FinalVoteAlreadyCast(_))));
+        assert!(matches!(
+            result,
+            Err(ConsensusError::FinalVoteAlreadyCast(_))
+        ));
     }
 
     #[test]

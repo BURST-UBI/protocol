@@ -46,10 +46,7 @@ impl RepresentativeVoting {
 
         if let Some(existing) = self.votes.get(voter) {
             if existing.is_final {
-                return VoteResult::Error(format!(
-                    "final vote already cast by {}",
-                    voter.as_str()
-                ));
+                return VoteResult::Error(format!("final vote already cast by {}", voter.as_str()));
             }
 
             let new_sequence = existing.sequence + 1;
@@ -64,14 +61,7 @@ impl RepresentativeVoting {
             self.votes.insert(voter.clone(), info);
             VoteResult::Updated
         } else {
-            let info = VoteInfo::new(
-                voter.clone(),
-                block,
-                rep.delegated_weight,
-                is_final,
-                now,
-                1,
-            );
+            let info = VoteInfo::new(voter.clone(), block, rep.delegated_weight, is_final, now, 1);
             self.votes.insert(voter.clone(), info);
             VoteResult::Accepted
         }

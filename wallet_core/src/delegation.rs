@@ -1,7 +1,7 @@
 //! Delegation management — delegate and revoke voting power.
 
-use burst_types::{PrivateKey, Signature, WalletAddress};
 use crate::error::WalletError;
+use burst_types::{PrivateKey, Signature, WalletAddress};
 
 /// Delegate voting power to a representative.
 ///
@@ -24,17 +24,16 @@ pub fn create_delegation(
     let delegation_public_key = delegation_keys.public.as_bytes().to_vec();
 
     let delegator_x25519_secret = burst_crypto::ed25519_private_to_x25519(&delegator_private.0);
-    let delegator_x25519_pub = x25519_dalek::PublicKey::from(
-        &x25519_dalek::StaticSecret::from(delegator_x25519_secret),
-    );
+    let delegator_x25519_pub =
+        x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(delegator_x25519_secret));
 
     let delegate_ed25519_pub = burst_crypto::decode_address(delegate.as_str())
         .ok_or(WalletError::InvalidAddress(delegate.as_str().to_string()))?;
     let delegate_x25519_pub_bytes = burst_crypto::ed25519_public_to_x25519(&delegate_ed25519_pub)
         .ok_or(WalletError::InvalidAddress(format!(
-            "failed to convert {} to X25519",
-            delegate.as_str()
-        )))?;
+        "failed to convert {} to X25519",
+        delegate.as_str()
+    )))?;
 
     let encrypted_delegation_key = burst_crypto::encrypt_delegation_key(
         &delegation_keys.private.0,
@@ -170,8 +169,10 @@ mod tests {
         let delegator_addr = derive_address(&delegator_kp.public);
         let delegate_addr = derive_address(&delegate_kp.public);
 
-        let tx1 = create_delegation(&delegator_addr, &delegate_addr, &delegator_kp.private).unwrap();
-        let tx2 = create_delegation(&delegator_addr, &delegate_addr, &delegator_kp.private).unwrap();
+        let tx1 =
+            create_delegation(&delegator_addr, &delegate_addr, &delegator_kp.private).unwrap();
+        let tx2 =
+            create_delegation(&delegator_addr, &delegate_addr, &delegator_kp.private).unwrap();
 
         // Delegation keys are randomly generated each time, so encrypted keys differ
         assert_ne!(tx1.encrypted_delegation_key, tx2.encrypted_delegation_key);

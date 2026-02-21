@@ -98,10 +98,7 @@ pub fn encrypt_keystore(
 }
 
 /// Decrypt a keystore file with the given password, returning the 32-byte secret key.
-pub fn decrypt_keystore(
-    keystore: &KeystoreFile,
-    password: &str,
-) -> Result<[u8; 32], WalletError> {
+pub fn decrypt_keystore(keystore: &KeystoreFile, password: &str) -> Result<[u8; 32], WalletError> {
     if keystore.version != 1 {
         return Err(WalletError::Key(format!(
             "unsupported keystore version: {}",
@@ -132,9 +129,9 @@ pub fn decrypt_keystore(
         .map_err(|e| WalletError::Key(format!("AES key init failed: {}", e)))?;
 
     let nonce = Nonce::from_slice(&nonce_bytes);
-    let plaintext = cipher
-        .decrypt(nonce, ciphertext.as_ref())
-        .map_err(|_| WalletError::Key("decryption failed: wrong password or corrupted data".to_string()))?;
+    let plaintext = cipher.decrypt(nonce, ciphertext.as_ref()).map_err(|_| {
+        WalletError::Key("decryption failed: wrong password or corrupted data".to_string())
+    })?;
 
     if plaintext.len() != 32 {
         return Err(WalletError::Key(format!(

@@ -18,7 +18,10 @@ pub enum SyncRequest {
     /// Full bootstrap: download all frontiers then pull missing blocks.
     Bootstrap { peer: String },
     /// Sync a specific account chain.
-    SyncAccount { peer: String, account: WalletAddress },
+    SyncAccount {
+        peer: String,
+        account: WalletAddress,
+    },
     /// Lazy pull: request a specific block on demand.
     LazyPull { peer: String, block_hash: BlockHash },
 }
@@ -236,10 +239,7 @@ mod tests {
             // Send blocks response
             handle
                 .response_tx
-                .send(SyncResponse::Blocks(vec![
-                    vec![1, 2, 3],
-                    vec![4, 5, 6],
-                ]))
+                .send(SyncResponse::Blocks(vec![vec![1, 2, 3], vec![4, 5, 6]]))
                 .await
                 .unwrap();
         });
@@ -261,7 +261,10 @@ mod tests {
         let network = tokio::spawn(async move {
             let req = handle.request_rx.recv().await.unwrap();
             match req {
-                SyncRequest::SyncAccount { peer: p, account: a } => {
+                SyncRequest::SyncAccount {
+                    peer: p,
+                    account: a,
+                } => {
                     assert_eq!(p, "192.168.1.1:7075");
                     assert_eq!(a.as_str(), "brst_sync_target");
                 }

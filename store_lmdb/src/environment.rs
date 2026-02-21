@@ -252,11 +252,7 @@ impl LmdbEnvironment {
 
     /// Create a BRN store backed by this environment.
     pub fn brn_store(&self) -> LmdbBrnStore {
-        LmdbBrnStore::new(
-            Arc::clone(&self.env),
-            self.brn_wallets_db,
-            self.brn_meta_db,
-        )
+        LmdbBrnStore::new(Arc::clone(&self.env), self.brn_wallets_db, self.brn_meta_db)
     }
 
     /// Create a representative weight store backed by this environment.

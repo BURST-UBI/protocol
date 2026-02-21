@@ -242,9 +242,7 @@ impl PeerManager {
 
     /// Iterate over all connected (and not-banned) peers.
     pub fn iter_connected(&self) -> impl Iterator<Item = (&String, &PeerState)> {
-        self.peers
-            .iter()
-            .filter(|(_, p)| p.connected && !p.banned)
+        self.peers.iter().filter(|(_, p)| p.connected && !p.banned)
     }
 
     /// Return peers that are known but not currently connected and not banned.
@@ -376,9 +374,7 @@ impl PeerManager {
 
     /// Check whether a peer is currently banned.
     pub fn is_banned(&self, peer_id: &str) -> bool {
-        self.peers
-            .get(peer_id)
-            .map_or(false, |p| p.banned)
+        self.peers.get(peer_id).map_or(false, |p| p.banned)
     }
 
     /// Unban peers whose ban has expired.

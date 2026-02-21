@@ -8,10 +8,10 @@ use crate::error::RpcError;
 use crate::pagination::{self, PaginationParams};
 use crate::server::RpcState;
 
+use crate::server::ProcessResult;
 use burst_brn::BrnWalletState;
 use burst_governance::Proposal;
 use burst_ledger::StateBlock;
-use crate::server::ProcessResult;
 use burst_store::account::AccountInfo;
 use burst_store::StoreError;
 use burst_types::{BlockHash, Timestamp, TxHash, WalletAddress};
@@ -23,7 +23,9 @@ use tracing::debug;
 
 fn validate_account(account: &str) -> Result<(), RpcError> {
     if account.is_empty() {
-        return Err(RpcError::InvalidRequest("account address must not be empty".into()));
+        return Err(RpcError::InvalidRequest(
+            "account address must not be empty".into(),
+        ));
     }
     if !account.starts_with("brst_") || account.len() != 65 {
         return Err(RpcError::InvalidRequest(
@@ -38,7 +40,9 @@ fn validate_positive_amount(amount_str: &str) -> Result<u128, RpcError> {
         .parse()
         .map_err(|e| RpcError::InvalidRequest(format!("invalid amount: {e}")))?;
     if amount == 0 {
-        return Err(RpcError::InvalidRequest("amount must be greater than zero".into()));
+        return Err(RpcError::InvalidRequest(
+            "amount must be greater than zero".into(),
+        ));
     }
     Ok(amount)
 }
@@ -115,11 +119,7 @@ fn account_not_found(e: StoreError, address: &str) -> RpcError {
 ///
 /// Uses `BlockStore::height_of_block` for O(1) lookup instead of loading
 /// the entire account chain.
-fn is_block_confirmed(
-    block_hash: &BlockHash,
-    account: &WalletAddress,
-    state: &RpcState,
-) -> bool {
+fn is_block_confirmed(block_hash: &BlockHash, account: &WalletAddress, state: &RpcState) -> bool {
     let acct = match state.account_store.get_account(account) {
         Ok(a) => a,
         Err(_) => return false,
@@ -403,7 +403,10 @@ pub async fn handle_account_pending(
 
     // Apply threshold filter
     let filtered: Vec<_> = if threshold > 0 {
-        all_pending.into_iter().filter(|p| p.amount >= threshold).collect()
+        all_pending
+            .into_iter()
+            .filter(|p| p.amount >= threshold)
+            .collect()
     } else {
         all_pending
     };
@@ -859,9 +862,10 @@ fn proposal_description(proposal: &Proposal) -> String {
 /// Get the current active vote counts (from whichever phase is active).
 fn current_vote_counts(proposal: &Proposal) -> (u32, u32) {
     match proposal.phase {
-        burst_governance::GovernancePhase::Exploration => {
-            (proposal.exploration_votes_yea, proposal.exploration_votes_nay)
-        }
+        burst_governance::GovernancePhase::Exploration => (
+            proposal.exploration_votes_yea,
+            proposal.exploration_votes_nay,
+        ),
         burst_governance::GovernancePhase::Promotion => {
             (proposal.promotion_votes_yea, proposal.promotion_votes_nay)
         }
@@ -1008,9 +1012,9 @@ pub async fn handle_governance_proposal_info(
         burst_governance::ProposalContent::ConstitutionalAmendment { title, .. } => {
             ("constitution".to_string(), title.clone())
         }
-        burst_governance::ProposalContent::Emergency { param, new_value, .. } => {
-            (format!("{:?}", param), new_value.to_string())
-        }
+        burst_governance::ProposalContent::Emergency {
+            param, new_value, ..
+        } => (format!("{:?}", param), new_value.to_string()),
     };
 
     let (votes_yea, votes_nay, votes_abstain) = match proposal.phase {
@@ -1049,32 +1053,23 @@ pub async fn handle_governance_proposal_info(
 }
 
 /// Compute the deadline (Unix timestamp) for the current phase of a proposal.
-fn compute_phase_deadline(
-    proposal: &Proposal,
-    params: &burst_types::ProtocolParams,
-) -> u64 {
+fn compute_phase_deadline(proposal: &Proposal, params: &burst_types::ProtocolParams) -> u64 {
     match proposal.phase {
         burst_governance::GovernancePhase::Proposal => {
             proposal.created_at.as_secs() + params.governance_proposal_duration_secs
         }
-        burst_governance::GovernancePhase::Exploration => {
-            proposal
-                .exploration_started_at
-                .map(|t| t.as_secs() + params.governance_exploration_duration_secs)
-                .unwrap_or(0)
-        }
-        burst_governance::GovernancePhase::Cooldown => {
-            proposal
-                .cooldown_started_at
-                .map(|t| t.as_secs() + params.governance_cooldown_duration_secs)
-                .unwrap_or(0)
-        }
-        burst_governance::GovernancePhase::Promotion => {
-            proposal
-                .promotion_started_at
-                .map(|t| t.as_secs() + params.governance_promotion_duration_secs)
-                .unwrap_or(0)
-        }
+        burst_governance::GovernancePhase::Exploration => proposal
+            .exploration_started_at
+            .map(|t| t.as_secs() + params.governance_exploration_duration_secs)
+            .unwrap_or(0),
+        burst_governance::GovernancePhase::Cooldown => proposal
+            .cooldown_started_at
+            .map(|t| t.as_secs() + params.governance_cooldown_duration_secs)
+            .unwrap_or(0),
+        burst_governance::GovernancePhase::Promotion => proposal
+            .promotion_started_at
+            .map(|t| t.as_secs() + params.governance_promotion_duration_secs)
+            .unwrap_or(0),
         _ => 0,
     }
 }
@@ -1478,7 +1473,9 @@ pub async fn handle_faucet(
 
     account_info.state = burst_types::WalletState::Verified;
     account_info.verified_at = Some(now);
-    account_info.trst_balance = account_info.trst_balance.saturating_add(1_000_000_000_000_000_000);
+    account_info.trst_balance = account_info
+        .trst_balance
+        .saturating_add(1_000_000_000_000_000_000);
 
     state
         .account_store
@@ -1491,4 +1488,3 @@ pub async fn handle_faucet(
         message: "Account verified and 1 TRST credited (testnet faucet)".to_string(),
     }))
 }
-

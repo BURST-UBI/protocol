@@ -147,12 +147,8 @@ mod tests {
     #[test]
     fn establish_and_authorize() {
         let mut reg = CustodianshipRegistry::new();
-        let parent = addr(
-            "brst_parent000000000000000000000000000000000000000000000000000parent00",
-        );
-        let child = addr(
-            "brst_child0000000000000000000000000000000000000000000000000child000",
-        );
+        let parent = addr("brst_parent000000000000000000000000000000000000000000000000000parent00");
+        let child = addr("brst_child0000000000000000000000000000000000000000000000000child000");
 
         reg.establish(parent.clone(), child.clone(), 1000).unwrap();
         assert!(reg.is_authorized(&parent, &child));
@@ -162,12 +158,8 @@ mod tests {
     #[test]
     fn terminate_custodianship() {
         let mut reg = CustodianshipRegistry::new();
-        let parent = addr(
-            "brst_parent000000000000000000000000000000000000000000000000000parent00",
-        );
-        let child = addr(
-            "brst_child0000000000000000000000000000000000000000000000000child000",
-        );
+        let parent = addr("brst_parent000000000000000000000000000000000000000000000000000parent00");
+        let child = addr("brst_child0000000000000000000000000000000000000000000000000child000");
 
         reg.establish(parent.clone(), child.clone(), 1000).unwrap();
         reg.terminate(&child, 2000).unwrap();
@@ -177,9 +169,7 @@ mod tests {
     #[test]
     fn self_custodianship_rejected() {
         let mut reg = CustodianshipRegistry::new();
-        let addr1 = addr(
-            "brst_self00000000000000000000000000000000000000000000000000self0000",
-        );
+        let addr1 = addr("brst_self00000000000000000000000000000000000000000000000000self0000");
         assert_eq!(
             reg.establish(addr1.clone(), addr1, 1000).unwrap_err(),
             CustodianshipError::SelfCustodianship
@@ -189,15 +179,9 @@ mod tests {
     #[test]
     fn duplicate_custodianship_rejected() {
         let mut reg = CustodianshipRegistry::new();
-        let p1 = addr(
-            "brst_p1000000000000000000000000000000000000000000000000000000p10000",
-        );
-        let p2 = addr(
-            "brst_p2000000000000000000000000000000000000000000000000000000p20000",
-        );
-        let child = addr(
-            "brst_child0000000000000000000000000000000000000000000000000child000",
-        );
+        let p1 = addr("brst_p1000000000000000000000000000000000000000000000000000000p10000");
+        let p2 = addr("brst_p2000000000000000000000000000000000000000000000000000000p20000");
+        let child = addr("brst_child0000000000000000000000000000000000000000000000000child000");
 
         reg.establish(p1, child.clone(), 1000).unwrap();
         assert_eq!(

@@ -88,10 +88,7 @@ pub enum ProposalContent {
         new_value: u128,
     },
     /// Constitutional amendment (handled by the consti crate).
-    ConstitutionalAmendment {
-        title: String,
-        text: String,
-    },
+    ConstitutionalAmendment { title: String, text: String },
     /// Emergency parameter change — fast-tracked lifecycle with higher thresholds.
     /// Skips Proposal and Cooldown phases, 24-hour voting periods, 95% supermajority.
     Emergency {

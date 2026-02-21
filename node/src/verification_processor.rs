@@ -121,11 +121,7 @@ impl VerifierPool {
     }
 
     /// Opt in as a verifier. Fails if the BRN balance is below the minimum.
-    pub fn opt_in(
-        &mut self,
-        address: WalletAddress,
-        brn_balance: u128,
-    ) -> Result<(), String> {
+    pub fn opt_in(&mut self, address: WalletAddress, brn_balance: u128) -> Result<(), String> {
         if brn_balance < self.min_brn_stake {
             return Err(format!(
                 "insufficient BRN: have {}, need {}",
@@ -198,53 +194,35 @@ mod tests {
     fn test_process_votes_pending() {
         let proc = VerificationProcessor::new(3, 5, 0.67);
         // 5 verifiers, need ceil(5 * 0.67) = 4 votes
-        assert_eq!(
-            proc.process_votes(1, 1, 5),
-            VerificationOutcome::Pending
-        );
-        assert_eq!(
-            proc.process_votes(2, 0, 5),
-            VerificationOutcome::Pending
-        );
+        assert_eq!(proc.process_votes(1, 1, 5), VerificationOutcome::Pending);
+        assert_eq!(proc.process_votes(2, 0, 5), VerificationOutcome::Pending);
     }
 
     #[test]
     fn test_process_votes_verified() {
         let proc = VerificationProcessor::new(3, 5, 0.67);
         // 4 votes total, 3 for > 1 against
-        assert_eq!(
-            proc.process_votes(3, 1, 5),
-            VerificationOutcome::Verified
-        );
+        assert_eq!(proc.process_votes(3, 1, 5), VerificationOutcome::Verified);
     }
 
     #[test]
     fn test_process_votes_rejected() {
         let proc = VerificationProcessor::new(3, 5, 0.67);
         // 4 votes total, 1 for < 3 against
-        assert_eq!(
-            proc.process_votes(1, 3, 5),
-            VerificationOutcome::Rejected
-        );
+        assert_eq!(proc.process_votes(1, 3, 5), VerificationOutcome::Rejected);
     }
 
     #[test]
     fn test_process_votes_tie_rejected() {
         let proc = VerificationProcessor::new(3, 5, 0.5);
         // Tie: votes_for == votes_against → not strictly greater, so rejected
-        assert_eq!(
-            proc.process_votes(2, 2, 5),
-            VerificationOutcome::Rejected
-        );
+        assert_eq!(proc.process_votes(2, 2, 5), VerificationOutcome::Rejected);
     }
 
     #[test]
     fn test_process_votes_all_for() {
         let proc = VerificationProcessor::new(1, 3, 1.0);
-        assert_eq!(
-            proc.process_votes(3, 0, 3),
-            VerificationOutcome::Verified
-        );
+        assert_eq!(proc.process_votes(3, 0, 3), VerificationOutcome::Verified);
     }
 
     // -- VerifierPool tests --

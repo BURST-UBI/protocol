@@ -67,13 +67,12 @@ pub fn check_integrity(env: &Arc<Env>) -> Result<IntegrityReport, LmdbError> {
                 report.databases_checked += 1;
                 match db.len(&rtxn) {
                     Ok(count) => {
-                        report.total_entries += count as u64;
+                        report.total_entries += count;
                     }
                     Err(e) => {
-                        report.errors.push(format!(
-                            "failed to read database '{}': {}",
-                            db_name, e
-                        ));
+                        report
+                            .errors
+                            .push(format!("failed to read database '{}': {}", db_name, e));
                     }
                 }
             }
@@ -81,10 +80,9 @@ pub fn check_integrity(env: &Arc<Env>) -> Result<IntegrityReport, LmdbError> {
                 // Database doesn't exist yet — acceptable for a fresh node
             }
             Err(e) => {
-                report.errors.push(format!(
-                    "failed to open database '{}': {}",
-                    db_name, e
-                ));
+                report
+                    .errors
+                    .push(format!("failed to open database '{}': {}", db_name, e));
             }
         }
     }

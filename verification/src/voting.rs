@@ -1,7 +1,7 @@
 //! Verification voting — verifiers cast votes on wallet legitimacy.
 
 use crate::error::VerificationError;
-use crate::state::{VerificationState, VerifierVote, VerificationPhase};
+use crate::state::{VerificationPhase, VerificationState, VerifierVote};
 use burst_types::{Timestamp, WalletAddress};
 use serde::{Deserialize, Serialize};
 
@@ -61,12 +61,21 @@ impl VerificationVoting {
     /// Threshold is in basis points (e.g., 9000 = 90%).
     /// If the threshold is not reached but revotes remain, returns `Revote`.
     /// Once `max_revotes` is exhausted, returns `Failed`.
-    pub fn tally(&self, state: &VerificationState, threshold_bps: u32, max_revotes: u32) -> VotingOutcome {
+    pub fn tally(
+        &self,
+        state: &VerificationState,
+        threshold_bps: u32,
+        max_revotes: u32,
+    ) -> VotingOutcome {
         let total = state.votes.len() as u32;
         if total == 0 {
             return VotingOutcome::Revote;
         }
-        let legitimate = state.votes.iter().filter(|v| v.vote == Vote::Legitimate).count() as u32;
+        let legitimate = state
+            .votes
+            .iter()
+            .filter(|v| v.vote == Vote::Legitimate)
+            .count() as u32;
         let percentage_bps = (legitimate * 10_000) / total;
 
         if percentage_bps >= threshold_bps {
@@ -84,24 +93,24 @@ impl VerificationVoting {
         state: &'a VerificationState,
         outcome_was_legitimate: bool,
     ) -> Vec<&'a VerifierVote> {
-        state.votes.iter().filter(|v| {
-            if outcome_was_legitimate {
-                v.vote != Vote::Legitimate
-            } else {
-                v.vote == Vote::Legitimate
-            }
-        }).collect()
+        state
+            .votes
+            .iter()
+            .filter(|v| {
+                if outcome_was_legitimate {
+                    v.vote != Vote::Legitimate
+                } else {
+                    v.vote == Vote::Legitimate
+                }
+            })
+            .collect()
     }
 
     /// Apply timeout for absent verifiers — those who were selected but
     /// haven't voted by the deadline. Their vote defaults to Neither.
     ///
     /// Returns the number of absent verifiers whose votes were set to Neither.
-    pub fn apply_timeout_defaults(
-        &self,
-        state: &mut VerificationState,
-        now: Timestamp,
-    ) -> u32 {
+    pub fn apply_timeout_defaults(&self, state: &mut VerificationState, now: Timestamp) -> u32 {
         let mut absent_count = 0u32;
         let voted_verifiers: std::collections::HashSet<&WalletAddress> =
             state.votes.iter().map(|v| &v.verifier).collect();
@@ -135,7 +144,9 @@ impl VerificationVoting {
         if state.revote_count >= max_revotes {
             return Err(VerificationError::MaxRevotesExceeded(max_revotes));
         }
-        state.excluded_verifiers.extend(state.selected_verifiers.drain(..));
+        state
+            .excluded_verifiers
+            .extend(state.selected_verifiers.drain(..));
         state.votes.clear();
         state.revote_count += 1;
         state.phase = VerificationPhase::Voting;
@@ -207,12 +218,18 @@ impl NeitherVoteTracker {
 
     /// Get the total number of assignments for a verifier.
     pub fn total_assignments(&self, verifier: &WalletAddress) -> u32 {
-        self.history.get(verifier.as_str()).map(|(t, _)| *t).unwrap_or(0)
+        self.history
+            .get(verifier.as_str())
+            .map(|(t, _)| *t)
+            .unwrap_or(0)
     }
 
     /// Get the total number of Neither votes for a verifier.
     pub fn neither_count(&self, verifier: &WalletAddress) -> u32 {
-        self.history.get(verifier.as_str()).map(|(_, n)| *n).unwrap_or(0)
+        self.history
+            .get(verifier.as_str())
+            .map(|(_, n)| *n)
+            .unwrap_or(0)
     }
 
     /// Apply a penalty for excessive Neither voting.
@@ -249,7 +266,10 @@ mod tests {
     use super::*;
 
     fn test_addr(s: &str) -> WalletAddress {
-        WalletAddress::new(format!("brst_{}", s.repeat(60 / s.len() + 1)[..60].to_string()))
+        WalletAddress::new(format!(
+            "brst_{}",
+            s.repeat(60 / s.len() + 1)[..60].to_string()
+        ))
     }
 
     #[test]

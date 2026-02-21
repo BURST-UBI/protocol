@@ -56,7 +56,9 @@ impl ConstiDocument {
 
     /// Get an article by its number, including repealed ones.
     pub fn get_article_including_repealed(&self, number: u64) -> Option<&Article> {
-        self.articles.iter().find(|article| article.number == number)
+        self.articles
+            .iter()
+            .find(|article| article.number == number)
     }
 
     /// Get the total number of active (non-repealed) articles.
@@ -71,12 +73,7 @@ impl ConstiDocument {
 
     /// Get the next available article number.
     pub fn next_article_number(&self) -> u64 {
-        self.articles
-            .iter()
-            .map(|a| a.number)
-            .max()
-            .unwrap_or(0)
-            + 1
+        self.articles.iter().map(|a| a.number).max().unwrap_or(0) + 1
     }
 
     /// Check if an article number exists and is not repealed.

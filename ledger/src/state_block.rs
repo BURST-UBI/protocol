@@ -201,9 +201,13 @@ mod tests {
         StateBlock {
             version: CURRENT_BLOCK_VERSION,
             block_type: BlockType::Open,
-            account: WalletAddress::new("brst_1111111111111111111111111111111111111111111111111111111111111111111"),
+            account: WalletAddress::new(
+                "brst_1111111111111111111111111111111111111111111111111111111111111111111",
+            ),
             previous: BlockHash::ZERO,
-            representative: WalletAddress::new("brst_2222222222222222222222222222222222222222222222222222222222222222222"),
+            representative: WalletAddress::new(
+                "brst_2222222222222222222222222222222222222222222222222222222222222222222",
+            ),
             brn_balance: 1000,
             trst_balance: 500,
             link: BlockHash::ZERO,
@@ -221,7 +225,7 @@ mod tests {
         let block = create_test_block();
         let hash1 = block.compute_hash();
         let hash2 = block.compute_hash();
-        
+
         // Same block should produce same hash
         assert_eq!(hash1, hash2);
     }
@@ -230,13 +234,13 @@ mod tests {
     fn test_compute_hash_different_blocks() {
         let block1 = create_test_block();
         let mut block2 = create_test_block();
-        
+
         // Change one field
         block2.brn_balance = 2000;
-        
+
         let hash1 = block1.compute_hash();
         let hash2 = block2.compute_hash();
-        
+
         // Different blocks should produce different hashes
         assert_ne!(hash1, hash2);
     }
@@ -245,13 +249,13 @@ mod tests {
     fn test_compute_hash_different_block_types() {
         let mut block1 = create_test_block();
         let mut block2 = create_test_block();
-        
+
         block1.block_type = BlockType::Open;
         block2.block_type = BlockType::Burn;
-        
+
         let hash1 = block1.compute_hash();
         let hash2 = block2.compute_hash();
-        
+
         assert_ne!(hash1, hash2);
     }
 
@@ -259,13 +263,17 @@ mod tests {
     fn test_compute_hash_different_accounts() {
         let mut block1 = create_test_block();
         let mut block2 = create_test_block();
-        
-        block1.account = WalletAddress::new("brst_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-        block2.account = WalletAddress::new("brst_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
-        
+
+        block1.account = WalletAddress::new(
+            "brst_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
+        block2.account = WalletAddress::new(
+            "brst_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        );
+
         let hash1 = block1.compute_hash();
         let hash2 = block2.compute_hash();
-        
+
         assert_ne!(hash1, hash2);
     }
 
@@ -273,14 +281,14 @@ mod tests {
     fn test_compute_hash_excludes_signature_and_work() {
         let block1 = create_test_block();
         let mut block2 = create_test_block();
-        
+
         // Change signature and work (should not affect hash)
         block2.signature = Signature([0xFFu8; 64]);
         block2.work = 999999;
-        
+
         let hash1 = block1.compute_hash();
         let hash2 = block2.compute_hash();
-        
+
         // Hash should be the same since signature and work are excluded
         assert_eq!(hash1, hash2);
     }
@@ -288,18 +296,18 @@ mod tests {
     #[test]
     fn test_verify_work_with_valid_nonce() {
         let mut block = create_test_block();
-        
+
         // Compute hash first
         block.hash = block.compute_hash();
-        
+
         // Generate valid work for a low difficulty
         let min_difficulty = 1000;
         let generator = WorkGenerator;
         let work_nonce = generator.generate(&block.hash, min_difficulty).unwrap();
-        
+
         // Set the work nonce
         block.work = work_nonce.0;
-        
+
         // Verify work should pass
         assert!(block.verify_work(min_difficulty));
     }
@@ -308,10 +316,10 @@ mod tests {
     fn test_verify_work_with_invalid_nonce() {
         let mut block = create_test_block();
         block.hash = block.compute_hash();
-        
+
         // Use a random nonce that likely won't meet high difficulty
         block.work = 12345;
-        
+
         // With very high difficulty, this should fail
         assert!(!block.verify_work(u64::MAX));
     }
@@ -321,7 +329,7 @@ mod tests {
         let mut block = create_test_block();
         block.hash = block.compute_hash();
         block.work = 0;
-        
+
         // Zero difficulty should always pass
         assert!(block.verify_work(0));
     }

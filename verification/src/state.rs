@@ -1,8 +1,8 @@
 //! Verification process state tracking.
 
-use std::collections::HashSet;
 use burst_types::{Timestamp, WalletAddress};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 /// The current state of a verification process for a wallet.
 #[derive(Clone, Debug, Serialize, Deserialize)]

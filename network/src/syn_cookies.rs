@@ -119,11 +119,7 @@ impl SynCookies {
 
         // Verify signature of cookie against claimed identity
         if let Some(pubkey_bytes) = burst_crypto::decode_address(claimed_id.as_str()) {
-            burst_crypto::verify_signature(
-                &entry.cookie,
-                signature,
-                &PublicKey(pubkey_bytes),
-            )
+            burst_crypto::verify_signature(&entry.cookie, signature, &PublicKey(pubkey_bytes))
         } else {
             false
         }

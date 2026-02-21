@@ -69,9 +69,7 @@ fn bench_brn_total_accrued(c: &mut Criterion) {
             &segment_count,
             |b, _| {
                 b.iter(|| {
-                    black_box(
-                        history.total_accrued(black_box(state.verified_at), black_box(now)),
-                    )
+                    black_box(history.total_accrued(black_box(state.verified_at), black_box(now)))
                 });
             },
         );

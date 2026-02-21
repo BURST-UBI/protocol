@@ -86,8 +86,8 @@ pub fn update_account_on_block(
     }
 
     // Serialize and put in batch
-    let info_bytes = bincode::serialize(&info)
-        .map_err(|e| format!("failed to serialize AccountInfo: {e}"))?;
+    let info_bytes =
+        bincode::serialize(&info).map_err(|e| format!("failed to serialize AccountInfo: {e}"))?;
     batch
         .put_account(&block.account, &info_bytes)
         .map_err(|e| format!("failed to put account: {e}"))?;
@@ -120,7 +120,8 @@ pub fn create_pending_entry(
             origin_wallet: c.origin_wallet,
             origin_timestamp: c.origin_timestamp,
             effective_origin_timestamp: c.effective_origin_timestamp,
-            origin_proportions: c.origin_proportions
+            origin_proportions: c
+                .origin_proportions
                 .into_iter()
                 .map(|p| burst_types::OriginProportion {
                     origin: p.origin,
@@ -148,10 +149,7 @@ pub fn create_pending_entry(
 /// Handles both `Receive` (claiming pending TRST) and `RejectReceive`
 /// (returning pending TRST to sender). Uses binary composite key
 /// `account_bytes ++ link_bytes` matching `create_pending_entry`.
-pub fn delete_pending_entry(
-    batch: &mut WriteBatch<'_>,
-    block: &StateBlock,
-) -> Result<(), String> {
+pub fn delete_pending_entry(batch: &mut WriteBatch<'_>, block: &StateBlock) -> Result<(), String> {
     if (block.block_type != BlockType::Receive && block.block_type != BlockType::RejectReceive)
         || block.link.is_zero()
     {
@@ -175,21 +173,15 @@ mod tests {
     use burst_types::{BlockHash, Signature, Timestamp, TxHash, WalletAddress, WalletState};
 
     fn test_account() -> WalletAddress {
-        WalletAddress::new(
-            "brst_1test111111111111111111111111111111111111111111111111111111111111",
-        )
+        WalletAddress::new("brst_1test111111111111111111111111111111111111111111111111111111111111")
     }
 
     fn test_rep() -> WalletAddress {
-        WalletAddress::new(
-            "brst_1rep1111111111111111111111111111111111111111111111111111111111111",
-        )
+        WalletAddress::new("brst_1rep1111111111111111111111111111111111111111111111111111111111111")
     }
 
     fn test_rep2() -> WalletAddress {
-        WalletAddress::new(
-            "brst_2rep2222222222222222222222222222222222222222222222222222222222222",
-        )
+        WalletAddress::new("brst_2rep2222222222222222222222222222222222222222222222222222222222222")
     }
 
     fn make_open_block(account: &WalletAddress, rep: &WalletAddress, trst: u128) -> StateBlock {
@@ -399,13 +391,7 @@ mod tests {
         let account = test_account();
         let rep = test_rep();
         let open = make_open_block(&account, &rep, 1000);
-        let send = make_send_block(
-            &account,
-            &rep,
-            open.hash,
-            700,
-            BlockHash::new([0xAA; 32]),
-        );
+        let send = make_send_block(&account, &rep, open.hash, 700, BlockHash::new([0xAA; 32]));
 
         let mut info = make_account_info(&account, &rep, open.hash, 1000, 1);
         info.head = send.hash;

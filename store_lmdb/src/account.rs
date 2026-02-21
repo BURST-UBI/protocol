@@ -69,7 +69,7 @@ impl AccountStore for LmdbAccountStore {
             .get(&wtxn, info.address.as_str().as_bytes())
             .map_err(LmdbError::from)?
             .and_then(|old| bincode::deserialize::<AccountInfo>(old).ok())
-            .map_or(false, |old| is_verified(&old));
+            .is_some_and(|old| is_verified(&old));
 
         self.accounts_db
             .put(&mut wtxn, info.address.as_str().as_bytes(), &bytes)
@@ -114,8 +114,7 @@ impl AccountStore for LmdbAccountStore {
         let iter = self.accounts_db.iter(&rtxn).map_err(LmdbError::from)?;
         for result in iter {
             let (_key, val) = result.map_err(LmdbError::from)?;
-            let info: AccountInfo =
-                bincode::deserialize(val).map_err(LmdbError::from)?;
+            let info: AccountInfo = bincode::deserialize(val).map_err(LmdbError::from)?;
             accounts.push(info);
         }
         Ok(accounts)
@@ -127,8 +126,7 @@ impl AccountStore for LmdbAccountStore {
         let iter = self.accounts_db.iter(&rtxn).map_err(LmdbError::from)?;
         for result in iter {
             let (_key, val) = result.map_err(LmdbError::from)?;
-            let info: AccountInfo =
-                bincode::deserialize(val).map_err(LmdbError::from)?;
+            let info: AccountInfo = bincode::deserialize(val).map_err(LmdbError::from)?;
             if is_verified(&info) {
                 accounts.push(info);
             }
@@ -163,8 +161,7 @@ impl AccountStore for LmdbAccountStore {
                         break;
                     }
                     let (_k, v) = result.map_err(LmdbError::from)?;
-                    let info: AccountInfo =
-                        bincode::deserialize(v).map_err(LmdbError::from)?;
+                    let info: AccountInfo = bincode::deserialize(v).map_err(LmdbError::from)?;
                     accounts.push(info);
                 }
             }
@@ -175,8 +172,7 @@ impl AccountStore for LmdbAccountStore {
                         break;
                     }
                     let (_k, v) = result.map_err(LmdbError::from)?;
-                    let info: AccountInfo =
-                        bincode::deserialize(v).map_err(LmdbError::from)?;
+                    let info: AccountInfo = bincode::deserialize(v).map_err(LmdbError::from)?;
                     accounts.push(info);
                 }
             }

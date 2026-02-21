@@ -282,11 +282,7 @@ mod tests {
     #[test]
     fn test_select_verifiers_known_vector_1() {
         // Fixed inputs produce a fixed, verifiable output.
-        let pool = vec![
-            make_addr("alice"),
-            make_addr("bob"),
-            make_addr("carol"),
-        ];
+        let pool = vec![make_addr("alice"), make_addr("bob"), make_addr("carol")];
         let randomness = b"fixed_seed_vector_1";
         let selected = select_verifiers(randomness, &pool, 2);
 
@@ -481,7 +477,7 @@ mod tests {
     #[test]
     fn test_custom_eligibility_config() {
         let config = EligibilityConfig {
-            min_verification_age_secs: 7 * 24 * 3600, // 7 days
+            min_verification_age_secs: 7 * 24 * 3600,        // 7 days
             min_brn_balance: 50 * 1_000_000_000_000_000_000, // 50 BRN
         };
         let verified_at = make_timestamp(1_000_000);

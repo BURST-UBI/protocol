@@ -32,7 +32,11 @@ impl RepWeightStore for LmdbRepWeightStore {
     fn get_rep_weight(&self, rep: &WalletAddress) -> Result<Option<u128>, StoreError> {
         let key = rep.as_str().as_bytes();
         let rtxn = self.env.read_txn().map_err(LmdbError::from)?;
-        match self.rep_weights_db.get(&rtxn, key).map_err(LmdbError::from)? {
+        match self
+            .rep_weights_db
+            .get(&rtxn, key)
+            .map_err(LmdbError::from)?
+        {
             Some(bytes) => {
                 if bytes.len() != 16 {
                     return Err(StoreError::Serialization(
@@ -63,8 +67,8 @@ impl RepWeightStore for LmdbRepWeightStore {
         let mut results = Vec::new();
         for entry in iter {
             let (key, val) = entry.map_err(LmdbError::from)?;
-            let addr_str = std::str::from_utf8(key)
-                .map_err(|e| LmdbError::Serialization(e.to_string()))?;
+            let addr_str =
+                std::str::from_utf8(key).map_err(|e| LmdbError::Serialization(e.to_string()))?;
             if val.len() != 16 {
                 continue;
             }
@@ -151,9 +155,15 @@ mod tests {
         let env = open_test_env();
         let store = env.rep_weight_store();
 
-        store.put_rep_weight(&WalletAddress::new("brst_alice"), 1000).unwrap();
-        store.put_rep_weight(&WalletAddress::new("brst_bob"), 2000).unwrap();
-        store.put_rep_weight(&WalletAddress::new("brst_carol"), 3000).unwrap();
+        store
+            .put_rep_weight(&WalletAddress::new("brst_alice"), 1000)
+            .unwrap();
+        store
+            .put_rep_weight(&WalletAddress::new("brst_bob"), 2000)
+            .unwrap();
+        store
+            .put_rep_weight(&WalletAddress::new("brst_carol"), 3000)
+            .unwrap();
 
         let all = store.iter_rep_weights().unwrap();
         assert_eq!(all.len(), 3);
@@ -196,7 +206,9 @@ mod tests {
         let store = env.rep_weight_store();
 
         for ts in 0..20 {
-            store.put_online_weight_sample(ts * 20, ts as u128 * 1000).unwrap();
+            store
+                .put_online_weight_sample(ts * 20, ts as u128 * 1000)
+                .unwrap();
         }
 
         let samples = store.get_online_weight_samples(5).unwrap();
@@ -209,7 +221,12 @@ mod tests {
         let env = open_test_env();
         let store = env.rep_weight_store();
 
-        assert_eq!(store.get_rep_weight(&WalletAddress::new("brst_nobody")).unwrap(), None);
+        assert_eq!(
+            store
+                .get_rep_weight(&WalletAddress::new("brst_nobody"))
+                .unwrap(),
+            None
+        );
         assert!(store.iter_rep_weights().unwrap().is_empty());
         assert!(store.get_online_weight_samples(10).unwrap().is_empty());
     }

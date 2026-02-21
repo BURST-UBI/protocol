@@ -40,7 +40,9 @@ impl ChallengeEngine {
 
     /// Whether a challenge has timed out (auto-resolves in favor of target).
     pub fn is_timed_out(&self, challenge: &Challenge, now: Timestamp) -> bool {
-        let elapsed = now.as_secs().saturating_sub(challenge.initiated_at.as_secs());
+        let elapsed = now
+            .as_secs()
+            .saturating_sub(challenge.initiated_at.as_secs());
         elapsed >= CHALLENGE_TIMEOUT_SECS
     }
 }
@@ -57,7 +59,10 @@ mod tests {
     fn initiate_challenge() {
         let engine = ChallengeEngine;
         let c = engine.initiate(
-            addr("challenger"), addr("target"), 500, Timestamp::new(1000),
+            addr("challenger"),
+            addr("target"),
+            500,
+            Timestamp::new(1000),
         );
         assert_eq!(c.challenger, addr("challenger"));
         assert_eq!(c.target, addr("target"));
@@ -68,9 +73,7 @@ mod tests {
     #[test]
     fn challenge_not_timed_out_before_deadline() {
         let engine = ChallengeEngine;
-        let c = engine.initiate(
-            addr("a"), addr("b"), 100, Timestamp::new(1000),
-        );
+        let c = engine.initiate(addr("a"), addr("b"), 100, Timestamp::new(1000));
         let still_within = Timestamp::new(1000 + CHALLENGE_TIMEOUT_SECS - 1);
         assert!(!engine.is_timed_out(&c, still_within));
     }
@@ -78,9 +81,7 @@ mod tests {
     #[test]
     fn challenge_timed_out_at_exactly_deadline() {
         let engine = ChallengeEngine;
-        let c = engine.initiate(
-            addr("a"), addr("b"), 100, Timestamp::new(0),
-        );
+        let c = engine.initiate(addr("a"), addr("b"), 100, Timestamp::new(0));
         let at_deadline = Timestamp::new(CHALLENGE_TIMEOUT_SECS);
         assert!(engine.is_timed_out(&c, at_deadline));
     }
@@ -88,9 +89,7 @@ mod tests {
     #[test]
     fn challenge_timed_out_well_past_deadline() {
         let engine = ChallengeEngine;
-        let c = engine.initiate(
-            addr("a"), addr("b"), 100, Timestamp::new(0),
-        );
+        let c = engine.initiate(addr("a"), addr("b"), 100, Timestamp::new(0));
         let way_past = Timestamp::new(CHALLENGE_TIMEOUT_SECS * 10);
         assert!(engine.is_timed_out(&c, way_past));
     }
