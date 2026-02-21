@@ -364,13 +364,12 @@ pub fn build_state_block(
         burst_transactions::Transaction::Burn(tx) => (
             BlockType::Burn,
             address_to_link(&tx.receiver)?,
-            account_state
-                .brn_balance
-                .checked_sub(tx.amount)
-                .ok_or_else(|| WalletError::InsufficientBrn {
+            account_state.brn_balance.checked_sub(tx.amount).ok_or(
+                WalletError::InsufficientBrn {
                     needed: tx.amount,
                     available: account_state.brn_balance,
-                })?,
+                },
+            )?,
             account_state.trst_balance,
             None,
         ),
@@ -378,13 +377,12 @@ pub fn build_state_block(
             BlockType::Send,
             address_to_link(&tx.receiver)?,
             account_state.brn_balance,
-            account_state
-                .trst_balance
-                .checked_sub(tx.amount)
-                .ok_or_else(|| WalletError::InsufficientTrst {
+            account_state.trst_balance.checked_sub(tx.amount).ok_or(
+                WalletError::InsufficientTrst {
                     needed: tx.amount,
                     available: account_state.trst_balance,
-                })?,
+                },
+            )?,
             None,
         ),
         burst_transactions::Transaction::Split(tx) => {
@@ -393,13 +391,12 @@ pub fn build_state_block(
                 BlockType::Split,
                 BlockHash::new(*tx.parent_hash.as_bytes()),
                 account_state.brn_balance,
-                account_state
-                    .trst_balance
-                    .checked_sub(total_output)
-                    .ok_or_else(|| WalletError::InsufficientTrst {
+                account_state.trst_balance.checked_sub(total_output).ok_or(
+                    WalletError::InsufficientTrst {
                         needed: total_output,
                         available: account_state.trst_balance,
-                    })?,
+                    },
+                )?,
                 None,
             )
         }
@@ -416,7 +413,7 @@ pub fn build_state_block(
             account_state
                 .brn_balance
                 .checked_sub(tx.burn_amount)
-                .ok_or_else(|| WalletError::InsufficientBrn {
+                .ok_or(WalletError::InsufficientBrn {
                     needed: tx.burn_amount,
                     available: account_state.brn_balance,
                 })?,
@@ -429,7 +426,7 @@ pub fn build_state_block(
             account_state
                 .brn_balance
                 .checked_sub(tx.stake_amount)
-                .ok_or_else(|| WalletError::InsufficientBrn {
+                .ok_or(WalletError::InsufficientBrn {
                     needed: tx.stake_amount,
                     available: account_state.brn_balance,
                 })?,
@@ -491,7 +488,7 @@ pub fn build_state_block(
             account_state
                 .brn_balance
                 .checked_sub(tx.stake_amount)
-                .ok_or_else(|| WalletError::InsufficientBrn {
+                .ok_or(WalletError::InsufficientBrn {
                     needed: tx.stake_amount,
                     available: account_state.brn_balance,
                 })?,

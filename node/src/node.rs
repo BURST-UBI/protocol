@@ -1124,7 +1124,7 @@ impl BurstNode {
                             // orchestrator confirms fraud via WalletUnverified.
                             let challenger_verified = prev_account
                                 .as_ref()
-                                .map_or(false, |a| a.state == burst_types::WalletState::Verified);
+                                .is_some_and(|a| a.state == burst_types::WalletState::Verified);
                             let mut orch = verification_orch_bp.lock().await;
                             if let Err(e) = orch.initiate_challenge(
                                 target_addr,

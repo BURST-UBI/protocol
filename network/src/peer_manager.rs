@@ -374,7 +374,7 @@ impl PeerManager {
 
     /// Check whether a peer is currently banned.
     pub fn is_banned(&self, peer_id: &str) -> bool {
-        self.peers.get(peer_id).map_or(false, |p| p.banned)
+        self.peers.get(peer_id).is_some_and(|p| p.banned)
     }
 
     /// Unban peers whose ban has expired.

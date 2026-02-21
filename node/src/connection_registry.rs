@@ -96,6 +96,7 @@ pub async fn write_framed(writer: &Mutex<OwnedWriteHalf>, payload: &[u8]) -> std
 ///
 /// On read error or disconnect the peer is cleaned up from both the
 /// connection registry and the peer manager.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_peer_read_loop(
     peer_id: String,
     reader: OwnedReadHalf,
@@ -159,6 +160,7 @@ pub fn spawn_peer_read_loop(
 ///
 /// Integrates message deduplication, peer reputation rewards, and online
 /// weight sampling for effective quorum computation.
+#[allow(clippy::too_many_arguments)]
 async fn peer_read_loop(
     peer_id: &str,
     mut reader: OwnedReadHalf,

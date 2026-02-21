@@ -153,7 +153,7 @@ impl VerificationOrchestrator {
         let filtered: Vec<&WalletAddress> = eligible_verifiers
             .iter()
             .filter(|w| !state.excluded_verifiers.contains(w))
-            .filter(|w| !penalized.get(w).is_some_and(|&until| now_secs < until))
+            .filter(|w| penalized.get(w).is_none_or(|&until| until <= now_secs))
             .collect();
 
         let count = params.num_verifiers as usize;

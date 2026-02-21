@@ -28,10 +28,7 @@ impl PaginationParams {
     /// Decode the cursor to a numeric offset. Returns 0 if cursor is absent or
     /// invalid. The cursor is a base64-encoded decimal string of the offset.
     pub fn decode_offset(&self) -> u64 {
-        self.cursor
-            .as_deref()
-            .and_then(|c| decode_cursor(c))
-            .unwrap_or(0)
+        self.cursor.as_deref().and_then(decode_cursor).unwrap_or(0)
     }
 }
 

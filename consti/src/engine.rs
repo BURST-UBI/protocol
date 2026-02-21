@@ -260,11 +260,7 @@ impl ConstiEngine {
         supermajority_bps: u32,
     ) -> Result<(), ConstiError> {
         let total_yea_nay = votes_yea + votes_nay;
-        let actual_bps = if total_yea_nay > 0 {
-            (votes_yea * 10000) / total_yea_nay
-        } else {
-            0
-        };
+        let actual_bps = (votes_yea * 10000).checked_div(total_yea_nay).unwrap_or(0);
 
         if actual_bps < supermajority_bps {
             Err(ConstiError::SupermajorityNotMet {

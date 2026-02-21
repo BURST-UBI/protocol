@@ -11,22 +11,13 @@ const MAX_ENTRIES: usize = 16_384;
 const MAX_FORKS_PER_ROOT: usize = 10;
 
 /// Caches fork blocks keyed by root (the `previous` hash they share).
+#[derive(Default)]
 pub struct ForkCache {
     entries: HashMap<BlockHash, Vec<BlockHash>>,
     total_count: usize,
     /// FIFO order for eviction. Roots removed mid-queue are left as
     /// tombstones and skipped during eviction (lazy cleanup).
     insertion_order: VecDeque<BlockHash>,
-}
-
-impl Default for ForkCache {
-    fn default() -> Self {
-        Self {
-            entries: HashMap::new(),
-            total_count: 0,
-            insertion_order: VecDeque::new(),
-        }
-    }
 }
 
 impl ForkCache {

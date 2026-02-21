@@ -213,8 +213,7 @@ impl BootstrapServer {
             .unwrap_or(frontiers.len());
 
         let end_idx = (start_idx + max).min(frontiers.len());
-        let page: Vec<(WalletAddress, BlockHash)> =
-            frontiers[start_idx..end_idx].iter().cloned().collect();
+        let page: Vec<(WalletAddress, BlockHash)> = frontiers[start_idx..end_idx].to_vec();
         let has_more = end_idx < frontiers.len();
 
         BootstrapMessage::FrontierResp {

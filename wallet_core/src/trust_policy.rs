@@ -62,28 +62,21 @@ pub fn evaluate_policy(
         }
 
         TrustPolicy::Custom { rules } => {
-            for rule in rules {
+            if let Some(rule) = rules.first() {
                 match rule {
-                    TrustRule::GroupMembership { .. } => {
-                        return TrustDecision::Warn {
-                            reason: "group membership check requires async verification".into(),
-                        };
-                    }
-                    TrustRule::MinVerificationAge { .. } => {
-                        // Requires node state to check verified_at; warn for now
-                        return TrustDecision::Warn {
-                            reason: "verification age check requires node state".into(),
-                        };
-                    }
-                    TrustRule::MaxUnknownOriginProportion { .. } => {
-                        // Requires TRST origin analysis; warn for now
-                        return TrustDecision::Warn {
-                            reason: "origin proportion check requires TRST analysis".into(),
-                        };
-                    }
+                    TrustRule::GroupMembership { .. } => TrustDecision::Warn {
+                        reason: "group membership check requires async verification".into(),
+                    },
+                    TrustRule::MinVerificationAge { .. } => TrustDecision::Warn {
+                        reason: "verification age check requires node state".into(),
+                    },
+                    TrustRule::MaxUnknownOriginProportion { .. } => TrustDecision::Warn {
+                        reason: "origin proportion check requires TRST analysis".into(),
+                    },
                 }
+            } else {
+                TrustDecision::Accept
             }
-            TrustDecision::Accept
         }
     }
 }

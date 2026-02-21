@@ -399,7 +399,7 @@ pub async fn handle_account_pending(
         .map_err(|e| RpcError::Store(format!("failed to query pending: {e}")))?;
 
     // Sort by amount descending (highest priority first)
-    all_pending.sort_by(|a, b| b.amount.cmp(&a.amount));
+    all_pending.sort_by_key(|p| std::cmp::Reverse(p.amount));
 
     // Apply threshold filter
     let filtered: Vec<_> = if threshold > 0 {
@@ -523,7 +523,7 @@ pub async fn handle_process(
     let result = state
         .block_processor
         .process_block(&block_bytes)
-        .map_err(|e| RpcError::Server(e))?;
+        .map_err(RpcError::Server)?;
 
     let accepted = matches!(result, ProcessResult::Accepted);
     let detail = match &result {
@@ -1222,7 +1222,7 @@ pub async fn handle_representatives(
             .map(|(addr, &weight)| (addr.to_string(), weight, 0u64))
             .collect()
     };
-    reps.sort_by(|a, b| b.1.cmp(&a.1));
+    reps.sort_by_key(|r| std::cmp::Reverse(r.1));
 
     let start = (offset as usize).min(reps.len());
     let end = (start + count as usize).min(reps.len());

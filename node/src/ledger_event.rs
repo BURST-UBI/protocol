@@ -44,6 +44,7 @@ pub enum LedgerEvent {
 /// Listeners are invoked inline on the emitting thread; keep handlers fast to
 /// avoid stalling block processing.
 pub struct EventBus {
+    #[allow(clippy::type_complexity)]
     listeners: Vec<Box<dyn Fn(&LedgerEvent) + Send + Sync>>,
 }
 
