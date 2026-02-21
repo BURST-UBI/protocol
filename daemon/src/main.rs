@@ -52,6 +52,10 @@ struct Cli {
     #[arg(long, env = "BURST_ENABLE_FAUCET")]
     faucet: bool,
 
+    /// Disable UPnP port mapping (enabled by default on live/test networks).
+    #[arg(long, env = "BURST_DISABLE_UPNP")]
+    disable_upnp: bool,
+
     /// Log level: "trace", "debug", "info", "warn", "error".
     #[arg(long, default_value = "info", env = "BURST_LOG_LEVEL")]
     log_level: String,
@@ -118,6 +122,8 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    let enable_upnp = !cli.disable_upnp;
+
     let config = if let Some(file_cfg) = file_config {
         NodeConfig {
             network,
@@ -135,6 +141,7 @@ async fn main() -> anyhow::Result<()> {
             max_peers: cli.max_peers.unwrap_or(file_cfg.max_peers),
             enable_metrics: cli.metrics || file_cfg.enable_metrics,
             enable_faucet: cli.faucet || file_cfg.enable_faucet,
+            enable_upnp: enable_upnp && file_cfg.enable_upnp,
             log_level: cli.log_level,
             ..file_cfg
         }
@@ -151,6 +158,7 @@ async fn main() -> anyhow::Result<()> {
             max_peers: cli.max_peers.unwrap_or(50),
             enable_metrics: cli.metrics,
             enable_faucet: cli.faucet,
+            enable_upnp,
             log_level: cli.log_level,
             ..Default::default()
         }

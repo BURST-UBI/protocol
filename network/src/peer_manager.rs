@@ -3,6 +3,7 @@
 use burst_messages::PeerAddress;
 use rand::seq::SliceRandom;
 use std::collections::HashMap;
+use std::net::SocketAddrV4;
 
 // ---------------------------------------------------------------------------
 // Penalty / scoring types
@@ -95,6 +96,10 @@ pub struct PeerManager {
     last_keepalive_secs: Option<u64>,
     /// Incrementally tracked count of connected peers — O(1) queries.
     num_connected: usize,
+    /// External (public) address discovered via UPnP, if available.
+    /// When set, keepalive messages advertise this address so peers behind
+    /// NAT can be reached by others.
+    external_address: Option<SocketAddrV4>,
 }
 
 impl PeerManager {
@@ -107,6 +112,7 @@ impl PeerManager {
             keepalive_interval_secs: 60,
             last_keepalive_secs: None,
             num_connected: 0,
+            external_address: None,
         }
     }
 
@@ -123,6 +129,7 @@ impl PeerManager {
             keepalive_interval_secs,
             last_keepalive_secs: None,
             num_connected: 0,
+            external_address: None,
         }
     }
 
@@ -251,7 +258,17 @@ impl PeerManager {
 
     /// Return up to `count` random *connected* peer addresses, suitable for
     /// inclusion in a keepalive message.
+    ///
+    /// If UPnP has discovered an external address, it is included as the first
+    /// entry so other nodes learn this node's reachable address.
     pub fn random_peers(&self, count: usize) -> Vec<PeerAddress> {
+        let mut result = Vec::with_capacity(count);
+
+        // Include our own external address so peers learn how to reach us
+        if let Some(self_addr) = self.self_peer_address() {
+            result.push(self_addr);
+        }
+
         let connected: Vec<&PeerState> = self
             .peers
             .values()
@@ -261,12 +278,43 @@ impl PeerManager {
         let mut rng = rand::thread_rng();
         let mut indices: Vec<usize> = (0..connected.len()).collect();
         indices.shuffle(&mut rng);
-        indices.truncate(count);
 
-        indices
-            .into_iter()
-            .map(|i| connected[i].address.clone())
-            .collect()
+        for i in indices {
+            if result.len() >= count {
+                break;
+            }
+            result.push(connected[i].address.clone());
+        }
+
+        result
+    }
+
+    // -- External address (UPnP) -----------------------------------------------
+
+    /// Set the node's external (public) address as discovered by UPnP.
+    /// When set, keepalive messages will include this address so other
+    /// peers know how to reach this node.
+    pub fn set_external_address(&mut self, addr: SocketAddrV4) {
+        self.external_address = Some(addr);
+    }
+
+    /// Clear the external address (e.g. when UPnP mapping expires or is removed).
+    pub fn clear_external_address(&mut self) {
+        self.external_address = None;
+    }
+
+    /// Returns the external address if UPnP mapping is active.
+    pub fn external_address(&self) -> Option<SocketAddrV4> {
+        self.external_address
+    }
+
+    /// Returns the address to advertise for this node in keepalive messages.
+    /// Prefers the UPnP external address; falls back to `None` if unavailable.
+    pub fn self_peer_address(&self) -> Option<PeerAddress> {
+        self.external_address.map(|addr| PeerAddress {
+            ip: addr.ip().to_string(),
+            port: addr.port(),
+        })
     }
 
     // -- Keepalive -------------------------------------------------------------

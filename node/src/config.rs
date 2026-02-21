@@ -76,6 +76,12 @@ pub struct NodeConfig {
     /// Whether to enable the testnet faucet endpoint.
     #[serde(default)]
     pub enable_faucet: bool,
+
+    /// Whether to enable UPnP port mapping for NAT traversal.
+    /// Automatically requests the router to forward the P2P port.
+    /// Disabled on dev networks; enabled by default on live/test.
+    #[serde(default = "default_true")]
+    pub enable_upnp: bool,
 }
 
 // ── Serde default helpers ──────────────────────────────────────────────
@@ -160,6 +166,7 @@ impl Default for NodeConfig {
             work_threads: default_work_threads(),
             enable_metrics: false,
             enable_faucet: false,
+            enable_upnp: true,
         }
     }
 }

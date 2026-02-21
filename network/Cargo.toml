@@ -17,3 +17,4 @@ rand = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 getrandom = { workspace = true }
+igd-next = { workspace = true }

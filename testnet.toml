@@ -44,5 +44,10 @@ enable_metrics = true
 # Enable the testnet faucet endpoint (test network only).
 enable_faucet = true
 
+# UPnP port mapping for NAT traversal.
+# Automatically requests the local router to forward the P2P port.
+# Disable if running on a VPS with a public IP (not needed).
+enable_upnp = true
+
 # Opt-in to act as a verifier in the UHV process.
 enable_verification = false

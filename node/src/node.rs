@@ -11,7 +11,7 @@ use burst_governance::GovernanceEngine;
 use burst_governance::delegation::DelegationEngine;
 use burst_ledger::{BlockType, DagFrontier, LedgerPruner, PruningConfig, StateBlock, CURRENT_BLOCK_VERSION};
 use burst_messages::PeerAddress;
-use burst_network::{Broadcaster, ClockSync, PeerManager};
+use burst_network::{Broadcaster, ClockSync, PeerManager, PortMapper, UpnpState};
 use burst_consensus::{ActiveElections, OnlineWeightSampler, PriorityScheduler, RepWeightCache, VoteCache, VoteGenerator};
 use burst_rpc::{BlockProcessorCallback, ProcessResult as RpcProcessResult, RpcServer, RpcState};
 use burst_store::block::BlockStore;
@@ -193,6 +193,8 @@ pub struct BurstNode {
     block_queue: Arc<BlockPriorityQueue>,
     /// Broadcaster for flooding messages to connected peers.
     broadcaster: Broadcaster,
+    /// UPnP port mapper for NAT traversal (None if disabled or dev network).
+    port_mapper: Option<PortMapper>,
     /// Handles for spawned background tasks (joined during shutdown).
     task_handles: Vec<JoinHandle<()>>,
 }
@@ -373,6 +375,7 @@ impl BurstNode {
             ))),
             block_queue,
             broadcaster,
+            port_mapper: None,
             task_handles: Vec::new(),
         };
 
@@ -520,7 +523,7 @@ impl BurstNode {
                 };
 
                 let start = std::time::Instant::now();
-                let loop_now_secs = unix_now_secs();
+                let _loop_now_secs = unix_now_secs();
 
                 // Load previous block (if any) for balance validation and
                 // ledger updater context.
@@ -2671,6 +2674,58 @@ impl BurstNode {
         });
         self.task_handles.push(p2p_handle);
 
+        // ── UPnP port mapping (NAT traversal) ────────────────────────────
+        let is_dev_network = matches!(self.config.network, burst_types::NetworkId::Dev);
+        if self.config.enable_upnp && !is_dev_network {
+            let description = format!(
+                "BURST Node ({})",
+                self.config.network.as_str()
+            );
+            let mapper = PortMapper::start(self.config.port, description);
+            tracing::info!(port = self.config.port, "UPnP: port mapping initiated");
+
+            let mut state_rx = mapper.subscribe();
+            let pm_upnp = Arc::clone(&self.peer_manager);
+            let mut shutdown_rx_upnp = self.shutdown.subscribe();
+
+            let upnp_sync_handle = tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = shutdown_rx_upnp.recv() => break,
+                        result = state_rx.changed() => {
+                            if result.is_err() {
+                                break;
+                            }
+                            let new_state = state_rx.borrow().clone();
+                            match new_state {
+                                UpnpState::Active { external_ip, external_port } => {
+                                    let addr = std::net::SocketAddrV4::new(external_ip, external_port);
+                                    let mut pm = pm_upnp.write().await;
+                                    pm.set_external_address(addr);
+                                    tracing::info!(
+                                        external = %addr,
+                                        "UPnP: external address set on PeerManager"
+                                    );
+                                }
+                                UpnpState::NotFound | UpnpState::NonRoutable | UpnpState::Failed(_) => {
+                                    let mut pm = pm_upnp.write().await;
+                                    pm.clear_external_address();
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            });
+            self.task_handles.push(upnp_sync_handle);
+            self.port_mapper = Some(mapper);
+        } else if is_dev_network {
+            tracing::debug!("UPnP: disabled on dev network");
+        } else {
+            tracing::debug!("UPnP: disabled by configuration");
+        }
+
         // ── Bootstrap peer discovery ──────────────────────────────────────
         let bootstrap_peers: Vec<String> = {
             let pm = self.peer_manager.read().await;
@@ -2989,6 +3044,12 @@ impl BurstNode {
 
         // Signal all tasks
         self.shutdown.shutdown();
+
+        // Remove UPnP port mapping (be a good citizen for the router)
+        if let Some(ref mut mapper) = self.port_mapper {
+            tracing::info!("UPnP: removing port mapping");
+            mapper.stop().await;
+        }
 
         // Drop all TCP write halves (causes peer read loops to terminate)
         {
