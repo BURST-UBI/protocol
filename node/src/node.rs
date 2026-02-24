@@ -2900,199 +2900,228 @@ impl BurstNode {
             let node_private_bs = burst_types::PrivateKey(self.node_private_key.0);
             let node_address_bs = self.node_address.clone();
             let store_bs2 = Arc::clone(&self.store);
+            let mut shutdown_rx_bs = self.shutdown.subscribe();
 
             let bs_handle = tokio::spawn(async move {
-                for addr_str in &bootstrap_peers {
-                    tracing::info!(peer = %addr_str, "connecting to bootstrap peer");
-                    match tokio::net::TcpStream::connect(addr_str).await {
-                        Ok(stream) => {
+                loop {
+                    for addr_str in &bootstrap_peers {
+                        // Skip peers that are already connected
+                        {
+                            let pm = peer_manager_bs.read().await;
                             let parts: Vec<&str> = addr_str.rsplitn(2, ':').collect();
-                            let (port, ip) = if parts.len() == 2 {
-                                (
-                                    parts[0].parse::<u16>().unwrap_or(7075),
-                                    parts[1].to_string(),
-                                )
-                            } else {
-                                (7075, addr_str.clone())
-                            };
-                            let peer_addr = PeerAddress {
-                                ip: ip.clone(),
-                                port,
-                            };
-                            let peer_id = format!("{ip}:{port}");
-                            let now = unix_now_secs();
+                            if parts.len() == 2 {
+                                let key = format!("{}:{}", parts[1], parts[0]);
+                                if pm.is_connected(&key) {
+                                    continue;
+                                }
+                            }
+                        }
 
-                            let (read_half, mut write_half) = stream.into_split();
+                        tracing::info!(peer = %addr_str, "connecting to bootstrap peer");
+                        match tokio::net::TcpStream::connect(addr_str).await {
+                            Ok(stream) => {
+                                let parts: Vec<&str> = addr_str.rsplitn(2, ':').collect();
+                                let (port, ip) = if parts.len() == 2 {
+                                    (
+                                        parts[0].parse::<u16>().unwrap_or(7075),
+                                        parts[1].to_string(),
+                                    )
+                                } else {
+                                    (7075, addr_str.clone())
+                                };
+                                let peer_addr = PeerAddress {
+                                    ip: ip.clone(),
+                                    port,
+                                };
+                                let peer_id = format!("{ip}:{port}");
+                                let now = unix_now_secs();
 
-                            // Read the cookie challenge from the peer
-                            let mut reader = tokio::io::BufReader::new(read_half);
-                            let cookie_opt = {
-                                use tokio::io::AsyncReadExt;
-                                let mut len_buf = [0u8; 4];
-                                match tokio::time::timeout(
-                                    std::time::Duration::from_secs(10),
-                                    reader.read_exact(&mut len_buf),
-                                )
-                                .await
-                                {
-                                    Ok(Ok(_)) => {
-                                        let body_len = u32::from_be_bytes(len_buf) as usize;
-                                        if body_len > 0 && body_len < 65536 {
-                                            let mut body = vec![0u8; body_len];
-                                            if reader.read_exact(&mut body).await.is_ok() {
-                                                if let Ok(WireMessage::Handshake(hs)) =
-                                                    bincode::deserialize::<WireMessage>(&body)
-                                                {
-                                                    hs.cookie
+                                let (read_half, mut write_half) = stream.into_split();
+
+                                // Read the cookie challenge from the peer
+                                let mut reader = tokio::io::BufReader::new(read_half);
+                                let cookie_opt = {
+                                    use tokio::io::AsyncReadExt;
+                                    let mut len_buf = [0u8; 4];
+                                    match tokio::time::timeout(
+                                        std::time::Duration::from_secs(10),
+                                        reader.read_exact(&mut len_buf),
+                                    )
+                                    .await
+                                    {
+                                        Ok(Ok(_)) => {
+                                            let body_len = u32::from_be_bytes(len_buf) as usize;
+                                            if body_len > 0 && body_len < 65536 {
+                                                let mut body = vec![0u8; body_len];
+                                                if reader.read_exact(&mut body).await.is_ok() {
+                                                    if let Ok(WireMessage::Handshake(hs)) =
+                                                        bincode::deserialize::<WireMessage>(&body)
+                                                    {
+                                                        hs.cookie
+                                                    } else {
+                                                        None
+                                                    }
                                                 } else {
                                                     None
                                                 }
                                             } else {
                                                 None
                                             }
-                                        } else {
-                                            None
                                         }
-                                    }
-                                    _ => None,
-                                }
-                            };
-
-                            // Sign and send cookie response
-                            if let Some(cookie) = cookie_opt {
-                                use tokio::io::AsyncWriteExt;
-                                let sig = burst_crypto::sign_message(&cookie, &node_private_bs);
-                                let response =
-                                    WireMessage::Handshake(crate::wire_message::HandshakeMsg {
-                                        node_id: node_address_bs.clone(),
-                                        cookie: None,
-                                        cookie_signature: Some(sig),
-                                    });
-                                if let Ok(bytes) = bincode::serialize(&response) {
-                                    let len_bytes = (bytes.len() as u32).to_be_bytes();
-                                    let _ = write_half.write_all(&len_bytes).await;
-                                    let _ = write_half.write_all(&bytes).await;
-                                    let _ = write_half.flush().await;
-                                    tracing::debug!(
-                                        peer = %peer_id,
-                                        "sent cookie response to bootstrap peer"
-                                    );
-                                }
-                            } else {
-                                tracing::warn!(
-                                    peer = %peer_id,
-                                    "no cookie challenge received from bootstrap peer"
-                                );
-                            }
-
-                            let read_half = reader.into_inner();
-
-                            // Register write half in the connection registry
-                            {
-                                let mut registry = conn_registry_bs.write().await;
-                                registry.insert(peer_id.clone(), write_half);
-                            }
-
-                            // Register the peer
-                            {
-                                let mut pm = peer_manager_bs.write().await;
-                                pm.add_peer(peer_addr);
-                                pm.mark_connected(&peer_id, now);
-                                metrics_bs.peer_count.set(pm.connected_count() as i64);
-                            }
-
-                            // Spawn a read loop (no SYN cookie for outbound — already done)
-                            spawn_peer_read_loop(
-                                peer_id.clone(),
-                                read_half,
-                                Arc::clone(&block_queue_bs),
-                                Arc::clone(&conn_registry_bs),
-                                Arc::clone(&peer_manager_bs),
-                                Arc::clone(&metrics_bs),
-                                Arc::clone(&active_elections_bs),
-                                Arc::clone(&rep_weights_bs),
-                                Arc::clone(&message_dedup_bs),
-                                Arc::clone(&online_weight_sampler_bs),
-                                None,
-                                ip.clone(),
-                                Arc::clone(&frontier_bs),
-                                Arc::clone(&store_bs2),
-                            );
-
-                            tracing::info!(peer = %peer_id, "bootstrap peer connected");
-
-                            // Check if we need to bootstrap — if our frontier
-                            // is empty, we have no ledger data and need to pull
-                            // everything from this peer.
-                            let local_frontier_count = { frontier_bs.read().await.account_count() };
-
-                            if local_frontier_count == 0 {
-                                tracing::info!(
-                                    peer = %peer_id,
-                                    "local frontier is empty — initiating bootstrap sync"
-                                );
-
-                                let mut bootstrap_client =
-                                    crate::bootstrap::BootstrapClient::new(10_000);
-
-                                // Step 1: Request frontiers from the peer
-                                let frontier_req = bootstrap_client.start_frontier_scan();
-                                let wire_req = WireMessage::Bootstrap(frontier_req);
-                                let req_bytes = match bincode::serialize(&wire_req) {
-                                    Ok(b) => b,
-                                    Err(e) => {
-                                        tracing::error!("failed to serialize frontier req: {e}");
-                                        continue;
+                                        _ => None,
                                     }
                                 };
 
-                                // Send the frontier request to the peer
+                                // Sign and send cookie response
+                                if let Some(cookie) = cookie_opt {
+                                    use tokio::io::AsyncWriteExt;
+                                    let sig = burst_crypto::sign_message(&cookie, &node_private_bs);
+                                    let response =
+                                        WireMessage::Handshake(crate::wire_message::HandshakeMsg {
+                                            node_id: node_address_bs.clone(),
+                                            cookie: None,
+                                            cookie_signature: Some(sig),
+                                        });
+                                    if let Ok(bytes) = bincode::serialize(&response) {
+                                        let len_bytes = (bytes.len() as u32).to_be_bytes();
+                                        let _ = write_half.write_all(&len_bytes).await;
+                                        let _ = write_half.write_all(&bytes).await;
+                                        let _ = write_half.flush().await;
+                                        tracing::debug!(
+                                            peer = %peer_id,
+                                            "sent cookie response to bootstrap peer"
+                                        );
+                                    }
+                                } else {
+                                    tracing::warn!(
+                                        peer = %peer_id,
+                                        "no cookie challenge received from bootstrap peer"
+                                    );
+                                }
+
+                                let read_half = reader.into_inner();
+
+                                // Register write half in the connection registry
                                 {
-                                    let registry = conn_registry_bs.read().await;
-                                    if let Some(writer) = registry.get(&peer_id) {
-                                        if let Err(e) = write_framed(&writer, &req_bytes).await {
+                                    let mut registry = conn_registry_bs.write().await;
+                                    registry.insert(peer_id.clone(), write_half);
+                                }
+
+                                // Register the peer
+                                {
+                                    let mut pm = peer_manager_bs.write().await;
+                                    pm.add_peer(peer_addr);
+                                    pm.mark_connected(&peer_id, now);
+                                    metrics_bs.peer_count.set(pm.connected_count() as i64);
+                                }
+
+                                // Spawn a read loop (no SYN cookie for outbound — already done)
+                                spawn_peer_read_loop(
+                                    peer_id.clone(),
+                                    read_half,
+                                    Arc::clone(&block_queue_bs),
+                                    Arc::clone(&conn_registry_bs),
+                                    Arc::clone(&peer_manager_bs),
+                                    Arc::clone(&metrics_bs),
+                                    Arc::clone(&active_elections_bs),
+                                    Arc::clone(&rep_weights_bs),
+                                    Arc::clone(&message_dedup_bs),
+                                    Arc::clone(&online_weight_sampler_bs),
+                                    None,
+                                    ip.clone(),
+                                    Arc::clone(&frontier_bs),
+                                    Arc::clone(&store_bs2),
+                                );
+
+                                tracing::info!(peer = %peer_id, "bootstrap peer connected");
+
+                                // Check if we need to bootstrap — if our frontier
+                                // is empty, we have no ledger data and need to pull
+                                // everything from this peer.
+                                let local_frontier_count =
+                                    { frontier_bs.read().await.account_count() };
+
+                                if local_frontier_count == 0 {
+                                    tracing::info!(
+                                        peer = %peer_id,
+                                        "local frontier is empty — initiating bootstrap sync"
+                                    );
+
+                                    let mut bootstrap_client =
+                                        crate::bootstrap::BootstrapClient::new(10_000);
+
+                                    // Step 1: Request frontiers from the peer
+                                    let frontier_req = bootstrap_client.start_frontier_scan();
+                                    let wire_req = WireMessage::Bootstrap(frontier_req);
+                                    let req_bytes = match bincode::serialize(&wire_req) {
+                                        Ok(b) => b,
+                                        Err(e) => {
+                                            tracing::error!(
+                                                "failed to serialize frontier req: {e}"
+                                            );
+                                            continue;
+                                        }
+                                    };
+
+                                    // Send the frontier request to the peer
+                                    {
+                                        let registry = conn_registry_bs.read().await;
+                                        if let Some(writer) = registry.get(&peer_id) {
+                                            if let Err(e) = write_framed(&writer, &req_bytes).await
+                                            {
+                                                tracing::warn!(
+                                                    peer = %peer_id,
+                                                    "failed to send frontier request: {e}"
+                                                );
+                                            }
+                                        } else {
                                             tracing::warn!(
                                                 peer = %peer_id,
-                                                "failed to send frontier request: {e}"
+                                                "no writer found in registry for bootstrap peer"
                                             );
                                         }
-                                    } else {
-                                        tracing::warn!(
+                                    }
+
+                                    tracing::info!(
+                                        peer = %peer_id,
+                                        "bootstrap frontier request sent — blocks will arrive via read loop"
+                                    );
+                                } else {
+                                    tracing::debug!(
+                                        peer = %peer_id,
+                                        frontier_accounts = local_frontier_count,
+                                        "frontier not empty — skipping bootstrap for this peer"
+                                    );
+                                }
+
+                                // Also check LMDB block count for a more thorough
+                                // behind-detection (frontier may exist but be stale).
+                                if let Ok(block_count) = store_bs.block_store().block_count() {
+                                    if block_count < 10 && local_frontier_count > 0 {
+                                        tracing::info!(
                                             peer = %peer_id,
-                                            "no writer found in registry for bootstrap peer"
+                                            block_count = block_count,
+                                            "very few blocks in store — may need catch-up sync"
                                         );
                                     }
                                 }
-
-                                tracing::info!(
-                                    peer = %peer_id,
-                                    "bootstrap frontier request sent — blocks will arrive via read loop"
-                                );
-                            } else {
-                                tracing::debug!(
-                                    peer = %peer_id,
-                                    frontier_accounts = local_frontier_count,
-                                    "frontier not empty — skipping bootstrap for this peer"
-                                );
                             }
-
-                            // Also check LMDB block count for a more thorough
-                            // behind-detection (frontier may exist but be stale).
-                            if let Ok(block_count) = store_bs.block_store().block_count() {
-                                if block_count < 10 && local_frontier_count > 0 {
-                                    tracing::info!(
-                                        peer = %peer_id,
-                                        block_count = block_count,
-                                        "very few blocks in store — may need catch-up sync"
-                                    );
-                                }
+                            Err(e) => {
+                                tracing::warn!(peer = %addr_str, "bootstrap connection failed: {e}");
                             }
-                        }
-                        Err(e) => {
-                            tracing::warn!(peer = %addr_str, "bootstrap connection failed: {e}");
                         }
                     }
-                }
+
+                    // Wait 30s before retrying disconnected bootstrap peers
+                    tokio::select! {
+                        biased;
+                        _ = shutdown_rx_bs.recv() => {
+                            tracing::debug!("bootstrap reconnect task shutting down");
+                            break;
+                        }
+                        _ = tokio::time::sleep(Duration::from_secs(30)) => {}
+                    }
+                } // end loop
             });
             self.task_handles.push(bs_handle);
         }

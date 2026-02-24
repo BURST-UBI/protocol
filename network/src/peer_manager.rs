@@ -240,6 +240,14 @@ impl PeerManager {
         self.num_connected
     }
 
+    /// Check if a peer is currently connected by its key (ip:port).
+    pub fn is_connected(&self, key: &str) -> bool {
+        self.peers
+            .get(key)
+            .map(|p| p.connected && !p.banned)
+            .unwrap_or(false)
+    }
+
     /// Iterate over all connected (and not-banned) peers.
     pub fn iter_connected(&self) -> impl Iterator<Item = (&String, &PeerState)> {
         self.peers.iter().filter(|(_, p)| p.connected && !p.banned)
