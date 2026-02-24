@@ -198,6 +198,10 @@ pub struct BurstNode {
     block_queue: Arc<BlockPriorityQueue>,
     /// Broadcaster for flooding messages to connected peers.
     broadcaster: Broadcaster,
+    /// Node identity private key for P2P handshakes.
+    node_private_key: burst_types::PrivateKey,
+    /// Node identity address (derived from the keypair).
+    node_address: WalletAddress,
     /// UPnP port mapper for NAT traversal (None if disabled or dev network).
     port_mapper: Option<PortMapper>,
     /// Handles for spawned background tasks (joined during shutdown).
@@ -267,12 +271,15 @@ impl BurstNode {
         // Vote generator — produce votes when acting as a representative.
         // Generate a transient node key; in production the key would come
         // from persistent configuration.
+        let vote_kp = burst_crypto::generate_keypair();
         let vote_generator = {
-            let kp = burst_crypto::generate_keypair();
-            let rep_addr = burst_crypto::derive_address(&kp.public);
+            let rep_addr = burst_crypto::derive_address(&vote_kp.public);
             tracing::info!(representative = %rep_addr, "generated node representative key");
-            Arc::new(Mutex::new(VoteGenerator::new(rep_addr, kp.private.0)))
+            Arc::new(Mutex::new(VoteGenerator::new(rep_addr, vote_kp.private.0)))
         };
+        let node_kp = burst_crypto::generate_keypair();
+        let node_address = burst_crypto::derive_address(&node_kp.public);
+        let node_private_key = node_kp.private;
 
         // Representative weight cache (rebuilt at startup from the account set)
         let rep_weights = Arc::new(RwLock::new(RepWeightCache::new()));
@@ -397,6 +404,8 @@ impl BurstNode {
             ))),
             block_queue,
             broadcaster,
+            node_private_key,
+            node_address,
             port_mapper: None,
             task_handles: Vec::new(),
         };
@@ -2696,6 +2705,7 @@ impl BurstNode {
         let online_weight_sampler_p2p = Arc::clone(&self.online_weight_sampler);
         let frontier_p2p = Arc::clone(&self.frontier);
         let store_p2p = Arc::clone(&self.store);
+        let node_address_p2p = self.node_address.clone();
 
         let p2p_handle = tokio::spawn(async move {
             let listener = match tokio::net::TcpListener::bind(format!("0.0.0.0:{p2p_port}")).await
@@ -2759,7 +2769,7 @@ impl BurstNode {
 
                                 // Send the cookie challenge before registering
                                 let challenge = WireMessage::Handshake(crate::wire_message::HandshakeMsg {
-                                    node_id: WalletAddress::new("brst_node"),
+                                    node_id: node_address_p2p.clone(),
                                     cookie: Some(cookie),
                                     cookie_signature: None,
                                 });
@@ -2887,6 +2897,8 @@ impl BurstNode {
             let online_weight_sampler_bs = Arc::clone(&self.online_weight_sampler);
             let frontier_bs = Arc::clone(&self.frontier);
             let store_bs = Arc::clone(&self.store);
+            let node_private_bs = burst_types::PrivateKey(self.node_private_key.0);
+            let node_address_bs = self.node_address.clone();
             let store_bs2 = Arc::clone(&self.store);
 
             let bs_handle = tokio::spawn(async move {
@@ -2910,8 +2922,70 @@ impl BurstNode {
                             let peer_id = format!("{ip}:{port}");
                             let now = unix_now_secs();
 
-                            // Split the TCP stream into read and write halves
-                            let (read_half, write_half) = stream.into_split();
+                            let (read_half, mut write_half) = stream.into_split();
+
+                            // Read the cookie challenge from the peer
+                            let mut reader = tokio::io::BufReader::new(read_half);
+                            let cookie_opt = {
+                                use tokio::io::AsyncReadExt;
+                                let mut len_buf = [0u8; 4];
+                                match tokio::time::timeout(
+                                    std::time::Duration::from_secs(10),
+                                    reader.read_exact(&mut len_buf),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(_)) => {
+                                        let body_len = u32::from_be_bytes(len_buf) as usize;
+                                        if body_len > 0 && body_len < 65536 {
+                                            let mut body = vec![0u8; body_len];
+                                            if reader.read_exact(&mut body).await.is_ok() {
+                                                if let Ok(WireMessage::Handshake(hs)) =
+                                                    bincode::deserialize::<WireMessage>(&body)
+                                                {
+                                                    hs.cookie
+                                                } else {
+                                                    None
+                                                }
+                                            } else {
+                                                None
+                                            }
+                                        } else {
+                                            None
+                                        }
+                                    }
+                                    _ => None,
+                                }
+                            };
+
+                            // Sign and send cookie response
+                            if let Some(cookie) = cookie_opt {
+                                use tokio::io::AsyncWriteExt;
+                                let sig = burst_crypto::sign_message(&cookie, &node_private_bs);
+                                let response =
+                                    WireMessage::Handshake(crate::wire_message::HandshakeMsg {
+                                        node_id: node_address_bs.clone(),
+                                        cookie: None,
+                                        cookie_signature: Some(sig),
+                                    });
+                                if let Ok(bytes) = bincode::serialize(&response) {
+                                    let len_bytes = (bytes.len() as u32).to_be_bytes();
+                                    let _ = write_half.write_all(&len_bytes).await;
+                                    let _ = write_half.write_all(&bytes).await;
+                                    let _ = write_half.flush().await;
+                                    tracing::debug!(
+                                        peer = %peer_id,
+                                        "sent cookie response to bootstrap peer"
+                                    );
+                                }
+                            } else {
+                                tracing::warn!(
+                                    peer = %peer_id,
+                                    "no cookie challenge received from bootstrap peer"
+                                );
+                            }
+
+                            let read_half = reader.into_inner();
 
                             // Register write half in the connection registry
                             {
@@ -2927,7 +3001,7 @@ impl BurstNode {
                                 metrics_bs.peer_count.set(pm.connected_count() as i64);
                             }
 
-                            // Spawn a read loop (no SYN cookie for outbound connections)
+                            // Spawn a read loop (no SYN cookie for outbound — already done)
                             spawn_peer_read_loop(
                                 peer_id.clone(),
                                 read_half,

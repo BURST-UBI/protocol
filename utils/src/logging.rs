@@ -2,10 +2,16 @@
 
 /// Initialize the tracing subscriber with sensible defaults.
 ///
-/// Respects the `RUST_LOG` environment variable for filtering.
+/// Checks `RUST_LOG` first, then falls back to `BURST_LOG_LEVEL`.
+/// If neither is set, defaults to `info`.
 pub fn init_tracing() {
     use tracing_subscriber::EnvFilter;
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .init();
+    let filter = if std::env::var("RUST_LOG").is_ok() {
+        EnvFilter::from_default_env()
+    } else if let Ok(level) = std::env::var("BURST_LOG_LEVEL") {
+        EnvFilter::new(level)
+    } else {
+        EnvFilter::new("info")
+    };
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 }
