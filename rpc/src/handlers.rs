@@ -1603,14 +1603,16 @@ fn submit_block(block: &burst_ledger::StateBlock, state: &RpcState) -> Result<bo
         .block_processor
         .process_block(&block_bytes)
         .map_err(RpcError::Server)?;
-    let accepted = matches!(result, crate::server::ProcessResult::Accepted);
+    let accepted = matches!(
+        result,
+        crate::server::ProcessResult::Accepted | crate::server::ProcessResult::Queued
+    );
     if !accepted {
         let detail = match &result {
             crate::server::ProcessResult::Rejected(r) => r.clone(),
             crate::server::ProcessResult::Duplicate => "duplicate block".to_string(),
             crate::server::ProcessResult::Fork => "fork detected".to_string(),
             crate::server::ProcessResult::Gap => "gap — previous block unknown".to_string(),
-            crate::server::ProcessResult::Queued => "queued".to_string(),
             _ => "unknown".to_string(),
         };
         return Err(RpcError::Server(format!("block not accepted: {detail}")));
