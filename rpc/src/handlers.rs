@@ -2233,3 +2233,318 @@ pub async fn handle_change_rep_simple(
         new_representative: req.new_representative,
     }))
 }
+
+// ── governance_propose_simple (create a parameter change proposal) ────
+
+#[derive(Debug, Deserialize)]
+pub struct GovernanceProposeSimpleRequest {
+    pub private_key: String,
+    pub param: String,
+    pub new_value: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GovernanceProposeSimpleResponse {
+    pub block_hash: String,
+    pub proposal_hash: String,
+    pub account: String,
+    pub param: String,
+    pub new_value: String,
+}
+
+pub async fn handle_governance_propose_simple(
+    params: serde_json::Value,
+    state: &RpcState,
+) -> Result<serde_json::Value, RpcError> {
+    require_faucet(state)?;
+
+    let req: GovernanceProposeSimpleRequest =
+        serde_json::from_value(params).map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
+    let private_key = parse_private_key(&req.private_key)?;
+    let public_key = burst_crypto::public_from_private(&private_key);
+    let address = burst_crypto::derive_address(&public_key);
+
+    let account = state
+        .account_store
+        .get_account(&address)
+        .map_err(|e| account_not_found(e, address.as_str()))?;
+
+    if account.head == BlockHash::ZERO {
+        return Err(RpcError::InvalidRequest(
+            "account has no blocks yet — burn BRN first".into(),
+        ));
+    }
+
+    let param = parse_governable_param(&req.param)?;
+    let new_value: u128 = req
+        .new_value
+        .parse()
+        .map_err(|e| RpcError::InvalidRequest(format!("invalid new_value: {e}")))?;
+
+    let content = burst_governance::ProposalContent::ParameterChange {
+        param: param.clone(),
+        new_value,
+    };
+    let content_bytes = bincode::serialize(&content)
+        .map_err(|e| RpcError::Server(format!("failed to serialize proposal content: {e}")))?;
+    if content_bytes.len() > 32 {
+        return Err(RpcError::InvalidRequest(
+            "proposal content too large for link field (max 32 bytes)".into(),
+        ));
+    }
+    let mut link_bytes = [0u8; 32];
+    link_bytes[..content_bytes.len()].copy_from_slice(&content_bytes);
+    let link = BlockHash::new(link_bytes);
+
+    let now = Timestamp::now();
+    let brn_state = brn_state_from_account(&account, state.params.brn_rate);
+    let brn_balance = {
+        let brn = state.brn_engine.lock().await;
+        brn.compute_balance(&brn_state, now)
+    };
+
+    let tx_hash = TxHash::new(burst_crypto::blake2b_256(
+        &[
+            address.as_str().as_bytes(),
+            &now.as_secs().to_be_bytes(),
+            b"governance_propose",
+        ]
+        .concat(),
+    ));
+
+    let pk_bytes = private_key.0;
+    let block = tokio::task::spawn_blocking({
+        let address = address.clone();
+        let representative = account.representative.clone();
+        let previous = account.head;
+        let trst_balance = account.trst_balance;
+        let work_gen = state.work_generator.clone();
+        let min_diff = state.params.min_work_difficulty;
+        move || {
+            let pk = burst_types::PrivateKey(pk_bytes);
+            build_and_sign_block(
+                burst_ledger::BlockType::GovernanceProposal,
+                &address,
+                previous,
+                &representative,
+                brn_balance,
+                trst_balance,
+                link,
+                TxHash::ZERO,
+                tx_hash,
+                &pk,
+                &work_gen,
+                min_diff,
+            )
+        }
+    })
+    .await
+    .map_err(|e| RpcError::Server(format!("block build task failed: {e}")))??;
+
+    submit_block(&block, state)?;
+
+    let mut updated = account.clone();
+    updated.head = block.hash;
+    updated.block_count += 1;
+
+    state
+        .account_store
+        .put_account(&updated)
+        .map_err(|e| RpcError::Store(format!("failed to update account: {e}")))?;
+
+    let block_bytes = bincode::serialize(&block)
+        .map_err(|e| RpcError::Server(format!("block serialization failed: {e}")))?;
+    let _ = state
+        .block_store
+        .put_block_with_account(&block.hash, &block_bytes, &address);
+
+    Ok(to_value(&GovernanceProposeSimpleResponse {
+        block_hash: format!("{}", block.hash),
+        proposal_hash: format!("{}", tx_hash),
+        account: address.to_string(),
+        param: req.param,
+        new_value: req.new_value,
+    }))
+}
+
+// ── governance_vote_simple (vote on a governance proposal) ───────────
+
+#[derive(Debug, Deserialize)]
+pub struct GovernanceVoteSimpleRequest {
+    pub private_key: String,
+    pub proposal_hash: String,
+    pub vote: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GovernanceVoteSimpleResponse {
+    pub block_hash: String,
+    pub account: String,
+    pub proposal_hash: String,
+    pub vote: String,
+}
+
+pub async fn handle_governance_vote_simple(
+    params: serde_json::Value,
+    state: &RpcState,
+) -> Result<serde_json::Value, RpcError> {
+    require_faucet(state)?;
+
+    let req: GovernanceVoteSimpleRequest =
+        serde_json::from_value(params).map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
+    let private_key = parse_private_key(&req.private_key)?;
+    let public_key = burst_crypto::public_from_private(&private_key);
+    let address = burst_crypto::derive_address(&public_key);
+
+    let account = state
+        .account_store
+        .get_account(&address)
+        .map_err(|e| account_not_found(e, address.as_str()))?;
+
+    if account.head == BlockHash::ZERO {
+        return Err(RpcError::InvalidRequest(
+            "account has no blocks yet — burn BRN first".into(),
+        ));
+    }
+
+    let vote_byte: u8 = match req.vote.to_lowercase().as_str() {
+        "yea" | "yes" | "y" => 0,
+        "nay" | "no" | "n" => 1,
+        "abstain" | "a" => 2,
+        _ => {
+            return Err(RpcError::InvalidRequest(
+                "vote must be 'yea', 'nay', or 'abstain'".into(),
+            ))
+        }
+    };
+
+    let proposal_hash_bytes = hex::decode(&req.proposal_hash)
+        .map_err(|e| RpcError::InvalidRequest(format!("invalid proposal_hash hex: {e}")))?;
+    if proposal_hash_bytes.len() != 32 {
+        return Err(RpcError::InvalidRequest(
+            "proposal_hash must be 32 bytes (64 hex chars)".into(),
+        ));
+    }
+    let mut ph = [0u8; 32];
+    ph.copy_from_slice(&proposal_hash_bytes);
+    let link = BlockHash::new(ph);
+
+    let mut tx_bytes = [0u8; 32];
+    tx_bytes[0] = vote_byte;
+    let transaction = TxHash::new(tx_bytes);
+
+    let now = Timestamp::now();
+    let brn_state = brn_state_from_account(&account, state.params.brn_rate);
+    let brn_balance = {
+        let brn = state.brn_engine.lock().await;
+        brn.compute_balance(&brn_state, now)
+    };
+
+    let pk_bytes = private_key.0;
+    let block = tokio::task::spawn_blocking({
+        let address = address.clone();
+        let representative = account.representative.clone();
+        let previous = account.head;
+        let trst_balance = account.trst_balance;
+        let work_gen = state.work_generator.clone();
+        let min_diff = state.params.min_work_difficulty;
+        move || {
+            let pk = burst_types::PrivateKey(pk_bytes);
+            build_and_sign_block(
+                burst_ledger::BlockType::GovernanceVote,
+                &address,
+                previous,
+                &representative,
+                brn_balance,
+                trst_balance,
+                link,
+                TxHash::ZERO,
+                transaction,
+                &pk,
+                &work_gen,
+                min_diff,
+            )
+        }
+    })
+    .await
+    .map_err(|e| RpcError::Server(format!("block build task failed: {e}")))??;
+
+    submit_block(&block, state)?;
+
+    let mut updated = account.clone();
+    updated.head = block.hash;
+    updated.block_count += 1;
+
+    state
+        .account_store
+        .put_account(&updated)
+        .map_err(|e| RpcError::Store(format!("failed to update account: {e}")))?;
+
+    let block_bytes = bincode::serialize(&block)
+        .map_err(|e| RpcError::Server(format!("block serialization failed: {e}")))?;
+    let _ = state
+        .block_store
+        .put_block_with_account(&block.hash, &block_bytes, &address);
+
+    let vote_name = match vote_byte {
+        0 => "yea",
+        1 => "nay",
+        _ => "abstain",
+    };
+
+    Ok(to_value(&GovernanceVoteSimpleResponse {
+        block_hash: format!("{}", block.hash),
+        account: address.to_string(),
+        proposal_hash: req.proposal_hash,
+        vote: vote_name.to_string(),
+    }))
+}
+
+fn parse_governable_param(name: &str) -> Result<burst_governance::GovernableParam, RpcError> {
+    use burst_governance::GovernableParam;
+    match name {
+        "brn_rate" => Ok(GovernableParam::BrnRate),
+        "trst_expiry_secs" => Ok(GovernableParam::TrstExpirySecs),
+        "endorsement_threshold" => Ok(GovernableParam::EndorsementThreshold),
+        "endorsement_burn_amount" => Ok(GovernableParam::EndorsementBurnAmount),
+        "num_verifiers" => Ok(GovernableParam::NumVerifiers),
+        "verification_threshold_bps" => Ok(GovernableParam::VerificationThresholdBps),
+        "verifier_stake_amount" => Ok(GovernableParam::VerifierStakeAmount),
+        "max_revotes" => Ok(GovernableParam::MaxRevotes),
+        "challenge_stake_amount" => Ok(GovernableParam::ChallengeStakeAmount),
+        "governance_proposal_duration_secs" => Ok(GovernableParam::GovernanceProposalDurationSecs),
+        "governance_exploration_duration_secs" => {
+            Ok(GovernableParam::GovernanceExplorationDurationSecs)
+        }
+        "governance_cooldown_duration_secs" => Ok(GovernableParam::GovernanceCooldownDurationSecs),
+        "governance_promotion_duration_secs" => {
+            Ok(GovernableParam::GovernancePromotionDurationSecs)
+        }
+        "governance_supermajority_bps" => Ok(GovernableParam::GovernanceSupermajorityBps),
+        "governance_quorum_bps" => Ok(GovernableParam::GovernanceQuorumBps),
+        "governance_proposal_endorsements" => Ok(GovernableParam::GovernanceProposalEndorsements),
+        "governance_ema_participation_bps" => Ok(GovernableParam::GovernanceEmaParticipationBps),
+        "consti_supermajority_bps" => Ok(GovernableParam::ConstiSupermajorityBps),
+        "consti_quorum_bps" => Ok(GovernableParam::ConstiQuorumBps),
+        "verification_timeout_secs" => Ok(GovernableParam::VerificationTimeoutSecs),
+        "challenge_duration_secs" => Ok(GovernableParam::ChallengeDurationSecs),
+        "endorser_reward_bps" => Ok(GovernableParam::EndorserRewardBps),
+        "new_wallet_spending_limit" => Ok(GovernableParam::NewWalletSpendingLimit),
+        "new_wallet_limit_duration_secs" => Ok(GovernableParam::NewWalletLimitDurationSecs),
+        "bootstrap_exit_threshold" => Ok(GovernableParam::BootstrapExitThreshold),
+        "new_wallet_tx_limit_per_day" => Ok(GovernableParam::NewWalletTxLimitPerDay),
+        "new_wallet_rate_limit_duration_secs" => {
+            Ok(GovernableParam::NewWalletRateLimitDurationSecs)
+        }
+        "governance_proposal_cost" => Ok(GovernableParam::GovernanceProposalCost),
+        "governance_max_rounds" => Ok(GovernableParam::GovernanceMaxRounds),
+        "governance_proposal_window_secs" => Ok(GovernableParam::GovernanceProposalWindowSecs),
+        "governance_propagation_buffer_secs" => {
+            Ok(GovernableParam::GovernancePropagationBufferSecs)
+        }
+        "min_work_difficulty" => Ok(GovernableParam::MinWorkDifficulty),
+        _ => Err(RpcError::InvalidRequest(format!(
+            "unknown governable parameter: '{name}'"
+        ))),
+    }
+}

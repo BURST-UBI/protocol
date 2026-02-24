@@ -186,6 +186,11 @@ async fn main() -> anyhow::Result<()> {
                     tracing::info!("Bootstrap peers: {}", config.bootstrap_peers.join(", "));
                 }
 
+                let mut config = config;
+                if network == NetworkId::Test {
+                    config.params = burst_types::ProtocolParams::testnet_defaults();
+                    tracing::info!("using fast governance timelines for testnet");
+                }
                 let mut node = burst_node::BurstNode::new(config).await?;
                 node.start().await?;
 

@@ -183,6 +183,25 @@ impl ProtocolParams {
     }
 }
 
+impl ProtocolParams {
+    /// Testnet overrides — fast governance for interactive testing.
+    pub fn testnet_defaults() -> Self {
+        let mut p = Self::burst_defaults();
+        p.governance_proposal_duration_secs = 30;
+        p.governance_exploration_duration_secs = 60;
+        p.governance_cooldown_duration_secs = 15;
+        p.governance_promotion_duration_secs = 60;
+        p.governance_proposal_endorsements = 0;
+        p.governance_proposal_cost = 0;
+        p.governance_quorum_bps = 1; // 0.01% — effectively any vote counts
+        p.governance_supermajority_bps = 5100; // 51%
+        p.governance_propagation_buffer_secs = 5;
+        p.governance_proposal_window_secs = 30;
+        p.min_work_difficulty = 0xffff_f000_0000_0000;
+        p
+    }
+}
+
 /// Default is the BURST UBI configuration.
 impl Default for ProtocolParams {
     fn default() -> Self {
