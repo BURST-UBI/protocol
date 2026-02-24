@@ -2081,3 +2081,123 @@ pub async fn handle_receive_simple(
         trst_after: trst_after.to_string(),
     }))
 }
+
+// ── change_rep_simple (change consensus representative) ──────────────
+
+#[derive(Debug, Deserialize)]
+pub struct ChangeRepSimpleRequest {
+    pub private_key: String,
+    pub new_representative: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChangeRepSimpleResponse {
+    pub block_hash: String,
+    pub account: String,
+    pub old_representative: String,
+    pub new_representative: String,
+}
+
+pub async fn handle_change_rep_simple(
+    params: serde_json::Value,
+    state: &RpcState,
+) -> Result<serde_json::Value, RpcError> {
+    require_faucet(state)?;
+
+    let req: ChangeRepSimpleRequest =
+        serde_json::from_value(params).map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
+    validate_account(&req.new_representative)?;
+    let private_key = parse_private_key(&req.private_key)?;
+    let public_key = burst_crypto::public_from_private(&private_key);
+    let address = burst_crypto::derive_address(&public_key);
+
+    let account = state
+        .account_store
+        .get_account(&address)
+        .map_err(|e| account_not_found(e, address.as_str()))?;
+
+    if account.head == BlockHash::ZERO {
+        return Err(RpcError::InvalidRequest(
+            "account has no blocks yet — send or receive first".into(),
+        ));
+    }
+
+    let old_representative = account.representative.clone();
+    let new_representative = WalletAddress::new(req.new_representative.clone());
+
+    if old_representative == new_representative {
+        return Err(RpcError::InvalidRequest(
+            "new representative is the same as current".into(),
+        ));
+    }
+
+    let now = Timestamp::now();
+    let brn_state = brn_state_from_account(&account, state.params.brn_rate);
+    let brn_balance = {
+        let brn = state.brn_engine.lock().await;
+        brn.compute_balance(&brn_state, now)
+    };
+
+    let tx_hash = TxHash::new(burst_crypto::blake2b_256(
+        &[
+            address.as_str().as_bytes(),
+            &now.as_secs().to_be_bytes(),
+            b"change_rep",
+        ]
+        .concat(),
+    ));
+
+    let pk_bytes = private_key.0;
+    let block = tokio::task::spawn_blocking({
+        let address = address.clone();
+        let new_rep = new_representative.clone();
+        let previous = account.head;
+        let trst_balance = account.trst_balance;
+        let work_gen = state.work_generator.clone();
+        let min_diff = state.params.min_work_difficulty;
+        move || {
+            let pk = burst_types::PrivateKey(pk_bytes);
+            build_and_sign_block(
+                burst_ledger::BlockType::ChangeRepresentative,
+                &address,
+                previous,
+                &new_rep,
+                brn_balance,
+                trst_balance,
+                BlockHash::ZERO,
+                TxHash::ZERO,
+                tx_hash,
+                &pk,
+                &work_gen,
+                min_diff,
+            )
+        }
+    })
+    .await
+    .map_err(|e| RpcError::Server(format!("block build task failed: {e}")))??;
+
+    submit_block(&block, state)?;
+
+    let mut updated = account.clone();
+    updated.head = block.hash;
+    updated.block_count += 1;
+    updated.representative = new_representative.clone();
+
+    state
+        .account_store
+        .put_account(&updated)
+        .map_err(|e| RpcError::Store(format!("failed to update account: {e}")))?;
+
+    let block_bytes = bincode::serialize(&block)
+        .map_err(|e| RpcError::Server(format!("block serialization failed: {e}")))?;
+    let _ = state
+        .block_store
+        .put_block_with_account(&block.hash, &block_bytes, &address);
+
+    Ok(to_value(&ChangeRepSimpleResponse {
+        block_hash: format!("{}", block.hash),
+        account: address.to_string(),
+        old_representative: old_representative.to_string(),
+        new_representative: req.new_representative,
+    }))
+}

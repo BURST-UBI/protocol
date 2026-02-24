@@ -350,6 +350,7 @@ async fn dispatch_action(
         "burn_simple" => handlers::handle_burn_simple(params, state).await,
         "send_simple" => handlers::handle_send_simple(params, state).await,
         "receive_simple" => handlers::handle_receive_simple(params, state).await,
+        "change_rep_simple" => handlers::handle_change_rep_simple(params, state).await,
         other => {
             warn!("unknown RPC action: {other}");
             Err(RpcError::InvalidRequest(format!("unknown action: {other}")))
