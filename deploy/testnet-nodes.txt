@@ -1,0 +1,7 @@
+# BURST Testnet Nodes
+# First node is the seed node (RPC/WS/faucet enabled)
+167.172.83.88
+159.65.80.231
+143.244.131.5
+157.230.164.117
+164.92.242.73
