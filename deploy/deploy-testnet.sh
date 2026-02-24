@@ -213,6 +213,17 @@ step_install_deps() {
     local output
     output=$(ssh_cmd "$host" "
         export DEBIAN_FRONTEND=noninteractive
+
+        # Wait for any running apt/dpkg locks (unattended-upgrades, etc.)
+        echo 'Waiting for apt locks...'
+        while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || \
+              fuser /var/lib/apt/lists/lock >/dev/null 2>&1 || \
+              fuser /var/cache/apt/archives/lock >/dev/null 2>&1; do
+            echo '  apt is locked by another process, waiting 5s...'
+            sleep 5
+        done
+        echo 'apt lock is free'
+
         apt-get update -qq
         apt-get install -y -qq git ca-certificates curl gnupg lsb-release
 
