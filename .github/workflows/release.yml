@@ -5,6 +5,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   REGISTRY: ghcr.io
@@ -12,8 +16,9 @@ env:
 
 jobs:
   build:
-    name: Build binary & Docker image
+    name: Build & push
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
@@ -25,7 +30,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
+          shared-key: burst-nightly
+          save-if: true
           cache-on-failure: true
+          cache-all-crates: true
 
       - name: Build release binary
         run: cargo build --release -p burst-daemon
