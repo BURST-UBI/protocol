@@ -226,7 +226,7 @@ impl BurstNode {
         let peer_manager = PeerManager::with_config(
             config.max_peers,
             config.bootstrap_peers.clone(),
-            60, // keepalive interval
+            15, // keepalive interval (must be < READ_TIMEOUT of 30s)
         );
         let peer_manager = Arc::new(RwLock::new(peer_manager));
 
