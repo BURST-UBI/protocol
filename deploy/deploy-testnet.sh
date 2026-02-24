@@ -414,7 +414,8 @@ step_watchtower() {
         --name watchtower \
         --restart unless-stopped \
         -v /var/run/docker.sock:/var/run/docker.sock \
-        containrrr/watchtower \
+        -e DOCKER_API_VERSION=1.44 \
+        containrrr/watchtower:latest \
         --interval 30 \
         --cleanup \
         --include-stopped \
