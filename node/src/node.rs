@@ -3099,6 +3099,7 @@ impl BurstNode {
 
         // ── Keepalive task ────────────────────────────────────────────────
         let peer_manager_ka = Arc::clone(&self.peer_manager);
+        let conn_registry_ka = Arc::clone(&self.connection_registry);
         let mut shutdown_rx_ka = self.shutdown.subscribe();
 
         let ka_handle = tokio::spawn(async move {
@@ -3116,6 +3117,37 @@ impl BurstNode {
                         pm.check_bans(now);
                         if pm.should_keepalive(now) {
                             pm.record_keepalive(now);
+
+                            let connected_peers: Vec<String> = pm
+                                .random_peers(8)
+                                .iter()
+                                .map(|a| format!("{}:{}", a.ip, a.port))
+                                .collect();
+
+                            let msg = WireMessage::Keepalive(
+                                crate::wire_message::KeepaliveMsg {
+                                    peers: connected_peers,
+                                },
+                            );
+                            if let Ok(bytes) = bincode::serialize(&msg) {
+                                let registry = conn_registry_ka.read().await;
+                                let peer_ids: Vec<String> =
+                                    registry.peer_ids().into_iter().cloned().collect();
+                                drop(registry);
+
+                                for pid in &peer_ids {
+                                    let registry = conn_registry_ka.read().await;
+                                    if let Some(writer) = registry.get(pid) {
+                                        if let Err(e) = write_framed(&writer, &bytes).await {
+                                            tracing::debug!(
+                                                peer = %pid,
+                                                error = %e,
+                                                "keepalive send failed"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
                             tracing::trace!(
                                 connected = pm.connected_count(),
                                 "keepalive round"

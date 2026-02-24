@@ -71,6 +71,11 @@ impl ConnectionRegistry {
     pub fn is_empty(&self) -> bool {
         self.connections.is_empty()
     }
+
+    /// All registered peer IDs.
+    pub fn peer_ids(&self) -> Vec<&String> {
+        self.connections.keys().collect()
+    }
 }
 
 impl Default for ConnectionRegistry {
@@ -395,6 +400,18 @@ async fn peer_read_loop(
                     peers = ka.peers.len(),
                     "received keepalive"
                 );
+                if !ka.peers.is_empty() {
+                    let mut pm = peer_manager.write().await;
+                    for addr_str in &ka.peers {
+                        let parts: Vec<&str> = addr_str.rsplitn(2, ':').collect();
+                        if parts.len() == 2 {
+                            if let Ok(port) = parts[0].parse::<u16>() {
+                                let ip = parts[1].to_string();
+                                pm.add_peer(burst_messages::PeerAddress { ip, port });
+                            }
+                        }
+                    }
+                }
             }
             Ok(WireMessage::Bootstrap(msg)) => match msg {
                 BootstrapMessage::FrontierReq {
