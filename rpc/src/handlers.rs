@@ -1101,11 +1101,7 @@ pub async fn handle_telemetry(
 
     let block_count = state.block_store.block_count().unwrap_or(0);
     let account_count = state.account_store.account_count().unwrap_or(0);
-    let peer_count = state
-        .online_reps
-        .read()
-        .map(|reps| reps.len() as u32)
-        .unwrap_or(0);
+    let peer_count = state.peer_manager.read().await.connected_count() as u32;
 
     Ok(to_value(&TelemetryResponse {
         block_count,
@@ -1114,6 +1110,15 @@ pub async fn handle_telemetry(
         protocol_version: 1,
         uptime_secs: now.saturating_sub(state.started_at),
     }))
+}
+
+pub async fn handle_peers(
+    _params: serde_json::Value,
+    state: &RpcState,
+) -> Result<serde_json::Value, RpcError> {
+    let pm = state.peer_manager.read().await;
+    let peers: Vec<String> = pm.iter_connected().map(|(id, _)| id.clone()).collect();
+    Ok(serde_json::json!({ "peers": peers, "count": peers.len() }))
 }
 
 // ═══════════════════════════════════════════════════════════════════════

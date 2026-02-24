@@ -10,6 +10,7 @@ burst-types = { workspace = true }
 burst-store = { workspace = true }
 burst-brn = { workspace = true }
 burst-consensus = { workspace = true }
+burst-network = { workspace = true }
 burst-work = { workspace = true }
 burst-ledger = { workspace = true }
 burst-governance = { workspace = true }

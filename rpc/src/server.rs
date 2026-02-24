@@ -136,6 +136,8 @@ pub struct RpcState {
     /// Online representatives, updated by the peer manager.
     /// Each entry is (address, voting_weight).
     pub online_reps: Arc<std::sync::RwLock<Vec<(WalletAddress, u128)>>>,
+    /// Peer manager for connected peer count.
+    pub peer_manager: Arc<tokio::sync::RwLock<burst_network::PeerManager>>,
     /// Whether the testnet faucet endpoint is enabled. Default: `false`.
     /// Only set to `true` on dev/test nodes.
     pub enable_faucet: bool,
@@ -321,6 +323,7 @@ async fn dispatch_action(
             handlers::handle_governance_proposal_info(params, state).await
         }
         "telemetry" => handlers::handle_telemetry(params, state).await,
+        "peers" => handlers::handle_peers(params, state).await,
         "verification_status" => handlers::handle_verification_status(params, state).await,
         "representatives" => handlers::handle_representatives(params, state).await,
         "representatives_online" => handlers::handle_representatives_online(params, state).await,

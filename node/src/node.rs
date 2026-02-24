@@ -3228,6 +3228,7 @@ impl BurstNode {
                     frontier: Arc::clone(&self.frontier),
                 }),
                 online_reps: Arc::new(std::sync::RwLock::new(Vec::new())),
+                peer_manager: Arc::clone(&self.peer_manager),
                 enable_faucet: self.config.enable_faucet,
                 rate_limiter: Arc::new(burst_rpc::RateLimiter::new(100)),
             });
