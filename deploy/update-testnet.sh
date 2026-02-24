@@ -217,21 +217,39 @@ do_update() {
         *) failed=$((failed + 1)); failed_hosts+=("$SEED_IP") ;;
     esac
 
-    if [ ${#NODE_IPS[@]} -gt 0 ]; then
+    if [ ${#NODE_IPS[@]} -gt 0 ] && [ $failed -eq 0 ]; then
         sleep 5
-    fi
 
-    local node_num=2
-    for ip in "${NODE_IPS[@]}"; do
         echo ""
-        echo "--- Node ${node_num} ---"
-        update_node "$ip" "$node_num" "false" "$target_commit"
-        case $? in
-            0) succeeded=$((succeeded + 1)) ;;
-            *) failed=$((failed + 1)); failed_hosts+=("$ip") ;;
-        esac
-        node_num=$((node_num + 1))
-    done
+        echo "--- Updating nodes 2-$((${#NODE_IPS[@]} + 1)) in parallel ---"
+
+        local pids=()
+        local node_num=2
+        for ip in "${NODE_IPS[@]}"; do
+            (
+                update_node "$ip" "$node_num" "false" "$target_commit"
+                echo $? > "${STATE_DIR}/${ip}.update_result"
+            ) &
+            pids+=($!)
+            node_num=$((node_num + 1))
+        done
+
+        for pid in "${pids[@]}"; do
+            wait "$pid" 2>/dev/null || true
+        done
+
+        node_num=2
+        for ip in "${NODE_IPS[@]}"; do
+            local rc=1
+            [ -f "${STATE_DIR}/${ip}.update_result" ] && rc=$(cat "${STATE_DIR}/${ip}.update_result")
+            rm -f "${STATE_DIR}/${ip}.update_result"
+            case $rc in
+                0) succeeded=$((succeeded + 1)) ;;
+                *) failed=$((failed + 1)); failed_hosts+=("$ip") ;;
+            esac
+            node_num=$((node_num + 1))
+        done
+    fi
 
     echo ""
     echo "Result: ${succeeded}/${#ALL_IPS[@]} updated"

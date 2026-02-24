@@ -523,6 +523,36 @@ deploy_node() {
     return 0
 }
 
+# ── Deploy a node silently (output to log + result file, for parallel use) ──
+
+deploy_node_bg() {
+    local host="$1" node_num="$2" is_seed="$3" target_commit="$4"
+    local logfile result_file
+    logfile=$(node_log "$host")
+    result_file="${STATE_DIR}/${host}.result"
+
+    # Redirect all step output to logfile only
+    {
+        echo ""
+        echo "################################################################"
+        echo "# DEPLOYMENT RUN — $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "# Target: ${target_commit}"
+        echo "# Node: ${node_num} ($([ "$is_seed" = "true" ] && echo "SEED" || echo "regular"))"
+        echo "################################################################"
+        echo ""
+
+        step_check_ssh "$host"                      || { echo "RESULT:FAIL:ssh"; echo "FAIL" > "$result_file"; return; }
+        step_install_deps "$host"                    || { echo "RESULT:FAIL:deps"; echo "FAIL" > "$result_file"; return; }
+        step_sync_repo "$host" "$target_commit"      || { echo "RESULT:FAIL:repo"; echo "FAIL" > "$result_file"; return; }
+        step_build_image "$host" "$target_commit"    || { echo "RESULT:FAIL:build"; echo "FAIL" > "$result_file"; return; }
+        step_run_container "$host" "$node_num" "$is_seed" || { echo "RESULT:FAIL:container"; echo "FAIL" > "$result_file"; return; }
+        step_verify "$host" "$node_num"              || { echo "RESULT:FAIL:verify"; echo "FAIL" > "$result_file"; return; }
+
+        echo "RESULT:OK"
+        echo "OK" > "$result_file"
+    } >> "$logfile" 2>&1
+}
+
 # ── Main ─────────────────────────────────────────────────────────────
 
 echo -e "${BOLD}=== BURST Testnet Deployment ===${NC}"
@@ -545,33 +575,95 @@ SUCCEEDED=0
 FAILED=0
 FAILED_HOSTS=()
 
-# Seed first
+# ── Step 1: Deploy seed node (must complete first) ───────────────────
+
 deploy_node "$SEED_IP" 1 "true" "$TARGET_COMMIT"
 if [ $? -eq 0 ]; then
     SUCCEEDED=$((SUCCEEDED + 1))
 else
     FAILED=$((FAILED + 1))
     FAILED_HOSTS+=("$SEED_IP")
-fi
-
-# Wait for seed before starting others
-if [ ${#NODE_IPS[@]} -gt 0 ]; then
     echo ""
-    echo "--- Waiting 5s for seed node ---"
-    sleep 5
+    echo -e "${RED}${BOLD}Seed node failed — other nodes need the seed to bootstrap.${NC}"
+    echo -e "${RED}Fix the seed first, then re-run.${NC}"
 fi
 
-node_num=2
-for ip in "${NODE_IPS[@]}"; do
-    deploy_node "$ip" "$node_num" "false" "$TARGET_COMMIT"
-    if [ $? -eq 0 ]; then
-        SUCCEEDED=$((SUCCEEDED + 1))
-    else
-        FAILED=$((FAILED + 1))
-        FAILED_HOSTS+=("$ip")
-    fi
-    node_num=$((node_num + 1))
-done
+# ── Step 2: Deploy remaining nodes in parallel ───────────────────────
+
+if [ ${#NODE_IPS[@]} -gt 0 ] && [ $FAILED -eq 0 ]; then
+    echo ""
+    echo "--- Waiting 5s for seed node to initialize ---"
+    sleep 5
+
+    echo ""
+    echo -e "${BOLD}=== Deploying nodes 2-$((${#NODE_IPS[@]} + 1)) in parallel ===${NC}"
+    echo ""
+
+    # Clear previous result files
+    for ip in "${NODE_IPS[@]}"; do
+        rm -f "${STATE_DIR}/${ip}.result"
+    done
+
+    # Launch all in background
+    PIDS=()
+    node_num=2
+    for ip in "${NODE_IPS[@]}"; do
+        echo -e "  ${CYAN}Starting deploy for node ${node_num} (${ip})...${NC}"
+        deploy_node_bg "$ip" "$node_num" "false" "$TARGET_COMMIT" &
+        PIDS+=($!)
+        node_num=$((node_num + 1))
+    done
+
+    echo ""
+    echo -e "  ${#PIDS[@]} deploys running in parallel. Waiting..."
+    echo ""
+
+    # Progress monitor — poll result files
+    TOTAL_PARALLEL=${#NODE_IPS[@]}
+    while true; do
+        DONE=0
+        for ip in "${NODE_IPS[@]}"; do
+            [ -f "${STATE_DIR}/${ip}.result" ] && DONE=$((DONE + 1))
+        done
+        if [ $DONE -ge $TOTAL_PARALLEL ]; then
+            break
+        fi
+        echo -ne "  \r  Progress: ${DONE}/${TOTAL_PARALLEL} nodes finished..."
+        sleep 5
+    done
+    echo -e "\r  Progress: ${TOTAL_PARALLEL}/${TOTAL_PARALLEL} nodes finished.   "
+
+    # Wait for all background processes to fully exit
+    for pid in "${PIDS[@]}"; do
+        wait "$pid" 2>/dev/null || true
+    done
+
+    # Collect results
+    echo ""
+    node_num=2
+    for ip in "${NODE_IPS[@]}"; do
+        result="FAIL"
+        [ -f "${STATE_DIR}/${ip}.result" ] && result=$(cat "${STATE_DIR}/${ip}.result")
+        rm -f "${STATE_DIR}/${ip}.result"
+
+        if [ "$result" = "OK" ]; then
+            echo -e "  ${GREEN}✓ Node ${node_num} (${ip}) — deployed${NC}"
+            SUCCEEDED=$((SUCCEEDED + 1))
+        else
+            # Find which step failed from the log
+            fail_step=$(grep "RESULT:FAIL:" "$(node_log "$ip")" 2>/dev/null | tail -1 | cut -d: -f3)
+            echo -e "  ${RED}✗ Node ${node_num} (${ip}) — failed at: ${fail_step:-unknown}${NC}"
+
+            # Show error excerpt
+            echo -e "    ${YELLOW}Last 10 lines from log:${NC}"
+            tail -10 "$(node_log "$ip")" 2>/dev/null | grep -v "^RESULT:" | sed "s/^/    ${RED}│${NC} /"
+
+            FAILED=$((FAILED + 1))
+            FAILED_HOSTS+=("$ip")
+        fi
+        node_num=$((node_num + 1))
+    done
+fi
 
 # ── Summary ──────────────────────────────────────────────────────────
 
