@@ -17,9 +17,12 @@ const EMERGENCY_PHASE_DURATION_SECS: u64 = 86400;
 /// Supermajority threshold for emergency proposals (95%).
 const EMERGENCY_SUPERMAJORITY_BPS: u32 = 9500;
 
-/// Delay between promotion passing and activation applying (1 hour).
+/// Delay between promotion passing and activation applying.
 /// Ensures all nodes activate the change at the same deterministic timestamp.
-const ACTIVATION_DELAY_SECS: u64 = 3600;
+/// Uses the governance_propagation_buffer_secs parameter (default 3600s / 1 hour).
+fn activation_delay_secs(params: &ProtocolParams) -> u64 {
+    params.governance_propagation_buffer_secs
+}
 
 /// The governance engine manages proposals through the 5-phase lifecycle,
 /// tracking endorsements, votes, and phase transitions.
@@ -312,7 +315,7 @@ impl GovernanceEngine {
     ///
     /// Two-pass approach:
     /// 1. Activate proposals already in the Activation phase whose `activation_at` <= `now`.
-    /// 2. Try advancing other proposals; newly promoted ones get `activation_at = now + ACTIVATION_DELAY_SECS`.
+    /// 2. Try advancing other proposals; newly promoted ones get deferred activation.
     pub fn tick(&mut self, now: Timestamp, params: &mut ProtocolParams) -> Vec<TxHash> {
         let mut activated = Vec::new();
 
@@ -349,8 +352,9 @@ impl GovernanceEngine {
                 let mut p = proposal.clone();
                 match self.try_advance(&mut p, now, params) {
                     Ok(GovernancePhase::Activation) => {
-                        p.activation_at =
-                            Some(Timestamp::new(now.as_secs() + ACTIVATION_DELAY_SECS));
+                        p.activation_at = Some(Timestamp::new(
+                            now.as_secs() + activation_delay_secs(params),
+                        ));
                         tracing::debug!(
                             proposal = ?hash,
                             phase = ?GovernancePhase::Activation,
