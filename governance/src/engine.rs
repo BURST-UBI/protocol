@@ -280,6 +280,11 @@ impl GovernanceEngine {
         self.proposals.get(hash)
     }
 
+    /// Iterate over all proposals (any phase).
+    pub fn all_proposals(&self) -> impl Iterator<Item = &Proposal> {
+        self.proposals.values()
+    }
+
     /// Get a mutable reference to a stored proposal by hash.
     pub fn get_proposal_mut(&mut self, hash: &TxHash) -> Option<&mut Proposal> {
         self.proposals.get_mut(hash)

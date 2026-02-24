@@ -814,6 +814,38 @@ pub async fn handle_governance_proposals(
     let count = req.pagination.effective_count();
     let offset = req.pagination.decode_offset();
 
+    if let Some(ref engine) = state.governance_engine {
+        let gov = engine.lock().await;
+        let all: Vec<_> = gov.all_proposals().collect();
+        let start = (offset as usize).min(all.len());
+        let end = (start + count as usize).min(all.len());
+        let page = &all[start..end];
+
+        let proposals: Vec<ProposalSummary> = page
+            .iter()
+            .map(|proposal| {
+                let description = proposal_description(proposal);
+                let (votes_yea, votes_nay) = current_vote_counts(proposal);
+                ProposalSummary {
+                    hash: format!("{}", proposal.hash),
+                    proposer: proposal.proposer.to_string(),
+                    phase: format!("{:?}", proposal.phase),
+                    description,
+                    votes_yea,
+                    votes_nay,
+                }
+            })
+            .collect();
+
+        let cursor = if end < all.len() {
+            Some(pagination::encode_cursor(end as u64))
+        } else {
+            None
+        };
+
+        return Ok(to_value(&GovernanceProposalsResponse { proposals, cursor }));
+    }
+
     let active_hashes = state
         .governance_store
         .list_active_proposals()

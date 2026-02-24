@@ -132,6 +132,8 @@ pub struct RpcState {
     pub verification_store: Arc<dyn VerificationStore + Send + Sync>,
     /// Governance data storage.
     pub governance_store: Arc<dyn GovernanceStore + Send + Sync>,
+    /// Governance engine (shared with the node) for live proposal state.
+    pub governance_engine: Option<Arc<tokio::sync::Mutex<burst_governance::GovernanceEngine>>>,
     /// BRN computation engine (shared with the node).
     pub brn_engine: Arc<tokio::sync::Mutex<BrnEngine>>,
     /// Cached representative weights (shared with the node).

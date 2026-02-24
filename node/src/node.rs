@@ -3289,6 +3289,7 @@ impl BurstNode {
                 frontier_store: Arc::new(self.store.frontier_store()),
                 verification_store: Arc::new(self.store.verification_store()),
                 governance_store: Arc::new(self.store.governance_store()),
+                governance_engine: Some(Arc::clone(&self.governance)),
                 brn_engine: self.brn_engine.clone(),
                 rep_weight_cache: self.rep_weights.clone(),
                 work_generator: Arc::new(WorkGenerator),
