@@ -2217,7 +2217,11 @@ pub async fn handle_change_rep_simple(
 
     {
         let mut cache = state.rep_weight_cache.write().await;
-        cache.change_rep(&old_representative, &new_representative, account.trst_balance);
+        cache.change_rep(
+            &old_representative,
+            &new_representative,
+            account.trst_balance,
+        );
     }
 
     Ok(to_value(&ChangeRepSimpleResponse {

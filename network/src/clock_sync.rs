@@ -109,6 +109,11 @@ impl ClockSync {
 
         // Parse transmit timestamp (bytes 40-47): seconds since NTP epoch (big-endian u32)
         let ntp_secs = u32::from_be_bytes([response[40], response[41], response[42], response[43]]);
+        if (ntp_secs as u64) < NTP_EPOCH_OFFSET {
+            return Err(NetworkError::ConnectionFailed(
+                "NTP response contains invalid timestamp".into(),
+            ));
+        }
         let server_unix_secs = ntp_secs as u64 - NTP_EPOCH_OFFSET;
 
         // Record local time after receiving
