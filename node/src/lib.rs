@@ -18,6 +18,7 @@ pub mod confirming_set;
 pub mod connection_registry;
 pub mod error;
 pub mod ledger_bridge;
+pub mod ledger_cache;
 pub mod ledger_event;
 pub mod ledger_updater;
 pub mod limits;

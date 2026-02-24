@@ -80,6 +80,41 @@ impl Broadcaster {
 
         result
     }
+
+    /// Broadcast using sqrt-fanout: select `max(sqrt(n), min_fanout)` of the
+    /// highest-scoring connected peers. Reduces O(n) flood to O(sqrt(n)) while
+    /// maintaining reliable propagation through high-reputation nodes.
+    pub async fn broadcast_with_fanout(
+        &self,
+        message: &[u8],
+        peers: &[PeerState],
+        min_fanout: usize,
+    ) -> BroadcastResult {
+        let mut eligible: Vec<&PeerState> =
+            peers.iter().filter(|p| p.connected && !p.banned).collect();
+
+        if eligible.is_empty() {
+            return BroadcastResult::default();
+        }
+
+        // Sort by score descending — prefer high-reputation peers for propagation
+        eligible.sort_unstable_by_key(|p| std::cmp::Reverse(p.score));
+
+        let fanout = (eligible.len() as f64).sqrt().ceil() as usize;
+        let count = fanout.max(min_fanout).min(eligible.len());
+
+        let mut result = BroadcastResult::default();
+
+        for peer in eligible.into_iter().take(count) {
+            let peer_id = format!("{}:{}", peer.address.ip, peer.address.port);
+            match self.outbound_tx.try_send((peer_id, message.to_vec())) {
+                Ok(()) => result.sent += 1,
+                Err(_) => result.failed += 1,
+            }
+        }
+
+        result
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -164,6 +199,53 @@ mod tests {
 
         let (id, _) = rx.recv().await.unwrap();
         assert_eq!(id, "1.0.0.2:2");
+    }
+
+    #[tokio::test]
+    async fn broadcast_with_fanout_selects_sqrt_peers() {
+        let (tx, mut rx) = mpsc::channel(64);
+        let broadcaster = Broadcaster::new(tx);
+
+        let peers: Vec<PeerState> = (0..16)
+            .map(|i| {
+                let mut p = make_peer(&format!("10.0.0.{i}"), 7075, true);
+                p.score = i; // higher IP = higher score
+                p
+            })
+            .collect();
+
+        let result = broadcaster.broadcast_with_fanout(b"block", &peers, 2).await;
+        // sqrt(16) = 4, min_fanout = 2, so fanout = max(4, 2) = 4
+        assert_eq!(result.sent, 4);
+
+        let mut received = Vec::new();
+        while let Ok(item) = rx.try_recv() {
+            received.push(item.0);
+        }
+        assert_eq!(received.len(), 4);
+        // Should prefer highest-scoring peers (IPs .15, .14, .13, .12)
+        assert!(received.contains(&"10.0.0.15:7075".to_string()));
+        assert!(received.contains(&"10.0.0.14:7075".to_string()));
+    }
+
+    #[tokio::test]
+    async fn broadcast_with_fanout_respects_min_fanout() {
+        let (tx, mut rx) = mpsc::channel(64);
+        let broadcaster = Broadcaster::new(tx);
+
+        // 4 peers: sqrt(4) = 2, but min_fanout = 3
+        let peers: Vec<PeerState> = (0..4)
+            .map(|i| make_peer(&format!("10.0.0.{i}"), 7075, true))
+            .collect();
+
+        let result = broadcaster.broadcast_with_fanout(b"block", &peers, 3).await;
+        assert_eq!(result.sent, 3);
+
+        let mut received = Vec::new();
+        while let Ok(item) = rx.try_recv() {
+            received.push(item.0);
+        }
+        assert_eq!(received.len(), 3);
     }
 
     #[tokio::test]

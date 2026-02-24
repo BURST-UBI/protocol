@@ -10,7 +10,7 @@
 //! tallies, enforces a per-hash voter limit, and expires stale entries via TTL.
 
 use burst_types::{BlockHash, WalletAddress};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
 const MAX_CACHE_SIZE: usize = 65536;
@@ -39,12 +39,17 @@ struct CacheEntry {
 /// the election — they should NOT be inserted here.
 pub struct VoteCache {
     entries: HashMap<BlockHash, CacheEntry>,
+    /// Time index: maps vote arrival instants to hashes that received
+    /// votes at that time. Enables O(log n) eviction by iterating only
+    /// entries older than the TTL cutoff.
+    time_index: BTreeMap<Instant, Vec<BlockHash>>,
 }
 
 impl VoteCache {
     pub fn new() -> Self {
         Self {
             entries: HashMap::new(),
+            time_index: BTreeMap::new(),
         }
     }
 
@@ -109,6 +114,7 @@ impl VoteCache {
             }
         }
 
+        let now = Instant::now();
         entry.tally += weight;
         if is_final {
             entry.final_tally += weight;
@@ -118,8 +124,9 @@ impl VoteCache {
             weight,
             timestamp,
             is_final,
-            arrived: Instant::now(),
+            arrived: now,
         });
+        self.time_index.entry(now).or_default().push(hash);
     }
 
     /// Get and remove all cached votes for a block hash (called when election starts).
@@ -160,20 +167,47 @@ impl VoteCache {
     }
 
     /// Remove entries whose votes have all expired beyond the TTL.
+    ///
+    /// Uses the `time_index` BTreeMap to only inspect entries that
+    /// actually have votes older than the cutoff — O(k log n) where
+    /// k is the number of expired vote batches rather than O(n) over
+    /// the entire cache.
     pub fn cleanup(&mut self) {
         let cutoff = Instant::now() - VOTE_CACHE_TTL;
-        self.entries.retain(|_, entry| {
-            entry.votes.retain(|v| v.arrived > cutoff);
-            // Recalculate tallies after pruning individual votes
-            entry.tally = entry.votes.iter().map(|v| v.weight).sum();
-            entry.final_tally = entry
-                .votes
-                .iter()
-                .filter(|v| v.is_final)
-                .map(|v| v.weight)
-                .sum();
-            !entry.votes.is_empty()
-        });
+
+        // Collect hashes that may have expired votes (via the time index).
+        let mut candidate_hashes = std::collections::HashSet::new();
+        let expired_keys: Vec<Instant> =
+            self.time_index.range(..=cutoff).map(|(k, _)| *k).collect();
+
+        for key in &expired_keys {
+            if let Some(hashes) = self.time_index.remove(key) {
+                for h in hashes {
+                    candidate_hashes.insert(h);
+                }
+            }
+        }
+
+        // Prune expired votes only in candidate entries.
+        for hash in candidate_hashes {
+            let remove_entry = if let Some(entry) = self.entries.get_mut(&hash) {
+                entry.votes.retain(|v| v.arrived > cutoff);
+                entry.tally = entry.votes.iter().map(|v| v.weight).sum();
+                entry.final_tally = entry
+                    .votes
+                    .iter()
+                    .filter(|v| v.is_final)
+                    .map(|v| v.weight)
+                    .sum();
+                entry.votes.is_empty()
+            } else {
+                false
+            };
+
+            if remove_entry {
+                self.entries.remove(&hash);
+            }
+        }
     }
 
     /// Number of distinct block hashes with cached votes.

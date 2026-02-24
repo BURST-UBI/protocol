@@ -525,18 +525,18 @@ pub async fn handle_process(
         .process_block(&block_bytes)
         .map_err(RpcError::Server)?;
 
-    let accepted = matches!(result, ProcessResult::Accepted);
+    let accepted = matches!(result, ProcessResult::Accepted | ProcessResult::Queued);
     let detail = match &result {
         ProcessResult::Accepted => None,
         ProcessResult::Duplicate => Some("duplicate block".to_string()),
         ProcessResult::Fork => Some("fork detected — election started".to_string()),
         ProcessResult::Gap => Some("gap — previous block unknown, queued for later".to_string()),
-        ProcessResult::Queued => Some("queued for processing".to_string()),
+        ProcessResult::Queued => None,
         ProcessResult::Rejected(reason) => Some(reason.clone()),
     };
 
     if accepted {
-        debug!(hash = %block_hash_str, "block accepted via RPC");
+        debug!(hash = %block_hash_str, "block queued for processing via RPC");
     }
 
     Ok(to_value(&ProcessResponse {
@@ -1108,8 +1108,14 @@ pub async fn handle_telemetry(
         .unwrap_or_default()
         .as_secs();
 
-    let block_count = state.block_store.block_count().unwrap_or(0);
-    let account_count = state.account_store.account_count().unwrap_or(0);
+    let (block_count, account_count) = if let Some(ref cache) = state.ledger_cache {
+        (cache.block_count(), cache.account_count())
+    } else {
+        (
+            state.block_store.block_count().unwrap_or(0),
+            state.account_store.account_count().unwrap_or(0),
+        )
+    };
     let peer_count = state.peer_manager.read().await.connected_count() as u32;
 
     Ok(to_value(&TelemetryResponse {

@@ -714,11 +714,18 @@ impl TrstEngine {
             .origin_wallet
             .clone();
 
+        let earliest_origin = tokens
+            .iter()
+            .min_by_key(|t| t.origin_timestamp)
+            .unwrap()
+            .origin;
+        let most_recent_input = tokens.iter().max_by_key(|t| t.origin_timestamp).unwrap().id;
+
         Ok(TrstToken {
             id: merge_tx_hash,
             amount: total_amount,
-            origin: merge_tx_hash,
-            link: tokens[0].id,
+            origin: earliest_origin,
+            link: most_recent_input,
             holder,
             origin_timestamp: now,
             effective_origin_timestamp: effective_ts,
@@ -1359,7 +1366,8 @@ mod tests {
         assert_eq!(merged.amount, 800);
         assert_eq!(merged.holder, holder);
         assert_eq!(merged.id, merge_tx);
-        assert_eq!(merged.origin, merge_tx);
+        assert_eq!(merged.origin, origin1); // preserves earliest original burn origin
+        assert_eq!(merged.link, origin2); // most recent input token (token2 has later timestamp)
         assert_eq!(merged.state, TrstState::Active);
         assert_eq!(merged.origin_timestamp, test_timestamp(1500)); // merge time
         assert_eq!(merged.effective_origin_timestamp, test_timestamp(1000)); // earliest constituent

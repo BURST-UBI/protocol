@@ -41,6 +41,7 @@ use crate::confirmation_processor::{CementResult, ConfirmationProcessor, LmdbCha
 use crate::confirming_set::ConfirmingSet;
 use crate::connection_registry::{spawn_peer_read_loop, write_framed, ConnectionRegistry};
 use crate::error::NodeError;
+use crate::ledger_cache::LedgerCache;
 use crate::local_broadcaster::LocalBroadcaster;
 use crate::metrics::NodeMetrics;
 use crate::online_weight::OnlineWeightTracker;
@@ -83,8 +84,7 @@ fn genesis_address() -> WalletAddress {
 /// Adapts the node's concrete [`BlockProcessor`] into the trait expected by
 /// the RPC crate, breaking the circular dependency.
 struct NodeBlockProcessor {
-    processor: Arc<Mutex<BlockProcessor>>,
-    frontier: Arc<RwLock<DagFrontier>>,
+    block_queue: Arc<BlockPriorityQueue>,
 }
 
 impl BlockProcessorCallback for NodeBlockProcessor {
@@ -92,31 +92,11 @@ impl BlockProcessorCallback for NodeBlockProcessor {
         let block: StateBlock = bincode::deserialize(block_bytes)
             .map_err(|e| format!("failed to deserialize block: {e}"))?;
 
-        // Use try_lock to avoid holding an async mutex across blocking code.
-        let mut bp = self
-            .processor
-            .try_lock()
-            .map_err(|_| "block processor busy".to_string())?;
-        let mut frontier = self
-            .frontier
-            .try_write()
-            .map_err(|_| "frontier lock busy".to_string())?;
-
-        let result = bp.process(&block, &mut frontier);
-        Ok(convert_process_result(&result))
-    }
-}
-
-/// Map the node-internal `ProcessResult` to the RPC-crate variant.
-fn convert_process_result(r: &ProcessResult) -> RpcProcessResult {
-    match r {
-        ProcessResult::Accepted => RpcProcessResult::Accepted,
-        ProcessResult::Gap => RpcProcessResult::Gap,
-        ProcessResult::GapSource => RpcProcessResult::Gap, // gap-source maps to Gap for RPC
-        ProcessResult::Fork => RpcProcessResult::Fork,
-        ProcessResult::Rejected(s) => RpcProcessResult::Rejected(s.clone()),
-        ProcessResult::Duplicate => RpcProcessResult::Duplicate,
-        ProcessResult::Queued => RpcProcessResult::Queued,
+        if self.block_queue.try_push(block) {
+            Ok(RpcProcessResult::Queued)
+        } else {
+            Err("block queue full — try again later".to_string())
+        }
     }
 }
 
@@ -204,6 +184,8 @@ pub struct BurstNode {
     node_address: WalletAddress,
     /// UPnP port mapper for NAT traversal (None if disabled or dev network).
     port_mapper: Option<PortMapper>,
+    /// Atomic counters for block/account/pending counts (O(1) lookups).
+    pub ledger_cache: Arc<LedgerCache>,
     /// Handles for spawned background tasks (joined during shutdown).
     task_handles: Vec<JoinHandle<()>>,
 }
@@ -357,6 +339,22 @@ impl BurstNode {
         };
 
         let trst_expiry = config.params.trst_expiry_secs;
+        let ledger_cache = {
+            let block_store = store.block_store();
+            let account_store = store.account_store();
+            let pending_store = store.pending_store();
+            let bc = block_store.block_count().unwrap_or(0);
+            let ac = account_store.account_count().unwrap_or(0);
+            let pc = pending_store.pending_count().unwrap_or(0);
+            tracing::info!(
+                blocks = bc,
+                accounts = ac,
+                pending = pc,
+                "ledger cache initialized"
+            );
+            Arc::new(LedgerCache::new(bc, ac, pc))
+        };
+
         let mut node = Self {
             config,
             brn_engine: Arc::new(Mutex::new(brn_engine)),
@@ -407,6 +405,7 @@ impl BurstNode {
             node_private_key,
             node_address,
             port_mapper: None,
+            ledger_cache,
             task_handles: Vec::new(),
         };
 
@@ -525,6 +524,7 @@ impl BurstNode {
         let backlog_bp = Arc::clone(&self.backlog);
         let brn_engine_bp = Arc::clone(&self.brn_engine);
         let trst_engine_bp = Arc::clone(&self.trst_engine);
+        let ledger_cache_bp = Arc::clone(&self.ledger_cache);
         let trst_expiry_secs = self.config.params.trst_expiry_secs;
         let config_params_bp = self.config.params.clone();
         let fork_cache_bp = Arc::clone(&self.fork_cache);
@@ -980,6 +980,19 @@ impl BurstNode {
                                 tracing::error!(hash = %block.hash, "failed to commit unified batch: {e}");
                                 break 'persist false;
                             }
+
+                            // Update atomic ledger cache counters
+                            ledger_cache_bp.inc_block_count();
+                            if block.block_type == BlockType::Open {
+                                ledger_cache_bp.inc_account_count();
+                            }
+                            if block.block_type == BlockType::Send {
+                                ledger_cache_bp.inc_pending_count();
+                            }
+                            if block.block_type == BlockType::Receive {
+                                ledger_cache_bp.dec_pending_count();
+                            }
+
                             true
                         };
                         drop(rw);
@@ -1691,7 +1704,7 @@ impl BurstNode {
                                             pm.iter_connected().map(|(_, s)| s.clone()).collect()
                                         };
                                         let _ = broadcaster_bp
-                                            .broadcast_to_all(&msg_bytes, &peers)
+                                            .broadcast_with_fanout(&msg_bytes, &peers, 4)
                                             .await;
                                     }
                                 } else {
@@ -1844,7 +1857,7 @@ impl BurstNode {
                                                 .collect()
                                         };
                                         let _ = broadcaster_ct
-                                            .broadcast_to_all(&bytes, &peers)
+                                            .broadcast_with_fanout(&bytes, &peers, 4)
                                             .await;
                                     }
                                 }
@@ -2167,7 +2180,7 @@ impl BurstNode {
                             };
                             for (hash, block_bytes) in &blocks {
                                 let _ = broadcaster_rb
-                                    .broadcast_to_all(block_bytes, &peers)
+                                    .broadcast_with_fanout(block_bytes, &peers, 4)
                                     .await;
                                 tracing::trace!(%hash, "re-broadcast local block");
                             }
@@ -2200,10 +2213,21 @@ impl BurstNode {
                         break;
                     }
                     Some((peer_id, msg_bytes)) = outbound_rx.recv() => {
-                        let writer = {
-                            let registry = conn_registry_drain.read().await;
-                            registry.get(&peer_id)
+                        // Check outbound bandwidth throttle (requires write lock)
+                        let (writer, throttle_ok) = {
+                            let mut registry = conn_registry_drain.write().await;
+                            let ok = registry.try_consume_outbound(&peer_id, msg_bytes.len() as u64);
+                            (registry.get(&peer_id), ok)
                         };
+
+                        if !throttle_ok {
+                            tracing::trace!(
+                                peer = %peer_id,
+                                bytes = msg_bytes.len(),
+                                "outbound message throttled"
+                            );
+                            continue;
+                        }
 
                         match writer {
                             Some(writer) => {
@@ -3142,8 +3166,25 @@ impl BurstNode {
                     }
                     _ = interval.tick() => {
                         let now = unix_now_secs();
+
+                        // Disconnect peers idle for >5 minutes and unban expired bans
+                        let idle_peers = {
+                            let mut pm = peer_manager_ka.write().await;
+                            pm.check_bans(now);
+                            pm.cleanup_idle(now, 300)
+                        };
+                        if !idle_peers.is_empty() {
+                            tracing::info!(
+                                count = idle_peers.len(),
+                                "disconnecting idle peers"
+                            );
+                            let mut registry = conn_registry_ka.write().await;
+                            for pid in &idle_peers {
+                                registry.remove(pid);
+                            }
+                        }
+
                         let mut pm = peer_manager_ka.write().await;
-                        pm.check_bans(now);
                         if pm.should_keepalive(now) {
                             pm.record_keepalive(now);
 
@@ -3253,13 +3294,15 @@ impl BurstNode {
                 work_generator: Arc::new(WorkGenerator),
                 params: Arc::new(self.config.params.clone()),
                 block_processor: Arc::new(NodeBlockProcessor {
-                    processor: Arc::clone(&self.block_processor),
-                    frontier: Arc::clone(&self.frontier),
+                    block_queue: Arc::clone(&self.block_queue),
                 }),
                 online_reps: Arc::new(std::sync::RwLock::new(Vec::new())),
                 peer_manager: Arc::clone(&self.peer_manager),
                 enable_faucet: self.config.enable_faucet,
                 rate_limiter: Arc::new(burst_rpc::RateLimiter::new(100)),
+                ledger_cache: Some(
+                    self.ledger_cache.clone() as Arc<dyn burst_rpc::LedgerCacheView + Send + Sync>
+                ),
             });
 
             let rpc_server = RpcServer::with_state(rpc_port, rpc_state);
@@ -3616,7 +3659,10 @@ impl BurstNode {
                 let pm = self.peer_manager.read().await;
                 pm.iter_connected().map(|(_, s)| s.clone()).collect()
             };
-            let result = self.broadcaster.broadcast_to_all(&msg_bytes, &peers).await;
+            let result = self
+                .broadcaster
+                .broadcast_with_fanout(&msg_bytes, &peers, 4)
+                .await;
             tracing::debug!(
                 sent = result.sent,
                 failed = result.failed,

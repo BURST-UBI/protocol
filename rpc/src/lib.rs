@@ -15,4 +15,6 @@ pub mod handlers;
 pub mod pagination;
 pub mod server;
 
-pub use server::{BlockProcessorCallback, ProcessResult, RateLimiter, RpcServer, RpcState};
+pub use server::{
+    BlockProcessorCallback, LedgerCacheView, ProcessResult, RateLimiter, RpcServer, RpcState,
+};

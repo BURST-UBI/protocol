@@ -9,6 +9,7 @@ description = "Anti-spam proof-of-work generation and validation"
 burst-types = { workspace = true }
 burst-crypto = { workspace = true }
 thiserror = { workspace = true }
+rayon = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

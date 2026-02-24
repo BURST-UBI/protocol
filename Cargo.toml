@@ -79,6 +79,9 @@ prost = "0.13"
 # Metrics
 prometheus = "0.13"
 
+# Parallelism
+rayon = "1"
+
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
 

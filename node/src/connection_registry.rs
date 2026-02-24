@@ -14,7 +14,7 @@ use tokio::sync::{Mutex, RwLock};
 use burst_consensus::{ActiveElections, OnlineWeightSampler, RepWeightCache};
 use burst_crypto::{decode_address, verify_signature};
 use burst_ledger::{DagFrontier, StateBlock};
-use burst_network::{MessageDedup, PeerManager, PeerTelemetry, SynCookies};
+use burst_network::{BandwidthThrottle, MessageDedup, PeerManager, PeerTelemetry, SynCookies};
 use burst_store::account::AccountStore;
 use burst_store::block::BlockStore;
 use burst_store_lmdb::LmdbStore;
@@ -35,6 +35,7 @@ const READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// message drain to route messages to the correct peer stream.
 pub struct ConnectionRegistry {
     connections: HashMap<String, Arc<Mutex<OwnedWriteHalf>>>,
+    throttles: HashMap<String, BandwidthThrottle>,
 }
 
 impl ConnectionRegistry {
@@ -42,19 +43,32 @@ impl ConnectionRegistry {
     pub fn new() -> Self {
         Self {
             connections: HashMap::new(),
+            throttles: HashMap::new(),
         }
     }
 
     /// Register a peer's write half. If a previous connection existed for this
     /// peer, it is replaced (the old writer is dropped, closing its half).
     pub fn insert(&mut self, peer_id: String, writer: OwnedWriteHalf) {
+        self.throttles.entry(peer_id.clone()).or_default();
         self.connections
             .insert(peer_id, Arc::new(Mutex::new(writer)));
     }
 
     /// Remove a peer's write half, returning it if present.
     pub fn remove(&mut self, peer_id: &str) -> Option<Arc<Mutex<OwnedWriteHalf>>> {
+        self.throttles.remove(peer_id);
         self.connections.remove(peer_id)
+    }
+
+    /// Check the outbound throttle for a peer. Returns `true` if the message
+    /// can be sent (and consumes the bandwidth tokens), `false` if throttled.
+    pub fn try_consume_outbound(&mut self, peer_id: &str, bytes: u64) -> bool {
+        if let Some(throttle) = self.throttles.get_mut(peer_id) {
+            throttle.try_consume(bytes)
+        } else {
+            true
+        }
     }
 
     /// Look up a peer's write half (returns a cheaply cloned `Arc`).
@@ -300,6 +314,16 @@ async fn peer_read_loop(
                 );
                 continue;
             }
+        }
+
+        // Update last-seen timestamp for idle detection.
+        {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let mut pm = peer_manager.write().await;
+            pm.touch(peer_id, now);
         }
 
         // Try to deserialize as a WireMessage (the canonical P2P envelope).

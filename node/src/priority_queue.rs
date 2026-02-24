@@ -105,6 +105,32 @@ impl BlockPriorityQueue {
         true
     }
 
+    /// Non-async push using `try_lock`. Returns `false` if the lock is
+    /// contended or the queue is at capacity.
+    pub fn try_push(&self, block: StateBlock) -> bool {
+        let difficulty = work_difficulty(&block.hash, block.work);
+
+        let mut guard = match self.heap.try_lock() {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
+        let (heap, seq) = &mut *guard;
+        if heap.len() >= self.capacity {
+            return false;
+        }
+        *seq += 1;
+        let sequence = *seq;
+        heap.push(PrioritizedBlock {
+            block,
+            difficulty,
+            sequence,
+        });
+        drop(guard);
+
+        self.notify.notify_one();
+        true
+    }
+
     /// Pop the highest-priority block. Waits asynchronously if the queue is empty.
     pub async fn pop(&self) -> StateBlock {
         loop {

@@ -223,6 +223,14 @@ impl PeerManager {
         }
     }
 
+    /// Update a peer's `last_seen_secs` timestamp. Called on every inbound
+    /// message so idle detection works correctly.
+    pub fn touch(&mut self, peer_id: &str, now_secs: u64) {
+        if let Some(peer) = self.peers.get_mut(peer_id) {
+            peer.last_seen_secs = now_secs;
+        }
+    }
+
     /// Mark a peer as disconnected.
     pub fn mark_disconnected(&mut self, peer_id: &str) {
         if let Some(peer) = self.peers.get_mut(peer_id) {
@@ -398,6 +406,23 @@ impl PeerManager {
                 }
             }
         }
+    }
+
+    /// Return peer IDs of connections that have been idle longer than
+    /// `timeout_secs` and mark them disconnected. The caller should close
+    /// the associated TCP streams.
+    pub fn cleanup_idle(&mut self, now_secs: u64, timeout_secs: u64) -> Vec<String> {
+        let cutoff = now_secs.saturating_sub(timeout_secs);
+        let mut idle_peers = Vec::new();
+
+        for (key, peer) in self.peers.iter_mut() {
+            if peer.connected && !peer.banned && peer.last_seen_secs < cutoff {
+                peer.connected = false;
+                idle_peers.push(key.clone());
+            }
+        }
+
+        idle_peers
     }
 
     /// Update a peer's telemetry data.

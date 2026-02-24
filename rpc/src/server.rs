@@ -18,6 +18,15 @@ use burst_store::governance::GovernanceStore;
 use burst_store::verification::VerificationStore;
 use burst_store::{FrontierStore, PendingStore};
 use burst_types::{ProtocolParams, WalletAddress};
+
+/// Trait for O(1) ledger counter lookups. Implemented by the node's
+/// `LedgerCache` and injected into `RpcState` to break the circular
+/// dependency between `burst-rpc` and `burst-node`.
+pub trait LedgerCacheView {
+    fn block_count(&self) -> u64;
+    fn account_count(&self) -> u64;
+    fn pending_count(&self) -> u64;
+}
 use burst_work::WorkGenerator;
 use prometheus::{Encoder, Registry, TextEncoder};
 use serde::{Deserialize, Serialize};
@@ -143,6 +152,9 @@ pub struct RpcState {
     pub enable_faucet: bool,
     /// Per-IP rate limiter for RPC requests.
     pub rate_limiter: Arc<RateLimiter>,
+    /// Cached ledger counters (block/account/pending counts) — O(1) lookups.
+    /// Optional to avoid breaking test callers that don't provide one.
+    pub ledger_cache: Option<Arc<dyn LedgerCacheView + Send + Sync>>,
 }
 
 // ── JSON-RPC envelope types ─────────────────────────────────────────────
