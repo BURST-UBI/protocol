@@ -20,10 +20,11 @@ use burst_messages::PeerAddress;
 use burst_network::{Broadcaster, ClockSync, PeerManager, PortMapper, UpnpState};
 use burst_rpc::{BlockProcessorCallback, ProcessResult as RpcProcessResult, RpcServer, RpcState};
 use burst_store::block::BlockStore;
+use burst_store::brn::BrnStore;
 use burst_store::frontier::FrontierStore;
 use burst_store_lmdb::LmdbStore;
 use burst_trst::TrstEngine;
-use burst_types::{BlockHash, Signature, Timestamp, TxHash, WalletAddress};
+use burst_types::{BlockHash, ProtocolParams, Signature, Timestamp, TxHash, WalletAddress};
 use burst_websocket::{WebSocketServer, WsState};
 use burst_work::WorkGenerator;
 
@@ -196,7 +197,7 @@ impl BurstNode {
     /// Opens the LMDB environment at `config.data_dir` and prepares all
     /// subsystems. Call [`start`] to begin accepting connections and
     /// processing blocks.
-    pub async fn new(config: NodeConfig) -> Result<Self, NodeError> {
+    pub async fn new(mut config: NodeConfig) -> Result<Self, NodeError> {
         let min_work_difficulty = config.params.min_work_difficulty;
 
         // Open LMDB storage
@@ -309,6 +310,25 @@ impl BurstNode {
         ));
 
         // Load persisted BRN engine state from LMDB (fall back to fresh engine)
+        // Load self-amended protocol params from LMDB (persisted by governance activation).
+        {
+            let brn_store = store.brn_store();
+            match brn_store.get_meta(b"protocol_params") {
+                Ok(Some(ref bytes)) => match bincode::deserialize::<ProtocolParams>(bytes) {
+                    Ok(persisted) => {
+                        tracing::info!("loaded self-amended protocol params from LMDB");
+                        config.params = persisted;
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to deserialize persisted params, using config defaults");
+                    }
+                },
+                _ => {
+                    tracing::info!("no persisted protocol params found, using config defaults");
+                }
+            }
+        }
+
         let brn_engine = {
             let brn_store = store.brn_store();
             match BrnEngine::load_from_store(&brn_store) {
@@ -2116,6 +2136,21 @@ impl BurstNode {
                                             Err(e) => tracing::warn!(title = %title, "failed to apply constitutional amendment: {e}"),
                                         }
                                     }
+                                }
+                            }
+
+                            // Persist self-amended params to LMDB so they survive restarts.
+                            match bincode::serialize(&gov_params) {
+                                Ok(bytes) => {
+                                    let brn_store = store_gov.brn_store();
+                                    if let Err(e) = brn_store.put_meta(b"protocol_params", &bytes) {
+                                        tracing::warn!(error = %e, "failed to persist amended protocol params");
+                                    } else {
+                                        tracing::info!("self-amended protocol params persisted to LMDB");
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "failed to serialize protocol params");
                                 }
                             }
 
