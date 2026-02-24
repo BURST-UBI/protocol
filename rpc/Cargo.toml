@@ -14,6 +14,7 @@ burst-network = { workspace = true }
 burst-work = { workspace = true }
 burst-ledger = { workspace = true }
 burst-governance = { workspace = true }
+burst-transactions = { workspace = true }
 burst-crypto = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }

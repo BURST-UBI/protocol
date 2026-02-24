@@ -2390,6 +2390,36 @@ pub async fn handle_governance_propose_simple(
         .block_store
         .put_block_with_account(&block.hash, &block_bytes, &address);
 
+    if let Some(ref engine) = state.governance_engine {
+        let proposal = burst_governance::Proposal {
+            hash: tx_hash,
+            proposer: address.clone(),
+            content,
+            phase: burst_governance::GovernancePhase::Proposal,
+            created_at: now,
+            endorsement_count: 0,
+            exploration_votes_yea: 0,
+            exploration_votes_nay: 0,
+            exploration_votes_abstain: 0,
+            promotion_votes_yea: 0,
+            promotion_votes_nay: 0,
+            promotion_votes_abstain: 0,
+            exploration_started_at: None,
+            cooldown_started_at: None,
+            promotion_started_at: None,
+            activation_at: None,
+            total_eligible_voters: 1,
+            round: 0,
+        };
+        let mut gov = engine.lock().await;
+        match gov.submit_proposal(proposal, brn_balance, true, &state.params) {
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!("governance proposal accepted as block but engine rejected: {e}");
+            }
+        }
+    }
+
     Ok(to_value(&GovernanceProposeSimpleResponse {
         block_hash: format!("{}", block.hash),
         proposal_hash: format!("{}", tx_hash),
@@ -2517,6 +2547,36 @@ pub async fn handle_governance_vote_simple(
     let _ = state
         .block_store
         .put_block_with_account(&block.hash, &block_bytes, &address);
+
+    if let Some(ref engine) = state.governance_engine {
+        let gov_vote = match vote_byte {
+            0 => burst_transactions::governance::GovernanceVote::Yea,
+            1 => burst_transactions::governance::GovernanceVote::Nay,
+            _ => burst_transactions::governance::GovernanceVote::Abstain,
+        };
+        let proposal_tx_hash = TxHash::new(ph);
+        let mut gov = engine.lock().await;
+        match gov.cast_exploration_vote(&proposal_tx_hash, &address, gov_vote, now, &state.params) {
+            Ok(()) => {}
+            Err(burst_governance::GovernanceError::WrongPhase) => {
+                match gov.cast_promotion_vote(
+                    &proposal_tx_hash,
+                    &address,
+                    gov_vote,
+                    now,
+                    &state.params,
+                ) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        tracing::warn!("governance vote rejected by engine: {e}");
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("governance vote rejected by engine: {e}");
+            }
+        }
+    }
 
     let vote_name = match vote_byte {
         0 => "yea",
