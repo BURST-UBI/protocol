@@ -1777,6 +1777,15 @@ pub async fn handle_burn_simple(
         .block_store
         .put_block_with_account(&block.hash, &block_bytes, &address);
 
+    {
+        let mut cache = state.rep_weight_cache.write().await;
+        if is_first_block {
+            cache.add_weight(&account.representative, trst_after);
+        } else {
+            cache.add_weight(&account.representative, amount);
+        }
+    }
+
     Ok(to_value(&BurnSimpleResponse {
         block_hash: format!("{}", block.hash),
         account: address.to_string(),
@@ -1927,6 +1936,11 @@ pub async fn handle_send_simple(
         )
         .map_err(|e| RpcError::Store(format!("failed to create pending: {e}")))?;
 
+    {
+        let mut cache = state.rep_weight_cache.write().await;
+        cache.remove_weight(&account.representative, amount);
+    }
+
     Ok(to_value(&SendSimpleResponse {
         block_hash: format!("{}", block.hash),
         source: address.to_string(),
@@ -2075,6 +2089,11 @@ pub async fn handle_receive_simple(
         .delete_pending(&address, &send_tx_hash)
         .map_err(|e| RpcError::Store(format!("failed to delete pending: {e}")))?;
 
+    {
+        let mut cache = state.rep_weight_cache.write().await;
+        cache.add_weight(&account.representative, pending.amount);
+    }
+
     Ok(to_value(&ReceiveSimpleResponse {
         block_hash: format!("{}", block.hash),
         account: address.to_string(),
@@ -2195,6 +2214,11 @@ pub async fn handle_change_rep_simple(
     let _ = state
         .block_store
         .put_block_with_account(&block.hash, &block_bytes, &address);
+
+    {
+        let mut cache = state.rep_weight_cache.write().await;
+        cache.change_rep(&old_representative, &new_representative, account.trst_balance);
+    }
 
     Ok(to_value(&ChangeRepSimpleResponse {
         block_hash: format!("{}", block.hash),
