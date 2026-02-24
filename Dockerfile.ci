@@ -1,0 +1,27 @@
+# Lightweight image — binary is pre-built by CI, no Rust compilation here.
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd -m -s /bin/bash burst
+
+ARG BINARY_PATH=target/release/burst-daemon
+COPY ${BINARY_PATH} /usr/local/bin/burst-daemon
+COPY testnet.toml /home/burst/testnet.toml
+
+RUN chmod +x /usr/local/bin/burst-daemon \
+    && mkdir -p /home/burst/data \
+    && chown -R burst:burst /home/burst
+
+USER burst
+WORKDIR /home/burst
+
+EXPOSE 17076 7077 7078
+
+VOLUME ["/home/burst/data"]
+
+ENTRYPOINT ["burst-daemon"]
+CMD ["--data-dir", "/home/burst/data", "node", "run"]

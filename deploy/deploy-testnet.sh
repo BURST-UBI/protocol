@@ -3,6 +3,9 @@ set -uo pipefail
 
 # deploy-testnet.sh — Idempotent, resumable BURST testnet deployment.
 #
+# Pulls pre-built Docker images from GHCR (built by CI). No compilation
+# on the VPSes — just docker pull + run. Redeployments take seconds.
+#
 # Safe to re-run at any time. Each node goes through discrete stages
 # and only does work that hasn't already succeeded. Failed nodes don't
 # block the rest — just re-run and it picks up where it left off.
@@ -15,27 +18,26 @@ set -uo pipefail
 #   ./deploy/deploy-testnet.sh [flags] --nodes-file deploy/testnet-nodes.txt
 #
 # Flags:
-#   --force           Force rebuild even if image is current
+#   --force           Force re-pull + restart even if image is current
 #   --nodes-file FILE Read IPs from file (one per line, # comments ok)
+#   --tag TAG         Docker image tag to deploy (default: latest)
 #
 # Environment variables:
 #   SSH_USER          — remote user (default: root)
 #   SSH_PASS          — SSH password (uses sshpass; omit for key auth)
 #   SSH_KEY           — path to SSH private key (default: ~/.ssh/id_ed25519)
-#   BURST_REPO        — git repo URL (default: https://github.com/BURST-UBI/protocol.git)
-#   BURST_BRANCH      — branch to deploy (default: main)
 #   BURST_LOG_LEVEL   — log level for all nodes (default: info)
 
 SSH_USER="${SSH_USER:-root}"
 SSH_PASS="${SSH_PASS:-}"
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_ed25519}"
-BURST_REPO="${BURST_REPO:-https://github.com/BURST-UBI/protocol.git}"
-BURST_BRANCH="${BURST_BRANCH:-main}"
 BURST_LOG_LEVEL="${BURST_LOG_LEVEL:-info}"
 
 FORCE_REBUILD=false
+IMAGE_TAG="latest"
 
-REPO_DIR="/opt/burst-protocol"
+DOCKER_IMAGE="ghcr.io/burst-ubi/protocol"
+
 STATE_DIR="${HOME}/.burst-deploy"
 LOG_DIR="${STATE_DIR}/logs"
 
@@ -58,6 +60,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --force)        FORCE_REBUILD=true; shift ;;
         --nodes-file)   NODES_FILE="$2"; shift 2 ;;
+        --tag)          IMAGE_TAG="$2"; shift 2 ;;
         -*)             echo "Unknown flag: $1"; exit 1 ;;
         *)              POSITIONAL+=("$1"); shift ;;
     esac
@@ -76,11 +79,11 @@ if [ -n "$NODES_FILE" ]; then
 fi
 
 if [ ${#POSITIONAL[@]} -lt 1 ]; then
-    echo "Usage: $0 [--force] [--nodes-file FILE] <seed-ip> [node-ip ...]"
+    echo "Usage: $0 [--force] [--nodes-file FILE] [--tag TAG] <seed-ip> [node-ip ...]"
     echo ""
     echo "Examples:"
-    echo "  SSH_PASS='pw' $0 167.172.83.88 159.65.80.231 143.244.131.5"
     echo "  SSH_PASS='pw' $0 --nodes-file deploy/testnet-nodes.txt"
+    echo "  SSH_PASS='pw' $0 --tag abc1234 --nodes-file deploy/testnet-nodes.txt"
     echo "  SSH_PASS='pw' $0 --force --nodes-file deploy/testnet-nodes.txt"
     exit 1
 fi
@@ -157,10 +160,6 @@ clear_stages() {
     rm -f "${STATE_DIR}/${host}".* 2>/dev/null || true
 }
 
-get_target_commit() {
-    git ls-remote "$BURST_REPO" "refs/heads/${BURST_BRANCH}" 2>/dev/null | awk '{print $1}'
-}
-
 # ── Per-node deployment steps (each is idempotent) ───────────────────
 
 step_check_ssh() {
@@ -186,29 +185,23 @@ step_check_ssh() {
     fi
 }
 
-step_install_deps() {
+step_install_docker() {
     local host="$1"
     local logfile
     logfile=$(node_log "$host")
 
-    echo -n "  [2/6] Dependencies (git, docker)... "
-    log_header "$host" "Install Dependencies"
+    echo -n "  [2/6] Docker... "
+    log_header "$host" "Install Docker"
 
-    local needs_install
-    needs_install=$(ssh_cmd "$host" "
-        missing=''
-        command -v git  &>/dev/null || missing=\"\${missing} git\"
-        command -v docker &>/dev/null || missing=\"\${missing} docker\"
-        echo \"\$missing\"
-    " 2>&1)
-    echo "Missing: [${needs_install}]" >> "$logfile"
+    local has_docker
+    has_docker=$(ssh_cmd "$host" "command -v docker &>/dev/null && echo yes || echo no" 2>/dev/null)
 
-    if [ -z "$(echo "$needs_install" | xargs)" ]; then
+    if [ "$has_docker" = "yes" ]; then
         echo -e "${GREEN}already installed${NC}"
         return 0
     fi
 
-    echo -e "${CYAN}installing${needs_install}...${NC}"
+    echo -e "${CYAN}installing...${NC}"
 
     local output
     output=$(ssh_cmd "$host" "
@@ -225,129 +218,85 @@ step_install_deps() {
         echo 'apt lock is free'
 
         apt-get update -qq
-        apt-get install -y -qq git ca-certificates curl gnupg lsb-release
+        apt-get install -y -qq ca-certificates curl gnupg lsb-release
 
-        if ! command -v docker &>/dev/null; then
-            install -m 0755 -d /etc/apt/keyrings
-            curl -fsSL https://download.docker.com/linux/\$(. /etc/os-release && echo \"\$ID\")/gpg \
-                | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-            chmod a+r /etc/apt/keyrings/docker.gpg
-            echo \"deb [arch=\$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
-                https://download.docker.com/linux/\$(. /etc/os-release && echo \"\$ID\") \
-                \$(lsb_release -cs) stable\" \
-                | tee /etc/apt/sources.list.d/docker.list > /dev/null
-            apt-get update -qq
-            apt-get install -y -qq docker-ce docker-ce-cli containerd.io
-            systemctl enable --now docker
-        fi
+        install -m 0755 -d /etc/apt/keyrings
+        curl -fsSL https://download.docker.com/linux/\$(. /etc/os-release && echo \"\$ID\")/gpg \
+            | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+        chmod a+r /etc/apt/keyrings/docker.gpg
+        echo \"deb [arch=\$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+            https://download.docker.com/linux/\$(. /etc/os-release && echo \"\$ID\") \
+            \$(lsb_release -cs) stable\" \
+            | tee /etc/apt/sources.list.d/docker.list > /dev/null
+        apt-get update -qq
+        apt-get install -y -qq docker-ce docker-ce-cli containerd.io
+        systemctl enable --now docker
 
-        echo '--- versions ---'
-        git --version
+        echo '--- version ---'
         docker --version
     " 2>&1)
     local rc=$?
     echo "$output" >> "$logfile"
 
     if [ $rc -eq 0 ]; then
-        echo -e "  ${GREEN}Dependencies installed${NC}"
+        echo -e "  ${GREEN}Docker installed${NC}"
         return 0
     else
-        show_error "$host" "dependency installation"
+        show_error "$host" "Docker installation"
         return 1
     fi
 }
 
-step_sync_repo() {
-    local host="$1" target_commit="$2"
+step_pull_image() {
+    local host="$1" tag="$2"
+    local full_image="${DOCKER_IMAGE}:${tag}"
     local logfile
     logfile=$(node_log "$host")
 
-    echo -n "  [3/6] Git repo... "
-    log_header "$host" "Sync Repo (target: ${target_commit:0:8})"
-
-    local node_commit
-    node_commit=$(ssh_cmd "$host" "
-        if [ -d '${REPO_DIR}/.git' ]; then
-            cd '${REPO_DIR}'
-            git rev-parse HEAD
-        else
-            echo 'none'
-        fi
-    " 2>/dev/null)
-    echo "Current commit on node: ${node_commit}" >> "$logfile"
-
-    if [ "$node_commit" = "$target_commit" ]; then
-        echo -e "${GREEN}up to date${NC} (${target_commit:0:8})"
-        return 0
-    fi
-
-    local output rc
-    if [ "$node_commit" = "none" ]; then
-        echo -e "${CYAN}cloning...${NC}"
-        output=$(ssh_cmd "$host" "git clone --branch '${BURST_BRANCH}' --depth 1 '${BURST_REPO}' '${REPO_DIR}'" 2>&1)
-        rc=$?
-    else
-        echo -e "${CYAN}updating ${node_commit:0:8} -> ${target_commit:0:8}...${NC}"
-        output=$(ssh_cmd "$host" "cd '${REPO_DIR}' && git fetch origin '${BURST_BRANCH}' && git reset --hard 'origin/${BURST_BRANCH}'" 2>&1)
-        rc=$?
-    fi
-    echo "$output" >> "$logfile"
-
-    if [ $rc -eq 0 ]; then
-        echo -e "  ${GREEN}Repo synced${NC} to ${target_commit:0:8}"
-        return 0
-    else
-        show_error "$host" "git sync"
-        return 1
-    fi
-}
-
-step_build_image() {
-    local host="$1" target_commit="$2"
-    local logfile
-    logfile=$(node_log "$host")
-
-    echo -n "  [4/6] Docker image... "
-    log_header "$host" "Build Image (target: ${target_commit:0:8})"
+    echo -n "  [3/6] Pull image... "
+    log_header "$host" "Pull Image (${full_image})"
 
     if [ "$FORCE_REBUILD" = "false" ]; then
-        local image_commit
-        image_commit=$(ssh_cmd "$host" "docker image inspect burst-daemon:testnet --format '{{index .Config.Labels \"burst.commit\"}}' 2>/dev/null || echo 'none'")
-        echo "Current image commit: ${image_commit}" >> "$logfile"
+        local current_id
+        current_id=$(ssh_cmd "$host" "docker image inspect '${full_image}' --format '{{.Id}}' 2>/dev/null || echo 'none'")
 
-        if [ "$image_commit" = "$target_commit" ]; then
-            echo -e "${GREEN}already built${NC} for ${target_commit:0:8}"
+        # Pull to check for updates
+        local pull_output
+        pull_output=$(ssh_cmd "$host" "docker pull '${full_image}' 2>&1")
+        local rc=$?
+        echo "$pull_output" >> "$logfile"
+
+        if [ $rc -ne 0 ]; then
+            echo -e "${RED}FAILED${NC}"
+            show_error "$host" "docker pull"
+            return 1
+        fi
+
+        local new_id
+        new_id=$(ssh_cmd "$host" "docker image inspect '${full_image}' --format '{{.Id}}' 2>/dev/null || echo 'none'")
+
+        if [ "$current_id" = "$new_id" ] && [ "$current_id" != "none" ]; then
+            echo -e "${GREEN}up to date${NC}"
             return 0
         fi
+
+        echo -e "${GREEN}updated${NC}"
+        mark_stage "$host" "needs_restart"
+        return 0
     fi
 
-    echo -e "${CYAN}building (this takes a few minutes)...${NC}"
-    local build_start
-    build_start=$(date +%s)
-
+    echo -e "${CYAN}pulling...${NC}"
     local output
-    output=$(ssh_cmd "$host" "cd '${REPO_DIR}' && docker build --label 'burst.commit=${target_commit}' -t burst-daemon:testnet . 2>&1")
+    output=$(ssh_cmd "$host" "docker pull '${full_image}'" 2>&1)
     local rc=$?
     echo "$output" >> "$logfile"
 
-    local build_end elapsed
-    build_end=$(date +%s)
-    elapsed=$((build_end - build_start))
-
     if [ $rc -eq 0 ]; then
-        echo -e "  ${GREEN}Image built${NC} (${elapsed}s)"
-        clear_stages "$host"
+        echo -e "  ${GREEN}Image pulled${NC}"
         mark_stage "$host" "needs_restart"
         return 0
     else
-        echo -e "  ${RED}${BOLD}BUILD FAILED${NC} after ${elapsed}s"
-        echo ""
-        echo -e "  ${RED}═══ Build errors ═══${NC}"
-        # Show last 30 lines — enough to see the actual compile error
-        echo "$output" | tail -30 | sed "s/^/  ${RED}│${NC} /"
-        echo -e "  ${RED}═══════════════════${NC}"
-        echo -e "  ${YELLOW}Full build log: ${logfile}${NC}"
-        echo ""
+        show_error "$host" "docker pull"
         return 1
     fi
 }
@@ -355,10 +304,11 @@ step_build_image() {
 step_run_container() {
     local host="$1" node_num="$2" is_seed="$3"
     local container_name="burst-testnet-${node_num}"
+    local full_image="${DOCKER_IMAGE}:${IMAGE_TAG}"
     local logfile
     logfile=$(node_log "$host")
 
-    echo -n "  [5/6] Container... "
+    echo -n "  [4/6] Container... "
     log_header "$host" "Run Container (${container_name})"
 
     local container_status
@@ -417,7 +367,7 @@ step_run_container() {
         )
     fi
 
-    docker_args+=("burst-daemon:testnet")
+    docker_args+=("${full_image}")
     echo "Running: ${docker_args[*]}" >> "$logfile"
 
     local output
@@ -431,6 +381,55 @@ step_run_container() {
     else
         show_error "$host" "container start"
         return 1
+    fi
+}
+
+step_watchtower() {
+    local host="$1"
+    local logfile
+    logfile=$(node_log "$host")
+
+    echo -n "  [5/6] Watchtower (auto-update)... "
+    log_header "$host" "Watchtower"
+
+    local wt_status
+    wt_status=$(ssh_cmd "$host" "
+        running=\$(docker ps -q -f name='^watchtower\$' 2>/dev/null)
+        if [ -n \"\$running\" ]; then
+            echo 'running'
+        else
+            echo 'absent'
+        fi
+    ")
+
+    if [ "$wt_status" = "running" ]; then
+        echo -e "${GREEN}already running${NC}"
+        return 0
+    fi
+
+    ssh_cmd "$host" "docker stop watchtower 2>/dev/null || true; docker rm watchtower 2>/dev/null || true" >> "$logfile" 2>&1
+
+    local output
+    output=$(ssh_cmd "$host" "docker run -d \
+        --name watchtower \
+        --restart unless-stopped \
+        -v /var/run/docker.sock:/var/run/docker.sock \
+        containrrr/watchtower \
+        --interval 30 \
+        --cleanup \
+        --include-stopped \
+        --revive-stopped \
+        --label-enable=false \
+        burst-testnet-1 burst-testnet-2 burst-testnet-3 burst-testnet-4 burst-testnet-5" 2>&1)
+    local rc=$?
+    echo "$output" >> "$logfile"
+
+    if [ $rc -eq 0 ]; then
+        echo -e "${GREEN}started${NC} (polls every 30s)"
+        return 0
+    else
+        echo -e "${YELLOW}SKIPPED${NC} — watchtower failed (non-critical)"
+        return 0
     fi
 }
 
@@ -449,12 +448,10 @@ step_verify() {
     running=$(ssh_cmd "$host" "docker ps -q -f name='^${container_name}\$' 2>/dev/null || true")
 
     if [ -n "$running" ]; then
-        # Grab startup logs to check for immediate crashes
         local startup_logs
         startup_logs=$(ssh_cmd "$host" "docker logs --tail 20 $container_name 2>&1" 2>/dev/null || true)
         echo "$startup_logs" >> "$logfile"
 
-        # Check if there are panic/error lines in startup
         local error_lines
         error_lines=$(echo "$startup_logs" | grep -iE "panic|fatal|error|failed to" || true)
 
@@ -490,15 +487,14 @@ step_verify() {
 # ── Deploy a single node (all steps, skip what's done) ───────────────
 
 deploy_node() {
-    local host="$1" node_num="$2" is_seed="$3" target_commit="$4"
+    local host="$1" node_num="$2" is_seed="$3"
     local logfile
     logfile=$(node_log "$host")
 
-    # Start fresh log section for this run
     echo "" >> "$logfile"
     echo "################################################################" >> "$logfile"
     echo "# DEPLOYMENT RUN — $(date '+%Y-%m-%d %H:%M:%S')" >> "$logfile"
-    echo "# Target: ${target_commit}" >> "$logfile"
+    echo "# Image: ${DOCKER_IMAGE}:${IMAGE_TAG}" >> "$logfile"
     echo "# Node: ${node_num} ($([ "$is_seed" = "true" ] && echo "SEED" || echo "regular"))" >> "$logfile"
     echo "################################################################" >> "$logfile"
 
@@ -513,22 +509,19 @@ deploy_node() {
         echo -e "  ${RED}SKIPPED — cannot reach host${NC}"
         return 1
     }
-    step_install_deps "$host" || {
-        echo -e "  ${RED}STOPPED — dependency install failed${NC}"
+    step_install_docker "$host" || {
+        echo -e "  ${RED}STOPPED — Docker install failed${NC}"
         return 1
     }
-    step_sync_repo "$host" "$target_commit" || {
-        echo -e "  ${RED}STOPPED — repo sync failed${NC}"
-        return 1
-    }
-    step_build_image "$host" "$target_commit" || {
-        echo -e "  ${RED}STOPPED — image build failed${NC}"
+    step_pull_image "$host" "$IMAGE_TAG" || {
+        echo -e "  ${RED}STOPPED — image pull failed${NC}"
         return 1
     }
     step_run_container "$host" "$node_num" "$is_seed" || {
         echo -e "  ${RED}STOPPED — container start failed${NC}"
         return 1
     }
+    step_watchtower "$host"
     step_verify "$host" "$node_num" || return 1
 
     return 0
@@ -537,26 +530,25 @@ deploy_node() {
 # ── Deploy a node silently (output to log + result file, for parallel use) ──
 
 deploy_node_bg() {
-    local host="$1" node_num="$2" is_seed="$3" target_commit="$4"
+    local host="$1" node_num="$2" is_seed="$3"
     local logfile result_file
     logfile=$(node_log "$host")
     result_file="${STATE_DIR}/${host}.result"
 
-    # Redirect all step output to logfile only
     {
         echo ""
         echo "################################################################"
         echo "# DEPLOYMENT RUN — $(date '+%Y-%m-%d %H:%M:%S')"
-        echo "# Target: ${target_commit}"
+        echo "# Image: ${DOCKER_IMAGE}:${IMAGE_TAG}"
         echo "# Node: ${node_num} ($([ "$is_seed" = "true" ] && echo "SEED" || echo "regular"))"
         echo "################################################################"
         echo ""
 
         step_check_ssh "$host"                      || { echo "RESULT:FAIL:ssh"; echo "FAIL" > "$result_file"; return; }
-        step_install_deps "$host"                    || { echo "RESULT:FAIL:deps"; echo "FAIL" > "$result_file"; return; }
-        step_sync_repo "$host" "$target_commit"      || { echo "RESULT:FAIL:repo"; echo "FAIL" > "$result_file"; return; }
-        step_build_image "$host" "$target_commit"    || { echo "RESULT:FAIL:build"; echo "FAIL" > "$result_file"; return; }
+        step_install_docker "$host"                  || { echo "RESULT:FAIL:docker"; echo "FAIL" > "$result_file"; return; }
+        step_pull_image "$host" "$IMAGE_TAG"         || { echo "RESULT:FAIL:pull"; echo "FAIL" > "$result_file"; return; }
         step_run_container "$host" "$node_num" "$is_seed" || { echo "RESULT:FAIL:container"; echo "FAIL" > "$result_file"; return; }
+        step_watchtower "$host"
         step_verify "$host" "$node_num"              || { echo "RESULT:FAIL:verify"; echo "FAIL" > "$result_file"; return; }
 
         echo "RESULT:OK"
@@ -569,18 +561,10 @@ deploy_node_bg() {
 echo -e "${BOLD}=== BURST Testnet Deployment ===${NC}"
 echo "Seed:   $SEED_IP"
 echo "Nodes:  ${ALL_IPS[*]}"
-echo "Repo:   $BURST_REPO ($BURST_BRANCH)"
+echo "Image:  ${DOCKER_IMAGE}:${IMAGE_TAG}"
 echo "Force:  $FORCE_REBUILD"
 echo "Logs:   $LOG_DIR"
 echo ""
-
-echo -n "Resolving target commit... "
-TARGET_COMMIT=$(get_target_commit)
-if [ -z "$TARGET_COMMIT" ]; then
-    echo -e "${RED}FAILED — cannot reach $BURST_REPO${NC}"
-    exit 1
-fi
-echo -e "${GREEN}${TARGET_COMMIT:0:8}${NC} (${BURST_BRANCH})"
 
 SUCCEEDED=0
 FAILED=0
@@ -588,7 +572,7 @@ FAILED_HOSTS=()
 
 # ── Step 1: Deploy seed node (must complete first) ───────────────────
 
-deploy_node "$SEED_IP" 1 "true" "$TARGET_COMMIT"
+deploy_node "$SEED_IP" 1 "true"
 if [ $? -eq 0 ]; then
     SUCCEEDED=$((SUCCEEDED + 1))
 else
@@ -610,17 +594,15 @@ if [ ${#NODE_IPS[@]} -gt 0 ] && [ $FAILED -eq 0 ]; then
     echo -e "${BOLD}=== Deploying nodes 2-$((${#NODE_IPS[@]} + 1)) in parallel ===${NC}"
     echo ""
 
-    # Clear previous result files
     for ip in "${NODE_IPS[@]}"; do
         rm -f "${STATE_DIR}/${ip}.result"
     done
 
-    # Launch all in background
     PIDS=()
     node_num=2
     for ip in "${NODE_IPS[@]}"; do
         echo -e "  ${CYAN}Starting deploy for node ${node_num} (${ip})...${NC}"
-        deploy_node_bg "$ip" "$node_num" "false" "$TARGET_COMMIT" &
+        deploy_node_bg "$ip" "$node_num" "false" &
         PIDS+=($!)
         node_num=$((node_num + 1))
     done
@@ -629,7 +611,6 @@ if [ ${#NODE_IPS[@]} -gt 0 ] && [ $FAILED -eq 0 ]; then
     echo -e "  ${#PIDS[@]} deploys running in parallel. Waiting..."
     echo ""
 
-    # Progress monitor — poll result files
     TOTAL_PARALLEL=${#NODE_IPS[@]}
     while true; do
         DONE=0
@@ -644,12 +625,10 @@ if [ ${#NODE_IPS[@]} -gt 0 ] && [ $FAILED -eq 0 ]; then
     done
     echo -e "\r  Progress: ${TOTAL_PARALLEL}/${TOTAL_PARALLEL} nodes finished.   "
 
-    # Wait for all background processes to fully exit
     for pid in "${PIDS[@]}"; do
         wait "$pid" 2>/dev/null || true
     done
 
-    # Collect results
     echo ""
     node_num=2
     for ip in "${NODE_IPS[@]}"; do
@@ -661,11 +640,9 @@ if [ ${#NODE_IPS[@]} -gt 0 ] && [ $FAILED -eq 0 ]; then
             echo -e "  ${GREEN}✓ Node ${node_num} (${ip}) — deployed${NC}"
             SUCCEEDED=$((SUCCEEDED + 1))
         else
-            # Find which step failed from the log
             fail_step=$(grep "RESULT:FAIL:" "$(node_log "$ip")" 2>/dev/null | tail -1 | cut -d: -f3)
             echo -e "  ${RED}✗ Node ${node_num} (${ip}) — failed at: ${fail_step:-unknown}${NC}"
 
-            # Show error excerpt
             echo -e "    ${YELLOW}Last 10 lines from log:${NC}"
             tail -10 "$(node_log "$ip")" 2>/dev/null | grep -v "^RESULT:" | sed "s/^/    ${RED}│${NC} /"
 
@@ -695,7 +672,6 @@ echo "Seed RPC:       http://${SEED_IP}:${RPC_PORT}"
 echo "Seed WebSocket: ws://${SEED_IP}:${WS_PORT}"
 echo ""
 echo "Health check:   ./deploy/health-check.sh ${ALL_IPS[*]}"
-echo "Auto-update:    ./deploy/update-testnet.sh ${ALL_IPS[*]}"
 echo ""
 echo -e "Per-node logs:  ${CYAN}ls ${LOG_DIR}/${NC}"
 for ip in "${ALL_IPS[@]}"; do
