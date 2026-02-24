@@ -1706,6 +1706,13 @@ pub async fn handle_burn_simple(
         .concat(),
     ));
 
+    let is_first_block = account.head == BlockHash::ZERO;
+    let block_type = if is_first_block {
+        burst_ledger::BlockType::Open
+    } else {
+        burst_ledger::BlockType::Burn
+    };
+
     let pk_bytes = private_key.0;
     let block = tokio::task::spawn_blocking({
         let address = address.clone();
@@ -1716,7 +1723,7 @@ pub async fn handle_burn_simple(
         move || {
             let pk = burst_types::PrivateKey(pk_bytes);
             build_and_sign_block(
-                burst_ledger::BlockType::Burn,
+                block_type,
                 &address,
                 previous,
                 &representative,
@@ -1834,6 +1841,13 @@ pub async fn handle_send_simple(
         .concat(),
     ));
 
+    let is_first_block = account.head == BlockHash::ZERO;
+    let block_type = if is_first_block {
+        burst_ledger::BlockType::Open
+    } else {
+        burst_ledger::BlockType::Send
+    };
+
     let pk_bytes = private_key.0;
     let block = tokio::task::spawn_blocking({
         let address = address.clone();
@@ -1844,7 +1858,7 @@ pub async fn handle_send_simple(
         move || {
             let pk = burst_types::PrivateKey(pk_bytes);
             build_and_sign_block(
-                burst_ledger::BlockType::Send,
+                block_type,
                 &address,
                 previous,
                 &representative,
