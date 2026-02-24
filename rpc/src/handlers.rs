@@ -14,7 +14,7 @@ use burst_governance::Proposal;
 use burst_ledger::StateBlock;
 use burst_store::account::AccountInfo;
 use burst_store::StoreError;
-use burst_types::{BlockHash, Timestamp, TxHash, WalletAddress};
+use burst_types::{BlockHash, Signature, Timestamp, TxHash, WalletAddress};
 
 use serde::{Deserialize, Serialize};
 use tracing::debug;
@@ -1491,5 +1491,558 @@ pub async fn handle_faucet(
         account: req.account,
         status: "ok".to_string(),
         message: "Account verified and 1 TRST credited (testnet faucet)".to_string(),
+    }))
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Testnet convenience RPCs (faucet-only)
+//
+// These endpoints construct, sign, and submit blocks server-side so that
+// testnet validation can be performed via simple curl commands without a
+// local wallet. They are gated behind `enable_faucet`.
+// ═══════════════════════════════════════════════════════════════════════
+
+fn require_faucet(state: &RpcState) -> Result<(), RpcError> {
+    if !state.enable_faucet {
+        return Err(RpcError::InvalidRequest(
+            "this endpoint is only available on testnet nodes with faucet enabled".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn parse_private_key(hex_str: &str) -> Result<burst_types::PrivateKey, RpcError> {
+    let bytes = hex::decode(hex_str)
+        .map_err(|e| RpcError::InvalidRequest(format!("invalid private key hex: {e}")))?;
+    if bytes.len() != 32 {
+        return Err(RpcError::InvalidRequest(
+            "private key must be 32 bytes (64 hex chars)".into(),
+        ));
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&bytes);
+    Ok(burst_types::PrivateKey(arr))
+}
+
+/// Build a StateBlock, compute its hash, sign it, and generate PoW.
+#[allow(clippy::too_many_arguments)]
+fn build_and_sign_block(
+    block_type: burst_ledger::BlockType,
+    account: &WalletAddress,
+    previous: BlockHash,
+    representative: &WalletAddress,
+    brn_balance: u128,
+    trst_balance: u128,
+    link: BlockHash,
+    origin: TxHash,
+    transaction: TxHash,
+    private_key: &burst_types::PrivateKey,
+    work_generator: &burst_work::WorkGenerator,
+    min_work_difficulty: u64,
+) -> Result<burst_ledger::StateBlock, RpcError> {
+    use burst_ledger::CURRENT_BLOCK_VERSION;
+
+    let now = Timestamp::now();
+
+    let mut block = burst_ledger::StateBlock {
+        version: CURRENT_BLOCK_VERSION,
+        block_type,
+        account: account.clone(),
+        previous,
+        representative: representative.clone(),
+        brn_balance,
+        trst_balance,
+        link,
+        origin,
+        transaction,
+        timestamp: now,
+        work: 0,
+        signature: Signature([0u8; 64]),
+        hash: BlockHash::ZERO,
+    };
+
+    block.hash = block.compute_hash();
+    block.signature = burst_crypto::sign_message(block.hash.as_bytes(), private_key);
+
+    let work_kind = match block.block_type {
+        burst_ledger::BlockType::Open | burst_ledger::BlockType::Receive => {
+            burst_work::WorkBlockKind::ReceiveOrOpen
+        }
+        _ => burst_work::WorkBlockKind::Base,
+    };
+    let threshold =
+        burst_work::WorkThresholds::with_base(min_work_difficulty).threshold_for(work_kind);
+    let nonce = work_generator
+        .generate(&block.hash, threshold)
+        .map_err(|e| RpcError::Server(format!("work generation failed: {e}")))?;
+    block.work = nonce.0;
+
+    Ok(block)
+}
+
+/// Submit a block through the block processor and return whether it was accepted.
+fn submit_block(block: &burst_ledger::StateBlock, state: &RpcState) -> Result<bool, RpcError> {
+    let block_bytes = bincode::serialize(block)
+        .map_err(|e| RpcError::Server(format!("block serialization failed: {e}")))?;
+    let result = state
+        .block_processor
+        .process_block(&block_bytes)
+        .map_err(RpcError::Server)?;
+    let accepted = matches!(result, crate::server::ProcessResult::Accepted);
+    if !accepted {
+        let detail = match &result {
+            crate::server::ProcessResult::Rejected(r) => r.clone(),
+            crate::server::ProcessResult::Duplicate => "duplicate block".to_string(),
+            crate::server::ProcessResult::Fork => "fork detected".to_string(),
+            crate::server::ProcessResult::Gap => "gap — previous block unknown".to_string(),
+            crate::server::ProcessResult::Queued => "queued".to_string(),
+            _ => "unknown".to_string(),
+        };
+        return Err(RpcError::Server(format!("block not accepted: {detail}")));
+    }
+    Ok(true)
+}
+
+// ── wallet_create_full (testnet-only, returns private key) ──────────
+
+#[derive(Debug, Deserialize)]
+pub struct WalletCreateFullRequest {
+    #[serde(default)]
+    pub seed: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WalletCreateFullResponse {
+    pub address: String,
+    pub public_key: String,
+    pub private_key: String,
+}
+
+pub async fn handle_wallet_create_full(
+    params: serde_json::Value,
+    state: &RpcState,
+) -> Result<serde_json::Value, RpcError> {
+    require_faucet(state)?;
+
+    let _req: WalletCreateFullRequest =
+        serde_json::from_value(params).map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
+
+    let kp = burst_crypto::generate_keypair();
+    let address = burst_crypto::derive_address(&kp.public);
+
+    Ok(to_value(&WalletCreateFullResponse {
+        address: address.to_string(),
+        public_key: hex::encode(kp.public.0),
+        private_key: hex::encode(kp.private.0),
+    }))
+}
+
+// ── burn_simple (BRN → TRST) ────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct BurnSimpleRequest {
+    pub private_key: String,
+    pub amount: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BurnSimpleResponse {
+    pub block_hash: String,
+    pub account: String,
+    pub brn_before: String,
+    pub brn_after: String,
+    pub trst_before: String,
+    pub trst_after: String,
+    pub origin: String,
+}
+
+pub async fn handle_burn_simple(
+    params: serde_json::Value,
+    state: &RpcState,
+) -> Result<serde_json::Value, RpcError> {
+    require_faucet(state)?;
+
+    let req: BurnSimpleRequest =
+        serde_json::from_value(params).map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
+    let amount = validate_positive_amount(&req.amount)?;
+    let private_key = parse_private_key(&req.private_key)?;
+    let public_key = burst_crypto::public_from_private(&private_key);
+    let address = burst_crypto::derive_address(&public_key);
+
+    let account = state
+        .account_store
+        .get_account(&address)
+        .map_err(|e| account_not_found(e, address.as_str()))?;
+
+    if account.state != burst_types::WalletState::Verified {
+        return Err(RpcError::InvalidRequest(
+            "account must be verified to burn BRN (use faucet first)".into(),
+        ));
+    }
+
+    let now = Timestamp::now();
+    let brn_state = brn_state_from_account(&account, state.params.brn_rate);
+    let brn_balance = {
+        let brn = state.brn_engine.lock().await;
+        brn.compute_balance(&brn_state, now)
+    };
+
+    if brn_balance < amount {
+        return Err(RpcError::InvalidRequest(format!(
+            "insufficient BRN: have {brn_balance}, need {amount}"
+        )));
+    }
+
+    let brn_after = brn_balance - amount;
+    let trst_before = account.trst_balance;
+    let trst_after = trst_before + amount;
+
+    let tx_hash = TxHash::new(burst_crypto::blake2b_256(
+        &[
+            address.as_str().as_bytes(),
+            &now.as_secs().to_be_bytes(),
+            b"burn",
+        ]
+        .concat(),
+    ));
+
+    let pk_bytes = private_key.0;
+    let block = tokio::task::spawn_blocking({
+        let address = address.clone();
+        let representative = account.representative.clone();
+        let previous = account.head;
+        let work_gen = state.work_generator.clone();
+        let min_diff = state.params.min_work_difficulty;
+        move || {
+            let pk = burst_types::PrivateKey(pk_bytes);
+            build_and_sign_block(
+                burst_ledger::BlockType::Burn,
+                &address,
+                previous,
+                &representative,
+                brn_after,
+                trst_after,
+                BlockHash::ZERO,
+                tx_hash,
+                tx_hash,
+                &pk,
+                &work_gen,
+                min_diff,
+            )
+        }
+    })
+    .await
+    .map_err(|e| RpcError::Server(format!("block build task failed: {e}")))??;
+
+    submit_block(&block, state)?;
+
+    let mut updated = account.clone();
+    updated.head = block.hash;
+    updated.block_count += 1;
+    updated.total_brn_burned += amount;
+    updated.trst_balance = trst_after;
+
+    state
+        .account_store
+        .put_account(&updated)
+        .map_err(|e| RpcError::Store(format!("failed to update account: {e}")))?;
+
+    let block_bytes = bincode::serialize(&block)
+        .map_err(|e| RpcError::Server(format!("block serialization failed: {e}")))?;
+    let _ = state.block_store.put_block(&block.hash, &block_bytes);
+
+    Ok(to_value(&BurnSimpleResponse {
+        block_hash: format!("{}", block.hash),
+        account: address.to_string(),
+        brn_before: brn_balance.to_string(),
+        brn_after: brn_after.to_string(),
+        trst_before: trst_before.to_string(),
+        trst_after: trst_after.to_string(),
+        origin: format!("{}", tx_hash),
+    }))
+}
+
+// ── send_simple (TRST transfer) ─────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct SendSimpleRequest {
+    pub private_key: String,
+    pub destination: String,
+    pub amount: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SendSimpleResponse {
+    pub block_hash: String,
+    pub source: String,
+    pub destination: String,
+    pub amount: String,
+    pub trst_before: String,
+    pub trst_after: String,
+}
+
+pub async fn handle_send_simple(
+    params: serde_json::Value,
+    state: &RpcState,
+) -> Result<serde_json::Value, RpcError> {
+    require_faucet(state)?;
+
+    let req: SendSimpleRequest =
+        serde_json::from_value(params).map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
+    validate_account(&req.destination)?;
+    let amount = validate_positive_amount(&req.amount)?;
+    let private_key = parse_private_key(&req.private_key)?;
+    let public_key = burst_crypto::public_from_private(&private_key);
+    let address = burst_crypto::derive_address(&public_key);
+
+    let account = state
+        .account_store
+        .get_account(&address)
+        .map_err(|e| account_not_found(e, address.as_str()))?;
+
+    if account.state != burst_types::WalletState::Verified {
+        return Err(RpcError::InvalidRequest(
+            "account must be verified to send TRST".into(),
+        ));
+    }
+
+    if account.trst_balance < amount {
+        return Err(RpcError::InvalidRequest(format!(
+            "insufficient TRST: have {}, need {amount}",
+            account.trst_balance
+        )));
+    }
+
+    let trst_before = account.trst_balance;
+    let trst_after = trst_before - amount;
+    let destination = WalletAddress::new(req.destination.clone());
+
+    let now = Timestamp::now();
+    let brn_state = brn_state_from_account(&account, state.params.brn_rate);
+    let brn_balance = {
+        let brn = state.brn_engine.lock().await;
+        brn.compute_balance(&brn_state, now)
+    };
+
+    let dest_hash = BlockHash::new(burst_crypto::blake2b_256(destination.as_str().as_bytes()));
+    let tx_hash = TxHash::new(burst_crypto::blake2b_256(
+        &[
+            address.as_str().as_bytes(),
+            &now.as_secs().to_be_bytes(),
+            b"send",
+        ]
+        .concat(),
+    ));
+
+    let pk_bytes = private_key.0;
+    let block = tokio::task::spawn_blocking({
+        let address = address.clone();
+        let representative = account.representative.clone();
+        let previous = account.head;
+        let work_gen = state.work_generator.clone();
+        let min_diff = state.params.min_work_difficulty;
+        move || {
+            let pk = burst_types::PrivateKey(pk_bytes);
+            build_and_sign_block(
+                burst_ledger::BlockType::Send,
+                &address,
+                previous,
+                &representative,
+                brn_balance,
+                trst_after,
+                dest_hash,
+                TxHash::ZERO,
+                tx_hash,
+                &pk,
+                &work_gen,
+                min_diff,
+            )
+        }
+    })
+    .await
+    .map_err(|e| RpcError::Server(format!("block build task failed: {e}")))??;
+
+    submit_block(&block, state)?;
+
+    let mut updated = account.clone();
+    updated.head = block.hash;
+    updated.block_count += 1;
+    updated.trst_balance = trst_after;
+
+    state
+        .account_store
+        .put_account(&updated)
+        .map_err(|e| RpcError::Store(format!("failed to update account: {e}")))?;
+
+    let block_bytes = bincode::serialize(&block)
+        .map_err(|e| RpcError::Server(format!("block serialization failed: {e}")))?;
+    let _ = state.block_store.put_block(&block.hash, &block_bytes);
+
+    state
+        .pending_store
+        .put_pending(
+            &destination,
+            &tx_hash,
+            &burst_store::pending::PendingInfo {
+                source: address.clone(),
+                amount,
+                timestamp: now,
+                provenance: vec![],
+            },
+        )
+        .map_err(|e| RpcError::Store(format!("failed to create pending: {e}")))?;
+
+    Ok(to_value(&SendSimpleResponse {
+        block_hash: format!("{}", block.hash),
+        source: address.to_string(),
+        destination: req.destination,
+        amount: req.amount,
+        trst_before: trst_before.to_string(),
+        trst_after: trst_after.to_string(),
+    }))
+}
+
+// ── receive_simple (pocket a pending TRST transfer) ──────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct ReceiveSimpleRequest {
+    pub private_key: String,
+    pub send_block_hash: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReceiveSimpleResponse {
+    pub block_hash: String,
+    pub account: String,
+    pub amount: String,
+    pub trst_before: String,
+    pub trst_after: String,
+}
+
+pub async fn handle_receive_simple(
+    params: serde_json::Value,
+    state: &RpcState,
+) -> Result<serde_json::Value, RpcError> {
+    require_faucet(state)?;
+
+    let req: ReceiveSimpleRequest =
+        serde_json::from_value(params).map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
+    let private_key = parse_private_key(&req.private_key)?;
+    let public_key = burst_crypto::public_from_private(&private_key);
+    let address = burst_crypto::derive_address(&public_key);
+
+    let send_tx_hash = parse_tx_hash(&req.send_block_hash)?;
+
+    let pending = state
+        .pending_store
+        .get_pending(&address, &send_tx_hash)
+        .map_err(|e| {
+            RpcError::InvalidRequest(format!(
+                "no pending receive found for hash {}: {e}",
+                req.send_block_hash
+            ))
+        })?;
+
+    let account = state
+        .account_store
+        .get_account(&address)
+        .unwrap_or_else(|_| AccountInfo {
+            address: address.clone(),
+            state: burst_types::WalletState::Unverified,
+            verified_at: None,
+            head: BlockHash::ZERO,
+            representative: address.clone(),
+            block_count: 0,
+            confirmation_height: 0,
+            total_brn_burned: 0,
+            trst_balance: 0,
+            total_brn_staked: 0,
+            expired_trst: 0,
+            revoked_trst: 0,
+            epoch: 0,
+        });
+
+    let trst_before = account.trst_balance;
+    let trst_after = trst_before + pending.amount;
+
+    let now = Timestamp::now();
+    let brn_state = brn_state_from_account(&account, state.params.brn_rate);
+    let brn_balance = {
+        let brn = state.brn_engine.lock().await;
+        brn.compute_balance(&brn_state, now)
+    };
+
+    let is_open = account.head == BlockHash::ZERO;
+    let block_type = if is_open {
+        burst_ledger::BlockType::Open
+    } else {
+        burst_ledger::BlockType::Receive
+    };
+
+    let link = BlockHash::new(*send_tx_hash.as_bytes());
+    let tx_hash = TxHash::new(burst_crypto::blake2b_256(
+        &[
+            address.as_str().as_bytes(),
+            &now.as_secs().to_be_bytes(),
+            b"receive",
+        ]
+        .concat(),
+    ));
+
+    let pk_bytes = private_key.0;
+    let block = tokio::task::spawn_blocking({
+        let address = address.clone();
+        let representative = account.representative.clone();
+        let previous = account.head;
+        let work_gen = state.work_generator.clone();
+        let min_diff = state.params.min_work_difficulty;
+        move || {
+            let pk = burst_types::PrivateKey(pk_bytes);
+            build_and_sign_block(
+                block_type,
+                &address,
+                previous,
+                &representative,
+                brn_balance,
+                trst_after,
+                link,
+                TxHash::ZERO,
+                tx_hash,
+                &pk,
+                &work_gen,
+                min_diff,
+            )
+        }
+    })
+    .await
+    .map_err(|e| RpcError::Server(format!("block build task failed: {e}")))??;
+
+    submit_block(&block, state)?;
+
+    let mut updated = account.clone();
+    updated.head = block.hash;
+    updated.block_count += 1;
+    updated.trst_balance = trst_after;
+
+    state
+        .account_store
+        .put_account(&updated)
+        .map_err(|e| RpcError::Store(format!("failed to update account: {e}")))?;
+
+    let block_bytes = bincode::serialize(&block)
+        .map_err(|e| RpcError::Server(format!("block serialization failed: {e}")))?;
+    let _ = state.block_store.put_block(&block.hash, &block_bytes);
+
+    state
+        .pending_store
+        .delete_pending(&address, &send_tx_hash)
+        .map_err(|e| RpcError::Store(format!("failed to delete pending: {e}")))?;
+
+    Ok(to_value(&ReceiveSimpleResponse {
+        block_hash: format!("{}", block.hash),
+        account: address.to_string(),
+        amount: pending.amount.to_string(),
+        trst_before: trst_before.to_string(),
+        trst_after: trst_after.to_string(),
     }))
 }

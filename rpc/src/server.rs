@@ -334,6 +334,10 @@ async fn dispatch_action(
         "wallet_info" => handlers::handle_wallet_info(params, state).await,
         "node_info" => handlers::handle_node_info(params, state).await,
         "faucet" => handlers::handle_faucet(params, state).await,
+        "wallet_create_full" => handlers::handle_wallet_create_full(params, state).await,
+        "burn_simple" => handlers::handle_burn_simple(params, state).await,
+        "send_simple" => handlers::handle_send_simple(params, state).await,
+        "receive_simple" => handlers::handle_receive_simple(params, state).await,
         other => {
             warn!("unknown RPC action: {other}");
             Err(RpcError::InvalidRequest(format!("unknown action: {other}")))
