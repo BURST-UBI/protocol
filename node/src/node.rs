@@ -323,9 +323,23 @@ impl BurstNode {
         let brn_engine = {
             let brn_store = store.brn_store();
             match BrnEngine::load_from_store(&brn_store) {
-                Ok(loaded) => {
+                Ok(mut loaded) => {
                     let wallet_count = loaded.wallets.len();
                     tracing::info!(wallets = wallet_count, "BRN engine state loaded from LMDB");
+                    // On a fresh database the rate_history has rate=0 (default).
+                    // Ensure it matches the protocol's configured brn_rate.
+                    if loaded.current_rate() != config.params.brn_rate {
+                        tracing::info!(
+                            stored_rate = loaded.current_rate(),
+                            protocol_rate = config.params.brn_rate,
+                            "BRN rate mismatch — reinitializing rate history"
+                        );
+                        loaded.rate_history =
+                            burst_brn::RateHistory::new(config.params.brn_rate, Timestamp::new(0));
+                        if let Err(e) = loaded.save_to_store(&brn_store) {
+                            tracing::warn!(error = %e, "failed to persist corrected BRN rate");
+                        }
+                    }
                     loaded
                 }
                 Err(e) => {
