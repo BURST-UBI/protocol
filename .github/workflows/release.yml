@@ -16,12 +16,11 @@ env:
 
 jobs:
   build:
-    name: Build & push
+    name: Build binary
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    permissions:
-      contents: read
-      packages: write
+    container:
+      image: rust:bookworm
 
     steps:
       - uses: actions/checkout@v4
@@ -30,7 +29,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: burst-nightly
+          shared-key: burst-release
           save-if: true
           cache-on-failure: true
           cache-all-crates: true
@@ -44,6 +43,27 @@ jobs:
           name: burst-daemon-linux-amd64
           path: target/release/burst-daemon
           retention-days: 90
+
+  push:
+    name: Push Docker image
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download binary
+        uses: actions/download-artifact@v4
+        with:
+          name: burst-daemon-linux-amd64
+          path: target/release
+
+      - name: Make binary executable
+        run: chmod +x target/release/burst-daemon
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
