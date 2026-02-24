@@ -1,12 +1,12 @@
 # Multi-stage build for burst-daemon
-FROM rust:latest AS builder
+FROM rust:bookworm AS builder
 
 WORKDIR /usr/src/burst
 COPY . .
 
 RUN cargo build --release -p burst-daemon
 
-# Runtime image
+# Runtime image — must match builder's Debian version for glibc compatibility
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
