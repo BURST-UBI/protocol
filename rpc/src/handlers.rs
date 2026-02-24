@@ -1765,7 +1765,9 @@ pub async fn handle_burn_simple(
 
     let block_bytes = bincode::serialize(&block)
         .map_err(|e| RpcError::Server(format!("block serialization failed: {e}")))?;
-    let _ = state.block_store.put_block(&block.hash, &block_bytes);
+    let _ = state
+        .block_store
+        .put_block_with_account(&block.hash, &block_bytes, &address);
 
     Ok(to_value(&BurnSimpleResponse {
         block_hash: format!("{}", block.hash),
@@ -1899,7 +1901,9 @@ pub async fn handle_send_simple(
 
     let block_bytes = bincode::serialize(&block)
         .map_err(|e| RpcError::Server(format!("block serialization failed: {e}")))?;
-    let _ = state.block_store.put_block(&block.hash, &block_bytes);
+    let _ = state
+        .block_store
+        .put_block_with_account(&block.hash, &block_bytes, &address);
 
     state
         .pending_store
@@ -2054,7 +2058,9 @@ pub async fn handle_receive_simple(
 
     let block_bytes = bincode::serialize(&block)
         .map_err(|e| RpcError::Server(format!("block serialization failed: {e}")))?;
-    let _ = state.block_store.put_block(&block.hash, &block_bytes);
+    let _ = state
+        .block_store
+        .put_block_with_account(&block.hash, &block_bytes, &address);
 
     state
         .pending_store
