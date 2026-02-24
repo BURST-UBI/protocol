@@ -1502,6 +1502,12 @@ pub async fn handle_faucet(
         .put_account(&account_info)
         .map_err(|e| RpcError::Store(format!("failed to update faucet account: {e}")))?;
 
+    {
+        let faucet_amount: u128 = 1_000_000_000_000_000_000;
+        let mut cache = state.rep_weight_cache.write().await;
+        cache.add_weight(&account_info.representative, faucet_amount);
+    }
+
     Ok(to_value(&FaucetResponse {
         account: req.account,
         status: "ok".to_string(),
@@ -1779,11 +1785,7 @@ pub async fn handle_burn_simple(
 
     {
         let mut cache = state.rep_weight_cache.write().await;
-        if is_first_block {
-            cache.add_weight(&account.representative, trst_after);
-        } else {
-            cache.add_weight(&account.representative, amount);
-        }
+        cache.add_weight(&account.representative, amount);
     }
 
     Ok(to_value(&BurnSimpleResponse {
