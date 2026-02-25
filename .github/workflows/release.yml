@@ -15,29 +15,54 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  build:
-    name: Build (${{ matrix.arch }})
+  build-amd64:
+    name: Build (amd64)
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            target: x86_64-unknown-linux-musl
-          - arch: arm64
-            target: aarch64-unknown-linux-musl
-
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@nightly
         with:
-          targets: ${{ matrix.target }}
+          targets: x86_64-unknown-linux-musl
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: burst-release-${{ matrix.arch }}
+          shared-key: burst-release-amd64
+          save-if: true
+          cache-on-failure: true
+          cache-all-crates: true
+
+      - name: Install musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build static binary
+        run: cargo build --release -p burst-daemon --target x86_64-unknown-linux-musl
+
+      - name: Verify static linking
+        run: file target/x86_64-unknown-linux-musl/release/burst-daemon
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: burst-daemon-linux-amd64
+          path: target/x86_64-unknown-linux-musl/release/burst-daemon
+          retention-days: 90
+
+  build-arm64:
+    name: Build (arm64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: aarch64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: burst-release-arm64
           save-if: true
           cache-on-failure: true
           cache-all-crates: true
@@ -46,22 +71,22 @@ jobs:
         run: cargo install cross --git https://github.com/cross-rs/cross
 
       - name: Build static binary
-        run: cross build --release -p burst-daemon --target ${{ matrix.target }}
+        run: cross build --release -p burst-daemon --target aarch64-unknown-linux-musl
 
       - name: Verify static linking
-        run: file target/${{ matrix.target }}/release/burst-daemon
+        run: file target/aarch64-unknown-linux-musl/release/burst-daemon
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
-          name: burst-daemon-linux-${{ matrix.arch }}
-          path: target/${{ matrix.target }}/release/burst-daemon
+          name: burst-daemon-linux-arm64
+          path: target/aarch64-unknown-linux-musl/release/burst-daemon
           retention-days: 90
 
   push:
     name: Push multi-arch Docker image
     runs-on: ubuntu-latest
-    needs: build
+    needs: [build-amd64, build-arm64]
     timeout-minutes: 15
     permissions:
       contents: read
