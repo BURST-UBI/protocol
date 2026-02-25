@@ -1,6 +1,6 @@
 # Lightweight multi-arch image — binaries are pre-built by CI for each
 # platform (amd64, arm64).  Docker buildx sets TARGETARCH automatically.
-FROM debian:bookworm-slim
+FROM ubuntu:24.04
 
 ARG TARGETARCH
 
