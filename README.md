@@ -10,38 +10,64 @@ Normal money is BURST with r=0 and e=∞. Every other economic model is a differ
 
 ## Quick Start
 
-Install a BURST node on any Linux machine (x86_64 or aarch64):
+### Linux
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/BURST-UBI/protocol/main/install.sh | sudo sh
 ```
 
-That's it. The script downloads a static binary, creates a systemd service, and enables auto-updates. No Docker, no build tools, no dependencies.
+### macOS
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/BURST-UBI/protocol/main/install.sh | sh
+```
+
+### Windows (PowerShell as Administrator)
+
+```powershell
+irm https://raw.githubusercontent.com/BURST-UBI/protocol/main/install.ps1 | iex
+```
+
+That's it. Each script downloads a pre-built binary, writes a default config, registers a background service, and enables auto-updates. No Docker, no build tools, no dependencies.
 
 ### What it sets up
 
-| Component | Path |
-|-----------|------|
-| Binary | `/usr/local/bin/burst-daemon` |
-| Config | `/etc/burst/config.toml` |
-| Data | `/var/lib/burst` |
-| Service | `burst-node.service` (systemd) |
-| Auto-update | `burst-update.timer` (checks every 5 min) |
+| | Linux | macOS | Windows |
+|---|---|---|---|
+| Binary | `/usr/local/bin/burst-daemon` | `/usr/local/bin/burst-daemon` | `C:\ProgramData\BURST\burst-daemon.exe` |
+| Config | `/etc/burst/config.toml` | `~/Library/Application Support/BURST/config.toml` | `C:\ProgramData\BURST\config.toml` |
+| Data | `/var/lib/burst` | `~/Library/Application Support/BURST/data` | `C:\ProgramData\BURST\data` |
+| Service | systemd | launchd | Windows Service |
+| Auto-update | systemd timer (5 min) | launchd (5 min) | Scheduled Task (5 min) |
 
 ### Common commands
 
+**Linux:**
 ```bash
-journalctl -u burst-node -f        # view logs
-systemctl status burst-node         # check status
-sudo systemctl restart burst-node   # restart
-sudo nano /etc/burst/config.toml    # edit config
+journalctl -u burst-node -f         # view logs
+systemctl status burst-node          # check status
+sudo systemctl restart burst-node    # restart
+```
+
+**macOS:**
+```bash
+tail -f ~/Library/Application\ Support/BURST/burst-node.log   # view logs
+launchctl kickstart -k gui/$(id -u)/com.burst.node             # restart
+```
+
+**Windows (PowerShell):**
+```powershell
+Get-Service BurstNode                # check status
+Restart-Service BurstNode            # restart
 ```
 
 ### Uninstall
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/BURST-UBI/protocol/main/install.sh | sudo sh -s -- --uninstall
-```
+**Linux:** `curl -fsSL https://raw.githubusercontent.com/BURST-UBI/protocol/main/install.sh | sudo sh -s -- --uninstall`
+
+**macOS:** `curl -fsSL https://raw.githubusercontent.com/BURST-UBI/protocol/main/install.sh | sh -s -- --uninstall`
+
+**Windows:** Run `install.ps1 --uninstall` in an elevated PowerShell.
 
 ## Architecture
 
@@ -65,8 +91,7 @@ Rust workspace organized into modular crates:
 cargo build --release -p burst-daemon
 ```
 
-The binary is at `target/release/burst-daemon`. For cross-compilation to arm64:
-
+Cross-compile for Linux arm64:
 ```bash
 cross build --release -p burst-daemon --target aarch64-unknown-linux-musl
 ```
@@ -77,8 +102,7 @@ cross build --release -p burst-daemon --target aarch64-unknown-linux-musl
 cargo run --bin burst-daemon -- node run
 ```
 
-Or with a config file:
-
+With a config file:
 ```bash
 cargo run --bin burst-daemon -- --config testnet.toml node run
 ```
@@ -95,9 +119,21 @@ docker run -d --name burst \
   ghcr.io/burst-ubi/protocol:latest
 ```
 
+## Supported Platforms
+
+| Platform | Architecture | Build |
+|----------|-------------|-------|
+| Linux | x86_64 | Static (musl) |
+| Linux | arm64 (RPi4) | Static (musl) |
+| macOS | Apple Silicon (M1/M2/M3/M4) | Native |
+| macOS | Intel | Native |
+| Windows | x86_64 | Native (MSVC) |
+
+All platforms use rustls for TLS (no OpenSSL dependency).
+
 ## Testnet
 
-The public testnet runs 5 VPS nodes + any number of community nodes. The seed node is at `167.172.83.88:17076`. Nodes installed via the install script automatically connect to it.
+The public testnet runs 5 VPS nodes + any number of community nodes. The seed node is at `167.172.83.88:17076`. Nodes installed via the install scripts automatically connect to it.
 
 ## License
 
