@@ -9,8 +9,9 @@ use std::path::PathBuf;
 #[command(name = "burst-daemon", about = "BURST protocol node daemon")]
 struct Cli {
     /// Network to connect to: "live", "test", or "dev".
-    #[arg(long, default_value = "dev", env = "BURST_NETWORK")]
-    network: String,
+    /// When a config file is provided, defaults to the file's network value.
+    #[arg(long, env = "BURST_NETWORK")]
+    network: Option<String>,
 
     /// Data directory for ledger storage.
     #[arg(long, default_value = "./burst_data", env = "BURST_DATA_DIR")]
@@ -92,11 +93,15 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    let network = match cli.network.as_str() {
-        "live" => NetworkId::Live,
-        "test" => NetworkId::Test,
-        _ => NetworkId::Dev,
-    };
+    fn parse_network(s: &str) -> NetworkId {
+        match s.to_lowercase().as_str() {
+            "live" => NetworkId::Live,
+            "test" => NetworkId::Test,
+            _ => NetworkId::Dev,
+        }
+    }
+
+    let cli_network = cli.network.as_deref().map(parse_network);
 
     let file_config: Option<NodeConfig> = if let Some(ref config_path) = cli.config {
         match std::fs::read_to_string(config_path) {
@@ -125,6 +130,7 @@ async fn main() -> anyhow::Result<()> {
     let enable_upnp = !cli.disable_upnp;
 
     let config = if let Some(file_cfg) = file_config {
+        let network = cli_network.unwrap_or(file_cfg.network);
         NodeConfig {
             network,
             data_dir: cli.data_dir,
@@ -146,6 +152,7 @@ async fn main() -> anyhow::Result<()> {
             ..file_cfg
         }
     } else {
+        let network = cli_network.unwrap_or(NetworkId::Dev);
         NodeConfig {
             network,
             data_dir: cli.data_dir,
@@ -169,7 +176,7 @@ async fn main() -> anyhow::Result<()> {
             NodeAction::Run => {
                 tracing::info!(
                     "Starting BURST node on {} network (P2P:{}, RPC:{}, WS:{})",
-                    network.as_str(),
+                    config.network.as_str(),
                     config.port,
                     if config.enable_rpc {
                         config.rpc_port.to_string()
@@ -187,7 +194,7 @@ async fn main() -> anyhow::Result<()> {
                 }
 
                 let mut config = config;
-                if network == NetworkId::Test {
+                if config.network == NetworkId::Test {
                     config.params = burst_types::ProtocolParams::testnet_defaults();
                     tracing::info!("using fast governance timelines for testnet");
                 }
