@@ -107,18 +107,6 @@ With a config file:
 cargo run --bin burst-daemon -- --config testnet.toml node run
 ```
 
-## Docker
-
-Multi-arch Docker images (amd64 + arm64) are published on every push to `main`:
-
-```bash
-docker run -d --name burst \
-  -p 17076:17076 -p 7077:7077 \
-  -v burst-data:/home/burst/data \
-  -e BURST_NETWORK=test \
-  ghcr.io/burst-ubi/protocol:latest
-```
-
 ## Supported Platforms
 
 | Platform | Architecture | Build |
