@@ -17,20 +17,16 @@ env:
 jobs:
   build:
     name: Build (${{ matrix.arch }})
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: amd64
-            target: x86_64-unknown-linux-gnu
-            runner: ubuntu-latest
-            use_cross: false
+            target: x86_64-unknown-linux-musl
           - arch: arm64
-            target: aarch64-unknown-linux-gnu
-            runner: ubuntu-latest
-            use_cross: true
+            target: aarch64-unknown-linux-musl
 
     steps:
       - uses: actions/checkout@v4
@@ -47,16 +43,13 @@ jobs:
           cache-all-crates: true
 
       - name: Install cross
-        if: matrix.use_cross
         run: cargo install cross --git https://github.com/cross-rs/cross
 
-      - name: Build (native)
-        if: "!matrix.use_cross"
-        run: cargo build --release -p burst-daemon --target ${{ matrix.target }}
-
-      - name: Build (cross)
-        if: matrix.use_cross
+      - name: Build static binary
         run: cross build --release -p burst-daemon --target ${{ matrix.target }}
+
+      - name: Verify static linking
+        run: file target/${{ matrix.target }}/release/burst-daemon
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4

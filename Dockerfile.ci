@@ -1,15 +1,11 @@
-# Lightweight multi-arch image — binaries are pre-built by CI for each
-# platform (amd64, arm64).  Docker buildx sets TARGETARCH automatically.
-FROM ubuntu:24.04
+# Minimal multi-arch image — statically-linked musl binaries need no
+# system libraries.  Only ca-certificates is added for TLS connections.
+FROM alpine:3.21 AS base
+
+RUN apk add --no-cache ca-certificates \
+    && adduser -D -h /home/burst burst
 
 ARG TARGETARCH
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN useradd -m -s /bin/bash burst
-
 COPY binaries/${TARGETARCH}/burst-daemon /usr/local/bin/burst-daemon
 COPY testnet.toml /home/burst/testnet.toml
 

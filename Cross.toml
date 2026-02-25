@@ -1,13 +1,14 @@
 # Cross-compilation config for `cross build --target <target>`.
 #
 # Install: cargo install cross --git https://github.com/cross-rs/cross
-# Build:   cross build --release -p burst-daemon --target aarch64-unknown-linux-gnu
+# Build:   cross build --release -p burst-daemon --target aarch64-unknown-linux-musl
 #
-# The resulting binary will be at:
-#   target/aarch64-unknown-linux-gnu/release/burst-daemon
+# All targets produce fully static binaries (musl) with zero runtime
+# dependencies — no glibc, no OpenSSL, nothing. The binary runs on
+# any Linux distribution.
 
-[target.aarch64-unknown-linux-gnu]
-image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:main"
+[target.aarch64-unknown-linux-musl]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-musl:main"
 
-[target.armv7-unknown-linux-gnueabihf]
-image = "ghcr.io/cross-rs/armv7-unknown-linux-gnueabihf:main"
+[target.x86_64-unknown-linux-musl]
+image = "ghcr.io/cross-rs/x86_64-unknown-linux-musl:main"
