@@ -4,8 +4,8 @@
 
 use crate::amount::BRN_UNIT;
 use crate::BlockHash;
-use blake2::{Blake2b, Digest};
 use blake2::digest::consts::U32;
+use blake2::{Blake2b, Digest};
 use serde::{Deserialize, Serialize};
 
 /// All protocol parameters stored by every node.

@@ -299,7 +299,10 @@ impl BlockProcessor {
         }
 
         if self.verify_signatures {
-            let signer = if matches!(block.block_type, BlockType::Epoch | BlockType::GovernanceActivation) {
+            let signer = if matches!(
+                block.block_type,
+                BlockType::Epoch | BlockType::GovernanceActivation
+            ) {
                 &self.genesis_account
             } else {
                 &block.account

@@ -447,10 +447,7 @@ async fn peer_read_loop(
                     let mut pm = peer_manager.write().await;
                     pm.process_keepalive(parsed);
                     if let Some(pa) = peering {
-                        if !pa.ip.is_empty()
-                            && pa.ip != "0.0.0.0"
-                            && pa.ip != "::"
-                        {
+                        if !pa.ip.is_empty() && pa.ip != "0.0.0.0" && pa.ip != "::" {
                             pm.set_peering_addr(peer_id, pa);
                         }
                     }

@@ -777,7 +777,9 @@ mod tests {
         )
         .unwrap();
         let tx = burst_transactions::Transaction::Burn(burn);
-        let signed = build_and_sign_state_block(&state, &tx, &kp.private, TxHash::ZERO, BlockHash::ZERO).unwrap();
+        let signed =
+            build_and_sign_state_block(&state, &tx, &kp.private, TxHash::ZERO, BlockHash::ZERO)
+                .unwrap();
         assert!(burst_crypto::verify_signature(
             signed.hash.as_bytes(),
             &signed.signature,

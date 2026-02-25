@@ -385,7 +385,10 @@ impl BurstNode {
                     Ok(Some(ref bytes)) => match bincode::deserialize::<GovernanceEngine>(bytes) {
                         Ok(engine) => {
                             let count = engine.all_proposals().count();
-                            tracing::info!(proposals = count, "loaded GovernanceEngine state from LMDB");
+                            tracing::info!(
+                                proposals = count,
+                                "loaded GovernanceEngine state from LMDB"
+                            );
                             Arc::new(Mutex::new(engine))
                         }
                         Err(e) => {
@@ -1457,7 +1460,8 @@ impl BurstNode {
                                             for (param, value) in &changes {
                                                 match param {
                                                     burst_governance::GovernableParam::BrnRate => {
-                                                        let mut brn_lock = brn_engine_bp.lock().await;
+                                                        let mut brn_lock =
+                                                            brn_engine_bp.lock().await;
                                                         if let Err(e) = brn_lock.apply_rate_change(
                                                             *value,
                                                             Timestamp::new(unix_now_secs()),
@@ -1498,7 +1502,9 @@ impl BurstNode {
                                         // Persist to LMDB
                                         if let Ok(bytes) = bincode::serialize(&config_params_bp) {
                                             let brn_store_meta = store.brn_store();
-                                            if let Err(e) = brn_store_meta.put_meta(b"protocol_params", &bytes) {
+                                            if let Err(e) =
+                                                brn_store_meta.put_meta(b"protocol_params", &bytes)
+                                            {
                                                 tracing::warn!(error = %e, "failed to persist params from activation block");
                                             } else {
                                                 tracing::info!(%proposal_hash, "self-amended protocol params persisted via on-chain activation block");
@@ -3186,11 +3192,8 @@ impl BurstNode {
             let bs_handle = tokio::spawn(async move {
                 loop {
                     for addr_str in &bootstrap_peers {
-                        if crate::peer_connector::is_peer_connected(
-                            addr_str,
-                            &bs_ctx.peer_manager,
-                        )
-                        .await
+                        if crate::peer_connector::is_peer_connected(addr_str, &bs_ctx.peer_manager)
+                            .await
                         {
                             continue;
                         }
