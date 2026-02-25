@@ -337,7 +337,7 @@ async fn peer_read_loop(
                     hash = %block.hash,
                     "received block from peer"
                 );
-                if block_queue.push(block).await {
+                if block_queue.push(*block).await {
                     // Reward peer for delivering a new block (+1 reputation).
                     let mut pm = peer_manager.write().await;
                     pm.reward(peer_id, 1);

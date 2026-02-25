@@ -15,7 +15,7 @@ use crate::bootstrap::BootstrapMessage;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum WireMessage {
     /// A block (publish/flood)
-    Block(StateBlock),
+    Block(Box<StateBlock>),
     /// A vote for a block
     Vote(WireVote),
     /// Request votes for a block (confirm_req)
@@ -183,7 +183,7 @@ mod tests {
 
     #[test]
     fn block_message_roundtrip() {
-        let msg = WireMessage::Block(sample_block());
+        let msg = WireMessage::Block(Box::new(sample_block()));
         let bytes = bincode::serialize(&msg).unwrap();
         let decoded: WireMessage = bincode::deserialize(&bytes).unwrap();
         match decoded {
