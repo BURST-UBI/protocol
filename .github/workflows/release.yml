@@ -98,11 +98,13 @@ jobs:
 
   build-macos-amd64:
     name: Build (darwin-amd64)
-    runs-on: macos-13
+    runs-on: macos-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: burst-darwin-amd64
@@ -110,13 +112,13 @@ jobs:
           cache-on-failure: true
           cache-all-crates: true
       - name: Build
-        run: cargo build --release -p burst-daemon
+        run: cargo build --release -p burst-daemon --target x86_64-apple-darwin
       - name: Verify
-        run: file target/release/burst-daemon
+        run: file target/x86_64-apple-darwin/release/burst-daemon
       - uses: actions/upload-artifact@v4
         with:
           name: burst-daemon-darwin-amd64
-          path: target/release/burst-daemon
+          path: target/x86_64-apple-darwin/release/burst-daemon
           retention-days: 90
 
   # ── Windows ──────────────────────────────────────────────────────────
