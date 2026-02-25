@@ -172,7 +172,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=${BURST_USER}
-ExecStart=${BIN_PATH} --config ${CONFIG_PATH} node run
+ExecStart=${BIN_PATH} --config ${CONFIG_PATH} --data-dir ${DATA_DIR} node run
+WorkingDirectory=${DATA_DIR}
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
