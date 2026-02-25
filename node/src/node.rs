@@ -55,7 +55,7 @@ use crate::wire_message::{WireMessage, WireVote};
 /// Default LMDB map size: 1 GiB.
 const DEFAULT_MAP_SIZE: usize = 1 << 30;
 /// Number of named LMDB databases.
-const MAX_DBS: u32 = 28;
+const MAX_DBS: u32 = 29;
 /// Channel capacity for the block-processing pipeline.
 const BLOCK_CHANNEL_CAPACITY: usize = 4096;
 /// Channel capacity for outbound peer messages.
@@ -379,7 +379,26 @@ impl BurstNode {
             config,
             brn_engine: Arc::new(Mutex::new(brn_engine)),
             trst_engine: Arc::new(Mutex::new(TrstEngine::with_expiry(trst_expiry))),
-            governance: Arc::new(Mutex::new(GovernanceEngine::new())),
+            governance: {
+                let brn_store = store.brn_store();
+                match brn_store.get_meta(b"governance_engine") {
+                    Ok(Some(ref bytes)) => match bincode::deserialize::<GovernanceEngine>(bytes) {
+                        Ok(engine) => {
+                            let count = engine.all_proposals().count();
+                            tracing::info!(proposals = count, "loaded GovernanceEngine state from LMDB");
+                            Arc::new(Mutex::new(engine))
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "failed to deserialize GovernanceEngine, starting fresh");
+                            Arc::new(Mutex::new(GovernanceEngine::new()))
+                        }
+                    },
+                    _ => {
+                        tracing::info!("no persisted GovernanceEngine state, starting fresh");
+                        Arc::new(Mutex::new(GovernanceEngine::new()))
+                    }
+                }
+            },
             block_processor,
             frontier,
             peer_manager,
@@ -491,6 +510,7 @@ impl BurstNode {
             origin: TxHash::ZERO,
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(0),
+            params_hash: self.config.params.params_hash(),
             work: 0,
             signature: Signature([0u8; 64]),
             hash: BlockHash::ZERO,
@@ -546,7 +566,7 @@ impl BurstNode {
         let trst_engine_bp = Arc::clone(&self.trst_engine);
         let ledger_cache_bp = Arc::clone(&self.ledger_cache);
         let trst_expiry_secs = self.config.params.trst_expiry_secs;
-        let config_params_bp = self.config.params.clone();
+        let mut config_params_bp = self.config.params.clone();
         let fork_cache_bp = Arc::clone(&self.fork_cache);
         let vote_spacing_bp = Arc::clone(&self.vote_spacing);
         let ws_state_bp = Arc::clone(&self.ws_state);
@@ -559,6 +579,7 @@ impl BurstNode {
         let verification_orch_bp = Arc::clone(&self.verification_orchestrator);
         let difficulty_adjuster_bp = Arc::clone(&self.difficulty_adjuster);
         let priority_scheduler_bp = Arc::clone(&self.priority_scheduler);
+        let consti_engine_bp = Arc::clone(&self.consti_engine);
 
         let bp_handle = tokio::spawn(async move {
             loop {
@@ -1416,6 +1437,89 @@ impl BurstNode {
                             }
                         }
 
+                        // GovernanceActivation: apply the on-chain parameter change
+                        // (Tezos-style self-amendment recorded on the genesis chain).
+                        if let crate::ledger_bridge::EconomicResult::GovernanceActivation {
+                            proposal_hash,
+                            new_params_hash,
+                        } = &econ_result
+                        {
+                            let mut gov = governance_bp.lock().await;
+                            if let Some(proposal) = gov.get_proposal(proposal_hash) {
+                                let p = proposal.clone();
+                                let mut params = config_params_bp.clone();
+                                if gov.activate(&p, &mut params).is_ok() {
+                                    let computed = params.params_hash();
+                                    if computed == *new_params_hash {
+                                        config_params_bp = params.clone();
+                                        let changes = gov.drain_pending_changes();
+                                        if !changes.is_empty() {
+                                            for (param, value) in &changes {
+                                                match param {
+                                                    burst_governance::GovernableParam::BrnRate => {
+                                                        let mut brn_lock = brn_engine_bp.lock().await;
+                                                        if let Err(e) = brn_lock.apply_rate_change(
+                                                            *value,
+                                                            Timestamp::new(unix_now_secs()),
+                                                        ) {
+                                                            tracing::warn!(error = %e, "failed to propagate BRN rate change from activation block");
+                                                        }
+                                                    }
+                                                    other => {
+                                                        tracing::info!(param = ?other, value = value, "governance parameter activated via on-chain block");
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        let amendments = gov.drain_activated_amendments();
+                                        if !amendments.is_empty() {
+                                            let mut consti = consti_engine_bp.lock().await;
+                                            for amendment_content in &amendments {
+                                                if let burst_governance::ProposalContent::ConstitutionalAmendment { ref title, ref text } = amendment_content {
+                                                    let amendment = burst_consti::Amendment {
+                                                        hash: TxHash::ZERO,
+                                                        proposer: WalletAddress::new("governance"),
+                                                        title: title.clone(),
+                                                        text: text.clone(),
+                                                        phase: burst_governance::GovernancePhase::Activated,
+                                                        votes_yea: 0,
+                                                        votes_nay: 0,
+                                                        votes_abstain: 0,
+                                                        created_at: Timestamp::new(unix_now_secs()),
+                                                        operations: Vec::new(),
+                                                    };
+                                                    match consti.activate_amendment_internal(&amendment) {
+                                                        Ok(()) => tracing::info!(title = %title, "constitutional amendment applied via activation block"),
+                                                        Err(e) => tracing::warn!(title = %title, "failed to apply constitutional amendment from activation block: {e}"),
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        // Persist to LMDB
+                                        if let Ok(bytes) = bincode::serialize(&config_params_bp) {
+                                            let brn_store_meta = store.brn_store();
+                                            if let Err(e) = brn_store_meta.put_meta(b"protocol_params", &bytes) {
+                                                tracing::warn!(error = %e, "failed to persist params from activation block");
+                                            } else {
+                                                tracing::info!(%proposal_hash, "self-amended protocol params persisted via on-chain activation block");
+                                            }
+                                        }
+                                    } else {
+                                        tracing::warn!(
+                                            %proposal_hash,
+                                            expected = %new_params_hash,
+                                            computed = %computed,
+                                            "params hash mismatch in governance activation block — skipping"
+                                        );
+                                    }
+                                } else {
+                                    tracing::warn!(%proposal_hash, "governance activation failed");
+                                }
+                            } else {
+                                tracing::warn!(%proposal_hash, "governance activation block references unknown proposal");
+                            }
+                        }
+
                         // Split/Merge: balance is handled at the ledger level by
                         // update_account_on_block (trst_balance comes from the block).
                         // Individual token provenance tracking (TrstEngine split/merge)
@@ -2072,11 +2176,14 @@ impl BurstNode {
         });
         self.task_handles.push(cementation_handle);
 
-        // ── Governance tick task — periodically advances proposals through phases ──
+        // ── Governance tick task — periodically advances proposals through phases.
+        //    When a proposal reaches activation, creates a GovernanceActivation
+        //    block on the genesis chain (Tezos-style on-chain self-amendment).
+        //    The actual param change is applied when that block is processed. ──
         let governance_tick = Arc::clone(&self.governance);
-        let brn_engine_gov = Arc::clone(&self.brn_engine);
-        let consti_engine_gov = Arc::clone(&self.consti_engine);
         let store_gov = Arc::clone(&self.store);
+        let block_queue_gov = Arc::clone(&self.block_queue);
+        let frontier_gov = Arc::clone(&self.frontier);
         let mut shutdown_rx_gov = self.shutdown.subscribe();
         let mut gov_params = self.config.params.clone();
 
@@ -2094,73 +2201,95 @@ impl BurstNode {
                         let mut gov = governance_tick.lock().await;
                         let activated = gov.tick(now, &mut gov_params);
                         if !activated.is_empty() {
-                            let changes = gov.drain_pending_changes();
-                            if !changes.is_empty() {
-                                let mut brn = brn_engine_gov.lock().await;
-                                for (param, value) in &changes {
-                                    match param {
-                                        burst_governance::GovernableParam::BrnRate => {
-                                            if let Err(e) = brn.apply_rate_change(*value, now) {
-                                                tracing::warn!(error = %e, "failed to propagate BRN rate change via governance tick");
-                                            } else {
-                                                tracing::info!(new_rate = value, "BRN rate change propagated via governance tick");
+                            // For each activated proposal, create a GovernanceActivation
+                            // block on the genesis chain. The block processing loop
+                            // applies the param change when it processes the block.
+                            for proposal_hash in &activated {
+                                let proposal_snapshot = gov.get_proposal(proposal_hash).cloned();
+                                if let Some(proposal) = proposal_snapshot {
+                                    let mut tentative_params = gov_params.clone();
+                                    if gov.activate(&proposal, &mut tentative_params).is_ok() {
+                                        let new_params_hash = tentative_params.params_hash();
+
+                                        let kp = genesis_keypair();
+                                        let genesis_addr = genesis_address();
+                                        let genesis_head = {
+                                            let f = frontier_gov.read().await;
+                                            f.get_head(&genesis_addr).copied()
+                                        };
+                                        let previous = match genesis_head {
+                                            Some(h) => h,
+                                            None => {
+                                                tracing::warn!(%proposal_hash, "genesis account not in frontier, cannot create activation block");
+                                                continue;
+                                            }
+                                        };
+
+                                        let genesis_acct = store_gov.account_store().get_account(&genesis_addr);
+                                        let (brn_bal, trst_bal) = match genesis_acct {
+                                            Ok(acct) => (0u128, acct.trst_balance),
+                                            Err(_) => (0, 0),
+                                        };
+
+                                        let mut block = StateBlock {
+                                            version: CURRENT_BLOCK_VERSION,
+                                            block_type: BlockType::GovernanceActivation,
+                                            account: genesis_addr,
+                                            previous,
+                                            representative: WalletAddress::new("brst_genesis"),
+                                            brn_balance: brn_bal,
+                                            trst_balance: trst_bal,
+                                            link: BlockHash::new(*proposal_hash.as_bytes()),
+                                            origin: TxHash::ZERO,
+                                            transaction: TxHash::new(*new_params_hash.as_bytes()),
+                                            timestamp: now,
+                                            params_hash: gov_params.params_hash(),
+                                            work: 0,
+                                            signature: Signature([0u8; 64]),
+                                            hash: BlockHash::ZERO,
+                                        };
+                                        block.hash = block.compute_hash();
+                                        block.signature = burst_crypto::sign_message(
+                                            block.hash.as_bytes(),
+                                            &kp.private,
+                                        );
+
+                                        let work_thresholds = burst_work::WorkThresholds::with_base(
+                                            gov_params.min_work_difficulty,
+                                        );
+                                        let threshold = work_thresholds.threshold_for(
+                                            burst_work::WorkBlockKind::Epoch,
+                                        );
+                                        let generator = WorkGenerator;
+                                        match generator.generate(&block.hash, threshold) {
+                                            Ok(nonce) => block.work = nonce.0,
+                                            Err(e) => {
+                                                tracing::warn!(error = %e, "failed to generate PoW for activation block");
+                                                continue;
                                             }
                                         }
-                                        other => {
-                                            tracing::info!(param = ?other, value = value, "governance parameter activated");
+
+                                        tracing::info!(
+                                            %proposal_hash,
+                                            params_hash = %new_params_hash,
+                                            block_hash = %block.hash,
+                                            "created GovernanceActivation block on genesis chain"
+                                        );
+
+                                        // Submit through the block queue for normal processing
+                                        if !block_queue_gov.try_push(block) {
+                                            tracing::warn!("block queue full, activation block not submitted");
                                         }
                                     }
                                 }
                             }
-
-                            // Apply activated constitutional amendments to the ConstiEngine
-                            let amendments = gov.drain_activated_amendments();
-                            if !amendments.is_empty() {
-                                let mut consti = consti_engine_gov.lock().await;
-                                for amendment_content in &amendments {
-                                    if let burst_governance::ProposalContent::ConstitutionalAmendment { ref title, ref text } = amendment_content {
-                                        let amendment = burst_consti::Amendment {
-                                            hash: TxHash::ZERO,
-                                            proposer: WalletAddress::new("governance"),
-                                            title: title.clone(),
-                                            text: text.clone(),
-                                            phase: burst_governance::GovernancePhase::Activated,
-                                            votes_yea: 0,
-                                            votes_nay: 0,
-                                            votes_abstain: 0,
-                                            created_at: now,
-                                            operations: Vec::new(),
-                                        };
-                                        match consti.activate_amendment_internal(&amendment) {
-                                            Ok(()) => tracing::info!(title = %title, "constitutional amendment applied"),
-                                            Err(e) => tracing::warn!(title = %title, "failed to apply constitutional amendment: {e}"),
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Persist self-amended params to LMDB so they survive restarts.
-                            match bincode::serialize(&gov_params) {
-                                Ok(bytes) => {
-                                    let brn_store = store_gov.brn_store();
-                                    if let Err(e) = brn_store.put_meta(b"protocol_params", &bytes) {
-                                        tracing::warn!(error = %e, "failed to persist amended protocol params");
-                                    } else {
-                                        tracing::info!("self-amended protocol params persisted to LMDB");
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!(error = %e, "failed to serialize protocol params");
-                                }
-                            }
-
-                            for hash in &activated {
-                                tracing::info!(%hash, "governance proposal activated");
-                            }
+                            // Drain pending changes/amendments so they don't accumulate
+                            // (actual application happens in block processing loop).
+                            let _ = gov.drain_pending_changes();
+                            let _ = gov.drain_activated_amendments();
                         }
 
                         // Update adaptive quorum EMA with current participation data.
-                        // Compute participation from the most recently finished proposals.
                         let total_verified = store_gov
                             .account_store()
                             .verified_account_count()
@@ -2179,6 +2308,15 @@ impl BurstNode {
                                         burst_governance::GovernanceEngine::update_ema(&mut gov_params, participation_bps);
                                     }
                                 }
+                            }
+                        }
+
+                        // Persist GovernanceEngine state to LMDB so in-flight
+                        // proposals survive restarts.
+                        if let Ok(bytes) = bincode::serialize(&*gov) {
+                            let brn_store = store_gov.brn_store();
+                            if let Err(e) = brn_store.put_meta(b"governance_engine", &bytes) {
+                                tracing::trace!(error = %e, "failed to persist GovernanceEngine state");
                             }
                         }
                     }
@@ -2765,6 +2903,7 @@ impl BurstNode {
         let frontier_p2p = Arc::clone(&self.frontier);
         let store_p2p = Arc::clone(&self.store);
         let node_address_p2p = self.node_address.clone();
+        let config_params_p2p = self.config.params.clone();
 
         let p2p_handle = tokio::spawn(async move {
             let listener = match tokio::net::TcpListener::bind(format!("0.0.0.0:{p2p_port}")).await
@@ -2831,6 +2970,7 @@ impl BurstNode {
                                     node_id: node_address_p2p.clone(),
                                     cookie: Some(cookie),
                                     cookie_signature: None,
+                                    params_hash: config_params_p2p.params_hash(),
                                 });
                                 if let Ok(bytes) = bincode::serialize(&challenge) {
                                     use tokio::io::AsyncWriteExt;
@@ -2876,6 +3016,7 @@ impl BurstNode {
                                     peer_ip,
                                     Arc::clone(&frontier_p2p),
                                     Arc::clone(&store_p2p),
+                                    config_params_p2p.params_hash(),
                                 );
 
                                 tracing::info!(peer = %peer_id, "inbound peer connected");
@@ -2939,6 +3080,82 @@ impl BurstNode {
             tracing::debug!("UPnP: disabled by configuration");
         }
 
+        // ── Peer cache loader — reconnect to previously known peers ───────
+        {
+            use burst_store::peer::PeerStore;
+
+            let peer_store = self.store.peer_store();
+            match peer_store.iter_peers() {
+                Ok(cached) if !cached.is_empty() => {
+                    tracing::info!(
+                        count = cached.len(),
+                        "peer cache: loaded cached peers from LMDB"
+                    );
+
+                    let cache_ctx = crate::peer_connector::PeerConnectorContext {
+                        peer_manager: Arc::clone(&self.peer_manager),
+                        connection_registry: Arc::clone(&self.connection_registry),
+                        block_queue: Arc::clone(&self.block_queue),
+                        metrics: Arc::clone(&self.metrics),
+                        active_elections: Arc::clone(&self.active_elections),
+                        rep_weights: Arc::clone(&self.rep_weights),
+                        message_dedup: Arc::clone(&self.message_dedup),
+                        online_weight_sampler: Arc::clone(&self.online_weight_sampler),
+                        frontier: Arc::clone(&self.frontier),
+                        store: Arc::clone(&self.store),
+                        node_private_key: burst_types::PrivateKey(self.node_private_key.0),
+                        node_address: self.node_address.clone(),
+                        params_hash: self.config.params.params_hash(),
+                    };
+                    let mut shutdown_rx_cache = self.shutdown.subscribe();
+
+                    let cache_handle = tokio::spawn(async move {
+                        for (addr, _ts) in cached {
+                            if crate::peer_connector::is_peer_connected(
+                                &addr,
+                                &cache_ctx.peer_manager,
+                            )
+                            .await
+                            {
+                                continue;
+                            }
+
+                            // Check for shutdown between attempts
+                            if shutdown_rx_cache.try_recv().is_ok() {
+                                break;
+                            }
+
+                            tracing::debug!(peer = %addr, "peer cache: connecting to cached peer");
+                            match crate::peer_connector::connect_to_peer(&addr, &cache_ctx).await {
+                                Ok(connected) => {
+                                    tracing::info!(
+                                        peer = %connected.peer_id,
+                                        "peer cache: reconnected to cached peer"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::debug!(
+                                        peer = %addr,
+                                        error = %e,
+                                        "peer cache: failed to reconnect"
+                                    );
+                                }
+                            }
+
+                            tokio::time::sleep(Duration::from_millis(500)).await;
+                        }
+                    });
+                    self.task_handles.push(cache_handle);
+                }
+                Ok(_) => {
+                    tracing::debug!("peer cache: no cached peers found");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "peer cache: failed to load cached peers");
+                }
+            }
+        }
+
         // ── Bootstrap peer discovery ──────────────────────────────────────
         let bootstrap_peers: Vec<String> = {
             let pm = self.peer_manager.read().await;
@@ -2946,152 +3163,42 @@ impl BurstNode {
         };
 
         if !bootstrap_peers.is_empty() {
-            let peer_manager_bs = Arc::clone(&self.peer_manager);
-            let metrics_bs = Arc::clone(&self.metrics);
-            let conn_registry_bs = Arc::clone(&self.connection_registry);
-            let block_queue_bs = Arc::clone(&self.block_queue);
-            let active_elections_bs = Arc::clone(&self.active_elections);
-            let rep_weights_bs = Arc::clone(&self.rep_weights);
-            let message_dedup_bs = Arc::clone(&self.message_dedup);
-            let online_weight_sampler_bs = Arc::clone(&self.online_weight_sampler);
+            let bs_ctx = crate::peer_connector::PeerConnectorContext {
+                peer_manager: Arc::clone(&self.peer_manager),
+                connection_registry: Arc::clone(&self.connection_registry),
+                block_queue: Arc::clone(&self.block_queue),
+                metrics: Arc::clone(&self.metrics),
+                active_elections: Arc::clone(&self.active_elections),
+                rep_weights: Arc::clone(&self.rep_weights),
+                message_dedup: Arc::clone(&self.message_dedup),
+                online_weight_sampler: Arc::clone(&self.online_weight_sampler),
+                frontier: Arc::clone(&self.frontier),
+                store: Arc::clone(&self.store),
+                node_private_key: burst_types::PrivateKey(self.node_private_key.0),
+                node_address: self.node_address.clone(),
+                params_hash: self.config.params.params_hash(),
+            };
             let frontier_bs = Arc::clone(&self.frontier);
+            let conn_registry_bs = Arc::clone(&self.connection_registry);
             let store_bs = Arc::clone(&self.store);
-            let node_private_bs = burst_types::PrivateKey(self.node_private_key.0);
-            let node_address_bs = self.node_address.clone();
-            let store_bs2 = Arc::clone(&self.store);
             let mut shutdown_rx_bs = self.shutdown.subscribe();
 
             let bs_handle = tokio::spawn(async move {
                 loop {
                     for addr_str in &bootstrap_peers {
-                        // Skip peers that are already connected
+                        if crate::peer_connector::is_peer_connected(
+                            addr_str,
+                            &bs_ctx.peer_manager,
+                        )
+                        .await
                         {
-                            let pm = peer_manager_bs.read().await;
-                            let parts: Vec<&str> = addr_str.rsplitn(2, ':').collect();
-                            if parts.len() == 2 {
-                                let key = format!("{}:{}", parts[1], parts[0]);
-                                if pm.is_connected(&key) {
-                                    continue;
-                                }
-                            }
+                            continue;
                         }
 
                         tracing::info!(peer = %addr_str, "connecting to bootstrap peer");
-                        match tokio::net::TcpStream::connect(addr_str).await {
-                            Ok(stream) => {
-                                let parts: Vec<&str> = addr_str.rsplitn(2, ':').collect();
-                                let (port, ip) = if parts.len() == 2 {
-                                    (
-                                        parts[0].parse::<u16>().unwrap_or(7075),
-                                        parts[1].to_string(),
-                                    )
-                                } else {
-                                    (7075, addr_str.clone())
-                                };
-                                let peer_addr = PeerAddress {
-                                    ip: ip.clone(),
-                                    port,
-                                };
-                                let peer_id = format!("{ip}:{port}");
-                                let now = unix_now_secs();
-
-                                let (read_half, mut write_half) = stream.into_split();
-
-                                // Read the cookie challenge from the peer
-                                let mut reader = tokio::io::BufReader::new(read_half);
-                                let cookie_opt = {
-                                    use tokio::io::AsyncReadExt;
-                                    let mut len_buf = [0u8; 4];
-                                    match tokio::time::timeout(
-                                        std::time::Duration::from_secs(10),
-                                        reader.read_exact(&mut len_buf),
-                                    )
-                                    .await
-                                    {
-                                        Ok(Ok(_)) => {
-                                            let body_len = u32::from_be_bytes(len_buf) as usize;
-                                            if body_len > 0 && body_len < 65536 {
-                                                let mut body = vec![0u8; body_len];
-                                                if reader.read_exact(&mut body).await.is_ok() {
-                                                    if let Ok(WireMessage::Handshake(hs)) =
-                                                        bincode::deserialize::<WireMessage>(&body)
-                                                    {
-                                                        hs.cookie
-                                                    } else {
-                                                        None
-                                                    }
-                                                } else {
-                                                    None
-                                                }
-                                            } else {
-                                                None
-                                            }
-                                        }
-                                        _ => None,
-                                    }
-                                };
-
-                                // Sign and send cookie response
-                                if let Some(cookie) = cookie_opt {
-                                    use tokio::io::AsyncWriteExt;
-                                    let sig = burst_crypto::sign_message(&cookie, &node_private_bs);
-                                    let response =
-                                        WireMessage::Handshake(crate::wire_message::HandshakeMsg {
-                                            node_id: node_address_bs.clone(),
-                                            cookie: None,
-                                            cookie_signature: Some(sig),
-                                        });
-                                    if let Ok(bytes) = bincode::serialize(&response) {
-                                        let len_bytes = (bytes.len() as u32).to_be_bytes();
-                                        let _ = write_half.write_all(&len_bytes).await;
-                                        let _ = write_half.write_all(&bytes).await;
-                                        let _ = write_half.flush().await;
-                                        tracing::debug!(
-                                            peer = %peer_id,
-                                            "sent cookie response to bootstrap peer"
-                                        );
-                                    }
-                                } else {
-                                    tracing::warn!(
-                                        peer = %peer_id,
-                                        "no cookie challenge received from bootstrap peer"
-                                    );
-                                }
-
-                                let read_half = reader.into_inner();
-
-                                // Register write half in the connection registry
-                                {
-                                    let mut registry = conn_registry_bs.write().await;
-                                    registry.insert(peer_id.clone(), write_half);
-                                }
-
-                                // Register the peer
-                                {
-                                    let mut pm = peer_manager_bs.write().await;
-                                    pm.add_peer(peer_addr);
-                                    pm.mark_connected(&peer_id, now);
-                                    metrics_bs.peer_count.set(pm.connected_count() as i64);
-                                }
-
-                                // Spawn a read loop (no SYN cookie for outbound — already done)
-                                spawn_peer_read_loop(
-                                    peer_id.clone(),
-                                    read_half,
-                                    Arc::clone(&block_queue_bs),
-                                    Arc::clone(&conn_registry_bs),
-                                    Arc::clone(&peer_manager_bs),
-                                    Arc::clone(&metrics_bs),
-                                    Arc::clone(&active_elections_bs),
-                                    Arc::clone(&rep_weights_bs),
-                                    Arc::clone(&message_dedup_bs),
-                                    Arc::clone(&online_weight_sampler_bs),
-                                    None,
-                                    ip.clone(),
-                                    Arc::clone(&frontier_bs),
-                                    Arc::clone(&store_bs2),
-                                );
-
+                        match crate::peer_connector::connect_to_peer(addr_str, &bs_ctx).await {
+                            Ok(connected) => {
+                                let peer_id = connected.peer_id;
                                 tracing::info!(peer = %peer_id, "bootstrap peer connected");
 
                                 // Check if we need to bootstrap — if our frontier
@@ -3109,7 +3216,6 @@ impl BurstNode {
                                     let mut bootstrap_client =
                                         crate::bootstrap::BootstrapClient::new(10_000);
 
-                                    // Step 1: Request frontiers from the peer
                                     let frontier_req = bootstrap_client.start_frontier_scan();
                                     let wire_req = WireMessage::Bootstrap(frontier_req);
                                     let req_bytes = match bincode::serialize(&wire_req) {
@@ -3122,7 +3228,6 @@ impl BurstNode {
                                         }
                                     };
 
-                                    // Send the frontier request to the peer
                                     {
                                         let registry = conn_registry_bs.read().await;
                                         if let Some(writer) = registry.get(&peer_id) {
@@ -3153,8 +3258,6 @@ impl BurstNode {
                                     );
                                 }
 
-                                // Also check LMDB block count for a more thorough
-                                // behind-detection (frontier may exist but be stale).
                                 if let Ok(block_count) = store_bs.block_store().block_count() {
                                     if block_count < 10 && local_frontier_count > 0 {
                                         tracing::info!(
@@ -3186,12 +3289,16 @@ impl BurstNode {
         }
 
         // ── Keepalive task ────────────────────────────────────────────────
+        // Alternates between two flood types each period (matching rsnano):
+        //   - "self" keepalive: includes own external address in slot 0, sent to ~25% of peers
+        //   - "random" keepalive: all 8 slots are random connected peers, sent to ~75%
         let peer_manager_ka = Arc::clone(&self.peer_manager);
         let conn_registry_ka = Arc::clone(&self.connection_registry);
         let mut shutdown_rx_ka = self.shutdown.subscribe();
 
         let ka_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(15));
+            let mut round: u64 = 0;
             loop {
                 tokio::select! {
                     biased;
@@ -3222,28 +3329,55 @@ impl BurstNode {
                         let mut pm = peer_manager_ka.write().await;
                         if pm.should_keepalive(now) {
                             pm.record_keepalive(now);
+                            round = round.wrapping_add(1);
 
-                            let connected_peers: Vec<String> = pm
+                            let peer_ids: Vec<String> = {
+                                let registry = conn_registry_ka.read().await;
+                                registry.peer_ids().into_iter().cloned().collect()
+                            };
+
+                            if peer_ids.is_empty() {
+                                continue;
+                            }
+
+                            // Build the two keepalive variants
+                            let self_peers: Vec<String> = pm
+                                .random_peers_with_self(8)
+                                .iter()
+                                .map(|a| format!("{}:{}", a.ip, a.port))
+                                .collect();
+                            let random_peers: Vec<String> = pm
                                 .random_peers(8)
                                 .iter()
                                 .map(|a| format!("{}:{}", a.ip, a.port))
                                 .collect();
 
-                            let msg = WireMessage::Keepalive(
+                            let self_msg = WireMessage::Keepalive(
                                 crate::wire_message::KeepaliveMsg {
-                                    peers: connected_peers,
+                                    peers: self_peers,
                                 },
                             );
-                            if let Ok(bytes) = bincode::serialize(&msg) {
-                                let registry = conn_registry_ka.read().await;
-                                let peer_ids: Vec<String> =
-                                    registry.peer_ids().into_iter().cloned().collect();
-                                drop(registry);
+                            let random_msg = WireMessage::Keepalive(
+                                crate::wire_message::KeepaliveMsg {
+                                    peers: random_peers,
+                                },
+                            );
 
-                                for pid in &peer_ids {
+                            let self_bytes = bincode::serialize(&self_msg).ok();
+                            let random_bytes = bincode::serialize(&random_msg).ok();
+
+                            // Send self-keepalive to ~25% of peers,
+                            // random-keepalive to the remaining ~75%.
+                            for (i, pid) in peer_ids.iter().enumerate() {
+                                let bytes = if i % 4 == (round as usize % 4) {
+                                    &self_bytes
+                                } else {
+                                    &random_bytes
+                                };
+                                if let Some(ref payload) = bytes {
                                     let registry = conn_registry_ka.read().await;
                                     if let Some(writer) = registry.get(pid) {
-                                        if let Err(e) = write_framed(&writer, &bytes).await {
+                                        if let Err(e) = write_framed(&writer, payload).await {
                                             tracing::debug!(
                                                 peer = %pid,
                                                 error = %e,
@@ -3253,8 +3387,10 @@ impl BurstNode {
                                     }
                                 }
                             }
+
                             tracing::trace!(
                                 connected = pm.connected_count(),
+                                round = round,
                                 "keepalive round"
                             );
                         }
@@ -3263,6 +3399,92 @@ impl BurstNode {
             }
         });
         self.task_handles.push(ka_handle);
+
+        // ── Reachout loop — connect to peers discovered via keepalive ─────
+        {
+            let reachout_ctx = crate::peer_connector::PeerConnectorContext {
+                peer_manager: Arc::clone(&self.peer_manager),
+                connection_registry: Arc::clone(&self.connection_registry),
+                block_queue: Arc::clone(&self.block_queue),
+                metrics: Arc::clone(&self.metrics),
+                active_elections: Arc::clone(&self.active_elections),
+                rep_weights: Arc::clone(&self.rep_weights),
+                message_dedup: Arc::clone(&self.message_dedup),
+                online_weight_sampler: Arc::clone(&self.online_weight_sampler),
+                frontier: Arc::clone(&self.frontier),
+                store: Arc::clone(&self.store),
+                node_private_key: burst_types::PrivateKey(self.node_private_key.0),
+                node_address: self.node_address.clone(),
+                params_hash: self.config.params.params_hash(),
+            };
+            let mut shutdown_rx_ro = self.shutdown.subscribe();
+
+            let ro_handle = tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(1));
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = shutdown_rx_ro.recv() => {
+                            tracing::debug!("reachout loop shutting down");
+                            break;
+                        }
+                        _ = interval.tick() => {
+                            let keepalive_peers = {
+                                let mut pm = reachout_ctx.peer_manager.write().await;
+                                pm.pop_random_keepalive()
+                            };
+                            let Some(peers) = keepalive_peers else {
+                                continue;
+                            };
+
+                            for peer_addr in &peers {
+                                if peer_addr.ip.is_empty()
+                                    || peer_addr.ip == "0.0.0.0"
+                                    || peer_addr.ip == "::"
+                                {
+                                    continue;
+                                }
+
+                                let addr_str = format!("{}:{}", peer_addr.ip, peer_addr.port);
+
+                                {
+                                    let pm = reachout_ctx.peer_manager.read().await;
+                                    if pm.is_connected(&addr_str) || pm.is_banned(&addr_str) {
+                                        continue;
+                                    }
+                                }
+
+                                tracing::debug!(peer = %addr_str, "reachout: attempting connection");
+                                match crate::peer_connector::connect_to_peer(
+                                    &addr_str,
+                                    &reachout_ctx,
+                                )
+                                .await
+                                {
+                                    Ok(connected) => {
+                                        tracing::info!(
+                                            peer = %connected.peer_id,
+                                            "reachout: peer connected"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::debug!(
+                                            peer = %addr_str,
+                                            error = %e,
+                                            "reachout: connection failed"
+                                        );
+                                    }
+                                }
+
+                                // Throttle between connection attempts
+                                tokio::time::sleep(Duration::from_millis(250)).await;
+                            }
+                        }
+                    }
+                }
+            });
+            self.task_handles.push(ro_handle);
+        }
 
         // ── Periodic telemetry request task ────────────────────────────────
         let conn_registry_telem = Arc::clone(&self.connection_registry);
@@ -3305,6 +3527,71 @@ impl BurstNode {
             }
         });
         self.task_handles.push(telem_handle);
+
+        // ── Peer cache writer — persist connected peers to LMDB ──────────
+        {
+            let store_pc = Arc::clone(&self.store);
+            let peer_manager_pc = Arc::clone(&self.peer_manager);
+            let mut shutdown_rx_pc = self.shutdown.subscribe();
+
+            let pc_handle = tokio::spawn(async move {
+                use burst_store::peer::PeerStore;
+
+                let mut interval = tokio::time::interval(Duration::from_secs(300));
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = shutdown_rx_pc.recv() => {
+                            tracing::debug!("peer cache writer shutting down");
+                            break;
+                        }
+                        _ = interval.tick() => {
+                            let connected = {
+                                let pm = peer_manager_pc.read().await;
+                                pm.connected_peer_addresses()
+                            };
+
+                            let peer_store = store_pc.peer_store();
+                            let mut saved = 0usize;
+                            for (addr, ts) in &connected {
+                                if let Err(e) = peer_store.put_peer(addr, *ts) {
+                                    tracing::warn!(
+                                        peer = %addr,
+                                        error = %e,
+                                        "failed to cache peer"
+                                    );
+                                } else {
+                                    saved += 1;
+                                }
+                            }
+
+                            let now = unix_now_secs();
+                            let cutoff = now.saturating_sub(3600);
+                            match peer_store.purge_older_than(cutoff) {
+                                Ok(purged) if purged > 0 => {
+                                    tracing::debug!(
+                                        purged = purged,
+                                        "peer cache: purged stale entries"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "peer cache purge failed");
+                                }
+                                _ => {}
+                            }
+
+                            if saved > 0 {
+                                tracing::trace!(
+                                    saved = saved,
+                                    "peer cache: persisted connected peers"
+                                );
+                            }
+                        }
+                    }
+                }
+            });
+            self.task_handles.push(pc_handle);
+        }
 
         // ── RPC server (optional) ─────────────────────────────────────────
         if self.config.enable_rpc {
@@ -3864,6 +4151,7 @@ impl BurstNode {
             origin,
             transaction: tx_hash,
             timestamp: now,
+            params_hash: BlockHash::ZERO,
             work: 0,
             signature: tx.signature().clone(),
             hash: BlockHash::ZERO,

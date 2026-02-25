@@ -42,10 +42,10 @@ format_uptime() {
 TOTAL=0
 HEALTHY=0
 
-printf "\n%-20s %-8s %10s %10s %6s %12s\n" \
-    "NODE" "STATUS" "BLOCKS" "ACCOUNTS" "PEERS" "UPTIME"
-printf "%-20s %-8s %10s %10s %6s %12s\n" \
-    "----" "------" "------" "--------" "-----" "------"
+printf "\n%-20s %-8s %-8s %10s %10s %6s %12s\n" \
+    "NODE" "STATUS" "ARCH" "BLOCKS" "ACCOUNTS" "PEERS" "UPTIME"
+printf "%-20s %-8s %-8s %10s %10s %6s %12s\n" \
+    "----" "------" "----" "------" "--------" "-----" "------"
 
 for host in "$@"; do
     TOTAL=$((TOTAL + 1))
@@ -56,23 +56,27 @@ for host in "$@"; do
         -d '{"action":"node_info"}' 2>/dev/null) || response=""
 
     if [ -z "$response" ]; then
-        printf "%-20s \e[31m%-8s\e[0m %10s %10s %6s %12s\n" \
-            "$host" "OFFLINE" "-" "-" "-" "-"
+        printf "%-20s \e[31m%-8s\e[0m %-8s %10s %10s %6s %12s\n" \
+            "$host" "OFFLINE" "-" "-" "-" "-" "-"
         continue
     fi
 
     error=$(echo "$response" | jq -r '.error // empty' 2>/dev/null)
     if [ -n "$error" ]; then
-        printf "%-20s \e[33m%-8s\e[0m %10s %10s %6s %12s\n" \
-            "$host" "ERROR" "-" "-" "-" "$error"
+        printf "%-20s \e[33m%-8s\e[0m %-8s %10s %10s %6s %12s\n" \
+            "$host" "ERROR" "-" "-" "-" "-" "$error"
         continue
     fi
 
-    block_count=$(echo "$response" | jq -r '.block_count // 0' 2>/dev/null)
-    account_count=$(echo "$response" | jq -r '.account_count // 0' 2>/dev/null)
-    peer_count=$(echo "$response" | jq -r '.peer_count // 0' 2>/dev/null)
-    uptime_secs=$(echo "$response" | jq -r '.uptime_secs // 0' 2>/dev/null)
+    block_count=$(echo "$response" | jq -r '.result.block_count // 0' 2>/dev/null)
+    account_count=$(echo "$response" | jq -r '.result.account_count // 0' 2>/dev/null)
+    peer_count=$(echo "$response" | jq -r '.result.peer_count // 0' 2>/dev/null)
+    uptime_secs=$(echo "$response" | jq -r '.result.uptime_secs // 0' 2>/dev/null)
     uptime_str=$(format_uptime "$uptime_secs")
+    node_arch=$(echo "$response" | jq -r '.result.arch // "?"' 2>/dev/null)
+    if [ "$node_arch" = "?" ] || [ "$node_arch" = "null" ]; then
+        node_arch="-"
+    fi
 
     HEALTHY=$((HEALTHY + 1))
 
@@ -82,8 +86,8 @@ for host in "$@"; do
         color="\e[32m"
     fi
 
-    printf "%-20s ${color}%-8s\e[0m %10s %10s %6s %12s\n" \
-        "$host" "OK" "$block_count" "$account_count" "$peer_count" "$uptime_str"
+    printf "%-20s ${color}%-8s\e[0m %-8s %10s %10s %6s %12s\n" \
+        "$host" "OK" "$node_arch" "$block_count" "$account_count" "$peer_count" "$uptime_str"
 done
 
 echo ""

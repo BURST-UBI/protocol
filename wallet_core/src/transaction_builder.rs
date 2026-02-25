@@ -359,6 +359,7 @@ pub fn build_state_block(
     account_state: &AccountState,
     transaction: &burst_transactions::Transaction,
     previous_origin: TxHash,
+    params_hash: BlockHash,
 ) -> Result<StateBlock, WalletError> {
     let (block_type, link, brn_balance, trst_balance, representative) = match transaction {
         burst_transactions::Transaction::Burn(tx) => (
@@ -516,6 +517,7 @@ pub fn build_state_block(
         origin,
         transaction: *transaction.hash(),
         timestamp: transaction.timestamp(),
+        params_hash,
         work: 0,
         signature: Signature([0u8; 64]),
         hash: BlockHash::ZERO,
@@ -546,8 +548,9 @@ pub fn build_and_sign_state_block(
     transaction: &burst_transactions::Transaction,
     private_key: &burst_types::PrivateKey,
     previous_origin: TxHash,
+    params_hash: BlockHash,
 ) -> Result<StateBlock, WalletError> {
-    let block = build_state_block(account_state, transaction, previous_origin)?;
+    let block = build_state_block(account_state, transaction, previous_origin, params_hash)?;
     Ok(sign_state_block(block, private_key))
 }
 
@@ -687,7 +690,7 @@ mod tests {
         )
         .unwrap();
         let tx = burst_transactions::Transaction::Burn(burn);
-        let block = build_state_block(&state, &tx, TxHash::ZERO).unwrap();
+        let block = build_state_block(&state, &tx, TxHash::ZERO, BlockHash::ZERO).unwrap();
 
         assert_eq!(block.block_type, BlockType::Burn);
         assert_eq!(block.brn_balance, 9_900);
@@ -710,7 +713,7 @@ mod tests {
         )
         .unwrap();
         let tx = burst_transactions::Transaction::Send(send);
-        let block = build_state_block(&state, &tx, prev_origin).unwrap();
+        let block = build_state_block(&state, &tx, prev_origin, BlockHash::ZERO).unwrap();
 
         assert_eq!(block.block_type, BlockType::Send);
         assert_eq!(block.brn_balance, 10_000);
@@ -732,7 +735,7 @@ mod tests {
         )
         .unwrap();
         let tx = burst_transactions::Transaction::Burn(burn);
-        let result = build_state_block(&state, &tx, TxHash::ZERO);
+        let result = build_state_block(&state, &tx, TxHash::ZERO, BlockHash::ZERO);
         assert!(result.is_err());
     }
 
@@ -746,7 +749,7 @@ mod tests {
         )
         .unwrap();
         let tx = burst_transactions::Transaction::ChangeRepresentative(rep_change);
-        let block = build_state_block(&state, &tx, TxHash::ZERO).unwrap();
+        let block = build_state_block(&state, &tx, TxHash::ZERO, BlockHash::ZERO).unwrap();
 
         assert_eq!(block.block_type, BlockType::ChangeRepresentative);
         assert_eq!(
@@ -774,7 +777,7 @@ mod tests {
         )
         .unwrap();
         let tx = burst_transactions::Transaction::Burn(burn);
-        let signed = build_and_sign_state_block(&state, &tx, &kp.private, TxHash::ZERO).unwrap();
+        let signed = build_and_sign_state_block(&state, &tx, &kp.private, TxHash::ZERO, BlockHash::ZERO).unwrap();
         assert!(burst_crypto::verify_signature(
             signed.hash.as_bytes(),
             &signed.signature,

@@ -6,7 +6,7 @@
 //!   3. Initiator verifies the signature to confirm the responder's identity.
 
 use burst_crypto::{sign_message, verify_signature};
-use burst_types::{NetworkId, PrivateKey, PublicKey, Signature};
+use burst_types::{BlockHash, NetworkId, PrivateKey, PublicKey, Signature};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -20,6 +20,8 @@ pub struct PeerInfo {
     pub node_id: PublicKey,
     pub protocol_version: u16,
     pub network_id: NetworkId,
+    /// Deterministic hash of the peer's current ProtocolParams.
+    pub params_hash: BlockHash,
 }
 
 /// Sent by the initiator to begin the handshake.
@@ -29,6 +31,9 @@ pub struct HandshakeInit {
     pub cookie: [u8; 32],
     pub protocol_version: u16,
     pub network_id: NetworkId,
+    /// Deterministic hash of the node's current ProtocolParams.
+    #[serde(default)]
+    pub params_hash: BlockHash,
 }
 
 /// Sent by the responder to complete the handshake.
@@ -38,6 +43,9 @@ pub struct HandshakeResponse {
     pub cookie_signature: Signature,
     pub protocol_version: u16,
     pub network_id: NetworkId,
+    /// Deterministic hash of the node's current ProtocolParams.
+    #[serde(default)]
+    pub params_hash: BlockHash,
 }
 
 /// Generate a random 32-byte cookie for the handshake challenge.
@@ -99,6 +107,7 @@ pub async fn initiate_handshake(
     our_key: &PrivateKey,
     our_public: &PublicKey,
     network: NetworkId,
+    our_params_hash: BlockHash,
 ) -> Result<PeerInfo, ProtocolError> {
     let cookie = create_cookie();
 
@@ -107,6 +116,7 @@ pub async fn initiate_handshake(
         cookie,
         protocol_version: PROTOCOL_VERSION,
         network_id: network,
+        params_hash: our_params_hash,
     };
     write_framed(stream, &init).await?;
 
@@ -141,6 +151,7 @@ pub async fn initiate_handshake(
         node_id: resp.node_id,
         protocol_version: resp.protocol_version,
         network_id: resp.network_id,
+        params_hash: resp.params_hash,
     })
 }
 
@@ -154,6 +165,7 @@ pub async fn respond_handshake(
     our_key: &PrivateKey,
     our_public: &PublicKey,
     network: NetworkId,
+    our_params_hash: BlockHash,
 ) -> Result<PeerInfo, ProtocolError> {
     // Read the initiator's handshake.
     let init: HandshakeInit = read_framed(stream).await?;
@@ -179,6 +191,7 @@ pub async fn respond_handshake(
         cookie_signature,
         protocol_version: PROTOCOL_VERSION,
         network_id: network,
+        params_hash: our_params_hash,
     };
     write_framed(stream, &resp).await?;
 
@@ -194,6 +207,7 @@ pub async fn respond_handshake(
         node_id: init.node_id,
         protocol_version: init.protocol_version,
         network_id: init.network_id,
+        params_hash: init.params_hash,
     })
 }
 
@@ -221,6 +235,7 @@ mod tests {
             cookie,
             protocol_version: PROTOCOL_VERSION,
             network_id: NetworkId::Dev,
+            params_hash: BlockHash::ZERO,
         };
         let encoded = codec::encode(&init).unwrap();
         let (decoded, _): (HandshakeInit, _) = codec::decode_framed(&encoded).unwrap();
@@ -246,6 +261,7 @@ mod tests {
                 &responder_private,
                 &responder_public,
                 NetworkId::Dev,
+                BlockHash::ZERO,
             )
             .await
         });
@@ -256,6 +272,7 @@ mod tests {
             &initiator_kp.private,
             &initiator_kp.public,
             NetworkId::Dev,
+            BlockHash::ZERO,
         )
         .await
         .unwrap();
@@ -283,23 +300,23 @@ mod tests {
         let responder_public = responder_kp.public.clone();
         let _responder_handle = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            // Responder is on Live network.
             respond_handshake(
                 &mut stream,
                 &responder_private,
                 &responder_public,
                 NetworkId::Live,
+                BlockHash::ZERO,
             )
             .await
         });
 
         let mut stream = TcpStream::connect(addr).await.unwrap();
-        // Initiator is on Dev network — the responder will reject.
         let result = initiate_handshake(
             &mut stream,
             &initiator_kp.private,
             &initiator_kp.public,
             NetworkId::Dev,
+            BlockHash::ZERO,
         )
         .await;
 

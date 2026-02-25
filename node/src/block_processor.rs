@@ -168,13 +168,17 @@ pub struct BlockProcessor {
     pub delegation_store: Option<Arc<dyn DelegationStore + Send + Sync>>,
     /// Optional persistent block store for dedup fallback after cache eviction.
     pub block_store: Option<Arc<dyn BlockStore + Send + Sync>>,
+    /// Current protocol params hash. Updated after GovernanceActivation blocks.
+    /// When set, blocks with a non-zero params_hash that doesn't match are
+    /// logged as warnings (soft validation during bootstrap grace period).
+    current_params_hash: BlockHash,
 }
 
 /// Map a ledger `BlockType` to the work-crate's `WorkBlockKind`.
 fn block_type_to_work_kind(bt: &BlockType) -> WorkBlockKind {
     match bt {
         BlockType::Receive | BlockType::Open => WorkBlockKind::ReceiveOrOpen,
-        BlockType::Epoch => WorkBlockKind::Epoch,
+        BlockType::Epoch | BlockType::GovernanceActivation => WorkBlockKind::Epoch,
         _ => WorkBlockKind::Base,
     }
 }
@@ -205,7 +209,18 @@ impl BlockProcessor {
             validate_timestamps: true,
             delegation_store: None,
             block_store: None,
+            current_params_hash: BlockHash::ZERO,
         }
+    }
+
+    /// Set the current protocol params hash for validation.
+    pub fn set_params_hash(&mut self, hash: BlockHash) {
+        self.current_params_hash = hash;
+    }
+
+    /// Get the current protocol params hash.
+    pub fn params_hash(&self) -> BlockHash {
+        self.current_params_hash
     }
 
     /// Disable Ed25519 signature verification (for testing with synthetic addresses).
@@ -284,7 +299,7 @@ impl BlockProcessor {
         }
 
         if self.verify_signatures {
-            let signer = if block.block_type == BlockType::Epoch {
+            let signer = if matches!(block.block_type, BlockType::Epoch | BlockType::GovernanceActivation) {
                 &self.genesis_account
             } else {
                 &block.account
@@ -329,9 +344,31 @@ impl BlockProcessor {
             }
         }
 
-        // Stage 3.5: Epoch block validation
+        // Stage 3.5: params_hash validation
+        // GovernanceActivation blocks carry the *new* params_hash in their
+        // `transaction` field; their own `params_hash` stamp is the pre-activation
+        // hash, so we skip validation for them. Bootstrap blocks (old blocks
+        // replayed) may carry an earlier params_hash, so we only warn rather
+        // than hard-reject to allow gradual migration.
+        if !block.params_hash.is_zero()
+            && !self.current_params_hash.is_zero()
+            && block.params_hash != self.current_params_hash
+            && block.block_type != BlockType::GovernanceActivation
+        {
+            tracing::warn!(
+                block_hash = %block.hash,
+                block_params = %block.params_hash,
+                our_params = %self.current_params_hash,
+                "params_hash mismatch — block was created under different protocol parameters"
+            );
+        }
+
+        // Stage 3.6: Epoch / GovernanceActivation block validation
         if block.block_type == BlockType::Epoch {
             return self.process_epoch(block, frontier);
+        }
+        if block.block_type == BlockType::GovernanceActivation {
+            return self.process_governance_activation(block, frontier);
         }
 
         // Stage 4–8: Account-state–dependent checks
@@ -650,6 +687,53 @@ impl BlockProcessor {
         }
     }
 
+    /// Process a governance activation block.
+    ///
+    /// GovernanceActivation blocks record on-chain parameter changes (Tezos-style).
+    /// Rules:
+    /// - Must be signed by the genesis account.
+    /// - The block's `account` field is the genesis account (placed on its chain).
+    /// - `link` = proposal hash, `transaction` = new params hash.
+    /// - Must chain from the genesis account's current head.
+    /// - Balances must remain unchanged.
+    fn process_governance_activation(
+        &mut self,
+        block: &StateBlock,
+        frontier: &mut DagFrontier,
+    ) -> ProcessResult {
+        if block.account != self.genesis_account {
+            return ProcessResult::Rejected(
+                "governance activation block must be on the genesis account chain".into(),
+            );
+        }
+
+        if block.previous.is_zero() {
+            return ProcessResult::Rejected(
+                "governance activation block must reference existing genesis chain".into(),
+            );
+        }
+
+        let account_head = frontier.get_head(&block.account).copied();
+
+        match account_head {
+            Some(frontier_head) => {
+                if block.previous != frontier_head {
+                    return ProcessResult::Rejected(
+                        "governance activation block previous does not match genesis chain head"
+                            .into(),
+                    );
+                }
+
+                frontier.update(block.account.clone(), block.hash);
+                self.mark_processed(block.hash);
+                ProcessResult::Accepted
+            }
+            None => ProcessResult::Rejected(
+                "genesis account not found in frontier for governance activation".into(),
+            ),
+        }
+    }
+
     /// Current minimum work difficulty.
     pub fn min_work_difficulty(&self) -> u64 {
         self.min_work_difficulty
@@ -770,6 +854,11 @@ impl BlockProcessor {
                     return Err("epoch block cannot change balances".into());
                 }
             }
+            BlockType::GovernanceActivation => {
+                if block.brn_balance != prev_brn || block.trst_balance != prev_trst {
+                    return Err("governance activation block cannot change balances".into());
+                }
+            }
             BlockType::RejectReceive => {
                 if block.brn_balance != prev_brn || block.trst_balance != prev_trst {
                     return Err("reject-receive block cannot change balances".into());
@@ -823,6 +912,7 @@ mod tests {
             origin: TxHash::ZERO,
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_000),
+            params_hash: BlockHash::ZERO,
             work: 0,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,
@@ -853,6 +943,7 @@ mod tests {
             origin: TxHash::ZERO,
             transaction: TxHash::new([0xBB; 32]),
             timestamp: Timestamp::new(1_000_001),
+            params_hash: BlockHash::ZERO,
             work: 0,
             signature: Signature([2u8; 64]),
             hash: BlockHash::ZERO,
@@ -882,6 +973,7 @@ mod tests {
             origin: TxHash::ZERO,
             transaction: TxHash::new([0xDD; 32]),
             timestamp: Timestamp::new(1_000_002),
+            params_hash: BlockHash::ZERO,
             work: 0,
             signature: Signature([3u8; 64]),
             hash: BlockHash::ZERO,
@@ -1205,6 +1297,7 @@ mod tests {
             origin: TxHash::ZERO,
             transaction: TxHash::new([0xFF; 32]),
             timestamp: Timestamp::new(2_000_000),
+            params_hash: BlockHash::ZERO,
             work: 0,
             signature: Signature([5u8; 64]),
             hash: BlockHash::ZERO,
@@ -1235,6 +1328,7 @@ mod tests {
             origin: TxHash::ZERO,
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_000),
+            params_hash: BlockHash::ZERO,
             work: 0,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,
@@ -1273,6 +1367,7 @@ mod tests {
             origin: TxHash::ZERO,
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_001),
+            params_hash: BlockHash::ZERO,
             work: 0,
             signature: Signature([4u8; 64]),
             hash: BlockHash::ZERO,
@@ -1364,6 +1459,7 @@ mod tests {
             origin: TxHash::ZERO,
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(2_000_000),
+            params_hash: BlockHash::ZERO,
             work: 0,
             signature: Signature([7u8; 64]),
             hash: BlockHash::ZERO,
@@ -1477,6 +1573,7 @@ mod tests {
             origin: TxHash::ZERO,
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_000),
+            params_hash: BlockHash::ZERO,
             work: 0,
             signature: Signature([0u8; 64]),
             hash: BlockHash::ZERO,
@@ -1508,6 +1605,7 @@ mod tests {
             origin: TxHash::ZERO,
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_000),
+            params_hash: BlockHash::ZERO,
             work: 0,
             signature: Signature([0u8; 64]),
             hash: BlockHash::ZERO,
@@ -1545,6 +1643,7 @@ mod tests {
             origin: TxHash::ZERO,
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_000),
+            params_hash: BlockHash::ZERO,
             work: 0,
             signature: Signature([0u8; 64]),
             hash: BlockHash::ZERO,
@@ -1569,6 +1668,7 @@ mod tests {
             origin: TxHash::ZERO,
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(2_000_000),
+            params_hash: BlockHash::ZERO,
             work: 0,
             signature: Signature([0u8; 64]),
             hash: BlockHash::ZERO,
@@ -1605,6 +1705,7 @@ mod tests {
             origin: TxHash::ZERO,
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_000),
+            params_hash: BlockHash::ZERO,
             work: 0,
             signature: Signature([0u8; 64]),
             hash: BlockHash::ZERO,
@@ -1629,6 +1730,7 @@ mod tests {
             origin: TxHash::ZERO,
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(2_000_000),
+            params_hash: BlockHash::ZERO,
             work: 0,
             signature: Signature([0u8; 64]),
             hash: BlockHash::ZERO,
@@ -1692,6 +1794,7 @@ mod tests {
             origin: TxHash::ZERO,
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_001),
+            params_hash: BlockHash::ZERO,
             work: 0,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,
@@ -1715,6 +1818,7 @@ mod tests {
             origin: TxHash::ZERO,
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_001),
+            params_hash: BlockHash::ZERO,
             work: 0,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,
@@ -1742,6 +1846,7 @@ mod tests {
             origin: TxHash::ZERO,
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_001),
+            params_hash: BlockHash::ZERO,
             work: 0,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,
@@ -1765,6 +1870,7 @@ mod tests {
             origin: TxHash::ZERO,
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_001),
+            params_hash: BlockHash::ZERO,
             work: 0,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,
@@ -1789,6 +1895,7 @@ mod tests {
             origin: TxHash::ZERO,
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_001),
+            params_hash: BlockHash::ZERO,
             work: 0,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,
@@ -1918,6 +2025,7 @@ mod tests {
             origin: TxHash::ZERO,
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_010),
+            params_hash: BlockHash::ZERO,
             work: 0,
             signature: Signature([6u8; 64]),
             hash: BlockHash::ZERO,

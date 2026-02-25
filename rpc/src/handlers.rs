@@ -1592,6 +1592,7 @@ fn build_and_sign_block(
     private_key: &burst_types::PrivateKey,
     work_generator: &burst_work::WorkGenerator,
     min_work_difficulty: u64,
+    params_hash: BlockHash,
 ) -> Result<burst_ledger::StateBlock, RpcError> {
     use burst_ledger::CURRENT_BLOCK_VERSION;
 
@@ -1609,6 +1610,7 @@ fn build_and_sign_block(
         origin,
         transaction,
         timestamp: now,
+        params_hash,
         work: 0,
         signature: Signature([0u8; 64]),
         hash: BlockHash::ZERO,
@@ -1775,6 +1777,7 @@ pub async fn handle_burn_simple(
         let previous = account.head;
         let work_gen = state.work_generator.clone();
         let min_diff = state.params.min_work_difficulty;
+        let ph = state.params.params_hash();
         move || {
             let pk = burst_types::PrivateKey(pk_bytes);
             build_and_sign_block(
@@ -1790,6 +1793,7 @@ pub async fn handle_burn_simple(
                 &pk,
                 &work_gen,
                 min_diff,
+                ph,
             )
         }
     })
@@ -1917,6 +1921,7 @@ pub async fn handle_send_simple(
         let previous = account.head;
         let work_gen = state.work_generator.clone();
         let min_diff = state.params.min_work_difficulty;
+        let ph = state.params.params_hash();
         move || {
             let pk = burst_types::PrivateKey(pk_bytes);
             build_and_sign_block(
@@ -1932,6 +1937,7 @@ pub async fn handle_send_simple(
                 &pk,
                 &work_gen,
                 min_diff,
+                ph,
             )
         }
     })
@@ -2079,6 +2085,7 @@ pub async fn handle_receive_simple(
         let previous = account.head;
         let work_gen = state.work_generator.clone();
         let min_diff = state.params.min_work_difficulty;
+        let ph = state.params.params_hash();
         move || {
             let pk = burst_types::PrivateKey(pk_bytes);
             build_and_sign_block(
@@ -2094,6 +2101,7 @@ pub async fn handle_receive_simple(
                 &pk,
                 &work_gen,
                 min_diff,
+                ph,
             )
         }
     })
@@ -2210,6 +2218,7 @@ pub async fn handle_change_rep_simple(
         let trst_balance = account.trst_balance;
         let work_gen = state.work_generator.clone();
         let min_diff = state.params.min_work_difficulty;
+        let ph = state.params.params_hash();
         move || {
             let pk = burst_types::PrivateKey(pk_bytes);
             build_and_sign_block(
@@ -2225,6 +2234,7 @@ pub async fn handle_change_rep_simple(
                 &pk,
                 &work_gen,
                 min_diff,
+                ph,
             )
         }
     })
@@ -2352,6 +2362,7 @@ pub async fn handle_governance_propose_simple(
         let trst_balance = account.trst_balance;
         let work_gen = state.work_generator.clone();
         let min_diff = state.params.min_work_difficulty;
+        let ph = state.params.params_hash();
         move || {
             let pk = burst_types::PrivateKey(pk_bytes);
             build_and_sign_block(
@@ -2367,6 +2378,7 @@ pub async fn handle_governance_propose_simple(
                 &pk,
                 &work_gen,
                 min_diff,
+                ph,
             )
         }
     })
@@ -2510,6 +2522,7 @@ pub async fn handle_governance_vote_simple(
         let trst_balance = account.trst_balance;
         let work_gen = state.work_generator.clone();
         let min_diff = state.params.min_work_difficulty;
+        let ph = state.params.params_hash();
         move || {
             let pk = burst_types::PrivateKey(pk_bytes);
             build_and_sign_block(
@@ -2525,6 +2538,7 @@ pub async fn handle_governance_vote_simple(
                 &pk,
                 &work_gen,
                 min_diff,
+                ph,
             )
         }
     })

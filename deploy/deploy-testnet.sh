@@ -176,7 +176,10 @@ step_check_ssh() {
     echo "$output" >> "$logfile"
 
     if [ $rc -eq 0 ]; then
-        echo -e "${GREEN}OK${NC}"
+        local arch
+        arch=$(ssh_cmd "$host" "uname -m" 2>/dev/null | tr -d '[:space:]')
+        echo -e "${GREEN}OK${NC} (${arch})"
+        echo "$arch" > "${STATE_DIR}/${host}.arch"
         return 0
     else
         echo -e "${RED}FAILED${NC}"
@@ -385,7 +388,8 @@ step_run_container() {
 }
 
 step_watchtower() {
-    local host="$1"
+    local host="$1" node_num="$2"
+    local container_name="burst-testnet-${node_num}"
     local logfile
     logfile=$(node_log "$host")
 
@@ -409,24 +413,26 @@ step_watchtower() {
 
     ssh_cmd "$host" "docker stop watchtower 2>/dev/null || true; docker rm watchtower 2>/dev/null || true" >> "$logfile" 2>&1
 
+    # Watchtower is multi-arch (amd64, arm64, arm/v7) — docker pulls the
+    # correct variant automatically. It watches only this node's container
+    # and pulls the matching platform when a new multi-arch manifest appears.
     local output
     output=$(ssh_cmd "$host" "docker run -d \
         --name watchtower \
         --restart unless-stopped \
         -v /var/run/docker.sock:/var/run/docker.sock \
-        -e DOCKER_API_VERSION=1.44 \
         containrrr/watchtower:latest \
-        --interval 30 \
+        --interval 300 \
         --cleanup \
         --include-stopped \
         --revive-stopped \
         --label-enable=false \
-        burst-testnet-1 burst-testnet-2 burst-testnet-3 burst-testnet-4 burst-testnet-5" 2>&1)
+        ${container_name}" 2>&1)
     local rc=$?
     echo "$output" >> "$logfile"
 
     if [ $rc -eq 0 ]; then
-        echo -e "${GREEN}started${NC} (polls every 30s)"
+        echo -e "${GREEN}started${NC} (watches ${container_name}, polls every 5m)"
         return 0
     else
         echo -e "${YELLOW}SKIPPED${NC} — watchtower failed (non-critical)"
@@ -453,11 +459,14 @@ step_verify() {
         startup_logs=$(ssh_cmd "$host" "docker logs --tail 20 $container_name 2>&1" 2>/dev/null || true)
         echo "$startup_logs" >> "$logfile"
 
+        local img_arch
+        img_arch=$(ssh_cmd "$host" "docker inspect ${container_name} --format '{{.Architecture}}' 2>/dev/null || echo unknown" | tr -d '[:space:]')
+
         local error_lines
         error_lines=$(echo "$startup_logs" | grep -iE "panic|fatal|error|failed to" || true)
 
         if [ -n "$error_lines" ]; then
-            echo -e "${YELLOW}RUNNING (with warnings)${NC}"
+            echo -e "${YELLOW}RUNNING (with warnings)${NC} [${img_arch}]"
             echo -e "  ${YELLOW}Suspicious lines in startup log:${NC}"
             echo "$error_lines" | head -5 | sed "s/^/    ${YELLOW}│${NC} /"
             echo -e "  ${YELLOW}Full log: ${logfile}${NC}"
@@ -465,7 +474,7 @@ step_verify() {
             return 0
         fi
 
-        echo -e "${GREEN}${BOLD}OK${NC} — healthy"
+        echo -e "${GREEN}${BOLD}OK${NC} — healthy [${img_arch}]"
         mark_stage "$host" "deployed"
         return 0
     else
@@ -522,7 +531,7 @@ deploy_node() {
         echo -e "  ${RED}STOPPED — container start failed${NC}"
         return 1
     }
-    step_watchtower "$host"
+    step_watchtower "$host" "$node_num"
     step_verify "$host" "$node_num" || return 1
 
     return 0
@@ -549,7 +558,7 @@ deploy_node_bg() {
         step_install_docker "$host"                  || { echo "RESULT:FAIL:docker"; echo "FAIL" > "$result_file"; return; }
         step_pull_image "$host" "$IMAGE_TAG"         || { echo "RESULT:FAIL:pull"; echo "FAIL" > "$result_file"; return; }
         step_run_container "$host" "$node_num" "$is_seed" || { echo "RESULT:FAIL:container"; echo "FAIL" > "$result_file"; return; }
-        step_watchtower "$host"
+        step_watchtower "$host" "$node_num"
         step_verify "$host" "$node_num"              || { echo "RESULT:FAIL:verify"; echo "FAIL" > "$result_file"; return; }
 
         echo "RESULT:OK"
@@ -672,6 +681,21 @@ echo ""
 echo "Seed RPC:       http://${SEED_IP}:${RPC_PORT}"
 echo "Seed WebSocket: ws://${SEED_IP}:${WS_PORT}"
 echo ""
+
+any_arch_saved=false
+for ip in "${ALL_IPS[@]}"; do
+    [ -f "${STATE_DIR}/${ip}.arch" ] && any_arch_saved=true && break
+done
+if [ "$any_arch_saved" = "true" ]; then
+    echo "Node architectures:"
+    for ip in "${ALL_IPS[@]}"; do
+        arch="unknown"
+        [ -f "${STATE_DIR}/${ip}.arch" ] && arch=$(cat "${STATE_DIR}/${ip}.arch")
+        echo "  ${ip}: ${arch}"
+    done
+    echo ""
+fi
+
 echo "Health check:   ./deploy/health-check.sh ${ALL_IPS[*]}"
 echo ""
 echo -e "Per-node logs:  ${CYAN}ls ${LOG_DIR}/${NC}"

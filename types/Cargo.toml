@@ -9,7 +9,8 @@ description = "Fundamental types for the BURST protocol"
 serde = { workspace = true }
 thiserror = { workspace = true }
 zeroize = { workspace = true }
+blake2 = { workspace = true }
+bincode = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
-bincode = { workspace = true }

@@ -9,6 +9,7 @@ use crate::error::GovernanceError;
 use crate::proposal::{GovernancePhase, Proposal, ProposalContent};
 use burst_transactions::governance::GovernanceVote;
 use burst_types::{ProtocolParams, Timestamp, TxHash, WalletAddress};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Duration of each voting phase for emergency proposals (24 hours).
@@ -26,6 +27,7 @@ fn activation_delay_secs(params: &ProtocolParams) -> u64 {
 
 /// The governance engine manages proposals through the 5-phase lifecycle,
 /// tracking endorsements, votes, and phase transitions.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GovernanceEngine {
     /// All submitted proposals indexed by their transaction hash.
     proposals: HashMap<TxHash, Proposal>,

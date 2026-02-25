@@ -60,6 +60,7 @@ fn make_block(
         origin,
         transaction: TxHash::ZERO,
         timestamp: Timestamp::new(ts),
+        params_hash: BlockHash::ZERO,
         work: 0,
         signature: Signature(dummy_sig),
         hash: BlockHash::ZERO,

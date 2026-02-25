@@ -3,6 +3,9 @@
 //! Every field is democratically governable via the 5-phase governance process.
 
 use crate::amount::BRN_UNIT;
+use crate::BlockHash;
+use blake2::{Blake2b, Digest};
+use blake2::digest::consts::U32;
 use serde::{Deserialize, Serialize};
 
 /// All protocol parameters stored by every node.
@@ -136,6 +139,19 @@ pub struct ProtocolParams {
 impl ProtocolParams {
     /// 1 BRN per hour expressed as raw units per second (rounded up).
     pub const BRN_RATE_1_PER_HOUR: u128 = BRN_UNIT / 3600 + 1; // 277_777_777_777_778
+
+    /// Compute a deterministic blake2b-256 hash of these params.
+    /// Equivalent to Tezos's protocol hash — used in block headers,
+    /// handshakes, and telemetry for cross-node verification.
+    pub fn params_hash(&self) -> BlockHash {
+        let bytes = bincode::serialize(self).expect("ProtocolParams serialization is infallible");
+        let mut hasher = Blake2b::<U32>::new();
+        hasher.update(&bytes);
+        let result = hasher.finalize();
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&result);
+        BlockHash::new(hash)
+    }
 
     /// BURST UBI defaults — the intended configuration for the live network.
     pub fn burst_defaults() -> Self {

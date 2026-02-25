@@ -43,6 +43,9 @@ pub enum BlockType {
     RejectReceive,
     /// Verification vote — verifier casts a vote on a wallet's humanity.
     VerificationVote,
+    /// Governance activation block — records an on-chain parameter change
+    /// (Tezos-style self-amendment). Placed on the genesis account's chain.
+    GovernanceActivation,
 }
 
 /// Current state block version.
@@ -92,6 +95,10 @@ pub struct StateBlock {
 
     /// Block timestamp.
     pub timestamp: Timestamp,
+
+    /// Deterministic hash of the ProtocolParams this block was validated under.
+    /// Equivalent to Tezos's protocol hash in block headers.
+    pub params_hash: BlockHash,
 
     /// Proof-of-work nonce (anti-spam).
     pub work: u64,
@@ -145,6 +152,7 @@ impl StateBlock {
             BlockType::Epoch => 13,
             BlockType::RejectReceive => 14,
             BlockType::VerificationVote => 15,
+            BlockType::GovernanceActivation => 16,
         };
         buffer.push(block_type_byte);
 
@@ -174,6 +182,9 @@ impl StateBlock {
 
         // 9. timestamp (8 bytes, big-endian u64)
         buffer.extend_from_slice(&self.timestamp.as_secs().to_be_bytes());
+
+        // 10. params_hash (32 bytes)
+        buffer.extend_from_slice(self.params_hash.as_bytes());
 
         // Hash the concatenated bytes
         let hash_bytes = blake2b_256(&buffer);
@@ -214,6 +225,7 @@ mod tests {
             origin: TxHash::ZERO,
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1234567890),
+            params_hash: BlockHash::ZERO,
             work: 0,
             signature: Signature([0u8; 64]),
             hash: BlockHash::ZERO,

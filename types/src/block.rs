@@ -7,6 +7,12 @@ use std::fmt;
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct BlockHash([u8; 32]);
 
+impl Default for BlockHash {
+    fn default() -> Self {
+        Self::ZERO
+    }
+}
+
 impl BlockHash {
     pub const ZERO: Self = Self([0u8; 32]);
 

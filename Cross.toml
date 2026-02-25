@@ -1,0 +1,13 @@
+# Cross-compilation config for `cross build --target <target>`.
+#
+# Install: cargo install cross --git https://github.com/cross-rs/cross
+# Build:   cross build --release -p burst-daemon --target aarch64-unknown-linux-gnu
+#
+# The resulting binary will be at:
+#   target/aarch64-unknown-linux-gnu/release/burst-daemon
+
+[target.aarch64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:main"
+
+[target.armv7-unknown-linux-gnueabihf]
+image = "ghcr.io/cross-rs/armv7-unknown-linux-gnueabihf:main"

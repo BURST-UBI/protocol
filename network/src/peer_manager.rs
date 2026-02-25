@@ -3,6 +3,7 @@
 use burst_messages::PeerAddress;
 use rand::seq::SliceRandom;
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::net::SocketAddrV4;
 
 // ---------------------------------------------------------------------------
@@ -65,6 +66,11 @@ pub struct PeerState {
     pub ban_until_secs: Option<u64>,
     /// Most recent telemetry data received from this peer.
     pub telemetry: Option<PeerTelemetry>,
+    /// The address other nodes should use to connect to this peer.
+    /// Learned from the peer's self-address in keepalive slot 0.
+    /// Differs from `address` when the peer is behind NAT (the TCP
+    /// `peer_addr` may use an ephemeral port).
+    pub peering_addr: Option<PeerAddress>,
 }
 
 /// Score at or below which a peer is banned.
@@ -79,6 +85,9 @@ const SCORE_MAX: i32 = 100;
 // ---------------------------------------------------------------------------
 // Peer manager
 // ---------------------------------------------------------------------------
+
+/// Maximum number of recent keepalive payloads to buffer for the reachout loop.
+const LATEST_KEEPALIVES_CAPACITY: usize = 32;
 
 /// Central registry for peer discovery, keepalive scheduling, scoring, and
 /// ban management.
@@ -100,6 +109,9 @@ pub struct PeerManager {
     /// When set, keepalive messages advertise this address so peers behind
     /// NAT can be reached by others.
     external_address: Option<SocketAddrV4>,
+    /// Ring buffer of recently received keepalive peer lists. The reachout
+    /// loop pops random entries and attempts connections to discovered peers.
+    latest_keepalives: VecDeque<Vec<PeerAddress>>,
 }
 
 impl PeerManager {
@@ -113,6 +125,7 @@ impl PeerManager {
             last_keepalive_secs: None,
             num_connected: 0,
             external_address: None,
+            latest_keepalives: VecDeque::with_capacity(LATEST_KEEPALIVES_CAPACITY),
         }
     }
 
@@ -130,6 +143,7 @@ impl PeerManager {
             last_keepalive_secs: None,
             num_connected: 0,
             external_address: None,
+            latest_keepalives: VecDeque::with_capacity(LATEST_KEEPALIVES_CAPACITY),
         }
     }
 
@@ -191,6 +205,7 @@ impl PeerManager {
                 banned: false,
                 ban_until_secs: None,
                 telemetry: None,
+                peering_addr: None,
             },
         );
     }
@@ -273,15 +288,10 @@ impl PeerManager {
     /// Return up to `count` random *connected* peer addresses, suitable for
     /// inclusion in a keepalive message.
     ///
-    /// If UPnP has discovered an external address, it is included as the first
-    /// entry so other nodes learn this node's reachable address.
+    /// Prefers `peering_addr` over the raw TCP address so that peers behind
+    /// NAT advertise their externally reachable address.
     pub fn random_peers(&self, count: usize) -> Vec<PeerAddress> {
         let mut result = Vec::with_capacity(count);
-
-        // Include our own external address so peers learn how to reach us
-        if let Some(self_addr) = self.self_peer_address() {
-            result.push(self_addr);
-        }
 
         let connected: Vec<&PeerState> = self
             .peers
@@ -297,9 +307,27 @@ impl PeerManager {
             if result.len() >= count {
                 break;
             }
-            result.push(connected[i].address.clone());
+            let peer = connected[i];
+            result.push(
+                peer.peering_addr
+                    .clone()
+                    .unwrap_or_else(|| peer.address.clone()),
+            );
         }
 
+        result
+    }
+
+    /// Return up to `count` random *connected* peer addresses with this
+    /// node's own external address in slot 0 (for self-advertisement).
+    pub fn random_peers_with_self(&self, count: usize) -> Vec<PeerAddress> {
+        let mut result = Vec::with_capacity(count);
+        if let Some(self_addr) = self.self_peer_address() {
+            result.push(self_addr);
+        }
+        let rest = self.random_peers(count.saturating_sub(result.len()));
+        result.extend(rest);
+        result.truncate(count);
         result
     }
 
@@ -347,11 +375,44 @@ impl PeerManager {
         self.last_keepalive_secs = Some(now_secs);
     }
 
-    /// Process a received keepalive message: learn any new peer addresses.
+    /// Process a received keepalive message: learn any new peer addresses
+    /// and buffer the full list for the reachout loop.
     pub fn process_keepalive(&mut self, peers: Vec<PeerAddress>) {
+        if !peers.is_empty() {
+            if self.latest_keepalives.len() >= LATEST_KEEPALIVES_CAPACITY {
+                self.latest_keepalives.pop_front();
+            }
+            self.latest_keepalives.push_back(peers.clone());
+        }
         for addr in peers {
             self.add_peer(addr);
         }
+    }
+
+    /// Pop a random recently received keepalive peer list for the reachout
+    /// loop. Returns `None` when the buffer is empty.
+    pub fn pop_random_keepalive(&mut self) -> Option<Vec<PeerAddress>> {
+        if self.latest_keepalives.is_empty() {
+            return None;
+        }
+        let idx = rand::random::<usize>() % self.latest_keepalives.len();
+        self.latest_keepalives.remove(idx)
+    }
+
+    /// Set a peer's reachable address (learned from keepalive self-advertisement).
+    pub fn set_peering_addr(&mut self, peer_id: &str, addr: PeerAddress) {
+        if let Some(peer) = self.peers.get_mut(peer_id) {
+            peer.peering_addr = Some(addr);
+        }
+    }
+
+    /// Return addresses of all currently connected peers (for cache persistence).
+    pub fn connected_peer_addresses(&self) -> Vec<(String, u64)> {
+        self.peers
+            .iter()
+            .filter(|(_, p)| p.connected && !p.banned)
+            .map(|(key, p)| (key.clone(), p.last_seen_secs))
+            .collect()
     }
 
     // -- Scoring / banning -----------------------------------------------------

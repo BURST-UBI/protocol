@@ -305,6 +305,7 @@ mod tests {
             origin: TxHash::ZERO,
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1000),
+            params_hash: BlockHash::ZERO,
             work: 0,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,

@@ -138,6 +138,7 @@ mod tests {
             banned: false,
             ban_until_secs: None,
             telemetry: None,
+            peering_addr: None,
         }
     }
 

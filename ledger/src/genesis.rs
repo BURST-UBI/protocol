@@ -47,6 +47,7 @@ pub fn create_genesis_block(config: &GenesisConfig) -> StateBlock {
         origin: TxHash::ZERO,
         transaction: TxHash::ZERO,
         timestamp,
+        params_hash: BlockHash::ZERO,
         work: 0,
         signature: Signature([0u8; 64]),
         hash: BlockHash::ZERO,

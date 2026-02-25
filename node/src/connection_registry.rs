@@ -131,6 +131,7 @@ pub fn spawn_peer_read_loop(
     peer_ip: String,
     frontier: Arc<RwLock<DagFrontier>>,
     store: Arc<LmdbStore>,
+    our_params_hash: burst_types::BlockHash,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let result = peer_read_loop(
@@ -147,6 +148,7 @@ pub fn spawn_peer_read_loop(
             &connection_registry,
             &frontier,
             &store,
+            our_params_hash,
         )
         .await;
         match &result {
@@ -194,6 +196,7 @@ async fn peer_read_loop(
     connection_registry: &RwLock<ConnectionRegistry>,
     frontier: &RwLock<DagFrontier>,
     store: &LmdbStore,
+    our_params_hash: burst_types::BlockHash,
 ) -> Result<(), std::io::Error> {
     // SYN cookie validation: inbound peers must respond with a signed cookie
     if let Some(cookies) = syn_cookies {
@@ -425,14 +428,30 @@ async fn peer_read_loop(
                     "received keepalive"
                 );
                 if !ka.peers.is_empty() {
-                    let mut pm = peer_manager.write().await;
+                    let mut parsed: Vec<burst_messages::PeerAddress> =
+                        Vec::with_capacity(ka.peers.len());
                     for addr_str in &ka.peers {
                         let parts: Vec<&str> = addr_str.rsplitn(2, ':').collect();
                         if parts.len() == 2 {
                             if let Ok(port) = parts[0].parse::<u16>() {
                                 let ip = parts[1].to_string();
-                                pm.add_peer(burst_messages::PeerAddress { ip, port });
+                                parsed.push(burst_messages::PeerAddress { ip, port });
                             }
+                        }
+                    }
+
+                    // Slot 0 is the sender's self-advertised address (peering_addr).
+                    // Store it so keepalive messages use the NAT-traversed address.
+                    let peering = parsed.first().cloned();
+
+                    let mut pm = peer_manager.write().await;
+                    pm.process_keepalive(parsed);
+                    if let Some(pa) = peering {
+                        if !pa.ip.is_empty()
+                            && pa.ip != "0.0.0.0"
+                            && pa.ip != "::"
+                        {
+                            pm.set_peering_addr(peer_id, pa);
                         }
                     }
                 }
@@ -616,6 +635,7 @@ async fn peer_read_loop(
                     minor_version: 1,
                     patch_version: 0,
                     timestamp: unix_now_secs(),
+                    params_hash: our_params_hash,
                 });
                 if let Ok(bytes) = bincode::serialize(&ack) {
                     let registry = connection_registry.read().await;

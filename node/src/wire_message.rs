@@ -77,6 +77,10 @@ pub struct HandshakeMsg {
     pub node_id: WalletAddress,
     pub cookie: Option<[u8; 32]>,
     pub cookie_signature: Option<Signature>,
+    /// Deterministic hash of the node's current ProtocolParams.
+    /// Peers compare this to detect protocol version divergence.
+    #[serde(default)]
+    pub params_hash: BlockHash,
 }
 
 /// UHV verification request: an endorser vouches for a target wallet's humanity.
@@ -129,6 +133,9 @@ pub struct TelemetryAckMessage {
     pub minor_version: u8,
     pub patch_version: u8,
     pub timestamp: u64,
+    /// Deterministic hash of the node's current ProtocolParams.
+    #[serde(default)]
+    pub params_hash: BlockHash,
 }
 
 #[cfg(test)]
@@ -154,6 +161,7 @@ mod tests {
             origin: TxHash::new([3u8; 32]),
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(42),
+            params_hash: BlockHash::ZERO,
             work: 0xDEAD,
             signature: Signature([0xFF; 64]),
             hash: BlockHash::ZERO,
@@ -244,6 +252,7 @@ mod tests {
             node_id: addr("node1"),
             cookie: Some([0xCC; 32]),
             cookie_signature: Some(Signature([0xDD; 64])),
+            params_hash: burst_types::BlockHash::default(),
         });
         let bytes = bincode::serialize(&msg).unwrap();
         let decoded: WireMessage = bincode::deserialize(&bytes).unwrap();
@@ -263,6 +272,7 @@ mod tests {
             node_id: addr("node2"),
             cookie: None,
             cookie_signature: None,
+            params_hash: burst_types::BlockHash::default(),
         });
         let bytes = bincode::serialize(&msg).unwrap();
         let decoded: WireMessage = bincode::deserialize(&bytes).unwrap();
@@ -368,6 +378,7 @@ mod tests {
             minor_version: 1,
             patch_version: 0,
             timestamp: 1700000000,
+            params_hash: BlockHash::ZERO,
         });
         let bytes = bincode::serialize(&msg).unwrap();
         let decoded: WireMessage = bincode::deserialize(&bytes).unwrap();

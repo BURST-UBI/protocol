@@ -13,6 +13,7 @@ use crate::frontier::LmdbFrontierStore;
 use crate::governance::LmdbGovernanceStore;
 use crate::merger_graph::LmdbMergerGraphStore;
 use crate::meta::LmdbMetaStore;
+use crate::peer::LmdbPeerStore;
 use crate::pending::LmdbPendingStore;
 use crate::rep_weights::LmdbRepWeightStore;
 use crate::transaction::LmdbTransactionStore;
@@ -79,6 +80,9 @@ pub struct LmdbEnvironment {
     // Representative weight stores
     pub(crate) rep_weights_db: Database<Bytes, Bytes>,
     pub(crate) online_weight_db: Database<Bytes, Bytes>,
+
+    // Peer cache store
+    pub(crate) peers_db: Database<Bytes, Bytes>,
 }
 
 impl LmdbEnvironment {
@@ -122,6 +126,7 @@ impl LmdbEnvironment {
         let block_height_db = env.create_database(&mut wtxn, Some("block_height_reverse"))?;
         let rep_weights_db = env.create_database(&mut wtxn, Some("rep_weights"))?;
         let online_weight_db = env.create_database(&mut wtxn, Some("online_weights"))?;
+        let peers_db = env.create_database(&mut wtxn, Some("peers"))?;
 
         wtxn.commit()?;
 
@@ -153,6 +158,7 @@ impl LmdbEnvironment {
             block_height_db,
             rep_weights_db,
             online_weight_db,
+            peers_db,
         })
     }
 
@@ -261,6 +267,14 @@ impl LmdbEnvironment {
             env: Arc::clone(&self.env),
             rep_weights_db: self.rep_weights_db,
             online_weight_db: self.online_weight_db,
+        }
+    }
+
+    /// Create a peer cache store backed by this environment.
+    pub fn peer_store(&self) -> LmdbPeerStore {
+        LmdbPeerStore {
+            env: Arc::clone(&self.env),
+            peers_db: self.peers_db,
         }
     }
 

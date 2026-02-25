@@ -1,5 +1,8 @@
-# Lightweight image — binary is pre-built by CI, no Rust compilation here.
+# Lightweight multi-arch image — binaries are pre-built by CI for each
+# platform (amd64, arm64).  Docker buildx sets TARGETARCH automatically.
 FROM debian:bookworm-slim
+
+ARG TARGETARCH
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -8,8 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN useradd -m -s /bin/bash burst
 
-ARG BINARY_PATH=target/release/burst-daemon
-COPY ${BINARY_PATH} /usr/local/bin/burst-daemon
+COPY binaries/${TARGETARCH}/burst-daemon /usr/local/bin/burst-daemon
 COPY testnet.toml /home/burst/testnet.toml
 
 RUN chmod +x /usr/local/bin/burst-daemon \

@@ -114,6 +114,7 @@ fn arb_state_block() -> impl Strategy<Value = StateBlock> {
                     origin,
                     transaction: TxHash::ZERO,
                     timestamp: ts,
+                    params_hash: BlockHash::ZERO,
                     work,
                     signature: sig,
                     hash: BlockHash::ZERO,

@@ -222,6 +222,14 @@ pub fn process_block_economics(
                 stake: stake_amount,
             }
         }
+        BlockType::GovernanceActivation => {
+            let proposal_hash = burst_types::TxHash::new(*block.link.as_bytes());
+            let new_params_hash = BlockHash::new(*block.transaction.as_bytes());
+            EconomicResult::GovernanceActivation {
+                proposal_hash,
+                new_params_hash,
+            }
+        }
         _ => EconomicResult::NoEconomicEffect,
     }
 }
@@ -466,6 +474,11 @@ pub enum EconomicResult {
         vote: u8,
         stake: u128,
     },
+    /// Governance activation — a parameter change is being applied on-chain.
+    GovernanceActivation {
+        proposal_hash: burst_types::TxHash,
+        new_params_hash: BlockHash,
+    },
     /// Block rejected due to economic invariant violation.
     Rejected { reason: String },
     /// No economic effect (e.g. epoch, delegation).
@@ -517,6 +530,7 @@ mod tests {
             origin: TxHash::ZERO,
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_000),
+            params_hash: BlockHash::ZERO,
             work: 0,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,
@@ -538,6 +552,7 @@ mod tests {
             origin: TxHash::ZERO,
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_001),
+            params_hash: BlockHash::ZERO,
             work: 0,
             signature: Signature([2u8; 64]),
             hash: BlockHash::ZERO,
@@ -560,6 +575,7 @@ mod tests {
             origin: TxHash::ZERO,
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_002),
+            params_hash: BlockHash::ZERO,
             work: 0,
             signature: Signature([3u8; 64]),
             hash: BlockHash::ZERO,
@@ -586,6 +602,7 @@ mod tests {
             origin: TxHash::ZERO,
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_003),
+            params_hash: BlockHash::ZERO,
             work: 0,
             signature: Signature([4u8; 64]),
             hash: BlockHash::ZERO,
@@ -612,6 +629,7 @@ mod tests {
             origin: TxHash::ZERO,
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_004),
+            params_hash: BlockHash::ZERO,
             work: 0,
             signature: Signature([5u8; 64]),
             hash: BlockHash::ZERO,
@@ -679,6 +697,7 @@ mod tests {
             origin: TxHash::ZERO,
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_000),
+            params_hash: BlockHash::ZERO,
             work: 0,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,
@@ -774,6 +793,7 @@ mod tests {
             origin: TxHash::ZERO,
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_000),
+            params_hash: BlockHash::ZERO,
             work: 0,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,
