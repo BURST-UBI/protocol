@@ -60,16 +60,14 @@ pub fn validate_transaction(
         Transaction::Merge(merge_tx) => {
             validate_merge(merge_tx, now)?;
         }
-        Transaction::Challenge(challenge_tx) => {
-            if challenge_tx.stake_amount == 0 {
-                return Err(TransactionError::ZeroAmount);
-            }
+        Transaction::Challenge(challenge_tx) if challenge_tx.stake_amount == 0 => {
+            return Err(TransactionError::ZeroAmount);
         }
-        Transaction::Endorse(endorse_tx) => {
-            if endorse_tx.burn_amount == 0 {
-                return Err(TransactionError::ZeroAmount);
-            }
+        Transaction::Challenge(_) => {}
+        Transaction::Endorse(endorse_tx) if endorse_tx.burn_amount == 0 => {
+            return Err(TransactionError::ZeroAmount);
         }
+        Transaction::Endorse(_) => {}
         _ => {}
     }
 
