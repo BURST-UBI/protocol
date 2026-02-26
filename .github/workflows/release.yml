@@ -36,7 +36,7 @@ jobs:
         run: cargo build --release -p burst-daemon --target x86_64-unknown-linux-musl
       - name: Verify
         run: file target/x86_64-unknown-linux-musl/release/burst-daemon
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: burst-daemon-linux-amd64
           path: target/x86_64-unknown-linux-musl/release/burst-daemon
@@ -63,7 +63,7 @@ jobs:
         run: cross build --release -p burst-daemon --target aarch64-unknown-linux-musl
       - name: Verify
         run: file target/aarch64-unknown-linux-musl/release/burst-daemon
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: burst-daemon-linux-arm64
           path: target/aarch64-unknown-linux-musl/release/burst-daemon
@@ -88,7 +88,7 @@ jobs:
         run: cargo build --release -p burst-daemon
       - name: Verify
         run: file target/release/burst-daemon
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: burst-daemon-darwin-arm64
           path: target/release/burst-daemon
@@ -113,7 +113,7 @@ jobs:
         run: cargo build --release -p burst-daemon --target x86_64-apple-darwin
       - name: Verify
         run: file target/x86_64-apple-darwin/release/burst-daemon
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: burst-daemon-darwin-amd64
           path: target/x86_64-apple-darwin/release/burst-daemon
@@ -139,7 +139,7 @@ jobs:
       - name: Verify
         run: Get-Item target\release\burst-daemon.exe | Select-Object Name, Length
         shell: pwsh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: burst-daemon-windows-amd64
           path: target/release/burst-daemon.exe
