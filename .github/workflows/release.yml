@@ -162,31 +162,31 @@ jobs:
 
     steps:
       - name: Download linux-amd64
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: burst-daemon-linux-amd64
           path: dl/linux-amd64
 
       - name: Download linux-arm64
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: burst-daemon-linux-arm64
           path: dl/linux-arm64
 
       - name: Download darwin-arm64
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: burst-daemon-darwin-arm64
           path: dl/darwin-arm64
 
       - name: Download darwin-amd64
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: burst-daemon-darwin-amd64
           path: dl/darwin-amd64
 
       - name: Download windows-amd64
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: burst-daemon-windows-amd64
           path: dl/windows-amd64
