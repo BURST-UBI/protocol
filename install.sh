@@ -23,6 +23,9 @@ BURST_NETWORK="${BURST_NETWORK:-test}"
 BURST_SEED="${BURST_SEED:-167.172.83.88:17076}"
 # Set BURST_IS_SEED=1 when installing on the seed node itself (no bootstrap, faucet enabled).
 BURST_IS_SEED="${BURST_IS_SEED:-0}"
+# BURST_ADVERTISE_ADDRESS — optional override for keepalive self-advertisement.
+# Node auto-detects public IP on cloud VPSes; set this only if auto-detect fails.
+BURST_ADVERTISE_ADDRESS="${BURST_ADVERTISE_ADDRESS:-}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -210,6 +213,10 @@ ${FAUCET_LINE}
 enable_upnp = true
 enable_verification = false
 TOML
+    if [ -n "${BURST_ADVERTISE_ADDRESS}" ]; then
+        echo "advertise_address = \"${BURST_ADVERTISE_ADDRESS}\"" >> "${CONFIG_PATH}"
+        info "Set advertise_address override (auto-detect disabled)"
+    fi
     info "Config written to ${CONFIG_PATH}"
 else
     warn "Config already exists at ${CONFIG_PATH} — not overwriting."

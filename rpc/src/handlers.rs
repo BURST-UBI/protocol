@@ -165,6 +165,7 @@ pub struct AccountInfoRequest {
 #[derive(Debug, Serialize)]
 pub struct AccountInfoResponse {
     pub address: String,
+    pub head: String,
     pub brn_balance: String,
     pub trst_balance: String,
     pub trst_expired: String,
@@ -206,6 +207,7 @@ pub async fn handle_account_info(
 
     Ok(to_value(&AccountInfoResponse {
         address: req.account,
+        head: format!("{}", account.head),
         brn_balance: brn_balance.to_string(),
         trst_balance: account.trst_balance.to_string(),
         trst_expired,
@@ -395,17 +397,17 @@ pub async fn handle_account_pending(
     let address = WalletAddress::new(req.account.clone());
     let mut all_pending = state
         .pending_store
-        .get_pending_for_account(&address)
+        .get_pending_for_account_with_hashes(&address)
         .map_err(|e| RpcError::Store(format!("failed to query pending: {e}")))?;
 
     // Sort by amount descending (highest priority first)
-    all_pending.sort_by_key(|p| std::cmp::Reverse(p.amount));
+    all_pending.sort_by_key(|(_, p)| std::cmp::Reverse(p.amount));
 
     // Apply threshold filter
     let filtered: Vec<_> = if threshold > 0 {
         all_pending
             .into_iter()
-            .filter(|p| p.amount >= threshold)
+            .filter(|(_, p)| p.amount >= threshold)
             .collect()
     } else {
         all_pending
@@ -417,8 +419,8 @@ pub async fn handle_account_pending(
 
     let pending: Vec<PendingEntry> = page
         .iter()
-        .map(|p| PendingEntry {
-            hash: format!("{}:{}", p.source, p.timestamp.as_secs()),
+        .map(|(source_hash, p)| PendingEntry {
+            hash: format!("{}", source_hash),
             source: p.source.to_string(),
             amount: p.amount.to_string(),
             timestamp: p.timestamp.as_secs(),
@@ -772,6 +774,23 @@ pub async fn handle_work_generate(
         difficulty: format!("{:016x}", difficulty),
         multiplier: format!("{:.6}", multiplier),
         hash: req.hash,
+    }))
+}
+
+// ── params_hash ────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub struct ParamsHashResponse {
+    pub params_hash: String,
+}
+
+pub async fn handle_params_hash(
+    _params: serde_json::Value,
+    state: &RpcState,
+) -> Result<serde_json::Value, RpcError> {
+    let ph = state.params.params_hash();
+    Ok(to_value(&ParamsHashResponse {
+        params_hash: format!("{}", ph),
     }))
 }
 

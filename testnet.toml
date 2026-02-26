@@ -49,5 +49,8 @@ enable_faucet = true
 # Disable if running on a VPS with a public IP (not needed).
 enable_upnp = true
 
+# Advertise address — optional. Node auto-detects public IP on cloud VPSes.
+# Override only if auto-detect fails. Example: advertise_address = "167.172.83.88"
+
 # Opt-in to act as a verifier in the UHV process.
 enable_verification = false

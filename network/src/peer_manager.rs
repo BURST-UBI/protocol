@@ -258,9 +258,11 @@ impl PeerManager {
 
     // -- Queries ---------------------------------------------------------------
 
-    /// Number of currently connected peers — O(1).
+    /// Number of currently connected peers.
+    /// Uses actual count from iter_connected to stay consistent with peers list
+    /// (num_connected can drift due to races).
     pub fn connected_count(&self) -> usize {
-        self.num_connected
+        self.iter_connected().count()
     }
 
     /// Check if a peer is currently connected by its key (ip:port).
@@ -274,6 +276,17 @@ impl PeerManager {
     /// Iterate over all connected (and not-banned) peers.
     pub fn iter_connected(&self) -> impl Iterator<Item = (&String, &PeerState)> {
         self.peers.iter().filter(|(_, p)| p.connected && !p.banned)
+    }
+
+    /// Return peer IDs of all connected peers from this IP.
+    /// Used for one-connection-per-IP enforcement (avoids overcounting reconnects).
+    pub fn connected_peer_ids_from_ip(&self, ip: &str) -> Vec<String> {
+        let prefix = format!("{ip}:");
+        self.peers
+            .iter()
+            .filter(|(key, p)| key.starts_with(&prefix) && p.connected && !p.banned)
+            .map(|(k, _)| k.clone())
+            .collect()
     }
 
     /// Return peers that are known but not currently connected and not banned.
@@ -479,6 +492,7 @@ impl PeerManager {
         for (key, peer) in self.peers.iter_mut() {
             if peer.connected && !peer.banned && peer.last_seen_secs < cutoff {
                 peer.connected = false;
+                self.num_connected = self.num_connected.saturating_sub(1);
                 idle_peers.push(key.clone());
             }
         }
@@ -681,5 +695,20 @@ mod tests {
 
         let connected: Vec<_> = pm.iter_connected().collect();
         assert_eq!(connected.len(), 1);
+    }
+
+    #[test]
+    fn cleanup_idle_decrements_num_connected() {
+        let mut pm = PeerManager::new(10);
+        pm.add_peer(addr("1.0.0.1", 1));
+        pm.add_peer(addr("1.0.0.2", 2));
+        pm.mark_connected(&key("1.0.0.1", 1), 100);
+        pm.mark_connected(&key("1.0.0.2", 2), 100);
+        assert_eq!(pm.connected_count(), 2);
+
+        // At t=500, peers last_seen at 100 are idle (>300 sec threshold)
+        let idle = pm.cleanup_idle(500, 300);
+        assert_eq!(idle.len(), 2);
+        assert_eq!(pm.connected_count(), 0);
     }
 }

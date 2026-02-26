@@ -94,7 +94,16 @@ impl PendingStore for LmdbPendingStore {
         &self,
         destination: &WalletAddress,
     ) -> Result<Vec<PendingInfo>, StoreError> {
+        self.get_pending_for_account_with_hashes(destination)
+            .map(|v| v.into_iter().map(|(_, info)| info).collect())
+    }
+
+    fn get_pending_for_account_with_hashes(
+        &self,
+        destination: &WalletAddress,
+    ) -> Result<Vec<(TxHash, PendingInfo)>, StoreError> {
         let prefix = destination.as_str().as_bytes();
+        let prefix_len = prefix.len();
         let mut upper = prefix.to_vec();
         increment_prefix(&mut upper);
 
@@ -106,9 +115,16 @@ impl PendingStore for LmdbPendingStore {
             .map_err(LmdbError::from)?;
         let mut results = Vec::new();
         for result in iter {
-            let (_key, val) = result.map_err(LmdbError::from)?;
+            let (key, val) = result.map_err(LmdbError::from)?;
             let info: PendingInfo = bincode::deserialize(val).map_err(LmdbError::from)?;
-            results.push(info);
+            let source_hash = if key.len() >= prefix_len + 32 {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&key[prefix_len..prefix_len + 32]);
+                TxHash::new(arr)
+            } else {
+                TxHash::new([0u8; 32])
+            };
+            results.push((source_hash, info));
         }
         Ok(results)
     }

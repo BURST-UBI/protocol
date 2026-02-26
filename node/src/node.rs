@@ -542,6 +542,7 @@ impl BurstNode {
             .commit()
             .map_err(|e| NodeError::Other(format!("failed to commit genesis batch: {e}")))?;
 
+        self.ledger_cache.inc_block_count();
         tracing::info!(hash = %genesis_block.hash, "genesis block created");
         Ok(())
     }
@@ -2724,6 +2725,7 @@ impl BurstNode {
                 if let Err(e) = acct_store.put_account(&info) {
                     tracing::error!("failed to auto-verify genesis creator: {e}");
                 } else {
+                    self.ledger_cache.inc_account_count();
                     tracing::info!(%genesis_addr, "genesis creator auto-verified for bootstrap");
                 }
             }
@@ -2894,6 +2896,25 @@ impl BurstNode {
         // Update metrics with initial counts
         self.refresh_metrics().await;
 
+        // ── Advertise address (for cloud nodes without UPnP) ───────────────
+        // Priority: config > auto-detect > (UPnP will set later if it succeeds)
+        let external_addr = if let Some(ref addr_str) = self.config.advertise_address {
+            parse_advertise_address(addr_str, self.config.port)
+        } else if !matches!(self.config.network, burst_types::NetworkId::Dev) {
+            // Auto-detect: on cloud VPSes, outbound IP is typically the public IP.
+            detect_outbound_ip(self.config.port)
+        } else {
+            None
+        };
+        if let Some(addr) = external_addr {
+            let mut pm = self.peer_manager.write().await;
+            pm.set_external_address(addr);
+            tracing::info!(
+                advertise = %addr,
+                "advertise address set (cloud VPS / no UPnP)"
+            );
+        }
+
         // ── P2P TCP listener ──────────────────────────────────────────────
         let p2p_port = self.config.port;
         let peer_manager = Arc::clone(&self.peer_manager);
@@ -2935,16 +2956,39 @@ impl BurstNode {
                         match result {
                             Ok((stream, addr)) => {
                                 let now_secs = unix_now_secs();
+                                let peer_ip = addr.ip().to_string();
                                 let peer_addr = PeerAddress {
-                                    ip: addr.ip().to_string(),
+                                    ip: peer_ip.clone(),
                                     port: addr.port(),
                                 };
                                 let peer_id = format!("{}:{}", addr.ip(), addr.port());
 
+                                // One connection per IP: disconnect any existing connection
+                                // from this IP to avoid overcounting reconnects (same node,
+                                // different ephemeral ports).
+                                let to_disconnect: Vec<String> = {
+                                    let pm = peer_manager.read().await;
+                                    pm.connected_peer_ids_from_ip(&peer_ip)
+                                };
+                                if !to_disconnect.is_empty() {
+                                    for pid in &to_disconnect {
+                                        let mut pm = peer_manager.write().await;
+                                        pm.mark_disconnected(pid);
+                                    }
+                                    let mut registry = conn_registry_p2p.write().await;
+                                    for pid in &to_disconnect {
+                                        registry.remove(pid);
+                                    }
+                                    tracing::debug!(
+                                        peer = %peer_id,
+                                        replaced = to_disconnect.len(),
+                                        "disconnected existing connection(s) from same IP"
+                                    );
+                                }
+
                                 // SYN cookie validation — generate a cookie challenge for
                                 // this peer's IP. The read loop validates the signed
                                 // response when the peer completes the handshake.
-                                let peer_ip = addr.ip().to_string();
                                 let cookie = {
                                     let mut cookies = syn_cookies_p2p.lock().await;
                                     cookies.generate(&peer_ip)
@@ -3069,8 +3113,8 @@ impl BurstNode {
                                     );
                                 }
                                 UpnpState::NotFound | UpnpState::NonRoutable | UpnpState::Failed(_) => {
-                                    let mut pm = pm_upnp.write().await;
-                                    pm.clear_external_address();
+                                    // Don't clear — preserve advertise_address from config
+                                    // (cloud VPSes have no UPnP IGD).
                                 }
                                 _ => {}
                             }
@@ -4193,6 +4237,43 @@ impl BurstNode {
     pub fn block_queue(&self) -> Arc<BlockPriorityQueue> {
         Arc::clone(&self.block_queue)
     }
+}
+
+/// Detect outbound (public) IP by binding a UDP socket to an external address.
+/// On cloud VPSes with a direct public IP, local_addr() returns that IP.
+fn detect_outbound_ip(port: u16) -> Option<std::net::SocketAddrV4> {
+    // TCP connect uses the route; local_addr() returns our source IP.
+    let addr: std::net::SocketAddr = "8.8.8.8:80".parse().ok()?;
+    let stream = std::net::TcpStream::connect_timeout(
+        &addr,
+        std::time::Duration::from_secs(3),
+    )
+    .ok()?;
+    let local = stream.local_addr().ok()?;
+    if let std::net::SocketAddr::V4(v4) = local {
+        let ip = *v4.ip();
+        if !ip.is_loopback() && !ip.is_private() && !ip.is_link_local() {
+            return Some(std::net::SocketAddrV4::new(ip, port));
+        }
+    }
+    None
+}
+
+/// Parse advertise_address config: "IP" or "IP:port".
+fn parse_advertise_address(s: &str, default_port: u16) -> Option<std::net::SocketAddrV4> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = s.rsplitn(2, ':').collect();
+    let (ip_str, port) = if parts.len() == 2 {
+        let port = parts[0].parse::<u16>().ok()?;
+        (parts[1], port)
+    } else {
+        (s, default_port)
+    };
+    let ip: std::net::Ipv4Addr = ip_str.parse().ok()?;
+    Some(std::net::SocketAddrV4::new(ip, port))
 }
 
 /// Helper: current UNIX timestamp in seconds.

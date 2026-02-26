@@ -63,6 +63,12 @@ pub trait PendingStore {
         destination: &WalletAddress,
     ) -> Result<Vec<PendingInfo>, StoreError>;
 
+    /// Get all pending receives with their source block hashes (for receive RPC).
+    fn get_pending_for_account_with_hashes(
+        &self,
+        destination: &WalletAddress,
+    ) -> Result<Vec<(TxHash, PendingInfo)>, StoreError>;
+
     /// Total number of pending receives across all accounts.
     fn pending_count(&self) -> Result<u64, StoreError>;
 }

@@ -82,6 +82,12 @@ pub struct NodeConfig {
     /// Disabled on dev networks; enabled by default on live/test.
     #[serde(default = "default_true")]
     pub enable_upnp: bool,
+
+    /// Override address advertised to peers in keepalive (for nodes without UPnP).
+    /// Use when running on cloud VPSes where UPnP fails. Format: "IP" or "IP:port".
+    /// If only IP is given, the P2P port is used. UPnP overrides this when active.
+    #[serde(default)]
+    pub advertise_address: Option<String>,
 }
 
 // ── Serde default helpers ──────────────────────────────────────────────
@@ -167,6 +173,7 @@ impl Default for NodeConfig {
             enable_metrics: false,
             enable_faucet: false,
             enable_upnp: true,
+            advertise_address: None,
         }
     }
 }
