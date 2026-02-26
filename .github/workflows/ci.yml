@@ -67,3 +67,61 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
+
+  health-check:
+    name: Health Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: burst-nightly
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build daemon
+        run: cargo build --release -p burst-daemon
+      - name: Verify daemon starts
+        run: |
+          # Create minimal config
+          mkdir -p /tmp/burst-test
+          cat > /tmp/burst-config.toml <<EOF
+          network = "Test"
+          data_dir = "/tmp/burst-test"
+          port = 17076
+          enable_rpc = true
+          rpc_port = 7077
+          bootstrap_peers = []
+          log_level = "info"
+          EOF
+
+          # Start daemon in background
+          timeout 10 ./target/release/burst-daemon --config /tmp/burst-config.toml node run &
+          DAEMON_PID=$!
+
+          # Wait for startup
+          sleep 3
+
+          # Check if process is still running
+          if kill -0 $DAEMON_PID 2>/dev/null; then
+            echo "✓ Daemon started successfully"
+            kill $DAEMON_PID 2>/dev/null || true
+            exit 0
+          else
+            echo "✗ Daemon failed to start"
+            exit 1
+          fi
+
+  integration-test:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: burst-nightly
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Run integration tests
+        run: cargo test --workspace --test '*' -- --test-threads=1

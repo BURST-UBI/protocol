@@ -713,6 +713,18 @@ impl GovernanceEngine {
         }
     }
 
+    /// Safely convert u128 to u32, saturating at u32::MAX to prevent truncation.
+    #[inline]
+    fn saturating_u32(value: u128) -> u32 {
+        u32::try_from(value).unwrap_or(u32::MAX)
+    }
+
+    /// Safely convert u128 to u64, saturating at u64::MAX to prevent truncation.
+    #[inline]
+    fn saturating_u64(value: u128) -> u64 {
+        u64::try_from(value).unwrap_or(u64::MAX)
+    }
+
     /// Apply a parameter change from the given param and value.
     fn apply_param_change(
         param: &crate::params::GovernableParam,
@@ -724,97 +736,97 @@ impl GovernanceEngine {
                 params.brn_rate = new_value;
             }
             crate::params::GovernableParam::TrstExpirySecs => {
-                params.trst_expiry_secs = new_value as u64;
+                params.trst_expiry_secs = Self::saturating_u64(new_value);
             }
             crate::params::GovernableParam::EndorsementThreshold => {
-                params.endorsement_threshold = new_value as u32;
+                params.endorsement_threshold = Self::saturating_u32(new_value);
             }
             crate::params::GovernableParam::EndorsementBurnAmount => {
                 params.endorsement_burn_amount = new_value;
             }
             crate::params::GovernableParam::NumVerifiers => {
-                params.num_verifiers = new_value as u32;
+                params.num_verifiers = Self::saturating_u32(new_value);
             }
             crate::params::GovernableParam::VerificationThresholdBps => {
-                params.verification_threshold_bps = new_value as u32;
+                params.verification_threshold_bps = Self::saturating_u32(new_value);
             }
             crate::params::GovernableParam::VerifierStakeAmount => {
                 params.verifier_stake_amount = new_value;
             }
             crate::params::GovernableParam::MaxRevotes => {
-                params.max_revotes = new_value as u32;
+                params.max_revotes = Self::saturating_u32(new_value);
             }
             crate::params::GovernableParam::ChallengeStakeAmount => {
                 params.challenge_stake_amount = new_value;
             }
             crate::params::GovernableParam::GovernanceProposalDurationSecs => {
-                params.governance_proposal_duration_secs = new_value as u64;
+                params.governance_proposal_duration_secs = Self::saturating_u64(new_value);
             }
             crate::params::GovernableParam::GovernanceExplorationDurationSecs => {
-                params.governance_exploration_duration_secs = new_value as u64;
+                params.governance_exploration_duration_secs = Self::saturating_u64(new_value);
             }
             crate::params::GovernableParam::GovernanceCooldownDurationSecs => {
-                params.governance_cooldown_duration_secs = new_value as u64;
+                params.governance_cooldown_duration_secs = Self::saturating_u64(new_value);
             }
             crate::params::GovernableParam::GovernancePromotionDurationSecs => {
-                params.governance_promotion_duration_secs = new_value as u64;
+                params.governance_promotion_duration_secs = Self::saturating_u64(new_value);
             }
             crate::params::GovernableParam::GovernanceSupermajorityBps => {
-                params.governance_supermajority_bps = new_value as u32;
+                params.governance_supermajority_bps = Self::saturating_u32(new_value);
             }
             crate::params::GovernableParam::GovernanceQuorumBps => {
-                params.governance_quorum_bps = new_value as u32;
+                params.governance_quorum_bps = Self::saturating_u32(new_value);
             }
             crate::params::GovernableParam::GovernanceProposalEndorsements => {
-                params.governance_proposal_endorsements = new_value as u32;
+                params.governance_proposal_endorsements = Self::saturating_u32(new_value);
             }
             crate::params::GovernableParam::GovernanceEmaParticipationBps => {
-                params.governance_ema_participation_bps = new_value as u32;
+                params.governance_ema_participation_bps = Self::saturating_u32(new_value);
             }
             crate::params::GovernableParam::ConstiSupermajorityBps => {
-                params.consti_supermajority_bps = new_value as u32;
+                params.consti_supermajority_bps = Self::saturating_u32(new_value);
             }
             crate::params::GovernableParam::ConstiQuorumBps => {
-                params.consti_quorum_bps = new_value as u32;
+                params.consti_quorum_bps = Self::saturating_u32(new_value);
             }
             crate::params::GovernableParam::VerificationTimeoutSecs => {
-                params.verification_timeout_secs = new_value as u64;
+                params.verification_timeout_secs = Self::saturating_u64(new_value);
             }
             crate::params::GovernableParam::ChallengeDurationSecs => {
-                params.challenge_duration_secs = new_value as u64;
+                params.challenge_duration_secs = Self::saturating_u64(new_value);
             }
             crate::params::GovernableParam::EndorserRewardBps => {
-                params.endorser_reward_bps = new_value as u32;
+                params.endorser_reward_bps = Self::saturating_u32(new_value);
             }
             crate::params::GovernableParam::NewWalletSpendingLimit => {
                 params.new_wallet_spending_limit = new_value;
             }
             crate::params::GovernableParam::NewWalletLimitDurationSecs => {
-                params.new_wallet_limit_duration_secs = new_value as u64;
+                params.new_wallet_limit_duration_secs = Self::saturating_u64(new_value);
             }
             crate::params::GovernableParam::BootstrapExitThreshold => {
-                params.bootstrap_exit_threshold = new_value as u32;
+                params.bootstrap_exit_threshold = Self::saturating_u32(new_value);
             }
             crate::params::GovernableParam::NewWalletTxLimitPerDay => {
-                params.new_wallet_tx_limit_per_day = new_value as u32;
+                params.new_wallet_tx_limit_per_day = Self::saturating_u32(new_value);
             }
             crate::params::GovernableParam::NewWalletRateLimitDurationSecs => {
-                params.new_wallet_rate_limit_duration_secs = new_value as u64;
+                params.new_wallet_rate_limit_duration_secs = Self::saturating_u64(new_value);
             }
             crate::params::GovernableParam::GovernanceProposalCost => {
                 params.governance_proposal_cost = new_value;
             }
             crate::params::GovernableParam::GovernanceMaxRounds => {
-                params.governance_max_rounds = new_value as u32;
+                params.governance_max_rounds = Self::saturating_u32(new_value);
             }
             crate::params::GovernableParam::GovernanceProposalWindowSecs => {
-                params.governance_proposal_window_secs = new_value as u64;
+                params.governance_proposal_window_secs = Self::saturating_u64(new_value);
             }
             crate::params::GovernableParam::GovernancePropagationBufferSecs => {
-                params.governance_propagation_buffer_secs = new_value as u64;
+                params.governance_propagation_buffer_secs = Self::saturating_u64(new_value);
             }
             crate::params::GovernableParam::MinWorkDifficulty => {
-                params.min_work_difficulty = new_value as u64;
+                params.min_work_difficulty = Self::saturating_u64(new_value);
             }
         }
     }

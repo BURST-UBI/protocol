@@ -40,9 +40,12 @@ impl NullClock {
     }
 }
 
-// NullClock is Send + Sync thanks to AtomicU64 (no RefCell/Cell).
-unsafe impl Send for NullClock {}
-unsafe impl Sync for NullClock {}
+// NullClock is automatically Send + Sync because AtomicU64 is Send + Sync.
+// Compile-time assertion to catch regressions if fields are added that break this.
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<NullClock>();
+};
 
 #[cfg(test)]
 mod tests {

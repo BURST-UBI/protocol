@@ -21,6 +21,8 @@ REPO="BURST-UBI/protocol"
 RELEASE_URL="https://github.com/${REPO}/releases/latest/download"
 BURST_NETWORK="${BURST_NETWORK:-test}"
 BURST_SEED="${BURST_SEED:-167.172.83.88:17076}"
+# Set BURST_IS_SEED=1 when installing on the seed node itself (no bootstrap, faucet enabled).
+BURST_IS_SEED="${BURST_IS_SEED:-0}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -64,8 +66,9 @@ if [ "${PLATFORM}" = "linux" ]; then
     UPDATE_SERVICE="burst-update"
     BURST_USER="burst"
 else
-    BIN_PATH="/usr/local/bin/burst-daemon"
     BURST_APP_DIR="${HOME}/Library/Application Support/BURST"
+    BIN_DIR="${BURST_APP_DIR}/bin"
+    BIN_PATH="${BIN_DIR}/burst-daemon"
     CONFIG_DIR="${BURST_APP_DIR}"
     CONFIG_PATH="${CONFIG_DIR}/config.toml"
     DATA_DIR="${BURST_DATA_DIR:-${BURST_APP_DIR}/data}"
@@ -109,11 +112,8 @@ uninstall_macos() {
     rm -f "${PLIST_DIR}/${UPDATE_PLIST}.plist"
 
     info "Removing binary..."
-    if [ -w "${BIN_PATH}" ]; then
-        rm -f "${BIN_PATH}"
-    else
-        sudo rm -f "${BIN_PATH}"
-    fi
+    rm -f "${BIN_PATH}"
+    rmdir "${BIN_DIR}" 2>/dev/null || true
 
     printf "${YELLOW}[!]${NC} Data and config at %s were NOT removed.\n" "${BURST_APP_DIR}"
     printf "    Remove manually:  rm -rf \"%s\"\n" "${BURST_APP_DIR}"
@@ -160,19 +160,17 @@ info "Network: ${BURST_NETWORK}"
 # ── Download binary ──────────────────────────────────────────────────
 
 info "Downloading burst-daemon..."
-TMP_BIN="${BIN_PATH}.tmp"
-if [ "${PLATFORM}" = "darwin" ] && [ ! -w "$(dirname "${BIN_PATH}")" ]; then
-    TMP_BIN="/tmp/burst-daemon.tmp"
+
+# macOS: create user-owned bin directory (no sudo needed for updates)
+if [ "${PLATFORM}" = "darwin" ]; then
+    mkdir -p "${BIN_DIR}"
 fi
 
+TMP_BIN="${BIN_PATH}.tmp"
+
 if curl -fSL --progress-bar -o "${TMP_BIN}" "${BINARY_URL}"; then
-    if [ "${PLATFORM}" = "darwin" ] && [ ! -w "$(dirname "${BIN_PATH}")" ]; then
-        sudo mv "${TMP_BIN}" "${BIN_PATH}"
-        sudo chmod +x "${BIN_PATH}"
-    else
-        mv "${TMP_BIN}" "${BIN_PATH}"
-        chmod +x "${BIN_PATH}"
-    fi
+    mv "${TMP_BIN}" "${BIN_PATH}"
+    chmod +x "${BIN_PATH}"
     info "Installed ${BIN_PATH}"
 else
     rm -f "${TMP_BIN}"
@@ -185,6 +183,15 @@ mkdir -p "${CONFIG_DIR}"
 mkdir -p "${DATA_DIR}"
 
 if [ ! -f "${CONFIG_PATH}" ]; then
+    if [ "${BURST_IS_SEED}" = "1" ] || [ -z "${BURST_SEED}" ]; then
+        BOOTSTRAP_LINE="bootstrap_peers = []"
+        FAUCET_LINE="enable_faucet = true"
+        info "Installing as SEED node (no bootstrap, faucet enabled)"
+    else
+        BOOTSTRAP_LINE="bootstrap_peers = [\"${BURST_SEED}\"]"
+        FAUCET_LINE="enable_faucet = false"
+        info "Installing as NON-SEED node (bootstrap from ${BURST_SEED})"
+    fi
     cat > "${CONFIG_PATH}" <<TOML
 network = "Test"
 data_dir = "${DATA_DIR}"
@@ -194,12 +201,12 @@ enable_rpc = true
 rpc_port = 7077
 enable_websocket = true
 websocket_port = 7078
-bootstrap_peers = ["${BURST_SEED}"]
+${BOOTSTRAP_LINE}
 log_format = "human"
 log_level = "info"
 work_threads = 2
 enable_metrics = true
-enable_faucet = false
+${FAUCET_LINE}
 enable_upnp = true
 enable_verification = false
 TOML
@@ -267,12 +274,12 @@ EOF
 
     cat > "/etc/systemd/system/${UPDATE_SERVICE}.timer" <<EOF
 [Unit]
-Description=Check for BURST node updates every 5 minutes
+Description=Check for BURST node updates every 30 minutes
 
 [Timer]
 OnBootSec=60
-OnUnitActiveSec=300
-RandomizedDelaySec=30
+OnUnitActiveSec=1800
+RandomizedDelaySec=60
 
 [Install]
 WantedBy=timers.target
@@ -303,7 +310,7 @@ EOF
     printf "  ${CYAN}Stop:${NC}          sudo systemctl stop ${SERVICE_NAME}\n"
     printf "  ${CYAN}Uninstall:${NC}     curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | sudo sh -s -- --uninstall\n"
     echo ""
-    printf "  Auto-updates are enabled (checks every 5 minutes).\n"
+    printf "  Auto-updates are enabled (checks every 30 minutes).\n"
     printf "  Edit %s to customize your node.\n" "${CONFIG_PATH}"
     echo ""
 }
@@ -360,22 +367,22 @@ ARCH=\$(uname -m);
 case "\$ARCH" in x86_64) A=amd64;; arm64) A=arm64;; *) exit 0;; esac;
 URL="https://github.com/${REPO}/releases/latest/download/burst-daemon-darwin-\$A";
 NEW=\$(curl -fsSL "https://github.com/${REPO}/releases/latest/download/SHA256SUMS" 2>/dev/null | grep "darwin-\$A" | cut -d" " -f1);
-OLD=\$(shasum -a 256 ${BIN_PATH} 2>/dev/null | cut -d" " -f1);
+OLD=\$(shasum -a 256 "${BIN_PATH}" 2>/dev/null | cut -d" " -f1);
 if [ -n "\$NEW" ] &amp;&amp; [ "\$NEW" != "\$OLD" ]; then
-    curl -fsSL -o /tmp/burst-daemon.tmp "\$URL" &amp;&amp;
-    VERIFY=\$(shasum -a 256 /tmp/burst-daemon.tmp | cut -d" " -f1) &amp;&amp;
+    curl -fsSL -o "${BIN_PATH}.tmp" "\$URL" &amp;&amp;
+    VERIFY=\$(shasum -a 256 "${BIN_PATH}.tmp" | cut -d" " -f1) &amp;&amp;
     if [ "\$VERIFY" = "\$NEW" ]; then
-        sudo mv /tmp/burst-daemon.tmp ${BIN_PATH} &amp;&amp;
-        sudo chmod +x ${BIN_PATH} &amp;&amp;
+        mv "${BIN_PATH}.tmp" "${BIN_PATH}" &amp;&amp;
+        chmod +x "${BIN_PATH}" &amp;&amp;
         launchctl kickstart -k "gui/\$(id -u)/${NODE_PLIST}";
     else
-        rm -f /tmp/burst-daemon.tmp;
+        rm -f "${BIN_PATH}.tmp";
     fi;
 fi
         </string>
     </array>
     <key>StartInterval</key>
-    <integer>300</integer>
+    <integer>1800</integer>
     <key>StandardOutPath</key>
     <string>${BURST_APP_DIR}/burst-update.log</string>
     <key>StandardErrorPath</key>
@@ -408,7 +415,7 @@ EOF
     printf "  ${CYAN}Stop:${NC}          launchctl kill SIGTERM gui/\$(id -u)/${NODE_PLIST}\n"
     printf "  ${CYAN}Uninstall:${NC}     curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | sh -s -- --uninstall\n"
     echo ""
-    printf "  Auto-updates are enabled (checks every 5 minutes).\n"
+    printf "  Auto-updates are enabled (checks every 30 minutes).\n"
     printf "  Edit \"%s\" to customize your node.\n" "${CONFIG_PATH}"
     echo ""
 }

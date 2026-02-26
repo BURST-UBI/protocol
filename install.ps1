@@ -181,15 +181,15 @@ Set-Content -Path $scriptPath -Value $updateScript -Encoding UTF8
 $action  = New-ScheduledTaskAction -Execute 'powershell.exe' `
     -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
 $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
-    -RepetitionInterval (New-TimeSpan -Minutes 5)
+    -RepetitionInterval (New-TimeSpan -Minutes 30)
 $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
     -StartWhenAvailable -MultipleInstances IgnoreNew
 
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
-    -Principal $principal -Settings $settings -Description 'Check for BURST node updates every 5 minutes' | Out-Null
+    -Principal $principal -Settings $settings -Description 'Check for BURST node updates every 30 minutes' | Out-Null
 
-Write-Status 'Auto-update task registered (checks every 5 minutes).'
+Write-Status 'Auto-update task registered (checks every 30 minutes).'
 
 # ── Summary ──────────────────────────────────────────────────────────
 
@@ -205,12 +205,12 @@ Write-Host "  Network:   $Network"
 Write-Host "  P2P port:  17076"
 Write-Host "  RPC port:  7077"
 Write-Host ''
-Write-Host '  View logs:    Get-EventLog -LogName Application -Source BurstNode' -ForegroundColor Cyan
+Write-Host '  View logs:    Get-WinEvent -FilterHashtable @{LogName="System"; ProviderName="Service Control Manager"} | Where-Object { $_.Message -like "*BurstNode*" } | Select-Object -First 20' -ForegroundColor Cyan
 Write-Host "  Node status:  Get-Service $ServiceName" -ForegroundColor Cyan
 Write-Host "  Restart:      Restart-Service $ServiceName" -ForegroundColor Cyan
 Write-Host "  Stop:         Stop-Service $ServiceName" -ForegroundColor Cyan
 Write-Host "  Uninstall:    irm https://raw.githubusercontent.com/$Repo/main/install.ps1 | iex; Uninstall-BurstNode" -ForegroundColor Cyan
 Write-Host ''
-Write-Host '  Auto-updates are enabled (checks every 5 minutes).'
+Write-Host '  Auto-updates are enabled (checks every 30 minutes).'
 Write-Host "  Edit $ConfigPath to customize your node."
 Write-Host ''
