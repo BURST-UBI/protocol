@@ -63,7 +63,7 @@ hmac = "0.12"
 blst = "0.3"
 
 # Storage
-heed = "0.20"
+heed = "0.22"
 bincode = "1"
 
 # Networking
