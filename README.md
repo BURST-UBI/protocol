@@ -127,4 +127,4 @@ The public testnet runs 5 VPS nodes + any number of community nodes. The seed no
 
 MIT License. Copyright 2025 Nitesh Gautam.
 
-See [the whitepaper](../burst_source_of_truth/BURST_WHITEPAPER.pdf) for the full design.
+See [the whitepaper](BURST_WHITEPAPER.md) for the full design.
