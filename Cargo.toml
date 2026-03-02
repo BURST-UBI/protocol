@@ -67,7 +67,7 @@ heed = "0.20"
 bincode = "1"
 
 # Networking
-igd-next = { version = "0.15", features = ["aio_tokio"] }
+igd-next = { version = "0.16", features = ["aio_tokio"] }
 axum = { version = "0.7", features = ["ws"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors"] }
