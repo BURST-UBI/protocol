@@ -203,7 +203,7 @@ jobs:
           sha256sum burst-daemon-* > SHA256SUMS
 
       - name: Create or update rolling release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: latest
           name: Latest Build
