@@ -1810,8 +1810,6 @@ impl BurstNode {
                                         burst_verification::VerificationEvent::VerificationComplete { ref wallet, ref result, ref outcomes } => {
                                             tracing::info!(%wallet, ?result, "verification complete");
                                             if *result == burst_verification::VerificationResult::Verified {
-                                                let mut was_revoked = false;
-                                                let mut was_deactivated = false;
                                                 // Create-or-update: a freshly endorsed wallet
                                                 // (e.g. genesis bootstrap) has no account yet —
                                                 // verification is what brings it on-chain.
@@ -1835,8 +1833,8 @@ impl BurstNode {
                                                             epoch: 0,
                                                         }
                                                     });
-                                                was_revoked = acct.state == burst_types::WalletState::Revoked;
-                                                was_deactivated = acct.state == burst_types::WalletState::Deactivated;
+                                                let was_revoked = acct.state == burst_types::WalletState::Revoked;
+                                                let was_deactivated = acct.state == burst_types::WalletState::Deactivated;
                                                 acct.state = burst_types::WalletState::Verified;
                                                 acct.verified_at = Some(Timestamp::now());
                                                 if let Err(e) = store.account_store().put_account(&acct) {
@@ -3751,10 +3749,13 @@ impl BurstNode {
         // ── Reachout task (mesh self-formation) ───────────────────────────
         // Actively dials peers learned via keepalive gossip but not yet
         // connected, using their advertised listening address, up to a target
-        // out-degree. This is what makes the mesh self-form and self-heal from
-        // a single seed — without it, a node stays a star around its
-        // configured bootstrap_peers (peers get recorded but never dialed).
-        {
+        // out-degree — the piece that lets a mesh self-form from one seed.
+        //
+        // Gated OFF by default: enabling it triggers simultaneous-connect
+        // churn between mutually-dialing public nodes (connection dedup has no
+        // deterministic initiator tie-break, and NAT reachability isn't
+        // tracked). Enable once those land; until then use bootstrap_peers.
+        if self.config.enable_peer_reachout {
             let target_out = self.config.max_peers.min(8).max(3);
             let reach_ctx = crate::peer_connector::PeerConnectorContext {
                 peer_manager: Arc::clone(&self.peer_manager),
