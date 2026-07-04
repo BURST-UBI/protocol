@@ -1567,6 +1567,110 @@ pub async fn handle_faucet(
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// Genesis bootstrap endorsement (authority node only)
+// ═══════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Deserialize)]
+pub struct GenesisEndorseRequest {
+    /// The wallet address to verify during the bootstrap phase.
+    pub account: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GenesisEndorseResponse {
+    pub target: String,
+    pub block_hash: String,
+    pub genesis: String,
+    pub message: String,
+}
+
+/// Author a genesis Endorse block that directly verifies `account` during the
+/// bootstrap phase (whitepaper §Genesis: the creator endorses the first
+/// wallets). Only works on the node holding the genesis seed; the resulting
+/// block, signed by the genesis key, triggers `genesis_verify` when processed.
+///
+/// Call once per wallet, sequentially — each block builds on the genesis
+/// account's previous one, so let each confirm before the next.
+pub async fn handle_genesis_endorse(
+    params: serde_json::Value,
+    state: &RpcState,
+) -> Result<serde_json::Value, RpcError> {
+    let seed = state.genesis_seed.ok_or_else(|| {
+        RpcError::InvalidRequest(
+            "this node is not the genesis authority (no genesis seed) — run genesis_endorse on the creator's node".into(),
+        )
+    })?;
+
+    let req: GenesisEndorseRequest =
+        serde_json::from_value(params).map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
+    validate_account(&req.account)?;
+    let target = WalletAddress::new(req.account.clone());
+
+    // Genesis identity from the seed.
+    let kp = burst_crypto::keypair_from_seed(&seed);
+    let genesis_addr = burst_crypto::derive_address(&kp.public);
+    if target == genesis_addr {
+        return Err(RpcError::InvalidRequest(
+            "cannot endorse the genesis account itself".into(),
+        ));
+    }
+
+    // Target → link (its public key bytes), same encoding the econ layer decodes.
+    let target_pubkey = burst_crypto::decode_address(target.as_str())
+        .ok_or_else(|| RpcError::InvalidRequest(format!("invalid target address: {}", target.as_str())))?;
+    let link = BlockHash::new(target_pubkey);
+
+    // Genesis account current state: head (previous) + spent-BRN odometer.
+    let genesis_acct = state.account_store.get_account(&genesis_addr).map_err(|e| {
+        RpcError::Server(format!("genesis account not found (is this the authority node?): {e}"))
+    })?;
+    let previous = state
+        .frontier_store
+        .get_frontier(&genesis_addr)
+        .unwrap_or(genesis_acct.head);
+    let prev_spent = prev_spent_brn(state, &previous);
+    let burn_amount = state.params.endorsement_burn_amount;
+
+    // Endorse block: odometer += burn, TRST unchanged; signed by genesis key.
+    let genesis_rep = genesis_acct.representative.clone();
+    let pk_bytes = seed;
+    let work_gen = state.work_generator.clone();
+    let min_diff = state.params.min_work_difficulty;
+    let ph = state.params.params_hash();
+    let genesis_for_build = genesis_addr.clone();
+    let block = tokio::task::spawn_blocking(move || {
+        let pk = burst_crypto::keypair_from_seed(&pk_bytes).private;
+        build_and_sign_block(
+            burst_ledger::BlockType::Endorse,
+            &genesis_for_build,
+            previous,
+            &genesis_rep,
+            prev_spent.saturating_add(burn_amount),
+            genesis_acct.trst_balance,
+            link,
+            TxHash::ZERO,
+            TxHash::ZERO,
+            &pk,
+            &work_gen,
+            min_diff,
+            ph,
+            Vec::new(),
+        )
+    })
+    .await
+    .map_err(|e| RpcError::Server(format!("block build task failed: {e}")))??;
+
+    submit_block(&block, state)?;
+
+    Ok(to_value(&GenesisEndorseResponse {
+        target: req.account,
+        block_hash: format!("{}", block.hash),
+        genesis: genesis_addr.to_string(),
+        message: "Genesis endorse block submitted — target will be verified when it confirms. Call sequentially, one wallet at a time.".to_string(),
+    }))
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // Testnet convenience RPCs (faucet-only)
 //
 // These endpoints construct, sign, and submit blocks server-side so that

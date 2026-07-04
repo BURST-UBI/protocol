@@ -138,6 +138,19 @@ pub fn has_genesis_authority(network: NetworkId) -> bool {
     genesis_signing_key(network).is_some()
 }
 
+/// The validated genesis seed for this node, if held. Used to hand the
+/// signing material to the RPC layer (decoupled from this crate) so the
+/// authority node can author bootstrap endorsement blocks. `None` on every
+/// non-creator node.
+pub fn genesis_seed(network: NetworkId) -> Option<[u8; 32]> {
+    let cell = match network {
+        NetworkId::Dev => &DEV_SEED,
+        NetworkId::Test => &TEST_SEED,
+        NetworkId::Live => &LIVE_SEED,
+    };
+    *cell.get_or_init(|| resolve_seed(network))
+}
+
 /// Sign the genesis block hash with the genesis key if this node holds it,
 /// otherwise return a zero signature. Genesis validity is established by hash
 /// (well-known per network), not by signature re-verification, so a zero

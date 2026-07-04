@@ -152,6 +152,10 @@ pub struct RpcState {
     /// Whether the testnet faucet endpoint is enabled. Default: `false`.
     /// Only set to `true` on dev/test nodes.
     pub enable_faucet: bool,
+    /// Genesis signing seed — present ONLY on the creator's authority node.
+    /// Gates `genesis_endorse` (bootstrap wallet verification). Must never be
+    /// exposed: keep this node's RPC bound to localhost / firewalled.
+    pub genesis_seed: Option<[u8; 32]>,
     /// Per-IP rate limiter for RPC requests.
     pub rate_limiter: Arc<RateLimiter>,
     /// Cached ledger counters (block/account/pending counts) — O(1) lookups.
@@ -348,6 +352,7 @@ async fn dispatch_action(
         "wallet_info" => handlers::handle_wallet_info(params, state).await,
         "node_info" => handlers::handle_node_info(params, state).await,
         "faucet" => handlers::handle_faucet(params, state).await,
+        "genesis_endorse" => handlers::handle_genesis_endorse(params, state).await,
         "wallet_create_full" => handlers::handle_wallet_create_full(params, state).await,
         "burn_simple" => handlers::handle_burn_simple(params, state).await,
         "send_simple" => handlers::handle_send_simple(params, state).await,

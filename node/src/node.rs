@@ -1812,14 +1812,35 @@ impl BurstNode {
                                             if *result == burst_verification::VerificationResult::Verified {
                                                 let mut was_revoked = false;
                                                 let mut was_deactivated = false;
-                                                if let Ok(mut acct) = store.account_store().get_account(wallet) {
-                                                    was_revoked = acct.state == burst_types::WalletState::Revoked;
-                                                    was_deactivated = acct.state == burst_types::WalletState::Deactivated;
-                                                    acct.state = burst_types::WalletState::Verified;
-                                                    acct.verified_at = Some(Timestamp::now());
-                                                    if let Err(e) = store.account_store().put_account(&acct) {
-                                                        tracing::error!(%wallet, "failed to update account to Verified: {e}");
-                                                    }
+                                                // Create-or-update: a freshly endorsed wallet
+                                                // (e.g. genesis bootstrap) has no account yet —
+                                                // verification is what brings it on-chain.
+                                                let mut acct = store
+                                                    .account_store()
+                                                    .get_account(wallet)
+                                                    .unwrap_or_else(|_| {
+                                                        burst_store::account::AccountInfo {
+                                                            address: wallet.clone(),
+                                                            state: burst_types::WalletState::Unverified,
+                                                            verified_at: None,
+                                                            head: BlockHash::ZERO,
+                                                            block_count: 0,
+                                                            confirmation_height: 0,
+                                                            representative: wallet.clone(),
+                                                            total_brn_burned: 0,
+                                                            total_brn_staked: 0,
+                                                            trst_balance: 0,
+                                                            expired_trst: 0,
+                                                            revoked_trst: 0,
+                                                            epoch: 0,
+                                                        }
+                                                    });
+                                                was_revoked = acct.state == burst_types::WalletState::Revoked;
+                                                was_deactivated = acct.state == burst_types::WalletState::Deactivated;
+                                                acct.state = burst_types::WalletState::Verified;
+                                                acct.verified_at = Some(Timestamp::now());
+                                                if let Err(e) = store.account_store().put_account(&acct) {
+                                                    tracing::error!(%wallet, "failed to persist Verified account: {e}");
                                                 }
 
                                                 // 6.15(b): re-verification un-revokes the TRST
@@ -3082,6 +3103,20 @@ impl BurstNode {
                     tracing::info!(%genesis_addr, "genesis creator auto-verified for bootstrap");
                 }
             }
+
+            // Track the genesis account in the BRN engine (accruing from epoch
+            // 0, matching its verified_at) so it has BRN to burn when authoring
+            // bootstrap endorsements — otherwise the endorse burn and the
+            // computed-BRN spend check would reject it.
+            {
+                let mut brn = self.brn_engine.lock().await;
+                if brn.get_wallet(&genesis_addr).is_none() {
+                    brn.track_wallet(
+                        genesis_addr.clone(),
+                        burst_brn::BrnWalletState::new(Timestamp::new(0)),
+                    );
+                }
+            }
         }
 
         // Re-load frontier after genesis init (in case we just created it)
@@ -4054,6 +4089,10 @@ impl BurstNode {
                 ledger_cache: Some(
                     self.ledger_cache.clone() as Arc<dyn burst_rpc::LedgerCacheView + Send + Sync>
                 ),
+                // Only the creator's node holds this; it gates the
+                // genesis_endorse RPC used to bootstrap the first verified
+                // wallets. `None` on every other node.
+                genesis_seed: genesis_key::genesis_seed(self.config.network),
             });
 
             let rpc_server = RpcServer::with_state(rpc_port, rpc_state);
