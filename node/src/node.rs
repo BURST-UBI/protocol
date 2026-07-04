@@ -67,18 +67,7 @@ const MERGER_GRAPH_META_KEY: &str = "merger_graph";
 /// Meta-store key used to persist the verification orchestrator snapshot.
 const VERIFICATION_ORCHESTRATOR_META_KEY: &str = "verification_orchestrator";
 
-/// Well-known seed for the deterministic genesis keypair (all zeros).
-const GENESIS_SEED: [u8; 32] = [0u8; 32];
-
-/// Derive the deterministic genesis Ed25519 keypair from `GENESIS_SEED`.
-fn genesis_keypair() -> burst_types::KeyPair {
-    burst_crypto::keypair_from_seed(&GENESIS_SEED)
-}
-
-/// Derive the genesis wallet address from the genesis public key.
-fn genesis_address() -> WalletAddress {
-    burst_crypto::derive_address(&genesis_keypair().public)
-}
+use crate::genesis_key;
 
 // ── BlockProcessorCallback bridge ───────────────────────────────────────
 
@@ -238,7 +227,7 @@ impl BurstNode {
         let frontier = Arc::new(RwLock::new(frontier));
         let block_processor = Arc::new(Mutex::new(BlockProcessor::with_genesis_account(
             min_work_difficulty,
-            genesis_address(),
+            genesis_key::genesis_address(config.network),
         )));
 
         // Consensus subsystems
@@ -503,8 +492,8 @@ impl BurstNode {
             }
         }
 
-        let kp = genesis_keypair();
-        let genesis_account = genesis_address();
+        let genesis_network = self.config.network;
+        let genesis_account = genesis_key::genesis_address(genesis_network);
         let representative = genesis_account.clone();
 
         let mut genesis_block = StateBlock {
@@ -526,8 +515,11 @@ impl BurstNode {
             hash: BlockHash::ZERO,
         };
         genesis_block.hash = genesis_block.compute_hash();
+        // Signed by the creator's node if it holds the seed; a zero signature
+        // on other nodes is safe — genesis is trusted by its (signature-
+        // independent) hash, identical on every node.
         genesis_block.signature =
-            burst_crypto::sign_message(genesis_block.hash.as_bytes(), &kp.private);
+            genesis_key::sign_genesis(genesis_network, genesis_block.hash.as_bytes());
 
         // Persist genesis block, frontier, and schema version in a single write batch
         let block_bytes =
@@ -578,6 +570,7 @@ impl BurstNode {
         let ledger_cache_bp = Arc::clone(&self.ledger_cache);
         let trst_expiry_secs = self.config.params.trst_expiry_secs;
         let mut config_params_bp = self.config.params.clone();
+        let genesis_network_bp = self.config.network;
         let fork_cache_bp = Arc::clone(&self.fork_cache);
         let vote_spacing_bp = Arc::clone(&self.vote_spacing);
         let ws_state_bp = Arc::clone(&self.ws_state);
@@ -1225,7 +1218,7 @@ impl BurstNode {
                                 "endorsement recorded"
                             );
 
-                            let genesis_addr = genesis_address();
+                            let genesis_addr = genesis_key::genesis_address(genesis_network_bp);
                             let verified_count =
                                 store.account_store().verified_account_count().unwrap_or(0);
                             let bootstrap_threshold =
@@ -2442,6 +2435,7 @@ impl BurstNode {
         let frontier_gov = Arc::clone(&self.frontier);
         let mut shutdown_rx_gov = self.shutdown.subscribe();
         let mut gov_params = self.config.params.clone();
+        let genesis_network_gov = self.config.network;
 
         let gov_tick_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(10));
@@ -2467,8 +2461,14 @@ impl BurstNode {
                                     if gov.activate(&proposal, &mut tentative_params).is_ok() {
                                         let new_params_hash = tentative_params.params_hash();
 
-                                        let kp = genesis_keypair();
-                                        let genesis_addr = genesis_address();
+                                        let kp = match genesis_key::genesis_signing_key(genesis_network_gov) {
+                                            Some(kp) => kp,
+                                            None => {
+                                                tracing::debug!(%proposal_hash, "node lacks genesis authority — skipping activation block authoring (will sync from creator)");
+                                                continue;
+                                            }
+                                        };
+                                        let genesis_addr = genesis_key::genesis_address(genesis_network_gov);
                                         let genesis_head = {
                                             let f = frontier_gov.read().await;
                                             f.get_head(&genesis_addr).copied()
@@ -3052,7 +3052,7 @@ impl BurstNode {
         // Auto-verify the genesis creator so it can endorse during bootstrap
         {
             use burst_store::account::AccountInfo;
-            let genesis_addr = genesis_address();
+            let genesis_addr = genesis_key::genesis_address(self.config.network);
             let acct_store = self.store.account_store();
             let already_verified = acct_store
                 .get_account(&genesis_addr)

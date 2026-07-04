@@ -157,8 +157,16 @@ command -v curl >/dev/null 2>&1 || {
     fi
 }
 
+# Resolve network → config value (capitalized, matches NetworkId serde) and
+# its P2P port, once, so both the config writer and the summary agree.
+case "${BURST_NETWORK}" in
+    live|Live|LIVE) NET_NAME="Live"; NET_PORT=7076 ;;
+    dev|Dev|DEV)    NET_NAME="Dev";  NET_PORT=27076 ;;
+    *)              NET_NAME="Test"; NET_PORT=17076 ;;
+esac
+
 info "Platform: ${PLATFORM}/${ARCH_LABEL}"
-info "Network: ${BURST_NETWORK}"
+info "Network: ${BURST_NETWORK} (${NET_NAME}, P2P ${NET_PORT})"
 
 # ── Download binary ──────────────────────────────────────────────────
 
@@ -188,17 +196,26 @@ mkdir -p "${DATA_DIR}"
 if [ ! -f "${CONFIG_PATH}" ]; then
     if [ "${BURST_IS_SEED}" = "1" ] || [ -z "${BURST_SEED}" ]; then
         BOOTSTRAP_LINE="bootstrap_peers = []"
-        FAUCET_LINE="enable_faucet = true"
-        info "Installing as SEED node (no bootstrap, faucet enabled)"
+        info "Installing as SEED node (no bootstrap peers)"
     else
         BOOTSTRAP_LINE="bootstrap_peers = [\"${BURST_SEED}\"]"
-        FAUCET_LINE="enable_faucet = false"
         info "Installing as NON-SEED node (bootstrap from ${BURST_SEED})"
     fi
+
+    # Faucet is testnet-only (mints unbacked TRST). Never on live — the daemon
+    # force-disables it there anyway; keep the config honest.
+    if [ "${NET_NAME}" = "Live" ]; then
+        FAUCET_LINE="enable_faucet = false"
+    elif [ "${BURST_IS_SEED}" = "1" ] || [ -z "${BURST_SEED}" ]; then
+        FAUCET_LINE="enable_faucet = true"
+    else
+        FAUCET_LINE="enable_faucet = false"
+    fi
+
     cat > "${CONFIG_PATH}" <<TOML
-network = "Test"
+network = "${NET_NAME}"
 data_dir = "${DATA_DIR}"
-port = 17076
+port = ${NET_PORT}
 max_peers = 50
 enable_rpc = true
 rpc_port = 7077
@@ -309,7 +326,7 @@ EOF
     printf "  Config:    %s\n" "${CONFIG_PATH}"
     printf "  Data:      %s\n" "${DATA_DIR}"
     printf "  Network:   %s\n" "${BURST_NETWORK}"
-    printf "  P2P port:  17076\n"
+    printf "  P2P port:  %s\n" "${NET_PORT:-17076}"
     printf "  RPC port:  7077\n"
     echo ""
     printf "  ${CYAN}View logs:${NC}     journalctl -u ${SERVICE_NAME} -f\n"
@@ -415,7 +432,7 @@ EOF
     printf "  Data:      %s\n" "${DATA_DIR}"
     printf "  Logs:      %s/burst-node.log\n" "${BURST_APP_DIR}"
     printf "  Network:   %s\n" "${BURST_NETWORK}"
-    printf "  P2P port:  17076\n"
+    printf "  P2P port:  %s\n" "${NET_PORT:-17076}"
     printf "  RPC port:  7077\n"
     echo ""
     printf "  ${CYAN}View logs:${NC}     tail -f \"%s/burst-node.log\"\n" "${BURST_APP_DIR}"

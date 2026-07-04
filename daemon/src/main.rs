@@ -171,6 +171,21 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // The faucet mints verified wallets and unbacked TRST — a testnet-only
+    // convenience. It must never run on the live network (it would violate the
+    // "TRST only from burned BRN" invariant), so force it off there regardless
+    // of flags or config file.
+    let mut config = config;
+    if config.network == NetworkId::Live && config.enable_faucet {
+        tracing::warn!("faucet requested on the live network — refusing (faucet is testnet-only)");
+        config.enable_faucet = false;
+    }
+    if config.network == NetworkId::Live && !burst_node::genesis_key::live_identity_configured() {
+        tracing::error!(
+            "live network selected but the genesis public identity is not configured              (still the all-zeros placeholder). Generate one with `genesis_keygen` and bake              the public key into node/src/genesis_key.rs before launching a real network."
+        );
+    }
+
     match cli.command {
         Command::Node { action } => match action {
             NodeAction::Run => {
