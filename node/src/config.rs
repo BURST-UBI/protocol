@@ -78,13 +78,11 @@ pub struct NodeConfig {
     pub enable_faucet: bool,
 
     /// Whether to run the reachout loop that actively dials peers discovered
-    /// via keepalive gossip (self-forming mesh). Default OFF: enabling it
-    /// today triggers a simultaneous-connect churn between two mutually-
-    /// dialing public nodes ("early eof"), because connection dedup lacks a
-    /// deterministic initiator tie-break and NAT reachability isn't tracked.
-    /// Turn on only once those are handled; until then rely on explicit
-    /// `bootstrap_peers`.
-    #[serde(default)]
+    /// via keepalive gossip (self-forming mesh). Now safe by default: the
+    /// connection registry resolves simultaneous connects deterministically
+    /// (the connection from the lower-addressed node survives), so mutual
+    /// dials dedup to one stable connection instead of churning.
+    #[serde(default = "default_true")]
     pub enable_peer_reachout: bool,
 
     /// Whether to enable UPnP port mapping for NAT traversal.
@@ -188,7 +186,7 @@ impl Default for NodeConfig {
             work_threads: default_work_threads(),
             enable_metrics: false,
             enable_faucet: false,
-            enable_peer_reachout: false,
+            enable_peer_reachout: true,
             enable_upnp: true,
             advertise_address: None,
             enable_representative: true,

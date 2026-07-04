@@ -3356,6 +3356,8 @@ impl BurstNode {
                 }
             };
 
+            let params_hash_p2p = config_params_p2p.params_hash();
+
             loop {
                 tokio::select! {
                     biased;
@@ -3366,121 +3368,146 @@ impl BurstNode {
                     result = listener.accept() => {
                         match result {
                             Ok((stream, addr)) => {
-                                let now_secs = unix_now_secs();
-                                let peer_ip = addr.ip().to_string();
-                                let peer_addr = PeerAddress {
-                                    ip: peer_ip.clone(),
-                                    port: addr.port(),
-                                };
-                                let peer_id = format!("{}:{}", addr.ip(), addr.port());
+                                // Handle each inbound connection in its own task so a
+                                // slow or malicious handshake never head-of-line-blocks
+                                // the accept loop (matches rsnano's per-connection model).
+                                let syn_cookies_c = Arc::clone(&syn_cookies_p2p);
+                                let conn_registry_c = Arc::clone(&conn_registry_p2p);
+                                let peer_manager_c = Arc::clone(&peer_manager);
+                                let metrics_c = Arc::clone(&metrics_p2p);
+                                let block_queue_c = Arc::clone(&block_queue_p2p);
+                                let active_elections_c = Arc::clone(&active_elections_p2p);
+                                let rep_weights_c = Arc::clone(&rep_weights_p2p);
+                                let message_dedup_c = Arc::clone(&message_dedup_p2p);
+                                let online_weight_sampler_c = Arc::clone(&online_weight_sampler_p2p);
+                                let frontier_c = Arc::clone(&frontier_p2p);
+                                let store_c = Arc::clone(&store_p2p);
+                                let our_node_id = node_address_p2p.clone();
+                                let params_hash_c = params_hash_p2p;
 
-                                // One connection per IP: disconnect any existing connection
-                                // from this IP to avoid overcounting reconnects (same node,
-                                // different ephemeral ports).
-                                let to_disconnect: Vec<String> = {
-                                    let pm = peer_manager.read().await;
-                                    pm.connected_peer_ids_from_ip(&peer_ip)
-                                };
-                                if !to_disconnect.is_empty() {
-                                    for pid in &to_disconnect {
-                                        let mut pm = peer_manager.write().await;
-                                        pm.mark_disconnected(pid);
+                                tokio::spawn(async move {
+                                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                                    let now_secs = unix_now_secs();
+                                    let peer_ip = addr.ip().to_string();
+                                    let peer_addr = PeerAddress { ip: peer_ip.clone(), port: addr.port() };
+                                    let peer_id = format!("{}:{}", addr.ip(), addr.port());
+
+                                    // Generate + send the SYN cookie challenge.
+                                    let cookie = match { syn_cookies_c.lock().await.generate(&peer_ip) } {
+                                        Some(c) => c,
+                                        None => return,
+                                    };
+                                    let (mut read_half, mut write_half) = stream.into_split();
+                                    let challenge = WireMessage::Handshake(crate::wire_message::HandshakeMsg {
+                                        node_id: our_node_id.clone(),
+                                        cookie: Some(cookie),
+                                        cookie_signature: None,
+                                        params_hash: params_hash_c,
+                                    });
+                                    match bincode::serialize(&challenge) {
+                                        Ok(bytes) => {
+                                            let len_bytes = (bytes.len() as u32).to_be_bytes();
+                                            if write_half.write_all(&len_bytes).await.is_err()
+                                                || write_half.write_all(&bytes).await.is_err()
+                                            {
+                                                return;
+                                            }
+                                            let _ = write_half.flush().await;
+                                        }
+                                        Err(_) => return,
                                     }
-                                    let mut registry = conn_registry_p2p.write().await;
-                                    for pid in &to_disconnect {
-                                        registry.remove(pid);
+
+                                    // Read + verify the peer's signed cookie response so we
+                                    // learn their node_id BEFORE registering — reading directly
+                                    // off read_half leaves no buffered bytes for the read loop.
+                                    let mut len_buf = [0u8; 4];
+                                    match tokio::time::timeout(Duration::from_secs(10), read_half.read_exact(&mut len_buf)).await {
+                                        Ok(Ok(_)) => {}
+                                        _ => return,
                                     }
-                                    tracing::debug!(
-                                        peer = %peer_id,
-                                        replaced = to_disconnect.len(),
-                                        "disconnected existing connection(s) from same IP"
+                                    let body_len = u32::from_be_bytes(len_buf) as usize;
+                                    if body_len == 0 || body_len > 65536 { return; }
+                                    let mut body = vec![0u8; body_len];
+                                    match tokio::time::timeout(Duration::from_secs(10), read_half.read_exact(&mut body)).await {
+                                        Ok(Ok(_)) => {}
+                                        _ => return,
+                                    }
+                                    let remote_node_id = match bincode::deserialize::<WireMessage>(&body) {
+                                        Ok(WireMessage::Handshake(hs)) => match &hs.cookie_signature {
+                                            Some(sig) => {
+                                                let ok = { syn_cookies_c.lock().await.verify(&peer_ip, &hs.node_id, sig) };
+                                                if !ok {
+                                                    tracing::warn!(peer = %peer_id, "SYN cookie verification failed");
+                                                    return;
+                                                }
+                                                hs.node_id
+                                            }
+                                            None => return,
+                                        },
+                                        _ => return,
+                                    };
+
+                                    // Never accept a connection claiming our own node_id.
+                                    if remote_node_id == our_node_id {
+                                        tracing::debug!(peer = %peer_id, "dropping inbound self-connection");
+                                        return;
+                                    }
+
+                                    let our_nid = our_node_id.as_str().to_string();
+                                    let peer_nid = remote_node_id.as_str().to_string();
+
+                                    // Deterministic node_id dedup: if we already dialed this
+                                    // peer, keep exactly one (the connection from the lower
+                                    // node_id). `None` → this inbound lost; drop it.
+                                    let conn_id = {
+                                        let mut registry = conn_registry_c.write().await;
+                                        match registry.register_dedup(
+                                            peer_id.clone(),
+                                            peer_nid,
+                                            crate::connection_registry::Direction::Inbound,
+                                            write_half,
+                                            &our_nid,
+                                        ) {
+                                            Some(id) => {
+                                                metrics_c.peer_count.set(registry.len() as i64);
+                                                id
+                                            }
+                                            None => {
+                                                tracing::debug!(peer = %peer_id, "inbound superseded by our outbound (tie-break)");
+                                                return;
+                                            }
+                                        }
+                                    };
+
+                                    {
+                                        let mut pm = peer_manager_c.write().await;
+                                        pm.add_peer(peer_addr);
+                                        pm.mark_connected(&peer_id, now_secs);
+                                    }
+
+                                    // Handshake already validated here — read loop needs no
+                                    // SYN cookie step (syn_cookies = None).
+                                    spawn_peer_read_loop(
+                                        peer_id.clone(),
+                                        conn_id,
+                                        read_half,
+                                        block_queue_c,
+                                        conn_registry_c,
+                                        peer_manager_c,
+                                        metrics_c,
+                                        active_elections_c,
+                                        rep_weights_c,
+                                        message_dedup_c,
+                                        online_weight_sampler_c,
+                                        None,
+                                        peer_ip,
+                                        frontier_c,
+                                        store_c,
+                                        params_hash_c,
                                     );
-                                }
 
-                                // SYN cookie validation — generate a cookie challenge for
-                                // this peer's IP. The read loop validates the signed
-                                // response when the peer completes the handshake.
-                                let cookie = {
-                                    let mut cookies = syn_cookies_p2p.lock().await;
-                                    cookies.generate(&peer_ip)
-                                };
-
-                                let cookie = match cookie {
-                                    Some(c) => {
-                                        tracing::trace!(
-                                            peer = %peer_id,
-                                            "SYN cookie challenge generated"
-                                        );
-                                        c
-                                    }
-                                    None => {
-                                        tracing::warn!(
-                                            peer = %peer_id,
-                                            "SYN cookie generation failed, rejecting connection"
-                                        );
-                                        drop(stream);
-                                        continue;
-                                    }
-                                };
-
-                                // Split the TCP stream into read and write halves
-                                let (read_half, mut write_half) = stream.into_split();
-
-                                // Send the cookie challenge before registering
-                                let challenge = WireMessage::Handshake(crate::wire_message::HandshakeMsg {
-                                    node_id: node_address_p2p.clone(),
-                                    cookie: Some(cookie),
-                                    cookie_signature: None,
-                                    params_hash: config_params_p2p.params_hash(),
+                                    tracing::info!(peer = %peer_id, "inbound peer connected");
                                 });
-                                if let Ok(bytes) = bincode::serialize(&challenge) {
-                                    use tokio::io::AsyncWriteExt;
-                                    let len_bytes = (bytes.len() as u32).to_be_bytes();
-                                    if let Err(e) = write_half.write_all(&len_bytes).await {
-                                        tracing::warn!(peer = %peer_id, "failed to send cookie challenge length: {e}");
-                                        continue;
-                                    }
-                                    if let Err(e) = write_half.write_all(&bytes).await {
-                                        tracing::warn!(peer = %peer_id, "failed to send cookie challenge: {e}");
-                                        continue;
-                                    }
-                                    let _ = write_half.flush().await;
-                                }
-
-                                // Register write half in the connection registry
-                                {
-                                    let mut registry = conn_registry_p2p.write().await;
-                                    registry.insert(peer_id.clone(), write_half);
-                                }
-
-                                // Register the peer
-                                {
-                                    let mut pm = peer_manager.write().await;
-                                    pm.add_peer(peer_addr);
-                                    pm.mark_connected(&peer_id, now_secs);
-                                    metrics_p2p.peer_count.set(pm.connected_count() as i64);
-                                }
-
-                                // Spawn a read loop for inbound messages (with cookie validation)
-                                spawn_peer_read_loop(
-                                    peer_id.clone(),
-                                    read_half,
-                                    Arc::clone(&block_queue_p2p),
-                                    Arc::clone(&conn_registry_p2p),
-                                    Arc::clone(&peer_manager),
-                                    Arc::clone(&metrics_p2p),
-                                    Arc::clone(&active_elections_p2p),
-                                    Arc::clone(&rep_weights_p2p),
-                                    Arc::clone(&message_dedup_p2p),
-                                    Arc::clone(&online_weight_sampler_p2p),
-                                    Some(Arc::clone(&syn_cookies_p2p)),
-                                    peer_ip,
-                                    Arc::clone(&frontier_p2p),
-                                    Arc::clone(&store_p2p),
-                                    config_params_p2p.params_hash(),
-                                );
-
-                                tracing::info!(peer = %peer_id, "inbound peer connected");
                             }
                             Err(e) => {
                                 tracing::warn!("P2P accept error: {e}");

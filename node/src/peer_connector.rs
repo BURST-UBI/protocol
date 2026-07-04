@@ -17,7 +17,7 @@ use burst_network::{MessageDedup, PeerManager};
 use burst_store_lmdb::LmdbStore;
 use burst_types::BlockHash;
 
-use crate::connection_registry::{spawn_peer_read_loop, ConnectionRegistry};
+use crate::connection_registry::{spawn_peer_read_loop, ConnectionRegistry, Direction};
 use crate::metrics::NodeMetrics;
 use crate::priority_queue::BlockPriorityQueue;
 use crate::wire_message::{HandshakeMsg, WireMessage};
@@ -146,23 +146,52 @@ pub async fn connect_to_peer(
     let read_half = reader.into_inner();
     let now = unix_now_secs();
 
-    // Register write half in the connection registry
-    {
-        let mut registry = ctx.connection_registry.write().await;
-        registry.insert(peer_id.clone(), write_half);
-    }
+    // The peer's verified node_id (from the handshake) is the dedup key.
+    // Without it we can't dedup deterministically, so require it.
+    let peer_node_id = match remote_node_id {
+        Some(id) => id.as_str().to_string(),
+        None => {
+            tracing::warn!(peer = %peer_id, "outbound handshake had no node_id — dropping");
+            return Err("no peer node_id".into());
+        }
+    };
+    let our_node_id = ctx.node_address.as_str().to_string();
 
-    // Register the peer
+    // Register with deterministic dedup keyed by node_id: if the peer already
+    // dialed us (opposite direction), keep exactly one — the connection from
+    // the lower node_id — so simultaneous connects don't churn. `None` means
+    // this outbound lost the tie-break; close it.
+    let conn_id = {
+        let mut registry = ctx.connection_registry.write().await;
+        match registry.register_dedup(
+            peer_id.clone(),
+            peer_node_id,
+            Direction::Outbound,
+            write_half,
+            &our_node_id,
+        ) {
+            Some(id) => {
+                ctx.metrics.peer_count.set(registry.len() as i64);
+                id
+            }
+            None => {
+                tracing::debug!(peer = %peer_id, "outbound superseded by peer's inbound (tie-break)");
+                return Err("connection deduplicated".into());
+            }
+        }
+    };
+
+    // Register the peer address (address book, for gossip/dialing).
     {
         let mut pm = ctx.peer_manager.write().await;
         pm.add_peer(peer_addr.clone());
         pm.mark_connected(&peer_id, now);
-        ctx.metrics.peer_count.set(pm.connected_count() as i64);
     }
 
     // Spawn a read loop (no SYN cookie for outbound — already validated)
     spawn_peer_read_loop(
         peer_id.clone(),
+        conn_id,
         read_half,
         Arc::clone(&ctx.block_queue),
         Arc::clone(&ctx.connection_registry),

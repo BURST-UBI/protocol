@@ -31,11 +31,47 @@ const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024; // 16 MiB
 /// Read timeout for peer connections.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Which side opened a connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Direction {
+    /// We dialed the peer.
+    Outbound,
+    /// The peer dialed us.
+    Inbound,
+}
+
+/// Per-connection metadata used for deterministic dedup and generation-guarded
+/// cleanup. Peers are identified by their handshake `node_id` (a `brst_`
+/// address string) — NOT their IP — so nodes sharing an IP (localhost cluster,
+/// or several nodes behind one NAT) are treated as distinct, matching rsnano.
+struct ConnMeta {
+    node_id: String,
+    direction: Direction,
+    /// Monotonic id distinguishing this physical connection from any prior one
+    /// under the same peer_id, so a superseded socket's teardown can't evict
+    /// the live entry.
+    conn_id: u64,
+}
+
+/// Decide, on a simultaneous-connect conflict, whether the NEW connection
+/// should survive (dropping the existing one) or be rejected.
+///
+/// Deterministic across both endpoints: the surviving connection is always the
+/// one initiated by the lower node_id. Both peers compute the same answer, so
+/// exactly one connection survives (no churn, no "both drop" partition).
+///
+/// `keep_new = (our_id < peer_id) == (new is Outbound)`.
+pub fn prefer_new_on_conflict(our_node_id: &str, peer_node_id: &str, new_dir: Direction) -> bool {
+    (our_node_id < peer_node_id) == (new_dir == Direction::Outbound)
+}
+
 /// Registry of active peer TCP write halves, enabling the outbound
 /// message drain to route messages to the correct peer stream.
 pub struct ConnectionRegistry {
     connections: HashMap<String, Arc<Mutex<OwnedWriteHalf>>>,
     throttles: HashMap<String, BandwidthThrottle>,
+    meta: HashMap<String, ConnMeta>,
+    next_conn_id: u64,
 }
 
 impl ConnectionRegistry {
@@ -44,21 +80,99 @@ impl ConnectionRegistry {
         Self {
             connections: HashMap::new(),
             throttles: HashMap::new(),
+            meta: HashMap::new(),
+            next_conn_id: 1,
         }
     }
 
     /// Register a peer's write half. If a previous connection existed for this
     /// peer, it is replaced (the old writer is dropped, closing its half).
-    pub fn insert(&mut self, peer_id: String, writer: OwnedWriteHalf) {
+    /// Assigns a fresh generation id (no dedup — for callers that already
+    /// resolved identity). Prefer [`register_dedup`](Self::register_dedup).
+    pub fn insert(&mut self, peer_id: String, writer: OwnedWriteHalf) -> u64 {
+        let conn_id = self.next_conn_id;
+        self.next_conn_id += 1;
         self.throttles.entry(peer_id.clone()).or_default();
         self.connections
-            .insert(peer_id, Arc::new(Mutex::new(writer)));
+            .insert(peer_id.clone(), Arc::new(Mutex::new(writer)));
+        self.meta.insert(
+            peer_id,
+            ConnMeta {
+                node_id: String::new(),
+                direction: Direction::Outbound,
+                conn_id,
+            },
+        );
+        conn_id
+    }
+
+    /// Register a connection with deterministic simultaneous-connect dedup,
+    /// keyed by the peer's handshake `node_id`.
+    ///
+    /// If a live connection to the same node_id already exists in the opposite
+    /// direction, keep exactly one — the one initiated by the lower node_id
+    /// (see [`prefer_new_on_conflict`]). Both endpoints agree, so exactly one
+    /// survives. Returns `Some(conn_id)` if the new connection is kept (spawn
+    /// its read loop with this id) or `None` if it should be rejected.
+    pub fn register_dedup(
+        &mut self,
+        peer_id: String,
+        peer_node_id: String,
+        direction: Direction,
+        writer: OwnedWriteHalf,
+        our_node_id: &str,
+    ) -> Option<u64> {
+        // Find a conflicting connection: same node_id, opposite direction.
+        let conflict: Option<String> = self
+            .meta
+            .iter()
+            .find(|(_, m)| m.node_id == peer_node_id && m.direction != direction)
+            .map(|(id, _)| id.clone());
+
+        if let Some(existing_id) = conflict {
+            if prefer_new_on_conflict(our_node_id, &peer_node_id, direction) {
+                // New wins — drop the existing (closes its socket; its read
+                // loop later no-ops via the generation guard).
+                self.remove(&existing_id);
+            } else {
+                // New loses — reject it (the existing connection survives).
+                return None;
+            }
+        }
+
+        let conn_id = self.next_conn_id;
+        self.next_conn_id += 1;
+        self.throttles.entry(peer_id.clone()).or_default();
+        self.connections
+            .insert(peer_id.clone(), Arc::new(Mutex::new(writer)));
+        self.meta.insert(
+            peer_id,
+            ConnMeta {
+                node_id: peer_node_id,
+                direction,
+                conn_id,
+            },
+        );
+        Some(conn_id)
     }
 
     /// Remove a peer's write half, returning it if present.
     pub fn remove(&mut self, peer_id: &str) -> Option<Arc<Mutex<OwnedWriteHalf>>> {
         self.throttles.remove(peer_id);
+        self.meta.remove(peer_id);
         self.connections.remove(peer_id)
+    }
+
+    /// Generation-guarded removal: only remove if the current entry is the
+    /// same physical connection (matching `conn_id`). Prevents a superseded
+    /// socket's cleanup from evicting the live connection that replaced it.
+    pub fn remove_if(&mut self, peer_id: &str, conn_id: u64) -> bool {
+        if self.meta.get(peer_id).is_some_and(|m| m.conn_id == conn_id) {
+            self.remove(peer_id);
+            true
+        } else {
+            false
+        }
     }
 
     /// Check the outbound throttle for a peer. Returns `true` if the message
@@ -118,6 +232,7 @@ pub async fn write_framed(writer: &Mutex<OwnedWriteHalf>, payload: &[u8]) -> std
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_peer_read_loop(
     peer_id: String,
+    conn_id: u64,
     reader: OwnedReadHalf,
     block_queue: Arc<BlockPriorityQueue>,
     connection_registry: Arc<RwLock<ConnectionRegistry>>,
@@ -160,17 +275,20 @@ pub fn spawn_peer_read_loop(
             }
         }
 
-        // Clean up connection registry
-        {
+        // Clean up connection registry — generation-guarded so a superseded
+        // socket (replaced by dedup) doesn't evict the live connection.
+        let removed = {
             let mut registry = connection_registry.write().await;
-            registry.remove(&peer_id);
-        }
+            let removed = registry.remove_if(&peer_id, conn_id);
+            metrics.peer_count.set(registry.len() as i64);
+            removed
+        };
 
-        // Mark peer as disconnected in the peer manager
-        {
+        // Mark peer as disconnected in the peer manager only if this was the
+        // live connection (not a superseded duplicate).
+        if removed {
             let mut pm = peer_manager.write().await;
             pm.mark_disconnected(&peer_id);
-            metrics.peer_count.set(pm.connected_count() as i64);
         }
 
         tracing::debug!(peer = %peer_id, "peer cleaned up after disconnect");
@@ -755,4 +873,48 @@ fn unix_now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{prefer_new_on_conflict, Direction};
+
+    // The core invariant: on a simultaneous connect between two nodes, both
+    // ends independently keep the SAME physical connection — the one initiated
+    // by the lower-addressed node — so exactly one survives (no churn, no
+    // "both drop" partition).
+    #[test]
+    fn tie_break_keeps_lower_addressed_initiator_consistently() {
+        let low = "1.1.1.1:7076";
+        let high = "2.2.2.2:7076";
+
+        // Low node: keeps its own outbound, rejects the peer's inbound.
+        assert!(prefer_new_on_conflict(low, high, Direction::Outbound));
+        assert!(!prefer_new_on_conflict(low, high, Direction::Inbound));
+
+        // High node: rejects its own outbound, keeps the peer's inbound.
+        assert!(!prefer_new_on_conflict(high, low, Direction::Outbound));
+        assert!(prefer_new_on_conflict(high, low, Direction::Inbound));
+
+        // ⇒ Surviving link is low→high: the low node keeps it as Outbound, the
+        // high node keeps it as Inbound. Same physical connection on both ends.
+    }
+
+    #[test]
+    fn tie_break_is_symmetric_for_any_pair() {
+        // For any distinct pair, exactly one direction survives, agreed by both.
+        for (a, b) in [
+            ("10.0.0.1:7076", "10.0.0.2:7076"),
+            ("4.223.174.176:7076", "20.101.66.128:7076"),
+            ("168.63.71.72:7076", "20.101.66.128:7076"),
+        ] {
+            let (low, high) = if a < b { (a, b) } else { (b, a) };
+            // low keeps outbound; high keeps inbound; both = the low→high link.
+            assert!(prefer_new_on_conflict(low, high, Direction::Outbound));
+            assert!(prefer_new_on_conflict(high, low, Direction::Inbound));
+            // and the losing direction is rejected on both ends.
+            assert!(!prefer_new_on_conflict(low, high, Direction::Inbound));
+            assert!(!prefer_new_on_conflict(high, low, Direction::Outbound));
+        }
+    }
 }
