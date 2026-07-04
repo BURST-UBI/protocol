@@ -86,6 +86,7 @@ pub async fn connect_to_peer(
 
     // Read the cookie challenge from the peer
     let mut reader = tokio::io::BufReader::new(read_half);
+    let mut remote_node_id: Option<burst_types::WalletAddress> = None;
     let cookie_opt = {
         let mut len_buf = [0u8; 4];
         match tokio::time::timeout(HANDSHAKE_TIMEOUT, reader.read_exact(&mut len_buf)).await {
@@ -97,6 +98,7 @@ pub async fn connect_to_peer(
                         if let Ok(WireMessage::Handshake(hs)) =
                             bincode::deserialize::<WireMessage>(&body)
                         {
+                            remote_node_id = Some(hs.node_id.clone());
                             hs.cookie
                         } else {
                             None
@@ -111,6 +113,15 @@ pub async fn connect_to_peer(
             _ => None,
         }
     };
+
+    // Never peer with ourselves: if the handshake reveals our own node_id, the
+    // address we dialed is really us (learned via gossip or our own advertised
+    // address). Abort before registering — this is what produced phantom
+    // "self" entries that inflated peer_count.
+    if remote_node_id.as_ref() == Some(&ctx.node_address) {
+        tracing::debug!(peer = %peer_id, "dropping self-connection (own node_id)");
+        return Err("self-connection".into());
+    }
 
     // Sign and send cookie response
     if let Some(cookie) = cookie_opt {
