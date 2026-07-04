@@ -795,8 +795,11 @@ impl GovernanceEngine {
             crate::params::GovernableParam::ChallengeDurationSecs => {
                 params.challenge_duration_secs = Self::saturating_u64(new_value);
             }
-            crate::params::GovernableParam::EndorserRewardBps => {
-                params.endorser_reward_bps = Self::saturating_u32(new_value);
+            crate::params::GovernableParam::ChallengeRewardBps => {
+                params.challenge_reward_bps = Self::saturating_u32(new_value);
+            }
+            crate::params::GovernableParam::ChallengeRewardCap => {
+                params.challenge_reward_cap = new_value;
             }
             crate::params::GovernableParam::NewWalletSpendingLimit => {
                 params.new_wallet_spending_limit = new_value;
@@ -912,34 +915,62 @@ impl GovernanceEngine {
     }
 
     /// Shared implementation for transitive delegation vote counting.
+    ///
+    /// Instead of iterating all verified wallets O(w×d), we:
+    /// 1. Count direct votes: O(v) where v = voters
+    /// 2. For each direct voter, walk reverse-delegation tree to count
+    ///    non-voting delegators whose chain resolves to this voter: O(δ×d)
+    ///    where δ = delegators and d = max delegation depth
+    /// Total: O(v × (δ/v) × d) ≈ O(δ×d), much less than O(w×d)
     fn count_votes_with_delegation(
         direct_votes: &HashMap<WalletAddress, GovernanceVote>,
         delegation_engine: &DelegationEngine,
-        all_verified_wallets: &[WalletAddress],
+        _all_verified_wallets: &[WalletAddress],
     ) -> (u32, u32, u32) {
         let mut yea = 0u32;
         let mut nay = 0u32;
         let mut abstain = 0u32;
 
-        for wallet in all_verified_wallets {
-            let vote = if let Some(v) = direct_votes.get(wallet) {
-                Some(*v)
-            } else {
-                // Resolve delegation transitively
-                delegation_engine.resolve(wallet).and_then(|delegate| {
-                    if delegate != *wallet {
-                        direct_votes.get(&delegate).copied()
-                    } else {
-                        None
-                    }
-                })
-            };
+        // Step 1: Count direct votes
+        for vote in direct_votes.values() {
+            match vote {
+                GovernanceVote::Yea => yea += 1,
+                GovernanceVote::Nay => nay += 1,
+                GovernanceVote::Abstain => abstain += 1,
+            }
+        }
 
-            if let Some(v) = vote {
-                match v {
-                    GovernanceVote::Yea => yea += 1,
-                    GovernanceVote::Nay => nay += 1,
-                    GovernanceVote::Abstain => abstain += 1,
+        // Step 2: For each voter, find delegators whose chain resolves to them.
+        // BFS through reverse-delegation index, only counting wallets that
+        // didn't vote directly and whose chain terminates at this voter.
+        for (voter, vote) in direct_votes {
+            let delegators = delegation_engine.get_delegators(voter);
+            let mut queue = std::collections::VecDeque::new();
+            for d in delegators {
+                if !direct_votes.contains_key(d) {
+                    queue.push_back(d.clone());
+                }
+            }
+            let mut visited = std::collections::HashSet::new();
+            while let Some(current) = queue.pop_front() {
+                if !visited.insert(current.clone()) {
+                    continue;
+                }
+                // Verify this delegator's chain actually resolves to `voter`
+                if let Some(resolved) = delegation_engine.resolve(&current) {
+                    if &resolved == voter {
+                        match vote {
+                            GovernanceVote::Yea => yea += 1,
+                            GovernanceVote::Nay => nay += 1,
+                            GovernanceVote::Abstain => abstain += 1,
+                        }
+                    }
+                }
+                // Continue BFS to find deeper delegators
+                for deeper in delegation_engine.get_delegators(&current) {
+                    if !direct_votes.contains_key(deeper) && !visited.contains(deeper) {
+                        queue.push_back(deeper.clone());
+                    }
                 }
             }
         }

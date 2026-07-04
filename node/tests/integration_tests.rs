@@ -61,6 +61,7 @@ fn make_block(
         transaction: TxHash::ZERO,
         timestamp: Timestamp::new(ts),
         params_hash: BlockHash::ZERO,
+        merge_sources: Vec::new(),
         work: 0,
         signature: Signature(dummy_sig),
         hash: BlockHash::ZERO,
@@ -288,7 +289,7 @@ fn ledger_updater_burn_tracks_brn_correctly() {
         &account,
         open.hash,
         &rep,
-        300,
+        700, // ascending odometer: prev 500 spent + 200 burned
         0,
         BlockHash::new(pubkey_bytes(&receiver)),
         TxHash::ZERO,
@@ -330,7 +331,7 @@ fn economics_burn_mints_trst_token() {
         &burner,
         BlockHash::ZERO,
         &burner,
-        300,
+        700, // ascending odometer: prev 500 spent + 200 burned
         0,
         BlockHash::new(pubkey_bytes(&receiver)),
         TxHash::ZERO,
@@ -350,11 +351,9 @@ fn economics_burn_mints_trst_token() {
     match result {
         burst_node::EconomicResult::BurnAndMint {
             burn_amount,
-            burn_result,
             mint_token,
         } => {
             assert_eq!(burn_amount, 200);
-            assert!(burn_result.is_ok());
             let token = mint_token.expect("token should be minted");
             assert_eq!(token.amount, 200);
             assert_eq!(token.holder, receiver);
@@ -426,7 +425,7 @@ fn economics_full_burn_send_receive_chain() {
         &alice,
         BlockHash::ZERO,
         &alice,
-        300,
+        700, // ascending odometer: prev 500 spent + 200 burned
         0,
         BlockHash::new(pubkey_bytes(&bob)),
         TxHash::ZERO,
@@ -449,7 +448,7 @@ fn economics_full_burn_send_receive_chain() {
 
     assert_eq!(token.amount, 200);
     assert_eq!(token.holder, bob);
-    assert_eq!(trst.transferable_balance(&bob, now, expiry_secs), Some(200));
+    assert_eq!(trst.transferable_balance(&bob, now), Some(200));
 
     // Step 2: Bob sends 150 TRST to Carol
     let send = make_block(
@@ -485,7 +484,7 @@ fn economics_full_burn_send_receive_chain() {
         other => panic!("expected Send, got {:?}", other),
     }
 
-    let provenance = trst.debit_wallet_with_provenance(&bob, 150);
+    let provenance = trst.debit_wallet_with_provenance(&bob, &token.origin, 150);
     assert!(
         !provenance.is_empty(),
         "provenance should track consumed tokens"
@@ -493,7 +492,7 @@ fn economics_full_burn_send_receive_chain() {
     assert_eq!(provenance[0].amount, 150);
     assert_eq!(provenance[0].origin_wallet, alice);
 
-    assert_eq!(trst.transferable_balance(&bob, now, expiry_secs), Some(50));
+    assert_eq!(trst.transferable_balance(&bob, now), Some(50));
 
     // Step 3: Carol receives 150 TRST
     let receive = make_block(
@@ -531,14 +530,14 @@ fn economics_full_burn_send_receive_chain() {
 }
 
 // ---------------------------------------------------------------------------
-// 4. TRST provenance survives merge and split
+// 4. TRST provenance survives merge
 // ---------------------------------------------------------------------------
 
 #[test]
 fn trst_merge_preserves_provenance() {
     let mut trst = TrstEngine::with_expiry(86400 * 365);
     let now = Timestamp::new(5000);
-    let expiry = 86400u64 * 365;
+    let _expiry = 86400u64 * 365;
 
     let alice = make_address(70);
     let bob = make_address(71);
@@ -559,67 +558,28 @@ fn trst_merge_preserves_provenance() {
         .unwrap();
     trst.track_token(token2.clone());
 
-    assert_eq!(trst.transferable_balance(&bob, now, expiry), Some(300));
+    assert_eq!(trst.transferable_balance(&bob, now), Some(300));
 
+    let merge_tx = TxHash::new([3u8; 32]);
     let merged = trst
-        .merge(
-            &[token1, token2],
-            bob.clone(),
-            TxHash::new([3u8; 32]),
-            now,
-            expiry,
-        )
+        .merge(&[token1, token2], bob.clone(), merge_tx, now)
         .unwrap();
 
     assert_eq!(merged.amount, 300);
     assert_eq!(merged.holder, bob);
+    assert_eq!(
+        merged.origin, merge_tx,
+        "merged token's origin is the merge tx hash (whitepaper)"
+    );
     assert!(
-        !merged.origin_proportions.is_empty(),
-        "merged token should track origin proportions"
+        trst.merger_graph.get_merge(&merge_tx).is_some(),
+        "merger graph records the merge's immediate inputs"
     );
     assert_eq!(
         merged.effective_origin_timestamp,
         Timestamp::new(5000),
         "merged token uses earliest origin timestamp"
     );
-}
-
-#[test]
-fn trst_split_preserves_total_amount() {
-    let mut trst = TrstEngine::with_expiry(86400 * 365);
-    let now = Timestamp::new(5000);
-    let expiry = 86400u64 * 365;
-
-    let alice = make_address(80);
-    let bob = make_address(81);
-
-    let token = trst
-        .mint(
-            TxHash::new([10u8; 32]),
-            bob.clone(),
-            1000,
-            alice.clone(),
-            now,
-        )
-        .unwrap();
-
-    let children = trst
-        .split(
-            &token,
-            &[(bob.clone(), 400), (bob.clone(), 600)],
-            &[TxHash::new([11u8; 32]), TxHash::new([12u8; 32])],
-            now,
-            expiry,
-        )
-        .unwrap();
-
-    assert_eq!(children.len(), 2);
-    let total: u128 = children.iter().map(|c| c.amount).sum();
-    assert_eq!(total, 1000);
-    assert_eq!(children[0].amount, 400);
-    assert_eq!(children[1].amount, 600);
-    assert_eq!(children[0].origin_wallet, alice);
-    assert_eq!(children[1].origin_wallet, alice);
 }
 
 // ---------------------------------------------------------------------------
@@ -630,7 +590,7 @@ fn trst_split_preserves_total_amount() {
 fn trst_revocation_by_origin_removes_all_downstream() {
     let mut trst = TrstEngine::with_expiry(86400 * 365);
     let now = Timestamp::new(5000);
-    let expiry = 86400u64 * 365;
+    let _expiry = 86400u64 * 365;
 
     let sybil = make_address(90);
     let bob = make_address(91);
@@ -658,18 +618,18 @@ fn trst_revocation_by_origin_removes_all_downstream() {
         .unwrap();
     trst.track_token(t2);
 
-    assert_eq!(trst.transferable_balance(&bob, now, expiry), Some(500));
-    assert_eq!(trst.transferable_balance(&carol, now, expiry), Some(300));
+    assert_eq!(trst.transferable_balance(&bob, now), Some(500));
+    assert_eq!(trst.transferable_balance(&carol, now), Some(300));
 
     let _revocations = trst.revoke_by_origin(&sybil);
 
     assert_eq!(
-        trst.transferable_balance(&bob, now, expiry),
+        trst.transferable_balance(&bob, now),
         Some(0),
         "bob's balance should be 0 after sybil revocation"
     );
     assert_eq!(
-        trst.transferable_balance(&carol, now, expiry),
+        trst.transferable_balance(&carol, now),
         Some(0),
         "carol's balance should be 0 after sybil revocation"
     );
@@ -693,11 +653,11 @@ fn trst_expiry_zeroes_old_tokens() {
             mint_time,
         )
         .unwrap();
-    trst.track_token_with_expiry(token, expiry_secs);
+    trst.track_token(token);
 
     let before_expiry = Timestamp::new(5500);
     assert!(
-        trst.transferable_balance(&bob, before_expiry, expiry_secs)
+        trst.transferable_balance(&bob, before_expiry)
             .unwrap()
             > 0,
         "token should be active before expiry"
@@ -705,7 +665,7 @@ fn trst_expiry_zeroes_old_tokens() {
 
     let after_expiry = Timestamp::new(7000);
     assert_eq!(
-        trst.transferable_balance(&bob, after_expiry, expiry_secs),
+        trst.transferable_balance(&bob, after_expiry),
         Some(0),
         "token should be expired"
     );
@@ -880,7 +840,7 @@ fn economics_rejects_burn_exceeding_balance() {
         &alice,
         BlockHash::ZERO,
         &alice,
-        0,
+        100, // ascending odometer: prev 50 spent + 50 burned
         0,
         BlockHash::new(pubkey_bytes(&bob)),
         TxHash::ZERO,
@@ -894,7 +854,6 @@ fn economics_rejects_burn_exceeding_balance() {
     match &result {
         burst_node::EconomicResult::BurnAndMint {
             burn_amount,
-            burn_result: _,
             mint_token,
         } => {
             assert_eq!(*burn_amount, 50);
@@ -911,7 +870,7 @@ fn economics_rejects_burn_exceeding_balance() {
 fn trst_cannot_transfer_more_than_balance() {
     let mut trst = TrstEngine::with_expiry(86400 * 365);
     let now = Timestamp::new(5000);
-    let expiry = 86400u64 * 365;
+    let _expiry = 86400u64 * 365;
 
     let alice = make_address(160);
     let bob = make_address(161);
@@ -927,48 +886,20 @@ fn trst_cannot_transfer_more_than_balance() {
         .unwrap();
     trst.track_token(token);
 
-    assert_eq!(trst.transferable_balance(&bob, now, expiry), Some(100));
+    assert_eq!(trst.transferable_balance(&bob, now), Some(100));
 
-    trst.debit_wallet(&bob, 100);
-    assert_eq!(trst.transferable_balance(&bob, now, expiry), Some(0));
+    let token_origin = TxHash::new([40u8; 32]);
+    trst.debit_wallet(&bob, &token_origin, 100);
+    assert_eq!(trst.transferable_balance(&bob, now), Some(0));
 
-    trst.debit_wallet(&bob, 50);
+    trst.debit_wallet(&bob, &token_origin, 50);
     assert_eq!(
-        trst.transferable_balance(&bob, now, expiry),
+        trst.transferable_balance(&bob, now),
         Some(0),
         "overdraft should saturate to 0"
     );
 }
 
-#[test]
-fn trst_split_rejects_amount_exceeding_parent() {
-    let mut trst = TrstEngine::with_expiry(86400 * 365);
-    let now = Timestamp::new(5000);
-    let expiry = 86400u64 * 365;
-
-    let alice = make_address(170);
-    let bob = make_address(171);
-
-    let token = trst
-        .mint(
-            TxHash::new([50u8; 32]),
-            bob.clone(),
-            100,
-            alice.clone(),
-            now,
-        )
-        .unwrap();
-
-    let result = trst.split(
-        &token,
-        &[(bob.clone(), 200), (bob.clone(), 100)],
-        &[TxHash::new([51u8; 32]), TxHash::new([52u8; 32])],
-        now,
-        expiry,
-    );
-
-    assert!(result.is_err(), "split exceeding parent amount should fail");
-}
 
 #[test]
 fn brn_balance_monotonically_increases_with_time() {
@@ -1156,7 +1087,7 @@ fn e2e_real_signatures_burn_send_receive() {
         &mut trst,
         Timestamp::new(2000),
         86400 * 365,
-        1000,
+        0, // odometer on the preceding open block is 0
     );
     match &result {
         burst_node::EconomicResult::BurnAndMint {
@@ -1310,7 +1241,7 @@ fn endorsement_burns_brn_correctly() {
         &endorser,
         BlockHash::new([1u8; 32]),
         &endorser,
-        700,
+        1300, // ascending odometer: prev 1000 spent + 300 burned
         0,
         BlockHash::new(pubkey_bytes(&target)),
         TxHash::ZERO,
@@ -1329,11 +1260,9 @@ fn endorsement_burns_brn_correctly() {
     match result {
         burst_node::EconomicResult::Endorse {
             burn_amount,
-            burn_result,
             target: t,
         } => {
             assert_eq!(burn_amount, 300);
-            assert!(burn_result.is_ok());
             assert_eq!(t.unwrap(), target);
         }
         other => panic!("expected Endorse, got {:?}", other),
@@ -1359,7 +1288,7 @@ fn challenge_stakes_brn_correctly() {
         &challenger,
         BlockHash::new([1u8; 32]),
         &challenger,
-        200,
+        1800, // ascending odometer: prev 1000 spent + 800 staked
         0,
         BlockHash::new(pubkey_bytes(&target)),
         TxHash::ZERO,
@@ -1378,12 +1307,10 @@ fn challenge_stakes_brn_correctly() {
     match result {
         burst_node::EconomicResult::Challenge {
             stake_amount,
-            stake_result,
+            stake,
             target: t,
         } => {
             assert_eq!(stake_amount, 800);
-            assert!(stake_result.is_ok());
-            let stake = stake_result.unwrap();
             assert_eq!(stake.amount, 800);
             assert!(!stake.resolved);
             assert_eq!(t.unwrap(), target);
@@ -1405,13 +1332,20 @@ fn verification_vote_records_vote_value_and_stake() {
     let voter = make_address(200);
     let target = make_address(201);
 
+    // The stake is recorded in the BRN engine, so the voter must be tracked
+    // and have accrued enough.
+    brn.track_wallet(
+        voter.clone(),
+        burst_brn::BrnWalletState::new(Timestamp::new(0)),
+    );
+
     // Create a VerificationVote block
     let mut vote_block = make_block(
         BlockType::VerificationVote,
         &voter,
         BlockHash::new([1u8; 32]),
         &voter,
-        800,
+        1200, // ascending odometer: prev 1000 spent + 200 staked
         0,
         BlockHash::new(pubkey_bytes(&target)),
         TxHash::ZERO,
@@ -1443,7 +1377,7 @@ fn verification_vote_records_vote_value_and_stake() {
             assert_eq!(v, voter);
             assert_eq!(t.unwrap(), target);
             assert_eq!(vote, 1);
-            assert_eq!(stake, 200); // 1000 - 800
+            assert_eq!(stake, 200); // 1200 - 1000
         }
         other => panic!("expected VerificationVoteResult, got {:?}", other),
     }
@@ -1571,7 +1505,6 @@ fn create_received_token_single_provenance() {
             origin_wallet: origin_wallet.clone(),
             origin_timestamp: Timestamp::new(1000),
             effective_origin_timestamp: Timestamp::new(1000),
-            origin_proportions: Vec::new(),
         }],
     };
 
@@ -1586,11 +1519,10 @@ fn create_received_token_single_provenance() {
 }
 
 #[test]
-fn create_received_token_multi_provenance_uses_earliest_timestamp() {
+fn create_received_token_single_provenance_preserves_origin() {
     let sender = make_address(207);
     let receiver = make_address(208);
-    let origin_a = make_address(209);
-    let origin_b = make_address(210);
+    let origin_wallet = make_address(209);
 
     let receive_block = make_block(
         BlockType::Receive,
@@ -1598,48 +1530,35 @@ fn create_received_token_multi_provenance_uses_earliest_timestamp() {
         BlockHash::ZERO,
         &receiver,
         0,
-        700,
+        400,
         BlockHash::new([0xEE; 32]),
         TxHash::ZERO,
         8000,
     );
 
+    let origin_hash = TxHash::new([0x02; 32]);
     let pending = burst_store::pending::PendingInfo {
         source: sender.clone(),
-        amount: 700,
+        amount: 400,
         timestamp: Timestamp::new(7000),
-        provenance: vec![
-            burst_store::pending::PendingProvenance {
-                amount: 400,
-                origin: TxHash::new([0x02; 32]),
-                origin_wallet: origin_a.clone(),
-                origin_timestamp: Timestamp::new(3000),
-                effective_origin_timestamp: Timestamp::new(3000),
-                origin_proportions: Vec::new(),
-            },
-            burst_store::pending::PendingProvenance {
-                amount: 300,
-                origin: TxHash::new([0x03; 32]),
-                origin_wallet: origin_b.clone(),
-                origin_timestamp: Timestamp::new(1000),
-                effective_origin_timestamp: Timestamp::new(1000),
-                origin_proportions: Vec::new(),
-            },
-        ],
+        provenance: vec![burst_store::pending::PendingProvenance {
+            amount: 400,
+            origin: origin_hash,
+            origin_wallet: origin_wallet.clone(),
+            origin_timestamp: Timestamp::new(3000),
+            effective_origin_timestamp: Timestamp::new(3000),
+        }],
     };
 
     let token =
         burst_node::ledger_bridge::create_received_token(&receive_block, &pending, 86400 * 365);
-    assert_eq!(token.amount, 700);
+    assert_eq!(token.amount, 400);
     assert_eq!(token.holder, receiver);
-    assert_eq!(
-        token.effective_origin_timestamp,
-        Timestamp::new(1000),
-        "should use earliest effective origin timestamp"
-    );
-    assert_eq!(token.origin_proportions.len(), 2);
-    assert_eq!(token.origin_proportions[0].amount, 400);
-    assert_eq!(token.origin_proportions[1].amount, 300);
+    assert_eq!(token.origin, origin_hash, "origin should pass through from sender");
+    assert_eq!(token.origin_wallet, origin_wallet, "origin_wallet should pass through");
+    assert_eq!(token.origin_timestamp, Timestamp::new(3000));
+    assert_eq!(token.effective_origin_timestamp, Timestamp::new(3000));
+    assert!(token.revoked_origin.is_none());
 }
 
 #[test]
@@ -1672,7 +1591,7 @@ fn create_received_token_no_provenance_uses_pending_timestamp() {
     assert_eq!(token.holder, receiver);
     assert_eq!(token.origin_wallet, sender);
     assert_eq!(token.origin_timestamp, Timestamp::new(8000));
-    assert_eq!(token.origin_proportions.len(), 0);
+    assert!(token.revoked_origin.is_none());
 }
 
 // ---------------------------------------------------------------------------
@@ -1680,9 +1599,26 @@ fn create_received_token_no_provenance_uses_pending_timestamp() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn balance_validation_endorse_rejects_brn_increase() {
+fn balance_validation_endorse_requires_brn_burn() {
     use burst_node::BlockProcessor;
 
+    // Odometer unchanged → no burn happened → invalid endorse.
+    let block = make_block(
+        BlockType::Endorse,
+        &make_address(213),
+        BlockHash::new([1u8; 32]),
+        &make_address(214),
+        1000,
+        500,
+        BlockHash::ZERO,
+        TxHash::ZERO,
+        5000,
+    );
+    let result = BlockProcessor::validate_balance_transition(&block, 1000, 500);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("must burn BRN"));
+
+    // Odometer increased → the burn is the delta → valid.
     let block = make_block(
         BlockType::Endorse,
         &make_address(213),
@@ -1694,9 +1630,7 @@ fn balance_validation_endorse_rejects_brn_increase() {
         TxHash::ZERO,
         5000,
     );
-    let result = BlockProcessor::validate_balance_transition(&block, 1000, 500);
-    assert!(result.is_err());
-    assert!(result.unwrap_err().contains("increase BRN"));
+    assert!(BlockProcessor::validate_balance_transition(&block, 1000, 500).is_ok());
 }
 
 #[test]
@@ -1708,8 +1642,8 @@ fn balance_validation_challenge_rejects_trst_change() {
         &make_address(215),
         BlockHash::new([1u8; 32]),
         &make_address(216),
-        500,
-        600,
+        1500, // ascending odometer: valid 500 stake…
+        600,  // …but TRST must not change on a challenge
         BlockHash::ZERO,
         TxHash::ZERO,
         5000,
@@ -1845,7 +1779,7 @@ fn unified_path_burn_persists_account_and_pending() {
         &mut trst,
         Timestamp::new(2000),
         86400 * 365,
-        1000,
+        0, // odometer on the preceding open block is 0
     );
 
     let mint_token = match &econ {
@@ -1866,7 +1800,7 @@ fn unified_path_burn_persists_account_and_pending() {
     batch.put_block(&burn.hash, &bytes).unwrap();
     batch.put_frontier(&alice, &burn.hash).unwrap();
     let info2 =
-        burst_node::update_account_on_block(&mut batch, &burn, Some(&info), 1000, &mut rw).unwrap();
+        burst_node::update_account_on_block(&mut batch, &burn, Some(&info), 0, &mut rw).unwrap();
     batch.commit().unwrap();
 
     assert_eq!(info2.block_count, 2);
@@ -1897,7 +1831,7 @@ fn unified_path_burn_persists_account_and_pending() {
 fn trst_revoke_then_unrevoke() {
     let mut trst = TrstEngine::with_expiry(86400 * 365);
     let now = Timestamp::new(5000);
-    let expiry = 86400u64 * 365;
+    let _expiry = 86400u64 * 365;
 
     let origin_wallet = make_address(224);
     let holder = make_address(225);
@@ -1913,20 +1847,20 @@ fn trst_revoke_then_unrevoke() {
         .unwrap();
     trst.track_token(token);
 
-    assert_eq!(trst.transferable_balance(&holder, now, expiry), Some(1000));
+    assert_eq!(trst.transferable_balance(&holder, now), Some(1000));
 
     // Revoke all tokens from origin_wallet
     let _revoked = trst.revoke_by_origin(&origin_wallet);
     assert_eq!(
-        trst.transferable_balance(&holder, now, expiry),
+        trst.transferable_balance(&holder, now),
         Some(0),
         "balance should be 0 after revocation"
     );
 
     // Un-revoke
-    let _unrevoked = trst.un_revoke_by_origin(&origin_wallet);
+    let _unrevoked = trst.un_revoke_by_origin(&origin_wallet, now);
     assert_eq!(
-        trst.transferable_balance(&holder, now, expiry),
+        trst.transferable_balance(&holder, now),
         Some(1000),
         "balance should be restored after un-revocation"
     );
@@ -2035,4 +1969,367 @@ fn brn_accrual_piecewise_rate_history() {
     // Expected: 100 * (5000-1000) + 200 * (8000-5000) = 400_000 + 600_000 = 1_000_000
     let accrued = history.total_accrued(verified_at, now);
     assert_eq!(accrued, 1_000_000);
+}
+
+// ---------------------------------------------------------------------------
+// 19. Burn-backed verifier rewards (decision 33.7d)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn verifier_rewards_are_burn_backed_pending_entries() {
+    let (_dir, env) = temp_env();
+    let pending_store = env.pending_store();
+
+    let mut brn = BrnEngine::with_rate(100, Timestamp::new(0));
+    let correct = make_address(230);
+    let dissenter = make_address(231);
+    let verified_wallet = make_address(232);
+
+    brn.track_wallet(
+        correct.clone(),
+        burst_brn::BrnWalletState::new(Timestamp::new(0)),
+    );
+    brn.track_wallet(
+        dissenter.clone(),
+        burst_brn::BrnWalletState::new(Timestamp::new(0)),
+    );
+    // Both staked 500.
+    brn.get_wallet_mut(&correct).unwrap().total_staked = 500;
+    brn.get_wallet_mut(&dissenter).unwrap().total_staked = 500;
+
+    let outcome = burst_verification::compute_verification_outcomes(
+        &verified_wallet,
+        burst_verification::VerificationResult::Verified,
+        &[],
+        &[
+            (correct.clone(), 500, true),
+            (dissenter.clone(), 500, false),
+        ],
+    );
+
+    let ts = Timestamp::new(9000);
+    burst_node::ledger_bridge::resolve_verifier_outcomes(
+        &mut brn,
+        &pending_store,
+        &outcome.verifiers,
+        &verified_wallet,
+        ts,
+    );
+
+    // Correct voter: stake unlocked; dissenter: stake burned.
+    assert_eq!(brn.get_wallet(&correct).unwrap().total_staked, 0);
+    assert_eq!(brn.get_wallet(&correct).unwrap().total_burned, 0);
+    assert_eq!(brn.get_wallet(&dissenter).unwrap().total_staked, 0);
+    assert_eq!(brn.get_wallet(&dissenter).unwrap().total_burned, 500);
+
+    // The correct voter's TRST reward equals the forfeited stake and sits
+    // in pending, claimable via a normal Receive block.
+    use burst_store::pending::PendingStore;
+    let all = pending_store.get_all_pending().unwrap();
+    assert_eq!(all.len(), 1);
+    let (recipient, _hash, info) = &all[0];
+    assert_eq!(recipient, &correct);
+    assert_eq!(info.amount, 500);
+    assert_eq!(info.provenance.len(), 1);
+    // Conservation: minted reward == burned dissenter stake.
+    assert_eq!(info.amount, brn.get_wallet(&dissenter).unwrap().total_burned);
+}
+
+// ---------------------------------------------------------------------------
+// 20. FULL PROTOCOL LIFECYCLE SIMULATION
+//
+// One connected story exercising every principle through the same functions
+// the node calls, in the same order, with conservation asserted throughout:
+// verification → BRN accrual (computed) → two-phase burn/mint → receive →
+// per-origin send → merge (immediate-input graph) → challenge → vote →
+// fraud → proportional revocation (incl. in-flight sends) → burn-backed
+// rewards → re-verification un-revoke → expiry → governance resurrection.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn full_protocol_lifecycle_simulation() {
+    use burst_store::pending::{PendingInfo, PendingProvenance, PendingStore};
+    use burst_types::ProtocolParams;
+
+    let params = ProtocolParams {
+        endorsement_threshold: 3,
+        num_verifiers: 3,
+        verification_threshold_bps: 6000,
+        verifier_stake_amount: 100,
+        challenge_stake_amount: 1000,
+        max_revotes: 3,
+        ..ProtocolParams::burst_defaults()
+    };
+
+    let mut brn = BrnEngine::with_rate(100, Timestamp::new(0)); // 100 raw/sec
+    let mut trst = TrstEngine::with_expiry(10_000);
+    let (_dir, env) = temp_env();
+    let pending_store = env.pending_store();
+    let mut orch = burst_verification::VerificationOrchestrator::new();
+
+    let alice = make_address(240); // consumer
+    let bob = make_address(241); // provider
+    let carol = make_address(242); // merchant + challenger
+    let sybil = make_address(243); // fraud
+
+    // ── Act 1: identity — BRN is a computed birthright ──────────────────
+    for w in [&alice, &bob, &carol, &sybil] {
+        brn.track_wallet(
+            (*w).clone(),
+            burst_brn::BrnWalletState::new(Timestamp::new(1000)),
+        );
+    }
+    let t2000 = Timestamp::new(2000);
+    let st = brn.get_wallet(&alice).unwrap().clone();
+    assert_eq!(brn.compute_balance(&st, t2000), 100_000); // 100/s × 1000s
+
+    // ── Act 2: two-phase burn — TRST only ever from burned BRN ─────────
+    // Alice's open block: zero balances (birthright is computed, not claimed).
+    let alice_open = make_block(
+        BlockType::Open, &alice, BlockHash::ZERO, &alice,
+        0, 0, BlockHash::ZERO, TxHash::ZERO, 1500,
+    );
+    assert!(burst_node::BlockProcessor::validate_open_block(&alice_open, None).is_ok());
+
+    // Burn 600 to Bob: odometer 0 → 600, spend covered by computed BRN(w).
+    let burn = make_block(
+        BlockType::Burn, &alice, alice_open.hash, &alice,
+        600, 0, BlockHash::new(pubkey_bytes(&bob)), TxHash::ZERO, 2000,
+    );
+    assert!(burst_node::BlockProcessor::validate_balance_transition(&burn, 0, 0).is_ok());
+    assert!(600 <= brn.compute_balance(&st, t2000));
+    let econ = burst_node::process_block_economics(&burn, &mut brn, &mut trst, t2000, 10_000, 0);
+    let minted = match &econ {
+        burst_node::EconomicResult::BurnAndMint { burn_amount, mint_token } => {
+            assert_eq!(*burn_amount, 600);
+            mint_token.clone().unwrap()
+        }
+        other => panic!("expected BurnAndMint, got {other:?}"),
+    };
+    assert_eq!(brn.get_wallet(&alice).unwrap().total_burned, 600);
+    // Two-phase (8.4a): nothing lands in Bob's portfolio until he receives.
+    assert!(trst.get_portfolio(&bob).is_none());
+    let burn_hash = TxHash::new(*burn.hash.as_bytes());
+    pending_store
+        .put_pending(&bob, &burn_hash, &PendingInfo {
+            source: alice.clone(),
+            amount: minted.amount,
+            timestamp: t2000,
+            provenance: vec![PendingProvenance {
+                amount: minted.amount,
+                origin: minted.origin,
+                origin_wallet: minted.origin_wallet.clone(),
+                origin_timestamp: minted.origin_timestamp,
+                effective_origin_timestamp: minted.effective_origin_timestamp,
+            }],
+        })
+        .unwrap();
+
+    // Bob receives: claimed amount must match the pending entry exactly.
+    let bob_open = make_block(
+        BlockType::Open, &bob, BlockHash::ZERO, &bob,
+        0, 600, BlockHash::new(*burn_hash.as_bytes()), TxHash::ZERO, 2100,
+    );
+    let pend = pending_store.get_pending(&bob, &burn_hash).unwrap();
+    assert!(burst_node::BlockProcessor::validate_open_block(&bob_open, Some(pend.amount)).is_ok());
+    let bob_token = burst_node::ledger_bridge::create_received_token(&bob_open, &pend, 10_000);
+    trst.receive_token(bob_token, Timestamp::new(2100));
+    pending_store.delete_pending(&bob, &burn_hash).unwrap();
+    assert_eq!(trst.transferable_balance(&bob, Timestamp::new(2100)), Some(600));
+
+    // ── Act 3: commerce — sends never cross origins ─────────────────────
+    let origin_a = minted.origin;
+    assert_eq!(trst.origin_transferable(&bob, &origin_a, Timestamp::new(2200)), 600);
+    let prov = trst.debit_wallet_with_provenance(&bob, &origin_a, 200);
+    assert_eq!(prov[0].amount, 200);
+    let carol_recv = burst_trst::TrstToken {
+        id: test_hash_sim(1),
+        amount: 200,
+        origin: prov[0].origin,
+        link: test_hash_sim(1),
+        holder: carol.clone(),
+        origin_timestamp: prov[0].origin_timestamp,
+        effective_origin_timestamp: prov[0].effective_origin_timestamp,
+        state: burst_types::TrstState::Active,
+        origin_wallet: prov[0].origin_wallet.clone(),
+        revoked_origin: None,
+    };
+    trst.receive_token(carol_recv, Timestamp::new(2200));
+
+    // Sybil (wrongly verified) burns 400 to Bob.
+    let sybil_burn = make_block(
+        BlockType::Burn, &sybil, BlockHash::new([8u8; 32]), &sybil,
+        400, 0, BlockHash::new(pubkey_bytes(&bob)), TxHash::ZERO, 2500,
+    );
+    let econ = burst_node::process_block_economics(
+        &sybil_burn, &mut brn, &mut trst, Timestamp::new(2500), 10_000, 0,
+    );
+    let sybil_token = match &econ {
+        burst_node::EconomicResult::BurnAndMint { mint_token, .. } => mint_token.clone().unwrap(),
+        other => panic!("expected BurnAndMint, got {other:?}"),
+    };
+    trst.receive_token(sybil_token.clone(), Timestamp::new(2600));
+
+    // Bob merges clean 400 (origin A) + tainted 400 (origin S) → M(800).
+    let inputs: Vec<burst_trst::TrstToken> = trst
+        .get_portfolio(&bob).unwrap().tokens.iter()
+        .filter(|t| t.state == burst_types::TrstState::Active)
+        .cloned().collect();
+    assert_eq!(inputs.len(), 2);
+    let merge_tx = test_hash_sim(2);
+    let merged = trst.merge(&inputs, bob.clone(), merge_tx, Timestamp::new(2700)).unwrap();
+    assert_eq!(merged.origin, merge_tx); // origin = merge tx hash (6.17b)
+    let ids: std::collections::HashSet<TxHash> = inputs.iter().map(|t| t.id).collect();
+    trst.bulk_untrack(&bob, &ids);
+    trst.track_token(merged);
+
+    // Bob sends 300 of M to Carol — left IN FLIGHT during the revocation.
+    let prov_m = trst.debit_wallet_with_provenance(&bob, &merge_tx, 300);
+    assert_eq!(prov_m[0].amount, 300);
+
+    // ── Act 4: the challenge ─────────────────────────────────────────────
+    // Verify sybil in the orchestrator (endorse + vote) so it can be challenged.
+    for i in 0..3 {
+        orch.process_endorsement(&sybil, &make_address(210 + i), 1000, &params).unwrap();
+    }
+    let vs: Vec<_> = (0u8..3).map(|i| make_address(214 + i)).collect();
+    let sel = orch.select_verifiers(&sybil, &vs, &[1u8; 32], &params).unwrap();
+    for v in &sel {
+        orch.process_vote(&sybil, v, burst_verification::Vote::Legitimate, &params).unwrap();
+    }
+    orch.drain_events();
+
+    // Carol stakes a challenge via a real Challenge block.
+    let challenge = make_block(
+        BlockType::Challenge, &carol, BlockHash::new([7u8; 32]), &carol,
+        1000, 0, BlockHash::new(pubkey_bytes(&sybil)), TxHash::ZERO, 3000,
+    );
+    let econ = burst_node::process_block_economics(
+        &challenge, &mut brn, &mut trst, Timestamp::new(3000), 10_000, 0,
+    );
+    assert!(matches!(econ, burst_node::EconomicResult::Challenge { stake_amount: 1000, .. }));
+    assert_eq!(brn.get_wallet(&carol).unwrap().total_staked, 1000);
+    orch.initiate_challenge(&sybil, &carol, true, 1000, &params).unwrap();
+
+    // New random panel votes Illegitimate; resolution fires on the last vote.
+    let cvs: Vec<_> = (0u8..3).map(|i| make_address(220 + i)).collect();
+    for cv in &cvs {
+        brn.track_wallet(cv.clone(), burst_brn::BrnWalletState::new(Timestamp::new(1000)));
+        brn.get_wallet_mut(cv).unwrap().total_staked = params.verifier_stake_amount;
+    }
+    let sel = orch.select_verifiers(&sybil, &cvs, &[2u8; 32], &params).unwrap();
+    for (i, v) in sel.iter().enumerate() {
+        orch.process_vote(&sybil, v, burst_verification::Vote::Illegitimate, &params).unwrap();
+        if i + 1 < sel.len() {
+            assert!(orch.try_resolve_challenge(&sybil, &params).unwrap().is_none());
+        }
+    }
+    let resolved = orch.try_resolve_challenge(&sybil, &params).unwrap().unwrap();
+    let events = orch.drain_events();
+    assert!(events.iter().any(|e| matches!(e,
+        burst_verification::VerificationEvent::WalletUnverified { wallet } if *wallet == sybil)));
+
+    // Fraud confirmed → revoke all TRST originating from sybil.
+    let revocations = trst.revoke_by_origin(&sybil);
+    let revoked_total: u128 = revocations.iter().map(|r| r.revoked_amount).sum();
+    // Bob holds 500 of M (800 total, 400 tainted): ceil(500·400/800) = 250.
+    assert_eq!(revoked_total, 250);
+    assert_eq!(trst.transferable_balance(&bob, Timestamp::new(3100)), Some(250));
+
+    // Settle the challenge like the node does.
+    if let burst_verification::VerificationEvent::ChallengeResolved { outcome, .. } = &resolved {
+        assert_eq!(outcome.outcome, burst_verification::ChallengeResult::FraudConfirmed);
+        // Challenger stake returned in full.
+        let ws = brn.get_wallet_mut(&carol).unwrap();
+        ws.total_staked = ws.total_staked.saturating_sub(outcome.challenger_stake);
+        // Panel: unanimous → no dissenters → stakes unlocked, no TRST minted.
+        burst_node::ledger_bridge::resolve_verifier_outcomes(
+            &mut brn, &pending_store, &outcome.verifier_outcomes, &sybil, Timestamp::new(3100),
+        );
+        for cv in &cvs {
+            assert_eq!(brn.get_wallet(cv).unwrap().total_staked, 0);
+            assert_eq!(brn.get_wallet(cv).unwrap().total_burned, 0);
+        }
+        // Challenger TRST reward: min(1% of revoked, cap) — backed by the
+        // 100x destroyed revoked TRST.
+        let reward = std::cmp::min(
+            revoked_total.saturating_mul(params.challenge_reward_bps as u128) / 10_000,
+            params.challenge_reward_cap,
+        );
+        assert_eq!(reward, 2); // 1% of 250, integer math
+        let reward_hash = burst_node::ledger_bridge::create_reward_pending(
+            &pending_store, &carol, &sybil, b"challenger-reward", reward, Timestamp::new(3100),
+        ).unwrap();
+        let pend = pending_store.get_pending(&carol, &reward_hash).unwrap();
+        let reward_block = make_block(
+            BlockType::Receive, &carol, BlockHash::new([6u8; 32]), &carol,
+            0, 0, BlockHash::new(*reward_hash.as_bytes()), TxHash::ZERO, 3200,
+        );
+        let tok = burst_node::ledger_bridge::create_received_token(&reward_block, &pend, 10_000);
+        trst.receive_token(tok, Timestamp::new(3200));
+        pending_store.delete_pending(&carol, &reward_hash).unwrap();
+    } else {
+        panic!("expected ChallengeResolved");
+    }
+    assert_eq!(brn.get_wallet(&carol).unwrap().total_staked, 0);
+
+    // The in-flight 300 of M arrives at Carol — revocation caught at receive:
+    // ceil(300·400/800) = 150 revoked, 150 stays live.
+    let inflight = burst_trst::TrstToken {
+        id: test_hash_sim(3),
+        amount: 300,
+        origin: merge_tx,
+        link: test_hash_sim(3),
+        holder: carol.clone(),
+        origin_timestamp: prov_m[0].origin_timestamp,
+        effective_origin_timestamp: prov_m[0].effective_origin_timestamp,
+        state: burst_types::TrstState::Active,
+        origin_wallet: prov_m[0].origin_wallet.clone(),
+        revoked_origin: None,
+    };
+    let evs = trst.receive_token(inflight, Timestamp::new(3300));
+    assert_eq!(evs.len(), 1);
+    assert_eq!(evs[0].revoked_amount, 150);
+    // Carol live: 200 (origin A) + 150 (clean M) + 2 (reward) = 352.
+    assert_eq!(trst.transferable_balance(&carol, Timestamp::new(3300)), Some(352));
+
+    // Conservation: everything in existence traces to destroyed value.
+    // 600 (alice burn) + 400 (sybil burn) + 2 (reward, backed by revoked) = 1002.
+    let total_tracked: u128 = [&alice, &bob, &carol, &sybil]
+        .iter()
+        .filter_map(|w| trst.get_portfolio(w))
+        .flat_map(|p| p.tokens.iter())
+        .map(|t| t.amount)
+        .sum();
+    assert_eq!(total_tracked, 1002);
+
+    // ── Act 5: redemption — un-revoke on re-verification (6.15b) ───────
+    let restored = trst.un_revoke_by_origin(&sybil, Timestamp::new(3400));
+    assert_eq!(restored.len(), 2); // bob's 250 chunk + carol's 150 chunk
+    assert_eq!(trst.transferable_balance(&bob, Timestamp::new(3400)), Some(500));
+    assert_eq!(trst.transferable_balance(&carol, Timestamp::new(3400)), Some(502));
+
+    // ── Act 6: time — expiry, then governance resurrection (6.9) ───────
+    // M's effective timestamp is its earliest constituent (t=2000) → expires
+    // at 12000. The reward token (t=3100) survives until 13100.
+    trst.flush_all_expired(Timestamp::new(12_500));
+    assert_eq!(trst.transferable_balance(&bob, Timestamp::new(12_500)), Some(0));
+    assert_eq!(trst.transferable_balance(&carol, Timestamp::new(12_500)), Some(2));
+    // Governance extends the expiry period — expired TRST becomes money again.
+    trst.set_expiry_period(1_000_000, Timestamp::new(12_500));
+    assert_eq!(trst.transferable_balance(&bob, Timestamp::new(12_500)), Some(500));
+    assert_eq!(trst.transferable_balance(&carol, Timestamp::new(12_500)), Some(502));
+
+    // Conservation still holds after the whole story.
+    let total_tracked: u128 = [&alice, &bob, &carol, &sybil]
+        .iter()
+        .filter_map(|w| trst.get_portfolio(w))
+        .flat_map(|p| p.tokens.iter())
+        .map(|t| t.amount)
+        .sum();
+    assert_eq!(total_tracked, 1002);
+}
+
+fn test_hash_sim(n: u8) -> TxHash {
+    TxHash::new([0xB0 + n; 32])
 }

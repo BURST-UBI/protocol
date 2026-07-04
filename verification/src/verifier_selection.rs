@@ -42,8 +42,18 @@ impl VerifierSelector {
             })
             .collect();
 
-        scored.sort_by_key(|a| a.1);
-        scored.truncate(count);
+        // Use partial sort O(n) instead of full sort O(n log n) —
+        // we only need the top `count` lowest hashes, not full ordering.
+        let actual_count = count.min(scored.len());
+        if actual_count > 0 && actual_count < scored.len() {
+            scored.select_nth_unstable_by_key(actual_count - 1, |a| a.1);
+            scored.truncate(actual_count);
+            // Sort the selected few for deterministic ordering
+            scored.sort_by_key(|a| a.1);
+        } else {
+            scored.sort_by_key(|a| a.1);
+            scored.truncate(actual_count);
+        }
         scored
             .iter()
             .map(|(i, _)| eligible_verifiers[*i].clone())

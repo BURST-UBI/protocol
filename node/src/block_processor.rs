@@ -146,6 +146,13 @@ const MAX_RECENTLY_PROCESSED: usize = 65_536;
 ///
 /// Processes blocks synchronously through validation stages. The node calls this
 /// from an async context, but the pipeline itself is sync to keep reasoning simple.
+/// Max seconds a fresh block's timestamp may sit ahead of a node's own clock.
+pub const FUTURE_TIMESTAMP_TOLERANCE_SECS: u64 = 60;
+/// Max seconds a fresh block's timestamp may lag a node's own clock.
+/// Generous enough for propagation + queueing under load, tight enough that
+/// backdating cannot meaningfully resurrect expired TRST or shade accrual.
+pub const PAST_TIMESTAMP_TOLERANCE_SECS: u64 = 3600;
+
 pub struct BlockProcessor {
     /// Blocks waiting for a gap to be filled (previous block unknown).
     unchecked: UncheckedMap,
@@ -280,16 +287,28 @@ impl BlockProcessor {
         }
 
         // Stage 2.5: Timestamp validation
-        // Reject blocks with timestamps too far in the future (>60s ahead).
-        // Old timestamps are allowed for gap-filling and bootstrap sync.
+        // Two-sided timestamp bound, judged against THIS node's own clock —
+        // a sender's claimed timestamp is never taken as literal. Once a
+        // timestamp passes every node's own-clock check, the (bounded) claim
+        // is what the economic arithmetic uses, so all nodes compute
+        // identical expiry/accrual results. The maximum lie is the tolerance
+        // window: +60s forward (can't pre-accrue meaningful BRN), 1h backward
+        // (can't resurrect a token dead longer than an hour — nothing against
+        // multi-year expiries). Disable via set_validate_timestamps(false)
+        // for bootstrap/gap-fill sync of already-confirmed history.
         if self.validate_timestamps {
             let now_secs = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
             let block_ts = block.timestamp.as_secs();
-            if block_ts > now_secs + 60 {
+            if block_ts > now_secs + FUTURE_TIMESTAMP_TOLERANCE_SECS {
                 return ProcessResult::Rejected("block timestamp is too far in the future".into());
+            }
+            if block_ts + PAST_TIMESTAMP_TOLERANCE_SECS < now_secs {
+                return ProcessResult::Rejected(
+                    "block timestamp is too far in the past (backdating rejected)".into(),
+                );
             }
         }
 
@@ -765,13 +784,17 @@ impl BlockProcessor {
         prev_brn: u128,
         prev_trst: u128,
     ) -> Result<(), String> {
+        // `brn_balance` is an ascending odometer of cumulative BRN spent
+        // (burned + staked). BRN itself never lives on the ledger — the
+        // odometer delta is the amount, and the node validates it against
+        // the independently computed BRN(w) before accepting the block.
         match block.block_type {
             BlockType::Send => {
                 if block.trst_balance > prev_trst {
                     return Err("send block cannot increase TRST balance".into());
                 }
                 if block.brn_balance != prev_brn {
-                    return Err("send block cannot change BRN balance".into());
+                    return Err("send block cannot change spent BRN".into());
                 }
                 let send_amount = prev_trst.saturating_sub(block.trst_balance);
                 if send_amount == 0 {
@@ -783,45 +806,40 @@ impl BlockProcessor {
                     return Err("receive block cannot decrease TRST balance".into());
                 }
                 if block.brn_balance != prev_brn {
-                    return Err("receive block cannot change BRN balance".into());
+                    return Err("receive block cannot change spent BRN".into());
                 }
             }
             BlockType::Burn => {
-                let burn_amount = prev_brn.saturating_sub(block.brn_balance);
+                if block.brn_balance < prev_brn {
+                    return Err("burn: cumulative spent BRN cannot decrease".into());
+                }
+                let burn_amount = block.brn_balance.saturating_sub(prev_brn);
                 if burn_amount == 0 {
                     return Err("burn amount must be non-zero".into());
-                }
-                if block.brn_balance > prev_brn {
-                    return Err("burn: BRN balance increased".into());
                 }
                 if block.trst_balance != prev_trst {
                     return Err("burn: sender's TRST balance must not change".into());
                 }
             }
-            BlockType::Split => {
-                if block.trst_balance > prev_trst {
-                    return Err("split block cannot increase TRST balance".into());
-                }
-                if block.brn_balance != prev_brn {
-                    return Err("split block cannot change BRN balance".into());
-                }
-            }
             BlockType::Merge => {
                 if block.brn_balance != prev_brn {
-                    return Err("merge block cannot change BRN balance".into());
+                    return Err("merge block cannot change spent BRN".into());
+                }
+                if block.trst_balance != prev_trst {
+                    return Err("merge block cannot change TRST balance".into());
                 }
             }
             BlockType::Endorse => {
-                if block.brn_balance > prev_brn {
-                    return Err("endorse block cannot increase BRN balance".into());
+                if block.brn_balance <= prev_brn {
+                    return Err("endorse block must burn BRN (spent BRN must increase)".into());
                 }
                 if block.trst_balance != prev_trst {
                     return Err("endorse block cannot change TRST balance".into());
                 }
             }
             BlockType::Challenge => {
-                if block.brn_balance > prev_brn {
-                    return Err("challenge block cannot increase BRN balance".into());
+                if block.brn_balance <= prev_brn {
+                    return Err("challenge block must stake BRN (spent BRN must increase)".into());
                 }
                 if block.trst_balance != prev_trst {
                     return Err("challenge block cannot change TRST balance".into());
@@ -868,12 +886,61 @@ impl BlockProcessor {
                 }
             }
             BlockType::VerificationVote => {
-                if block.brn_balance != prev_brn || block.trst_balance != prev_trst {
-                    return Err("verification-vote block cannot change balances".into());
+                // Legitimate/Illegitimate votes stake BRN (odometer increases);
+                // "Neither" votes carry no stake (odometer unchanged).
+                if block.brn_balance < prev_brn {
+                    return Err(
+                        "verification-vote: cumulative spent BRN cannot decrease".into()
+                    );
+                }
+                if block.trst_balance != prev_trst {
+                    return Err("verification-vote block cannot change TRST balance".into());
                 }
             }
             BlockType::Open => {
                 // Open blocks have no previous — caller should not invoke this for them.
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate an Open block (the first block in an account chain).
+    ///
+    /// Balances on open blocks must not be self-reported:
+    /// - `brn_balance` must be 0 — BRN is a computed birthright, equal for
+    ///   everyone; nothing has been spent before the chain exists.
+    /// - `trst_balance` must be 0 unless this is a receive-open, in which
+    ///   case it must equal exactly the pending send's amount (checked by the
+    ///   caller against the pending store via `expected_pending_amount`).
+    pub fn validate_open_block(
+        block: &StateBlock,
+        expected_pending_amount: Option<u128>,
+    ) -> Result<(), String> {
+        if block.block_type != BlockType::Open {
+            return Ok(());
+        }
+        if block.brn_balance != 0 {
+            return Err(format!(
+                "open block must have zero spent BRN (birthright is computed, not claimed), got {}",
+                block.brn_balance
+            ));
+        }
+        match expected_pending_amount {
+            Some(amount) => {
+                if block.trst_balance != amount {
+                    return Err(format!(
+                        "receive-open TRST balance {} does not match pending send amount {}",
+                        block.trst_balance, amount
+                    ));
+                }
+            }
+            None => {
+                if block.trst_balance != 0 {
+                    return Err(format!(
+                        "open block claims {} TRST with no matching pending send",
+                        block.trst_balance
+                    ));
+                }
             }
         }
         Ok(())
@@ -916,6 +983,7 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_000),
             params_hash: BlockHash::ZERO,
+            merge_sources: Vec::new(),
             work: 0,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,
@@ -947,6 +1015,7 @@ mod tests {
             transaction: TxHash::new([0xBB; 32]),
             timestamp: Timestamp::new(1_000_001),
             params_hash: BlockHash::ZERO,
+            merge_sources: Vec::new(),
             work: 0,
             signature: Signature([2u8; 64]),
             hash: BlockHash::ZERO,
@@ -977,6 +1046,7 @@ mod tests {
             transaction: TxHash::new([0xDD; 32]),
             timestamp: Timestamp::new(1_000_002),
             params_hash: BlockHash::ZERO,
+            merge_sources: Vec::new(),
             work: 0,
             signature: Signature([3u8; 64]),
             hash: BlockHash::ZERO,
@@ -1301,6 +1371,7 @@ mod tests {
             transaction: TxHash::new([0xFF; 32]),
             timestamp: Timestamp::new(2_000_000),
             params_hash: BlockHash::ZERO,
+            merge_sources: Vec::new(),
             work: 0,
             signature: Signature([5u8; 64]),
             hash: BlockHash::ZERO,
@@ -1332,6 +1403,7 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_000),
             params_hash: BlockHash::ZERO,
+            merge_sources: Vec::new(),
             work: 0,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,
@@ -1371,6 +1443,7 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_001),
             params_hash: BlockHash::ZERO,
+            merge_sources: Vec::new(),
             work: 0,
             signature: Signature([4u8; 64]),
             hash: BlockHash::ZERO,
@@ -1463,6 +1536,7 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(2_000_000),
             params_hash: BlockHash::ZERO,
+            merge_sources: Vec::new(),
             work: 0,
             signature: Signature([7u8; 64]),
             hash: BlockHash::ZERO,
@@ -1577,6 +1651,7 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_000),
             params_hash: BlockHash::ZERO,
+            merge_sources: Vec::new(),
             work: 0,
             signature: Signature([0u8; 64]),
             hash: BlockHash::ZERO,
@@ -1585,6 +1660,7 @@ mod tests {
         block.signature = sign_message(block.hash.as_bytes(), &kp.private);
 
         let mut processor = BlockProcessor::new(0);
+        processor.set_validate_timestamps(false); // fixtures use epoch-era timestamps
         let mut frontier = DagFrontier::new();
         let result = processor.process(&block, &mut frontier);
         assert_eq!(result, ProcessResult::Accepted);
@@ -1609,6 +1685,7 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_000),
             params_hash: BlockHash::ZERO,
+            merge_sources: Vec::new(),
             work: 0,
             signature: Signature([0u8; 64]),
             hash: BlockHash::ZERO,
@@ -1617,6 +1694,7 @@ mod tests {
         block.signature = sign_message(block.hash.as_bytes(), &kp2.private);
 
         let mut processor = BlockProcessor::new(0);
+        processor.set_validate_timestamps(false); // fixtures use epoch-era timestamps
         let mut frontier = DagFrontier::new();
         let result = processor.process(&block, &mut frontier);
         assert_eq!(result, ProcessResult::Rejected("invalid signature".into()));
@@ -1631,6 +1709,7 @@ mod tests {
         let account_address = derive_address(&account_kp.public);
 
         let mut processor = BlockProcessor::with_genesis_account(0, genesis_address.clone());
+        processor.set_validate_timestamps(false); // fixtures use epoch-era timestamps
         let mut frontier = DagFrontier::new();
 
         // Open block for the account (signed by account key)
@@ -1647,6 +1726,7 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_000),
             params_hash: BlockHash::ZERO,
+            merge_sources: Vec::new(),
             work: 0,
             signature: Signature([0u8; 64]),
             hash: BlockHash::ZERO,
@@ -1672,6 +1752,7 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(2_000_000),
             params_hash: BlockHash::ZERO,
+            merge_sources: Vec::new(),
             work: 0,
             signature: Signature([0u8; 64]),
             hash: BlockHash::ZERO,
@@ -1693,6 +1774,7 @@ mod tests {
         let account_address = derive_address(&account_kp.public);
 
         let mut processor = BlockProcessor::with_genesis_account(0, genesis_address);
+        processor.set_validate_timestamps(false); // fixtures use epoch-era timestamps
         let mut frontier = DagFrontier::new();
 
         // Open block for account
@@ -1709,6 +1791,7 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_000),
             params_hash: BlockHash::ZERO,
+            merge_sources: Vec::new(),
             work: 0,
             signature: Signature([0u8; 64]),
             hash: BlockHash::ZERO,
@@ -1734,6 +1817,7 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(2_000_000),
             params_hash: BlockHash::ZERO,
+            merge_sources: Vec::new(),
             work: 0,
             signature: Signature([0u8; 64]),
             hash: BlockHash::ZERO,
@@ -1780,7 +1864,7 @@ mod tests {
         block.hash = block.compute_hash();
 
         let result = BlockProcessor::validate_balance_transition(&block, 1000, 100);
-        assert_eq!(result, Err("send block cannot change BRN balance".into()));
+        assert_eq!(result, Err("send block cannot change spent BRN".into()));
     }
 
     #[test]
@@ -1798,6 +1882,7 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_001),
             params_hash: BlockHash::ZERO,
+            merge_sources: Vec::new(),
             work: 0,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,
@@ -1822,6 +1907,7 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_001),
             params_hash: BlockHash::ZERO,
+            merge_sources: Vec::new(),
             work: 0,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,
@@ -1836,6 +1922,68 @@ mod tests {
     }
 
     #[test]
+    fn open_block_rejects_self_reported_brn() {
+        // The birthright is computed, never claimed: open blocks must not
+        // carry any spent BRN.
+        let mut block = StateBlock {
+            version: CURRENT_BLOCK_VERSION,
+            block_type: BlockType::Open,
+            account: test_account(),
+            previous: BlockHash::ZERO,
+            representative: test_representative(),
+            brn_balance: 12345,
+            trst_balance: 0,
+            link: BlockHash::ZERO,
+            origin: TxHash::ZERO,
+            transaction: TxHash::ZERO,
+            timestamp: Timestamp::new(1_000_001),
+            params_hash: BlockHash::ZERO,
+            merge_sources: Vec::new(),
+            work: 0,
+            signature: Signature([1u8; 64]),
+            hash: BlockHash::ZERO,
+        };
+        block.hash = block.compute_hash();
+        assert!(BlockProcessor::validate_open_block(&block, None).is_err());
+
+        block.brn_balance = 0;
+        block.hash = block.compute_hash();
+        assert!(BlockProcessor::validate_open_block(&block, None).is_ok());
+    }
+
+    #[test]
+    fn open_block_rejects_self_reported_trst() {
+        // TRST only enters a chain from a real pending send: an open block
+        // claiming TRST must match a pending entry exactly.
+        let mut block = StateBlock {
+            version: CURRENT_BLOCK_VERSION,
+            block_type: BlockType::Open,
+            account: test_account(),
+            previous: BlockHash::ZERO,
+            representative: test_representative(),
+            brn_balance: 0,
+            trst_balance: 777,
+            link: BlockHash::new([9u8; 32]),
+            origin: TxHash::ZERO,
+            transaction: TxHash::ZERO,
+            timestamp: Timestamp::new(1_000_001),
+            params_hash: BlockHash::ZERO,
+            merge_sources: Vec::new(),
+            work: 0,
+            signature: Signature([1u8; 64]),
+            hash: BlockHash::ZERO,
+        };
+        block.hash = block.compute_hash();
+
+        // No pending → any claimed TRST is rejected.
+        assert!(BlockProcessor::validate_open_block(&block, None).is_err());
+        // Pending with a different amount → rejected.
+        assert!(BlockProcessor::validate_open_block(&block, Some(500)).is_err());
+        // Pending matching exactly → receive-open accepted.
+        assert!(BlockProcessor::validate_open_block(&block, Some(777)).is_ok());
+    }
+
+    #[test]
     fn balance_validation_burn_valid() {
         let mut block = StateBlock {
             version: CURRENT_BLOCK_VERSION,
@@ -1843,13 +1991,15 @@ mod tests {
             account: test_account(),
             previous: BlockHash::new([0x11; 32]),
             representative: test_representative(),
-            brn_balance: 500,
+            // Ascending odometer: prev 1000 spent + 500 burned.
+            brn_balance: 1500,
             trst_balance: 100,
             link: BlockHash::ZERO,
             origin: TxHash::ZERO,
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_001),
             params_hash: BlockHash::ZERO,
+            merge_sources: Vec::new(),
             work: 0,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,
@@ -1860,20 +2010,22 @@ mod tests {
     }
 
     #[test]
-    fn balance_validation_burn_rejects_brn_increase() {
+    fn balance_validation_burn_rejects_spent_brn_decrease() {
         let mut block = StateBlock {
             version: CURRENT_BLOCK_VERSION,
             block_type: BlockType::Burn,
             account: test_account(),
             previous: BlockHash::new([0x11; 32]),
             representative: test_representative(),
-            brn_balance: 1500,
+            // Odometer going backwards (un-spending BRN) must be rejected.
+            brn_balance: 500,
             trst_balance: 100,
             link: BlockHash::ZERO,
             origin: TxHash::ZERO,
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_001),
             params_hash: BlockHash::ZERO,
+            merge_sources: Vec::new(),
             work: 0,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,
@@ -1899,6 +2051,7 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_001),
             params_hash: BlockHash::ZERO,
+            merge_sources: Vec::new(),
             work: 0,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,
@@ -2029,6 +2182,7 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_010),
             params_hash: BlockHash::ZERO,
+            merge_sources: Vec::new(),
             work: 0,
             signature: Signature([6u8; 64]),
             hash: BlockHash::ZERO,

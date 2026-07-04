@@ -48,6 +48,7 @@ pub fn create_genesis_block(config: &GenesisConfig) -> StateBlock {
         transaction: TxHash::ZERO,
         timestamp,
         params_hash: BlockHash::ZERO,
+        merge_sources: Vec::new(),
         work: 0,
         signature: Signature([0u8; 64]),
         hash: BlockHash::ZERO,

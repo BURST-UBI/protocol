@@ -13,6 +13,9 @@ pub struct VerificationState {
     pub phase: VerificationPhase,
     /// Endorsements received so far.
     pub endorsements: Vec<Endorsement>,
+    /// O(1) lookup set for endorser duplicate detection.
+    #[serde(default)]
+    pub endorser_set: HashSet<WalletAddress>,
     /// Verifiers selected for this round.
     pub selected_verifiers: Vec<WalletAddress>,
     /// Votes cast so far.

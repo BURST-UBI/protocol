@@ -2,7 +2,7 @@
 //!
 //! Provides endpoints for:
 //! - Account info, balances (BRN + TRST), history, and pending
-//! - Transaction submission (burn, send, split, merge)
+//! - Transaction submission (burn, send, merge)
 //! - Block queries (single and batch)
 //! - Work generation
 //! - Verification status

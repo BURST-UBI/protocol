@@ -24,14 +24,3 @@ pub use network::NetworkId;
 pub use params::ProtocolParams;
 pub use state::{TrstState, WalletState};
 pub use time::Timestamp;
-
-/// Tracks what fraction of a merged token came from a specific origin.
-///
-/// Used by the TRST engine, pending store, and ledger bridge to carry
-/// provenance through merges, transfers, and pending entries.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct OriginProportion {
-    pub origin: TxHash,
-    pub origin_wallet: WalletAddress,
-    pub amount: u128,
-}

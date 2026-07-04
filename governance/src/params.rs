@@ -42,7 +42,8 @@ pub enum GovernableParam {
     // Verification
     VerificationTimeoutSecs,
     ChallengeDurationSecs,
-    EndorserRewardBps,
+    ChallengeRewardBps,
+    ChallengeRewardCap,
 
     // Economic
     NewWalletSpendingLimit,
@@ -90,7 +91,8 @@ impl GovernableParam {
             Self::ConstiQuorumBps => "consti_quorum_bps",
             Self::VerificationTimeoutSecs => "verification_timeout_secs",
             Self::ChallengeDurationSecs => "challenge_duration_secs",
-            Self::EndorserRewardBps => "endorser_reward_bps",
+            Self::ChallengeRewardBps => "challenge_reward_bps",
+            Self::ChallengeRewardCap => "challenge_reward_cap",
             Self::NewWalletSpendingLimit => "new_wallet_spending_limit",
             Self::NewWalletLimitDurationSecs => "new_wallet_limit_duration_secs",
             Self::BootstrapExitThreshold => "bootstrap_exit_threshold",

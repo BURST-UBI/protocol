@@ -257,8 +257,14 @@ impl BurstNode {
         let vote_kp = burst_crypto::generate_keypair();
         let vote_generator = {
             let rep_addr = burst_crypto::derive_address(&vote_kp.public);
-            tracing::info!(representative = %rep_addr, "generated node representative key");
-            Arc::new(Mutex::new(VoteGenerator::new(rep_addr, vote_kp.private.0)))
+            let mut vg = VoteGenerator::new(rep_addr.clone(), vote_kp.private.0);
+            if config.enable_representative {
+                vg.set_representative(true);
+                tracing::info!(representative = %rep_addr, "node voting as representative (enabled)");
+            } else {
+                tracing::info!(representative = %rep_addr, "node representative voting disabled");
+            }
+            Arc::new(Mutex::new(vg))
         };
         let node_kp = burst_crypto::generate_keypair();
         let node_address = burst_crypto::derive_address(&node_kp.public);
@@ -514,6 +520,7 @@ impl BurstNode {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(0),
             params_hash: self.config.params.params_hash(),
+            merge_sources: Vec::new(),
             work: 0,
             signature: Signature([0u8; 64]),
             hash: BlockHash::ZERO,
@@ -639,12 +646,101 @@ impl BurstNode {
                     .err()
                 });
 
+                // Validate Open blocks: balances must not be self-reported.
+                // brn must be 0 (the birthright is computed, never claimed);
+                // trst must be 0 unless this is a receive-open matching an
+                // existing pending send exactly.
+                let open_rejected = if block.block_type == BlockType::Open {
+                    let expected_pending = if block.link.is_zero() {
+                        None
+                    } else {
+                        let send_hash = burst_types::TxHash::new(*block.link.as_bytes());
+                        store
+                            .pending_store()
+                            .get_pending(&block.account, &send_hash)
+                            .ok()
+                            .map(|p| p.amount)
+                    };
+                    BlockProcessor::validate_open_block(&block, expected_pending).err()
+                } else {
+                    None
+                };
+
+                // Validate Receive blocks against the pending store: the
+                // referenced pending send must exist and the claimed balance
+                // increase must equal its amount exactly. TRST is conserved —
+                // it only ever enters a chain from a real send (which traces
+                // to a real burn).
+                let receive_rejected = if block.block_type == BlockType::Receive {
+                    let send_hash = burst_types::TxHash::new(*block.link.as_bytes());
+                    match store.pending_store().get_pending(&block.account, &send_hash) {
+                        Ok(pending) => {
+                            let prev_trst =
+                                prev_block.as_ref().map_or(0, |b| b.trst_balance);
+                            let claimed = block.trst_balance.saturating_sub(prev_trst);
+                            if claimed != pending.amount {
+                                Some(format!(
+                                    "receive claims {} TRST but pending send {} holds {}",
+                                    claimed, send_hash, pending.amount
+                                ))
+                            } else {
+                                None
+                            }
+                        }
+                        Err(_) => Some(format!(
+                            "receive references pending send {} which does not exist",
+                            send_hash
+                        )),
+                    }
+                } else {
+                    None
+                };
+
+                // Validate BRN-spending blocks against the computed counter:
+                // the odometer delta (burn or stake amount) must be covered by
+                // BRN(w) = rate-accrual(verified_at → block.timestamp) − burned
+                // − staked, computed independently by this node. This is the
+                // whitepaper's core property — BRN exists only as computation,
+                // and the ledger verifies the computation at spend time.
+                let brn_spend_rejected = if matches!(
+                    block.block_type,
+                    BlockType::Burn
+                        | BlockType::Endorse
+                        | BlockType::Challenge
+                        | BlockType::VerificationVote
+                ) {
+                    let spend = block.brn_balance.saturating_sub(prev_brn_balance);
+                    if spend > 0 {
+                        let brn = brn_engine_bp.lock().await;
+                        match brn.wallets.get(&block.account) {
+                            Some(state) => {
+                                let available = brn.compute_balance(state, block.timestamp);
+                                if spend > available {
+                                    Some(format!(
+                                        "BRN spend of {} exceeds computed available balance {}",
+                                        spend, available
+                                    ))
+                                } else {
+                                    None
+                                }
+                            }
+                            None => Some(
+                                "account has no BRN accrual state (not verified) — cannot spend BRN"
+                                    .to_string(),
+                            ),
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
                 // Enforce verification status for Send/Burn blocks
                 let verification_rejected = if matches!(
                     block.block_type,
                     BlockType::Send
                         | BlockType::Burn
-                        | BlockType::Split
                         | BlockType::Merge
                         | BlockType::Endorse
                         | BlockType::Challenge
@@ -680,7 +776,7 @@ impl BurstNode {
                             let amount = if block.block_type == BlockType::Send {
                                 acct.trst_balance.saturating_sub(block.trst_balance)
                             } else {
-                                prev_brn_balance.saturating_sub(block.brn_balance)
+                                block.brn_balance.saturating_sub(prev_brn_balance)
                             };
                             let now = Timestamp::new(unix_now_secs());
                             crate::limits::check_wallet_limits(acct, amount, now, &config_params_bp)
@@ -690,13 +786,13 @@ impl BurstNode {
                         None
                     };
 
-                // Reject sends/splits of expired or revoked TRST.
+                // Reject sends of expired or revoked TRST.
                 // The TrstEngine tracks per-wallet token portfolios in memory;
                 // if the sender is tracked, verify the send amount doesn't
                 // exceed the non-expired, non-revoked (transferable) balance.
                 let trst_transferable_rejected = if matches!(
                     block.block_type,
-                    BlockType::Send | BlockType::Split
+                    BlockType::Send
                 ) {
                     let send_amount = prev_account
                         .as_ref()
@@ -704,8 +800,11 @@ impl BurstNode {
                         .unwrap_or(0);
                     if send_amount > 0 {
                         let mut trst = trst_engine_bp.lock().await;
-                        let now = Timestamp::new(unix_now_secs());
-                        match trst.transferable_balance(&block.account, now, trst_expiry_secs) {
+                        // Bounded block timestamp: deterministic across nodes
+                        // (a local clock would let honest nodes disagree at
+                        // the expiry margin).
+                        let now = block.timestamp;
+                        match trst.transferable_balance(&block.account, now) {
                             Some(transferable) if send_amount > transferable => {
                                 tracing::warn!(
                                     account = %block.account,
@@ -718,7 +817,33 @@ impl BurstNode {
                                     send_amount, transferable
                                 ))
                             }
-                            _ => None,
+                            Some(_) => {
+                                // Send must never cross origin boundaries — the
+                                // wallet must merge first (whitepaper §Merging).
+                                // Check the referenced origin actually covers
+                                // the amount.
+                                let origin_avail = trst.origin_transferable(
+                                    &block.account,
+                                    &block.origin,
+                                    now,
+                                );
+                                if send_amount > origin_avail {
+                                    tracing::warn!(
+                                        account = %block.account,
+                                        origin = %block.origin,
+                                        send_amount,
+                                        origin_avail,
+                                        "rejected send: amount exceeds the referenced origin's tokens (merge first)"
+                                    );
+                                    Some(format!(
+                                        "send of {} exceeds the {} transferable TRST of origin {} — merge tokens first",
+                                        send_amount, origin_avail, block.origin
+                                    ))
+                                } else {
+                                    None
+                                }
+                            }
+                            None => None,
                         }
                     } else {
                         None
@@ -728,6 +853,12 @@ impl BurstNode {
                 };
 
                 let result = if let Some(reason) = balance_rejected {
+                    ProcessResult::Rejected(reason)
+                } else if let Some(reason) = open_rejected {
+                    ProcessResult::Rejected(reason)
+                } else if let Some(reason) = receive_rejected {
+                    ProcessResult::Rejected(reason)
+                } else if let Some(reason) = brn_spend_rejected {
                     ProcessResult::Rejected(reason)
                 } else if let Some(reason) = verification_rejected {
                     ProcessResult::Rejected(reason)
@@ -777,7 +908,11 @@ impl BurstNode {
                         let mut trst = trst_engine_bp.lock().await;
 
                         // ── In-memory economics ──────────────────────────────
-                        let econ_now = Timestamp::new(unix_now_secs());
+                        // The bounded, signed block timestamp — NOT the local
+                        // clock — drives all economic computation so every
+                        // node stamps identical token timestamps and computes
+                        // identical expiry/accrual results.
+                        let econ_now = block.timestamp;
                         let econ_result = crate::ledger_bridge::process_block_economics(
                             &block,
                             &mut brn,
@@ -816,7 +951,24 @@ impl BurstNode {
                                 mint_token: Some(token),
                                 ..
                             } => {
-                                trst.track_token(token.clone());
+                                // Two-phase burn (8.4a): the freshly minted TRST
+                                // goes to PENDING — the provider must publish a
+                                // Receive block to claim it, exactly like a send.
+                                // This keeps the receiver's on-chain balance in
+                                // sync with the engine and lets them reject it.
+                                let provenance = vec![burst_trst::ConsumedProvenance {
+                                    amount: token.amount,
+                                    origin: token.origin,
+                                    origin_wallet: token.origin_wallet.clone(),
+                                    origin_timestamp: token.origin_timestamp,
+                                    effective_origin_timestamp: token
+                                        .effective_origin_timestamp,
+                                }];
+                                deferred_pending = Some((
+                                    token.amount,
+                                    token.holder.clone(),
+                                    provenance,
+                                ));
                                 let expiry_ts = Timestamp::new(
                                     token
                                         .effective_origin_timestamp
@@ -833,8 +985,9 @@ impl BurstNode {
                                 if let Some(acct) = prev_account.as_ref() {
                                     let send_amount =
                                         acct.trst_balance.saturating_sub(*trst_balance_after);
+                                    let token_origin = &block.origin;
                                     let provenance =
-                                        trst.debit_wallet_with_provenance(sender, send_amount);
+                                        trst.debit_wallet_with_provenance(sender, token_origin, send_amount);
                                     if let Some(destination) =
                                         crate::ledger_bridge::extract_receiver_from_link(
                                             &block.link,
@@ -861,7 +1014,20 @@ impl BurstNode {
                                             &pend,
                                             trst_expiry_secs,
                                         );
-                                    trst.track_token(received_token);
+                                    // Applies any revocation that landed while the
+                                    // send was in flight (O(1) graph lookup), then
+                                    // tracks the token.
+                                    let revocations =
+                                        trst.receive_token(received_token, econ_now);
+                                    for ev in &revocations {
+                                        tracing::warn!(
+                                            %receiver,
+                                            %send_block_hash,
+                                            revoked_origin = %ev.revoked_origin,
+                                            revoked_amount = ev.revoked_amount,
+                                            "TRST receive: revocation applied to in-flight token"
+                                        );
+                                    }
                                     tracing::debug!(
                                         %receiver,
                                         %send_block_hash,
@@ -878,79 +1044,59 @@ impl BurstNode {
                             }
                             crate::ledger_bridge::EconomicResult::Merge { ref account } => {
                                 if let Some(portfolio) = trst.get_portfolio(account) {
-                                    let active_tokens: Vec<burst_trst::TrstToken> = portfolio
-                                        .tokens
-                                        .iter()
-                                        .filter(|t| t.state == burst_types::TrstState::Active)
-                                        .cloned()
-                                        .collect();
-                                    if active_tokens.len() >= 2 {
+                                    // Input selection: the block's signed source
+                                    // list when the wallet chose one (6.17b),
+                                    // otherwise a deterministic expiry-grouped
+                                    // auto-selection — merging tokens with similar
+                                    // expiries maximizes retained value under the
+                                    // earliest-expiry floor rule (whitepaper
+                                    // §Merging).
+                                    let selected: Vec<burst_trst::TrstToken> = if !block
+                                        .merge_sources
+                                        .is_empty()
+                                    {
+                                        let mut chosen = Vec::with_capacity(block.merge_sources.len());
+                                        let mut all_found = true;
+                                        for id in &block.merge_sources {
+                                            match portfolio.tokens.iter().find(|t| t.id == *id) {
+                                                Some(t) => chosen.push(t.clone()),
+                                                None => {
+                                                    tracing::warn!(
+                                                        %account,
+                                                        token = %id,
+                                                        "merge block references a token not in the portfolio — merge skipped"
+                                                    );
+                                                    all_found = false;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        if all_found { chosen } else { Vec::new() }
+                                    } else {
+                                        select_expiry_merge_group(
+                                            portfolio,
+                                            econ_now,
+                                            trst.expiry_secs,
+                                        )
+                                    };
+                                    if selected.len() >= 2 {
                                         let merge_tx =
                                             burst_types::TxHash::new(*block.hash.as_bytes());
                                         match trst.merge(
-                                            &active_tokens,
+                                            &selected,
                                             account.clone(),
                                             merge_tx,
                                             econ_now,
-                                            trst_expiry_secs,
                                         ) {
                                             Ok(merged) => {
                                                 let ids_to_remove: std::collections::HashSet<_> =
-                                                    active_tokens.iter().map(|t| t.id).collect();
+                                                    selected.iter().map(|t| t.id).collect();
                                                 trst.bulk_untrack(account, &ids_to_remove);
                                                 trst.track_token(merged);
-                                                tracing::info!(%account, count = active_tokens.len(), "TRST merge: tokens merged in portfolio");
+                                                tracing::info!(%account, count = selected.len(), "TRST merge: tokens merged in portfolio");
                                             }
                                             Err(e) => {
                                                 tracing::warn!(%account, error = %e, "TRST merge failed");
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            crate::ledger_bridge::EconomicResult::Split { ref account } => {
-                                let split_amount = u128::from_be_bytes({
-                                    let b = block.link.as_bytes();
-                                    let mut arr = [0u8; 16];
-                                    arr.copy_from_slice(&b[..16]);
-                                    arr
-                                });
-                                if split_amount > 0 {
-                                    if let Some(portfolio) = trst.get_portfolio(account) {
-                                        if let Some(parent) = portfolio.tokens.first().cloned() {
-                                            if split_amount > parent.amount {
-                                                tracing::warn!(%account, split_amount, parent_amount = parent.amount, "TRST split rejected: split amount exceeds parent token");
-                                            } else if split_amount == parent.amount {
-                                                tracing::warn!(%account, split_amount, "TRST split rejected: split amount equals parent (no-op)");
-                                            } else {
-                                                let remainder = parent.amount - split_amount;
-                                                let hash_a = burst_types::TxHash::new(
-                                                    *block.hash.as_bytes(),
-                                                );
-                                                let mut hash_b_bytes = *block.hash.as_bytes();
-                                                hash_b_bytes[0] ^= 0xFF;
-                                                let hash_b = burst_types::TxHash::new(hash_b_bytes);
-                                                match trst.split(
-                                                    &parent,
-                                                    &[
-                                                        (account.clone(), split_amount),
-                                                        (account.clone(), remainder),
-                                                    ],
-                                                    &[hash_a, hash_b],
-                                                    econ_now,
-                                                    trst_expiry_secs,
-                                                ) {
-                                                    Ok(children) => {
-                                                        trst.untrack_token(account, &parent.id);
-                                                        for child in children {
-                                                            trst.track_token(child);
-                                                        }
-                                                        tracing::info!(%account, split_amount, remainder, "TRST split: token split in portfolio");
-                                                    }
-                                                    Err(e) => {
-                                                        tracing::warn!(%account, error = %e, "TRST split failed");
-                                                    }
-                                                }
                                             }
                                         }
                                     }
@@ -1229,28 +1375,14 @@ impl BurstNode {
                         // BurnOnly: BRN was burned but no valid receiver was found,
                         // so no TRST was minted. The burn was already recorded by
                         // process_block_economics; log for visibility.
-                        if let crate::ledger_bridge::EconomicResult::BurnOnly {
-                            burn_amount,
-                            ref burn_result,
-                        } = econ_result
+                        if let crate::ledger_bridge::EconomicResult::BurnOnly { burn_amount } =
+                            econ_result
                         {
-                            match burn_result {
-                                Ok(()) => {
-                                    tracing::info!(
-                                        account = %block.account,
-                                        burn_amount,
-                                        "BRN burned without TRST mint (no valid receiver)"
-                                    );
-                                }
-                                Err(e) => {
-                                    tracing::error!(
-                                        account = %block.account,
-                                        burn_amount,
-                                        error = %e,
-                                        "BRN burn-only recording failed"
-                                    );
-                                }
-                            }
+                            tracing::info!(
+                                account = %block.account,
+                                burn_amount,
+                                "BRN burned without TRST mint (no valid receiver)"
+                            );
                         }
 
                         // Process governance blocks through the GovernanceEngine
@@ -1470,6 +1602,22 @@ impl BurstNode {
                                                             tracing::warn!(error = %e, "failed to propagate BRN rate change from activation block");
                                                         }
                                                     }
+                                                    burst_governance::GovernableParam::TrstExpirySecs => {
+                                                        // 6.9: expiry is computed from inception +
+                                                        // CURRENT period — previously expired TRST
+                                                        // can become transferable again.
+                                                        let new_expiry = *value as u64;
+                                                        let mut trst_lock =
+                                                            trst_engine_bp.lock().await;
+                                                        trst_lock.set_expiry_period(
+                                                            new_expiry,
+                                                            Timestamp::new(unix_now_secs()),
+                                                        );
+                                                        tracing::info!(
+                                                            expiry_secs = new_expiry,
+                                                            "TRST expiry period changed via governance — portfolios re-evaluated"
+                                                        );
+                                                    }
                                                     other => {
                                                         tracing::info!(param = ?other, value = value, "governance parameter activated via on-chain block");
                                                     }
@@ -1527,15 +1675,10 @@ impl BurstNode {
                             }
                         }
 
-                        // Split/Merge: balance is handled at the ledger level by
+                        // Merge: balance is handled at the ledger level by
                         // update_account_on_block (trst_balance comes from the block).
-                        // Individual token provenance tracking (TrstEngine split/merge)
+                        // Individual token provenance tracking (TrstEngine merge)
                         // is deferred until per-token persistence via TrstIndexStore.
-                        if let crate::ledger_bridge::EconomicResult::Split { ref account } =
-                            econ_result
-                        {
-                            tracing::info!(%account, "TRST split processed at ledger level");
-                        }
                         if let crate::ledger_bridge::EconomicResult::Merge { ref account } =
                             econ_result
                         {
@@ -1646,6 +1789,21 @@ impl BurstNode {
                                 }
                             }
 
+                            // Challenge re-votes don't auto-tally: finalize as
+                            // soon as the last selected verifier has voted.
+                            // The resulting WalletUnverified/ChallengeResolved
+                            // events queue into pending_events and are drained
+                            // just below.
+                            match orch.try_resolve_challenge(target_addr, &config_params_bp) {
+                                Ok(Some(_)) => {
+                                    tracing::info!(target = %target_addr, "challenge vote complete — resolving");
+                                }
+                                Ok(None) => {}
+                                Err(e) => {
+                                    tracing::warn!(target = %target_addr, error = %e, "challenge resolution failed");
+                                }
+                            }
+
                             // Drain orchestrator events and act on them
                             let events = orch.drain_events();
                             for event in events {
@@ -1659,99 +1817,81 @@ impl BurstNode {
                                         burst_verification::VerificationEvent::VerificationComplete { ref wallet, ref result, ref outcomes } => {
                                             tracing::info!(%wallet, ?result, "verification complete");
                                             if *result == burst_verification::VerificationResult::Verified {
+                                                let mut was_revoked = false;
+                                                let mut was_deactivated = false;
                                                 if let Ok(mut acct) = store.account_store().get_account(wallet) {
+                                                    was_revoked = acct.state == burst_types::WalletState::Revoked;
+                                                    was_deactivated = acct.state == burst_types::WalletState::Deactivated;
                                                     acct.state = burst_types::WalletState::Verified;
                                                     acct.verified_at = Some(Timestamp::now());
                                                     if let Err(e) = store.account_store().put_account(&acct) {
                                                         tracing::error!(%wallet, "failed to update account to Verified: {e}");
                                                     }
                                                 }
-                                                let mut brn_inner = brn_engine_bp.lock().await;
-                                                let ws = burst_brn::BrnWalletState::new(Timestamp::now());
-                                                brn_inner.track_wallet(wallet.clone(), ws);
-                                                tracing::info!(%wallet, "BRN accrual activated after verification");
 
-                                                // Mint TRST rewards for endorsers
-                                                let mut trst_inner = trst_engine_bp.lock().await;
-                                                let now_ts = Timestamp::now();
-                                                for eo in &outcomes.endorsers {
-                                                    if eo.trst_reward > 0 {
-                                                        let reward_hash = TxHash::new(
-                                                            burst_crypto::blake2b_256_multi(&[
-                                                                b"endorser_reward",
-                                                                eo.address.as_str().as_bytes(),
-                                                                wallet.as_str().as_bytes(),
-                                                            ]),
+                                                // 6.15(b): re-verification un-revokes the TRST
+                                                // this wallet originated, restoring it to all
+                                                // current holders.
+                                                if was_revoked {
+                                                    let mut trst_inner = trst_engine_bp.lock().await;
+                                                    let restored = trst_inner.un_revoke_by_origin(wallet, Timestamp::now());
+                                                    drop(trst_inner);
+                                                    if !restored.is_empty() {
+                                                        let total_restored: u128 = restored.iter().map(|r| r.amount).sum();
+                                                        tracing::info!(
+                                                            %wallet,
+                                                            restored_count = restored.len(),
+                                                            total_restored,
+                                                            "TRST un-revoked after re-verification"
                                                         );
-                                                        match trst_inner.mint(
-                                                            reward_hash,
-                                                            eo.address.clone(),
-                                                            eo.trst_reward,
-                                                            eo.address.clone(),
-                                                            now_ts,
-                                                        ) {
-                                                            Ok(ref token) => {
-                                                                tracing::info!(
-                                                                    endorser = %eo.address,
-                                                                    reward = eo.trst_reward,
-                                                                    "minted TRST reward for endorser"
-                                                                );
-                                                                let expiry_ts = Timestamp::new(
-                                                                    token.effective_origin_timestamp.as_secs()
-                                                                        .saturating_add(trst_expiry_secs),
-                                                                );
-                                                                if let Ok(mut idx_batch) = store.write_batch() {
-                                                                    let _ = idx_batch.put_origin_index(&token.origin, &token.id);
-                                                                    let _ = idx_batch.put_expiry_index(expiry_ts, &token.id);
-                                                                    if let Err(e) = idx_batch.commit() {
-                                                                        tracing::warn!(
-                                                                            endorser = %eo.address,
-                                                                            "failed to persist endorser reward TRST indices: {e}"
-                                                                        );
-                                                                    }
-                                                                }
-                                                            }
-                                                            Err(e) => {
-                                                                tracing::error!(
-                                                                    endorser = %eo.address,
-                                                                    error = %e,
-                                                                    "failed to mint endorser TRST reward"
-                                                                );
+                                                        if let Ok(mut acct) = store.account_store().get_account(wallet) {
+                                                            acct.revoked_trst = acct.revoked_trst.saturating_sub(total_restored);
+                                                            acct.trst_balance = acct.trst_balance.saturating_add(total_restored);
+                                                            if let Err(e) = store.account_store().put_account(&acct) {
+                                                                tracing::error!(%wallet, "failed to persist un-revocation counters: {e}");
                                                             }
                                                         }
                                                     }
                                                 }
-                                            }
-
-                                            // Resolve verifier stakes via BRN engine
-                                            for vo in &outcomes.verifiers {
-                                                if vo.staked == 0 {
-                                                    continue;
-                                                }
+                                                // Activate (or resume) BRN accrual. Endorsers
+                                                // receive NO protocol reward (decision 33.8a) —
+                                                // endorsement is a social obligation; their BRN
+                                                // was permanently burned by the Endorse block.
                                                 let mut brn_inner = brn_engine_bp.lock().await;
-                                                if let Some(ws) = brn_inner.get_wallet_mut(&vo.address) {
-                                                    if vo.voted_correctly {
-                                                        ws.total_staked = ws.total_staked.saturating_sub(vo.staked);
-                                                        tracing::info!(
-                                                            verifier = %vo.address,
-                                                            staked = vo.staked,
-                                                            "verifier stake returned (correct vote)"
-                                                        );
+                                                if was_deactivated {
+                                                    // Benign deactivation → re-verification
+                                                    // resumes accrual, keeping the balance the
+                                                    // wallet had earned (gap-shifted).
+                                                    if let Some(ws) = brn_inner.get_wallet_mut(wallet) {
+                                                        ws.resume_accrual(Timestamp::now());
+                                                        tracing::info!(%wallet, "BRN accrual resumed after re-verification of deactivated wallet");
                                                     } else {
-                                                        ws.total_staked = ws.total_staked.saturating_sub(vo.staked);
-                                                        ws.total_burned = ws.total_burned.saturating_add(vo.staked);
-                                                        tracing::info!(
-                                                            verifier = %vo.address,
-                                                            penalty = vo.penalty,
-                                                            "dissenter verifier stake forfeited"
-                                                        );
+                                                        brn_inner.track_wallet(wallet.clone(), burst_brn::BrnWalletState::new(Timestamp::now()));
                                                     }
                                                 } else {
-                                                    tracing::warn!(
-                                                        verifier = %vo.address,
-                                                        "verifier wallet not tracked in BRN engine, cannot resolve stake"
-                                                    );
+                                                    // Fresh verification (or fraud re-verification
+                                                    // — "new BRN starts fresh", 6.15).
+                                                    let ws = burst_brn::BrnWalletState::new(Timestamp::now());
+                                                    brn_inner.track_wallet(wallet.clone(), ws);
+                                                    tracing::info!(%wallet, "BRN accrual activated after verification");
                                                 }
+                                                drop(brn_inner);
+                                            }
+
+                                            // Resolve verifier stakes and burn-backed TRST
+                                            // rewards (decision 33.7d): dissenter stakes are
+                                            // forfeited (burned) and the majority receives
+                                            // that value as TRST via pending entries claimed
+                                            // with normal Receive blocks.
+                                            {
+                                                let mut brn_inner = brn_engine_bp.lock().await;
+                                                crate::ledger_bridge::resolve_verifier_outcomes(
+                                                    &mut brn_inner,
+                                                    &store.pending_store(),
+                                                    &outcomes.verifiers,
+                                                    wallet,
+                                                    block.timestamp,
+                                                );
                                             }
                                         }
                                         burst_verification::VerificationEvent::WalletUnverified { ref wallet } => {
@@ -1768,6 +1908,14 @@ impl BurstNode {
                                                     "TRST revoked via orchestrator fraud confirmation"
                                                 );
                                             }
+                                            // Fraud stops BRN accrual — the whitepaper's
+                                            // "loses all BRN accrual and transaction rights".
+                                            {
+                                                let mut brn_inner = brn_engine_bp.lock().await;
+                                                if let Some(ws) = brn_inner.get_wallet_mut(wallet) {
+                                                    ws.stop_accrual(Timestamp::now());
+                                                }
+                                            }
                                             if let Ok(mut acct) = store.account_store().get_account(wallet) {
                                                 acct.state = burst_types::WalletState::Revoked;
                                                 acct.revoked_trst = acct.revoked_trst.saturating_add(total_revoked);
@@ -1777,8 +1925,109 @@ impl BurstNode {
                                                 }
                                             }
                                         }
+                                        burst_verification::VerificationEvent::WalletDeactivated { ref wallet } => {
+                                            // Benign unverification (whitepaper §Unverification
+                                            // Without Revocation): death, prolonged inactivity,
+                                            // or other Consti-defined grounds. BRN accrual stops
+                                            // and transaction rights are lost, but originated
+                                            // TRST is NOT revoked — it was legitimately earned.
+                                            tracing::info!(%wallet, "wallet deactivated (benign unverification — TRST NOT revoked)");
+                                            {
+                                                let mut brn_inner = brn_engine_bp.lock().await;
+                                                if let Some(ws) = brn_inner.get_wallet_mut(wallet) {
+                                                    ws.stop_accrual(Timestamp::now());
+                                                }
+                                            }
+                                            if let Ok(mut acct) = store.account_store().get_account(wallet) {
+                                                acct.state = burst_types::WalletState::Deactivated;
+                                                if let Err(e) = store.account_store().put_account(&acct) {
+                                                    tracing::error!(%wallet, "failed to persist account Deactivated state: {e}");
+                                                }
+                                            }
+                                        }
                                         burst_verification::VerificationEvent::ChallengeResolved { ref wallet, ref outcome } => {
                                             tracing::info!(%wallet, ?outcome.outcome, "challenge resolved via orchestrator");
+
+                                            // Resolve the challenger's BRN stake.
+                                            {
+                                                let mut brn_inner = brn_engine_bp.lock().await;
+                                                if let Some(ws) = brn_inner.get_wallet_mut(&outcome.challenger) {
+                                                    match outcome.outcome {
+                                                        burst_verification::ChallengeResult::FraudConfirmed => {
+                                                            // Stake returned in full.
+                                                            ws.total_staked = ws.total_staked.saturating_sub(outcome.challenger_stake);
+                                                            tracing::info!(challenger = %outcome.challenger, stake = outcome.challenger_stake, "challenger stake returned (fraud confirmed)");
+                                                        }
+                                                        burst_verification::ChallengeResult::ChallengeRejected => {
+                                                            // Stake forfeited (burned).
+                                                            ws.total_staked = ws.total_staked.saturating_sub(outcome.challenger_stake);
+                                                            ws.total_burned = ws.total_burned.saturating_add(outcome.challenger_stake);
+                                                            tracing::info!(challenger = %outcome.challenger, stake = outcome.challenger_stake, "challenger stake forfeited (challenge rejected)");
+                                                        }
+                                                        burst_verification::ChallengeResult::Expired => {
+                                                            // Half returned, half burned (time-wasting penalty).
+                                                            let penalty = outcome.challenger_stake / 2;
+                                                            ws.total_staked = ws.total_staked.saturating_sub(outcome.challenger_stake);
+                                                            ws.total_burned = ws.total_burned.saturating_add(penalty);
+                                                            tracing::info!(challenger = %outcome.challenger, penalty, "challenge expired — half the stake forfeited");
+                                                        }
+                                                    }
+                                                } else {
+                                                    tracing::warn!(challenger = %outcome.challenger, "challenger wallet not tracked in BRN engine, cannot resolve stake");
+                                                }
+
+                                                // Resolve challenge-vote verifier stakes and
+                                                // burn-backed TRST rewards (33.7d).
+                                                crate::ledger_bridge::resolve_verifier_outcomes(
+                                                    &mut brn_inner,
+                                                    &store.pending_store(),
+                                                    &outcome.verifier_outcomes,
+                                                    wallet,
+                                                    block.timestamp,
+                                                );
+                                            }
+
+                                            // Challenger TRST reward on confirmed fraud:
+                                            // min(revoked × bps, cap) per the parameter table.
+                                            // The WalletUnverified event is emitted before
+                                            // ChallengeResolved, so the revocation total is
+                                            // already recorded on the account. Backed by the
+                                            // destroyed revoked TRST (≥ 100x the reward), so
+                                            // never net-inflationary.
+                                            if outcome.outcome == burst_verification::ChallengeResult::FraudConfirmed {
+                                                let revoked_total = store
+                                                    .account_store()
+                                                    .get_account(wallet)
+                                                    .map(|a| a.revoked_trst)
+                                                    .unwrap_or(0);
+                                                let reward = std::cmp::min(
+                                                    revoked_total.saturating_mul(config_params_bp.challenge_reward_bps as u128) / 10_000,
+                                                    config_params_bp.challenge_reward_cap,
+                                                );
+                                                if reward > 0 {
+                                                    match crate::ledger_bridge::create_reward_pending(
+                                                        &store.pending_store(),
+                                                        &outcome.challenger,
+                                                        wallet,
+                                                        b"challenger-reward",
+                                                        reward,
+                                                        block.timestamp,
+                                                    ) {
+                                                        Ok(reward_hash) => tracing::info!(
+                                                            challenger = %outcome.challenger,
+                                                            reward,
+                                                            revoked_total,
+                                                            %reward_hash,
+                                                            "challenger TRST reward granted as pending"
+                                                        ),
+                                                        Err(e) => tracing::error!(
+                                                            challenger = %outcome.challenger,
+                                                            error = %e,
+                                                            "failed to create challenger reward pending entry"
+                                                        ),
+                                                    }
+                                                }
+                                            }
                                         }
                                         burst_verification::VerificationEvent::VerifierPenalized { ref verifier, ref reason, cooldown_until } => {
                                             tracing::warn!(
@@ -2251,6 +2500,7 @@ impl BurstNode {
                                             transaction: TxHash::new(*new_params_hash.as_bytes()),
                                             timestamp: now,
                                             params_hash: gov_params.params_hash(),
+                                            merge_sources: Vec::new(),
                                             work: 0,
                                             signature: Signature([0u8; 64]),
                                             hash: BlockHash::ZERO,
@@ -2441,9 +2691,17 @@ impl BurstNode {
         });
         self.task_handles.push(drain_handle);
 
-        // ── Expired TRST cleanup task — returns expired pending tokens ─────
+        // ── Expired TRST cleanup task ──────────────────────────────────────
+        // Every 60s:
+        //  1. flush expired tokens across tracked portfolios (amortized —
+        //     per-wallet earliest-expiry makes untouched wallets O(1))
+        //  2. return expired pending sends to their senders (6.16a)
+        //  3. clean up stale expiry index entries
         let store_expiry = Arc::clone(&self.store);
-        let trst_expiry_bg = self.config.params.trst_expiry_secs;
+        let trst_engine_expiry = Arc::clone(&self.trst_engine);
+        let orch_expiry = Arc::clone(&self.verification_orchestrator);
+        let brn_engine_expiry = Arc::clone(&self.brn_engine);
+        let challenge_duration_secs = self.config.params.challenge_duration_secs;
         let mut shutdown_rx_expiry = self.shutdown.subscribe();
 
         let expiry_handle = tokio::spawn(async move {
@@ -2457,23 +2715,118 @@ impl BurstNode {
                     }
                     _ = interval.tick() => {
                         let now_secs = unix_now_secs();
+                        let now = Timestamp::new(now_secs);
                         let cutoff = Timestamp::new(now_secs);
+
+                        // 1. Flush expired tokens in the engine so cached
+                        //    balances and account-facing state stay honest.
+                        {
+                            let mut trst = trst_engine_expiry.lock().await;
+                            trst.flush_all_expired(now);
+                        }
+
+                        // 2. Return expired pending TRST to senders (6.16a).
+                        //    A send whose token expired before the receiver
+                        //    claimed it auto-cancels back to the sender —
+                        //    expired (non-transferable), counting toward the
+                        //    sender's reputation, not the receiver's.
+                        match store_expiry.pending_store().get_all_pending() {
+                            Ok(all_pending) => {
+                                let mut trst = trst_engine_expiry.lock().await;
+                                let expiry_secs = trst.expiry_secs;
+                                for (destination, send_hash, info) in all_pending {
+                                    let expired = info
+                                        .provenance
+                                        .first()
+                                        .map(|p| p.effective_origin_timestamp.has_expired(expiry_secs, now))
+                                        .unwrap_or(false);
+                                    if !expired {
+                                        continue;
+                                    }
+                                    let returned = crate::ledger_bridge::create_returned_token(
+                                        &destination,
+                                        &send_hash,
+                                        &info,
+                                    );
+                                    let sender = info.source.clone();
+                                    let amount = info.amount;
+                                    trst.receive_token(returned, now);
+                                    if let Err(e) = store_expiry
+                                        .pending_store()
+                                        .delete_pending(&destination, &send_hash)
+                                    {
+                                        tracing::warn!(
+                                            %destination,
+                                            %send_hash,
+                                            "failed to delete returned pending entry: {e}"
+                                        );
+                                    } else {
+                                        tracing::info!(
+                                            %sender,
+                                            %destination,
+                                            amount,
+                                            %send_hash,
+                                            "expired pending TRST returned to sender"
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!("failed to scan pending entries for expiry returns: {e}");
+                            }
+                        }
+
+                        // 3. Expire challenges that ran past the governable
+                        //    review period without collecting all votes
+                        //    (challenge_duration_secs). Resolved in favor of
+                        //    the challenged wallet: the challenger forfeits
+                        //    half the stake, voters get their stakes back.
+                        {
+                            let mut orch = orch_expiry.lock().await;
+                            let expired_events =
+                                orch.cleanup_expired_challenges(now, challenge_duration_secs);
+                            drop(orch);
+                            for event in expired_events {
+                                if let burst_verification::VerificationEvent::ChallengeResolved {
+                                    ref wallet,
+                                    ref outcome,
+                                } = event
+                                {
+                                    tracing::info!(
+                                        challenged = %wallet,
+                                        challenger = %outcome.challenger,
+                                        "challenge expired without full vote — resolved in favor of the challenged wallet"
+                                    );
+                                    let mut brn = brn_engine_expiry.lock().await;
+                                    if let Some(ws) = brn.get_wallet_mut(&outcome.challenger) {
+                                        // Half returned, half burned (time-wasting penalty).
+                                        let penalty = outcome.challenger_stake / 2;
+                                        ws.total_staked =
+                                            ws.total_staked.saturating_sub(outcome.challenger_stake);
+                                        ws.total_burned = ws.total_burned.saturating_add(penalty);
+                                    }
+                                    // Voters on the expired challenge get their
+                                    // stakes back (no rewards — no dissenters).
+                                    crate::ledger_bridge::resolve_verifier_outcomes(
+                                        &mut brn,
+                                        &store_expiry.pending_store(),
+                                        &outcome.verifier_outcomes,
+                                        wallet,
+                                        now,
+                                    );
+                                }
+                            }
+                        }
+
+                        // 4. Clean up expiry index entries (prevents index bloat).
                         let trst_idx = store_expiry.trst_index_store();
                         match trst_idx.get_expired_before(cutoff) {
                             Ok(expired) if !expired.is_empty() => {
                                 tracing::info!(
                                     count = expired.len(),
                                     cutoff = now_secs,
-                                    expiry_secs = trst_expiry_bg,
-                                    "found expired TRST tokens for cleanup"
+                                    "found expired TRST tokens for index cleanup"
                                 );
-                                // Clean up expiry index entries. The TRST engine
-                                // uses lazy expiry checking via `is_transferable()`
-                                // at transfer time, so we don't update engine state
-                                // here. This cleanup only prevents index bloat.
-                                // Account-level expired_trst counters are updated
-                                // when transactions involving expired tokens are
-                                // rejected during block processing.
                                 for tx_hash in &expired {
                                     if let Err(e) = trst_idx.delete_expiry_index(cutoff, tx_hash) {
                                         tracing::warn!(token = %tx_hash, "failed to clean up expiry index: {e}");
@@ -2759,6 +3112,8 @@ impl BurstNode {
         }
 
         // Restore TRST engine per-wallet token portfolios from LMDB.
+        // Runs after the merger graph restore: rebuild_indexes needs the graph
+        // to classify merged origins (wallet_origins must only hold burn txs).
         {
             let meta = self.store.meta_store();
             match meta.get_meta(TrstEngine::meta_key()) {
@@ -2767,6 +3122,7 @@ impl BurstNode {
                     let restored =
                         TrstEngine::load_wallets(&bytes, self.config.params.trst_expiry_secs);
                     trst.wallets = restored.wallets;
+                    trst.rebuild_indexes();
                     tracing::info!("TRST engine wallet portfolios restored from LMDB");
                 }
                 Err(_) => {
@@ -2853,6 +3209,28 @@ impl BurstNode {
                         }
                     }
                 }
+            }
+        }
+
+        // Seed the representative weight cache for this node's voting key.
+        // On a fresh testnet the genesis account is the only account, and its
+        // representative is itself (with zero TRST balance).  Without explicit
+        // weight, votes from this node would be rejected as zero-weight.
+        // Give each voting node a bootstrap weight so the first elections can
+        // reach quorum.
+        if self.config.enable_representative {
+            let vg = self.vote_generator.lock().await;
+            let rep_addr = vg.representative.clone();
+            drop(vg);
+            let mut rw = self.rep_weights.write().await;
+            if rw.weight(&rep_addr) == 0 {
+                let bootstrap_weight: u128 = 1_000_000;
+                rw.add_weight(&rep_addr, bootstrap_weight);
+                tracing::info!(
+                    representative = %rep_addr,
+                    weight = bootstrap_weight,
+                    "seeded bootstrap representative weight for voting"
+                );
             }
         }
 
@@ -3384,17 +3762,20 @@ impl BurstNode {
                             };
 
                             if peer_ids.is_empty() {
-                                continue;
+                                tracing::trace!("keepalive: no connected peers, skipping send");
                             }
 
-                            // Build the two keepalive variants
+                            // Build the two keepalive variants.
+                            // Use random_known_peers (not just connected) so that
+                            // discovered-but-not-yet-connected peers are propagated,
+                            // breaking the chicken-and-egg peer discovery problem.
                             let self_peers: Vec<String> = pm
                                 .random_peers_with_self(8)
                                 .iter()
                                 .map(|a| format!("{}:{}", a.ip, a.port))
                                 .collect();
                             let random_peers: Vec<String> = pm
-                                .random_peers(8)
+                                .random_known_peers(8)
                                 .iter()
                                 .map(|a| format!("{}:{}", a.ip, a.port))
                                 .collect();
@@ -4086,20 +4467,45 @@ impl BurstNode {
 
         let is_open = previous == BlockHash::ZERO;
 
+        // Encode a wallet address into a link field as its public key —
+        // the inverse of `extract_receiver_from_link` (which derives the
+        // address from the pubkey bytes).
+        fn address_link(addr: &burst_types::WalletAddress) -> Result<BlockHash, NodeError> {
+            burst_crypto::decode_address(addr.as_str())
+                .map(BlockHash::new)
+                .ok_or_else(|| {
+                    NodeError::Other(format!("invalid receiver address: {}", addr.as_str()))
+                })
+        }
+
+        // Check a BRN spend against the computed counter BRN(w) — the
+        // odometer field on blocks records cumulative spending only.
+        let check_brn_spend = |brn: &burst_brn::BrnEngine,
+                               account: &burst_types::WalletAddress,
+                               amount: u128|
+         -> Result<(), NodeError> {
+            let state = brn.wallets.get(account).ok_or_else(|| {
+                NodeError::Other("account has no BRN accrual state (not verified)".into())
+            })?;
+            let available = brn.compute_balance(state, now);
+            if amount > available {
+                return Err(NodeError::Other(format!(
+                    "insufficient BRN: need {}, computed available {}",
+                    amount, available
+                )));
+            }
+            Ok(())
+        };
+
+        let mut merge_sources: Vec<TxHash> = Vec::new();
         let (block_type, new_brn, new_trst, link) = match tx {
             burst_transactions::Transaction::Burn(burn) => {
-                if burn.amount > brn_balance {
-                    return Err(NodeError::Other(format!(
-                        "insufficient BRN: need {}, have {}",
-                        burn.amount, brn_balance
-                    )));
+                {
+                    let brn = self.brn_engine.lock().await;
+                    check_brn_spend(&brn, &sender, burn.amount)?;
                 }
-                let new_brn = brn_balance - burn.amount;
-                let new_trst = trst_balance;
-                let mut link_bytes = [0u8; 32];
-                let addr_bytes = burn.receiver.as_str().as_bytes();
-                let copy_len = addr_bytes.len().min(32);
-                link_bytes[..copy_len].copy_from_slice(&addr_bytes[..copy_len]);
+                // Ascending odometer: spending BRN increases the field.
+                let new_brn = brn_balance.saturating_add(burn.amount);
                 (
                     if is_open {
                         BlockType::Open
@@ -4107,8 +4513,8 @@ impl BurstNode {
                         BlockType::Burn
                     },
                     new_brn,
-                    new_trst,
-                    BlockHash::new(link_bytes),
+                    trst_balance,
+                    address_link(&burn.receiver)?,
                 )
             }
             burst_transactions::Transaction::Send(send) => {
@@ -4121,9 +4527,7 @@ impl BurstNode {
                 // Verify sender has enough transferable (non-expired, non-revoked) TRST
                 {
                     let mut trst = self.trst_engine.lock().await;
-                    let trst_expiry = self.config.params.trst_expiry_secs;
-                    if let Some(transferable) = trst.transferable_balance(&sender, now, trst_expiry)
-                    {
+                    if let Some(transferable) = trst.transferable_balance(&sender, now) {
                         if send.amount > transferable {
                             return Err(NodeError::Other(format!(
                                 "insufficient transferable TRST: need {} but only {} is transferable",
@@ -4133,10 +4537,6 @@ impl BurstNode {
                     }
                 }
                 let new_trst = trst_balance - send.amount;
-                let mut link_bytes = [0u8; 32];
-                let addr_bytes = send.receiver.as_str().as_bytes();
-                let copy_len = addr_bytes.len().min(32);
-                link_bytes[..copy_len].copy_from_slice(&addr_bytes[..copy_len]);
                 (
                     if is_open {
                         BlockType::Open
@@ -4145,8 +4545,50 @@ impl BurstNode {
                     },
                     brn_balance,
                     new_trst,
-                    BlockHash::new(link_bytes),
+                    address_link(&send.receiver)?,
                 )
+            }
+            burst_transactions::Transaction::Endorse(endorse) => {
+                {
+                    let brn = self.brn_engine.lock().await;
+                    check_brn_spend(&brn, &sender, endorse.burn_amount)?;
+                }
+                (
+                    BlockType::Endorse,
+                    brn_balance.saturating_add(endorse.burn_amount),
+                    trst_balance,
+                    address_link(&endorse.target)?,
+                )
+            }
+            burst_transactions::Transaction::Challenge(challenge) => {
+                {
+                    let brn = self.brn_engine.lock().await;
+                    check_brn_spend(&brn, &sender, challenge.stake_amount)?;
+                }
+                (
+                    BlockType::Challenge,
+                    brn_balance.saturating_add(challenge.stake_amount),
+                    trst_balance,
+                    address_link(&challenge.target)?,
+                )
+            }
+            burst_transactions::Transaction::VerificationVote(vote) => {
+                if vote.stake_amount > 0 {
+                    let brn = self.brn_engine.lock().await;
+                    check_brn_spend(&brn, &sender, vote.stake_amount)?;
+                }
+                (
+                    BlockType::VerificationVote,
+                    brn_balance.saturating_add(vote.stake_amount),
+                    trst_balance,
+                    address_link(&vote.target_wallet)?,
+                )
+            }
+            burst_transactions::Transaction::Merge(merge) => {
+                // The wallet's chosen token set goes on-chain (6.17b) so the
+                // merge inputs are signed, validated, and reconstructible.
+                merge_sources = merge.source_hashes.clone();
+                (BlockType::Merge, brn_balance, trst_balance, BlockHash::ZERO)
             }
             _ => {
                 // For other transaction types, create a generic block
@@ -4154,10 +4596,6 @@ impl BurstNode {
                     BlockType::Open
                 } else {
                     match tx {
-                        burst_transactions::Transaction::Split(_) => BlockType::Split,
-                        burst_transactions::Transaction::Merge(_) => BlockType::Merge,
-                        burst_transactions::Transaction::Endorse(_) => BlockType::Endorse,
-                        burst_transactions::Transaction::Challenge(_) => BlockType::Challenge,
                         burst_transactions::Transaction::GovernanceProposal(_) => {
                             BlockType::GovernanceProposal
                         }
@@ -4199,6 +4637,7 @@ impl BurstNode {
             transaction: tx_hash,
             timestamp: now,
             params_hash: BlockHash::ZERO,
+            merge_sources,
             work: 0,
             signature: tx.signature().clone(),
             hash: BlockHash::ZERO,
@@ -4236,6 +4675,53 @@ impl BurstNode {
     /// Get a handle to the block priority queue for submitting blocks.
     pub fn block_queue(&self) -> Arc<BlockPriorityQueue> {
         Arc::clone(&self.block_queue)
+    }
+}
+
+/// Deterministic expiry-grouped auto-merge selection (whitepaper §Merging:
+/// wallets group "tokens with similar expiry dates to maximize retained
+/// value"). Under the earliest-expiry floor rule, merging a fresh token with
+/// an old one destroys the fresh token's remaining lifetime — so the group is
+/// the oldest token plus every live token whose effective timestamp falls
+/// within 10% of the expiry period of it. Deterministic across nodes: it
+/// depends only on portfolio state and the current expiry period.
+fn select_expiry_merge_group(
+    portfolio: &burst_trst::WalletPortfolio,
+    now: Timestamp,
+    expiry_secs: u64,
+) -> Vec<burst_trst::TrstToken> {
+    let mut live: Vec<&burst_trst::TrstToken> = portfolio
+        .tokens
+        .iter()
+        .filter(|t| {
+            t.state == burst_types::TrstState::Active
+                && t.revoked_origin.is_none()
+                && !t.is_expired(now, expiry_secs)
+        })
+        .collect();
+    if live.len() < 2 {
+        return Vec::new();
+    }
+    live.sort_by_key(|t| {
+        (
+            t.effective_origin_timestamp.as_secs(),
+            *t.id.as_bytes(),
+        )
+    });
+
+    let window = expiry_secs / 10;
+    let oldest = live[0].effective_origin_timestamp.as_secs();
+    let cutoff = oldest.saturating_add(window);
+    let group: Vec<burst_trst::TrstToken> = live
+        .into_iter()
+        .filter(|t| t.effective_origin_timestamp.as_secs() <= cutoff)
+        .take(burst_trst::MAX_MERGE_SOURCES)
+        .cloned()
+        .collect();
+    if group.len() < 2 {
+        Vec::new()
+    } else {
+        group
     }
 }
 

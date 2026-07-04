@@ -46,17 +46,6 @@ pub fn validate_transaction(
             }
             validate_send(send_tx, now)?;
         }
-        Transaction::Split(split_tx) => {
-            if split_tx.outputs.is_empty() {
-                return Err(TransactionError::ZeroAmount);
-            }
-            for output in &split_tx.outputs {
-                if output.amount == 0 {
-                    return Err(TransactionError::ZeroAmount);
-                }
-            }
-            validate_split(split_tx, now)?;
-        }
         Transaction::Merge(merge_tx) => {
             validate_merge(merge_tx, now)?;
         }
@@ -120,41 +109,21 @@ pub fn validate_send(tx: &crate::send::SendTx, _now: Timestamp) -> Result<(), Tr
     Ok(())
 }
 
-/// Validate a split transaction.
-pub fn validate_split(tx: &crate::split::SplitTx, _now: Timestamp) -> Result<(), TransactionError> {
-    if tx.outputs.is_empty() {
-        return Err(TransactionError::ZeroAmount);
-    }
-
-    for output in &tx.outputs {
-        if output.amount == 0 {
-            return Err(TransactionError::ZeroAmount);
-        }
-    }
-
-    // Parent hash must not be zero
-    if tx.parent_hash.is_zero() {
-        return Err(TransactionError::Other(
-            "split transaction parent hash must not be zero".into(),
-        ));
-    }
-
-    // Origin hash must not be zero
-    if tx.origin.is_zero() {
-        return Err(TransactionError::Other(
-            "split transaction origin hash must not be zero".into(),
-        ));
-    }
-
-    Ok(())
-}
-
 /// Validate a merge transaction.
 pub fn validate_merge(tx: &crate::merge::MergeTx, _now: Timestamp) -> Result<(), TransactionError> {
     if tx.source_hashes.len() < 2 {
         return Err(TransactionError::Other(
             "merge requires at least 2 sources".into(),
         ));
+    }
+
+    // IMPLEMENTATION_DECISIONS 6.12(b): at most 256 tokens per merge.
+    if tx.source_hashes.len() > burst_trst::MAX_MERGE_SOURCES {
+        return Err(TransactionError::Other(format!(
+            "merge cannot have more than {} sources, got {}",
+            burst_trst::MAX_MERGE_SOURCES,
+            tx.source_hashes.len()
+        )));
     }
 
     // All source hashes must be unique (no duplicates)
@@ -173,7 +142,7 @@ pub fn validate_merge(tx: &crate::merge::MergeTx, _now: Timestamp) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{burn::BurnTx, merge::MergeTx, send::SendTx, split::SplitTx};
+    use crate::{burn::BurnTx, merge::MergeTx, send::SendTx};
     use burst_types::{Signature, Timestamp, TxHash, WalletAddress};
 
     fn dummy_wallet_address() -> WalletAddress {
@@ -398,68 +367,6 @@ mod tests {
         };
 
         let result = validate_send(&tx, Timestamp::new(1000));
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_validate_split_zero_parent_hash() {
-        let tx = SplitTx {
-            hash: dummy_tx_hash(),
-            sender: dummy_wallet_address(),
-            timestamp: Timestamp::new(1000),
-            parent_hash: TxHash::ZERO,
-            origin: dummy_tx_hash(),
-            outputs: vec![crate::split::SplitOutput {
-                receiver: dummy_wallet_address_2(),
-                amount: 100,
-            }],
-            work: 0,
-            signature: dummy_signature(),
-        };
-
-        let result = validate_split(&tx, Timestamp::new(1000));
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), TransactionError::Other(_)));
-    }
-
-    #[test]
-    fn test_validate_split_zero_origin() {
-        let tx = SplitTx {
-            hash: dummy_tx_hash(),
-            sender: dummy_wallet_address(),
-            timestamp: Timestamp::new(1000),
-            parent_hash: dummy_tx_hash(),
-            origin: TxHash::ZERO,
-            outputs: vec![crate::split::SplitOutput {
-                receiver: dummy_wallet_address_2(),
-                amount: 100,
-            }],
-            work: 0,
-            signature: dummy_signature(),
-        };
-
-        let result = validate_split(&tx, Timestamp::new(1000));
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), TransactionError::Other(_)));
-    }
-
-    #[test]
-    fn test_validate_split_valid() {
-        let tx = SplitTx {
-            hash: dummy_tx_hash(),
-            sender: dummy_wallet_address(),
-            timestamp: Timestamp::new(1000),
-            parent_hash: dummy_tx_hash(),
-            origin: dummy_tx_hash(),
-            outputs: vec![crate::split::SplitOutput {
-                receiver: dummy_wallet_address_2(),
-                amount: 100,
-            }],
-            work: 0,
-            signature: dummy_signature(),
-        };
-
-        let result = validate_split(&tx, Timestamp::new(1000));
         assert!(result.is_ok());
     }
 

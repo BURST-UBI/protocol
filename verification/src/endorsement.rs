@@ -17,9 +17,10 @@ impl EndorsementEngine {
         burn_amount: u128,
         now: Timestamp,
     ) -> Result<(), VerificationError> {
-        if state.endorsements.iter().any(|e| e.endorser == endorser) {
+        if state.endorser_set.contains(&endorser) {
             return Err(VerificationError::AlreadyEndorsed(endorser.to_string()));
         }
+        state.endorser_set.insert(endorser.clone());
         state.endorsements.push(Endorsement {
             endorser,
             burn_amount,
@@ -48,6 +49,7 @@ impl EndorsementEngine {
     ) -> u32 {
         let before = state.endorsements.len();
         state.endorsements.retain(|e| &e.endorser != endorser);
+        state.endorser_set.remove(endorser);
         (before - state.endorsements.len()) as u32
     }
 
@@ -82,6 +84,7 @@ mod tests {
             target: addr(target),
             phase: VerificationPhase::Endorsing,
             endorsements: Vec::new(),
+            endorser_set: HashSet::new(),
             selected_verifiers: Vec::new(),
             votes: Vec::new(),
             revote_count: 0,

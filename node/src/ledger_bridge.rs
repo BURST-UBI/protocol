@@ -14,9 +14,10 @@ use burst_types::{BlockHash, Timestamp, WalletAddress};
 /// meets the token lifecycle engines. Returns an `EconomicResult`
 /// describing what economic effects the block had.
 ///
-/// `prev_brn_balance` is the BRN balance from the account's previous block
-/// (or 0 for the first block). Required to compute burn/stake deltas since
-/// the block only stores the post-operation balance.
+/// `prev_brn_balance` is the cumulative BRN spent recorded on the account's
+/// previous block (or 0 for the first block). The `brn_balance` field is an
+/// ascending odometer of committed BRN, so `block.brn_balance - prev` is the
+/// burn/stake amount of this block.
 pub fn process_block_economics(
     block: &StateBlock,
     brn_engine: &mut BrnEngine,
@@ -27,45 +28,59 @@ pub fn process_block_economics(
 ) -> EconomicResult {
     match block.block_type {
         BlockType::Burn => {
-            let burn_amount = prev_brn_balance.saturating_sub(block.brn_balance);
+            let burn_amount = block.brn_balance.saturating_sub(prev_brn_balance);
             let receiver = extract_receiver_from_link(&block.link);
             let burn_tx_hash = block.hash.into_tx_hash();
 
+            if burn_amount == 0 {
+                return EconomicResult::Rejected {
+                    reason: "burn block with zero burn amount".into(),
+                };
+            }
+
+            // Record the BRN burn FIRST — TRST may only ever be minted from
+            // successfully burned BRN (1:1). A failed burn rejects the block
+            // before anything is minted or persisted.
+            if let Err(e) = record_brn_burn(brn_engine, &block.account, burn_amount, now) {
+                tracing::error!(
+                    error = %e,
+                    burn_amount,
+                    account = %block.account,
+                    "BRN burn failed — rejecting block"
+                );
+                return EconomicResult::Rejected {
+                    reason: format!("BRN burn failed: {e}"),
+                };
+            }
+
             if let Some(receiver_addr) = receiver {
-                // Attempt TRST mint BEFORE recording the BRN burn so that
-                // a mint failure doesn't leave the BRN engine in a dirty state.
-                let mint_token = match trst_engine.mint(
+                match trst_engine.mint(
                     burn_tx_hash,
                     receiver_addr,
                     burn_amount,
                     block.account.clone(),
                     now,
                 ) {
-                    Ok(token) => Some(token),
+                    Ok(token) => EconomicResult::BurnAndMint {
+                        burn_amount,
+                        mint_token: Some(token),
+                    },
                     Err(e) => {
+                        // Undo the burn — burn and mint must be atomic.
+                        undo_brn_burn(brn_engine, &block.account, burn_amount);
                         tracing::error!(
                             error = %e,
                             burn_amount,
                             account = %block.account,
-                            "TRST mint failed — rejecting burn to preserve BRN/TRST invariant"
+                            "TRST mint failed — burn undone, block rejected"
                         );
-                        return EconomicResult::Rejected {
+                        EconomicResult::Rejected {
                             reason: format!("TRST mint failed: {e}"),
-                        };
+                        }
                     }
-                };
-                let burn_result = record_brn_burn(brn_engine, &block.account, burn_amount, now);
-                EconomicResult::BurnAndMint {
-                    burn_amount,
-                    burn_result,
-                    mint_token,
                 }
             } else {
-                let burn_result = record_brn_burn(brn_engine, &block.account, burn_amount, now);
-                EconomicResult::BurnOnly {
-                    burn_amount,
-                    burn_result,
-                }
+                EconomicResult::BurnOnly { burn_amount }
             }
         }
         BlockType::Send => {
@@ -94,24 +109,13 @@ pub fn process_block_economics(
             send_block_hash: block.link,
             trst_balance_after: block.trst_balance,
         },
-        BlockType::Split => {
-            // TRST split — one token becomes multiple tokens.
-            // Expiry: the child tokens inherit the parent's origin_timestamp,
-            // so each child expires at `origin_timestamp + trst_expiry_secs`.
-            // The block processor validates that the split amount does not
-            // exceed the sender's transferable balance (same check as Send).
-            // The TrstEngine enforces that the parent token is not expired
-            // before allowing a split. Once the TRST index is populated,
-            // the expiry index entries should be updated for the new children.
-            if trst_expiry_secs > 0 {
-                tracing::trace!(
-                    account = %block.account,
-                    trst_expiry_secs,
-                    "split block — child tokens inherit parent expiry"
-                );
-            }
-            EconomicResult::Split {
-                account: block.account.clone(),
+        // An Open block with a non-zero link is a receive-open (Nano-style):
+        // the account's first block pockets a pending send.
+        BlockType::Open if !block.link.is_zero() && block.trst_balance > 0 => {
+            EconomicResult::Receive {
+                receiver: block.account.clone(),
+                send_block_hash: block.link,
+                trst_balance_after: block.trst_balance,
             }
         }
         BlockType::Merge => {
@@ -134,15 +138,23 @@ pub fn process_block_economics(
         }
         BlockType::Endorse => {
             // Endorsement — the endorser permanently burns BRN to vouch for
-            // another wallet's humanity. The burn amount is the delta between
-            // the previous BRN balance and the post-endorsement balance.
-            let burn_amount = prev_brn_balance.saturating_sub(block.brn_balance);
+            // another wallet's humanity. The burn is the odometer delta.
+            let burn_amount = block.brn_balance.saturating_sub(prev_brn_balance);
             let target = extract_receiver_from_link(&block.link);
-            let burn_result = record_brn_burn(brn_engine, &block.account, burn_amount, now);
+
+            if burn_amount == 0 {
+                return EconomicResult::Rejected {
+                    reason: "endorse block requires a BRN burn".into(),
+                };
+            }
+            if let Err(e) = record_brn_burn(brn_engine, &block.account, burn_amount, now) {
+                return EconomicResult::Rejected {
+                    reason: format!("endorsement BRN burn failed: {e}"),
+                };
+            }
 
             EconomicResult::Endorse {
                 burn_amount,
-                burn_result,
                 target,
             }
         }
@@ -150,14 +162,19 @@ pub fn process_block_economics(
             // Challenge — the challenger temporarily stakes BRN to contest
             // another wallet's verification. The stake is returned if the
             // challenge succeeds, forfeited otherwise.
-            let stake_amount = prev_brn_balance.saturating_sub(block.brn_balance);
+            let stake_amount = block.brn_balance.saturating_sub(prev_brn_balance);
             let target = extract_receiver_from_link(&block.link);
             let target_str = target
                 .as_ref()
                 .map(|w| w.as_str().to_string())
                 .unwrap_or_default();
 
-            let stake_result = record_brn_stake(
+            if stake_amount == 0 {
+                return EconomicResult::Rejected {
+                    reason: "challenge block requires a BRN stake".into(),
+                };
+            }
+            let stake = match record_brn_stake(
                 brn_engine,
                 &block.account,
                 stake_amount,
@@ -165,11 +182,18 @@ pub fn process_block_economics(
                     target_wallet: target_str.into(),
                 },
                 now,
-            );
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    return EconomicResult::Rejected {
+                        reason: format!("challenge BRN stake failed: {e}"),
+                    }
+                }
+            };
 
             EconomicResult::Challenge {
                 stake_amount,
-                stake_result,
+                stake,
                 target,
             }
         }
@@ -213,8 +237,29 @@ pub fn process_block_economics(
         BlockType::VerificationVote => {
             let voter = block.account.clone();
             let target = extract_receiver_from_link(&block.link);
-            let stake_amount = prev_brn_balance.saturating_sub(block.brn_balance);
+            let stake_amount = block.brn_balance.saturating_sub(prev_brn_balance);
             let vote_value = block.transaction.as_bytes()[0];
+
+            // Legitimate/Illegitimate votes stake BRN; "Neither" votes carry
+            // no stake (whitepaper §Verifiers). Record the lock so the
+            // computed available balance reflects it.
+            if stake_amount > 0 {
+                let target_addr = target.clone().unwrap_or_else(|| voter.clone());
+                if let Err(e) = record_brn_stake(
+                    brn_engine,
+                    &block.account,
+                    stake_amount,
+                    StakeKind::Verification {
+                        target_wallet: target_addr,
+                    },
+                    now,
+                ) {
+                    return EconomicResult::Rejected {
+                        reason: format!("verification vote BRN stake failed: {e}"),
+                    };
+                }
+            }
+
             EconomicResult::VerificationVoteResult {
                 voter,
                 target,
@@ -250,6 +295,14 @@ fn record_brn_burn(
         result.map_err(|e| e.to_string())
     } else {
         Err("wallet not tracked in BRN engine".to_string())
+    }
+}
+
+/// Undo a just-recorded BRN burn (compensating action when the paired TRST
+/// mint fails — burn and mint must be atomic).
+fn undo_brn_burn(brn_engine: &mut BrnEngine, account: &WalletAddress, amount: u128) {
+    if let Some(state) = brn_engine.wallets.get_mut(account) {
+        state.total_burned = state.total_burned.saturating_sub(amount);
     }
 }
 
@@ -316,87 +369,209 @@ pub(crate) fn extract_receiver_from_link(link: &burst_types::BlockHash) -> Optio
 
 /// Create a `TrstToken` for a receiver based on the pending entry provenance.
 ///
-/// If the pending entry has provenance from one origin, the token carries
-/// that origin directly. If multiple origins were consumed (spanning a
-/// send across multiple TRST tokens), the receiver gets a token with
-/// `origin_proportions` — effectively a pre-merged token.
+/// Send operates on a single token at a time, so the receiver always gets
+/// a clean single-origin token preserving the sender's provenance chain.
+/// The token's `link` points at the SEND transaction it derives from
+/// (whitepaper: "hash of the immediately preceding transaction").
 pub fn create_received_token(
     receive_block: &StateBlock,
     pending: &burst_store::pending::PendingInfo,
     _expiry_secs: u64,
 ) -> TrstToken {
-    use burst_trst::token::OriginProportion;
-
     let token_id = burst_types::TxHash::new(*receive_block.hash.as_bytes());
+    let send_tx = burst_types::TxHash::new(*receive_block.link.as_bytes());
 
-    if pending.provenance.len() == 1 {
-        let p = &pending.provenance[0];
+    // Send operates on a single origin, so provenance has at most one entry.
+    // The receiver gets a clean single-origin token preserving the sender's provenance.
+    if let Some(p) = pending.provenance.first() {
         TrstToken {
             id: token_id,
             amount: pending.amount,
             origin: p.origin,
-            link: burst_types::TxHash::new(*receive_block.hash.as_bytes()),
+            link: send_tx,
             holder: receive_block.account.clone(),
             origin_timestamp: p.origin_timestamp,
             effective_origin_timestamp: p.effective_origin_timestamp,
             state: burst_types::TrstState::Active,
             origin_wallet: p.origin_wallet.clone(),
-            origin_proportions: p.origin_proportions.clone(),
-        }
-    } else if pending.provenance.len() > 1 {
-        let effective_ts = pending
-            .provenance
-            .iter()
-            .map(|p| p.effective_origin_timestamp)
-            .min_by_key(|ts| ts.as_secs())
-            .unwrap_or(pending.timestamp);
-        let origin_ts = pending
-            .provenance
-            .iter()
-            .map(|p| p.origin_timestamp)
-            .min_by_key(|ts| ts.as_secs())
-            .unwrap_or(pending.timestamp);
-        let proportions: Vec<OriginProportion> = pending
-            .provenance
-            .iter()
-            .flat_map(|p| {
-                if p.origin_proportions.is_empty() {
-                    vec![OriginProportion {
-                        origin: p.origin,
-                        origin_wallet: p.origin_wallet.clone(),
-                        amount: p.amount,
-                    }]
-                } else {
-                    p.origin_proportions.clone()
-                }
-            })
-            .collect();
-        TrstToken {
-            id: token_id,
-            amount: pending.amount,
-            origin: token_id,
-            link: burst_types::TxHash::new(*receive_block.hash.as_bytes()),
-            holder: receive_block.account.clone(),
-            origin_timestamp: origin_ts,
-            effective_origin_timestamp: effective_ts,
-            state: burst_types::TrstState::Active,
-            origin_wallet: pending.source.clone(),
-            origin_proportions: proportions,
+            revoked_origin: None,
         }
     } else {
-        // No provenance — sender wasn't tracked. Create a basic token
-        // with the sender as origin_wallet and current timestamp.
+        // No provenance — the sender wasn't tracked in the TRST engine when
+        // the pending entry was created. The amount is still fully backed by
+        // the on-chain send (validated against a real pending entry), but
+        // deep provenance is unavailable; anchor the token at the send tx.
+        tracing::warn!(
+            receiver = %receive_block.account,
+            send_tx = %send_tx,
+            amount = pending.amount,
+            "pending entry has no provenance — anchoring received token at the send tx"
+        );
         TrstToken {
             id: token_id,
             amount: pending.amount,
-            origin: token_id,
-            link: burst_types::TxHash::new(*receive_block.hash.as_bytes()),
+            origin: send_tx,
+            link: send_tx,
             holder: receive_block.account.clone(),
             origin_timestamp: pending.timestamp,
             effective_origin_timestamp: pending.timestamp,
             state: burst_types::TrstState::Active,
             origin_wallet: pending.source.clone(),
-            origin_proportions: Vec::new(),
+            revoked_origin: None,
+        }
+    }
+}
+
+/// Create the token returned to the sender when a pending send's TRST expires
+/// before the receiver claims it (IMPLEMENTATION_DECISIONS 6.16a).
+///
+/// The token keeps its original provenance and expiry timeline — it comes
+/// back expired (that's why it's being returned), counting toward the
+/// sender's expired/reputation balance rather than the receiver's.
+pub fn create_returned_token(
+    destination: &WalletAddress,
+    send_block_hash: &burst_types::TxHash,
+    pending: &burst_store::pending::PendingInfo,
+) -> TrstToken {
+    // Deterministic id: every node derives the same token without a
+    // corresponding on-chain transaction.
+    let token_id = burst_types::TxHash::new(burst_crypto::blake2b_256_multi(&[
+        send_block_hash.as_bytes(),
+        destination.as_str().as_bytes(),
+        b"trst-pending-return",
+    ]));
+
+    if let Some(p) = pending.provenance.first() {
+        TrstToken {
+            id: token_id,
+            amount: pending.amount,
+            origin: p.origin,
+            link: *send_block_hash,
+            holder: pending.source.clone(),
+            origin_timestamp: p.origin_timestamp,
+            effective_origin_timestamp: p.effective_origin_timestamp,
+            state: burst_types::TrstState::Active, // receive_token normalizes to Expired
+            origin_wallet: p.origin_wallet.clone(),
+            revoked_origin: None,
+        }
+    } else {
+        TrstToken {
+            id: token_id,
+            amount: pending.amount,
+            origin: token_id,
+            link: *send_block_hash,
+            holder: pending.source.clone(),
+            origin_timestamp: pending.timestamp,
+            effective_origin_timestamp: pending.timestamp,
+            state: burst_types::TrstState::Active,
+            origin_wallet: pending.source.clone(),
+            revoked_origin: None,
+        }
+    }
+}
+
+
+/// Grant a burn-backed TRST reward by creating a pending entry that the
+/// recipient claims with a normal Receive block — so the reward flows through
+/// the same on-chain validation as every other TRST (pending must exist and
+/// amounts must match exactly).
+///
+/// The reward id is deterministic across nodes: every node derives the same
+/// pending entry from the same verification outcome. The provenance anchors
+/// the token at the reward id with the RECIPIENT as origin wallet — if the
+/// recipient is later proven sybil, their reward TRST is revoked with them.
+pub fn create_reward_pending<P: burst_store::pending::PendingStore>(
+    pending_store: &P,
+    recipient: &WalletAddress,
+    context_wallet: &WalletAddress,
+    kind: &'static [u8],
+    amount: u128,
+    ts: Timestamp,
+) -> Result<burst_types::TxHash, String> {
+    let reward_hash = burst_types::TxHash::new(burst_crypto::blake2b_256_multi(&[
+        kind,
+        context_wallet.as_str().as_bytes(),
+        recipient.as_str().as_bytes(),
+    ]));
+    let info = burst_store::pending::PendingInfo {
+        source: context_wallet.clone(),
+        amount,
+        timestamp: ts,
+        provenance: vec![burst_store::pending::PendingProvenance {
+            amount,
+            origin: reward_hash,
+            origin_wallet: recipient.clone(),
+            origin_timestamp: ts,
+            effective_origin_timestamp: ts,
+        }],
+    };
+    pending_store
+        .put_pending(recipient, &reward_hash, &info)
+        .map_err(|e| e.to_string())?;
+    Ok(reward_hash)
+}
+
+/// Resolve verifier stakes and rewards after a verification or challenge vote.
+///
+/// - Correct staked voters: stake unlocked, plus a TRST reward equal to their
+///   share of the forfeited dissenter stakes (decision 33.7d). The reward is
+///   burn-backed: the dissenters' BRN is burned below, and the minted TRST
+///   sums to at most that burn — TRST is only ever created from burned BRN.
+/// - Incorrect voters: stake forfeited (unlocked and burned).
+pub fn resolve_verifier_outcomes<P: burst_store::pending::PendingStore>(
+    brn_engine: &mut BrnEngine,
+    pending_store: &P,
+    verifiers: &[burst_verification::VerifierOutcome],
+    context_wallet: &WalletAddress,
+    ts: Timestamp,
+) {
+    for vo in verifiers {
+        if vo.staked > 0 {
+            if let Some(ws) = brn_engine.get_wallet_mut(&vo.address) {
+                if vo.voted_correctly {
+                    ws.total_staked = ws.total_staked.saturating_sub(vo.staked);
+                    tracing::info!(
+                        verifier = %vo.address,
+                        staked = vo.staked,
+                        "verifier stake returned (correct vote)"
+                    );
+                } else {
+                    ws.total_staked = ws.total_staked.saturating_sub(vo.staked);
+                    ws.total_burned = ws.total_burned.saturating_add(vo.staked);
+                    tracing::info!(
+                        verifier = %vo.address,
+                        penalty = vo.penalty,
+                        "dissenter verifier stake forfeited (burned)"
+                    );
+                }
+            } else {
+                tracing::warn!(
+                    verifier = %vo.address,
+                    "verifier wallet not tracked in BRN engine, cannot resolve stake"
+                );
+            }
+        }
+        if vo.voted_correctly && vo.trst_reward > 0 {
+            match create_reward_pending(
+                pending_store,
+                &vo.address,
+                context_wallet,
+                b"verifier-reward",
+                vo.trst_reward,
+                ts,
+            ) {
+                Ok(reward_hash) => tracing::info!(
+                    verifier = %vo.address,
+                    reward = vo.trst_reward,
+                    %reward_hash,
+                    "verifier TRST reward granted as pending (funded by forfeited stakes)"
+                ),
+                Err(e) => tracing::error!(
+                    verifier = %vo.address,
+                    error = %e,
+                    "failed to create verifier reward pending entry"
+                ),
+            }
         }
     }
 }
@@ -405,16 +580,14 @@ pub fn create_received_token(
 #[derive(Clone, Debug)]
 pub enum EconomicResult {
     /// BRN was burned and TRST was minted for a receiver.
+    /// The burn is recorded before the mint; both succeeded (atomicity is
+    /// enforced by `process_block_economics` returning `Rejected` otherwise).
     BurnAndMint {
         burn_amount: u128,
-        burn_result: Result<(), String>,
         mint_token: Option<TrstToken>,
     },
     /// BRN was burned but no valid receiver was found.
-    BurnOnly {
-        burn_amount: u128,
-        burn_result: Result<(), String>,
-    },
+    BurnOnly { burn_amount: u128 },
     /// TRST send (pending entry created by block processor).
     Send {
         sender: WalletAddress,
@@ -427,20 +600,19 @@ pub enum EconomicResult {
         send_block_hash: BlockHash,
         trst_balance_after: u128,
     },
-    /// TRST split into multiple tokens.
-    Split { account: WalletAddress },
     /// TRST merge from multiple tokens.
     Merge { account: WalletAddress },
     /// Endorsement — BRN burned to vouch for another wallet's humanity.
+    /// The burn was recorded successfully (failures reject the block).
     Endorse {
         burn_amount: u128,
-        burn_result: Result<(), String>,
         target: Option<WalletAddress>,
     },
     /// Challenge — BRN staked to contest a wallet's verification.
+    /// The stake was recorded successfully (failures reject the block).
     Challenge {
         stake_amount: u128,
-        stake_result: Result<Stake, String>,
+        stake: Stake,
         target: Option<WalletAddress>,
     },
     /// Representative change.
@@ -524,13 +696,15 @@ mod tests {
             account: test_account(),
             previous: BlockHash::new([0x11; 32]),
             representative: test_representative(),
-            brn_balance: 500,
+            // Ascending odometer: prev 1000 spent + 500 burned now.
+            brn_balance: 1500,
             trst_balance: 0,
             link,
             origin: TxHash::ZERO,
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_000),
             params_hash: BlockHash::ZERO,
+            merge_sources: Vec::new(),
             work: 0,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,
@@ -553,6 +727,7 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_001),
             params_hash: BlockHash::ZERO,
+            merge_sources: Vec::new(),
             work: 0,
             signature: Signature([2u8; 64]),
             hash: BlockHash::ZERO,
@@ -576,6 +751,7 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_002),
             params_hash: BlockHash::ZERO,
+            merge_sources: Vec::new(),
             work: 0,
             signature: Signature([3u8; 64]),
             hash: BlockHash::ZERO,
@@ -596,13 +772,15 @@ mod tests {
             account: test_account(),
             previous: BlockHash::new([0x11; 32]),
             representative: test_representative(),
-            brn_balance: 664,
+            // Ascending odometer: prev 1000 spent + 336 burned now.
+            brn_balance: 1336,
             trst_balance: 0,
             link,
             origin: TxHash::ZERO,
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_003),
             params_hash: BlockHash::ZERO,
+            merge_sources: Vec::new(),
             work: 0,
             signature: Signature([4u8; 64]),
             hash: BlockHash::ZERO,
@@ -623,13 +801,15 @@ mod tests {
             account: test_account(),
             previous: BlockHash::new([0x11; 32]),
             representative: test_representative(),
-            brn_balance: 0,
+            // Ascending odometer: prev 1000 spent + 1000 staked now.
+            brn_balance: 2000,
             trst_balance: 0,
             link,
             origin: TxHash::ZERO,
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_004),
             params_hash: BlockHash::ZERO,
+            merge_sources: Vec::new(),
             work: 0,
             signature: Signature([5u8; 64]),
             hash: BlockHash::ZERO,
@@ -662,11 +842,9 @@ mod tests {
         match result {
             EconomicResult::BurnAndMint {
                 burn_amount,
-                burn_result,
                 mint_token,
             } => {
-                assert_eq!(burn_amount, 500); // 1000 - 500
-                assert!(burn_result.is_ok());
+                assert_eq!(burn_amount, 500); // 1500 - 1000
                 assert!(mint_token.is_some());
                 let token = mint_token.unwrap();
                 assert_eq!(token.amount, 500);
@@ -691,13 +869,15 @@ mod tests {
             account: test_account(),
             previous: BlockHash::new([0x11; 32]),
             representative: test_representative(),
-            brn_balance: 500,
+            // Ascending odometer: prev 1000 spent + 500 burned now.
+            brn_balance: 1500,
             trst_balance: 0,
             link: BlockHash::ZERO,
             origin: TxHash::ZERO,
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_000),
             params_hash: BlockHash::ZERO,
+            merge_sources: Vec::new(),
             work: 0,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,
@@ -714,12 +894,8 @@ mod tests {
             prev_brn_balance,
         );
         match result {
-            EconomicResult::BurnOnly {
-                burn_amount,
-                burn_result,
-            } => {
+            EconomicResult::BurnOnly { burn_amount } => {
                 assert_eq!(burn_amount, 500);
-                assert!(burn_result.is_ok());
             }
             _ => panic!("Expected BurnOnly, got {:?}", result),
         }
@@ -794,6 +970,7 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_000),
             params_hash: BlockHash::ZERO,
+            merge_sources: Vec::new(),
             work: 0,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,
@@ -829,11 +1006,9 @@ mod tests {
         match result {
             EconomicResult::Endorse {
                 burn_amount,
-                burn_result,
                 target,
             } => {
-                assert_eq!(burn_amount, 336); // 1000 - 664
-                assert!(burn_result.is_ok());
+                assert_eq!(burn_amount, 336); // 1336 - 1000
                 assert!(target.is_some());
                 assert_eq!(target.unwrap().as_str(), target_addr.as_str());
             }
@@ -865,12 +1040,10 @@ mod tests {
         match result {
             EconomicResult::Challenge {
                 stake_amount,
-                stake_result,
+                stake,
                 target,
             } => {
-                assert_eq!(stake_amount, 1000); // 1000 - 0
-                assert!(stake_result.is_ok());
-                let stake = stake_result.unwrap();
+                assert_eq!(stake_amount, 1000); // 2000 - 1000
                 assert_eq!(stake.amount, 1000);
                 assert!(!stake.resolved);
                 assert!(target.is_some());

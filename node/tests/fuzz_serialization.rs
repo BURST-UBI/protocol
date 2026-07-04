@@ -12,7 +12,7 @@ use burst_ledger::{BlockType, StateBlock, CURRENT_BLOCK_VERSION};
 use burst_store::account::AccountInfo;
 use burst_store::pending::{PendingInfo, PendingProvenance};
 use burst_types::{
-    BlockHash, OriginProportion, Signature, Timestamp, TxHash, WalletAddress, WalletState,
+    BlockHash, Signature, Timestamp, TxHash, WalletAddress, WalletState,
 };
 
 // ---------------------------------------------------------------------------
@@ -53,7 +53,6 @@ fn arb_block_type() -> impl Strategy<Value = BlockType> {
         Just(BlockType::GovernanceProposal),
         Just(BlockType::GovernanceVote),
         Just(BlockType::Merge),
-        Just(BlockType::Split),
         Just(BlockType::RejectReceive),
         Just(BlockType::Delegate),
         Just(BlockType::RevokeDelegation),
@@ -70,16 +69,6 @@ fn arb_wallet_state() -> impl Strategy<Value = WalletState> {
         Just(WalletState::Revoked),
         Just(WalletState::Deactivated),
     ]
-}
-
-fn arb_origin_proportion() -> impl Strategy<Value = OriginProportion> {
-    (arb_tx_hash(), arb_wallet_address(), any::<u128>()).prop_map(|(origin, wallet, amount)| {
-        OriginProportion {
-            origin,
-            origin_wallet: wallet,
-            amount,
-        }
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -115,6 +104,7 @@ fn arb_state_block() -> impl Strategy<Value = StateBlock> {
                     transaction: TxHash::ZERO,
                     timestamp: ts,
                     params_hash: BlockHash::ZERO,
+                    merge_sources: Vec::new(),
                     work,
                     signature: sig,
                     hash: BlockHash::ZERO,
@@ -212,16 +202,14 @@ fn arb_pending_provenance() -> impl Strategy<Value = PendingProvenance> {
         arb_wallet_address(),
         arb_timestamp(),
         arb_timestamp(),
-        proptest::collection::vec(arb_origin_proportion(), 0..3),
     )
         .prop_map(
-            |(amt, origin, wallet, ots, eots, props)| PendingProvenance {
+            |(amt, origin, wallet, ots, eots)| PendingProvenance {
                 amount: amt,
                 origin,
                 origin_wallet: wallet,
                 origin_timestamp: ots,
                 effective_origin_timestamp: eots,
-                origin_proportions: props,
             },
         )
 }
@@ -340,8 +328,8 @@ proptest! {
         let balance = burst_wallet_core::balance::compute_balance_with_history(
             verified, now, &history, burned, staked,
         );
-        // Balance must never underflow — saturating_sub guarantees this
-        prop_assert!(balance <= u128::MAX);
+        // Balance computation must not panic (saturating_sub guarantees no underflow)
+        let _ = balance;
     }
 
     #[test]

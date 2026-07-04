@@ -6,6 +6,7 @@
 
 use crate::{RandomOutput, VrfError, VrfProvider};
 use burst_types::WalletAddress;
+use std::collections::HashMap;
 
 /// A commitment from a representative.
 pub struct Commitment {
@@ -23,8 +24,8 @@ pub struct Reveal {
 
 /// Commit-reveal VRF provider — self-sovereign randomness.
 pub struct CommitRevealVrf {
-    /// Commitments received so far.
-    pub commitments: Vec<Commitment>,
+    /// Commitments indexed by representative for O(1) lookup.
+    commitment_index: HashMap<WalletAddress, [u8; 32]>,
     /// Reveals received so far.
     pub reveals: Vec<Reveal>,
 }
@@ -32,14 +33,20 @@ pub struct CommitRevealVrf {
 impl CommitRevealVrf {
     pub fn new() -> Self {
         Self {
-            commitments: Vec::new(),
+            commitment_index: HashMap::new(),
             reveals: Vec::new(),
         }
     }
 
     /// Record a commitment from a representative.
     pub fn record_commitment(&mut self, commitment: Commitment) {
-        self.commitments.push(commitment);
+        self.commitment_index
+            .insert(commitment.representative, commitment.hash);
+    }
+
+    /// Access commitments (for compatibility / inspection).
+    pub fn commitments_iter(&self) -> impl Iterator<Item = (&WalletAddress, &[u8; 32])> {
+        self.commitment_index.iter()
     }
 
     /// Record a reveal and verify it matches the corresponding commitment.
@@ -48,19 +55,14 @@ impl CommitRevealVrf {
     /// commitment hash from the same representative. Rejects if no matching
     /// commitment exists or if the hash doesn't match.
     pub fn record_reveal(&mut self, reveal: Reveal) -> Result<(), VrfError> {
-        let matching_commitment = self
-            .commitments
-            .iter()
-            .find(|c| c.representative == reveal.representative);
-
-        match matching_commitment {
+        match self.commitment_index.get(&reveal.representative) {
             None => Err(VrfError::CommitReveal(format!(
                 "no commitment found for representative {}",
                 reveal.representative
             ))),
-            Some(commitment) => {
+            Some(commitment_hash) => {
                 let reveal_hash = burst_crypto::blake2b_256(&reveal.value);
-                if reveal_hash != commitment.hash {
+                if reveal_hash != *commitment_hash {
                     return Err(VrfError::CommitReveal(
                         "reveal hash does not match commitment".into(),
                     ));
@@ -114,18 +116,13 @@ impl VrfProvider for CommitRevealVrf {
     /// Verify that all reveals match their commitments and that the output
     /// was correctly derived from the combined reveals.
     fn verify(&self, context: &[u8], output: &RandomOutput) -> Result<bool, VrfError> {
-        // Verify every reveal has a matching commitment
+        // Verify every reveal has a matching commitment (O(r) with HashMap)
         for reveal in &self.reveals {
-            let matching = self
-                .commitments
-                .iter()
-                .find(|c| c.representative == reveal.representative);
-
-            match matching {
+            match self.commitment_index.get(&reveal.representative) {
                 None => return Ok(false),
-                Some(commitment) => {
+                Some(commitment_hash) => {
                     let reveal_hash = burst_crypto::blake2b_256(&reveal.value);
-                    if reveal_hash != commitment.hash {
+                    if reveal_hash != *commitment_hash {
                         return Ok(false);
                     }
                 }

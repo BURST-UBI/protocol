@@ -1,7 +1,7 @@
 //! Verification orchestrator — connects endorsement, selection, voting, and outcomes
 //! into a single end-to-end verification workflow.
 
-use crate::challenge::{Challenge, ChallengeEngine, CHALLENGE_TIMEOUT_SECS};
+use crate::challenge::{Challenge, ChallengeEngine};
 use crate::endorsement::EndorsementEngine;
 use crate::error::VerificationError;
 use crate::outcomes::{
@@ -35,8 +35,16 @@ pub enum VerificationEvent {
         wallet: WalletAddress,
         outcome: ChallengeOutcomeEvent,
     },
-    /// Wallet unverified (fraud confirmed).
+    /// Wallet unverified (fraud confirmed). All TRST originating from the
+    /// wallet is revoked and BRN accrual stops.
     WalletUnverified { wallet: WalletAddress },
+    /// Wallet deactivated for benign, non-fraud reasons — death, prolonged
+    /// inactivity, or other community-defined grounds (whitepaper
+    /// §Unverification Without Revocation; grounds are defined via the
+    /// Consti). BRN accrual stops and transaction rights are lost, but the
+    /// TRST it originated is NOT revoked — the holder was a real person who
+    /// legitimately earned it.
+    WalletDeactivated { wallet: WalletAddress },
     /// Verifier penalized for excessive Neither voting.
     VerifierPenalized {
         verifier: WalletAddress,
@@ -95,6 +103,7 @@ impl VerificationOrchestrator {
                 target: wallet.clone(),
                 phase: VerificationPhase::Endorsing,
                 endorsements: Vec::new(),
+                endorser_set: std::collections::HashSet::new(),
                 selected_verifiers: Vec::new(),
                 votes: Vec::new(),
                 revote_count: 0,
@@ -332,6 +341,44 @@ impl VerificationOrchestrator {
     /// If fraud is confirmed the wallet is set to Unverified and a
     /// `WalletUnverified` event is emitted (the node uses this to trigger
     /// TRST revocation via the merger graph).
+    /// Deactivate a wallet for benign (non-fraud) reasons — distinct from
+    /// fraud revocation (whitepaper §Unverification Without Revocation).
+    ///
+    /// Emits `WalletDeactivated`: the node stops BRN accrual and removes
+    /// transaction rights, but does NOT revoke originated TRST. The wallet
+    /// can be re-verified later, resuming accrual without losing its earned
+    /// balance.
+    pub fn deactivate_wallet(&mut self, wallet: &WalletAddress) {
+        self.pending_events
+            .push(VerificationEvent::WalletDeactivated {
+                wallet: wallet.clone(),
+            });
+    }
+
+    /// Resolve a challenge if (and only if) one is active and every selected
+    /// verifier has voted. Called by the node after each processed vote so a
+    /// challenge finalizes the moment its last vote lands.
+    pub fn try_resolve_challenge(
+        &mut self,
+        target: &WalletAddress,
+        params: &ProtocolParams,
+    ) -> Result<Option<VerificationEvent>, VerificationError> {
+        if !self.active_challenges.contains_key(target) {
+            return Ok(None);
+        }
+        let ready = self
+            .states
+            .get(target)
+            .map(|st| {
+                !st.selected_verifiers.is_empty() && st.votes.len() >= st.selected_verifiers.len()
+            })
+            .unwrap_or(false);
+        if !ready {
+            return Ok(None);
+        }
+        self.resolve_challenge(target, params).map(Some)
+    }
+
     pub fn resolve_challenge(
         &mut self,
         target: &WalletAddress,
@@ -424,6 +471,7 @@ impl VerificationOrchestrator {
                 target: target.clone(),
                 phase: VerificationPhase::Endorsing,
                 endorsements: Vec::new(),
+                endorser_set: std::collections::HashSet::new(),
                 selected_verifiers: Vec::new(),
                 votes: Vec::new(),
                 revote_count: 0,
@@ -466,6 +514,7 @@ impl VerificationOrchestrator {
                 target: wallet.clone(),
                 phase: VerificationPhase::Endorsing,
                 endorsements: Vec::new(),
+                endorser_set: std::collections::HashSet::new(),
                 selected_verifiers: Vec::new(),
                 votes: Vec::new(),
                 revote_count: 0,
@@ -505,20 +554,44 @@ impl VerificationOrchestrator {
     /// Expired challenges resolve in favor of the challenged wallet.
     /// The challenger's stake is returned minus a penalty. Should be called
     /// periodically from the node's tick loop.
-    pub fn cleanup_expired_challenges(&mut self, now: Timestamp) -> Vec<VerificationEvent> {
+    /// Expire challenges that ran past `duration_secs` (governable,
+    /// `challenge_duration_secs`) without collecting all votes. Resolved in
+    /// favor of the challenged wallet: the challenger forfeits half the stake
+    /// (time-wasting penalty), and every verifier who did vote gets their
+    /// stake back with no reward or penalty — the vote never concluded.
+    ///
+    /// Returns the events WITHOUT queueing them in `pending_events`: the
+    /// caller (the node's periodic sweep) handles them directly, so they must
+    /// not also be re-handled on the next vote block.
+    pub fn cleanup_expired_challenges(
+        &mut self,
+        now: Timestamp,
+        duration_secs: u64,
+    ) -> Vec<VerificationEvent> {
         let now_secs = now.as_secs();
         let expired: Vec<WalletAddress> = self
             .active_challenges
             .iter()
-            .filter(|(_, c)| {
-                now_secs.saturating_sub(c.initiated_at.as_secs()) > CHALLENGE_TIMEOUT_SECS
-            })
+            .filter(|(_, c)| now_secs.saturating_sub(c.initiated_at.as_secs()) > duration_secs)
             .map(|(target, _)| target.clone())
             .collect();
 
         let mut events = Vec::new();
         for target in expired {
             let challenge = self.active_challenges.remove(&target).unwrap();
+
+            // All cast votes count as "correct" so stakes unlock; with no
+            // dissenters the forfeited pool is zero, so no TRST rewards.
+            let voters: Vec<(WalletAddress, u128, bool)> = self
+                .states
+                .get(&target)
+                .map(|st| {
+                    st.votes
+                        .iter()
+                        .map(|v| (v.verifier.clone(), v.stake_amount, true))
+                        .collect()
+                })
+                .unwrap_or_default();
 
             if let Some(state) = self.states.get_mut(&target) {
                 state.phase = VerificationPhase::Verified;
@@ -529,15 +602,13 @@ impl VerificationOrchestrator {
                 &challenge.challenger,
                 ChallengeResult::Expired,
                 challenge.stake_amount,
-                &[],
+                &voters,
             );
 
-            let event = VerificationEvent::ChallengeResolved {
+            events.push(VerificationEvent::ChallengeResolved {
                 wallet: target,
                 outcome: outcome_event,
-            };
-            events.push(event.clone());
-            self.pending_events.push(event);
+            });
         }
         events
     }
@@ -852,7 +923,7 @@ mod tests {
             VerificationEvent::ChallengeResolved { wallet: w, outcome } => {
                 assert_eq!(w, &wallet);
                 assert_eq!(outcome.outcome, ChallengeResult::FraudConfirmed);
-                assert_eq!(outcome.challenger_reward, 1000); // 2x stake
+                assert_eq!(outcome.challenger_stake, 500);
                 assert_eq!(outcome.challenger, challenger);
             }
             _ => panic!("expected ChallengeResolved"),
@@ -898,7 +969,7 @@ mod tests {
             VerificationEvent::ChallengeResolved { wallet: w, outcome } => {
                 assert_eq!(w, &wallet);
                 assert_eq!(outcome.outcome, ChallengeResult::ChallengeRejected);
-                assert_eq!(outcome.challenger_reward, 0);
+                assert_eq!(outcome.outcome, ChallengeResult::ChallengeRejected);
             }
             _ => panic!("expected ChallengeResolved"),
         }
@@ -1315,8 +1386,68 @@ mod tests {
             for eo in &outcomes.endorsers {
                 assert_eq!(eo.brn_burned, 1000);
                 // 10% of 1000 = 100
-                assert_eq!(eo.trst_reward, 100);
+                assert_eq!(eo.brn_burned, 1000);
             }
         }
+    }
+
+    #[test]
+    fn deactivate_wallet_emits_event_without_revocation() {
+        let mut orch = VerificationOrchestrator::new();
+        let wallet = WalletAddress::new("brst_deactivate_me");
+        orch.deactivate_wallet(&wallet);
+        let events = orch.drain_events();
+        assert!(matches!(
+            &events[..],
+            [VerificationEvent::WalletDeactivated { wallet: w }] if *w == wallet
+        ));
+    }
+
+    #[test]
+    fn try_resolve_challenge_waits_for_all_votes() {
+        let params = test_params();
+        let mut orch = VerificationOrchestrator::new();
+        let target = test_addr("challenged");
+        let challenger = test_addr("challenger");
+
+        // Set up a verified wallet, then challenge it.
+        verify_wallet(&mut orch, &target, &params);
+        orch.initiate_challenge(&target, &challenger, true, 1000, &params)
+            .unwrap();
+        let verifiers: Vec<WalletAddress> = (0..params.num_verifiers)
+            .map(|i| test_addr(&format!("cv{i}")))
+            .collect();
+        let rand = [7u8; 32];
+        orch.select_verifiers(&target, &verifiers, &rand, &params)
+            .unwrap();
+        orch.drain_events();
+
+        let selected = orch.get_state(&target).unwrap().selected_verifiers.clone();
+
+        // Not all votes in — must NOT resolve.
+        orch.process_vote(&target, &selected[0], Vote::Illegitimate, &params)
+            .unwrap();
+        assert!(orch
+            .try_resolve_challenge(&target, &params)
+            .unwrap()
+            .is_none());
+
+        // Remaining votes land — resolves on the last one.
+        for v in selected.iter().skip(1) {
+            orch.process_vote(&target, v, Vote::Illegitimate, &params)
+                .unwrap();
+        }
+        let resolved = orch.try_resolve_challenge(&target, &params).unwrap();
+        assert!(resolved.is_some());
+        // Unanimous Illegitimate → fraud confirmed → WalletUnverified queued.
+        let events = orch.drain_events();
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, VerificationEvent::WalletUnverified { wallet } if *wallet == target)));
+        // Second call is a no-op (challenge consumed).
+        assert!(orch
+            .try_resolve_challenge(&target, &params)
+            .unwrap()
+            .is_none());
     }
 }

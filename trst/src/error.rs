@@ -17,9 +17,6 @@ pub enum TrstError {
     #[error("insufficient TRST: need {needed}, have {available}")]
     InsufficientBalance { needed: u128, available: u128 },
 
-    #[error("split amounts ({total}) do not equal parent amount ({parent})")]
-    SplitMismatch { total: u128, parent: u128 },
-
     #[error("merge requires at least 2 tokens")]
     EmptyMerge,
 

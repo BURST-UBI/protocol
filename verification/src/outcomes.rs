@@ -1,13 +1,18 @@
 //! Verification outcome processor — distributes rewards and penalties.
 //!
 //! After a verification round completes, this module computes:
-//! - Endorser rewards (TRST reward on success, nothing on failure)
-//! - Correct verifier rewards (stake returned + share of dissenter stakes)
-//! - Incorrect verifier penalties (stake forfeited)
+//! - Endorser outcomes (burn recorded; NO protocol reward — decision 33.8a,
+//!   endorsement is a social obligation)
+//! - Correct verifier outcomes: stake returned + a TRST reward funded exactly
+//!   by the forfeited dissenter stakes (decision 33.7d) — TRST is only ever
+//!   created from burned BRN, and the forfeited stakes are that burn
+//! - Incorrect verifier penalties (stake forfeited/burned)
 //!
 //! For challenges:
-//! - Successful challenger: stake returned + 2x reward
+//! - Successful challenger: stake returned; the TRST reward
+//!   (min(1% of revoked, cap)) is computed by the node after revocation
 //! - Failed challenger: stake forfeited
+//! - Expired challenge: half the stake returned, half forfeited
 
 use burst_types::WalletAddress;
 
@@ -34,14 +39,15 @@ pub enum VerificationResult {
 }
 
 /// Outcome for a single endorser in a verification round.
+///
+/// Endorsers receive NO protocol reward (decision 33.8a) — endorsement is a
+/// social obligation and the burned BRN is gone regardless of outcome.
 #[derive(Clone, Debug)]
 pub struct EndorserOutcome {
     /// The endorser's wallet address.
     pub address: WalletAddress,
     /// Amount of BRN permanently burned for the endorsement.
     pub brn_burned: u128,
-    /// TRST reward on successful verification (10% of burn amount).
-    pub trst_reward: u128,
 }
 
 /// Outcome for a single verifier in a verification round.
@@ -53,42 +59,24 @@ pub struct VerifierOutcome {
     pub staked: u128,
     /// Whether this verifier voted with the majority outcome.
     pub voted_correctly: bool,
-    /// Reward: stake returned + share of dissenter stakes (correct voters only).
-    pub reward: u128,
-    /// Penalty: stake forfeited (incorrect voters only).
+    /// TRST reward for correct staked voters: an equal share of the forfeited
+    /// dissenter stakes (decision 33.7d). Burn-backed — the dissenters' BRN
+    /// was burned, and this TRST is minted against exactly that burn.
+    pub trst_reward: u128,
+    /// Penalty: stake forfeited/burned (incorrect voters only).
     pub penalty: u128,
 }
 
-/// Default endorser reward ratio in basis points (1000 = 10%).
-pub const DEFAULT_ENDORSER_REWARD_BPS: u32 = 1000;
-
 /// Process a completed verification and compute rewards/penalties.
 ///
-/// Endorsers receive a TRST reward (default 10% of burn amount) on success.
-/// Correct verifiers get their stake back plus an equal share of all dissenter stakes.
-/// Incorrect verifiers lose their entire stake.
+/// Endorsers get no protocol reward (33.8a). Correct staked verifiers get
+/// their stake back plus an equal TRST share of all forfeited dissenter
+/// stakes (33.7d). Incorrect verifiers lose their entire stake.
 pub fn compute_verification_outcomes(
     wallet: &WalletAddress,
     result: VerificationResult,
     endorsers: &[(WalletAddress, u128)],
     verifiers: &[(WalletAddress, u128, bool)],
-) -> VerificationOutcomeEvent {
-    compute_verification_outcomes_with_reward(
-        wallet,
-        result,
-        endorsers,
-        verifiers,
-        DEFAULT_ENDORSER_REWARD_BPS,
-    )
-}
-
-/// Process verification outcomes with a configurable endorser reward ratio.
-pub fn compute_verification_outcomes_with_reward(
-    wallet: &WalletAddress,
-    result: VerificationResult,
-    endorsers: &[(WalletAddress, u128)],
-    verifiers: &[(WalletAddress, u128, bool)],
-    endorser_reward_bps: u32,
 ) -> VerificationOutcomeEvent {
     let total_dissenter_stakes: u128 = verifiers
         .iter()
@@ -108,16 +96,9 @@ pub fn compute_verification_outcomes_with_reward(
 
     let endorser_outcomes: Vec<EndorserOutcome> = endorsers
         .iter()
-        .map(|(addr, burned)| {
-            let trst_reward = match result {
-                VerificationResult::Verified => *burned * endorser_reward_bps as u128 / 10_000,
-                VerificationResult::Failed => 0,
-            };
-            EndorserOutcome {
-                address: addr.clone(),
-                brn_burned: *burned,
-                trst_reward,
-            }
+        .map(|(addr, burned)| EndorserOutcome {
+            address: addr.clone(),
+            brn_burned: *burned,
         })
         .collect();
 
@@ -129,7 +110,7 @@ pub fn compute_verification_outcomes_with_reward(
                     address: addr.clone(),
                     staked: *staked,
                     voted_correctly: true,
-                    reward: staked + reward_per_correct,
+                    trst_reward: reward_per_correct,
                     penalty: 0,
                 }
             } else if *correct {
@@ -138,7 +119,7 @@ pub fn compute_verification_outcomes_with_reward(
                     address: addr.clone(),
                     staked: 0,
                     voted_correctly: true,
-                    reward: 0,
+                    trst_reward: 0,
                     penalty: 0,
                 }
             } else {
@@ -146,7 +127,7 @@ pub fn compute_verification_outcomes_with_reward(
                     address: addr.clone(),
                     staked: *staked,
                     voted_correctly: false,
-                    reward: 0,
+                    trst_reward: 0,
                     penalty: *staked,
                 }
             }
@@ -172,8 +153,6 @@ pub struct ChallengeOutcomeEvent {
     pub outcome: ChallengeResult,
     /// The BRN stake the challenger put up.
     pub challenger_stake: u128,
-    /// TRST reward for successful challengers (2x stake).
-    pub challenger_reward: u128,
     /// Outcomes for each verifier in the challenge vote.
     pub verifier_outcomes: Vec<VerifierOutcome>,
 }
@@ -192,9 +171,12 @@ pub enum ChallengeResult {
 
 /// Compute the outcome of a challenge.
 ///
-/// If fraud is confirmed, the challenger receives 2x their stake as reward.
-/// If the challenge is rejected, the challenger's stake is forfeited.
-/// Verifier outcomes follow the same reward/penalty logic as regular verification.
+/// If fraud is confirmed, the challenger's stake is returned and the node
+/// grants a TRST reward of min(1% of revoked TRST, cap) after revocation
+/// (parameter table in IMPLEMENTATION_DECISIONS). If the challenge is
+/// rejected, the challenger's stake is forfeited. If it expires, half the
+/// stake is returned. Verifier outcomes follow the same reward/penalty
+/// logic as regular verification.
 pub fn compute_challenge_outcome(
     challenged: &WalletAddress,
     challenger: &WalletAddress,
@@ -224,7 +206,7 @@ pub fn compute_challenge_outcome(
                     address: addr.clone(),
                     staked: *staked,
                     voted_correctly: true,
-                    reward: staked + reward_per_correct,
+                    trst_reward: reward_per_correct,
                     penalty: 0,
                 }
             } else if *correct {
@@ -232,7 +214,7 @@ pub fn compute_challenge_outcome(
                     address: addr.clone(),
                     staked: 0,
                     voted_correctly: true,
-                    reward: 0,
+                    trst_reward: 0,
                     penalty: 0,
                 }
             } else {
@@ -240,7 +222,7 @@ pub fn compute_challenge_outcome(
                     address: addr.clone(),
                     staked: *staked,
                     voted_correctly: false,
-                    reward: 0,
+                    trst_reward: 0,
                     penalty: *staked,
                 }
             }
@@ -253,7 +235,6 @@ pub fn compute_challenge_outcome(
             challenger: challenger.clone(),
             outcome: ChallengeResult::FraudConfirmed,
             challenger_stake: stake,
-            challenger_reward: stake * 2,
             verifier_outcomes,
         },
         ChallengeResult::ChallengeRejected => ChallengeOutcomeEvent {
@@ -261,7 +242,6 @@ pub fn compute_challenge_outcome(
             challenger: challenger.clone(),
             outcome: ChallengeResult::ChallengeRejected,
             challenger_stake: stake,
-            challenger_reward: 0,
             verifier_outcomes,
         },
         ChallengeResult::Expired => ChallengeOutcomeEvent {
@@ -269,7 +249,6 @@ pub fn compute_challenge_outcome(
             challenger: challenger.clone(),
             outcome: ChallengeResult::Expired,
             challenger_stake: stake,
-            challenger_reward: stake / 2, // return half; other half is penalty for wasting time
             verifier_outcomes,
         },
     }
@@ -303,8 +282,10 @@ mod tests {
 
         assert_eq!(outcome.result, VerificationResult::Verified);
         assert_eq!(outcome.endorsers.len(), 2);
-        assert_eq!(outcome.endorsers[0].trst_reward, 100); // 10% of 1000
-        assert_eq!(outcome.endorsers[1].trst_reward, 200); // 10% of 2000
+        // 33.8(a): endorsement is a social obligation — no protocol reward,
+        // and the burned BRN is permanently gone.
+        assert_eq!(outcome.endorsers[0].brn_burned, 1000);
+        assert_eq!(outcome.endorsers[1].brn_burned, 2000);
     }
 
     #[test]
@@ -321,7 +302,6 @@ mod tests {
         );
 
         assert_eq!(outcome.result, VerificationResult::Failed);
-        assert_eq!(outcome.endorsers[0].trst_reward, 0);
         assert_eq!(outcome.endorsers[0].brn_burned, 1000);
     }
 
@@ -343,18 +323,25 @@ mod tests {
             &verifiers,
         );
 
-        // Total dissenter stakes: 600 + 400 = 1000
-        // 2 correct verifiers: each gets 1000 / 2 = 500
-        assert_eq!(outcome.verifiers[0].reward, 500 + 500); // stake + share
+        // Total dissenter stakes: 600 + 400 = 1000 (BRN, burned)
+        // 2 correct verifiers: each gets a 500 TRST share — burn-backed
+        // by the forfeited stakes (33.7d). The stake itself is unlocked
+        // separately by the node.
+        assert_eq!(outcome.verifiers[0].trst_reward, 500);
         assert_eq!(outcome.verifiers[0].penalty, 0);
-        assert_eq!(outcome.verifiers[1].reward, 500 + 500);
+        assert_eq!(outcome.verifiers[1].trst_reward, 500);
         assert_eq!(outcome.verifiers[1].penalty, 0);
 
         // Dissenters lose their stakes
-        assert_eq!(outcome.verifiers[2].reward, 0);
+        assert_eq!(outcome.verifiers[2].trst_reward, 0);
         assert_eq!(outcome.verifiers[2].penalty, 600);
-        assert_eq!(outcome.verifiers[3].reward, 0);
+        assert_eq!(outcome.verifiers[3].trst_reward, 0);
         assert_eq!(outcome.verifiers[3].penalty, 400);
+
+        // Conservation: minted TRST rewards never exceed the burned stakes.
+        let total_rewards: u128 = outcome.verifiers.iter().map(|v| v.trst_reward).sum();
+        let total_forfeited: u128 = outcome.verifiers.iter().map(|v| v.penalty).sum();
+        assert!(total_rewards <= total_forfeited);
     }
 
     #[test]
@@ -373,9 +360,10 @@ mod tests {
             &verifiers,
         );
 
-        // No dissenters — reward equals only the stake itself
-        assert_eq!(outcome.verifiers[0].reward, 500);
-        assert_eq!(outcome.verifiers[1].reward, 500);
+        // No dissenters — nothing forfeited, so no TRST reward (stake is
+        // simply unlocked by the node).
+        assert_eq!(outcome.verifiers[0].trst_reward, 0);
+        assert_eq!(outcome.verifiers[1].trst_reward, 0);
     }
 
     #[test]
@@ -395,9 +383,9 @@ mod tests {
         );
 
         // No correct verifiers — all stakes forfeited
-        assert_eq!(outcome.verifiers[0].reward, 0);
+        assert_eq!(outcome.verifiers[0].trst_reward, 0);
         assert_eq!(outcome.verifiers[0].penalty, 500);
-        assert_eq!(outcome.verifiers[1].reward, 0);
+        assert_eq!(outcome.verifiers[1].trst_reward, 0);
         assert_eq!(outcome.verifiers[1].penalty, 500);
     }
 
@@ -420,8 +408,8 @@ mod tests {
         );
 
         // Total dissenter: 300 + 400 + 300 = 1000
-        // 1 correct verifier gets all 1000
-        assert_eq!(outcome.verifiers[0].reward, 500 + 1000);
+        // 1 correct verifier gets the whole 1000 as burn-backed TRST
+        assert_eq!(outcome.verifiers[0].trst_reward, 1000);
         assert_eq!(outcome.verifiers[0].penalty, 0);
     }
 
@@ -466,12 +454,12 @@ mod tests {
 
         assert_eq!(outcome.outcome, ChallengeResult::FraudConfirmed);
         assert_eq!(outcome.challenger_stake, 1000);
-        assert_eq!(outcome.challenger_reward, 2000);
         assert_eq!(outcome.challenged_wallet, challenged);
         assert_eq!(outcome.challenger, challenger);
         assert_eq!(outcome.verifier_outcomes.len(), 2);
         assert!(outcome.verifier_outcomes[0].voted_correctly);
-        assert_eq!(outcome.verifier_outcomes[0].reward, 500 + 500);
+        // TRST share funded by the forfeited dissenter stake.
+        assert_eq!(outcome.verifier_outcomes[0].trst_reward, 500);
         assert!(!outcome.verifier_outcomes[1].voted_correctly);
         assert_eq!(outcome.verifier_outcomes[1].penalty, 500);
     }
@@ -492,7 +480,6 @@ mod tests {
 
         assert_eq!(outcome.outcome, ChallengeResult::ChallengeRejected);
         assert_eq!(outcome.challenger_stake, 1000);
-        assert_eq!(outcome.challenger_reward, 0);
         assert!(outcome.verifier_outcomes.is_empty());
     }
 
@@ -510,7 +497,7 @@ mod tests {
         );
 
         assert_eq!(outcome.challenger_stake, 0);
-        assert_eq!(outcome.challenger_reward, 0);
+        assert!(outcome.verifier_outcomes.is_empty());
     }
 
     #[test]

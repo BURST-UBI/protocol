@@ -180,11 +180,21 @@ impl BrnWalletState {
         self.accrual_stopped_at = Some(at);
     }
 
-    /// Resume BRN accrual (e.g. on re-verification).
+    /// Resume BRN accrual (e.g. on re-verification of a deactivated wallet).
+    ///
+    /// Shifts `verified_at` forward by exactly the paused gap so the wallet
+    /// keeps everything it earned before deactivation but accrues nothing
+    /// for the paused period — the birthright pauses, it is never clawed
+    /// back and never granted retroactively.
     pub fn resume_accrual(&mut self, at: Timestamp) {
+        if !self.accrual_active {
+            if let Some(stopped) = self.accrual_stopped_at {
+                let gap = at.as_secs().saturating_sub(stopped.as_secs());
+                self.verified_at = Timestamp::new(self.verified_at.as_secs().saturating_add(gap));
+            }
+        }
         self.accrual_active = true;
         self.accrual_stopped_at = None;
-        self.verified_at = at;
     }
 }
 
@@ -310,7 +320,7 @@ mod tests {
     }
 
     #[test]
-    fn wallet_state_resume_accrual_resets_verified_at() {
+    fn wallet_state_resume_accrual_skips_paused_gap() {
         let rates = RateHistory::new(100, Timestamp::new(0));
         let mut state = BrnWalletState::new(Timestamp::new(0));
         state.total_burned = 5000;
@@ -318,11 +328,14 @@ mod tests {
         state.resume_accrual(Timestamp::new(100));
 
         assert!(state.accrual_active);
-        assert_eq!(state.verified_at, Timestamp::new(100));
-        // Previous burns still count, but accrual restarts from t=100
+        // The paused gap (50s) shifts verified_at forward: earned balance is
+        // preserved, but nothing accrues for the paused period.
+        assert_eq!(state.verified_at, Timestamp::new(50));
         let balance = state.available_balance(&rates, Timestamp::new(200));
-        // 100 * (200-100) = 10000, minus 5000 burned = 5000
-        assert_eq!(balance, 5000);
+        // accrued = 100 * (200 - 50) = 15000, minus 5000 burned = 10000
+        assert_eq!(balance, 10000);
+        // Exactly what it would have been at the stop moment (5000-5000=0)
+        // plus post-resume accrual (100 * 100 = 10000).
     }
 
     #[test]

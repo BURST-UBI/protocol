@@ -1612,6 +1612,7 @@ fn build_and_sign_block(
     work_generator: &burst_work::WorkGenerator,
     min_work_difficulty: u64,
     params_hash: BlockHash,
+    merge_sources: Vec<burst_types::TxHash>,
 ) -> Result<burst_ledger::StateBlock, RpcError> {
     use burst_ledger::CURRENT_BLOCK_VERSION;
 
@@ -1630,6 +1631,7 @@ fn build_and_sign_block(
         transaction,
         timestamp: now,
         params_hash,
+        merge_sources,
         work: 0,
         signature: Signature([0u8; 64]),
         hash: BlockHash::ZERO,
@@ -1652,6 +1654,21 @@ fn build_and_sign_block(
     block.work = nonce.0;
 
     Ok(block)
+}
+
+/// Cumulative-spent BRN (odometer) recorded on the account's head block.
+/// Zero for new accounts — open blocks must not claim BRN (birthright is
+/// computed, never self-reported).
+fn prev_spent_brn(state: &RpcState, head: &BlockHash) -> u128 {
+    if head.is_zero() {
+        return 0;
+    }
+    state
+        .block_store
+        .get_block(head)
+        .ok()
+        .and_then(|b| bincode::deserialize::<burst_ledger::StateBlock>(&b).ok())
+        .map_or(0, |b| b.brn_balance)
 }
 
 /// Submit a block through the block processor and return whether it was accepted.
@@ -1769,9 +1786,12 @@ pub async fn handle_burn_simple(
         )));
     }
 
-    let brn_after = brn_balance - amount;
+    let brn_after = brn_balance - amount; // computed remaining (for the response)
     let trst_before = account.trst_balance;
-    let trst_after = trst_before + amount;
+    // Two-phase burn (8.4a): the minted TRST goes to pending and must be
+    // claimed with a Receive block — the burn block itself never changes
+    // the burner's TRST balance.
+    let trst_after = trst_before;
 
     let tx_hash = TxHash::new(burst_crypto::blake2b_256(
         &[
@@ -1789,6 +1809,7 @@ pub async fn handle_burn_simple(
         burst_ledger::BlockType::Burn
     };
 
+    let spent_brn = prev_spent_brn(state, &account.head);
     let pk_bytes = private_key.0;
     let block = tokio::task::spawn_blocking({
         let address = address.clone();
@@ -1804,7 +1825,7 @@ pub async fn handle_burn_simple(
                 &address,
                 previous,
                 &representative,
-                brn_after,
+                spent_brn.saturating_add(amount),
                 trst_after,
                 BlockHash::ZERO,
                 tx_hash,
@@ -1813,6 +1834,7 @@ pub async fn handle_burn_simple(
                 &work_gen,
                 min_diff,
                 ph,
+                Vec::new(),
             )
         }
     })
@@ -1837,6 +1859,29 @@ pub async fn handle_burn_simple(
     let _ = state
         .block_store
         .put_block_with_account(&block.hash, &block_bytes, &address);
+
+    // Dev-faucet self-conversion: put the freshly minted TRST into pending,
+    // claimable with a normal Receive block (two-phase, 8.4a). Backed 1:1 by
+    // the BRN burned in the block above.
+    let pending_info = burst_store::pending::PendingInfo {
+        source: address.clone(),
+        amount,
+        timestamp: Timestamp::new(block.timestamp.as_secs()),
+        provenance: vec![burst_store::pending::PendingProvenance {
+            amount,
+            origin: TxHash::new(*block.hash.as_bytes()),
+            origin_wallet: address.clone(),
+            origin_timestamp: block.timestamp,
+            effective_origin_timestamp: block.timestamp,
+        }],
+    };
+    let pending_key = TxHash::new(*block.hash.as_bytes());
+    if let Err(e) = state
+        .pending_store
+        .put_pending(&address, &pending_key, &pending_info)
+    {
+        tracing::warn!(error = %e, "failed to create faucet pending entry");
+    }
 
     {
         let mut cache = state.rep_weight_cache.write().await;
@@ -1910,11 +1955,6 @@ pub async fn handle_send_simple(
     let destination = WalletAddress::new(req.destination.clone());
 
     let now = Timestamp::now();
-    let brn_state = brn_state_from_account(&account, state.params.brn_rate);
-    let brn_balance = {
-        let brn = state.brn_engine.lock().await;
-        brn.compute_balance(&brn_state, now)
-    };
 
     let dest_hash = BlockHash::new(burst_crypto::blake2b_256(destination.as_str().as_bytes()));
     let tx_hash = TxHash::new(burst_crypto::blake2b_256(
@@ -1933,6 +1973,7 @@ pub async fn handle_send_simple(
         burst_ledger::BlockType::Send
     };
 
+    let spent_brn = prev_spent_brn(state, &account.head);
     let pk_bytes = private_key.0;
     let block = tokio::task::spawn_blocking({
         let address = address.clone();
@@ -1948,7 +1989,7 @@ pub async fn handle_send_simple(
                 &address,
                 previous,
                 &representative,
-                brn_balance,
+                spent_brn,
                 trst_after,
                 dest_hash,
                 TxHash::ZERO,
@@ -1957,6 +1998,7 @@ pub async fn handle_send_simple(
                 &work_gen,
                 min_diff,
                 ph,
+                Vec::new(),
             )
         }
     })
@@ -2074,11 +2116,6 @@ pub async fn handle_receive_simple(
     let trst_after = trst_before + pending.amount;
 
     let now = Timestamp::now();
-    let brn_state = brn_state_from_account(&account, state.params.brn_rate);
-    let brn_balance = {
-        let brn = state.brn_engine.lock().await;
-        brn.compute_balance(&brn_state, now)
-    };
 
     let is_open = account.head == BlockHash::ZERO;
     let block_type = if is_open {
@@ -2097,6 +2134,7 @@ pub async fn handle_receive_simple(
         .concat(),
     ));
 
+    let spent_brn = prev_spent_brn(state, &account.head);
     let pk_bytes = private_key.0;
     let block = tokio::task::spawn_blocking({
         let address = address.clone();
@@ -2112,7 +2150,7 @@ pub async fn handle_receive_simple(
                 &address,
                 previous,
                 &representative,
-                brn_balance,
+                spent_brn,
                 trst_after,
                 link,
                 TxHash::ZERO,
@@ -2121,6 +2159,7 @@ pub async fn handle_receive_simple(
                 &work_gen,
                 min_diff,
                 ph,
+                Vec::new(),
             )
         }
     })
@@ -2214,11 +2253,6 @@ pub async fn handle_change_rep_simple(
     }
 
     let now = Timestamp::now();
-    let brn_state = brn_state_from_account(&account, state.params.brn_rate);
-    let brn_balance = {
-        let brn = state.brn_engine.lock().await;
-        brn.compute_balance(&brn_state, now)
-    };
 
     let tx_hash = TxHash::new(burst_crypto::blake2b_256(
         &[
@@ -2229,6 +2263,7 @@ pub async fn handle_change_rep_simple(
         .concat(),
     ));
 
+    let spent_brn = prev_spent_brn(state, &account.head);
     let pk_bytes = private_key.0;
     let block = tokio::task::spawn_blocking({
         let address = address.clone();
@@ -2245,7 +2280,7 @@ pub async fn handle_change_rep_simple(
                 &address,
                 previous,
                 &new_rep,
-                brn_balance,
+                spent_brn,
                 trst_balance,
                 BlockHash::ZERO,
                 TxHash::ZERO,
@@ -2254,6 +2289,7 @@ pub async fn handle_change_rep_simple(
                 &work_gen,
                 min_diff,
                 ph,
+                Vec::new(),
             )
         }
     })
@@ -2373,6 +2409,7 @@ pub async fn handle_governance_propose_simple(
         .concat(),
     ));
 
+    let spent_brn = prev_spent_brn(state, &account.head);
     let pk_bytes = private_key.0;
     let block = tokio::task::spawn_blocking({
         let address = address.clone();
@@ -2389,7 +2426,7 @@ pub async fn handle_governance_propose_simple(
                 &address,
                 previous,
                 &representative,
-                brn_balance,
+                spent_brn,
                 trst_balance,
                 link,
                 TxHash::ZERO,
@@ -2398,6 +2435,7 @@ pub async fn handle_governance_propose_simple(
                 &work_gen,
                 min_diff,
                 ph,
+                Vec::new(),
             )
         }
     })
@@ -2527,12 +2565,8 @@ pub async fn handle_governance_vote_simple(
     let transaction = TxHash::new(tx_bytes);
 
     let now = Timestamp::now();
-    let brn_state = brn_state_from_account(&account, state.params.brn_rate);
-    let brn_balance = {
-        let brn = state.brn_engine.lock().await;
-        brn.compute_balance(&brn_state, now)
-    };
 
+    let spent_brn = prev_spent_brn(state, &account.head);
     let pk_bytes = private_key.0;
     let block = tokio::task::spawn_blocking({
         let address = address.clone();
@@ -2549,7 +2583,7 @@ pub async fn handle_governance_vote_simple(
                 &address,
                 previous,
                 &representative,
-                brn_balance,
+                spent_brn,
                 trst_balance,
                 link,
                 TxHash::ZERO,
@@ -2558,6 +2592,7 @@ pub async fn handle_governance_vote_simple(
                 &work_gen,
                 min_diff,
                 ph,
+                Vec::new(),
             )
         }
     })
@@ -2653,7 +2688,8 @@ fn parse_governable_param(name: &str) -> Result<burst_governance::GovernablePara
         "consti_quorum_bps" => Ok(GovernableParam::ConstiQuorumBps),
         "verification_timeout_secs" => Ok(GovernableParam::VerificationTimeoutSecs),
         "challenge_duration_secs" => Ok(GovernableParam::ChallengeDurationSecs),
-        "endorser_reward_bps" => Ok(GovernableParam::EndorserRewardBps),
+        "challenge_reward_bps" => Ok(GovernableParam::ChallengeRewardBps),
+        "challenge_reward_cap" => Ok(GovernableParam::ChallengeRewardCap),
         "new_wallet_spending_limit" => Ok(GovernableParam::NewWalletSpendingLimit),
         "new_wallet_limit_duration_secs" => Ok(GovernableParam::NewWalletLimitDurationSecs),
         "bootstrap_exit_threshold" => Ok(GovernableParam::BootstrapExitThreshold),

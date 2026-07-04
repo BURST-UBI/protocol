@@ -306,6 +306,7 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1000),
             params_hash: BlockHash::ZERO,
+            merge_sources: Vec::new(),
             work: 0,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,

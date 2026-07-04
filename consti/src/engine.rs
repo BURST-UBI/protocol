@@ -156,39 +156,31 @@ impl ConstiEngine {
 
         if amendment.operations.is_empty() {
             // Legacy behavior: add a single article from title/text
-            let article_number = document.next_article_number();
-            let new_article = Article {
-                number: article_number,
+            document.push_article(Article {
+                number: 0, // assigned by push_article
                 title: amendment.title.clone(),
                 text: amendment.text.clone(),
                 introduced_by_amendment: new_version,
                 repealed: false,
-            };
-            document.articles.push(new_article);
+            });
         } else {
             // Diff-based: apply each operation
             for op in &amendment.operations {
                 match op {
                     AmendmentOp::AddArticle { title, text } => {
-                        let article_number = document.next_article_number();
-                        let new_article = Article {
-                            number: article_number,
+                        document.push_article(Article {
+                            number: 0, // assigned by push_article
                             title: title.clone(),
                             text: text.clone(),
                             introduced_by_amendment: new_version,
                             repealed: false,
-                        };
-                        document.articles.push(new_article);
+                        });
                     }
                     AmendmentOp::ModifyArticle {
                         article_number,
                         new_text,
                     } => {
-                        if let Some(article) = document
-                            .articles
-                            .iter_mut()
-                            .find(|a| a.number == *article_number && !a.repealed)
-                        {
+                        if let Some(article) = document.get_article_mut(*article_number) {
                             article.text = new_text.clone();
                             article.introduced_by_amendment = new_version;
                         } else {
@@ -196,18 +188,18 @@ impl ConstiEngine {
                         }
                     }
                     AmendmentOp::RepealArticle { article_number } => {
-                        if let Some(article) = document
-                            .articles
-                            .iter_mut()
-                            .find(|a| a.number == *article_number)
-                        {
-                            if article.repealed {
-                                return Err(ConstiError::ArticleAlreadyRepealed(*article_number));
+                        let article = document
+                            .get_article_including_repealed(*article_number)
+                            .ok_or(ConstiError::ArticleNotFound(*article_number))?;
+                        if article.repealed {
+                            return Err(ConstiError::ArticleAlreadyRepealed(*article_number));
+                        }
+                        document.repeal_article(*article_number);
+                        // Update introduced_by_amendment on the repealed article
+                        if let Some(&pos) = document.article_index.get(article_number) {
+                            if let Some(a) = document.articles.get_mut(pos) {
+                                a.introduced_by_amendment = new_version;
                             }
-                            article.repealed = true;
-                            article.introduced_by_amendment = new_version;
-                        } else {
-                            return Err(ConstiError::ArticleNotFound(*article_number));
                         }
                     }
                 }

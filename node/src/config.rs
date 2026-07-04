@@ -88,6 +88,12 @@ pub struct NodeConfig {
     /// If only IP is given, the P2P port is used. UPnP overrides this when active.
     #[serde(default)]
     pub advertise_address: Option<String>,
+
+    /// Whether this node participates in consensus as a voting representative.
+    /// When enabled, the node generates and broadcasts votes for validated blocks.
+    /// Defaults to true so testnet nodes vote out of the box.
+    #[serde(default = "default_true")]
+    pub enable_representative: bool,
 }
 
 // ── Serde default helpers ──────────────────────────────────────────────
@@ -174,6 +180,7 @@ impl Default for NodeConfig {
             enable_faucet: false,
             enable_upnp: true,
             advertise_address: None,
+            enable_representative: true,
         }
     }
 }

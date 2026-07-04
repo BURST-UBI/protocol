@@ -3,7 +3,6 @@
 //! Transaction types:
 //! - **Burn**: Consumer burns BRN → provider receives TRST
 //! - **Send**: Transfer TRST between wallets
-//! - **Split**: Divide TRST into smaller amounts
 //! - **Merge**: Combine multiple TRST tokens into one
 //! - **Endorse**: Endorser burns BRN to vouch for a new wallet
 //! - **Challenge**: Challenger stakes BRN to contest a wallet's legitimacy
@@ -24,7 +23,6 @@ pub mod receive;
 pub mod reject_receive;
 pub mod representative;
 pub mod send;
-pub mod split;
 pub mod validation;
 pub mod verification_vote;
 
@@ -36,7 +34,6 @@ use serde::{Deserialize, Serialize};
 pub enum Transaction {
     Burn(burn::BurnTx),
     Send(send::SendTx),
-    Split(split::SplitTx),
     Merge(merge::MergeTx),
     Endorse(endorse::EndorseTx),
     Challenge(challenge::ChallengeTx),
@@ -56,7 +53,6 @@ impl Transaction {
         match self {
             Self::Burn(tx) => &tx.hash,
             Self::Send(tx) => &tx.hash,
-            Self::Split(tx) => &tx.hash,
             Self::Merge(tx) => &tx.hash,
             Self::Endorse(tx) => &tx.hash,
             Self::Challenge(tx) => &tx.hash,
@@ -76,7 +72,6 @@ impl Transaction {
         match self {
             Self::Burn(tx) => &tx.sender,
             Self::Send(tx) => &tx.sender,
-            Self::Split(tx) => &tx.sender,
             Self::Merge(tx) => &tx.sender,
             Self::Endorse(tx) => &tx.endorser,
             Self::Challenge(tx) => &tx.challenger,
@@ -96,7 +91,6 @@ impl Transaction {
         match self {
             Self::Burn(tx) => tx.timestamp,
             Self::Send(tx) => tx.timestamp,
-            Self::Split(tx) => tx.timestamp,
             Self::Merge(tx) => tx.timestamp,
             Self::Endorse(tx) => tx.timestamp,
             Self::Challenge(tx) => tx.timestamp,
@@ -116,7 +110,6 @@ impl Transaction {
         match self {
             Self::Burn(tx) => tx.work,
             Self::Send(tx) => tx.work,
-            Self::Split(tx) => tx.work,
             Self::Merge(tx) => tx.work,
             Self::Endorse(tx) => tx.work,
             Self::Challenge(tx) => tx.work,
@@ -136,7 +129,6 @@ impl Transaction {
         match self {
             Self::Burn(tx) => &tx.signature,
             Self::Send(tx) => &tx.signature,
-            Self::Split(tx) => &tx.signature,
             Self::Merge(tx) => &tx.signature,
             Self::Endorse(tx) => &tx.signature,
             Self::Challenge(tx) => &tx.signature,

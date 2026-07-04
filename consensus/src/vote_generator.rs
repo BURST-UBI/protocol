@@ -31,6 +31,11 @@ impl VoteGenerator {
         }
     }
 
+    /// Set whether this node should act as a voting representative.
+    pub fn set_representative(&mut self, is_rep: bool) {
+        self.is_representative = is_rep;
+    }
+
     /// Generate a non-final vote for a block.
     ///
     /// Non-final votes can be changed later (e.g. if the node sees a

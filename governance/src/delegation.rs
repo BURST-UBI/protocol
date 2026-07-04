@@ -199,6 +199,10 @@ impl DelegationEngine {
     }
 
     /// Get the total voting power for an address in a scoped context.
+    ///
+    /// Uses BFS from reverse-delegation index (like `voting_power`) instead of
+    /// iterating all delegations. For each candidate, resolves with scoped
+    /// context to verify it terminates at `address`.
     pub fn voting_power_for_context(
         &self,
         address: &WalletAddress,
@@ -206,15 +210,32 @@ impl DelegationEngine {
         category: Option<&str>,
     ) -> u32 {
         let mut power = 1u32; // Own vote
-        let mut all_delegators = HashSet::new();
-        for delegator in self.delegations.keys() {
-            all_delegators.insert(delegator.clone());
+        // BFS through reverse-delegation index to find candidates
+        let mut candidates = HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(address.clone());
+        while let Some(current) = queue.pop_front() {
+            if let Some(delegators) = self.reverse_delegations.get(&current) {
+                for d in delegators {
+                    if candidates.insert(d.clone()) {
+                        queue.push_back(d.clone());
+                    }
+                }
+            }
         }
-        for (delegator, _) in self.scoped_delegations.keys() {
-            all_delegators.insert(delegator.clone());
+        // Also check scoped delegations that point to address or any candidate
+        // (scoped delegations can override global, so we need to check them too)
+        let mut scoped_candidates = HashSet::new();
+        for ((delegator, _scope), delegate) in &self.scoped_delegations {
+            if delegate == address || candidates.contains(delegator) {
+                scoped_candidates.insert(delegator.clone());
+            }
         }
-        for delegator in &all_delegators {
-            if let Some(resolved) = self.resolve_for_context(delegator, proposal_hash, category) {
+        candidates.extend(scoped_candidates);
+
+        // Verify each candidate resolves to address in the given context
+        for candidate in &candidates {
+            if let Some(resolved) = self.resolve_for_context(candidate, proposal_hash, category) {
                 if &resolved == address {
                     power += 1;
                 }

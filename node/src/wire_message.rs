@@ -162,6 +162,7 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(42),
             params_hash: BlockHash::ZERO,
+            merge_sources: Vec::new(),
             work: 0xDEAD,
             signature: Signature([0xFF; 64]),
             hash: BlockHash::ZERO,

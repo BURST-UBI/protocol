@@ -4,7 +4,7 @@
 //! - Key generation and management (primary + delegation key pairs)
 //! - BRN balance display (computed from time)
 //! - TRST portfolio (transferable, expired, revoked)
-//! - Transaction building and signing (burn, send, split, merge)
+//! - Transaction building and signing (burn, send, merge)
 //! - Delegation management
 //! - Voting interface
 //! - Group trust policy evaluation

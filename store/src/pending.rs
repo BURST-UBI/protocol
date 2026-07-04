@@ -17,6 +17,10 @@ pub struct PendingInfo {
 }
 
 /// Origin provenance for a consumed token portion, stored in pending entries.
+///
+/// Carries only the single origin pointer (IMPLEMENTATION_DECISIONS 6.17b) —
+/// for merged tokens the origin is the merge tx hash and constituent origins
+/// are found by following the merger graph.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PendingProvenance {
     pub amount: u128,
@@ -24,10 +28,6 @@ pub struct PendingProvenance {
     pub origin_wallet: WalletAddress,
     pub origin_timestamp: Timestamp,
     pub effective_origin_timestamp: Timestamp,
-    /// For merged tokens: proportions from each constituent origin.
-    /// Empty for simple (non-merged) tokens.
-    #[serde(default)]
-    pub origin_proportions: Vec<burst_types::OriginProportion>,
 }
 
 /// Trait for tracking pending receives.
@@ -71,4 +71,11 @@ pub trait PendingStore {
 
     /// Total number of pending receives across all accounts.
     fn pending_count(&self) -> Result<u64, StoreError>;
+
+    /// Get every pending receive across all accounts.
+    ///
+    /// Used by the expiry sweep (6.16a): pending TRST whose token has expired
+    /// is returned to the sender. O(total pending) — call from periodic
+    /// background tasks only.
+    fn get_all_pending(&self) -> Result<Vec<(WalletAddress, TxHash, PendingInfo)>, StoreError>;
 }

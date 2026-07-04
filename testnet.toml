@@ -54,3 +54,7 @@ enable_upnp = true
 
 # Opt-in to act as a verifier in the UHV process.
 enable_verification = false
+
+# Enable voting as a representative in consensus (ORV).
+# All testnet nodes vote so elections can reach quorum.
+enable_representative = true

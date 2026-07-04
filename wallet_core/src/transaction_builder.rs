@@ -160,46 +160,6 @@ pub fn build_change_rep_tx(
     })
 }
 
-/// Build a split transaction to divide a TRST token into multiple outputs.
-///
-/// The `parent_hash` references the token being split. The `origin` is copied
-/// from the parent token. All outputs share the same origin.
-/// The sum of output amounts must equal the parent token's full amount.
-pub fn build_split_tx(
-    sender: &WalletAddress,
-    parent_hash: TxHash,
-    origin: TxHash,
-    outputs: Vec<burst_transactions::split::SplitOutput>,
-    now: Timestamp,
-) -> Result<burst_transactions::split::SplitTx, WalletError> {
-    if outputs.is_empty() {
-        return Err(WalletError::TransactionBuild(
-            "split must have at least one output".to_string(),
-        ));
-    }
-
-    let outputs_str: String = outputs
-        .iter()
-        .map(|o| format!("{}:{}", o.receiver, o.amount))
-        .collect::<Vec<_>>()
-        .join(",");
-    let hash_data = format!(
-        "split:{}:{}:{}:[{}]:{}",
-        sender, parent_hash, origin, outputs_str, now
-    );
-    let hash = burst_crypto::hash_transaction(hash_data.as_bytes());
-    Ok(burst_transactions::split::SplitTx {
-        hash,
-        sender: sender.clone(),
-        timestamp: now,
-        parent_hash,
-        origin,
-        outputs,
-        work: 0,
-        signature: Signature([0u8; 64]),
-    })
-}
-
 /// Build a merge transaction to combine multiple TRST tokens into one.
 ///
 /// The merged token's expiry is the earliest among all inputs.
@@ -344,7 +304,10 @@ pub struct AccountState {
     pub block_count: u64,
     /// Current consensus representative.
     pub representative: WalletAddress,
-    /// BRN balance after the most recent block.
+    /// Cumulative BRN spent (burned + staked) recorded on the most recent
+    /// block — an ascending odometer, NOT the available balance. Available
+    /// BRN is computed from verified_at, the rate history, and this spending
+    /// record; query the node (RPC returns the components, decision 5.11b).
     pub brn_balance: u128,
     /// TRST balance after the most recent block.
     pub trst_balance: u128,
@@ -362,15 +325,12 @@ pub fn build_state_block(
     params_hash: BlockHash,
 ) -> Result<StateBlock, WalletError> {
     let (block_type, link, brn_balance, trst_balance, representative) = match transaction {
+        // BRN-spending blocks: the odometer increases by the spend amount.
+        // Availability is validated by nodes against the computed BRN(w).
         burst_transactions::Transaction::Burn(tx) => (
             BlockType::Burn,
             address_to_link(&tx.receiver)?,
-            account_state.brn_balance.checked_sub(tx.amount).ok_or(
-                WalletError::InsufficientBrn {
-                    needed: tx.amount,
-                    available: account_state.brn_balance,
-                },
-            )?,
+            account_state.brn_balance.saturating_add(tx.amount),
             account_state.trst_balance,
             None,
         ),
@@ -386,21 +346,6 @@ pub fn build_state_block(
             )?,
             None,
         ),
-        burst_transactions::Transaction::Split(tx) => {
-            let total_output: u128 = tx.outputs.iter().map(|o| o.amount).sum();
-            (
-                BlockType::Split,
-                BlockHash::new(*tx.parent_hash.as_bytes()),
-                account_state.brn_balance,
-                account_state.trst_balance.checked_sub(total_output).ok_or(
-                    WalletError::InsufficientTrst {
-                        needed: total_output,
-                        available: account_state.trst_balance,
-                    },
-                )?,
-                None,
-            )
-        }
         burst_transactions::Transaction::Merge(tx) => (
             BlockType::Merge,
             BlockHash::new(*tx.hash.as_bytes()),
@@ -411,26 +356,14 @@ pub fn build_state_block(
         burst_transactions::Transaction::Endorse(tx) => (
             BlockType::Endorse,
             address_to_link(&tx.target)?,
-            account_state
-                .brn_balance
-                .checked_sub(tx.burn_amount)
-                .ok_or(WalletError::InsufficientBrn {
-                    needed: tx.burn_amount,
-                    available: account_state.brn_balance,
-                })?,
+            account_state.brn_balance.saturating_add(tx.burn_amount),
             account_state.trst_balance,
             None,
         ),
         burst_transactions::Transaction::Challenge(tx) => (
             BlockType::Challenge,
             address_to_link(&tx.target)?,
-            account_state
-                .brn_balance
-                .checked_sub(tx.stake_amount)
-                .ok_or(WalletError::InsufficientBrn {
-                    needed: tx.stake_amount,
-                    available: account_state.brn_balance,
-                })?,
+            account_state.brn_balance.saturating_add(tx.stake_amount),
             account_state.trst_balance,
             None,
         ),
@@ -486,13 +419,7 @@ pub fn build_state_block(
         burst_transactions::Transaction::VerificationVote(tx) => (
             BlockType::VerificationVote,
             address_to_link(&tx.target_wallet)?,
-            account_state
-                .brn_balance
-                .checked_sub(tx.stake_amount)
-                .ok_or(WalletError::InsufficientBrn {
-                    needed: tx.stake_amount,
-                    available: account_state.brn_balance,
-                })?,
+            account_state.brn_balance.saturating_add(tx.stake_amount),
             account_state.trst_balance,
             None,
         ),
@@ -503,6 +430,13 @@ pub fn build_state_block(
     let origin = match block_type {
         BlockType::Burn => *transaction.hash(),
         _ => previous_origin,
+    };
+
+    // The wallet's chosen merge inputs go on-chain (6.17b) so expiry
+    // grouping is in the wallet's hands and the input set is signed.
+    let merge_sources = match transaction {
+        burst_transactions::Transaction::Merge(tx) => tx.source_hashes.clone(),
+        _ => Vec::new(),
     };
 
     let mut block = StateBlock {
@@ -518,6 +452,7 @@ pub fn build_state_block(
         transaction: *transaction.hash(),
         timestamp: transaction.timestamp(),
         params_hash,
+        merge_sources,
         work: 0,
         signature: Signature([0u8; 64]),
         hash: BlockHash::ZERO,
@@ -557,8 +492,6 @@ pub fn build_and_sign_state_block(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burst_transactions::split::SplitOutput;
-
     fn test_address(suffix: &str) -> WalletAddress {
         let seed: Vec<u8> = suffix.as_bytes().iter().copied().cycle().take(32).collect();
         let mut seed_arr = [0u8; 32];
@@ -606,39 +539,6 @@ mod tests {
         assert_eq!(tx.account.as_str(), account.as_str());
         assert_eq!(tx.new_representative.as_str(), new_rep.as_str());
         assert!(!tx.hash.is_zero());
-    }
-
-    #[test]
-    fn build_split_tx_creates_valid_tx() {
-        let sender = test_address("sender1");
-        let parent = TxHash::new([3u8; 32]);
-        let origin = TxHash::new([4u8; 32]);
-        let outputs = vec![
-            SplitOutput {
-                receiver: test_address("out1"),
-                amount: 300,
-            },
-            SplitOutput {
-                receiver: test_address("out2"),
-                amount: 200,
-            },
-        ];
-        let tx = build_split_tx(&sender, parent, origin, outputs, Timestamp::new(4000)).unwrap();
-        assert_eq!(tx.outputs.len(), 2);
-        assert!(!tx.hash.is_zero());
-    }
-
-    #[test]
-    fn build_split_tx_rejects_empty_outputs() {
-        let sender = test_address("sender1");
-        let result = build_split_tx(
-            &sender,
-            TxHash::ZERO,
-            TxHash::ZERO,
-            vec![],
-            Timestamp::new(0),
-        );
-        assert!(result.is_err());
     }
 
     #[test]
@@ -693,7 +593,8 @@ mod tests {
         let block = build_state_block(&state, &tx, TxHash::ZERO, BlockHash::ZERO).unwrap();
 
         assert_eq!(block.block_type, BlockType::Burn);
-        assert_eq!(block.brn_balance, 9_900);
+        // Ascending odometer: 10_000 previously spent + 100 burned now.
+        assert_eq!(block.brn_balance, 10_100);
         assert_eq!(block.trst_balance, 5_000);
         assert_eq!(block.version, CURRENT_BLOCK_VERSION);
         assert!(!block.hash.is_zero());
@@ -722,7 +623,11 @@ mod tests {
     }
 
     #[test]
-    fn build_state_block_insufficient_brn() {
+    fn build_state_block_burn_increases_spent_odometer() {
+        // The odometer is cumulative spending, not an available balance —
+        // the wallet cannot check BRN sufficiency from it (nodes validate
+        // the spend against the computed BRN(w)). Building always succeeds
+        // and records the spend as the odometer delta.
         let state = AccountState {
             brn_balance: 50,
             ..test_account_state()
@@ -735,8 +640,8 @@ mod tests {
         )
         .unwrap();
         let tx = burst_transactions::Transaction::Burn(burn);
-        let result = build_state_block(&state, &tx, TxHash::ZERO, BlockHash::ZERO);
-        assert!(result.is_err());
+        let block = build_state_block(&state, &tx, TxHash::ZERO, BlockHash::ZERO).unwrap();
+        assert_eq!(block.brn_balance, 150);
     }
 
     #[test]

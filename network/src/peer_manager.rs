@@ -331,14 +331,48 @@ impl PeerManager {
         result
     }
 
-    /// Return up to `count` random *connected* peer addresses with this
+    /// Return up to `count` random *known* (connected or not) peer addresses.
+    ///
+    /// Used in keepalive messages so that nodes can advertise peers they know
+    /// about even if they haven't connected to all of them yet. This breaks
+    /// the chicken-and-egg problem where peers can't discover each other
+    /// because keepalives only advertised connected peers.
+    pub fn random_known_peers(&self, count: usize) -> Vec<PeerAddress> {
+        let mut result = Vec::with_capacity(count);
+
+        let known: Vec<&PeerState> = self
+            .peers
+            .values()
+            .filter(|p| !p.banned)
+            .collect();
+
+        let mut rng = rand::thread_rng();
+        let mut indices: Vec<usize> = (0..known.len()).collect();
+        indices.shuffle(&mut rng);
+
+        for i in indices {
+            if result.len() >= count {
+                break;
+            }
+            let peer = known[i];
+            result.push(
+                peer.peering_addr
+                    .clone()
+                    .unwrap_or_else(|| peer.address.clone()),
+            );
+        }
+
+        result
+    }
+
+    /// Return up to `count` random *known* peer addresses with this
     /// node's own external address in slot 0 (for self-advertisement).
     pub fn random_peers_with_self(&self, count: usize) -> Vec<PeerAddress> {
         let mut result = Vec::with_capacity(count);
         if let Some(self_addr) = self.self_peer_address() {
             result.push(self_addr);
         }
-        let rest = self.random_peers(count.saturating_sub(result.len()));
+        let rest = self.random_known_peers(count.saturating_sub(result.len()));
         result.extend(rest);
         result.truncate(count);
         result
@@ -619,6 +653,21 @@ mod tests {
 
         let random = pm.random_peers(10);
         assert_eq!(random.len(), 2);
+    }
+
+    #[test]
+    fn random_known_peers_returns_all_unbanned() {
+        let mut pm = PeerManager::new(10);
+        pm.add_peer(addr("1.0.0.1", 1));
+        pm.add_peer(addr("1.0.0.2", 2));
+        pm.add_peer(addr("1.0.0.3", 3));
+        pm.mark_connected(&key("1.0.0.1", 1), 0);
+        // 1.0.0.2 is not connected, 1.0.0.3 is not connected
+        pm.penalize(&key("1.0.0.3", 3), PenaltyReason::ProtocolViolation, 0);
+
+        let known = pm.random_known_peers(10);
+        // Should return 1.0.0.1 and 1.0.0.2 (not 1.0.0.3 which is banned)
+        assert_eq!(known.len(), 2);
     }
 
     #[test]

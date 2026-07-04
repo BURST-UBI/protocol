@@ -3,25 +3,54 @@
 //! Normal transaction chains are backward-linked (holder → link → origin).
 //! The merger graph is the **inverse**: origin → [merges containing it] → current balances.
 //!
-//! Without the merger graph, every transaction requires O(n) backward traversal to check
-//! for revoked origins. With it, revocation is a one-time O(k) forward traversal at catch time,
-//! and every subsequent transaction is O(1).
+//! Per the whitepaper (§The Merger Graph) and IMPLEMENTATION_DECISIONS 6.17(b),
+//! each merge node records only its **immediate inputs** — the merge transaction's
+//! input list. Ancestry is never flattened onto tokens or nodes; it is discovered
+//! by following the chain. A source origin may itself be an earlier merge tx,
+//! which is what forms the multi-level graph:
+//!
+//! ```text
+//! origin (burn) → [merges containing it] → [merges of merges] → current balances
+//! ```
+//!
+//! Without the merger graph, every transaction requires O(n) backward traversal to
+//! check for revoked origins. With it, revocation is a one-time O(k) forward
+//! traversal at catch time, and every subsequent transaction is O(1).
 
-use burst_types::{TxHash, WalletAddress};
+use burst_types::TxHash;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// A node in the merger graph representing a merge operation.
+///
+/// `source_origins` lists the merge's immediate inputs only. Current holders of
+/// tokens descended from this merge are tracked by the engine's origin-holders
+/// index, not here — a holder recorded at merge time would go stale on the first
+/// transfer.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MergeNode {
     /// Hash of the merge transaction.
     pub merge_tx: TxHash,
-    /// Origins that were consumed by this merge, with their amounts.
+    /// Immediate inputs consumed by this merge: the origin of each input token
+    /// (a burn tx, or an earlier merge tx) with the amount consumed.
     pub source_origins: Vec<MergeSource>,
     /// Total amount of the merged token.
     pub total_amount: u128,
-    /// Current holder of this merged token.
-    pub holder: WalletAddress,
+    /// Amounts already revoked from this merge, keyed by the revoked burn origin.
+    /// Kept so sequential revocations of different origins split against the
+    /// correct remaining (unrevoked) denominator, and so un-revocation (6.15b)
+    /// can restore exactly what was taken.
+    #[serde(default)]
+    pub revoked_contribs: HashMap<TxHash, u128>,
+}
+
+impl MergeNode {
+    /// Sum of all amounts already revoked from this merge.
+    pub fn revoked_total(&self) -> u128 {
+        self.revoked_contribs
+            .values()
+            .fold(0u128, |acc, v| acc.saturating_add(*v))
+    }
 }
 
 /// One source in a merge operation.
@@ -31,14 +60,10 @@ pub struct MergeSource {
     pub amount: u128,
 }
 
-/// The merger graph — maps origins forward to all current live balances.
-///
-/// ```text
-/// origin (burn) → [merges containing it] → [merges of merges] → current balances
-/// ```
-#[derive(Serialize, Deserialize)]
+/// The merger graph — maps origins forward to all merges that consumed them.
+#[derive(Serialize, Deserialize, Default)]
 pub struct MergerGraph {
-    /// Maps an origin TxHash to all merge nodes that consumed it.
+    /// Maps an input origin (burn tx or merge tx) to all merges that consumed it.
     origin_to_merges: HashMap<TxHash, Vec<TxHash>>,
 
     /// Maps a merge TxHash to its full merge node data.
@@ -47,28 +72,54 @@ pub struct MergerGraph {
     /// Maps a merge TxHash to downstream merges that consumed it.
     merge_to_downstream: HashMap<TxHash, Vec<TxHash>>,
 
-    /// Set of origin TxHashes that are currently revoked.
-    /// Used to determine whether a merged token can be un-revoked
-    /// (all its constituent origins must be non-revoked).
+    /// Set of burn origins that are currently revoked.
     revoked_origins: HashSet<TxHash>,
+}
+
+/// Multiply-then-ceil-divide with saturation: `ceil(amount * num / den)`.
+/// The "harsh" rounding of IMPLEMENTATION_DECISIONS 6.18(b) — the holder
+/// loses the fractional raw.
+pub(crate) fn ceil_proportion(amount: u128, num: u128, den: u128) -> u128 {
+    if den == 0 || num == 0 || amount == 0 {
+        return 0;
+    }
+    let prod = amount.saturating_mul(num);
+    let out = prod / den + u128::from(!prod.is_multiple_of(den));
+    out.min(amount)
+}
+
+/// A taint computed for one merge node when a burn origin is revoked.
+#[derive(Clone, Debug)]
+pub struct TaintEvent {
+    /// The merge whose descendants contain tainted TRST.
+    pub merge_tx: TxHash,
+    /// Amount of this merge attributable to the revoked origin.
+    pub tainted_amount: u128,
+    /// Sum of amounts revoked from this merge by *earlier* revocations
+    /// (before this one). Live tokens split against `total_amount - prior_revoked`.
+    pub prior_revoked: u128,
+    /// Total amount of the merged token at merge time.
+    pub total_amount: u128,
+}
+
+/// Reversal of a taint when a burn origin is un-revoked (6.15b).
+#[derive(Clone, Debug)]
+pub struct UnTaintEvent {
+    pub merge_tx: TxHash,
+    /// The amount that had been revoked from this merge for the origin.
+    pub restored_amount: u128,
 }
 
 impl MergerGraph {
     pub fn new() -> Self {
-        Self {
-            origin_to_merges: HashMap::new(),
-            merge_nodes: HashMap::new(),
-            merge_to_downstream: HashMap::new(),
-            revoked_origins: HashSet::new(),
-        }
+        Self::default()
     }
 
     /// Record a new merge operation in the graph.
     ///
-    /// Automatically links downstream when a source origin is itself a merge
-    /// (i.e., when a merged token is consumed by a subsequent merge). This
-    /// removes the need for callers to manually call `record_downstream()` for
-    /// multi-level merge chains.
+    /// Automatically links downstream when a source origin is itself an earlier
+    /// merge (multi-level merges). Because sources are the immediate inputs,
+    /// this fires whenever a merged token is consumed by a subsequent merge.
     pub fn record_merge(&mut self, node: MergeNode) {
         let merge_tx = node.merge_tx;
         for source in &node.source_origins {
@@ -77,9 +128,6 @@ impl MergerGraph {
                 .or_default()
                 .push(merge_tx);
 
-            // Auto-downstream: if this source origin is itself a merge tx,
-            // link the parent merge to this new merge. This happens when a
-            // merged token (whose origin = its merge_tx) is consumed again.
             if self.merge_nodes.contains_key(&source.origin) {
                 self.record_downstream(source.origin, merge_tx);
             }
@@ -95,108 +143,184 @@ impl MergerGraph {
             .push(child_merge);
     }
 
-    /// Propagate a revocation from a single origin forward through the graph.
-    ///
-    /// Returns all affected (wallet, amount_to_revoke) pairs for proportional splitting.
-    pub fn propagate_revocation(&self, revoked_origin: &TxHash) -> Vec<RevocationEvent> {
-        let mut affected = Vec::new();
-        let mut visited = HashSet::new();
+    /// Whether `tx` is a known merge transaction (i.e. tokens with this origin
+    /// are merged tokens).
+    pub fn contains_merge(&self, tx: &TxHash) -> bool {
+        self.merge_nodes.contains_key(tx)
+    }
 
-        if let Some(merges) = self.origin_to_merges.get(revoked_origin) {
-            for &merge_tx in merges {
-                self.traverse_forward(merge_tx, revoked_origin, &mut affected, &mut visited);
+    /// Get a merge node by its transaction hash.
+    pub fn get_merge(&self, tx: &TxHash) -> Option<&MergeNode> {
+        self.merge_nodes.get(tx)
+    }
+
+    /// Collect all merges affected by an origin: its direct consumers plus the
+    /// full downstream closure, in a topological order (parents before children).
+    ///
+    /// Topological ordering is possible without timestamps because a merge can
+    /// only ever consume tokens that already exist — the graph is a DAG.
+    fn affected_merges_topo(&self, origin: &TxHash) -> Vec<TxHash> {
+        let mut affected: HashSet<TxHash> = HashSet::new();
+        let mut queue: VecDeque<TxHash> = VecDeque::new();
+
+        if let Some(direct) = self.origin_to_merges.get(origin) {
+            for &m in direct {
+                if affected.insert(m) {
+                    queue.push_back(m);
+                }
+            }
+        }
+        while let Some(m) = queue.pop_front() {
+            if let Some(children) = self.merge_to_downstream.get(&m) {
+                for &c in children {
+                    if affected.insert(c) {
+                        queue.push_back(c);
+                    }
+                }
             }
         }
 
-        affected
-    }
-
-    /// Recursively traverse the merger graph forward to find all affected balances.
-    ///
-    /// A node is tainted if it directly references the revoked origin, or if one
-    /// of its sources is a previously-visited (tainted) merge. This handles the
-    /// auto-downstream case where a merged token (whose origin = its merge_tx)
-    /// is consumed by a subsequent merge.
-    fn traverse_forward(
-        &self,
-        merge_tx: TxHash,
-        revoked_origin: &TxHash,
-        affected: &mut Vec<RevocationEvent>,
-        visited: &mut HashSet<TxHash>,
-    ) {
-        if !visited.insert(merge_tx) {
-            return;
-        }
-
-        if let Some(node) = self.merge_nodes.get(&merge_tx) {
-            // Direct contribution: amount sourced from the revoked origin itself.
-            let direct_revoked: u128 = node
+        // Kahn's algorithm restricted to the affected set.
+        let mut in_degree: HashMap<TxHash, usize> = HashMap::new();
+        for &m in &affected {
+            let node = match self.merge_nodes.get(&m) {
+                Some(n) => n,
+                None => continue,
+            };
+            let deg = node
                 .source_origins
                 .iter()
-                .filter(|s| s.origin == *revoked_origin)
-                .map(|s| s.amount)
-                .sum();
+                .filter(|s| affected.contains(&s.origin))
+                .count();
+            in_degree.insert(m, deg);
+        }
 
-            // Indirect contribution: amount sourced from a tainted parent merge
-            // (reached via auto-downstream linking). A source whose origin is
-            // already in the visited set is a tainted upstream merge.
-            let indirect_revoked: u128 = if direct_revoked == 0 {
-                node.source_origins
-                    .iter()
-                    .filter(|s| s.origin != *revoked_origin && visited.contains(&s.origin))
-                    .map(|s| s.amount)
-                    .sum()
-            } else {
-                0
-            };
-
-            let revoked_amount = direct_revoked + indirect_revoked;
-
-            if revoked_amount > 0 {
-                // Check if there are downstream merges.
-                if let Some(downstream) = self.merge_to_downstream.get(&merge_tx) {
-                    for &child in downstream {
-                        self.traverse_forward(child, revoked_origin, affected, visited);
+        let mut ready: VecDeque<TxHash> = in_degree
+            .iter()
+            .filter(|(_, &d)| d == 0)
+            .map(|(&m, _)| m)
+            .collect();
+        let mut order = Vec::with_capacity(affected.len());
+        while let Some(m) = ready.pop_front() {
+            order.push(m);
+            if let Some(children) = self.merge_to_downstream.get(&m) {
+                for c in children {
+                    if let Some(d) = in_degree.get_mut(c) {
+                        *d = d.saturating_sub(1);
+                        if *d == 0 {
+                            ready.push_back(*c);
+                        }
                     }
-                } else {
-                    // This is a leaf — a current live balance.
-                    affected.push(RevocationEvent {
-                        holder: node.holder.clone(),
-                        merge_tx,
-                        revoked_amount,
-                        total_amount: node.total_amount,
+                }
+            }
+        }
+        order
+    }
+
+    /// Compute the tainted amount per affected merge for `origin`, walking the
+    /// graph forward level by level. Does not mutate state.
+    ///
+    /// A merge's taint is its direct intake from `origin` plus, for every
+    /// source that is itself a tainted merge, the consumed amount scaled by the
+    /// parent's tainted fraction (rounded up per 6.18b).
+    fn compute_taints(&self, origin: &TxHash) -> Vec<(TxHash, u128)> {
+        let order = self.affected_merges_topo(origin);
+        let mut taint: HashMap<TxHash, u128> = HashMap::new();
+        let mut out = Vec::new();
+
+        for m in order {
+            let node = match self.merge_nodes.get(&m) {
+                Some(n) => n,
+                None => continue,
+            };
+            let mut t: u128 = 0;
+            for s in &node.source_origins {
+                if s.origin == *origin {
+                    t = t.saturating_add(s.amount);
+                } else if let (Some(&pt), Some(parent)) =
+                    (taint.get(&s.origin), self.merge_nodes.get(&s.origin))
+                {
+                    t = t.saturating_add(ceil_proportion(s.amount, pt, parent.total_amount));
+                }
+            }
+            let t = t.min(node.total_amount);
+            if t > 0 {
+                taint.insert(m, t);
+                out.push((m, t));
+            }
+        }
+        out
+    }
+
+    /// Mark a burn origin as revoked and propagate the taint forward through
+    /// every merge that (directly or transitively) consumed it.
+    ///
+    /// Records the per-origin revoked contribution on each affected node and
+    /// returns one `TaintEvent` per affected merge so the engine can split the
+    /// live tokens proportionally (7.2c). Idempotent: re-revoking an already
+    /// revoked origin returns no events.
+    pub fn apply_revocation(&mut self, origin: TxHash) -> Vec<TaintEvent> {
+        if !self.revoked_origins.insert(origin) {
+            return Vec::new();
+        }
+        let taints = self.compute_taints(&origin);
+        let mut events = Vec::with_capacity(taints.len());
+        for (merge_tx, tainted) in taints {
+            if let Some(node) = self.merge_nodes.get_mut(&merge_tx) {
+                let prior = node.revoked_total();
+                let tainted = tainted.min(node.total_amount.saturating_sub(prior));
+                if tainted == 0 {
+                    continue;
+                }
+                node.revoked_contribs.insert(origin, tainted);
+                events.push(TaintEvent {
+                    merge_tx,
+                    tainted_amount: tainted,
+                    prior_revoked: prior,
+                    total_amount: node.total_amount,
+                });
+            }
+        }
+        events
+    }
+
+    /// Un-mark a burn origin and remove its recorded contribution from every
+    /// affected merge (6.15b). Returns what was restored per merge. Idempotent.
+    pub fn apply_unrevocation(&mut self, origin: &TxHash) -> Vec<UnTaintEvent> {
+        if !self.revoked_origins.remove(origin) {
+            return Vec::new();
+        }
+        let order = self.affected_merges_topo(origin);
+        let mut events = Vec::new();
+        for m in order {
+            if let Some(node) = self.merge_nodes.get_mut(&m) {
+                if let Some(restored) = node.revoked_contribs.remove(origin) {
+                    events.push(UnTaintEvent {
+                        merge_tx: m,
+                        restored_amount: restored,
                     });
                 }
             }
         }
+        events
     }
 
-    /// Get all current holders affected by a specific origin.
-    pub fn get_affected_holders(&self, origin: &TxHash) -> Vec<WalletAddress> {
-        self.propagate_revocation(origin)
-            .into_iter()
-            .map(|e| e.holder)
-            .collect()
-    }
-
-    /// Mark an origin as revoked in the graph.
-    pub fn mark_origin_revoked(&mut self, origin: TxHash) {
-        self.revoked_origins.insert(origin);
-    }
-
-    /// Remove revocation mark for an origin (wallet re-verified).
-    pub fn mark_origin_unrevoked(&mut self, origin: &TxHash) {
-        self.revoked_origins.remove(origin);
-    }
-
-    /// Check if a specific origin is currently revoked.
+    /// Check if a specific burn origin is currently revoked — the O(1)
+    /// per-transaction validity check from the whitepaper.
     pub fn is_origin_revoked(&self, origin: &TxHash) -> bool {
         self.revoked_origins.contains(origin)
     }
 
-    /// Get the set of all currently revoked origin hashes.
+    /// Get the set of all currently revoked burn origins.
     pub fn revoked_origins(&self) -> &HashSet<TxHash> {
         &self.revoked_origins
+    }
+
+    /// Check whether a merge node has ANY remaining revoked contributions.
+    pub fn merge_has_revoked_origins(&self, merge_tx: &TxHash) -> bool {
+        self.merge_nodes
+            .get(merge_tx)
+            .is_some_and(|n| !n.revoked_contribs.is_empty())
     }
 
     /// Serialize the entire graph to bytes for LMDB persistence.
@@ -208,100 +332,6 @@ impl MergerGraph {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
         bincode::deserialize(bytes).map_err(|e| e.to_string())
     }
-
-    /// Check whether a merge node has ANY remaining revoked origins.
-    ///
-    /// A merged token can only be restored to Active if none of its
-    /// constituent origins are still revoked.
-    pub fn merge_has_revoked_origins(&self, merge_tx: &TxHash) -> bool {
-        if let Some(node) = self.merge_nodes.get(merge_tx) {
-            node.source_origins
-                .iter()
-                .any(|s| self.revoked_origins.contains(&s.origin))
-        } else {
-            false
-        }
-    }
-
-    /// Propagate un-revocation from an origin forward through the graph.
-    ///
-    /// Returns all merge nodes that are now fully clean (no remaining
-    /// revoked origins) and can be restored to Active.
-    pub fn propagate_unrevocation(&self, unrevoked_origin: &TxHash) -> Vec<UnRevocationEvent> {
-        let mut restored = Vec::new();
-        let mut visited = HashSet::new();
-
-        if let Some(merges) = self.origin_to_merges.get(unrevoked_origin) {
-            for &merge_tx in merges {
-                self.traverse_forward_unrevoke(merge_tx, &mut restored, &mut visited);
-            }
-        }
-
-        restored
-    }
-
-    /// Recursively traverse forward to find merge nodes that can be restored.
-    fn traverse_forward_unrevoke(
-        &self,
-        merge_tx: TxHash,
-        restored: &mut Vec<UnRevocationEvent>,
-        visited: &mut HashSet<TxHash>,
-    ) {
-        if !visited.insert(merge_tx) {
-            return;
-        }
-
-        if let Some(node) = self.merge_nodes.get(&merge_tx) {
-            let still_has_revoked = node
-                .source_origins
-                .iter()
-                .any(|s| self.revoked_origins.contains(&s.origin));
-
-            if !still_has_revoked {
-                if let Some(downstream) = self.merge_to_downstream.get(&merge_tx) {
-                    for &child in downstream {
-                        self.traverse_forward_unrevoke(child, restored, visited);
-                    }
-                } else {
-                    restored.push(UnRevocationEvent {
-                        holder: node.holder.clone(),
-                        merge_tx,
-                        total_amount: node.total_amount,
-                    });
-                }
-            }
-        }
-    }
-}
-
-impl Default for MergerGraph {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// A single revocation event — tells a holder how much TRST to invalidate.
-#[derive(Clone, Debug)]
-pub struct RevocationEvent {
-    /// The wallet holding the affected merged token.
-    pub holder: WalletAddress,
-    /// The merge transaction containing the tainted TRST.
-    pub merge_tx: TxHash,
-    /// Amount of TRST to revoke (proportional to the revoked origin's share).
-    pub revoked_amount: u128,
-    /// Total amount of the merged token (for computing proportions).
-    pub total_amount: u128,
-}
-
-/// An un-revocation event — a merged token that can be restored to Active.
-#[derive(Clone, Debug)]
-pub struct UnRevocationEvent {
-    /// The wallet holding the restored merged token.
-    pub holder: WalletAddress,
-    /// The merge transaction that is now clean.
-    pub merge_tx: TxHash,
-    /// Total amount of the restored merged token.
-    pub total_amount: u128,
 }
 
 #[cfg(test)]
@@ -312,304 +342,155 @@ mod tests {
         TxHash::new([id; 32])
     }
 
-    fn wallet(name: &str) -> WalletAddress {
-        WalletAddress::new(format!("brst_{name}"))
+    fn node(merge: TxHash, sources: &[(TxHash, u128)], total: u128) -> MergeNode {
+        MergeNode {
+            merge_tx: merge,
+            source_origins: sources
+                .iter()
+                .map(|(o, a)| MergeSource {
+                    origin: *o,
+                    amount: *a,
+                })
+                .collect(),
+            total_amount: total,
+            revoked_contribs: HashMap::new(),
+        }
     }
 
     #[test]
     fn record_merge_indexes_by_origin() {
         let mut graph = MergerGraph::new();
-        let origin1 = tx(1);
-        let origin2 = tx(2);
-        let merge1 = tx(10);
+        let (o1, o2, m1) = (tx(1), tx(2), tx(10));
+        graph.record_merge(node(m1, &[(o1, 50), (o2, 50)], 100));
 
-        graph.record_merge(MergeNode {
-            merge_tx: merge1,
-            source_origins: vec![
-                MergeSource {
-                    origin: origin1,
-                    amount: 50,
-                },
-                MergeSource {
-                    origin: origin2,
-                    amount: 50,
-                },
-            ],
-            total_amount: 100,
-            holder: wallet("alice"),
-        });
-
-        assert!(graph.origin_to_merges.contains_key(&origin1));
-        assert!(graph.origin_to_merges.contains_key(&origin2));
-        assert_eq!(graph.origin_to_merges[&origin1], vec![merge1]);
-        assert_eq!(graph.origin_to_merges[&origin2], vec![merge1]);
+        assert_eq!(graph.origin_to_merges[&o1], vec![m1]);
+        assert_eq!(graph.origin_to_merges[&o2], vec![m1]);
+        assert!(graph.contains_merge(&m1));
     }
 
     #[test]
-    fn auto_downstream_two_level_merge() {
+    fn auto_downstream_links_multi_level_merges() {
         let mut graph = MergerGraph::new();
+        let (o1, o2, o3, m1, m2) = (tx(1), tx(2), tx(3), tx(10), tx(20));
 
-        let origin1 = tx(1);
-        let origin2 = tx(2);
-        let merge1 = tx(10);
+        graph.record_merge(node(m1, &[(o1, 50), (o2, 50)], 100));
+        // The merged token's origin IS m1 (whitepaper), so a second-level merge
+        // lists m1 as an immediate source.
+        graph.record_merge(node(m2, &[(m1, 60), (o3, 40)], 100));
 
-        // Level 1: merge origin1 + origin2 → merge1
-        graph.record_merge(MergeNode {
-            merge_tx: merge1,
-            source_origins: vec![
-                MergeSource {
-                    origin: origin1,
-                    amount: 50,
-                },
-                MergeSource {
-                    origin: origin2,
-                    amount: 50,
-                },
-            ],
-            total_amount: 100,
-            holder: wallet("alice"),
-        });
-
-        // Level 2: merge merge1 (as origin) + origin3 → merge2
-        // When a merged token is consumed, its origin = its merge_tx.
-        let origin3 = tx(3);
-        let merge2 = tx(20);
-
-        graph.record_merge(MergeNode {
-            merge_tx: merge2,
-            source_origins: vec![
-                MergeSource {
-                    origin: merge1,
-                    amount: 60,
-                },
-                MergeSource {
-                    origin: origin3,
-                    amount: 40,
-                },
-            ],
-            total_amount: 100,
-            holder: wallet("bob"),
-        });
-
-        // Auto-downstream should have linked merge1 → merge2
-        assert!(graph.merge_to_downstream.contains_key(&merge1));
-        assert_eq!(graph.merge_to_downstream[&merge1], vec![merge2]);
+        assert_eq!(graph.merge_to_downstream[&m1], vec![m2]);
     }
 
     #[test]
-    fn auto_downstream_three_level_merge() {
+    fn no_downstream_for_plain_burn_origins() {
         let mut graph = MergerGraph::new();
-
-        let origin1 = tx(1);
-        let origin2 = tx(2);
-        let merge1 = tx(10);
-        let merge2 = tx(20);
-
-        // Level 1: merge origin1 + origin2 → merge1
-        graph.record_merge(MergeNode {
-            merge_tx: merge1,
-            source_origins: vec![
-                MergeSource {
-                    origin: origin1,
-                    amount: 50,
-                },
-                MergeSource {
-                    origin: origin2,
-                    amount: 50,
-                },
-            ],
-            total_amount: 100,
-            holder: wallet("alice"),
-        });
-
-        // Level 2: merge merge1 + origin3 → merge2
-        let origin3 = tx(3);
-        graph.record_merge(MergeNode {
-            merge_tx: merge2,
-            source_origins: vec![
-                MergeSource {
-                    origin: merge1,
-                    amount: 60,
-                },
-                MergeSource {
-                    origin: origin3,
-                    amount: 40,
-                },
-            ],
-            total_amount: 100,
-            holder: wallet("bob"),
-        });
-
-        // Level 3: merge merge2 + origin4 → merge3
-        let origin4 = tx(4);
-        let merge3 = tx(30);
-        graph.record_merge(MergeNode {
-            merge_tx: merge3,
-            source_origins: vec![
-                MergeSource {
-                    origin: merge2,
-                    amount: 70,
-                },
-                MergeSource {
-                    origin: origin4,
-                    amount: 30,
-                },
-            ],
-            total_amount: 100,
-            holder: wallet("carol"),
-        });
-
-        // Verify downstream chain: merge1 → merge2 → merge3
-        assert_eq!(graph.merge_to_downstream[&merge1], vec![merge2]);
-        assert_eq!(graph.merge_to_downstream[&merge2], vec![merge3]);
-
-        // Now revoke origin1 — should propagate through merge1 → merge2 → merge3
-        graph.mark_origin_revoked(origin1);
-        let events = graph.propagate_revocation(&origin1);
-
-        // merge3 is the leaf — should get a revocation event
-        // merge2 has downstream (merge3) so it's not a leaf
-        // merge1 has downstream (merge2) so it's not a leaf
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].merge_tx, merge3);
-        assert_eq!(events[0].holder, wallet("carol"));
-    }
-
-    #[test]
-    fn no_auto_downstream_for_plain_origins() {
-        let mut graph = MergerGraph::new();
-
-        let origin1 = tx(1);
-        let origin2 = tx(2);
-        let merge1 = tx(10);
-
-        graph.record_merge(MergeNode {
-            merge_tx: merge1,
-            source_origins: vec![
-                MergeSource {
-                    origin: origin1,
-                    amount: 50,
-                },
-                MergeSource {
-                    origin: origin2,
-                    amount: 50,
-                },
-            ],
-            total_amount: 100,
-            holder: wallet("alice"),
-        });
-
-        // No downstream entries should exist — neither origin1 nor origin2 are merges
+        graph.record_merge(node(tx(10), &[(tx(1), 50), (tx(2), 50)], 100));
         assert!(graph.merge_to_downstream.is_empty());
     }
 
     #[test]
-    fn revocation_propagates_through_auto_downstream() {
+    fn taint_propagates_proportionally_through_levels() {
         let mut graph = MergerGraph::new();
+        let (o1, o2, o3, m1, m2) = (tx(1), tx(2), tx(3), tx(10), tx(20));
 
-        let origin1 = tx(1);
-        let origin2 = tx(2);
-        let merge1 = tx(10);
+        graph.record_merge(node(m1, &[(o1, 50), (o2, 50)], 100));
+        // m2 consumed only 60 of m1's 100.
+        graph.record_merge(node(m2, &[(m1, 60), (o3, 40)], 100));
 
-        // Level 1
-        graph.record_merge(MergeNode {
-            merge_tx: merge1,
-            source_origins: vec![
-                MergeSource {
-                    origin: origin1,
-                    amount: 50,
-                },
-                MergeSource {
-                    origin: origin2,
-                    amount: 50,
-                },
-            ],
-            total_amount: 100,
-            holder: wallet("alice"),
-        });
+        let events = graph.apply_revocation(o1);
+        assert_eq!(events.len(), 2);
 
-        // Level 2: consume merge1
-        let origin3 = tx(3);
-        let merge2 = tx(20);
-        graph.record_merge(MergeNode {
-            merge_tx: merge2,
-            source_origins: vec![
-                MergeSource {
-                    origin: merge1,
-                    amount: 60,
-                },
-                MergeSource {
-                    origin: origin3,
-                    amount: 40,
-                },
-            ],
-            total_amount: 100,
-            holder: wallet("bob"),
-        });
+        let m1_ev = events.iter().find(|e| e.merge_tx == m1).unwrap();
+        assert_eq!(m1_ev.tainted_amount, 50);
 
-        // Revoke origin1 — affects merge1 → merge2
-        graph.mark_origin_revoked(origin1);
-        let events = graph.propagate_revocation(&origin1);
-
-        // merge2 is the leaf (merge1 has downstream to merge2)
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].merge_tx, merge2);
-        // merge2 sourced 60 from the tainted merge1
-        assert_eq!(events[0].revoked_amount, 60);
+        // m1 is 50% tainted; m2 consumed 60 of it → 30 tainted.
+        let m2_ev = events.iter().find(|e| e.merge_tx == m2).unwrap();
+        assert_eq!(m2_ev.tainted_amount, 30);
     }
 
     #[test]
-    fn unrevocation_propagates_through_auto_downstream() {
+    fn three_level_taint() {
         let mut graph = MergerGraph::new();
+        let (o1, o2, o3, o4) = (tx(1), tx(2), tx(3), tx(4));
+        let (m1, m2, m3) = (tx(10), tx(20), tx(30));
 
-        let origin1 = tx(1);
-        let origin2 = tx(2);
-        let merge1 = tx(10);
+        graph.record_merge(node(m1, &[(o1, 50), (o2, 50)], 100));
+        graph.record_merge(node(m2, &[(m1, 60), (o3, 40)], 100));
+        graph.record_merge(node(m3, &[(m2, 70), (o4, 30)], 100));
 
-        // Level 1
-        graph.record_merge(MergeNode {
-            merge_tx: merge1,
-            source_origins: vec![
-                MergeSource {
-                    origin: origin1,
-                    amount: 50,
-                },
-                MergeSource {
-                    origin: origin2,
-                    amount: 50,
-                },
-            ],
-            total_amount: 100,
-            holder: wallet("alice"),
-        });
+        let events = graph.apply_revocation(o1);
+        let m3_ev = events.iter().find(|e| e.merge_tx == m3).unwrap();
+        // m1: 50/100 tainted. m2: ceil(60*50/100)=30 of 100. m3: ceil(70*30/100)=21.
+        assert_eq!(m3_ev.tainted_amount, 21);
+    }
 
-        // Level 2: consume merge1
-        let origin3 = tx(3);
-        let merge2 = tx(20);
-        graph.record_merge(MergeNode {
-            merge_tx: merge2,
-            source_origins: vec![
-                MergeSource {
-                    origin: merge1,
-                    amount: 60,
-                },
-                MergeSource {
-                    origin: origin3,
-                    amount: 40,
-                },
-            ],
-            total_amount: 100,
-            holder: wallet("bob"),
-        });
+    #[test]
+    fn rounding_is_harsh_per_6_18_b() {
+        let mut graph = MergerGraph::new();
+        let (o1, o2, m1, m2) = (tx(1), tx(2), tx(10), tx(20));
 
-        // Revoke then unrevoke origin1
-        graph.mark_origin_revoked(origin1);
-        graph.mark_origin_unrevoked(&origin1);
+        graph.record_merge(node(m1, &[(o1, 1), (o2, 2)], 3));
+        graph.record_merge(node(m2, &[(m1, 2), (o2, 8)], 10));
 
-        let restored = graph.propagate_unrevocation(&origin1);
+        let events = graph.apply_revocation(o1);
+        let m2_ev = events.iter().find(|e| e.merge_tx == m2).unwrap();
+        // exact: 2 * 1/3 = 0.66… → rounds UP to 1.
+        assert_eq!(m2_ev.tainted_amount, 1);
+    }
 
-        // merge2 should be restorable since origin1 is no longer revoked
-        assert!(!restored.is_empty());
-        assert_eq!(restored[0].merge_tx, merge2);
+    #[test]
+    fn sequential_revocations_track_prior_revoked() {
+        let mut graph = MergerGraph::new();
+        let (o1, o2, m1) = (tx(1), tx(2), tx(10));
+        graph.record_merge(node(m1, &[(o1, 60), (o2, 40)], 100));
+
+        let ev1 = graph.apply_revocation(o1);
+        assert_eq!(ev1[0].tainted_amount, 60);
+        assert_eq!(ev1[0].prior_revoked, 0);
+
+        let ev2 = graph.apply_revocation(o2);
+        assert_eq!(ev2[0].tainted_amount, 40);
+        assert_eq!(ev2[0].prior_revoked, 60);
+    }
+
+    #[test]
+    fn revocation_is_idempotent() {
+        let mut graph = MergerGraph::new();
+        let (o1, o2, m1) = (tx(1), tx(2), tx(10));
+        graph.record_merge(node(m1, &[(o1, 50), (o2, 50)], 100));
+
+        assert_eq!(graph.apply_revocation(o1).len(), 1);
+        assert!(graph.apply_revocation(o1).is_empty());
+    }
+
+    #[test]
+    fn unrevocation_restores_contribs() {
+        let mut graph = MergerGraph::new();
+        let (o1, o2, m1) = (tx(1), tx(2), tx(10));
+        graph.record_merge(node(m1, &[(o1, 50), (o2, 50)], 100));
+
+        graph.apply_revocation(o1);
+        assert!(graph.is_origin_revoked(&o1));
+        assert!(graph.merge_has_revoked_origins(&m1));
+
+        let restored = graph.apply_unrevocation(&o1);
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].restored_amount, 50);
+        assert!(!graph.is_origin_revoked(&o1));
+        assert!(!graph.merge_has_revoked_origins(&m1));
+    }
+
+    #[test]
+    fn serialization_roundtrip() {
+        let mut graph = MergerGraph::new();
+        let (o1, o2, m1) = (tx(1), tx(2), tx(10));
+        graph.record_merge(node(m1, &[(o1, 50), (o2, 50)], 100));
+        graph.apply_revocation(o1);
+
+        let bytes = graph.to_bytes();
+        let restored = MergerGraph::from_bytes(&bytes).unwrap();
+        assert!(restored.is_origin_revoked(&o1));
+        assert!(restored.contains_merge(&m1));
+        assert_eq!(restored.get_merge(&m1).unwrap().revoked_contribs[&o1], 50);
     }
 }

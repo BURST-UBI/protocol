@@ -212,6 +212,7 @@ enable_metrics = true
 ${FAUCET_LINE}
 enable_upnp = true
 enable_verification = false
+enable_representative = true
 TOML
     if [ -n "${BURST_ADVERTISE_ADDRESS}" ]; then
         echo "advertise_address = \"${BURST_ADVERTISE_ADDRESS}\"" >> "${CONFIG_PATH}"
@@ -281,11 +282,11 @@ EOF
 
     cat > "/etc/systemd/system/${UPDATE_SERVICE}.timer" <<EOF
 [Unit]
-Description=Check for BURST node updates every 30 minutes
+Description=Check for BURST node updates every 5 minutes
 
 [Timer]
 OnBootSec=60
-OnUnitActiveSec=1800
+OnUnitActiveSec=300
 RandomizedDelaySec=60
 
 [Install]
@@ -317,7 +318,7 @@ EOF
     printf "  ${CYAN}Stop:${NC}          sudo systemctl stop ${SERVICE_NAME}\n"
     printf "  ${CYAN}Uninstall:${NC}     curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | sudo sh -s -- --uninstall\n"
     echo ""
-    printf "  Auto-updates are enabled (checks every 30 minutes).\n"
+    printf "  Auto-updates are enabled (checks every 5 minutes).\n"
     printf "  Edit %s to customize your node.\n" "${CONFIG_PATH}"
     echo ""
 }
@@ -389,7 +390,7 @@ fi
         </string>
     </array>
     <key>StartInterval</key>
-    <integer>1800</integer>
+    <integer>300</integer>
     <key>StandardOutPath</key>
     <string>${BURST_APP_DIR}/burst-update.log</string>
     <key>StandardErrorPath</key>
@@ -422,7 +423,7 @@ EOF
     printf "  ${CYAN}Stop:${NC}          launchctl kill SIGTERM gui/\$(id -u)/${NODE_PLIST}\n"
     printf "  ${CYAN}Uninstall:${NC}     curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | sh -s -- --uninstall\n"
     echo ""
-    printf "  Auto-updates are enabled (checks every 30 minutes).\n"
+    printf "  Auto-updates are enabled (checks every 5 minutes).\n"
     printf "  Edit \"%s\" to customize your node.\n" "${CONFIG_PATH}"
     echo ""
 }

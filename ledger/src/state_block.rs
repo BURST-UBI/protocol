@@ -19,8 +19,6 @@ pub enum BlockType {
     Send,
     /// Receive TRST from another account.
     Receive,
-    /// Split TRST into multiple outputs.
-    Split,
     /// Merge multiple TRST tokens.
     Merge,
     /// Endorse a new wallet.
@@ -73,7 +71,14 @@ pub struct StateBlock {
     /// The account's consensus representative.
     pub representative: WalletAddress,
 
-    /// BRN balance after this block (available, not total accrued).
+    /// Cumulative BRN this account has committed on-chain (burned + staked),
+    /// monotonically increasing. Must be 0 on Open blocks.
+    ///
+    /// BRN itself never lives on the ledger — it is a computed function of
+    /// time (whitepaper: "it doesn't exist on the ledger until it's spent").
+    /// This field only records spending: the delta between consecutive blocks
+    /// is the burn/stake amount, and nodes validate every delta against the
+    /// independently computed BRN(w) at the block's timestamp.
     pub brn_balance: u128,
 
     /// TRST balance after this block (transferable only).
@@ -92,6 +97,15 @@ pub struct StateBlock {
 
     /// The transaction contained in this block.
     pub transaction: TxHash,
+
+    /// For Merge blocks: the token ids consumed by this merge, chosen by the
+    /// wallet (IMPLEMENTATION_DECISIONS 6.17b: "the merge tx itself lists the
+    /// inputs"). Lets wallets group tokens with similar expiries (whitepaper
+    /// §Merging) and makes the merger graph reconstructible from the chain.
+    /// Empty on non-Merge blocks; empty on a Merge block requests the node's
+    /// deterministic expiry-grouped auto-selection. At most 256 entries (6.12b).
+    #[serde(default)]
+    pub merge_sources: Vec<TxHash>,
 
     /// Block timestamp.
     pub timestamp: Timestamp,
@@ -140,7 +154,6 @@ impl StateBlock {
             BlockType::Burn => 1,
             BlockType::Send => 2,
             BlockType::Receive => 3,
-            BlockType::Split => 4,
             BlockType::Merge => 5,
             BlockType::Endorse => 6,
             BlockType::Challenge => 7,
@@ -186,6 +199,13 @@ impl StateBlock {
         // 10. params_hash (32 bytes)
         buffer.extend_from_slice(self.params_hash.as_bytes());
 
+        // 11. merge_sources (u16 BE count + 32 bytes each) — committed into
+        // the hash so the merge input set is signed and consensus-final.
+        buffer.extend_from_slice(&(self.merge_sources.len() as u16).to_be_bytes());
+        for source in &self.merge_sources {
+            buffer.extend_from_slice(source.as_bytes());
+        }
+
         // Hash the concatenated bytes
         let hash_bytes = blake2b_256(&buffer);
         BlockHash::new(hash_bytes)
@@ -226,6 +246,7 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1234567890),
             params_hash: BlockHash::ZERO,
+            merge_sources: Vec::new(),
             work: 0,
             signature: Signature([0u8; 64]),
             hash: BlockHash::ZERO,

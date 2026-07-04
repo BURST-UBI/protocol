@@ -1,11 +1,41 @@
 //! Core TRST lifecycle engine.
+//!
+//! Implements the whitepaper's TRST lifecycle with the decisions from
+//! IMPLEMENTATION_DECISIONS.md:
+//! - merged tokens use the merge tx hash as their origin; provenance is
+//!   discovered by following the merger graph, never flattened (6.17b)
+//! - revocation of merged TRST is a proportional split — the tainted portion
+//!   becomes a separate revoked token, the clean remainder stays live (7.2c),
+//!   rounding against the holder (6.18b)
+//! - revocation is reversible when the originator is re-verified (6.15b)
+//! - expiry is always computed from the effective origin timestamp and the
+//!   CURRENT governance period, so a governance change can resurrect
+//!   previously-expired TRST (6.9)
 
 use std::collections::{HashMap, HashSet};
 
 use crate::error::TrstError;
-use crate::merger_graph::MergerGraph;
-use crate::token::{OriginProportion, TrstToken};
+use crate::merger_graph::{ceil_proportion, MergeNode, MergeSource, MergerGraph};
+use crate::token::TrstToken;
 use burst_types::{Timestamp, TrstState, TxHash, WalletAddress};
+
+/// Maximum number of source tokens in a single merge (6.12b).
+pub const MAX_MERGE_SOURCES: usize = 256;
+
+/// A revocation applied to one live token.
+#[derive(Clone, Debug)]
+pub struct RevocationEvent {
+    /// The wallet holding the affected token.
+    pub holder: WalletAddress,
+    /// The live token that was revoked or split.
+    pub token_id: TxHash,
+    /// The burn origin whose revocation caused this.
+    pub revoked_origin: TxHash,
+    /// Amount of TRST revoked from this token.
+    pub revoked_amount: u128,
+    /// Token amount before the split (for computing proportions).
+    pub total_amount: u128,
+}
 
 /// Result of un-revoking a single token.
 #[derive(Clone, Debug)]
@@ -19,6 +49,9 @@ pub struct UnRevocationResult {
 }
 
 /// Provenance info from a consumed token portion during debit.
+///
+/// Per 6.17(b) this carries only the single origin pointer — constituent
+/// origins of merged tokens are found by following the merger graph.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ConsumedProvenance {
     pub amount: u128,
@@ -26,29 +59,6 @@ pub struct ConsumedProvenance {
     pub origin_wallet: WalletAddress,
     pub origin_timestamp: Timestamp,
     pub effective_origin_timestamp: Timestamp,
-    pub origin_proportions: Vec<OriginProportion>,
-}
-
-/// Information about a pending token needed for expiry-based return.
-#[derive(Clone, Debug)]
-pub struct PendingTokenInfo {
-    /// The ID of the pending token.
-    pub token_id: TxHash,
-    /// When the pending send was created.
-    pub creation_timestamp: Timestamp,
-    /// The original sender who should get the token back if it expires.
-    pub sender: WalletAddress,
-}
-
-/// Result of returning a single expired pending token.
-#[derive(Clone, Debug)]
-pub struct PendingReturnResult {
-    /// The token that was returned.
-    pub token_id: TxHash,
-    /// The sender who received the token back.
-    pub sender: WalletAddress,
-    /// The amount of TRST returned.
-    pub amount: u128,
 }
 
 /// Per-wallet portfolio with O(1) balance lookups.
@@ -130,6 +140,30 @@ impl WalletPortfolio {
         self.recompute_earliest_expiry(expiry_secs);
         expired_amount
     }
+
+    /// Whether any live (non-revoked) token with this origin remains.
+    fn has_live_origin(&self, origin: &TxHash) -> bool {
+        self.tokens
+            .iter()
+            .any(|t| t.origin == *origin && t.revoked_origin.is_none())
+    }
+
+    /// Whether any token tagged with this revoked origin remains.
+    fn has_revoked_tag(&self, tag: &TxHash) -> bool {
+        self.tokens
+            .iter()
+            .any(|t| t.revoked_origin == Some(*tag))
+    }
+}
+
+/// Deterministic id for the revoked chunk split off a token — every node must
+/// derive the same id without a corresponding on-chain transaction.
+fn split_token_id(token_id: &TxHash, revoked_origin: &TxHash) -> TxHash {
+    TxHash::new(burst_crypto::blake2b_256_multi(&[
+        token_id.as_bytes(),
+        revoked_origin.as_bytes(),
+        b"trst-revocation-split",
+    ]))
 }
 
 /// The TRST engine — manages the full token lifecycle.
@@ -139,26 +173,22 @@ pub struct TrstEngine {
     /// Per-wallet portfolios with O(1) balance lookups and sorted tokens.
     pub wallets: HashMap<WalletAddress, WalletPortfolio>,
     /// Maps each origin wallet to all burn tx hashes (origins) it produced.
-    /// Populated incrementally on mint/track. Used by revocation to find
-    /// all real origin hashes belonging to a sybil wallet.
+    /// Used by revocation to find all origins belonging to a sybil wallet (7.1a).
     pub wallet_origins: HashMap<WalletAddress, HashSet<TxHash>>,
-    /// Maps each origin wallet to the set of holder wallets that contain
-    /// simple (non-merged) tokens originating from it. Enables O(k)
-    /// simple-token revocation instead of O(wallets * tokens).
-    origin_wallet_holders: HashMap<WalletAddress, HashSet<WalletAddress>>,
-    /// Global TRST expiry period in seconds (needed for earliest_expiry recomputation).
+    /// Maps an origin tx (burn or merge) to the wallets CURRENTLY holding live
+    /// tokens with that origin. Maintained on every track/untrack/debit so
+    /// revocation touches only actual holders, never historical ones.
+    origin_holders: HashMap<TxHash, HashSet<WalletAddress>>,
+    /// Maps a revoked burn origin to the wallets holding tokens tagged with it.
+    /// Makes un-revocation (6.15b) O(k) in the number of affected tokens.
+    revoked_holders: HashMap<TxHash, HashSet<WalletAddress>>,
+    /// Global TRST expiry period in seconds (governance parameter, 6.9).
     pub expiry_secs: u64,
 }
 
 impl TrstEngine {
     pub fn new() -> Self {
-        Self {
-            merger_graph: MergerGraph::new(),
-            wallets: HashMap::new(),
-            wallet_origins: HashMap::new(),
-            origin_wallet_holders: HashMap::new(),
-            expiry_secs: u64::MAX,
-        }
+        Self::with_expiry(u64::MAX)
     }
 
     pub fn with_expiry(expiry_secs: u64) -> Self {
@@ -166,37 +196,20 @@ impl TrstEngine {
             merger_graph: MergerGraph::new(),
             wallets: HashMap::new(),
             wallet_origins: HashMap::new(),
-            origin_wallet_holders: HashMap::new(),
+            origin_holders: HashMap::new(),
+            revoked_holders: HashMap::new(),
             expiry_secs,
         }
     }
 
     /// Track a token in the per-wallet portfolio.
-    /// Maintains sorted order and updates cached transferable balance — O(log n) insert.
-    /// Also updates the `wallet_origins` index for simple tokens.
+    ///
+    /// Maintains sorted order, the cached transferable balance, the earliest
+    /// expiry (using the engine's governance expiry period), and the
+    /// origin/revocation holder indexes.
     pub fn track_token(&mut self, token: TrstToken) {
-        self.index_origin(&token);
-        let portfolio = self.wallets.entry(token.holder.clone()).or_default();
-        if token.state == TrstState::Active {
-            portfolio.cached_transferable += token.amount;
-            let tok_expiry = token.earliest_expiry(u64::MAX);
-            match portfolio.earliest_expiry {
-                Some(existing) if tok_expiry.as_secs() < existing.as_secs() => {
-                    portfolio.earliest_expiry = Some(tok_expiry);
-                }
-                None => {
-                    portfolio.earliest_expiry = Some(tok_expiry);
-                }
-                _ => {}
-            }
-        }
-        portfolio.insert_sorted(token);
-    }
-
-    /// Track a token with a known expiry period (updates earliest_expiry correctly).
-    /// Also updates the `wallet_origins` index for simple tokens.
-    pub fn track_token_with_expiry(&mut self, token: TrstToken, expiry_secs: u64) {
-        self.index_origin(&token);
+        self.index_token(&token);
+        let expiry_secs = self.expiry_secs;
         let portfolio = self.wallets.entry(token.holder.clone()).or_default();
         if token.state == TrstState::Active {
             portfolio.cached_transferable += token.amount;
@@ -214,33 +227,176 @@ impl TrstEngine {
         portfolio.insert_sorted(token);
     }
 
-    /// Record a token's origin(s) in the `wallet_origins` and
-    /// `origin_wallet_holders` indexes.
-    fn index_origin(&mut self, token: &TrstToken) {
-        if token.origin_proportions.is_empty() {
-            if let Some(set) = self.wallet_origins.get_mut(&token.origin_wallet) {
-                set.insert(token.origin);
-            } else {
-                let mut set = HashSet::new();
-                set.insert(token.origin);
-                self.wallet_origins.insert(token.origin_wallet.clone(), set);
+    /// Track an incoming (received or returned) token, first applying any
+    /// revocations that happened while it was in flight.
+    ///
+    /// A send that was pending when its origin was revoked escapes the
+    /// portfolio sweep — this closes that hole at receive time with the same
+    /// O(1)/O(k) graph lookup the whitepaper describes. Returns the revocation
+    /// events applied, if any.
+    pub fn receive_token(&mut self, mut token: TrstToken, now: Timestamp) -> Vec<RevocationEvent> {
+        let mut events = Vec::new();
+
+        // Normalize expiry state against the current governance period.
+        if token.state == TrstState::Active && token.is_expired(now, self.expiry_secs) {
+            token.state = TrstState::Expired;
+        }
+
+        if token.revoked_origin.is_none()
+            && matches!(token.state, TrstState::Active | TrstState::Expired)
+        {
+            if let Some(node) = self.merger_graph.get_merge(&token.origin) {
+                if !node.revoked_contribs.is_empty() {
+                    // Apply outstanding revocations in deterministic (byte) order.
+                    let mut contribs: Vec<(TxHash, u128)> = node
+                        .revoked_contribs
+                        .iter()
+                        .map(|(o, a)| (*o, *a))
+                        .collect();
+                    contribs.sort_by_key(|(o, _)| *o.as_bytes());
+
+                    let mut denom = node.total_amount;
+                    let mut remaining = token.amount;
+                    let mut chunks: Vec<TrstToken> = Vec::new();
+                    for (origin, contrib) in contribs {
+                        let cut = ceil_proportion(remaining, contrib, denom);
+                        denom = denom.saturating_sub(contrib);
+                        if cut == 0 {
+                            continue;
+                        }
+                        events.push(RevocationEvent {
+                            holder: token.holder.clone(),
+                            token_id: token.id,
+                            revoked_origin: origin,
+                            revoked_amount: cut,
+                            total_amount: token.amount,
+                        });
+                        remaining -= cut;
+                        chunks.push(TrstToken {
+                            id: split_token_id(&token.id, &origin),
+                            amount: cut,
+                            origin: token.origin,
+                            link: token.id,
+                            holder: token.holder.clone(),
+                            origin_timestamp: token.origin_timestamp,
+                            effective_origin_timestamp: token.effective_origin_timestamp,
+                            state: TrstState::Revoked,
+                            origin_wallet: token.origin_wallet.clone(),
+                            revoked_origin: Some(origin),
+                        });
+                    }
+                    for chunk in chunks {
+                        self.track_token(chunk);
+                    }
+                    if remaining == 0 {
+                        return events;
+                    }
+                    token.amount = remaining;
+                }
+            } else if self.merger_graph.is_origin_revoked(&token.origin) {
+                // Simple token from a revoked burn — fully tainted.
+                events.push(RevocationEvent {
+                    holder: token.holder.clone(),
+                    token_id: token.id,
+                    revoked_origin: token.origin,
+                    revoked_amount: token.amount,
+                    total_amount: token.amount,
+                });
+                token.revoked_origin = Some(token.origin);
+                token.state = TrstState::Revoked;
             }
-            if let Some(holders) = self.origin_wallet_holders.get_mut(&token.origin_wallet) {
-                holders.insert(token.holder.clone());
-            } else {
-                let mut holders = HashSet::new();
-                holders.insert(token.holder.clone());
-                self.origin_wallet_holders
-                    .insert(token.origin_wallet.clone(), holders);
+        }
+
+        self.track_token(token);
+        events
+    }
+
+    /// Record a token in the holder/origin indexes.
+    fn index_token(&mut self, token: &TrstToken) {
+        match token.revoked_origin {
+            Some(tag) => {
+                self.revoked_holders
+                    .entry(tag)
+                    .or_default()
+                    .insert(token.holder.clone());
             }
-        } else {
-            for p in &token.origin_proportions {
-                if let Some(set) = self.wallet_origins.get_mut(&p.origin_wallet) {
-                    set.insert(p.origin);
-                } else {
-                    let mut set = HashSet::new();
-                    set.insert(p.origin);
-                    self.wallet_origins.insert(p.origin_wallet.clone(), set);
+            None => {
+                self.origin_holders
+                    .entry(token.origin)
+                    .or_default()
+                    .insert(token.holder.clone());
+            }
+        }
+        // Only burn origins belong in wallet_origins — a merge is a
+        // self-operation, not TRST originated by the merging wallet (7.1a).
+        if !self.merger_graph.contains_merge(&token.origin) {
+            self.wallet_origins
+                .entry(token.origin_wallet.clone())
+                .or_default()
+                .insert(token.origin);
+        }
+    }
+
+    /// Drop `wallet` from the holder indexes for any of `origins` / `tags`
+    /// it no longer holds tokens for.
+    fn deindex_wallet_origins(
+        &mut self,
+        wallet: &WalletAddress,
+        origins: &HashSet<TxHash>,
+        tags: &HashSet<TxHash>,
+    ) {
+        let portfolio = self.wallets.get(wallet);
+        for origin in origins {
+            let still_held = portfolio.is_some_and(|p| p.has_live_origin(origin));
+            if !still_held {
+                if let Some(set) = self.origin_holders.get_mut(origin) {
+                    set.remove(wallet);
+                    if set.is_empty() {
+                        self.origin_holders.remove(origin);
+                    }
+                }
+            }
+        }
+        for tag in tags {
+            let still_held = portfolio.is_some_and(|p| p.has_revoked_tag(tag));
+            if !still_held {
+                if let Some(set) = self.revoked_holders.get_mut(tag) {
+                    set.remove(wallet);
+                    if set.is_empty() {
+                        self.revoked_holders.remove(tag);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Rebuild all holder indexes from the portfolios and merger graph.
+    /// Call after restoring both `wallets` and `merger_graph` from disk.
+    pub fn rebuild_indexes(&mut self) {
+        self.origin_holders.clear();
+        self.revoked_holders.clear();
+        self.wallet_origins.clear();
+        for (addr, portfolio) in &self.wallets {
+            for t in &portfolio.tokens {
+                match t.revoked_origin {
+                    Some(tag) => {
+                        self.revoked_holders
+                            .entry(tag)
+                            .or_default()
+                            .insert(addr.clone());
+                    }
+                    None => {
+                        self.origin_holders
+                            .entry(t.origin)
+                            .or_default()
+                            .insert(addr.clone());
+                    }
+                }
+                if !self.merger_graph.contains_merge(&t.origin) {
+                    self.wallet_origins
+                        .entry(t.origin_wallet.clone())
+                        .or_default()
+                        .insert(t.origin);
                 }
             }
         }
@@ -249,6 +405,7 @@ impl TrstEngine {
     /// Remove a specific token from a wallet's tracked portfolio.
     pub fn untrack_token(&mut self, wallet: &WalletAddress, token_id: &TxHash) {
         let expiry = self.expiry_secs;
+        let mut removed_key: Option<(TxHash, Option<TxHash>)> = None;
         if let Some(portfolio) = self.wallets.get_mut(wallet) {
             if let Some(pos) = portfolio.tokens.iter().position(|t| t.id == *token_id) {
                 let removed = portfolio.tokens.remove(pos);
@@ -260,7 +417,13 @@ impl TrstEngine {
                         portfolio.recompute_earliest_expiry(expiry);
                     }
                 }
+                removed_key = Some((removed.origin, removed.revoked_origin));
             }
+        }
+        if let Some((origin, tag)) = removed_key {
+            let origins: HashSet<TxHash> = tag.is_none().then_some(origin).into_iter().collect();
+            let tags: HashSet<TxHash> = tag.into_iter().collect();
+            self.deindex_wallet_origins(wallet, &origins, &tags);
         }
     }
 
@@ -270,12 +433,22 @@ impl TrstEngine {
     /// would be O(n*k) due to linear scans + repeated expiry recomputation.
     pub fn bulk_untrack(&mut self, wallet: &WalletAddress, token_ids: &HashSet<TxHash>) {
         let expiry = self.expiry_secs;
+        let mut removed_origins: HashSet<TxHash> = HashSet::new();
+        let mut removed_tags: HashSet<TxHash> = HashSet::new();
         if let Some(portfolio) = self.wallets.get_mut(wallet) {
             let mut removed_amount = 0u128;
             portfolio.tokens.retain(|t| {
                 if token_ids.contains(&t.id) {
                     if t.state == TrstState::Active {
                         removed_amount += t.amount;
+                    }
+                    match t.revoked_origin {
+                        Some(tag) => {
+                            removed_tags.insert(tag);
+                        }
+                        None => {
+                            removed_origins.insert(t.origin);
+                        }
                     }
                     false
                 } else {
@@ -288,18 +461,17 @@ impl TrstEngine {
                 portfolio.recompute_earliest_expiry(expiry);
             }
         }
+        if !removed_origins.is_empty() || !removed_tags.is_empty() {
+            self.deindex_wallet_origins(wallet, &removed_origins, &removed_tags);
+        }
     }
 
     /// Compute the transferable (non-expired, non-revoked) balance for a wallet — O(1).
     ///
     /// Flushes any newly expired tokens first (amortized, only when `earliest_expiry` passes).
     /// Returns `None` if the wallet has no tracked tokens in memory.
-    pub fn transferable_balance(
-        &mut self,
-        wallet: &WalletAddress,
-        now: Timestamp,
-        expiry_secs: u64,
-    ) -> Option<u128> {
+    pub fn transferable_balance(&mut self, wallet: &WalletAddress, now: Timestamp) -> Option<u128> {
+        let expiry_secs = self.expiry_secs;
         if let Some(portfolio) = self.wallets.get_mut(wallet) {
             portfolio.flush_expired(now, expiry_secs);
             Some(portfolio.cached_transferable)
@@ -314,117 +486,126 @@ impl TrstEngine {
         self.wallets.get(wallet).map(|p| p.cached_transferable)
     }
 
+    /// Transferable amount held by `wallet` within tokens of a single origin.
+    ///
+    /// Send must never cross origin boundaries — the wallet must merge first
+    /// (whitepaper §Merging). Use this to validate that a send of `amount`
+    /// against `origin` is actually coverable.
+    pub fn origin_transferable(
+        &mut self,
+        wallet: &WalletAddress,
+        origin: &TxHash,
+        now: Timestamp,
+    ) -> u128 {
+        let expiry_secs = self.expiry_secs;
+        if let Some(portfolio) = self.wallets.get_mut(wallet) {
+            portfolio.flush_expired(now, expiry_secs);
+            portfolio
+                .tokens
+                .iter()
+                .filter(|t| {
+                    t.origin == *origin
+                        && t.state == TrstState::Active
+                        && t.revoked_origin.is_none()
+                })
+                .map(|t| t.amount)
+                .sum()
+        } else {
+            0
+        }
+    }
+
     /// Returns true if the wallet has tracked tokens in the engine.
     pub fn is_wallet_tracked(&self, wallet: &WalletAddress) -> bool {
         self.wallets.contains_key(wallet)
     }
 
-    /// Debit tokens from a wallet's tracked portfolio after a send.
+    /// Debit `amount` from a wallet's tokens of a single origin after a send.
     ///
-    /// Tokens are sorted by `origin_timestamp` (oldest first), so we consume
-    /// from the front. Truly O(k) where k = tokens fully consumed — only
-    /// drains the consumed prefix instead of rebuilding the entire vec.
-    pub fn debit_wallet(&mut self, wallet: &WalletAddress, mut amount: u128) {
-        if amount == 0 {
-            return;
-        }
-        let expiry_secs = self.expiry_secs;
-        if let Some(portfolio) = self.wallets.get_mut(wallet) {
-            portfolio.cached_transferable = portfolio.cached_transferable.saturating_sub(amount);
-
-            let mut fully_consumed = 0;
-            let mut consumed_earliest = false;
-            for t in portfolio.tokens.iter() {
-                if amount == 0 {
-                    break;
-                }
-                if t.amount <= amount {
-                    if t.state == TrstState::Active
-                        && portfolio.earliest_expiry == Some(t.earliest_expiry(expiry_secs))
-                    {
-                        consumed_earliest = true;
-                    }
-                    amount -= t.amount;
-                    fully_consumed += 1;
-                } else {
-                    break;
-                }
-            }
-            portfolio.tokens.drain(0..fully_consumed);
-            if amount > 0 {
-                if let Some(first) = portfolio.tokens.first_mut() {
-                    first.amount = first.amount.saturating_sub(amount);
-                }
-                if portfolio.tokens.first().is_some_and(|t| t.amount == 0) {
-                    portfolio.tokens.remove(0);
-                }
-            }
-            if consumed_earliest {
-                portfolio.recompute_earliest_expiry(expiry_secs);
-            }
-        }
+    /// Tokens sharing an origin are provenance-identical (same burn or merge,
+    /// same expiry), so the debit may span several of them without blending
+    /// provenance. It never crosses origin boundaries — if `amount` exceeds
+    /// what the origin's tokens hold, only what exists is debited (validation
+    /// must reject such sends beforehand via `origin_transferable`).
+    pub fn debit_wallet(&mut self, wallet: &WalletAddress, token_origin: &TxHash, amount: u128) {
+        let _ = self.debit_wallet_with_provenance(wallet, token_origin, amount);
     }
 
-    /// Debit tokens from a wallet and return provenance of consumed tokens.
+    /// Debit like [`debit_wallet`] and return the consumed provenance.
     ///
-    /// Same FIFO logic as `debit_wallet`, but returns a list of
-    /// `ConsumedProvenance` entries describing what was consumed. Used to
-    /// populate pending entries with origin info so receivers get properly
-    /// provenanced tokens.
+    /// Returns at most one entry — all consumed tokens share the origin, so
+    /// the receiver gets a single clean provenance pointer (6.17b).
     pub fn debit_wallet_with_provenance(
         &mut self,
         wallet: &WalletAddress,
-        mut amount: u128,
+        token_origin: &TxHash,
+        amount: u128,
     ) -> Vec<ConsumedProvenance> {
-        let mut consumed = Vec::new();
         if amount == 0 {
-            return consumed;
+            return Vec::new();
         }
         let expiry_secs = self.expiry_secs;
-        if let Some(portfolio) = self.wallets.get_mut(wallet) {
-            portfolio.cached_transferable = portfolio.cached_transferable.saturating_sub(amount);
+        let mut provenance: Option<ConsumedProvenance> = None;
+        let mut origin_exhausted = false;
 
-            let mut fully_consumed = 0;
+        if let Some(portfolio) = self.wallets.get_mut(wallet) {
+            let mut remaining = amount;
+            let mut consumed_total = 0u128;
             let mut consumed_earliest = false;
-            for t in portfolio.tokens.iter() {
-                if amount == 0 {
-                    break;
+            let mut i = 0;
+            while i < portfolio.tokens.len() && remaining > 0 {
+                let matches = {
+                    let t = &portfolio.tokens[i];
+                    t.origin == *token_origin
+                        && t.state == TrstState::Active
+                        && t.revoked_origin.is_none()
+                };
+                if !matches {
+                    i += 1;
+                    continue;
                 }
-                let take = t.amount.min(amount);
-                consumed.push(ConsumedProvenance {
-                    amount: take,
-                    origin: t.origin,
-                    origin_wallet: t.origin_wallet.clone(),
-                    origin_timestamp: t.origin_timestamp,
-                    effective_origin_timestamp: t.effective_origin_timestamp,
-                    origin_proportions: t.origin_proportions.clone(),
-                });
-                if t.amount <= amount {
-                    if t.state == TrstState::Active
-                        && portfolio.earliest_expiry == Some(t.earliest_expiry(expiry_secs))
-                    {
+                let take = portfolio.tokens[i].amount.min(remaining);
+                {
+                    let t = &portfolio.tokens[i];
+                    if portfolio.earliest_expiry == Some(t.earliest_expiry(expiry_secs)) {
                         consumed_earliest = true;
                     }
-                    amount -= t.amount;
-                    fully_consumed += 1;
+                    match &mut provenance {
+                        Some(p) => p.amount = p.amount.saturating_add(take),
+                        None => {
+                            provenance = Some(ConsumedProvenance {
+                                amount: take,
+                                origin: t.origin,
+                                origin_wallet: t.origin_wallet.clone(),
+                                origin_timestamp: t.origin_timestamp,
+                                effective_origin_timestamp: t.effective_origin_timestamp,
+                            })
+                        }
+                    }
+                }
+                remaining -= take;
+                consumed_total = consumed_total.saturating_add(take);
+                if take == portfolio.tokens[i].amount {
+                    portfolio.tokens.remove(i);
+                    // don't advance i — next token shifted into this slot
                 } else {
-                    break;
+                    portfolio.tokens[i].amount -= take;
+                    i += 1;
                 }
             }
-            portfolio.tokens.drain(0..fully_consumed);
-            if amount > 0 {
-                if let Some(first) = portfolio.tokens.first_mut() {
-                    first.amount = first.amount.saturating_sub(amount);
-                }
-                if portfolio.tokens.first().is_some_and(|t| t.amount == 0) {
-                    portfolio.tokens.remove(0);
-                }
-            }
+            portfolio.cached_transferable =
+                portfolio.cached_transferable.saturating_sub(consumed_total);
             if consumed_earliest {
                 portfolio.recompute_earliest_expiry(expiry_secs);
             }
+            origin_exhausted = !portfolio.has_live_origin(token_origin);
         }
-        consumed
+
+        if origin_exhausted {
+            let origins: HashSet<TxHash> = std::iter::once(*token_origin).collect();
+            self.deindex_wallet_origins(wallet, &origins, &HashSet::new());
+        }
+        provenance.into_iter().collect()
     }
 
     /// Mint fresh TRST from a burn transaction.
@@ -456,7 +637,7 @@ impl TrstEngine {
             effective_origin_timestamp: timestamp,
             state: TrstState::Active,
             origin_wallet,
-            origin_proportions: Vec::new(),
+            revoked_origin: None,
         })
     }
 
@@ -465,10 +646,6 @@ impl TrstEngine {
     /// Creates a new token for the receiver (with updated link) and
     /// returns the change back to the sender as a new token.
     /// Returns `(receiver_token, change_token_if_any)`.
-    ///
-    /// In Nano's account-balance model, the sender's balance is simply
-    /// decremented. Here we model TRST tokens explicitly for provenance
-    /// tracking, so a partial send produces a change token.
     #[allow(clippy::too_many_arguments)]
     pub fn transfer(
         &self,
@@ -479,7 +656,6 @@ impl TrstEngine {
         send_tx_hash: TxHash,
         change_tx_hash: TxHash,
         now: Timestamp,
-        expiry_secs: u64,
     ) -> Result<(TrstToken, Option<TrstToken>), TrstError> {
         if &token.holder != sender {
             return Err(TrstError::NotOwner {
@@ -493,7 +669,7 @@ impl TrstEngine {
         if sender == &receiver {
             return Err(TrstError::Other("cannot transfer to self".into()));
         }
-        if !token.is_transferable(now, expiry_secs) {
+        if !token.is_transferable(now, self.expiry_secs) {
             return Err(TrstError::NotTransferable(format!("{:?}", token.state)));
         }
         if amount > token.amount {
@@ -513,7 +689,7 @@ impl TrstEngine {
             effective_origin_timestamp: token.effective_origin_timestamp,
             state: TrstState::Active,
             origin_wallet: token.origin_wallet.clone(),
-            origin_proportions: token.origin_proportions.clone(),
+            revoked_origin: None,
         };
 
         let change = if amount < token.amount {
@@ -527,7 +703,7 @@ impl TrstEngine {
                 effective_origin_timestamp: token.effective_origin_timestamp,
                 state: TrstState::Active,
                 origin_wallet: token.origin_wallet.clone(),
-                origin_proportions: token.origin_proportions.clone(),
+                revoked_origin: None,
             })
         } else {
             None
@@ -536,111 +712,35 @@ impl TrstEngine {
         Ok((receiver_token, change))
     }
 
-    /// Split a token into multiple smaller tokens.
-    ///
-    /// All splits share the same origin and link back to the parent token.
-    /// Invariants enforced by this method:
-    /// - `child.origin == parent.origin` (provenance preserved, not a new origin)
-    /// - `child.link == parent.id` (link to the split source)
-    /// - `child.origin_timestamp == parent.origin_timestamp` (expiry base preserved)
-    ///
-    /// Amounts must sum to the parent.
-    pub fn split(
-        &self,
-        token: &TrstToken,
-        amounts: &[(WalletAddress, u128)],
-        tx_hashes: &[TxHash],
-        now: Timestamp,
-        expiry_secs: u64,
-    ) -> Result<Vec<TrstToken>, TrstError> {
-        if amounts.len() != tx_hashes.len() {
-            return Err(TrstError::SplitMismatch {
-                total: amounts.len() as u128,
-                parent: tx_hashes.len() as u128,
-            });
-        }
-        if amounts.len() < 2 {
-            return Err(TrstError::Other("split requires at least 2 outputs".into()));
-        }
-        if !token.is_transferable(now, expiry_secs) {
-            return Err(TrstError::NotTransferable(format!("{:?}", token.state)));
-        }
-
-        let total: u128 = amounts.iter().map(|(_, a)| a).sum();
-        if total != token.amount {
-            return Err(TrstError::SplitMismatch {
-                total,
-                parent: token.amount,
-            });
-        }
-
-        // Reject zero-amount splits
-        for (_, amt) in amounts {
-            if *amt == 0 {
-                return Err(TrstError::Other(
-                    "split output amount must be non-zero".into(),
-                ));
-            }
-        }
-
-        let splits = amounts
-            .iter()
-            .zip(tx_hashes.iter())
-            .map(|((receiver, amount), &hash)| {
-                // Scale origin_proportions proportionally to the split fraction.
-                let scaled_proportions = if !token.origin_proportions.is_empty() && token.amount > 0
-                {
-                    token
-                        .origin_proportions
-                        .iter()
-                        .map(|p| {
-                            let scaled = p.amount.saturating_mul(*amount) / token.amount;
-                            OriginProportion {
-                                origin: p.origin,
-                                origin_wallet: p.origin_wallet.clone(),
-                                amount: scaled,
-                            }
-                        })
-                        .collect()
-                } else {
-                    token.origin_proportions.clone()
-                };
-
-                TrstToken {
-                    id: hash,
-                    amount: *amount,
-                    origin: token.origin,
-                    link: token.id,
-                    holder: receiver.clone(),
-                    origin_timestamp: token.origin_timestamp,
-                    effective_origin_timestamp: token.effective_origin_timestamp,
-                    state: TrstState::Active,
-                    origin_wallet: token.origin_wallet.clone(),
-                    origin_proportions: scaled_proportions,
-                }
-            })
-            .collect();
-
-        Ok(splits)
-    }
-
     /// Merge multiple tokens into a single token.
     ///
-    /// The merged token's expiry is the **earliest** expiry among inputs (conservative).
-    /// Updates the merger graph for future revocation propagation.
+    /// - The merged token's origin is the merge tx hash (whitepaper §Merging).
+    /// - Its expiry is the **earliest** expiry among inputs (conservative).
+    /// - The merger graph records the merge's IMMEDIATE inputs (6.17b),
+    ///   forming the multi-level graph when a merged token is merged again.
+    /// - Expired tokens may be consolidated (6.8b); the result of merging any
+    ///   expired input is itself expired (earliest-expiry rule).
+    /// - At most [`MAX_MERGE_SOURCES`] inputs (6.12b).
     pub fn merge(
         &mut self,
         tokens: &[TrstToken],
         holder: WalletAddress,
         merge_tx_hash: TxHash,
         now: Timestamp,
-        expiry_secs: u64,
     ) -> Result<TrstToken, TrstError> {
         if tokens.len() < 2 {
             return Err(TrstError::EmptyMerge);
         }
+        if tokens.len() > MAX_MERGE_SOURCES {
+            return Err(TrstError::Other(format!(
+                "merge cannot consume more than {MAX_MERGE_SOURCES} tokens, got {}",
+                tokens.len()
+            )));
+        }
 
-        // Verify all tokens are transferable and held by the same wallet.
+        let mut seen_ids = HashSet::with_capacity(tokens.len());
+        let mut any_live = false;
+        let mut any_expired = false;
         for t in tokens {
             if t.holder != holder {
                 return Err(TrstError::NotOwner {
@@ -648,303 +748,402 @@ impl TrstEngine {
                     actual: t.holder.clone(),
                 });
             }
-            if !t.is_transferable(now, expiry_secs) {
+            if !seen_ids.insert(t.id) {
+                return Err(TrstError::Other(format!(
+                    "duplicate token {} in merge",
+                    t.id
+                )));
+            }
+            // 6.8(b): Active and Expired tokens can be merged (consolidation);
+            // Revoked and Pending cannot.
+            if t.revoked_origin.is_some()
+                || !matches!(t.state, TrstState::Active | TrstState::Expired)
+            {
                 return Err(TrstError::NotTransferable(format!(
                     "{:?} ({})",
                     t.state, t.id
                 )));
             }
+            if t.is_expired(now, self.expiry_secs) {
+                any_expired = true;
+            } else {
+                any_live = true;
+            }
+        }
+        // Never mix live and expired inputs: the earliest-expiry floor rule
+        // would silently expire the live value. Consolidation of expired
+        // tokens (6.8b) is expired-with-expired only.
+        if any_live && any_expired {
+            return Err(TrstError::Other(
+                "cannot merge live and expired tokens — the floor rule would expire the live value"
+                    .into(),
+            ));
         }
 
         let total_amount: u128 = tokens.iter().map(|t| t.amount).sum();
 
         // The effective origin timestamp for expiry is the earliest among all
-        // constituents, ensuring "the merged token's expiry date is the earliest
-        // expiry among all merged tokens" (whitepaper).
+        // constituents: "the merged token's expiry date is the earliest expiry
+        // among all merged tokens" (whitepaper).
         let effective_ts = tokens
             .iter()
             .map(|t| t.effective_origin_timestamp)
             .min()
             .unwrap();
 
-        // Build origin proportions for the merged token.
-        let mut proportions: Vec<OriginProportion> = Vec::new();
+        // Record the merge's immediate inputs. Tokens sharing an origin are
+        // provenance-identical, so their amounts combine into one source.
+        let mut source_amounts: HashMap<TxHash, u128> = HashMap::new();
+        let mut source_order: Vec<TxHash> = Vec::new();
         for t in tokens {
-            if t.origin_proportions.is_empty() {
-                proportions.push(OriginProportion {
-                    origin: t.origin,
-                    origin_wallet: t.origin_wallet.clone(),
-                    amount: t.amount,
-                });
-            } else {
-                proportions.extend(t.origin_proportions.clone());
+            match source_amounts.get_mut(&t.origin) {
+                Some(a) => *a = a.saturating_add(t.amount),
+                None => {
+                    source_amounts.insert(t.origin, t.amount);
+                    source_order.push(t.origin);
+                }
             }
         }
-
-        // Validate proportions sum BEFORE mutating the merger graph.
-        let proportions_sum: u128 = proportions.iter().map(|p| p.amount).sum();
-        if proportions_sum != total_amount {
-            return Err(TrstError::SplitMismatch {
-                total: proportions_sum,
-                parent: total_amount,
-            });
-        }
-
-        // Record in merger graph (only after all validation passes).
-        let merge_sources = proportions
-            .iter()
-            .map(|p| crate::merger_graph::MergeSource {
-                origin: p.origin,
-                amount: p.amount,
+        let merge_sources: Vec<MergeSource> = source_order
+            .into_iter()
+            .map(|origin| MergeSource {
+                origin,
+                amount: source_amounts[&origin],
             })
             .collect();
 
-        self.merger_graph
-            .record_merge(crate::merger_graph::MergeNode {
-                merge_tx: merge_tx_hash,
-                source_origins: merge_sources,
-                total_amount,
-                holder: holder.clone(),
-            });
+        self.merger_graph.record_merge(MergeNode {
+            merge_tx: merge_tx_hash,
+            source_origins: merge_sources,
+            total_amount,
+            revoked_contribs: HashMap::new(),
+        });
 
-        let earliest_origin_wallet = tokens
-            .iter()
-            .min_by_key(|t| t.origin_timestamp)
-            .unwrap()
-            .origin_wallet
-            .clone();
-
-        let earliest_origin = tokens
-            .iter()
-            .min_by_key(|t| t.origin_timestamp)
-            .unwrap()
-            .origin;
         let most_recent_input = tokens.iter().max_by_key(|t| t.origin_timestamp).unwrap().id;
+        let state = if Timestamp::new(effective_ts.as_secs()).has_expired(self.expiry_secs, now) {
+            TrstState::Expired
+        } else {
+            TrstState::Active
+        };
 
         Ok(TrstToken {
             id: merge_tx_hash,
             amount: total_amount,
-            origin: earliest_origin,
+            // Whitepaper: "Future transactions from the merged token use the
+            // merge transaction's hash as the new origin."
+            origin: merge_tx_hash,
             link: most_recent_input,
-            holder,
+            holder: holder.clone(),
             origin_timestamp: now,
             effective_origin_timestamp: effective_ts,
-            state: TrstState::Active,
-            origin_wallet: earliest_origin_wallet,
-            origin_proportions: proportions,
+            state,
+            // A merge is a self-operation (6.7) — constituent originators are
+            // found through the merger graph.
+            origin_wallet: holder,
+            revoked_origin: None,
         })
     }
 
     /// Check and update expiry state for a token.
-    pub fn check_expiry(&self, token: &mut TrstToken, now: Timestamp, expiry_secs: u64) {
-        if token.state == TrstState::Active && token.is_expired(now, expiry_secs) {
+    pub fn check_expiry(&self, token: &mut TrstToken, now: Timestamp) {
+        if token.state == TrstState::Active && token.is_expired(now, self.expiry_secs) {
             token.state = TrstState::Expired;
         }
     }
 
-    /// Revoke all TRST originating from a fraudulent wallet.
+    /// Revoke all TRST originating from a fraudulent wallet (7.1a).
     ///
-    /// Looks up all real burn tx hashes (origins) belonging to `origin_wallet`
-    /// via the `wallet_origins` index, then:
-    /// - Marks each origin as revoked in the merger graph
-    /// - Propagates through merged tokens via the merger graph — O(k)
-    /// - Revokes simple tokens in tracked wallets matching `origin_wallet` — O(k)
+    /// For every burn origin of the wallet:
+    /// - simple tokens are fully revoked (100% tainted)
+    /// - merged tokens are proportionally split (7.2c): the tainted portion
+    ///   becomes a separate token in Revoked state tagged with the origin,
+    ///   the clean remainder stays live; rounding is against the holder (6.18b)
     ///
-    /// Returns all revocation events (for merged tokens with proportional amounts).
-    pub fn revoke_by_origin(
-        &mut self,
-        origin_wallet: &WalletAddress,
-    ) -> Vec<crate::merger_graph::RevocationEvent> {
-        let origin_txs: Vec<TxHash> = self
+    /// Only CURRENT holders are touched, via the origin-holders index — cost
+    /// scales with affected balances, not transaction history.
+    pub fn revoke_by_origin(&mut self, origin_wallet: &WalletAddress) -> Vec<RevocationEvent> {
+        let mut origin_txs: Vec<TxHash> = self
             .wallet_origins
             .get(origin_wallet)
             .map(|s| s.iter().copied().collect())
             .unwrap_or_default();
+        // Deterministic application order — every node must compute the
+        // same sequential proportional splits.
+        origin_txs.sort_by_key(|t| *t.as_bytes());
 
-        let mut all_events = Vec::new();
-
-        for origin_tx in &origin_txs {
-            self.merger_graph.mark_origin_revoked(*origin_tx);
-            let events = self.merger_graph.propagate_revocation(origin_tx);
-            for event in &events {
-                if let Some(portfolio) = self.wallets.get_mut(&event.holder) {
-                    if let Some(t) = portfolio
-                        .tokens
-                        .iter_mut()
-                        .find(|t| t.id == event.merge_tx && t.state == TrstState::Active)
-                    {
-                        t.state = TrstState::Revoked;
-                        portfolio.cached_transferable =
-                            portfolio.cached_transferable.saturating_sub(t.amount);
-                    }
-                }
-            }
-            all_events.extend(events);
-        }
-
-        // Revoke simple (non-merged) tokens — only check holder wallets
-        // that we know contain tokens from this origin_wallet (via index).
-        let holder_addrs: Vec<WalletAddress> = self
-            .origin_wallet_holders
-            .get(origin_wallet)
-            .map(|s| s.iter().cloned().collect())
-            .unwrap_or_default();
-        for addr in holder_addrs {
-            if let Some(portfolio) = self.wallets.get_mut(&addr) {
-                for t in &mut portfolio.tokens {
-                    if t.state == TrstState::Active
-                        && t.origin_proportions.is_empty()
-                        && &t.origin_wallet == origin_wallet
-                    {
-                        portfolio.cached_transferable =
-                            portfolio.cached_transferable.saturating_sub(t.amount);
-                        t.state = TrstState::Revoked;
-                    }
-                }
-            }
-        }
-
-        all_events
-    }
-
-    /// Un-revoke TRST when a previously fraudulent wallet is re-verified.
-    ///
-    /// Symmetric with `revoke_by_origin`: uses the `wallet_origins` index to
-    /// find all real origins, then un-marks them in the merger graph and
-    /// restores both merged and simple tokens.
-    ///
-    /// Returns a list of (token_id, holder, amount) for each restored token.
-    pub fn un_revoke_by_origin(
-        &mut self,
-        origin_wallet: &WalletAddress,
-    ) -> Vec<UnRevocationResult> {
-        let mut results = Vec::new();
-
-        let origin_txs: Vec<TxHash> = self
-            .wallet_origins
-            .get(origin_wallet)
-            .map(|s| s.iter().copied().collect())
-            .unwrap_or_default();
-
-        // Remove revocation marks for all origins belonging to this wallet.
-        for origin_tx in &origin_txs {
-            self.merger_graph.mark_origin_unrevoked(origin_tx);
-        }
-
-        // Restore merged tokens via the merger graph — O(k).
-        for origin_tx in &origin_txs {
-            let events = self.merger_graph.propagate_unrevocation(origin_tx);
-            for event in events {
-                if let Some(portfolio) = self.wallets.get_mut(&event.holder) {
-                    if let Some(t) = portfolio
-                        .tokens
-                        .iter_mut()
-                        .find(|t| t.id == event.merge_tx && t.state == TrstState::Revoked)
-                    {
-                        t.state = TrstState::Active;
-                        portfolio.cached_transferable += t.amount;
-                        results.push(UnRevocationResult {
-                            token_id: t.id,
-                            holder: event.holder.clone(),
-                            amount: t.amount,
-                        });
-                    }
-                }
-            }
-        }
-
-        // Restore simple (non-merged) tokens — only check holder wallets
-        // that we know contain tokens from this origin_wallet (via index).
-        let holder_addrs: Vec<WalletAddress> = self
-            .origin_wallet_holders
-            .get(origin_wallet)
-            .map(|s| s.iter().cloned().collect())
-            .unwrap_or_default();
-        for addr in holder_addrs {
-            if let Some(portfolio) = self.wallets.get_mut(&addr) {
-                for t in &mut portfolio.tokens {
-                    if t.state == TrstState::Revoked
-                        && t.origin_proportions.is_empty()
-                        && &t.origin_wallet == origin_wallet
-                    {
-                        t.state = TrstState::Active;
-                        portfolio.cached_transferable += t.amount;
-                        results.push(UnRevocationResult {
-                            token_id: t.id,
-                            holder: addr.clone(),
-                            amount: t.amount,
-                        });
-                    }
-                }
-            }
-        }
-
-        results
-    }
-
-    /// Return pending TRST tokens that have expired back to their senders.
-    ///
-    /// In the block-lattice model, a sent token is Pending until the receiver
-    /// publishes a receive block. If the token's expiry elapses while still
-    /// pending, it should be returned to the sender rather than lost.
-    ///
-    /// Takes a list of pending token descriptors (token ID, creation timestamp,
-    /// sender address) plus the expiry period. Checks which pending tokens have
-    /// expired and returns them to their senders by updating the token state and holder.
-    ///
-    /// Returns a list of (token_id, sender, amount) for each returned token.
-    pub fn return_expired_pending(
-        &self,
-        pending_info: &[PendingTokenInfo],
-        tokens: &mut [TrstToken],
-        expiry_period: u64,
-        now: Timestamp,
-    ) -> Vec<PendingReturnResult> {
-        let mut returns = Vec::new();
-
-        // Build a lookup from token ID to pending info.
-        let pending_map: std::collections::HashMap<TxHash, &PendingTokenInfo> = pending_info
-            .iter()
-            .map(|info| (info.token_id, info))
-            .collect();
-
-        for token in tokens.iter_mut() {
-            if token.state != TrstState::Pending {
+        let mut events = Vec::new();
+        for origin in origin_txs {
+            if self.merger_graph.is_origin_revoked(&origin) {
                 continue;
             }
+            let taints = self.merger_graph.apply_revocation(origin);
 
-            if let Some(info) = pending_map.get(&token.id) {
-                // Check if the pending period has expired.
-                if info.creation_timestamp.has_expired(expiry_period, now) {
-                    // Return token to sender: restore holder and set to Active.
-                    let amount = token.amount;
-                    token.holder = info.sender.clone();
-                    token.state = TrstState::Active;
+            // Simple tokens: every live token with this burn origin.
+            let mut holders: Vec<WalletAddress> = self
+                .origin_holders
+                .get(&origin)
+                .map(|s| s.iter().cloned().collect())
+                .unwrap_or_default();
+            holders.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+            for holder in holders {
+                self.revoke_whole_tokens(&holder, &origin, &mut events);
+            }
 
-                    returns.push(PendingReturnResult {
-                        token_id: token.id,
-                        sender: info.sender.clone(),
-                        amount,
+            // Merged tokens: proportional split per affected merge.
+            for taint in &taints {
+                let denom = taint.total_amount.saturating_sub(taint.prior_revoked);
+                let mut holders: Vec<WalletAddress> = self
+                    .origin_holders
+                    .get(&taint.merge_tx)
+                    .map(|s| s.iter().cloned().collect())
+                    .unwrap_or_default();
+                holders.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+                for holder in holders {
+                    self.split_revoke_tokens(
+                        &holder,
+                        &taint.merge_tx,
+                        origin,
+                        taint.tainted_amount,
+                        denom,
+                        &mut events,
+                    );
+                }
+            }
+        }
+        events
+    }
+
+    /// Fully revoke every live token with `origin` held by `holder`.
+    fn revoke_whole_tokens(
+        &mut self,
+        holder: &WalletAddress,
+        origin: &TxHash,
+        events: &mut Vec<RevocationEvent>,
+    ) {
+        let expiry_secs = self.expiry_secs;
+        let mut touched = false;
+        if let Some(portfolio) = self.wallets.get_mut(holder) {
+            let mut active_revoked = 0u128;
+            for t in &mut portfolio.tokens {
+                if t.origin == *origin
+                    && t.revoked_origin.is_none()
+                    && matches!(t.state, TrstState::Active | TrstState::Expired)
+                {
+                    if t.state == TrstState::Active {
+                        active_revoked = active_revoked.saturating_add(t.amount);
+                    }
+                    t.state = TrstState::Revoked;
+                    t.revoked_origin = Some(*origin);
+                    events.push(RevocationEvent {
+                        holder: holder.clone(),
+                        token_id: t.id,
+                        revoked_origin: *origin,
+                        revoked_amount: t.amount,
+                        total_amount: t.amount,
+                    });
+                    touched = true;
+                }
+            }
+            if active_revoked > 0 {
+                portfolio.cached_transferable =
+                    portfolio.cached_transferable.saturating_sub(active_revoked);
+                portfolio.recompute_earliest_expiry(expiry_secs);
+            }
+        }
+        if touched {
+            self.revoked_holders
+                .entry(*origin)
+                .or_default()
+                .insert(holder.clone());
+            let origins: HashSet<TxHash> = std::iter::once(*origin).collect();
+            self.deindex_wallet_origins(holder, &origins, &HashSet::new());
+        }
+    }
+
+    /// Proportionally split every live token with origin `merge_tx` held by
+    /// `holder`: `ceil(amount * tainted / denom)` is cut into a Revoked token
+    /// tagged with `revoked_origin`; the remainder stays live.
+    fn split_revoke_tokens(
+        &mut self,
+        holder: &WalletAddress,
+        merge_tx: &TxHash,
+        revoked_origin: TxHash,
+        tainted: u128,
+        denom: u128,
+        events: &mut Vec<RevocationEvent>,
+    ) {
+        let expiry_secs = self.expiry_secs;
+        let mut touched = false;
+        if let Some(portfolio) = self.wallets.get_mut(holder) {
+            let mut active_revoked = 0u128;
+            let mut chunks: Vec<TrstToken> = Vec::new();
+            for t in &mut portfolio.tokens {
+                if t.origin != *merge_tx
+                    || t.revoked_origin.is_some()
+                    || !matches!(t.state, TrstState::Active | TrstState::Expired)
+                {
+                    continue;
+                }
+                let cut = ceil_proportion(t.amount, tainted, denom);
+                if cut == 0 {
+                    continue;
+                }
+                if t.state == TrstState::Active {
+                    active_revoked = active_revoked.saturating_add(cut);
+                }
+                events.push(RevocationEvent {
+                    holder: holder.clone(),
+                    token_id: t.id,
+                    revoked_origin,
+                    revoked_amount: cut,
+                    total_amount: t.amount,
+                });
+                touched = true;
+                if cut >= t.amount {
+                    t.state = TrstState::Revoked;
+                    t.revoked_origin = Some(revoked_origin);
+                } else {
+                    t.amount -= cut;
+                    chunks.push(TrstToken {
+                        id: split_token_id(&t.id, &revoked_origin),
+                        amount: cut,
+                        origin: *merge_tx,
+                        link: t.id,
+                        holder: holder.clone(),
+                        origin_timestamp: t.origin_timestamp,
+                        effective_origin_timestamp: t.effective_origin_timestamp,
+                        state: TrstState::Revoked,
+                        origin_wallet: t.origin_wallet.clone(),
+                        revoked_origin: Some(revoked_origin),
                     });
                 }
             }
+            for chunk in chunks {
+                portfolio.insert_sorted(chunk);
+            }
+            if active_revoked > 0 {
+                portfolio.cached_transferable =
+                    portfolio.cached_transferable.saturating_sub(active_revoked);
+                portfolio.recompute_earliest_expiry(expiry_secs);
+            }
         }
+        if touched {
+            self.revoked_holders
+                .entry(revoked_origin)
+                .or_default()
+                .insert(holder.clone());
+            let origins: HashSet<TxHash> = std::iter::once(*merge_tx).collect();
+            self.deindex_wallet_origins(holder, &origins, &HashSet::new());
+        }
+    }
 
-        returns
+    /// Un-revoke TRST when a previously fraudulent wallet is re-verified (6.15b).
+    ///
+    /// Symmetric with `revoke_by_origin`: un-marks every origin in the merger
+    /// graph, then restores exactly the tokens tagged with those origins via
+    /// the revoked-holders index — O(k) in affected tokens. Restored tokens
+    /// re-enter Active or Expired state depending on the current expiry period.
+    pub fn un_revoke_by_origin(
+        &mut self,
+        origin_wallet: &WalletAddress,
+        now: Timestamp,
+    ) -> Vec<UnRevocationResult> {
+        let mut origin_txs: Vec<TxHash> = self
+            .wallet_origins
+            .get(origin_wallet)
+            .map(|s| s.iter().copied().collect())
+            .unwrap_or_default();
+        origin_txs.sort_by_key(|t| *t.as_bytes());
+
+        let expiry_secs = self.expiry_secs;
+        let mut results = Vec::new();
+        for origin in origin_txs {
+            if !self.merger_graph.is_origin_revoked(&origin) {
+                continue;
+            }
+            self.merger_graph.apply_unrevocation(&origin);
+
+            let mut holders: Vec<WalletAddress> = self
+                .revoked_holders
+                .remove(&origin)
+                .map(|s| s.into_iter().collect())
+                .unwrap_or_default();
+            holders.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+
+            for holder in holders {
+                let mut restored_origins: HashSet<TxHash> = HashSet::new();
+                if let Some(portfolio) = self.wallets.get_mut(&holder) {
+                    let mut restored_active = 0u128;
+                    for t in &mut portfolio.tokens {
+                        if t.revoked_origin != Some(origin) {
+                            continue;
+                        }
+                        t.revoked_origin = None;
+                        t.state = if t.is_expired(now, expiry_secs) {
+                            TrstState::Expired
+                        } else {
+                            TrstState::Active
+                        };
+                        if t.state == TrstState::Active {
+                            restored_active = restored_active.saturating_add(t.amount);
+                        }
+                        restored_origins.insert(t.origin);
+                        results.push(UnRevocationResult {
+                            token_id: t.id,
+                            holder: holder.clone(),
+                            amount: t.amount,
+                        });
+                    }
+                    if restored_active > 0 {
+                        portfolio.cached_transferable = portfolio
+                            .cached_transferable
+                            .saturating_add(restored_active);
+                    }
+                    portfolio.recompute_earliest_expiry(expiry_secs);
+                }
+                for o in restored_origins {
+                    self.origin_holders
+                        .entry(o)
+                        .or_default()
+                        .insert(holder.clone());
+                }
+            }
+        }
+        results
+    }
+
+    /// Apply a governance change of the TRST expiry period (6.9).
+    ///
+    /// Expiry is computed from each token's inception and the CURRENT period,
+    /// so extending the period makes previously-expired TRST transferable
+    /// again, and shortening it expires tokens immediately. O(total tokens),
+    /// but governance changes are rare by construction.
+    pub fn set_expiry_period(&mut self, new_expiry_secs: u64, now: Timestamp) {
+        self.expiry_secs = new_expiry_secs;
+        for portfolio in self.wallets.values_mut() {
+            for t in &mut portfolio.tokens {
+                match t.state {
+                    TrstState::Active if t.is_expired(now, new_expiry_secs) => {
+                        t.state = TrstState::Expired;
+                    }
+                    TrstState::Expired if !t.is_expired(now, new_expiry_secs) => {
+                        t.state = TrstState::Active;
+                    }
+                    _ => {}
+                }
+            }
+            portfolio.recompute_transferable(now, new_expiry_secs);
+            portfolio.recompute_earliest_expiry(new_expiry_secs);
+        }
     }
 
     /// Compute total effective (demurrage-adjusted) TRST balance across tokens.
     /// Active tokens are valued based on time remaining; expired/revoked = 0.
-    pub fn effective_balance(
-        &self,
-        tokens: &[TrstToken],
-        now: Timestamp,
-        expiry_secs: u64,
-    ) -> u128 {
+    pub fn effective_balance(&self, tokens: &[TrstToken], now: Timestamp) -> u128 {
         tokens
             .iter()
             .filter(|t| t.state == TrstState::Active)
-            .map(|t| t.effective_value(now, expiry_secs))
+            .map(|t| t.effective_value(now, self.expiry_secs))
             .sum()
     }
 }
@@ -959,42 +1158,24 @@ impl TrstEngine {
     }
 
     /// Restore per-wallet token portfolios from serialized bytes.
-    /// Returns a TrstEngine with the restored portfolios and a fresh MergerGraph
-    /// (the merger graph is persisted separately).
+    ///
+    /// Returns a TrstEngine with the restored portfolios and a fresh
+    /// MergerGraph — the merger graph is persisted separately. Call
+    /// [`rebuild_indexes`](Self::rebuild_indexes) again after restoring the
+    /// merger graph so merged origins are classified correctly.
     pub fn load_wallets(data: &[u8], expiry_secs: u64) -> Self {
         let wallets: HashMap<WalletAddress, WalletPortfolio> =
             bincode::deserialize(data).unwrap_or_default();
-        let mut wallet_origins: HashMap<WalletAddress, HashSet<TxHash>> = HashMap::new();
-        let mut origin_wallet_holders: HashMap<WalletAddress, HashSet<WalletAddress>> =
-            HashMap::new();
-        for portfolio in wallets.values() {
-            for t in &portfolio.tokens {
-                if t.origin_proportions.is_empty() {
-                    wallet_origins
-                        .entry(t.origin_wallet.clone())
-                        .or_default()
-                        .insert(t.origin);
-                    origin_wallet_holders
-                        .entry(t.origin_wallet.clone())
-                        .or_default()
-                        .insert(t.holder.clone());
-                } else {
-                    for p in &t.origin_proportions {
-                        wallet_origins
-                            .entry(p.origin_wallet.clone())
-                            .or_default()
-                            .insert(p.origin);
-                    }
-                }
-            }
-        }
-        Self {
+        let mut engine = Self {
             merger_graph: MergerGraph::new(),
             wallets,
-            wallet_origins,
-            origin_wallet_holders,
+            wallet_origins: HashMap::new(),
+            origin_holders: HashMap::new(),
+            revoked_holders: HashMap::new(),
             expiry_secs,
-        }
+        };
+        engine.rebuild_indexes();
+        engine
     }
 
     /// The meta-store key used for wallet portfolio persistence.
@@ -1003,7 +1184,8 @@ impl TrstEngine {
     }
 
     /// Flush expired tokens across all wallets. Call periodically (e.g. every 30s).
-    pub fn flush_all_expired(&mut self, now: Timestamp, expiry_secs: u64) {
+    pub fn flush_all_expired(&mut self, now: Timestamp) {
+        let expiry_secs = self.expiry_secs;
         for portfolio in self.wallets.values_mut() {
             portfolio.flush_expired(now, expiry_secs);
         }
@@ -1039,1173 +1221,778 @@ mod tests {
         TxHash::new([n; 32])
     }
 
-    fn test_timestamp(secs: u64) -> Timestamp {
+    fn ts(secs: u64) -> Timestamp {
         Timestamp::new(secs)
     }
 
     #[test]
-    fn test_minting_creates_token_with_correct_fields() {
+    fn minting_creates_token_with_correct_fields() {
         let mut engine = TrstEngine::new();
-        let burn_tx_hash = test_hash(1);
+        let burn_tx = test_hash(1);
         let receiver = test_address(1);
         let origin_wallet = test_address(2);
-        let amount = 1000;
-        let timestamp = test_timestamp(1000);
 
         let token = engine
-            .mint(
-                burn_tx_hash,
-                receiver.clone(),
-                amount,
-                origin_wallet.clone(),
-                timestamp,
-            )
+            .mint(burn_tx, receiver.clone(), 1000, origin_wallet.clone(), ts(1000))
             .unwrap();
 
-        assert_eq!(token.id, burn_tx_hash);
-        assert_eq!(token.amount, amount);
-        assert_eq!(token.origin, burn_tx_hash);
-        assert_eq!(token.link, burn_tx_hash);
+        assert_eq!(token.id, burn_tx);
+        assert_eq!(token.amount, 1000);
+        assert_eq!(token.origin, burn_tx);
+        assert_eq!(token.link, burn_tx);
         assert_eq!(token.holder, receiver);
-        assert_eq!(token.origin_timestamp, timestamp);
         assert_eq!(token.state, TrstState::Active);
         assert_eq!(token.origin_wallet, origin_wallet);
-        assert!(token.origin_proportions.is_empty());
-
-        assert!(engine
-            .wallet_origins
-            .get(&origin_wallet)
-            .unwrap()
-            .contains(&burn_tx_hash));
+        assert!(token.revoked_origin.is_none());
+        assert!(engine.wallet_origins[&origin_wallet].contains(&burn_tx));
     }
 
     #[test]
-    fn test_transfer_creates_receiver_token_and_optional_change_token() {
-        let mut engine = TrstEngine::new();
-        let origin_tx = test_hash(1);
+    fn transfer_creates_receiver_and_change_tokens() {
+        let mut engine = TrstEngine::with_expiry(3600);
         let sender = test_address(1);
         let receiver = test_address(2);
-        let send_tx = test_hash(2);
-        let change_tx = test_hash(3);
-        let expiry_secs = 3600;
-
         let token = engine
-            .mint(
-                origin_tx,
-                sender.clone(),
-                1000,
-                sender.clone(),
-                test_timestamp(1000),
-            )
+            .mint(test_hash(1), sender.clone(), 1000, sender.clone(), ts(1000))
             .unwrap();
 
-        let now = test_timestamp(1500);
-        let (receiver_token, change_token) = engine
-            .transfer(
-                &token,
-                &sender,
-                receiver.clone(),
-                600,
-                send_tx,
-                change_tx,
-                now,
-                expiry_secs,
-            )
+        let (recv, change) = engine
+            .transfer(&token, &sender, receiver.clone(), 600, test_hash(2), test_hash(3), ts(1500))
             .unwrap();
-
-        assert_eq!(receiver_token.id, send_tx);
-        assert_eq!(receiver_token.amount, 600);
-        assert_eq!(receiver_token.origin, origin_tx);
-        assert_eq!(receiver_token.link, token.id);
-        assert_eq!(receiver_token.holder, receiver);
-        assert_eq!(receiver_token.state, TrstState::Active);
-
-        assert!(change_token.is_some());
-        let change = change_token.unwrap();
-        assert_eq!(change.id, change_tx);
+        assert_eq!(recv.amount, 600);
+        assert_eq!(recv.origin, test_hash(1));
+        assert_eq!(recv.link, token.id);
+        assert_eq!(recv.holder, receiver);
+        let change = change.unwrap();
         assert_eq!(change.amount, 400);
-        assert_eq!(change.origin, origin_tx);
-        assert_eq!(change.link, token.id);
         assert_eq!(change.holder, sender);
-        assert_eq!(change.state, TrstState::Active);
     }
 
     #[test]
-    fn test_transfer_full_amount_produces_no_change() {
-        let mut engine = TrstEngine::new();
-        let origin_tx = test_hash(1);
+    fn transfer_of_expired_token_fails() {
+        let mut engine = TrstEngine::with_expiry(3600);
         let sender = test_address(1);
-        let receiver = test_address(2);
-        let send_tx = test_hash(2);
-        let change_tx = test_hash(3);
-        let expiry_secs = 3600;
-
         let token = engine
-            .mint(
-                origin_tx,
-                sender.clone(),
-                1000,
-                sender.clone(),
-                test_timestamp(1000),
-            )
+            .mint(test_hash(1), sender.clone(), 1000, sender.clone(), ts(1000))
             .unwrap();
-
-        let now = test_timestamp(1500);
-        let (receiver_token, change_token) = engine
-            .transfer(
-                &token,
-                &sender,
-                receiver.clone(),
-                1000,
-                send_tx,
-                change_tx,
-                now,
-                expiry_secs,
-            )
-            .unwrap();
-
-        assert_eq!(receiver_token.amount, 1000);
-        assert_eq!(receiver_token.holder, receiver);
-
-        assert!(change_token.is_none());
-    }
-
-    #[test]
-    fn test_transfer_more_than_available_returns_error() {
-        let mut engine = TrstEngine::new();
-        let origin_tx = test_hash(1);
-        let sender = test_address(1);
-        let receiver = test_address(2);
-        let send_tx = test_hash(2);
-        let change_tx = test_hash(3);
-        let expiry_secs = 3600;
-
-        let token = engine
-            .mint(
-                origin_tx,
-                sender.clone(),
-                1000,
-                sender.clone(),
-                test_timestamp(1000),
-            )
-            .unwrap();
-
-        let now = test_timestamp(1500);
         let result = engine.transfer(
             &token,
             &sender,
-            receiver,
-            1500,
-            send_tx,
-            change_tx,
-            now,
-            expiry_secs,
-        );
-
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            TrstError::InsufficientBalance { needed, available } => {
-                assert_eq!(needed, 1500);
-                assert_eq!(available, 1000);
-            }
-            _ => panic!("Expected InsufficientBalance error"),
-        }
-    }
-
-    #[test]
-    fn test_transfer_of_expired_token_returns_error() {
-        let mut engine = TrstEngine::new();
-        let origin_tx = test_hash(1);
-        let sender = test_address(1);
-        let receiver = test_address(2);
-        let send_tx = test_hash(2);
-        let change_tx = test_hash(3);
-        let expiry_secs = 3600; // 1 hour
-
-        let origin_time = test_timestamp(1000);
-        let token = engine
-            .mint(origin_tx, sender.clone(), 1000, sender.clone(), origin_time)
-            .unwrap();
-
-        let now = test_timestamp(5000);
-        let result = engine.transfer(
-            &token,
-            &sender,
-            receiver,
+            test_address(2),
             500,
-            send_tx,
-            change_tx,
-            now,
-            expiry_secs,
+            test_hash(2),
+            test_hash(3),
+            ts(5000),
         );
-
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            TrstError::NotTransferable(_) => {}
-            _ => panic!("Expected NotTransferable error"),
-        }
+        assert!(matches!(result, Err(TrstError::NotTransferable(_))));
     }
 
     #[test]
-    fn test_split_with_correct_amounts_succeeds() {
-        let mut engine = TrstEngine::new();
-        let origin_tx = test_hash(1);
-        let holder = test_address(1);
-        let expiry_secs = 3600;
-
-        let token = engine
-            .mint(
-                origin_tx,
-                holder.clone(),
-                1000,
-                holder.clone(),
-                test_timestamp(1000),
-            )
-            .unwrap();
-
-        let amounts = vec![
-            (test_address(2), 300),
-            (test_address(3), 400),
-            (test_address(4), 300),
-        ];
-        let tx_hashes = vec![test_hash(2), test_hash(3), test_hash(4)];
-
-        let now = test_timestamp(1500);
-        let splits = engine
-            .split(&token, &amounts, &tx_hashes, now, expiry_secs)
-            .unwrap();
-
-        assert_eq!(splits.len(), 3);
-        assert_eq!(splits[0].amount, 300);
-        assert_eq!(splits[0].holder, test_address(2));
-        assert_eq!(splits[0].id, test_hash(2));
-        assert_eq!(splits[1].amount, 400);
-        assert_eq!(splits[1].holder, test_address(3));
-        assert_eq!(splits[2].amount, 300);
-        assert_eq!(splits[2].holder, test_address(4));
-
-        for split in &splits {
-            assert_eq!(split.origin, origin_tx);
-            assert_eq!(split.link, token.id);
-            assert_eq!(split.state, TrstState::Active);
-        }
-    }
-
-    #[test]
-    fn test_split_with_mismatched_amounts_fails() {
-        let mut engine = TrstEngine::new();
-        let origin_tx = test_hash(1);
-        let holder = test_address(1);
-        let expiry_secs = 3600;
-
-        let token = engine
-            .mint(
-                origin_tx,
-                holder.clone(),
-                1000,
-                holder.clone(),
-                test_timestamp(1000),
-            )
-            .unwrap();
-
-        let amounts = vec![
-            (test_address(2), 300),
-            (test_address(3), 400),
-            (test_address(4), 200),
-        ];
-        let tx_hashes = vec![test_hash(2), test_hash(3), test_hash(4)];
-
-        let now = test_timestamp(1500);
-        let result = engine.split(&token, &amounts, &tx_hashes, now, expiry_secs);
-
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            TrstError::SplitMismatch { total, parent } => {
-                assert_eq!(total, 900);
-                assert_eq!(parent, 1000);
-            }
-            _ => panic!("Expected SplitMismatch error"),
-        }
-    }
-
-    #[test]
-    fn test_merge_combines_amounts_and_creates_merger_graph_entry() {
-        let mut engine = TrstEngine::new();
-        let expiry_secs = 3600;
-
-        let origin1 = test_hash(1);
-        let origin2 = test_hash(2);
+    fn merged_token_uses_merge_tx_as_origin() {
+        let mut engine = TrstEngine::with_expiry(3600);
         let holder = test_address(5);
-        let token1 = engine
-            .mint(
-                origin1,
-                holder.clone(),
-                500,
-                test_address(10),
-                test_timestamp(1000),
-            )
+        let t1 = engine
+            .mint(test_hash(1), holder.clone(), 500, test_address(10), ts(1000))
             .unwrap();
-        let token2 = engine
-            .mint(
-                origin2,
-                holder.clone(),
-                300,
-                test_address(11),
-                test_timestamp(1100),
-            )
+        let t2 = engine
+            .mint(test_hash(2), holder.clone(), 300, test_address(11), ts(1100))
             .unwrap();
 
-        let tokens = vec![token1, token2];
         let merge_tx = test_hash(10);
-        let now = test_timestamp(1500);
-
         let merged = engine
-            .merge(&tokens, holder.clone(), merge_tx, now, expiry_secs)
+            .merge(&[t1, t2], holder.clone(), merge_tx, ts(1500))
             .unwrap();
 
         assert_eq!(merged.amount, 800);
-        assert_eq!(merged.holder, holder);
+        // Whitepaper: merged token's origin is the merge tx hash.
+        assert_eq!(merged.origin, merge_tx);
         assert_eq!(merged.id, merge_tx);
-        assert_eq!(merged.origin, origin1); // preserves earliest original burn origin
-        assert_eq!(merged.link, origin2); // most recent input token (token2 has later timestamp)
+        assert_eq!(merged.effective_origin_timestamp, ts(1000)); // earliest constituent
+        assert_eq!(merged.origin_timestamp, ts(1500));
         assert_eq!(merged.state, TrstState::Active);
-        assert_eq!(merged.origin_timestamp, test_timestamp(1500)); // merge time
-        assert_eq!(merged.effective_origin_timestamp, test_timestamp(1000)); // earliest constituent
+        // origin_wallet is the merging wallet (self-operation).
+        assert_eq!(merged.origin_wallet, holder);
 
-        assert_eq!(merged.origin_proportions.len(), 2);
-        assert!(merged
-            .origin_proportions
-            .iter()
-            .any(|p| p.origin == origin1 && p.amount == 500));
-        assert!(merged
-            .origin_proportions
-            .iter()
-            .any(|p| p.origin == origin2 && p.amount == 300));
-
-        let revocations = engine.revoke_by_origin(&test_address(10));
-        assert!(!revocations.is_empty());
+        // Graph records IMMEDIATE inputs.
+        let node = engine.merger_graph.get_merge(&merge_tx).unwrap();
+        assert_eq!(node.source_origins.len(), 2);
+        assert_eq!(node.total_amount, 800);
     }
 
     #[test]
-    fn test_check_expiry_transitions_active_to_expired() {
-        let mut engine = TrstEngine::new();
-        let origin_tx = test_hash(1);
+    fn merge_of_merged_token_links_downstream() {
+        let mut engine = TrstEngine::with_expiry(u64::MAX);
+        let holder = test_address(5);
+        let t1 = engine
+            .mint(test_hash(1), holder.clone(), 500, test_address(10), ts(1000))
+            .unwrap();
+        let t2 = engine
+            .mint(test_hash(2), holder.clone(), 300, test_address(11), ts(1100))
+            .unwrap();
+        let merged1 = engine
+            .merge(&[t1, t2], holder.clone(), test_hash(20), ts(1500))
+            .unwrap();
+
+        let t3 = engine
+            .mint(test_hash(3), holder.clone(), 200, test_address(12), ts(1600))
+            .unwrap();
+        let merged2 = engine
+            .merge(&[merged1, t3], holder.clone(), test_hash(21), ts(1700))
+            .unwrap();
+
+        assert_eq!(merged2.origin, test_hash(21));
+        // The second merge's node lists merge1's tx as an immediate source.
+        let node = engine.merger_graph.get_merge(&test_hash(21)).unwrap();
+        assert!(node
+            .source_origins
+            .iter()
+            .any(|s| s.origin == test_hash(20) && s.amount == 800));
+    }
+
+    #[test]
+    fn merge_rejects_too_many_sources() {
+        let mut engine = TrstEngine::with_expiry(u64::MAX);
         let holder = test_address(1);
-        let expiry_secs = 3600; // 1 hour
-
-        let origin_time = test_timestamp(1000);
-        let mut token = engine
-            .mint(origin_tx, holder.clone(), 1000, holder.clone(), origin_time)
-            .unwrap();
-
-        let now_before = test_timestamp(2000);
-        engine.check_expiry(&mut token, now_before, expiry_secs);
-        assert_eq!(token.state, TrstState::Active);
-
-        let now_after = test_timestamp(5000);
-        engine.check_expiry(&mut token, now_after, expiry_secs);
-        assert_eq!(token.state, TrstState::Expired);
-    }
-
-    #[test]
-    fn test_revoke_by_origin_propagates_through_merger_graph() {
-        let mut engine = TrstEngine::new();
-        let expiry_secs = 3600;
-
-        let origin1 = test_hash(1);
-        let origin2 = test_hash(2);
-        let origin_wallet1 = test_address(10);
-        let origin_wallet2 = test_address(11);
-        let holder1 = test_address(5);
-        let holder2 = test_address(6);
-
-        let token1 = engine
-            .mint(
-                origin1,
-                holder1.clone(),
-                500,
-                origin_wallet1.clone(),
-                test_timestamp(1000),
-            )
-            .unwrap();
-        let token2 = engine
-            .mint(
-                origin2,
-                holder1.clone(),
-                300,
-                origin_wallet2.clone(),
-                test_timestamp(1100),
-            )
-            .unwrap();
-        let token3 = engine
-            .mint(
-                origin1,
-                holder2.clone(),
-                200,
-                origin_wallet1.clone(),
-                test_timestamp(1200),
-            )
-            .unwrap();
-
-        let merge1_tx = test_hash(10);
-        let mut merged1 = engine
-            .merge(
-                &vec![token1, token2],
-                holder1.clone(),
-                merge1_tx,
-                test_timestamp(1500),
-                expiry_secs,
-            )
-            .unwrap();
-
-        merged1.holder = holder2.clone();
-
-        let merge2_tx = test_hash(11);
-        let _merged2 = engine
-            .merge(
-                &vec![merged1, token3],
-                holder2.clone(),
-                merge2_tx,
-                test_timestamp(1600),
-                expiry_secs,
-            )
-            .unwrap();
-
-        let revocations = engine.revoke_by_origin(&origin_wallet1);
-
-        assert!(!revocations.is_empty());
-        let total_revoked: u128 = revocations.iter().map(|r| r.revoked_amount).sum();
-        assert!(total_revoked > 0);
-    }
-
-    // ── Un-revocation tests ─────────────────────────────────────────────
-
-    #[test]
-    fn test_un_revoke_simple_tokens_restores_active_state() {
-        let mut engine = TrstEngine::new();
-        let origin_wallet = test_address(10);
-        let other_wallet = test_address(11);
-
-        let token1 = engine
-            .mint(
-                test_hash(1),
-                test_address(1),
-                500,
-                origin_wallet.clone(),
-                test_timestamp(1000),
-            )
-            .unwrap();
-        let token2 = engine
-            .mint(
-                test_hash(2),
-                test_address(2),
-                300,
-                origin_wallet.clone(),
-                test_timestamp(1100),
-            )
-            .unwrap();
-        let token3 = engine
-            .mint(
-                test_hash(3),
-                test_address(3),
-                200,
-                other_wallet.clone(),
-                test_timestamp(1200),
-            )
-            .unwrap();
-
-        engine.track_token(token1);
-        engine.track_token(token2);
-        engine.track_token(token3);
-
-        engine.revoke_by_origin(&origin_wallet);
-
-        let p1 = engine.wallets.get(&test_address(1)).unwrap();
-        assert_eq!(p1.tokens[0].state, TrstState::Revoked);
-        assert_eq!(p1.cached_transferable, 0);
-        let p2 = engine.wallets.get(&test_address(2)).unwrap();
-        assert_eq!(p2.tokens[0].state, TrstState::Revoked);
-        let p3 = engine.wallets.get(&test_address(3)).unwrap();
-        assert_eq!(p3.tokens[0].state, TrstState::Active);
-
-        let results = engine.un_revoke_by_origin(&origin_wallet);
-        assert_eq!(results.len(), 2);
-
-        let p1 = engine.wallets.get(&test_address(1)).unwrap();
-        assert_eq!(p1.tokens[0].state, TrstState::Active);
-        assert_eq!(p1.cached_transferable, 500);
-        let p2 = engine.wallets.get(&test_address(2)).unwrap();
-        assert_eq!(p2.tokens[0].state, TrstState::Active);
-        assert_eq!(p2.cached_transferable, 300);
-        let p3 = engine.wallets.get(&test_address(3)).unwrap();
-        assert_eq!(p3.tokens[0].state, TrstState::Active);
-    }
-
-    #[test]
-    fn test_un_revoke_skips_non_revoked_tokens() {
-        let mut engine = TrstEngine::new();
-        let origin_wallet = test_address(10);
-
-        let token1 = engine
-            .mint(
-                test_hash(1),
-                test_address(1),
-                500,
-                origin_wallet.clone(),
-                test_timestamp(1000),
-            )
-            .unwrap();
-        let token2 = engine
-            .mint(
-                test_hash(2),
-                test_address(1),
-                300,
-                origin_wallet.clone(),
-                test_timestamp(1100),
-            )
-            .unwrap();
-        engine.track_token(token1);
-        engine.track_token(token2);
-
-        engine.revoke_by_origin(&origin_wallet);
-
-        let results = engine.un_revoke_by_origin(&origin_wallet);
-        assert_eq!(results.len(), 2);
-
-        let p = engine.wallets.get(&test_address(1)).unwrap();
-        assert_eq!(p.cached_transferable, 800);
-        for t in &p.tokens {
-            assert_eq!(t.state, TrstState::Active);
+        let mut tokens = Vec::new();
+        for i in 0..(MAX_MERGE_SOURCES + 1) {
+            let mut h = [0u8; 32];
+            h[0] = (i % 256) as u8;
+            h[1] = (i / 256) as u8;
+            h[2] = 7;
+            tokens.push(TrstToken {
+                id: TxHash::new(h),
+                amount: 1,
+                origin: TxHash::new(h),
+                link: TxHash::new(h),
+                holder: holder.clone(),
+                origin_timestamp: ts(1000),
+                effective_origin_timestamp: ts(1000),
+                state: TrstState::Active,
+                origin_wallet: holder.clone(),
+                revoked_origin: None,
+            });
         }
+        let result = engine.merge(&tokens, holder, test_hash(99), ts(1500));
+        assert!(result.is_err());
     }
 
     #[test]
-    fn test_un_revoke_returns_correct_amounts_and_holders() {
-        let mut engine = TrstEngine::new();
+    fn expired_tokens_can_be_consolidated_by_merge() {
+        // 6.8(b): merge-only consolidation of expired TRST.
+        let mut engine = TrstEngine::with_expiry(100);
+        let holder = test_address(1);
+        let t1 = engine
+            .mint(test_hash(1), holder.clone(), 500, test_address(10), ts(1000))
+            .unwrap();
+        let t2 = engine
+            .mint(test_hash(2), holder.clone(), 300, test_address(10), ts(1010))
+            .unwrap();
+        // Both expired by now.
+        let merged = engine
+            .merge(&[t1, t2], holder.clone(), test_hash(10), ts(5000))
+            .unwrap();
+        assert_eq!(merged.state, TrstState::Expired);
+        assert_eq!(merged.amount, 800);
+    }
+
+    #[test]
+    fn merge_rejects_mixed_live_and_expired_tokens() {
+        // The earliest-expiry floor rule would silently expire the live
+        // value — consolidation (6.8b) is expired-with-expired only.
+        let mut engine = TrstEngine::with_expiry(100);
+        let holder = test_address(1);
+        let expired = engine
+            .mint(test_hash(1), holder.clone(), 500, test_address(10), ts(1000))
+            .unwrap();
+        let live = engine
+            .mint(test_hash(2), holder.clone(), 300, test_address(10), ts(4990))
+            .unwrap();
+        // At t=5000: token 1 (born 1000, expiry 100s) is expired; token 2 is live.
+        let result = engine.merge(&[expired, live], holder, test_hash(10), ts(5000));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn merge_rejects_revoked_tokens() {
+        let mut engine = TrstEngine::with_expiry(u64::MAX);
+        let holder = test_address(1);
+        let t1 = engine
+            .mint(test_hash(1), holder.clone(), 500, test_address(10), ts(1000))
+            .unwrap();
+        let mut t2 = engine
+            .mint(test_hash(2), holder.clone(), 300, test_address(10), ts(1010))
+            .unwrap();
+        t2.state = TrstState::Revoked;
+        t2.revoked_origin = Some(t2.origin);
+        let result = engine.merge(&[t1, t2], holder, test_hash(10), ts(1500));
+        assert!(matches!(result, Err(TrstError::NotTransferable(_))));
+    }
+
+    #[test]
+    fn track_token_uses_engine_expiry_for_earliest_expiry() {
+        // Regression: track_token previously computed expiry with u64::MAX,
+        // which disabled lazy expiry flushing entirely.
+        let mut engine = TrstEngine::with_expiry(100);
+        let holder = test_address(1);
+        let token = engine
+            .mint(test_hash(1), holder.clone(), 500, test_address(10), ts(1000))
+            .unwrap();
+        engine.track_token(token);
+
+        let p = engine.get_portfolio(&holder).unwrap();
+        assert_eq!(p.earliest_expiry, Some(ts(1100)));
+        assert_eq!(p.cached_transferable, 500);
+
+        // After expiry passes, the balance flushes to zero.
+        assert_eq!(engine.transferable_balance(&holder, ts(1200)), Some(0));
+        let p = engine.get_portfolio(&holder).unwrap();
+        assert_eq!(p.tokens[0].state, TrstState::Expired);
+    }
+
+    #[test]
+    fn simple_revocation_revokes_current_holders_only() {
+        let mut engine = TrstEngine::with_expiry(u64::MAX);
         let origin_wallet = test_address(10);
-        let holder_a = test_address(1);
-        let holder_b = test_address(2);
+        let a = test_address(1);
+        let b = test_address(2);
 
-        let token_a = engine
-            .mint(
-                test_hash(1),
-                holder_a.clone(),
-                750,
-                origin_wallet.clone(),
-                test_timestamp(1000),
-            )
+        let token = engine
+            .mint(test_hash(1), a.clone(), 500, origin_wallet.clone(), ts(1000))
             .unwrap();
-        let token_b = engine
-            .mint(
-                test_hash(2),
-                holder_b.clone(),
-                250,
-                origin_wallet.clone(),
-                test_timestamp(1100),
-            )
+        engine.track_token(token);
+
+        // a sends the whole token to b: debit from a, track under b.
+        let prov = engine.debit_wallet_with_provenance(&a, &test_hash(1), 500);
+        assert_eq!(prov.len(), 1);
+        let received = TrstToken {
+            id: test_hash(50),
+            amount: 500,
+            origin: prov[0].origin,
+            link: test_hash(50),
+            holder: b.clone(),
+            origin_timestamp: prov[0].origin_timestamp,
+            effective_origin_timestamp: prov[0].effective_origin_timestamp,
+            state: TrstState::Active,
+            origin_wallet: prov[0].origin_wallet.clone(),
+            revoked_origin: None,
+        };
+        engine.receive_token(received, ts(1100));
+
+        let events = engine.revoke_by_origin(&origin_wallet);
+        // Only b (current holder) is affected; a holds nothing.
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].holder, b);
+        assert_eq!(events[0].revoked_amount, 500);
+
+        let pb = engine.get_portfolio(&b).unwrap();
+        assert_eq!(pb.tokens[0].state, TrstState::Revoked);
+        assert_eq!(pb.tokens[0].revoked_origin, Some(test_hash(1)));
+        assert_eq!(pb.cached_transferable, 0);
+    }
+
+    #[test]
+    fn merged_revocation_splits_proportionally() {
+        // 7.2(c): the tainted portion becomes a separate revoked token,
+        // the clean remainder stays live. 6.18(b): round up the cut.
+        let mut engine = TrstEngine::with_expiry(u64::MAX);
+        let ow1 = test_address(10);
+        let ow2 = test_address(11);
+        let holder = test_address(5);
+
+        let t1 = engine
+            .mint(test_hash(1), holder.clone(), 600, ow1.clone(), ts(1000))
             .unwrap();
-        engine.track_token(token_a);
-        engine.track_token(token_b);
+        let t2 = engine
+            .mint(test_hash(2), holder.clone(), 400, ow2.clone(), ts(1100))
+            .unwrap();
+        engine.track_token(t1.clone());
+        engine.track_token(t2.clone());
 
-        engine.revoke_by_origin(&origin_wallet);
-        let results = engine.un_revoke_by_origin(&origin_wallet);
+        let merged = engine
+            .merge(&[t1, t2], holder.clone(), test_hash(10), ts(1500))
+            .unwrap();
+        let ids: HashSet<TxHash> = [test_hash(1), test_hash(2)].into_iter().collect();
+        engine.bulk_untrack(&holder, &ids);
+        engine.track_token(merged);
 
+        let events = engine.revoke_by_origin(&ow1);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].revoked_amount, 600);
+        assert_eq!(events[0].total_amount, 1000);
+
+        let p = engine.get_portfolio(&holder).unwrap();
+        // Two tokens now: the clean remainder (400, Active) and the revoked chunk (600).
+        assert_eq!(p.tokens.len(), 2);
+        let live = p.tokens.iter().find(|t| t.state == TrstState::Active).unwrap();
+        let dead = p.tokens.iter().find(|t| t.state == TrstState::Revoked).unwrap();
+        assert_eq!(live.amount, 400);
+        assert_eq!(live.origin, test_hash(10));
+        assert_eq!(dead.amount, 600);
+        assert_eq!(dead.revoked_origin, Some(test_hash(1)));
+        assert_eq!(p.cached_transferable, 400);
+    }
+
+    #[test]
+    fn revocation_propagates_through_multi_level_merges() {
+        let mut engine = TrstEngine::with_expiry(u64::MAX);
+        let ow1 = test_address(10);
+        let holder = test_address(5);
+
+        let t1 = engine
+            .mint(test_hash(1), holder.clone(), 50, ow1.clone(), ts(1000))
+            .unwrap();
+        let t2 = engine
+            .mint(test_hash(2), holder.clone(), 50, test_address(11), ts(1100))
+            .unwrap();
+        engine.track_token(t1.clone());
+        engine.track_token(t2.clone());
+        let m1 = engine
+            .merge(&[t1, t2], holder.clone(), test_hash(20), ts(1500))
+            .unwrap();
+        let ids: HashSet<TxHash> = [test_hash(1), test_hash(2)].into_iter().collect();
+        engine.bulk_untrack(&holder, &ids);
+        engine.track_token(m1.clone());
+
+        let t3 = engine
+            .mint(test_hash(3), holder.clone(), 100, test_address(12), ts(1600))
+            .unwrap();
+        engine.track_token(t3.clone());
+        let m2 = engine
+            .merge(&[m1, t3], holder.clone(), test_hash(21), ts(1700))
+            .unwrap();
+        let ids: HashSet<TxHash> = [test_hash(20), test_hash(3)].into_iter().collect();
+        engine.bulk_untrack(&holder, &ids);
+        engine.track_token(m2);
+
+        let events = engine.revoke_by_origin(&ow1);
+        // Only the live m2 token is split (m1's token was consumed):
+        // m1 tainted 50/100 → m2 consumed 100 of m1 → 50 tainted of m2's 200.
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].revoked_amount, 50);
+
+        let p = engine.get_portfolio(&holder).unwrap();
+        assert_eq!(p.cached_transferable, 150);
+    }
+
+    #[test]
+    fn sequential_revocations_of_different_origins() {
+        let mut engine = TrstEngine::with_expiry(u64::MAX);
+        let ow1 = test_address(10);
+        let ow2 = test_address(11);
+        let holder = test_address(5);
+
+        let t1 = engine
+            .mint(test_hash(1), holder.clone(), 600, ow1.clone(), ts(1000))
+            .unwrap();
+        let t2 = engine
+            .mint(test_hash(2), holder.clone(), 400, ow2.clone(), ts(1100))
+            .unwrap();
+        engine.track_token(t1.clone());
+        engine.track_token(t2.clone());
+        let merged = engine
+            .merge(&[t1, t2], holder.clone(), test_hash(10), ts(1500))
+            .unwrap();
+        let ids: HashSet<TxHash> = [test_hash(1), test_hash(2)].into_iter().collect();
+        engine.bulk_untrack(&holder, &ids);
+        engine.track_token(merged);
+
+        engine.revoke_by_origin(&ow1);
+        let events2 = engine.revoke_by_origin(&ow2);
+        // Remainder was 400, ow2's share of the unrevoked total is 400/400 → all.
+        assert_eq!(events2.len(), 1);
+        assert_eq!(events2[0].revoked_amount, 400);
+
+        let p = engine.get_portfolio(&holder).unwrap();
+        assert_eq!(p.cached_transferable, 0);
+        assert!(p.tokens.iter().all(|t| t.state == TrstState::Revoked));
+    }
+
+    #[test]
+    fn revocation_is_idempotent() {
+        let mut engine = TrstEngine::with_expiry(u64::MAX);
+        let ow = test_address(10);
+        let holder = test_address(1);
+        let t = engine
+            .mint(test_hash(1), holder.clone(), 500, ow.clone(), ts(1000))
+            .unwrap();
+        engine.track_token(t);
+        assert_eq!(engine.revoke_by_origin(&ow).len(), 1);
+        assert!(engine.revoke_by_origin(&ow).is_empty());
+    }
+
+    #[test]
+    fn un_revoke_restores_simple_tokens() {
+        let mut engine = TrstEngine::with_expiry(u64::MAX);
+        let ow = test_address(10);
+        let a = test_address(1);
+        let b = test_address(2);
+        let t1 = engine
+            .mint(test_hash(1), a.clone(), 500, ow.clone(), ts(1000))
+            .unwrap();
+        let t2 = engine
+            .mint(test_hash(2), b.clone(), 300, ow.clone(), ts(1100))
+            .unwrap();
+        engine.track_token(t1);
+        engine.track_token(t2);
+
+        engine.revoke_by_origin(&ow);
+        assert_eq!(engine.get_portfolio(&a).unwrap().cached_transferable, 0);
+
+        let results = engine.un_revoke_by_origin(&ow, ts(2000));
         assert_eq!(results.len(), 2);
-        let total: u128 = results.iter().map(|r| r.amount).sum();
-        assert_eq!(total, 1000);
-    }
-
-    #[test]
-    fn test_un_revoke_merged_token_all_origins_clean() {
-        let mut engine = TrstEngine::new();
-        let expiry_secs = 3600;
-        let origin_wallet1 = test_address(10);
-        let origin_wallet2 = test_address(11);
-        let holder = test_address(5);
-
-        let token1 = engine
-            .mint(
-                test_hash(1),
-                holder.clone(),
-                500,
-                origin_wallet1.clone(),
-                test_timestamp(1000),
-            )
-            .unwrap();
-        let token2 = engine
-            .mint(
-                test_hash(2),
-                holder.clone(),
-                300,
-                origin_wallet2.clone(),
-                test_timestamp(1100),
-            )
-            .unwrap();
-
-        let merge_tx = test_hash(10);
-        let merged = engine
-            .merge(
-                &[token1, token2],
-                holder.clone(),
-                merge_tx,
-                test_timestamp(1500),
-                expiry_secs,
-            )
-            .unwrap();
-        engine.track_token(merged);
-
-        engine.revoke_by_origin(&origin_wallet1);
-
-        let p = engine.wallets.get(&holder).unwrap();
-        assert_eq!(p.tokens[0].state, TrstState::Revoked);
-
-        let results = engine.un_revoke_by_origin(&origin_wallet1);
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].amount, 800);
-
-        let p = engine.wallets.get(&holder).unwrap();
-        assert_eq!(p.tokens[0].state, TrstState::Active);
-    }
-
-    #[test]
-    fn test_un_revoke_merged_token_other_origin_still_revoked() {
-        let mut engine = TrstEngine::new();
-        let expiry_secs = 3600;
-        let origin_wallet1 = test_address(10);
-        let origin_wallet2 = test_address(11);
-        let holder = test_address(5);
-
-        let token1 = engine
-            .mint(
-                test_hash(1),
-                holder.clone(),
-                500,
-                origin_wallet1.clone(),
-                test_timestamp(1000),
-            )
-            .unwrap();
-        let token2 = engine
-            .mint(
-                test_hash(2),
-                holder.clone(),
-                300,
-                origin_wallet2.clone(),
-                test_timestamp(1100),
-            )
-            .unwrap();
-
-        let merge_tx = test_hash(10);
-        let merged = engine
-            .merge(
-                &[token1, token2],
-                holder.clone(),
-                merge_tx,
-                test_timestamp(1500),
-                expiry_secs,
-            )
-            .unwrap();
-        engine.track_token(merged);
-
-        engine.revoke_by_origin(&origin_wallet1);
-        engine.revoke_by_origin(&origin_wallet2);
-
-        let results = engine.un_revoke_by_origin(&origin_wallet1);
-        assert_eq!(results.len(), 0);
-
-        let p = engine.wallets.get(&holder).unwrap();
-        assert_eq!(p.tokens[0].state, TrstState::Revoked);
-    }
-
-    #[test]
-    fn test_un_revoke_with_no_revoked_tokens_returns_empty() {
-        let mut engine = TrstEngine::new();
-        let origin_wallet = test_address(10);
-
-        let token = engine
-            .mint(
-                test_hash(1),
-                test_address(1),
-                500,
-                origin_wallet.clone(),
-                test_timestamp(1000),
-            )
-            .unwrap();
-        engine.track_token(token);
-
-        let results = engine.un_revoke_by_origin(&origin_wallet);
-        assert!(results.is_empty());
-
-        let p = engine.wallets.get(&test_address(1)).unwrap();
-        assert_eq!(p.tokens[0].state, TrstState::Active);
-    }
-
-    #[test]
-    fn test_un_revoke_updates_merger_graph_revocation_tracking() {
-        let mut engine = TrstEngine::new();
-        let origin_wallet = test_address(10);
-
-        let token = engine
-            .mint(
-                test_hash(1),
-                test_address(1),
-                500,
-                origin_wallet.clone(),
-                test_timestamp(1000),
-            )
-            .unwrap();
-        engine.track_token(token);
-
-        engine.revoke_by_origin(&origin_wallet);
-        assert!(engine.merger_graph.is_origin_revoked(&test_hash(1)));
-
-        engine.un_revoke_by_origin(&origin_wallet);
+        let pa = engine.get_portfolio(&a).unwrap();
+        assert_eq!(pa.tokens[0].state, TrstState::Active);
+        assert!(pa.tokens[0].revoked_origin.is_none());
+        assert_eq!(pa.cached_transferable, 500);
+        let pb = engine.get_portfolio(&b).unwrap();
+        assert_eq!(pb.cached_transferable, 300);
         assert!(!engine.merger_graph.is_origin_revoked(&test_hash(1)));
     }
 
-    // ── Pending expiry return tests ─────────────────────────────────────
-
     #[test]
-    fn test_return_expired_pending_returns_expired_tokens_to_sender() {
-        let mut engine = TrstEngine::new();
-        let sender = test_address(1);
-        let receiver = test_address(2);
-        let expiry_period = 3600; // 1 hour
+    fn un_revoke_restores_split_chunks_of_merged_tokens() {
+        let mut engine = TrstEngine::with_expiry(u64::MAX);
+        let ow1 = test_address(10);
+        let ow2 = test_address(11);
+        let holder = test_address(5);
 
-        let mut token = engine
-            .mint(
-                test_hash(1),
-                receiver.clone(),
-                500,
-                sender.clone(),
-                test_timestamp(1000),
-            )
+        let t1 = engine
+            .mint(test_hash(1), holder.clone(), 600, ow1.clone(), ts(1000))
             .unwrap();
-        token.state = TrstState::Pending;
+        let t2 = engine
+            .mint(test_hash(2), holder.clone(), 400, ow2.clone(), ts(1100))
+            .unwrap();
+        engine.track_token(t1.clone());
+        engine.track_token(t2.clone());
+        let merged = engine
+            .merge(&[t1, t2], holder.clone(), test_hash(10), ts(1500))
+            .unwrap();
+        let ids: HashSet<TxHash> = [test_hash(1), test_hash(2)].into_iter().collect();
+        engine.bulk_untrack(&holder, &ids);
+        engine.track_token(merged);
 
-        let pending_info = vec![PendingTokenInfo {
-            token_id: test_hash(1),
-            creation_timestamp: test_timestamp(1000),
-            sender: sender.clone(),
-        }];
+        engine.revoke_by_origin(&ow1);
+        let results = engine.un_revoke_by_origin(&ow1, ts(2000));
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].amount, 600);
 
-        let now = test_timestamp(5000);
-        let mut tokens = vec![token];
-        let returns = engine.return_expired_pending(&pending_info, &mut tokens, expiry_period, now);
-
-        assert_eq!(returns.len(), 1);
-        assert_eq!(returns[0].token_id, test_hash(1));
-        assert_eq!(returns[0].sender, sender);
-        assert_eq!(returns[0].amount, 500);
-
-        assert_eq!(tokens[0].holder, sender);
-        assert_eq!(tokens[0].state, TrstState::Active);
+        let p = engine.get_portfolio(&holder).unwrap();
+        assert_eq!(p.cached_transferable, 1000);
+        assert!(p.tokens.iter().all(|t| t.state == TrstState::Active));
+        assert!(engine.merger_graph.get_merge(&test_hash(10)).unwrap().revoked_contribs.is_empty());
     }
 
     #[test]
-    fn test_return_expired_pending_does_not_return_unexpired_tokens() {
-        let mut engine = TrstEngine::new();
-        let sender = test_address(1);
-        let receiver = test_address(2);
-        let expiry_period = 3600;
+    fn un_revoke_of_one_origin_leaves_other_revoked() {
+        let mut engine = TrstEngine::with_expiry(u64::MAX);
+        let ow1 = test_address(10);
+        let ow2 = test_address(11);
+        let holder = test_address(5);
 
-        let mut token = engine
-            .mint(
-                test_hash(1),
-                receiver.clone(),
-                500,
-                sender.clone(),
-                test_timestamp(1000),
-            )
+        let t1 = engine
+            .mint(test_hash(1), holder.clone(), 600, ow1.clone(), ts(1000))
             .unwrap();
-        token.state = TrstState::Pending;
+        let t2 = engine
+            .mint(test_hash(2), holder.clone(), 400, ow2.clone(), ts(1100))
+            .unwrap();
+        engine.track_token(t1.clone());
+        engine.track_token(t2.clone());
+        let merged = engine
+            .merge(&[t1, t2], holder.clone(), test_hash(10), ts(1500))
+            .unwrap();
+        let ids: HashSet<TxHash> = [test_hash(1), test_hash(2)].into_iter().collect();
+        engine.bulk_untrack(&holder, &ids);
+        engine.track_token(merged);
 
-        let pending_info = vec![PendingTokenInfo {
-            token_id: test_hash(1),
-            creation_timestamp: test_timestamp(1000),
-            sender: sender.clone(),
-        }];
-
-        let now = test_timestamp(2000);
-        let mut tokens = vec![token];
-        let returns = engine.return_expired_pending(&pending_info, &mut tokens, expiry_period, now);
-
-        assert!(returns.is_empty());
-        assert_eq!(tokens[0].holder, receiver);
-        assert_eq!(tokens[0].state, TrstState::Pending);
+        engine.revoke_by_origin(&ow1);
+        engine.revoke_by_origin(&ow2);
+        // Restore only ow1: its 600 chunk comes back, ow2's 400 stays revoked.
+        let results = engine.un_revoke_by_origin(&ow1, ts(2000));
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].amount, 600);
+        let p = engine.get_portfolio(&holder).unwrap();
+        assert_eq!(p.cached_transferable, 600);
+        assert!(p
+            .tokens
+            .iter()
+            .any(|t| t.state == TrstState::Revoked && t.revoked_origin == Some(test_hash(2))));
     }
 
     #[test]
-    fn test_return_expired_pending_handles_mixed_states() {
-        let mut engine = TrstEngine::new();
-        let sender = test_address(1);
-        let receiver = test_address(2);
-        let expiry_period = 3600;
-
-        let mut token1 = engine
-            .mint(
-                test_hash(1),
-                receiver.clone(),
-                500,
-                sender.clone(),
-                test_timestamp(1000),
-            )
-            .unwrap();
-        token1.state = TrstState::Pending;
-
-        let mut token2 = engine
-            .mint(
-                test_hash(2),
-                receiver.clone(),
-                300,
-                sender.clone(),
-                test_timestamp(4000),
-            )
-            .unwrap();
-        token2.state = TrstState::Pending;
-
-        let token3 = engine
-            .mint(
-                test_hash(3),
-                receiver.clone(),
-                200,
-                sender.clone(),
-                test_timestamp(1000),
-            )
-            .unwrap();
-
-        let pending_info = vec![
-            PendingTokenInfo {
-                token_id: test_hash(1),
-                creation_timestamp: test_timestamp(1000),
-                sender: sender.clone(),
-            },
-            PendingTokenInfo {
-                token_id: test_hash(2),
-                creation_timestamp: test_timestamp(4000),
-                sender: sender.clone(),
-            },
-        ];
-
-        let now = test_timestamp(5000);
-        let mut tokens = vec![token1, token2, token3];
-        let returns = engine.return_expired_pending(&pending_info, &mut tokens, expiry_period, now);
-
-        assert_eq!(returns.len(), 1);
-        assert_eq!(returns[0].token_id, test_hash(1));
-        assert_eq!(returns[0].amount, 500);
-
-        assert_eq!(tokens[0].state, TrstState::Active);
-        assert_eq!(tokens[0].holder, sender);
-        assert_eq!(tokens[1].state, TrstState::Pending);
-        assert_eq!(tokens[1].holder, receiver);
-        assert_eq!(tokens[2].state, TrstState::Active);
-        assert_eq!(tokens[2].holder, receiver);
-    }
-
-    #[test]
-    fn test_return_expired_pending_with_no_pending_tokens() {
-        let mut engine = TrstEngine::new();
-        let sender = test_address(1);
-
-        let token = engine
-            .mint(
-                test_hash(1),
-                test_address(2),
-                500,
-                sender.clone(),
-                test_timestamp(1000),
-            )
-            .unwrap();
-
-        let pending_info = vec![];
-        let now = test_timestamp(5000);
-        let mut tokens = vec![token];
-        let returns = engine.return_expired_pending(&pending_info, &mut tokens, 3600, now);
-
-        assert!(returns.is_empty());
-        assert_eq!(tokens[0].state, TrstState::Active);
-    }
-
-    #[test]
-    fn test_return_expired_pending_boundary_exact_expiry() {
-        let mut engine = TrstEngine::new();
-        let sender = test_address(1);
-        let receiver = test_address(2);
-        let expiry_period = 3600;
-
-        let mut token = engine
-            .mint(
-                test_hash(1),
-                receiver.clone(),
-                500,
-                sender.clone(),
-                test_timestamp(1000),
-            )
-            .unwrap();
-        token.state = TrstState::Pending;
-
-        let pending_info = vec![PendingTokenInfo {
-            token_id: test_hash(1),
-            creation_timestamp: test_timestamp(1000),
-            sender: sender.clone(),
-        }];
-
-        let now = test_timestamp(4600);
-        let mut tokens = vec![token];
-        let returns = engine.return_expired_pending(&pending_info, &mut tokens, expiry_period, now);
-
-        assert_eq!(returns.len(), 1);
-        assert_eq!(tokens[0].state, TrstState::Active);
-        assert_eq!(tokens[0].holder, sender);
-    }
-
-    #[test]
-    fn test_return_expired_pending_multiple_senders() {
-        let mut engine = TrstEngine::new();
-        let sender_a = test_address(1);
-        let sender_b = test_address(2);
-        let receiver = test_address(3);
-        let expiry_period = 3600;
-
-        let mut token1 = engine
-            .mint(
-                test_hash(1),
-                receiver.clone(),
-                500,
-                sender_a.clone(),
-                test_timestamp(1000),
-            )
-            .unwrap();
-        token1.state = TrstState::Pending;
-
-        let mut token2 = engine
-            .mint(
-                test_hash(2),
-                receiver.clone(),
-                300,
-                sender_b.clone(),
-                test_timestamp(1000),
-            )
-            .unwrap();
-        token2.state = TrstState::Pending;
-
-        let pending_info = vec![
-            PendingTokenInfo {
-                token_id: test_hash(1),
-                creation_timestamp: test_timestamp(1000),
-                sender: sender_a.clone(),
-            },
-            PendingTokenInfo {
-                token_id: test_hash(2),
-                creation_timestamp: test_timestamp(1000),
-                sender: sender_b.clone(),
-            },
-        ];
-
-        let now = test_timestamp(5000);
-        let mut tokens = vec![token1, token2];
-        let returns = engine.return_expired_pending(&pending_info, &mut tokens, expiry_period, now);
-
-        assert_eq!(returns.len(), 2);
-        assert_eq!(returns[0].sender, sender_a);
-        assert_eq!(returns[0].amount, 500);
-        assert_eq!(returns[1].sender, sender_b);
-        assert_eq!(returns[1].amount, 300);
-
-        assert_eq!(tokens[0].holder, sender_a);
-        assert_eq!(tokens[1].holder, sender_b);
-    }
-
-    #[test]
-    fn test_split_preserves_origin_and_link_from_parent() {
-        let mut engine = TrstEngine::new();
-        let original_burn_tx = test_hash(1);
+    fn debit_spans_multiple_tokens_of_same_origin() {
+        let mut engine = TrstEngine::with_expiry(u64::MAX);
         let holder = test_address(1);
-        let expiry_secs = 3600;
-
-        let token = engine
-            .mint(
-                original_burn_tx,
-                holder.clone(),
-                1000,
-                holder.clone(),
-                test_timestamp(500),
-            )
+        let origin = test_hash(1);
+        // Two tokens with the same origin (e.g. change + a receive).
+        let base = engine
+            .mint(origin, holder.clone(), 300, test_address(10), ts(1000))
             .unwrap();
+        engine.track_token(base.clone());
+        let second = TrstToken {
+            id: test_hash(2),
+            amount: 200,
+            ..base.clone()
+        };
+        engine.track_token(second);
 
-        let amounts = vec![(test_address(2), 600), (test_address(3), 400)];
-        let tx_hashes = vec![test_hash(10), test_hash(11)];
+        let prov = engine.debit_wallet_with_provenance(&holder, &origin, 450);
+        assert_eq!(prov.len(), 1);
+        assert_eq!(prov[0].amount, 450);
 
-        let splits = engine
-            .split(
-                &token,
-                &amounts,
-                &tx_hashes,
-                test_timestamp(1500),
-                expiry_secs,
-            )
-            .unwrap();
-
-        for split in &splits {
-            assert_eq!(
-                split.origin, original_burn_tx,
-                "split must preserve parent's origin"
-            );
-            assert_eq!(split.link, token.id, "split must link to parent token");
-            assert_eq!(
-                split.origin_timestamp,
-                test_timestamp(500),
-                "split must preserve origin_timestamp"
-            );
-            assert_eq!(
-                split.origin_wallet, holder,
-                "split must preserve origin_wallet"
-            );
-        }
+        let p = engine.get_portfolio(&holder).unwrap();
+        assert_eq!(p.cached_transferable, 50);
+        assert_eq!(p.tokens.len(), 1);
+        assert_eq!(p.tokens[0].amount, 50);
     }
 
     #[test]
-    fn test_split_of_transferred_token_preserves_original_origin() {
-        let mut engine = TrstEngine::new();
-        let original_burn_tx = test_hash(1);
-        let minter = test_address(1);
-        let recipient = test_address(2);
-        let expiry_secs = 7200;
-
-        let token = engine
-            .mint(
-                original_burn_tx,
-                minter.clone(),
-                1000,
-                minter.clone(),
-                test_timestamp(100),
-            )
+    fn debit_only_subtracts_what_was_consumed() {
+        // Regression: the cache used to be decremented by the requested
+        // amount even when the origin's tokens held less.
+        let mut engine = TrstEngine::with_expiry(u64::MAX);
+        let holder = test_address(1);
+        let t1 = engine
+            .mint(test_hash(1), holder.clone(), 300, test_address(10), ts(1000))
             .unwrap();
-
-        let (transferred, _) = engine
-            .transfer(
-                &token,
-                &minter,
-                recipient.clone(),
-                1000,
-                test_hash(5),
-                test_hash(6),
-                test_timestamp(200),
-                expiry_secs,
-            )
+        let t2 = engine
+            .mint(test_hash(2), holder.clone(), 500, test_address(10), ts(1100))
             .unwrap();
+        engine.track_token(t1);
+        engine.track_token(t2);
 
-        assert_eq!(transferred.origin, original_burn_tx);
-
-        let amounts = vec![(test_address(3), 700), (test_address(4), 300)];
-        let tx_hashes = vec![test_hash(20), test_hash(21)];
-
-        let splits = engine
-            .split(
-                &transferred,
-                &amounts,
-                &tx_hashes,
-                test_timestamp(300),
-                expiry_secs,
-            )
-            .unwrap();
-
-        for split in &splits {
-            assert_eq!(
-                split.origin, original_burn_tx,
-                "split of transferred token must trace back to original burn"
-            );
-            assert_eq!(
-                split.link, transferred.id,
-                "split must link to the transferred token"
-            );
-            assert_eq!(
-                split.origin_timestamp,
-                test_timestamp(100),
-                "origin_timestamp must be from original mint"
-            );
-        }
+        engine.debit_wallet(&holder, &test_hash(1), 400); // only 300 exists
+        let p = engine.get_portfolio(&holder).unwrap();
+        assert_eq!(p.cached_transferable, 500);
     }
 
     #[test]
-    fn test_cached_transferable_stays_consistent_with_full_recompute() {
-        let mut engine = TrstEngine::new();
-        let expiry_secs = 3600;
+    fn origin_transferable_reports_per_origin_balance() {
+        let mut engine = TrstEngine::with_expiry(u64::MAX);
+        let holder = test_address(1);
+        let t1 = engine
+            .mint(test_hash(1), holder.clone(), 300, test_address(10), ts(1000))
+            .unwrap();
+        let t2 = engine
+            .mint(test_hash(2), holder.clone(), 500, test_address(10), ts(1100))
+            .unwrap();
+        engine.track_token(t1);
+        engine.track_token(t2);
+        assert_eq!(engine.origin_transferable(&holder, &test_hash(1), ts(1200)), 300);
+        assert_eq!(engine.origin_transferable(&holder, &test_hash(2), ts(1200)), 500);
+        assert_eq!(engine.origin_transferable(&holder, &test_hash(9), ts(1200)), 0);
+    }
+
+    #[test]
+    fn receive_token_applies_outstanding_simple_revocation() {
+        let mut engine = TrstEngine::with_expiry(u64::MAX);
+        let ow = test_address(10);
+        let receiver = test_address(2);
+        // The burn origin is revoked while the send is pending.
+        let sender_token = engine
+            .mint(test_hash(1), test_address(1), 500, ow.clone(), ts(1000))
+            .unwrap();
+        engine.track_token(sender_token);
+        engine.debit_wallet(&test_address(1), &test_hash(1), 500);
+        engine.revoke_by_origin(&ow);
+
+        let incoming = TrstToken {
+            id: test_hash(50),
+            amount: 500,
+            origin: test_hash(1),
+            link: test_hash(50),
+            holder: receiver.clone(),
+            origin_timestamp: ts(1000),
+            effective_origin_timestamp: ts(1000),
+            state: TrstState::Active,
+            origin_wallet: ow.clone(),
+            revoked_origin: None,
+        };
+        let events = engine.receive_token(incoming, ts(1200));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].revoked_amount, 500);
+
+        let p = engine.get_portfolio(&receiver).unwrap();
+        assert_eq!(p.cached_transferable, 0);
+        assert_eq!(p.tokens[0].state, TrstState::Revoked);
+
+        // And un-revocation later restores the received token too.
+        let restored = engine.un_revoke_by_origin(&ow, ts(1300));
+        assert!(restored.iter().any(|r| r.holder == receiver && r.amount == 500));
+    }
+
+    #[test]
+    fn receive_token_applies_outstanding_merged_revocation() {
+        let mut engine = TrstEngine::with_expiry(u64::MAX);
+        let ow1 = test_address(10);
+        let holder = test_address(5);
+        let receiver = test_address(6);
+
+        let t1 = engine
+            .mint(test_hash(1), holder.clone(), 600, ow1.clone(), ts(1000))
+            .unwrap();
+        let t2 = engine
+            .mint(test_hash(2), holder.clone(), 400, test_address(11), ts(1100))
+            .unwrap();
+        engine.track_token(t1.clone());
+        engine.track_token(t2.clone());
+        let merged = engine
+            .merge(&[t1, t2], holder.clone(), test_hash(10), ts(1500))
+            .unwrap();
+        let ids: HashSet<TxHash> = [test_hash(1), test_hash(2)].into_iter().collect();
+        engine.bulk_untrack(&holder, &ids);
+        engine.track_token(merged);
+
+        // Holder sends half of the merged token; the send is in flight
+        // when the revocation lands.
+        engine.debit_wallet(&holder, &test_hash(10), 500);
+        engine.revoke_by_origin(&ow1);
+
+        let incoming = TrstToken {
+            id: test_hash(60),
+            amount: 500,
+            origin: test_hash(10),
+            link: test_hash(60),
+            holder: receiver.clone(),
+            origin_timestamp: ts(1500),
+            effective_origin_timestamp: ts(1000),
+            state: TrstState::Active,
+            origin_wallet: holder.clone(),
+            revoked_origin: None,
+        };
+        let events = engine.receive_token(incoming, ts(1600));
+        // 60% of the merge is tainted → ceil(500 * 600/1000) = 300 revoked.
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].revoked_amount, 300);
+        let p = engine.get_portfolio(&receiver).unwrap();
+        assert_eq!(p.cached_transferable, 200);
+    }
+
+    #[test]
+    fn set_expiry_period_resurrects_expired_tokens() {
+        // 6.9: "untransferrable trst can become transferrable again if the
+        // governance expiry period allows it"
+        let mut engine = TrstEngine::with_expiry(100);
+        let holder = test_address(1);
+        let token = engine
+            .mint(test_hash(1), holder.clone(), 500, test_address(10), ts(1000))
+            .unwrap();
+        engine.track_token(token);
+
+        // Expire it.
+        engine.flush_all_expired(ts(1200));
+        assert_eq!(engine.get_portfolio(&holder).unwrap().cached_transferable, 0);
+        assert_eq!(
+            engine.get_portfolio(&holder).unwrap().tokens[0].state,
+            TrstState::Expired
+        );
+
+        // Governance extends the period — the token comes back.
+        engine.set_expiry_period(10_000, ts(1200));
+        let p = engine.get_portfolio(&holder).unwrap();
+        assert_eq!(p.tokens[0].state, TrstState::Active);
+        assert_eq!(p.cached_transferable, 500);
+
+        // Governance shortens it again — the token expires immediately.
+        engine.set_expiry_period(50, ts(1200));
+        let p = engine.get_portfolio(&holder).unwrap();
+        assert_eq!(p.tokens[0].state, TrstState::Expired);
+        assert_eq!(p.cached_transferable, 0);
+    }
+
+    #[test]
+    fn set_expiry_period_does_not_resurrect_revoked_tokens() {
+        let mut engine = TrstEngine::with_expiry(100);
+        let ow = test_address(10);
+        let holder = test_address(1);
+        let token = engine
+            .mint(test_hash(1), holder.clone(), 500, ow.clone(), ts(1000))
+            .unwrap();
+        engine.track_token(token);
+        engine.revoke_by_origin(&ow);
+
+        engine.set_expiry_period(10_000, ts(1200));
+        let p = engine.get_portfolio(&holder).unwrap();
+        assert_eq!(p.tokens[0].state, TrstState::Revoked);
+        assert_eq!(p.cached_transferable, 0);
+    }
+
+    #[test]
+    fn cached_transferable_stays_consistent_with_full_recompute() {
+        let mut engine = TrstEngine::with_expiry(3600);
         let holder = test_address(1);
         let origin_wallet = test_address(10);
 
         let t1 = engine
-            .mint(
-                test_hash(1),
-                holder.clone(),
-                1000,
-                origin_wallet.clone(),
-                test_timestamp(100),
-            )
+            .mint(test_hash(1), holder.clone(), 1000, origin_wallet.clone(), ts(100))
             .unwrap();
-        engine.track_token_with_expiry(t1.clone(), expiry_secs);
+        engine.track_token(t1.clone());
         let t2 = engine
-            .mint(
-                test_hash(2),
-                holder.clone(),
-                500,
-                origin_wallet.clone(),
-                test_timestamp(200),
-            )
+            .mint(test_hash(2), holder.clone(), 500, origin_wallet.clone(), ts(200))
             .unwrap();
-        engine.track_token_with_expiry(t2.clone(), expiry_secs);
+        engine.track_token(t2.clone());
         let t3 = engine
-            .mint(
-                test_hash(3),
-                holder.clone(),
-                300,
-                origin_wallet.clone(),
-                test_timestamp(300),
-            )
+            .mint(test_hash(3), holder.clone(), 300, origin_wallet.clone(), ts(300))
             .unwrap();
-        engine.track_token_with_expiry(t3, expiry_secs);
+        engine.track_token(t3);
 
-        let now = test_timestamp(400);
+        let now = ts(400);
         let p = engine.wallets.get_mut(&holder).unwrap();
         let cached = p.cached_transferable;
-        p.recompute_transferable(now, expiry_secs);
-        assert_eq!(
-            p.cached_transferable, cached,
-            "after track_token, recompute must match incremental"
-        );
+        p.recompute_transferable(now, 3600);
+        assert_eq!(p.cached_transferable, cached);
         assert_eq!(cached, 1800);
 
-        engine.debit_wallet(&holder, 400);
+        engine.debit_wallet(&holder, &test_hash(1), 400);
         let p = engine.wallets.get_mut(&holder).unwrap();
         let cached = p.cached_transferable;
-        p.recompute_transferable(now, expiry_secs);
-        assert_eq!(
-            p.cached_transferable, cached,
-            "after debit, recompute must match incremental"
-        );
+        p.recompute_transferable(now, 3600);
+        assert_eq!(p.cached_transferable, cached);
 
-        let merged = engine
-            .merge(&[t1, t2], holder.clone(), test_hash(20), now, expiry_secs)
+        let remaining_t1 = engine
+            .get_portfolio(&holder)
+            .unwrap()
+            .tokens
+            .iter()
+            .find(|t| t.origin == test_hash(1))
+            .cloned()
             .unwrap();
-        engine.track_token_with_expiry(merged.clone(), expiry_secs);
+        let merged = engine
+            .merge(&[remaining_t1.clone(), t2.clone()], holder.clone(), test_hash(20), now)
+            .unwrap();
+        let ids: HashSet<TxHash> = [remaining_t1.id, t2.id].into_iter().collect();
+        engine.bulk_untrack(&holder, &ids);
+        engine.track_token(merged);
         let p = engine.wallets.get_mut(&holder).unwrap();
         let cached = p.cached_transferable;
-        p.recompute_transferable(now, expiry_secs);
-        assert_eq!(
-            p.cached_transferable, cached,
-            "after merge+track, recompute must match incremental"
-        );
+        p.recompute_transferable(now, 3600);
+        assert_eq!(p.cached_transferable, cached);
 
-        let far_future = test_timestamp(100 + expiry_secs + 1);
+        let far_future = ts(100 + 3600 + 1);
         let p = engine.wallets.get_mut(&holder).unwrap();
-        p.flush_expired(far_future, expiry_secs);
+        p.flush_expired(far_future, 3600);
         let cached = p.cached_transferable;
-        p.recompute_transferable(far_future, expiry_secs);
-        assert_eq!(
-            p.cached_transferable, cached,
-            "after expiry flush, recompute must match incremental"
-        );
+        p.recompute_transferable(far_future, 3600);
+        assert_eq!(p.cached_transferable, cached);
+    }
 
-        let _ = merged;
+    #[test]
+    fn save_and_load_wallets_rebuilds_indexes() {
+        let mut engine = TrstEngine::with_expiry(u64::MAX);
+        let ow = test_address(10);
+        let holder = test_address(1);
+        let token = engine
+            .mint(test_hash(1), holder.clone(), 500, ow.clone(), ts(1000))
+            .unwrap();
+        engine.track_token(token);
+
+        let bytes = engine.save_wallets();
+        let mut restored = TrstEngine::load_wallets(&bytes, u64::MAX);
+        assert_eq!(
+            restored.get_portfolio(&holder).unwrap().cached_transferable,
+            500
+        );
+        // Revocation works after restore (indexes rebuilt).
+        let events = restored.revoke_by_origin(&ow);
+        assert_eq!(events.len(), 1);
     }
 }

@@ -66,9 +66,10 @@ pub fn update_account_on_block(
             info.representative = block.representative.clone();
         }
 
-        // Track BRN burns (BRN decrease = amount burned → TRST minted 1:1)
+        // Track BRN burns. `brn_balance` is an ascending odometer of
+        // cumulative spent BRN, so the delta is the burn amount.
         if block.block_type == BlockType::Burn {
-            let burned = prev_brn_balance.saturating_sub(block.brn_balance);
+            let burned = block.brn_balance.saturating_sub(prev_brn_balance);
             info.total_brn_burned = info.total_brn_burned.saturating_add(burned);
         }
 
@@ -109,7 +110,10 @@ pub fn create_pending_entry(
     destination: &WalletAddress,
     consumed: Vec<burst_trst::ConsumedProvenance>,
 ) -> Result<(), String> {
-    if block.block_type != BlockType::Send || block.link.is_zero() {
+    // Send blocks AND Burn blocks create pending entries: burns are
+    // two-phase (8.4a) — the minted TRST is pending until the provider
+    // publishes a Receive block.
+    if !matches!(block.block_type, BlockType::Send | BlockType::Burn) || block.link.is_zero() {
         return Ok(());
     }
     let provenance: Vec<PendingProvenance> = consumed
@@ -120,15 +124,6 @@ pub fn create_pending_entry(
             origin_wallet: c.origin_wallet,
             origin_timestamp: c.origin_timestamp,
             effective_origin_timestamp: c.effective_origin_timestamp,
-            origin_proportions: c
-                .origin_proportions
-                .into_iter()
-                .map(|p| burst_types::OriginProportion {
-                    origin: p.origin,
-                    origin_wallet: p.origin_wallet,
-                    amount: p.amount,
-                })
-                .collect(),
         })
         .collect();
     let pending_data = bincode::serialize(&PendingInfo {
@@ -144,15 +139,19 @@ pub fn create_pending_entry(
     Ok(())
 }
 
-/// Delete a pending entry when a receive or reject-receive block is processed.
+/// Delete a pending entry when a receive, receive-open, or reject-receive
+/// block is processed.
 ///
-/// Handles both `Receive` (claiming pending TRST) and `RejectReceive`
+/// Handles `Receive`, `Open` with a non-zero link (receive-open — the
+/// account's first block pockets a pending send), and `RejectReceive`
 /// (returning pending TRST to sender). Uses binary composite key
 /// `account_bytes ++ link_bytes` matching `create_pending_entry`.
 pub fn delete_pending_entry(batch: &mut WriteBatch<'_>, block: &StateBlock) -> Result<(), String> {
-    if (block.block_type != BlockType::Receive && block.block_type != BlockType::RejectReceive)
-        || block.link.is_zero()
-    {
+    let claims_pending = matches!(
+        block.block_type,
+        BlockType::Receive | BlockType::RejectReceive
+    ) || (block.block_type == BlockType::Open && block.trst_balance > 0);
+    if !claims_pending || block.link.is_zero() {
         return Ok(());
     }
     batch
@@ -198,6 +197,7 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1000),
             params_hash: BlockHash::ZERO,
+            merge_sources: Vec::new(),
             work: 0,
             signature: Signature([0u8; 64]),
             hash: BlockHash::ZERO,
@@ -226,6 +226,7 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(2000),
             params_hash: BlockHash::ZERO,
+            merge_sources: Vec::new(),
             work: 0,
             signature: Signature([0u8; 64]),
             hash: BlockHash::ZERO,
@@ -254,6 +255,7 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(3000),
             params_hash: BlockHash::ZERO,
+            merge_sources: Vec::new(),
             work: 0,
             signature: Signature([0u8; 64]),
             hash: BlockHash::ZERO,

@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 
 /// A TRST token — the fundamental unit of transferable currency.
 ///
-/// Each token tracks its full provenance via `origin` and `link`.
+/// Each token tracks its provenance via `origin` and `link`. Per
+/// IMPLEMENTATION_DECISIONS 6.17(b), merged tokens do NOT carry flattened
+/// ancestry — their `origin` is the merge transaction hash, and constituent
+/// origins are discovered by following the merger graph.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TrstToken {
     /// Unique identifier for this token instance (hash of the creating tx).
@@ -15,7 +18,9 @@ pub struct TrstToken {
     pub amount: u128,
 
     /// Hash of the original burn transaction that created this TRST.
-    /// For merged tokens, this is the merge transaction hash.
+    /// For merged tokens, this is the merge transaction hash (whitepaper:
+    /// "Future transactions from the merged token use the merge transaction's
+    /// hash as the new origin").
     pub origin: TxHash,
 
     /// Hash of the immediately preceding transaction.
@@ -25,8 +30,8 @@ pub struct TrstToken {
     /// The wallet that currently holds this token.
     pub holder: WalletAddress,
 
-    /// Timestamp of the origin transaction (the burn that created this TRST,
-    /// or the merge that created this merged token).
+    /// Timestamp of the transaction that created this token instance
+    /// (the burn, or the merge for merged tokens).
     pub origin_timestamp: Timestamp,
 
     /// Effective origin timestamp for expiry computation.
@@ -39,21 +44,23 @@ pub struct TrstToken {
     pub state: TrstState,
 
     /// The wallet that originally burned BRN to create this TRST.
+    /// For merged tokens, the wallet that performed the merge (a merge is a
+    /// self-operation; constituent originators live in the merger graph).
     pub origin_wallet: WalletAddress,
 
-    /// For merged tokens: the proportions from each origin.
-    /// Maps origin TxHash → proportion of this token's amount from that origin.
-    /// Empty for non-merged tokens (100% from `self.origin`).
-    pub origin_proportions: Vec<OriginProportion>,
+    /// When `state == Revoked`: the burn origin whose revocation caused it.
+    /// This is what makes un-revocation (6.15b) O(k) — restoring an origin
+    /// restores exactly the tokens tagged with it. `None` otherwise.
+    #[serde(default)]
+    pub revoked_origin: Option<TxHash>,
 }
-
-pub use burst_types::OriginProportion;
 
 impl TrstToken {
     /// Check whether this token has expired given the current time and expiry period.
     ///
-    /// Uses `effective_origin_timestamp` so that merged tokens correctly expire
-    /// at the earliest constituent's expiry time.
+    /// Expiry is always computed from the effective origin timestamp and the
+    /// CURRENT governance expiry period (6.9) — never cached permanently, so a
+    /// governance change can make non-transferable TRST transferable again.
     pub fn is_expired(&self, now: Timestamp, expiry_secs: u64) -> bool {
         self.effective_origin_timestamp
             .has_expired(expiry_secs, now)
@@ -80,7 +87,7 @@ impl TrstToken {
     /// - `10_000` = full face value (just minted or no expiry)
     /// - `0` = expired
     ///
-    /// Uses linear decay: `value_bps = (time_remaining / expiry_period) * 10_000`
+    /// Uses linear decay (6.13a): `value_bps = (time_remaining / expiry_period) * 10_000`
     pub fn current_value_bps(&self, now: Timestamp, expiry_secs: u64) -> u64 {
         if expiry_secs == 0 || self.state == TrstState::Revoked {
             return 0;
@@ -104,18 +111,5 @@ impl TrstToken {
     pub fn effective_value(&self, now: Timestamp, expiry_secs: u64) -> u128 {
         let bps = self.current_value_bps(now, expiry_secs) as u128;
         self.amount.saturating_mul(bps) / 10_000
-    }
-
-    /// For merged tokens with multiple origins, compute effective value
-    /// considering each origin's individual expiry timeline.
-    pub fn effective_value_proportional(&self, now: Timestamp, expiry_secs: u64) -> u128 {
-        if self.origin_proportions.is_empty() {
-            return self.effective_value(now, expiry_secs);
-        }
-        // For merged tokens, origin_timestamp is the earliest, so simple
-        // effective_value gives a conservative (lower) estimate. The proportional
-        // version would need per-origin timestamps which aren't stored in
-        // OriginProportion. Use the conservative path for now.
-        self.effective_value(now, expiry_secs)
     }
 }

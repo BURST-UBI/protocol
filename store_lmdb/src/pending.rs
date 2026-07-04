@@ -134,4 +134,26 @@ impl PendingStore for LmdbPendingStore {
         let count = self.pending_db.len(&rtxn).map_err(LmdbError::from)?;
         Ok(count)
     }
+
+    fn get_all_pending(&self) -> Result<Vec<(WalletAddress, TxHash, PendingInfo)>, StoreError> {
+        let rtxn = self.env.read_txn().map_err(LmdbError::from)?;
+        let iter = self.pending_db.iter(&rtxn).map_err(LmdbError::from)?;
+        let mut results = Vec::new();
+        for result in iter {
+            let (key, val) = result.map_err(LmdbError::from)?;
+            if key.len() <= 32 {
+                continue;
+            }
+            let (dest_bytes, hash_bytes) = key.split_at(key.len() - 32);
+            let destination = match std::str::from_utf8(dest_bytes) {
+                Ok(s) => WalletAddress::new(s),
+                Err(_) => continue,
+            };
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(hash_bytes);
+            let info: PendingInfo = bincode::deserialize(val).map_err(LmdbError::from)?;
+            results.push((destination, TxHash::new(arr), info));
+        }
+        Ok(results)
+    }
 }

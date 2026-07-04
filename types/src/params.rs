@@ -2,7 +2,7 @@
 //!
 //! Every field is democratically governable via the 5-phase governance process.
 
-use crate::amount::BRN_UNIT;
+use crate::amount::{BRN_UNIT, TRST_UNIT};
 use crate::BlockHash;
 use blake2::digest::consts::U32;
 use blake2::{Blake2b, Digest};
@@ -112,8 +112,14 @@ pub struct ProtocolParams {
     /// Duration (seconds) of a challenge review period.
     pub challenge_duration_secs: u64,
 
-    /// Endorser reward ratio on successful verification (basis points, 1000 = 10%).
-    pub endorser_reward_bps: u32,
+    /// Challenger TRST reward as a fraction of the revoked total
+    /// (basis points, 100 = 1%). The reward is min(revoked × bps / 10_000,
+    /// `challenge_reward_cap`) — parameter table in IMPLEMENTATION_DECISIONS.
+    /// Backed by the destroyed revoked TRST, so it is never net-inflationary.
+    pub challenge_reward_bps: u32,
+
+    /// Absolute cap on the challenger TRST reward (raw units).
+    pub challenge_reward_cap: u128,
 
     // ── Economic ─────────────────────────────────────────────────────────
     /// Spending limit for newly verified wallets (TRST raw units; 0 = no limit).
@@ -186,7 +192,8 @@ impl ProtocolParams {
             consti_quorum_bps: 3000,                  // 30%
             verification_timeout_secs: 7 * 24 * 3600, // 1 week
             challenge_duration_secs: 7 * 24 * 3600,   // 1 week
-            endorser_reward_bps: 1000,                // 10%
+            challenge_reward_bps: 100,                // 1% of revoked
+            challenge_reward_cap: 2000 * TRST_UNIT,   // 2000 TRST
 
             new_wallet_spending_limit: 0,
             new_wallet_limit_duration_secs: 0,
