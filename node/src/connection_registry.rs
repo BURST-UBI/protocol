@@ -3,7 +3,7 @@
 //! Shared between the P2P listener (which registers new connections) and
 //! the outbound message drain (which writes framed messages to peers).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -72,6 +72,11 @@ pub struct ConnectionRegistry {
     throttles: HashMap<String, BandwidthThrottle>,
     meta: HashMap<String, ConnMeta>,
     next_conn_id: u64,
+    /// Addresses currently being dialed (Nano's "attempts list"). Prevents
+    /// several internal tasks (bootstrap, peer cache, reachout) from racing to
+    /// dial the same peer at once and creating duplicate connections that then
+    /// evict each other. Keyed by the dial target `"ip:port"`.
+    dialing: HashSet<String>,
 }
 
 impl ConnectionRegistry {
@@ -82,7 +87,24 @@ impl ConnectionRegistry {
             throttles: HashMap::new(),
             meta: HashMap::new(),
             next_conn_id: 1,
+            dialing: HashSet::new(),
         }
+    }
+
+    /// Try to claim a dial slot for `addr`. Returns `true` if the caller may
+    /// proceed (no other task is dialing it and we're not already connected to
+    /// it), `false` if it should abort. Callers MUST pair a `true` with
+    /// [`end_dial`](Self::end_dial).
+    pub fn begin_dial(&mut self, addr: &str) -> bool {
+        if self.connections.contains_key(addr) {
+            return false; // already have an outbound to this address
+        }
+        self.dialing.insert(addr.to_string())
+    }
+
+    /// Release a dial slot claimed by [`begin_dial`](Self::begin_dial).
+    pub fn end_dial(&mut self, addr: &str) {
+        self.dialing.remove(addr);
     }
 
     /// Register a peer's write half. If a previous connection existed for this
@@ -122,17 +144,27 @@ impl ConnectionRegistry {
         writer: OwnedWriteHalf,
         our_node_id: &str,
     ) -> Option<u64> {
-        // Find a conflicting connection: same node_id, opposite direction.
-        let conflict: Option<String> = self
+        // Look for any existing live connection to the same node.
+        let existing: Option<(String, Direction)> = self
             .meta
             .iter()
-            .find(|(_, m)| m.node_id == peer_node_id && m.direction != direction)
-            .map(|(id, _)| id.clone());
+            .find(|(_, m)| m.node_id == peer_node_id)
+            .map(|(id, m)| (id.clone(), m.direction));
 
-        if let Some(existing_id) = conflict {
+        if let Some((existing_id, existing_dir)) = existing {
+            if existing_dir == direction {
+                // Same node, same direction — a duplicate dial (bootstrap, peer
+                // cache, and reachout can all race to dial the same peer at
+                // startup) or a duplicate inbound. Keep the existing one; reject
+                // the new. This is the "attempts list" that stops the duplicate
+                // from overwriting and dropping the live connection.
+                return None;
+            }
+            // Opposite directions — a genuine simultaneous connect. Keep exactly
+            // one, deterministically (the connection from the lower node_id).
             if prefer_new_on_conflict(our_node_id, &peer_node_id, direction) {
-                // New wins — drop the existing (closes its socket; its read
-                // loop later no-ops via the generation guard).
+                // New wins — drop the existing (its read loop no-ops on cleanup
+                // via the generation guard).
                 self.remove(&existing_id);
             } else {
                 // New loses — reject it (the existing connection survives).

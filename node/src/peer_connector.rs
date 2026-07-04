@@ -62,6 +62,26 @@ pub async fn connect_to_peer(
     addr_str: &str,
     ctx: &PeerConnectorContext,
 ) -> Result<ConnectedPeer, String> {
+    // Claim a dial slot (attempts list) so concurrent tasks don't both dial
+    // the same peer and create duplicate connections. Always released below.
+    {
+        let mut reg = ctx.connection_registry.write().await;
+        if !reg.begin_dial(addr_str) {
+            return Err("already dialing or connected to this address".into());
+        }
+    }
+    let result = connect_to_peer_inner(addr_str, ctx).await;
+    {
+        let mut reg = ctx.connection_registry.write().await;
+        reg.end_dial(addr_str);
+    }
+    result
+}
+
+async fn connect_to_peer_inner(
+    addr_str: &str,
+    ctx: &PeerConnectorContext,
+) -> Result<ConnectedPeer, String> {
     let stream = tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::TcpStream::connect(addr_str))
         .await
         .map_err(|_| format!("connection timed out to {addr_str}"))?
