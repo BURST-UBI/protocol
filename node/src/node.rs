@@ -3748,6 +3748,89 @@ impl BurstNode {
             self.task_handles.push(bs_handle);
         }
 
+        // ── Reachout task (mesh self-formation) ───────────────────────────
+        // Actively dials peers learned via keepalive gossip but not yet
+        // connected, using their advertised listening address, up to a target
+        // out-degree. This is what makes the mesh self-form and self-heal from
+        // a single seed — without it, a node stays a star around its
+        // configured bootstrap_peers (peers get recorded but never dialed).
+        {
+            let target_out = self.config.max_peers.min(8).max(3);
+            let reach_ctx = crate::peer_connector::PeerConnectorContext {
+                peer_manager: Arc::clone(&self.peer_manager),
+                connection_registry: Arc::clone(&self.connection_registry),
+                block_queue: Arc::clone(&self.block_queue),
+                metrics: Arc::clone(&self.metrics),
+                active_elections: Arc::clone(&self.active_elections),
+                rep_weights: Arc::clone(&self.rep_weights),
+                message_dedup: Arc::clone(&self.message_dedup),
+                online_weight_sampler: Arc::clone(&self.online_weight_sampler),
+                frontier: Arc::clone(&self.frontier),
+                store: Arc::clone(&self.store),
+                node_private_key: burst_types::PrivateKey(self.node_private_key.0),
+                node_address: self.node_address.clone(),
+                params_hash: self.config.params.params_hash(),
+            };
+            let mut shutdown_rx_reach = self.shutdown.subscribe();
+
+            let reach_handle = tokio::spawn(async move {
+                // Small initial delay so bootstrap connects first.
+                let mut interval = tokio::time::interval(Duration::from_secs(20));
+                interval.tick().await; // fires immediately; skip the first
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = shutdown_rx_reach.recv() => {
+                            tracing::debug!("reachout task shutting down");
+                            break;
+                        }
+                        _ = interval.tick() => {
+                            let connected = reach_ctx.peer_manager.read().await.connected_count();
+                            if connected >= target_out {
+                                continue;
+                            }
+                            let candidates = {
+                                let pm = reach_ctx.peer_manager.read().await;
+                                pm.reachout_candidates()
+                            };
+                            if candidates.is_empty() {
+                                continue;
+                            }
+                            let mut have = connected;
+                            for addr in candidates {
+                                if have >= target_out {
+                                    break;
+                                }
+                                if crate::peer_connector::is_peer_connected(
+                                    &addr,
+                                    &reach_ctx.peer_manager,
+                                )
+                                .await
+                                {
+                                    continue;
+                                }
+                                match crate::peer_connector::connect_to_peer(&addr, &reach_ctx).await
+                                {
+                                    Ok(connected_peer) => {
+                                        have += 1;
+                                        tracing::info!(
+                                            peer = %connected_peer.peer_id,
+                                            %addr,
+                                            "reachout: connected to discovered peer"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::debug!(%addr, error = %e, "reachout: dial failed");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+            self.task_handles.push(reach_handle);
+        }
+
         // ── Keepalive task ────────────────────────────────────────────────
         // Alternates between two flood types each period (matching rsnano):
         //   - "self" keepalive: includes own external address in slot 0, sent to ~25% of peers

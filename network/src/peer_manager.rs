@@ -298,6 +298,35 @@ impl PeerManager {
             .collect()
     }
 
+    /// Dialable `ip:port` strings for known-but-unconnected peers, preferring
+    /// each peer's advertised listening address (`peering_addr`) over its raw
+    /// socket address, and excluding our own external address.
+    ///
+    /// The reachout loop uses this to actively connect to peers learned via
+    /// keepalive gossip, so the mesh self-forms from a single seed instead of
+    /// staying a star around whatever is in `bootstrap_peers`.
+    pub fn reachout_candidates(&self) -> Vec<String> {
+        let self_ip_port = self
+            .external_address
+            .map(|a| (a.ip().to_string(), a.port()));
+        self.peers
+            .values()
+            .filter(|p| !p.connected && !p.banned)
+            .filter_map(|p| {
+                let a = p.peering_addr.as_ref().unwrap_or(&p.address);
+                if a.ip.is_empty() || a.ip == "0.0.0.0" || a.ip == "::" {
+                    return None;
+                }
+                if let Some((sip, sport)) = &self_ip_port {
+                    if &a.ip == sip && a.port == *sport {
+                        return None;
+                    }
+                }
+                Some(format!("{}:{}", a.ip, a.port))
+            })
+            .collect()
+    }
+
     /// Return up to `count` random *connected* peer addresses, suitable for
     /// inclusion in a keepalive message.
     ///
@@ -579,6 +608,32 @@ mod tests {
 
         pm.mark_disconnected(&key("1.2.3.4", 7075));
         assert_eq!(pm.connected_count(), 0);
+    }
+
+    #[test]
+    fn reachout_candidates_prefer_peering_addr_exclude_connected_and_self() {
+        use std::net::{Ipv4Addr, SocketAddrV4};
+        let mut pm = PeerManager::new(10);
+        pm.set_external_address(SocketAddrV4::new(Ipv4Addr::new(9, 9, 9, 9), 7076));
+
+        // Connected peer — excluded.
+        pm.add_peer(addr("1.1.1.1", 7076));
+        pm.mark_connected(&key("1.1.1.1", 7076), 100);
+        // Disconnected, no peering_addr — dialed by its raw address.
+        pm.add_peer(addr("2.2.2.2", 7076));
+        // Disconnected, known only by an ephemeral source port but with an
+        // advertised listening address — must be dialed on the listening port.
+        pm.add_peer(addr("3.3.3.3", 40000));
+        pm.set_peering_addr(&key("3.3.3.3", 40000), addr("3.3.3.3", 7076));
+        // A record of ourselves — excluded.
+        pm.add_peer(addr("9.9.9.9", 7076));
+
+        let cands = pm.reachout_candidates();
+        assert!(cands.contains(&"2.2.2.2:7076".to_string()));
+        assert!(cands.contains(&"3.3.3.3:7076".to_string()));
+        assert!(!cands.contains(&"3.3.3.3:40000".to_string()));
+        assert!(!cands.iter().any(|c| c.starts_with("1.1.1.1")));
+        assert!(!cands.contains(&"9.9.9.9:7076".to_string()));
     }
 
     #[test]
