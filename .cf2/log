@@ -1,0 +1,50 @@
+[2m2026-07-05T17:54:53.490254Z[0m [32m INFO[0m [2mburst_daemon[0m[2m:[0m Starting BURST node on dev network (P2P:27830, RPC:17830, WS:off)
+[2m2026-07-05T17:54:53.493778Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m loaded frontier from LMDB [3maccounts[0m[2m=[0m0
+[2m2026-07-05T17:54:53.493974Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m node voting as representative (enabled) [3mrepresentative[0m[2m=[0mbrst_fe38ci8jtz31i8e3b5wd9u3x71ukgg4iqhs6nc8p7pmwzo3hra51g8dqaddc
+[2m2026-07-05T17:54:53.494203Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m no persisted protocol params found, using config defaults
+[2m2026-07-05T17:54:53.494210Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m BRN engine state loaded from LMDB [3mwallets[0m[2m=[0m0
+[2m2026-07-05T17:54:53.494213Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m BRN rate mismatch — reinitializing rate history [3mstored_rate[0m[2m=[0m0 [3mprotocol_rate[0m[2m=[0m277777777777778
+[2m2026-07-05T17:54:53.495941Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m ledger cache initialized [3mblocks[0m[2m=[0m0 [3maccounts[0m[2m=[0m0 [3mpending[0m[2m=[0m0
+[2m2026-07-05T17:54:53.495954Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m no persisted GovernanceEngine state, starting fresh
+[2m2026-07-05T17:54:53.495996Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m BURST node starting [3mnetwork[0m[2m=[0mDev [3mport[0m[2m=[0m27830 [3mdata_dir[0m[2m=[0m.cf2
+[2m2026-07-05T17:54:53.496003Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m empty database — creating genesis block
+[2m2026-07-05T17:54:53.496998Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m genesis block created [3mhash[0m[2m=[0m0bdfde61486e79b920df2bdeea22333402376aec2e38af5a639df3c17702cc79
+[2m2026-07-05T17:54:53.497825Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m genesis creator auto-verified for bootstrap [3mgenesis_addr[0m[2m=[0mbrst_9fo4hh8gptk4tro5o5a4nurfgfkm67dq5qj69bjtr36c54tsuanif4gtwduq [3mhead[0m[2m=[0m0bdfde61486e79b920df2bdeea22333402376aec2e38af5a639df3c17702cc79
+[2m2026-07-05T17:54:53.497845Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m loaded frontier from LMDB [3maccounts[0m[2m=[0m1
+[2m2026-07-05T17:54:53.497851Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m no persisted merger graph found — starting fresh
+[2m2026-07-05T17:54:53.497855Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m no persisted TRST wallet portfolios — starting fresh
+[2m2026-07-05T17:54:53.497858Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m no persisted delegation engine state — starting fresh
+[2m2026-07-05T17:54:53.497862Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m no persisted verification orchestrator state — starting fresh
+[2m2026-07-05T17:54:53.497905Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m representative weights rebuilt from account store [3mreps[0m[2m=[0m1
+[2m2026-07-05T17:54:53.497910Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m seeded bootstrap representative weight for voting [3mrepresentative[0m[2m=[0mbrst_fe38ci8jtz31i8e3b5wd9u3x71ukgg4iqhs6nc8p7pmwzo3hra51g8dqaddc [3mweight[0m[2m=[0m1000000
+[2m2026-07-05T17:54:53.523339Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m initial NTP clock sync complete [3moffset_ms[0m[2m=[0m-510
+[2m2026-07-05T17:54:53.523426Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m BURST node started — all subsystems running
+[2m2026-07-05T17:54:53.523498Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m P2P listener started [3mport[0m[2m=[0m27830
+[2m2026-07-05T17:54:53.523552Z[0m [32m INFO[0m [2mburst_rpc::server[0m[2m:[0m RPC server listening on 127.0.0.1:17830
+[2m2026-07-05T17:54:54.018833Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m BRN burned without TRST mint (no valid receiver) [3maccount[0m[2m=[0mbrst_9fo4hh8gptk4tro5o5a4nurfgfkm67dq5qj69bjtr36c54tsuanif4gtwduq [3mburn_amount[0m[2m=[0m10
+[2m2026-07-05T17:54:54.571155Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m BRN burned without TRST mint (no valid receiver) [3maccount[0m[2m=[0mbrst_9fo4hh8gptk4tro5o5a4nurfgfkm67dq5qj69bjtr36c54tsuanif4gtwduq [3mburn_amount[0m[2m=[0m10
+[2m2026-07-05T17:55:01.073511Z[0m [32m INFO[0m [2mburst_node::shutdown[0m[2m:[0m received SIGTERM, shutting down
+[2m2026-07-05T17:55:01.073575Z[0m [32m INFO[0m [2mburst_daemon[0m[2m:[0m Shutdown signal received — stopping node
+[2m2026-07-05T17:55:01.073582Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m BURST node stopping
+[2m2026-07-05T17:55:01.073588Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m connection registry cleared
+[2m2026-07-05T17:55:01.073592Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m all peers disconnected
+[2m2026-07-05T17:55:01.073595Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m outbound message task shutting down
+[2m2026-07-05T17:55:01.073626Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m pruning task shutting down
+[2m2026-07-05T17:55:01.073627Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m unchecked cleanup task shutting down
+[2m2026-07-05T17:55:01.073633Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m expired TRST cleanup task shutting down
+[2m2026-07-05T17:55:01.073659Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m P2P listener shutting down
+[2m2026-07-05T17:55:01.073653Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m governance tick task shutting down
+[2m2026-07-05T17:55:01.073681Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m RPC server shutting down
+[2m2026-07-05T17:55:01.073684Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m block processor task shutting down
+[2m2026-07-05T17:55:01.073688Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m cementation task shutting down
+[2m2026-07-05T17:55:01.073691Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m confirmation task shutting down
+[2m2026-07-05T17:55:01.073693Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m local re-broadcaster shutting down
+[2m2026-07-05T17:55:01.078597Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m BRN engine state persisted to LMDB [3mwallets[0m[2m=[0m1
+[2m2026-07-05T17:55:01.079311Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m merger graph persisted to LMDB [3mbytes[0m[2m=[0m32
+[2m2026-07-05T17:55:01.080090Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m TRST wallet portfolios persisted to LMDB [3mbytes[0m[2m=[0m8
+[2m2026-07-05T17:55:01.080859Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m delegation engine state persisted to LMDB [3mbytes[0m[2m=[0m24
+[2m2026-07-05T17:55:01.081661Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m verification orchestrator persisted to LMDB [3mbytes[0m[2m=[0m24
+[2m2026-07-05T17:55:01.082967Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m representative weights persisted to LMDB [3mreps[0m[2m=[0m2
+[2m2026-07-05T17:55:01.082970Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m LMDB flushed to disk
+[2m2026-07-05T17:55:01.083019Z[0m [32m INFO[0m [2mburst_node::node[0m[2m:[0m BURST node stopped
+[2m2026-07-05T17:55:01.083022Z[0m [32m INFO[0m [2mburst_daemon[0m[2m:[0m BURST daemon exited cleanly

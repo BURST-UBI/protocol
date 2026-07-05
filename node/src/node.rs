@@ -564,6 +564,7 @@ impl BurstNode {
         let block_queue = Arc::clone(&self.block_queue);
         let active_elections_bp = Arc::clone(&self.active_elections);
         let vote_generator_bp = Arc::clone(&self.vote_generator);
+        let online_weight_sampler_bp = Arc::clone(&self.online_weight_sampler);
         let broadcaster_bp = self.broadcaster.clone();
         let peer_manager_bp = Arc::clone(&self.peer_manager);
 
@@ -2127,6 +2128,38 @@ impl BurstNode {
                                     vs.record(block.account.clone(), block.hash);
                                     drop(vs);
                                     let vote = vg.generate_vote(block.hash);
+                                    drop(vg);
+
+                                    // Count OUR OWN vote in OUR election tally.
+                                    // Previously the accept path only broadcast
+                                    // the vote to peers and never fed it into the
+                                    // local active_elections, so a single node (or
+                                    // this node's own view) could never reach soft
+                                    // quorum → nothing ever confirmed/cemented.
+                                    // Start the election for this block (root = its
+                                    // own hash) and record our vote + online weight.
+                                    {
+                                        let now = Timestamp::new(unix_now_secs());
+                                        let our_weight =
+                                            rep_weights_bp.read().await.weight(&vote.voter);
+                                        if our_weight > 0 {
+                                            online_weight_sampler_bp
+                                                .lock()
+                                                .await
+                                                .record_vote(&vote.voter, now.as_secs());
+                                            let mut ae = active_elections_bp.write().await;
+                                            let _ = ae.start_election(block.hash, now);
+                                            let _ = ae.process_vote(
+                                                &block.hash,
+                                                &vote.voter,
+                                                block.hash,
+                                                our_weight,
+                                                false,
+                                                now,
+                                            );
+                                        }
+                                    }
+
                                     let wire_msg = WireMessage::Vote(WireVote {
                                         voter: vote.voter,
                                         block_hashes: vec![vote.block_hash],

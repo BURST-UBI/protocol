@@ -6,21 +6,39 @@
 //! permanently-offline representatives from inflating the quorum denominator.
 //!
 //! Additional features:
-//! - **Minimum weight floor**: prevents quorum from collapsing when very few
-//!   representatives are online.
+//! - **Adaptive weight floor**: prevents a small online minority from confirming
+//!   blocks the offline majority would reject — see below.
 //! - **Trended (EMA) weight**: smooths temporary dips so quorum doesn't
 //!   fluctuate wildly.
 //! - **Principal rep classification**: identifies representatives with ≥0.1%
 //!   of online weight.
+//!
+//! ## Adaptive floor vs Nano's fixed floor
+//!
+//! Nano floors the quorum's online weight at a fixed `online_weight_minimum`
+//! (~60M NANO, ≈45% of its ~133M premined supply). That works because Nano
+//! premines the ENTIRE supply into the genesis account, so from block one the
+//! genesis representative holds weight far above the floor and confirmation is
+//! immediate. BURST has NO premine — voting weight (TRST) is minted organically
+//! from burning BRN and starts near zero — so a fixed absolute floor would be
+//! unreachable at launch and would block ALL confirmation. Instead we scale the
+//! floor to the TOTAL voting weight currently in existence
+//! ([`MIN_ONLINE_WEIGHT_FRACTION_BPS`]): a small launch network (genesis holding
+//! ~all weight) can cement from block one, while the same safety property —
+//! "a substantial fraction of all weight must back a confirmation" — holds at
+//! every network size.
 
 use std::collections::HashMap;
 
 use burst_types::WalletAddress;
 
-/// Minimum online weight floor — prevents quorum from collapsing
-/// when very few representatives are online.
-/// Set to 60 million TRST (in raw units for the protocol).
-const MIN_ONLINE_WEIGHT: u128 = 60_000_000;
+/// The quorum's online-weight floor as a fraction (basis points) of the TOTAL
+/// voting weight currently in existence. `floor = total_weight * bps / 10_000`.
+/// 5000 bps = 50%: combined with the 67% confirmation threshold, a block can
+/// only confirm if at least ~33.5% of ALL weight actually votes for it, which
+/// scales with the network (unlike Nano's fixed absolute floor, which assumes a
+/// premined fixed supply). Not governable — a fixed consensus-safety constant.
+const MIN_ONLINE_WEIGHT_FRACTION_BPS: u128 = 5000;
 
 /// Decay percentage for EMA trending (95 = 0.95, slow decay).
 const TREND_DECAY_PCT: u128 = 95;
@@ -34,8 +52,6 @@ pub struct OnlineWeightSampler {
     window_secs: u64,
     /// Trended (smoothed) online weight — EMA of recent samples.
     trended_weight: u128,
-    /// Minimum online weight floor.
-    min_weight: u128,
 }
 
 impl OnlineWeightSampler {
@@ -45,7 +61,6 @@ impl OnlineWeightSampler {
             recent_voters: HashMap::new(),
             window_secs,
             trended_weight: 0,
-            min_weight: MIN_ONLINE_WEIGHT,
         }
     }
 
@@ -97,13 +112,17 @@ impl OnlineWeightSampler {
         }
     }
 
-    /// Get the effective online weight (max of current, trended, or floor).
-    ///
-    /// This ensures quorum never drops below the floor, and temporary dips
-    /// in online weight are smoothed by the EMA trend.
+    /// Get the effective online weight used as the quorum denominator: the max
+    /// of current online weight, the trended (EMA) weight, and the adaptive
+    /// floor (a fraction of the TOTAL weight in `weight_map`). The trend smooths
+    /// temporary dips; the adaptive floor stops a small online minority from
+    /// confirming while scaling with the network so a small/young BURST network
+    /// can still cement (see the module docs on Nano's fixed floor).
     pub fn effective_weight(&self, now: u64, weight_map: &HashMap<WalletAddress, u128>) -> u128 {
         let current = self.compute_online_weight(now, weight_map);
-        current.max(self.trended_weight).max(self.min_weight)
+        let total_weight: u128 = weight_map.values().sum();
+        let adaptive_floor = total_weight.saturating_mul(MIN_ONLINE_WEIGHT_FRACTION_BPS) / 10_000;
+        current.max(self.trended_weight).max(adaptive_floor)
     }
 
     /// Whether a representative is a "principal" rep (≥0.1% of online weight).
@@ -121,16 +140,6 @@ impl OnlineWeightSampler {
     /// Get the trended weight.
     pub fn trended_weight(&self) -> u128 {
         self.trended_weight
-    }
-
-    /// Get the minimum weight floor.
-    pub fn min_weight(&self) -> u128 {
-        self.min_weight
-    }
-
-    /// Override the minimum weight floor (useful for testing or configuration).
-    pub fn set_min_weight(&mut self, floor: u128) {
-        self.min_weight = floor;
     }
 
     /// Remove representatives that haven't voted within the window.
@@ -274,12 +283,41 @@ mod tests {
     }
 
     #[test]
-    fn test_effective_weight_uses_floor() {
+    fn test_effective_weight_uses_adaptive_floor() {
         let sampler = OnlineWeightSampler::new(300);
-        // No votes, no trend → effective should be the floor
-        let weights: HashMap<WalletAddress, u128> = HashMap::new();
+        // Weight exists (total 1000) but nobody is online / no trend → the
+        // effective weight is the adaptive floor = 50% of total = 500.
+        let mut weights = HashMap::new();
+        weights.insert(rep("alice"), 600);
+        weights.insert(rep("bob"), 400);
         let effective = sampler.effective_weight(1000, &weights);
-        assert_eq!(effective, MIN_ONLINE_WEIGHT);
+        assert_eq!(effective, 500); // 50% of 1000
+    }
+
+    #[test]
+    fn test_effective_weight_zero_when_no_weight_exists() {
+        // No weight in existence at all → floor is 0 (nothing to confirm against).
+        let sampler = OnlineWeightSampler::new(300);
+        let weights: HashMap<WalletAddress, u128> = HashMap::new();
+        assert_eq!(sampler.effective_weight(1000, &weights), 0);
+    }
+
+    #[test]
+    fn test_small_network_can_reach_quorum() {
+        // Regression for the launch blocker: a small network (genesis holds ~all
+        // weight and is online) must be able to cement. With the OLD fixed 60M
+        // floor, effective would be 60M and 1M of weight could never reach 67%.
+        let mut sampler = OnlineWeightSampler::new(300);
+        sampler.record_vote(&rep("genesis"), 1000);
+        sampler.update_trend(1_000_000);
+        let mut weights = HashMap::new();
+        weights.insert(rep("genesis"), 1_000_000);
+        let effective = sampler.effective_weight(1100, &weights);
+        // effective = max(online 1M, trended 1M, floor 500K) = 1M.
+        assert_eq!(effective, 1_000_000);
+        // 67% quorum = 670K; genesis's 1M vote clears it.
+        let quorum = effective * 6700 / 10_000;
+        assert!(1_000_000 >= quorum);
     }
 
     #[test]
@@ -302,31 +340,18 @@ mod tests {
     #[test]
     fn test_effective_weight_uses_current_when_highest() {
         let mut sampler = OnlineWeightSampler::new(300);
-        sampler.set_min_weight(100); // low floor
 
         // Low trend
         sampler.update_trend(500);
 
-        // But current online weight is high
+        // But current online weight is high (alice online with all 10K weight,
+        // so current 10K > adaptive floor 5K > trended 500).
         sampler.record_vote(&rep("alice"), 1000);
         let mut weights = HashMap::new();
         weights.insert(rep("alice"), 10_000);
 
         let effective = sampler.effective_weight(1100, &weights);
         assert_eq!(effective, 10_000);
-    }
-
-    #[test]
-    fn test_min_weight_default() {
-        let sampler = OnlineWeightSampler::new(300);
-        assert_eq!(sampler.min_weight(), MIN_ONLINE_WEIGHT);
-    }
-
-    #[test]
-    fn test_set_min_weight() {
-        let mut sampler = OnlineWeightSampler::new(300);
-        sampler.set_min_weight(42);
-        assert_eq!(sampler.min_weight(), 42);
     }
 
     #[test]
