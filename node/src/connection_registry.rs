@@ -281,6 +281,34 @@ pub fn spawn_peer_read_loop(
     our_params_hash: burst_types::BlockHash,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        // Immediately gossip our known peers to this freshly-connected peer so
+        // the mesh converges in seconds instead of waiting for the periodic
+        // keepalive cycle (rsnano sends a keepalive on connect). Covers every
+        // connect path — inbound and outbound both spawn this loop after the
+        // connection is registered, so `registry.get(peer_id)` finds the writer.
+        {
+            let self_peers: Vec<String> = {
+                let pm = peer_manager.read().await;
+                pm.random_peers_with_self(8)
+                    .iter()
+                    .map(|a| format!("{}:{}", a.ip, a.port))
+                    .collect()
+            };
+            let msg =
+                crate::wire_message::WireMessage::Keepalive(crate::wire_message::KeepaliveMsg {
+                    peers: self_peers,
+                });
+            if let Ok(bytes) = bincode::serialize(&msg) {
+                let writer = {
+                    let registry = connection_registry.read().await;
+                    registry.get(&peer_id)
+                };
+                if let Some(writer) = writer {
+                    let _ = write_framed(&writer, &bytes).await;
+                }
+            }
+        }
+
         let result = peer_read_loop(
             &peer_id,
             reader,
