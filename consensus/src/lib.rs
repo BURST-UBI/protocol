@@ -54,7 +54,7 @@ pub use request_aggregator::RequestAggregator;
 pub use scheduler::{ElectionBehavior, HintedScheduler, PriorityScheduler};
 pub use vote_by_hash::VoteByHash;
 pub use vote_cache::VoteCache;
-pub use vote_generator::{GeneratedVote, VoteGenerator};
+pub use vote_generator::{vote_signing_payload, GeneratedVote, VoteGenerator, VOTE_DOMAIN};
 pub use vote_info::{VoteInfo, VoteResult};
 pub use vote_rebroadcast::VoteRebroadcaster;
 pub use vote_solicitor::VoteSolicitor;

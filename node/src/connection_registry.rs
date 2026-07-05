@@ -18,12 +18,12 @@ use burst_network::{BandwidthThrottle, MessageDedup, PeerManager, PeerTelemetry,
 use burst_store::account::AccountStore;
 use burst_store::block::BlockStore;
 use burst_store_lmdb::LmdbStore;
-use burst_types::{BlockHash, PublicKey, Signature, Timestamp, WalletAddress};
+use burst_types::{BlockHash, PublicKey, Timestamp};
 
 use crate::bootstrap::{AscPullAckPayload, BootstrapMessage, BootstrapServer};
 use crate::metrics::NodeMetrics;
 use crate::priority_queue::BlockPriorityQueue;
-use crate::wire_message::{ConfirmAckMsg, TelemetryAckMessage, WireMessage, WireVote};
+use crate::wire_message::{TelemetryAckMessage, WireMessage};
 
 /// Maximum message body size (matches protocol codec limit).
 const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024; // 16 MiB
@@ -562,37 +562,18 @@ async fn peer_read_loop(
                 dispatch_vote(peer_id, &vote, active_elections, rep_weights).await;
             }
             Ok(WireMessage::ConfirmReq(req)) => {
+                // A peer asks whether specific blocks are confirmed. We do NOT
+                // answer with a signed vote here: this read loop has no access to
+                // the vote generator's signing key, and the previous response
+                // built an unsigned, fake-voter ConfirmAck that every peer
+                // correctly rejected. Peers learn our votes via the normal vote
+                // broadcast path (emitted when we vote / finalize). A properly
+                // signed confirm_req responder is a future liveness optimization.
                 tracing::debug!(
                     peer = %peer_id,
                     hashes = req.block_hashes.len(),
-                    "received confirm_req"
+                    "received confirm_req (no signed responder wired; relying on vote broadcast)"
                 );
-                let ae = active_elections.read().await;
-                let mut confirmed_hashes = Vec::new();
-                for hash in &req.block_hashes {
-                    if let Some(election) = ae.get_election(hash) {
-                        if election.is_confirmed() {
-                            confirmed_hashes.push(*hash);
-                        }
-                    }
-                }
-                drop(ae);
-
-                if !confirmed_hashes.is_empty() {
-                    let vote = WireVote {
-                        voter: WalletAddress::new("brst_node"),
-                        block_hashes: confirmed_hashes,
-                        is_final: true,
-                        timestamp: unix_now_secs(),
-                        sequence: 0,
-                        signature: Signature([0u8; 64]),
-                    };
-                    let ack = WireMessage::ConfirmAck(ConfirmAckMsg { vote });
-                    if let Ok(bytes) = bincode::serialize(&ack) {
-                        let registry = connection_registry.read().await;
-                        registry.send(peer_id, bytes);
-                    }
-                }
             }
             Ok(WireMessage::ConfirmAck(ack)) => {
                 if !is_vote_signature_valid(&ack.vote) {
@@ -852,11 +833,15 @@ fn is_vote_signature_valid(vote: &crate::wire_message::WireVote) -> bool {
         }
     };
 
-    let mut msg = Vec::with_capacity(8 + vote.block_hashes.len() * 32);
-    msg.extend_from_slice(&vote.timestamp.to_be_bytes());
-    for hash in &vote.block_hashes {
-        msg.extend_from_slice(hash.as_bytes());
-    }
+    // Reconstruct the SAME canonical payload the signer used (domain-tagged and
+    // bound to the voter identity) so signer and verifier can never diverge.
+    let msg = burst_consensus::vote_signing_payload(
+        &vote.voter,
+        vote.is_final,
+        vote.timestamp,
+        vote.sequence,
+        &vote.block_hashes,
+    );
 
     let public_key = PublicKey(pubkey_bytes);
     if !verify_signature(&msg, &vote.signature, &public_key) {

@@ -9,6 +9,40 @@
 use burst_crypto::sign_message;
 use burst_types::{BlockHash, PrivateKey, Signature, WalletAddress};
 
+/// Domain-separation tag for consensus vote signatures. Binding this (and the
+/// voter identity) into the signed payload prevents a vote signature from being
+/// reinterpreted in any other signing context and pins it to BURST consensus.
+pub const VOTE_DOMAIN: &[u8] = b"BURST_VOTE_V1";
+
+/// The canonical byte payload that a consensus vote signature covers. Used by
+/// BOTH the signer (this generator) and the verifier (the node's receive path)
+/// so they can never diverge:
+///
+/// `VOTE_DOMAIN ‖ voter ‖ is_final ‖ timestamp_le ‖ sequence_le ‖ block_hashes…`
+///
+/// Binding `voter` means the signature is only valid under that account's key
+/// and cannot be replayed as another account's vote.
+pub fn vote_signing_payload(
+    voter: &WalletAddress,
+    is_final: bool,
+    timestamp: u64,
+    sequence: u64,
+    block_hashes: &[BlockHash],
+) -> Vec<u8> {
+    let voter_bytes = voter.as_str().as_bytes();
+    let mut payload =
+        Vec::with_capacity(VOTE_DOMAIN.len() + voter_bytes.len() + 1 + 8 + 8 + block_hashes.len() * 32);
+    payload.extend_from_slice(VOTE_DOMAIN);
+    payload.extend_from_slice(voter_bytes);
+    payload.push(u8::from(is_final));
+    payload.extend_from_slice(&timestamp.to_le_bytes());
+    payload.extend_from_slice(&sequence.to_le_bytes());
+    for hash in block_hashes {
+        payload.extend_from_slice(hash.as_bytes());
+    }
+    payload
+}
+
 /// Generates votes for blocks the node has validated.
 pub struct VoteGenerator {
     /// This node's representative account.
@@ -82,7 +116,8 @@ impl VoteGenerator {
         self.sequence
     }
 
-    /// Sign a vote payload: block_hash ‖ is_final ‖ timestamp ‖ sequence.
+    /// Sign a vote over the canonical [`vote_signing_payload`] (domain-tagged and
+    /// bound to this node's voter identity), matching the receiver's verification.
     fn sign_vote(
         &self,
         block_hash: &BlockHash,
@@ -90,12 +125,13 @@ impl VoteGenerator {
         timestamp: u64,
         sequence: u64,
     ) -> Signature {
-        let mut payload = Vec::with_capacity(32 + 1 + 8 + 8);
-        payload.extend_from_slice(block_hash.as_bytes());
-        payload.push(u8::from(is_final));
-        payload.extend_from_slice(&timestamp.to_le_bytes());
-        payload.extend_from_slice(&sequence.to_le_bytes());
-
+        let payload = vote_signing_payload(
+            &self.representative,
+            is_final,
+            timestamp,
+            sequence,
+            std::slice::from_ref(block_hash),
+        );
         sign_message(&payload, &self.signing_key)
     }
 }
@@ -202,13 +238,14 @@ mod tests {
         let (mut gen, pubkey) = make_generator();
         let vote = gen.generate_vote(make_hash(42));
 
-        // Reconstruct the payload that was signed
-        let mut payload = Vec::new();
-        payload.extend_from_slice(vote.block_hash.as_bytes());
-        payload.push(u8::from(vote.is_final));
-        payload.extend_from_slice(&vote.timestamp.to_le_bytes());
-        payload.extend_from_slice(&vote.sequence.to_le_bytes());
-
+        // Reconstruct the canonical payload the signer used.
+        let payload = vote_signing_payload(
+            &vote.voter,
+            vote.is_final,
+            vote.timestamp,
+            vote.sequence,
+            std::slice::from_ref(&vote.block_hash),
+        );
         assert!(verify_signature(&payload, &vote.signature, &pubkey));
     }
 
@@ -217,13 +254,25 @@ mod tests {
         let (mut gen, pubkey) = make_generator();
         let vote = gen.generate_final_vote(make_hash(99));
 
-        let mut payload = Vec::new();
-        payload.extend_from_slice(vote.block_hash.as_bytes());
-        payload.push(u8::from(vote.is_final));
-        payload.extend_from_slice(&vote.timestamp.to_le_bytes());
-        payload.extend_from_slice(&vote.sequence.to_le_bytes());
-
+        let payload = vote_signing_payload(
+            &vote.voter,
+            vote.is_final,
+            vote.timestamp,
+            vote.sequence,
+            std::slice::from_ref(&vote.block_hash),
+        );
         assert!(verify_signature(&payload, &vote.signature, &pubkey));
+
+        // A vote signed for a DIFFERENT voter identity must not verify — the
+        // voter binding (and domain tag) is what this fix adds.
+        let wrong = vote_signing_payload(
+            &burst_types::WalletAddress::new("brst_someoneelse"),
+            vote.is_final,
+            vote.timestamp,
+            vote.sequence,
+            std::slice::from_ref(&vote.block_hash),
+        );
+        assert!(!verify_signature(&wrong, &vote.signature, &pubkey));
     }
 
     #[test]
