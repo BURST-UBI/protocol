@@ -40,11 +40,19 @@ pub enum Direction {
     Inbound,
 }
 
-/// Per-connection metadata used for deterministic dedup and generation-guarded
-/// cleanup. Peers are identified by their handshake `node_id` (a `brst_`
-/// address string) — NOT their IP — so nodes sharing an IP (localhost cluster,
-/// or several nodes behind one NAT) are treated as distinct, matching rsnano.
-struct ConnMeta {
+/// A live peer connection and its per-connection state — BURST's analogue of
+/// rsnano's `Channel`. Consolidates the write half, the per-connection
+/// bandwidth throttle, and the identity/dedup metadata that were previously
+/// three parallel maps keyed by `peer_id`.
+///
+/// Peers are identified by their handshake `node_id` (a `brst_` address string)
+/// — NOT their IP — so nodes sharing an IP (localhost cluster, or several nodes
+/// behind one NAT) are treated as distinct, matching rsnano.
+struct Channel {
+    /// The TCP write half, behind a mutex so the outbound drain can write.
+    writer: Arc<Mutex<OwnedWriteHalf>>,
+    /// Per-connection outbound bandwidth throttle.
+    throttle: BandwidthThrottle,
     node_id: String,
     direction: Direction,
     /// Monotonic id distinguishing this physical connection from any prior one
@@ -68,9 +76,8 @@ pub fn prefer_new_on_conflict(our_node_id: &str, peer_node_id: &str, new_dir: Di
 /// Registry of active peer TCP write halves, enabling the outbound
 /// message drain to route messages to the correct peer stream.
 pub struct ConnectionRegistry {
-    connections: HashMap<String, Arc<Mutex<OwnedWriteHalf>>>,
-    throttles: HashMap<String, BandwidthThrottle>,
-    meta: HashMap<String, ConnMeta>,
+    /// All live channels, keyed by `peer_id`.
+    channels: HashMap<String, Channel>,
     next_conn_id: u64,
     /// Addresses currently being dialed (Nano's "attempts list"). Prevents
     /// several internal tasks (bootstrap, peer cache, reachout) from racing to
@@ -83,9 +90,7 @@ impl ConnectionRegistry {
     /// Create an empty registry.
     pub fn new() -> Self {
         Self {
-            connections: HashMap::new(),
-            throttles: HashMap::new(),
-            meta: HashMap::new(),
+            channels: HashMap::new(),
             next_conn_id: 1,
             dialing: HashSet::new(),
         }
@@ -96,7 +101,7 @@ impl ConnectionRegistry {
     /// it), `false` if it should abort. Callers MUST pair a `true` with
     /// [`end_dial`](Self::end_dial).
     pub fn begin_dial(&mut self, addr: &str) -> bool {
-        if self.connections.contains_key(addr) {
+        if self.channels.contains_key(addr) {
             return false; // already have an outbound to this address
         }
         self.dialing.insert(addr.to_string())
@@ -114,12 +119,11 @@ impl ConnectionRegistry {
     pub fn insert(&mut self, peer_id: String, writer: OwnedWriteHalf) -> u64 {
         let conn_id = self.next_conn_id;
         self.next_conn_id += 1;
-        self.throttles.entry(peer_id.clone()).or_default();
-        self.connections
-            .insert(peer_id.clone(), Arc::new(Mutex::new(writer)));
-        self.meta.insert(
+        self.channels.insert(
             peer_id,
-            ConnMeta {
+            Channel {
+                writer: Arc::new(Mutex::new(writer)),
+                throttle: BandwidthThrottle::default(),
                 node_id: String::new(),
                 direction: Direction::Outbound,
                 conn_id,
@@ -146,10 +150,10 @@ impl ConnectionRegistry {
     ) -> Option<u64> {
         // Look for any existing live connection to the same node.
         let existing: Option<(String, Direction)> = self
-            .meta
+            .channels
             .iter()
-            .find(|(_, m)| m.node_id == peer_node_id)
-            .map(|(id, m)| (id.clone(), m.direction));
+            .find(|(_, c)| c.node_id == peer_node_id)
+            .map(|(id, c)| (id.clone(), c.direction));
 
         if let Some((existing_id, existing_dir)) = existing {
             if existing_dir == direction {
@@ -174,12 +178,11 @@ impl ConnectionRegistry {
 
         let conn_id = self.next_conn_id;
         self.next_conn_id += 1;
-        self.throttles.entry(peer_id.clone()).or_default();
-        self.connections
-            .insert(peer_id.clone(), Arc::new(Mutex::new(writer)));
-        self.meta.insert(
+        self.channels.insert(
             peer_id,
-            ConnMeta {
+            Channel {
+                writer: Arc::new(Mutex::new(writer)),
+                throttle: BandwidthThrottle::default(),
                 node_id: peer_node_id,
                 direction,
                 conn_id,
@@ -188,18 +191,20 @@ impl ConnectionRegistry {
         Some(conn_id)
     }
 
-    /// Remove a peer's write half, returning it if present.
+    /// Remove a peer's channel, returning its write half if present.
     pub fn remove(&mut self, peer_id: &str) -> Option<Arc<Mutex<OwnedWriteHalf>>> {
-        self.throttles.remove(peer_id);
-        self.meta.remove(peer_id);
-        self.connections.remove(peer_id)
+        self.channels.remove(peer_id).map(|c| c.writer)
     }
 
     /// Generation-guarded removal: only remove if the current entry is the
     /// same physical connection (matching `conn_id`). Prevents a superseded
     /// socket's cleanup from evicting the live connection that replaced it.
     pub fn remove_if(&mut self, peer_id: &str, conn_id: u64) -> bool {
-        if self.meta.get(peer_id).is_some_and(|m| m.conn_id == conn_id) {
+        if self
+            .channels
+            .get(peer_id)
+            .is_some_and(|c| c.conn_id == conn_id)
+        {
             self.remove(peer_id);
             true
         } else {
@@ -210,8 +215,8 @@ impl ConnectionRegistry {
     /// Check the outbound throttle for a peer. Returns `true` if the message
     /// can be sent (and consumes the bandwidth tokens), `false` if throttled.
     pub fn try_consume_outbound(&mut self, peer_id: &str, bytes: u64) -> bool {
-        if let Some(throttle) = self.throttles.get_mut(peer_id) {
-            throttle.try_consume(bytes)
+        if let Some(channel) = self.channels.get_mut(peer_id) {
+            channel.throttle.try_consume(bytes)
         } else {
             true
         }
@@ -219,22 +224,22 @@ impl ConnectionRegistry {
 
     /// Look up a peer's write half (returns a cheaply cloned `Arc`).
     pub fn get(&self, peer_id: &str) -> Option<Arc<Mutex<OwnedWriteHalf>>> {
-        self.connections.get(peer_id).cloned()
+        self.channels.get(peer_id).map(|c| Arc::clone(&c.writer))
     }
 
     /// Number of registered connections.
     pub fn len(&self) -> usize {
-        self.connections.len()
+        self.channels.len()
     }
 
     /// Whether the registry is empty.
     pub fn is_empty(&self) -> bool {
-        self.connections.is_empty()
+        self.channels.is_empty()
     }
 
     /// All registered peer IDs.
     pub fn peer_ids(&self) -> Vec<&String> {
-        self.connections.keys().collect()
+        self.channels.keys().collect()
     }
 }
 
