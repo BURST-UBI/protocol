@@ -1292,8 +1292,8 @@ pub async fn handle_representatives(
         let cache = state.rep_weight_cache.read().await;
         cache
             .all_weights()
-            .iter()
-            .map(|(addr, &weight)| (addr.to_string(), weight, 0u64))
+            .into_iter()
+            .map(|(addr, weight)| (addr.to_string(), weight, 0u64))
             .collect()
     };
     reps.sort_by_key(|r| std::cmp::Reverse(r.1));
@@ -2422,16 +2422,9 @@ pub async fn handle_change_rep_simple(
         .block_store
         .put_block_with_account(&block.hash, &block_bytes, &address);
 
-    {
-        // Move only the account's EXPIRED-TRST stake (its ORV consensus weight)
-        // to the new representative — transferable balance carries no weight.
-        let mut cache = state.rep_weight_cache.write().await;
-        cache.change_rep(
-            &old_representative,
-            &new_representative,
-            account.expired_trst,
-        );
-    }
+    // Consensus weight (verified-human delegation + bounded contribution) is
+    // rebuilt from the ledger by the node's periodic weight task, so this rep
+    // change is picked up automatically — no incremental cache mutation here.
 
     Ok(to_value(&ChangeRepSimpleResponse {
         block_hash: format!("{}", block.hash),

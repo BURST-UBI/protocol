@@ -179,17 +179,13 @@ fn ledger_updater_open_then_send_updates_account_correctly() {
         1000,
     );
 
-    let mut rw = RepWeightCache::new();
     let mut batch = env.tx_begin_write().unwrap();
-    let info = burst_node::update_account_on_block(&mut batch, &open, None, 0, &mut rw).unwrap();
+    let info = burst_node::update_account_on_block(&mut batch, &open, None, 0).unwrap();
     batch.commit().unwrap();
 
     assert_eq!(info.block_count, 1);
     assert_eq!(info.trst_balance, 1000);
     assert_eq!(info.representative, rep);
-    // Consensus weight = EXPIRED TRST, which is 0 for a fresh account — a large
-    // spendable balance contributes NO ORV weight.
-    assert_eq!(rw.weight(&rep), 0);
 
     let send_link = BlockHash::new(pubkey_bytes(&make_address(99)));
     let send = make_block(
@@ -205,19 +201,20 @@ fn ledger_updater_open_then_send_updates_account_correctly() {
     );
 
     let mut batch = env.tx_begin_write().unwrap();
-    let info2 =
-        burst_node::update_account_on_block(&mut batch, &send, Some(&info), 0, &mut rw).unwrap();
+    let info2 = burst_node::update_account_on_block(&mut batch, &send, Some(&info), 0).unwrap();
     batch.commit().unwrap();
 
     assert_eq!(info2.block_count, 2);
     assert_eq!(info2.trst_balance, 700);
     assert_eq!(info2.head, send.hash);
-    // A balance change (send) moves no consensus weight — still 0.
-    assert_eq!(rw.weight(&rep), 0);
 }
 
 #[test]
-fn ledger_updater_rep_change_moves_weight() {
+fn ledger_updater_rep_change_updates_representative() {
+    // update_account_on_block records the new representative in AccountInfo;
+    // consensus weight itself is derived from account state by the rep-weight
+    // cache (rebuilt separately), so here we verify the state transition and
+    // that a rebuild attributes the account's vote to the NEW rep.
     let (_dir, env) = temp_env();
     let account = make_address(20);
     let rep1 = make_address(21);
@@ -235,23 +232,14 @@ fn ledger_updater_rep_change_moves_weight() {
         1000,
     );
 
-    let mut rw = RepWeightCache::new();
     let mut batch = env.tx_begin_write().unwrap();
-    let info = burst_node::update_account_on_block(&mut batch, &open, None, 0, &mut rw).unwrap();
+    let mut info = burst_node::update_account_on_block(&mut batch, &open, None, 0).unwrap();
     batch.commit().unwrap();
+    assert_eq!(info.representative, rep1);
 
-    // Fresh account has no expired TRST, so no consensus weight yet.
-    assert_eq!(rw.weight(&rep1), 0);
-    assert_eq!(rw.weight(&rep2), 0);
+    // Mark verified (a human) so it counts as one delegated vote.
+    info.state = burst_types::WalletState::Verified;
 
-    // Simulate the account accruing an expired-TRST stake (what the expiry flush
-    // does): 500 units of its TRST expired in-place under rep1.
-    let mut info = info;
-    info.expired_trst = 500;
-    rw.add_weight(&rep1, 500);
-    assert_eq!(rw.weight(&rep1), 500);
-
-    // A rep change now moves that EXPIRED stake from rep1 to rep2.
     let change = make_block(
         BlockType::ChangeRepresentative,
         &account,
@@ -265,11 +253,18 @@ fn ledger_updater_rep_change_moves_weight() {
     );
 
     let mut batch = env.tx_begin_write().unwrap();
-    burst_node::update_account_on_block(&mut batch, &change, Some(&info), 0, &mut rw).unwrap();
+    let info2 = burst_node::update_account_on_block(&mut batch, &change, Some(&info), 0).unwrap();
     batch.commit().unwrap();
+    assert_eq!(info2.representative, rep2);
 
+    // A rebuilt cache attributes this verified human's one vote to rep2, not rep1.
+    let mut rw = RepWeightCache::new();
+    rw.rebuild_from_accounts(std::iter::once((true, info2.representative.clone(), 0)));
     assert_eq!(rw.weight(&rep1), 0);
-    assert_eq!(rw.weight(&rep2), 500);
+    assert_eq!(
+        rw.weight(&rep2),
+        burst_consensus::rep_weights::WEIGHT_PER_HUMAN
+    );
 }
 
 #[test]
@@ -290,9 +285,8 @@ fn ledger_updater_burn_tracks_brn_correctly() {
         1000,
     );
 
-    let mut rw = RepWeightCache::new();
     let mut batch = env.tx_begin_write().unwrap();
-    let info = burst_node::update_account_on_block(&mut batch, &open, None, 0, &mut rw).unwrap();
+    let info = burst_node::update_account_on_block(&mut batch, &open, None, 0).unwrap();
     batch.commit().unwrap();
 
     let receiver = make_address(32);
@@ -311,8 +305,7 @@ fn ledger_updater_burn_tracks_brn_correctly() {
     let prev_brn: u128 = 500;
     let mut batch = env.tx_begin_write().unwrap();
     let info2 =
-        burst_node::update_account_on_block(&mut batch, &burn, Some(&info), prev_brn, &mut rw)
-            .unwrap();
+        burst_node::update_account_on_block(&mut batch, &burn, Some(&info), prev_brn).unwrap();
     batch.commit().unwrap();
 
     assert_eq!(info2.total_brn_burned, 200);
@@ -1756,12 +1749,11 @@ fn unified_path_burn_persists_account_and_pending() {
         1000,
     );
 
-    let mut rw = burst_consensus::RepWeightCache::new();
     let mut batch = env.tx_begin_write().unwrap();
     let bytes = bincode::serialize(&open).unwrap();
     batch.put_block(&open.hash, &bytes).unwrap();
     batch.put_frontier(&alice, &open.hash).unwrap();
-    let info = burst_node::update_account_on_block(&mut batch, &open, None, 0, &mut rw).unwrap();
+    let info = burst_node::update_account_on_block(&mut batch, &open, None, 0).unwrap();
     batch.commit().unwrap();
 
     assert_eq!(info.block_count, 1);
@@ -1814,8 +1806,7 @@ fn unified_path_burn_persists_account_and_pending() {
     let bytes = bincode::serialize(&burn).unwrap();
     batch.put_block(&burn.hash, &bytes).unwrap();
     batch.put_frontier(&alice, &burn.hash).unwrap();
-    let info2 =
-        burst_node::update_account_on_block(&mut batch, &burn, Some(&info), 0, &mut rw).unwrap();
+    let info2 = burst_node::update_account_on_block(&mut batch, &burn, Some(&info), 0).unwrap();
     batch.commit().unwrap();
 
     assert_eq!(info2.block_count, 2);

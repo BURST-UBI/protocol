@@ -1,9 +1,14 @@
 //! Ledger state updater — maintains per-account state on block insertion.
 //!
 //! Inspired by rsnano's BlockInserter: atomically updates AccountInfo,
-//! pending entries, and rep weights when a block is inserted.
+//! pending entries, and tracks BRN burns when a block is inserted.
+//!
+//! It does NOT touch consensus (rep) weight. Weight is a pure function of
+//! confirmed account state (verified humans, their delegation, their expired
+//! TRST) and is rebuilt from the ledger periodically by the node — see
+//! [`burst_consensus::RepWeightCache`]. Patching weight per-block here would be
+//! a consensus-corruption hazard and is unnecessary.
 
-use burst_consensus::RepWeightCache;
 use burst_ledger::{BlockType, StateBlock};
 use burst_store::account::AccountInfo;
 use burst_store_lmdb::LmdbWriteTransaction;
@@ -12,8 +17,7 @@ use burst_types::{WalletAddress, WalletState};
 /// Update ledger state after a block is accepted.
 ///
 /// Called within the write batch so all updates are atomic. Updates the
-/// account's `AccountInfo`, adjusts representative weights, and tracks BRN
-/// burns.
+/// account's `AccountInfo` and tracks BRN burns.
 ///
 /// `prev_brn_balance` is the BRN balance from the previous StateBlock in
 /// the account chain (needed for burn tracking since `AccountInfo` does not
@@ -23,7 +27,6 @@ pub fn update_account_on_block(
     block: &StateBlock,
     prev_account: Option<&AccountInfo>,
     prev_brn_balance: u128,
-    rep_weights: &mut RepWeightCache,
 ) -> Result<AccountInfo, String> {
     let is_open = block.previous.is_zero();
 
@@ -49,25 +52,10 @@ pub fn update_account_on_block(
             .cloned()
             .ok_or_else(|| "previous account info not found".to_string())?;
 
-        let old_rep = info.representative.clone();
-
         info.head = block.hash;
         info.block_count += 1;
         info.trst_balance = block.trst_balance;
-
-        // Rep-weight update. Consensus weight = this account's EXPIRED TRST (not
-        // its spendable balance — see RepWeightCache docs), and `expired_trst`
-        // is unchanged by an ordinary block (it only moves on the expiry flush).
-        // So a balance change alone touches NO weight; only a rep change moves
-        // the account's existing expired-TRST stake from the old rep to the new.
-        if old_rep != block.representative {
-            let stake = info.expired_trst;
-            if stake > 0 {
-                rep_weights.remove_weight(&old_rep, stake);
-                rep_weights.add_weight(&block.representative, stake);
-            }
-            info.representative = block.representative.clone();
-        }
+        info.representative = block.representative.clone();
 
         // Track PERMANENT BRN burns. `brn_balance` is an ascending odometer of
         // cumulative spent BRN, so the delta is the amount spent by this block.
@@ -97,13 +85,6 @@ pub fn update_account_on_block(
 
         info
     };
-
-    // Open blocks seed rep weight with the account's EXPIRED TRST (zero for a
-    // brand-new account — it accrues later via the expiry flush; spendable
-    // balance carries no consensus weight).
-    if is_open {
-        rep_weights.add_weight(&block.representative, info.expired_trst);
-    }
 
     // Serialize and put in batch
     let info_bytes =
@@ -188,7 +169,6 @@ pub use burst_store::pending::{PendingInfo, PendingProvenance};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burst_consensus::RepWeightCache;
     use burst_ledger::{BlockType, StateBlock, CURRENT_BLOCK_VERSION};
     use burst_store::account::AccountInfo;
     use burst_types::{BlockHash, Signature, Timestamp, TxHash, WalletAddress, WalletState};
@@ -199,10 +179,6 @@ mod tests {
 
     fn test_rep() -> WalletAddress {
         WalletAddress::new("brst_1rep1111111111111111111111111111111111111111111111111111111111111")
-    }
-
-    fn test_rep2() -> WalletAddress {
-        WalletAddress::new("brst_2rep2222222222222222222222222222222222222222222222222222222222222")
     }
 
     fn make_open_block(account: &WalletAddress, rep: &WalletAddress, trst: u128) -> StateBlock {
@@ -327,41 +303,9 @@ mod tests {
         assert_eq!(deserialized.source, info.source);
     }
 
-    // --- Rep weight tests (unit-testing the logic paths) ---
-
-    #[test]
-    fn rep_weight_open_block_seeds_expired_stake_not_balance() {
-        // A brand-new account's open block seeds its rep with the account's
-        // EXPIRED TRST (zero for a fresh account — spendable balance carries no
-        // consensus weight). So an open block with a large balance adds nothing.
-        let mut rw = RepWeightCache::new();
-        let rep = test_rep();
-        let _block = make_open_block(&test_account(), &rep, 1000);
-
-        // Open-block path adds info.expired_trst, which is 0 for a new account.
-        rw.add_weight(&rep, 0);
-
-        assert_eq!(rw.weight(&rep), 0);
-        assert_eq!(rw.total_weight(), 0);
-    }
-
-    #[test]
-    fn rep_weight_transferred_on_rep_change() {
-        // A rep change moves the account's EXPIRED-TRST stake (not its balance)
-        // from the old representative to the new one.
-        let mut rw = RepWeightCache::new();
-        let old_rep = test_rep();
-        let new_rep = test_rep2();
-        rw.add_weight(&old_rep, 1000);
-
-        // Simulate rep change: move the account's expired stake old -> new.
-        let stake = 1000u128;
-        rw.remove_weight(&old_rep, stake);
-        rw.add_weight(&new_rep, stake);
-
-        assert_eq!(rw.weight(&old_rep), 0);
-        assert_eq!(rw.weight(&new_rep), 1000);
-    }
+    // Rep-weight behaviour now lives in `burst_consensus::rep_weights` (the
+    // cache is rebuilt from account state, not patched per block), so the
+    // per-block weight tests moved there.
 
     // --- AccountInfo construction tests ---
 

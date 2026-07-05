@@ -99,10 +99,14 @@ const DEFAULT_ONLINE_WEIGHT: u128 = 1_000_000;
 /// Bootstrap voting weight granted to the genesis representative on every node
 /// (the analog of Nano's genesis premine, for VOTING WEIGHT only — not spendable
 /// TRST). Consistent across nodes, so genesis's votes aggregate network-wide and
-/// consensus can confirm at launch before TRST circulates. 1000 TRST-equivalent:
-/// dominant at launch, overtaken as real delegated TRST grows past it, so
+/// consensus can confirm at launch before many humans run voting nodes.
+///
+/// Denominated in the hybrid weight's units, where one verified human ≈
+/// `WEIGHT_PER_HUMAN` (10_000). This is ≈ 10,000 verified-human-equivalents:
+/// dominant at genuine launch (a handful of verified wallets), and a shrinking
+/// fraction as the verified, participating population grows past ~10k, so
 /// consensus decentralises organically.
-const GENESIS_BOOTSTRAP_WEIGHT: u128 = 1_000 * burst_types::TRST_UNIT;
+const GENESIS_BOOTSTRAP_WEIGHT: u128 = 10_000 * burst_consensus::rep_weights::WEIGHT_PER_HUMAN;
 /// Default vote cache size.
 /// A running BURST node.
 pub struct BurstNode {
@@ -914,8 +918,9 @@ impl BurstNode {
 
                         // ── Acquire all locks needed before the unified write
                         // batch. RwTxn is !Send so no awaits are possible while
-                        // the batch exists. ───────────────────────────────────
-                        let mut rw = rep_weights_bp.write().await;
+                        // the batch exists. (Rep weights are NOT touched here —
+                        // they're rebuilt from the ledger by the periodic weight
+                        // task, so no rep-weight lock is held during the batch.)
                         let mut brn = brn_engine_bp.lock().await;
                         let mut trst = trst_engine_bp.lock().await;
 
@@ -941,7 +946,6 @@ impl BurstNode {
                             tracing::error!(hash = %block.hash, %reason, "block rejected due to economic invariant violation");
                             drop(trst);
                             drop(brn);
-                            drop(rw);
                             continue;
                         }
 
@@ -1153,7 +1157,6 @@ impl BurstNode {
                                 &block,
                                 prev_account.as_ref(),
                                 prev_brn_balance,
-                                &mut rw,
                             ) {
                                 tracing::error!(hash = %block.hash, "failed to update account: {e}");
                             }
@@ -1201,7 +1204,6 @@ impl BurstNode {
 
                             true
                         };
-                        drop(rw);
 
                         if !persisted {
                             let mut f = frontier.write().await;
@@ -2939,7 +2941,6 @@ impl BurstNode {
         let trst_engine_expiry = Arc::clone(&self.trst_engine);
         let orch_expiry = Arc::clone(&self.verification_orchestrator);
         let brn_engine_expiry = Arc::clone(&self.brn_engine);
-        let rep_weights_expiry = Arc::clone(&self.rep_weights);
         let challenge_duration_secs = self.config.params.challenge_duration_secs;
         let mut shutdown_rx_expiry = self.shutdown.subscribe();
 
@@ -2973,25 +2974,14 @@ impl BurstNode {
                             for (holder, amount) in newly_expired {
                                 if let Ok(mut acct) = store_expiry.account_store().get_account(&holder)
                                 {
+                                    // Accrue the holder's expired-TRST contribution
+                                    // reputation. This feeds the hybrid weight's
+                                    // (bounded) contribution multiplier — picked up
+                                    // by the periodic rebuild in the online-weight
+                                    // task, not patched here.
                                     acct.expired_trst = acct.expired_trst.saturating_add(amount);
-                                    if let Err(e) =
-                                        store_expiry.account_store().put_account(&acct)
-                                    {
+                                    if let Err(e) = store_expiry.account_store().put_account(&acct) {
                                         tracing::warn!(%holder, "failed to persist expired_trst: {e}");
-                                    } else {
-                                        // Newly-expired TRST becomes the holder's
-                                        // ORV consensus stake: credit it to the
-                                        // holder's representative. This is the sole
-                                        // path by which real (non-genesis) voting
-                                        // weight enters the network — the more
-                                        // trusted a server is (the more expiring
-                                        // TRST is routed to it), the more weight it
-                                        // earns. Un-buyable: the stake is the
-                                        // non-transferable expired TRST itself.
-                                        rep_weights_expiry
-                                            .write()
-                                            .await
-                                            .add_weight(&acct.representative, amount);
                                     }
                                 }
                             }
@@ -3256,8 +3246,13 @@ impl BurstNode {
                     }
                     _ = interval.tick() => {
                         let now_secs = unix_now_secs();
+                        // Refresh the hybrid rep-weight cache from the ledger so
+                        // newly-verified humans, delegation changes, and freshly
+                        // expired TRST are reflected in consensus weight. Cheap at
+                        // launch scale; the genesis bootstrap bonus is preserved.
+                        rebuild_rep_weights(&store_ow, &rep_weights_bg).await;
                         let rw = rep_weights_bg.read().await;
-                        let weight_map = rw.all_weights().clone();
+                        let weight_map = rw.all_weights();
                         drop(rw);
                         let sampler = online_weight_sampler_bg.lock().await;
                         let total_online = sampler.online_weight(now_secs, &weight_map);
@@ -3501,57 +3496,30 @@ impl BurstNode {
         }
 
         // Rebuild representative weights from the confirmed account set on every
-        // startup. Weight = each account's EXPIRED TRST delegated to its rep (the
-        // un-buyable consensus stake — see RepWeightCache docs). We deliberately
-        // do NOT restore a persisted rep-weight snapshot: (1) it would need a
-        // one-time migration off the old balance-based numbers, and (2) the
-        // snapshot used to be persisted *with* the genesis bootstrap weight baked
-        // in, so reloading it and then re-adding the bootstrap below double-
-        // counted genesis on every restart — diverging across nodes by restart
-        // count. Rebuilding from accounts (then adding the fixed bootstrap once)
-        // is deterministic and drift-proof at launch scale.
-        {
-            let acct_store = self.store.account_store();
-            match acct_store.iter_accounts() {
-                Ok(accounts) => {
-                    let mut rw = self.rep_weights.write().await;
-                    rw.rebuild_from_accounts(
-                        accounts
-                            .into_iter()
-                            .map(|a| (a.address.clone(), a.representative.clone(), a.expired_trst)),
-                    );
-                    tracing::info!(
-                        reps = rw.rep_count(),
-                        "representative weights rebuilt from account store (expired-TRST stake)"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "failed to rebuild rep weights from accounts — cache starts empty"
-                    );
-                }
-            }
-        }
+        // startup (and periodically thereafter — see the online-weight task).
+        // Weight is the HYBRID: one vote per VERIFIED human delegating to a rep,
+        // amplified by that rep's expired-TRST contribution up to a cap (see
+        // RepWeightCache docs). It is a pure function of account state, so we
+        // rebuild it rather than persist a snapshot: a snapshot would need
+        // migration off the old numbers and, worse, used to be persisted *with*
+        // the genesis bootstrap baked in, so reloading it and re-seeding the
+        // bootstrap double-counted genesis per restart — diverging nodes by
+        // restart count. Rebuild + seed-bootstrap-once is deterministic.
+        rebuild_rep_weights(&self.store, &self.rep_weights).await;
 
-        // Give the GENESIS representative a consistent bootstrap voting weight —
-        // BURST's analog of Nano's genesis premine, but for VOTING WEIGHT ONLY
-        // (not spendable TRST, so it doesn't violate "no premine"). Nano's
-        // genesis holds the whole supply, so real ledger-derived weight exists
-        // from block one; BURST mints TRST organically from ~zero, so without
-        // this there is no weight to confirm with at launch. Crucially this is
-        // seeded for the WELL-KNOWN genesis account on EVERY node (deterministic
-        // — the rep-weight cache is rebuilt from confirmed balances first), so
-        // all nodes agree on genesis's weight and its votes aggregate correctly
-        // across the network. (The old code seeded each node's OWN random rep
-        // locally, which no other node knew about → cross-node votes were
-        // zero-weight-ignored.) As real TRST is minted and delegated, other reps
-        // gain weight and this fixed bootstrap weight becomes a shrinking
-        // fraction — consensus decentralises organically.
+        // Give the GENESIS representative a bootstrap voting-weight bridge — a
+        // raw additive weight (NOT spendable TRST, so "no premine" holds), the
+        // analog of Nano's genesis premine. At launch few humans run voting
+        // nodes, so without this the one online genesis node couldn't clear the
+        // adaptive online-weight floor. Seeded for the WELL-KNOWN genesis account
+        // on EVERY node (deterministic), so all nodes agree on genesis's weight
+        // and its votes aggregate. `set_bonus` is preserved across the periodic
+        // rebuilds. As real verified humans delegate to online reps, this fixed
+        // bridge becomes a shrinking fraction and consensus decentralises.
         {
             let genesis_rep = genesis_key::genesis_address(self.config.network);
             let mut rw = self.rep_weights.write().await;
-            rw.add_weight(&genesis_rep, GENESIS_BOOTSTRAP_WEIGHT);
+            rw.set_bonus(&genesis_rep, GENESIS_BOOTSTRAP_WEIGHT);
             tracing::info!(
                 representative = %genesis_rep,
                 weight = GENESIS_BOOTSTRAP_WEIGHT,
@@ -5189,6 +5157,33 @@ fn eligible_verifiers(
         })
         .map(|a| a.address)
         .collect()
+}
+
+/// Rebuild the hybrid rep-weight cache from the confirmed account set: one vote
+/// per VERIFIED human delegating to a rep, plus that rep's expired-TRST
+/// contribution. Preserves the genesis bootstrap bonus (set via `set_bonus`).
+/// Called at startup and periodically by the online-weight task — weight is a
+/// pure function of account state, so it is derived, never patched per event.
+async fn rebuild_rep_weights(store: &LmdbStore, rep_weights: &RwLock<RepWeightCache>) {
+    match store.account_store().iter_accounts() {
+        Ok(accounts) => {
+            let mut rw = rep_weights.write().await;
+            rw.rebuild_from_accounts(accounts.into_iter().map(|a| {
+                (
+                    a.state == burst_types::WalletState::Verified,
+                    a.representative.clone(),
+                    a.expired_trst,
+                )
+            }));
+            tracing::debug!(
+                reps = rw.rep_count(),
+                "rep weights rebuilt from account store"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to rebuild rep weights from account store");
+        }
+    }
 }
 
 /// Apply per-holder TRST revocation to the ledger. `revoke_by_origin` returns
