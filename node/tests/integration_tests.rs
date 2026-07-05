@@ -1888,24 +1888,35 @@ fn election_lifecycle_vote_and_confirm() {
 
     assert!(!election.is_confirmed());
 
-    // rep1 votes 300 — total 300 < 670
-    election.vote(&rep1, block_hash, 300, false, Timestamp::new(1001));
+    // Confirmation is gated on FINAL votes (rsnano parity): a block is cemented
+    // only on a supermajority of irrevocable votes, never on soft/non-final
+    // ones. First show soft votes do NOT confirm even at full weight...
+    election.vote(&rep1, block_hash, 700, false, Timestamp::new(1001));
     election.try_confirm(Timestamp::new(1001));
-    assert!(!election.is_confirmed());
+    assert!(
+        !election.is_confirmed(),
+        "soft (non-final) votes must not cement a block"
+    );
 
-    // rep2 votes 200 — total 500 < 670
-    election.vote(&rep2, block_hash, 200, false, Timestamp::new(1002));
+    // ...now accumulate FINAL votes toward the 670 threshold.
+    // rep1 upgrades to final 300 — final 300 < 670
+    election.vote(&rep1, block_hash, 300, true, Timestamp::new(1002));
     election.try_confirm(Timestamp::new(1002));
     assert!(!election.is_confirmed());
 
-    // rep3 votes 200 — total 700 ≥ 670
-    election.vote(&rep3, block_hash, 200, false, Timestamp::new(1003));
-    let status = election.try_confirm(Timestamp::new(1003));
+    // rep2 final 200 — final 500 < 670
+    election.vote(&rep2, block_hash, 200, true, Timestamp::new(1003));
+    election.try_confirm(Timestamp::new(1003));
+    assert!(!election.is_confirmed());
+
+    // rep3 final 200 — final 700 ≥ 670 → confirms
+    election.vote(&rep3, block_hash, 200, true, Timestamp::new(1004));
+    let status = election.try_confirm(Timestamp::new(1004));
     assert!(election.is_confirmed());
     assert!(status.is_some());
     let status = status.unwrap();
     assert_eq!(status.winner, block_hash);
-    assert_eq!(status.tally, 700);
+    assert_eq!(status.final_tally, 700);
 }
 
 // ---------------------------------------------------------------------------
