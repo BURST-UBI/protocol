@@ -372,6 +372,50 @@ mod tests {
     }
 
     #[test]
+    fn fork_resolution_confirms_accepted_and_identifies_loser() {
+        // End-to-end ORV fork resolution at the election layer: an attacker
+        // votes for a fork block; we vote for the block we accepted with
+        // majority weight; the accepted block confirms on final votes and the
+        // fork is identified as the rollback loser.
+        let mut ae = ActiveElections::new(10, 1000);
+        let root = make_hash(1);
+        let accepted = make_hash(2);
+        let fork = make_hash(3);
+        let our_rep = make_voter("self");
+        ae.start_election(root, ts(100)).unwrap();
+
+        // Minority vote for the fork; our majority (soft) vote for accepted.
+        ae.process_vote(&root, &make_voter("attacker"), fork, 100, false, ts(101))
+            .unwrap();
+        ae.process_vote(&root, &our_rep, accepted, 800, false, ts(102))
+            .unwrap();
+
+        // Accepted leads by 700 ≥ 670 → soft quorum; we haven't finalized yet.
+        assert_eq!(
+            ae.soft_quorum_needing_final(&our_rep),
+            vec![(root, accepted)]
+        );
+
+        // The confirmation task's job: finalize. 800 final ≥ 670 → confirm.
+        let status = ae
+            .process_vote(&root, &our_rep, accepted, 800, true, ts(103))
+            .unwrap()
+            .expect("accepted block should confirm on final quorum");
+        assert_eq!(status.winner, accepted);
+
+        // The fork is the loser (rollback candidate); the accepted block is not.
+        let losers = ae.get_fork_losers(&root);
+        assert!(
+            losers.contains(&fork),
+            "fork block must be a rollback loser"
+        );
+        assert!(
+            !losers.contains(&accepted),
+            "accepted block must not be rolled back"
+        );
+    }
+
+    #[test]
     fn process_vote_on_confirmed_election_errors() {
         let mut ae = ActiveElections::new(10, 1000);
         ae.start_election(make_hash(1), ts(100)).unwrap();
