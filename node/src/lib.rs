@@ -41,7 +41,7 @@ pub mod wire_message;
 pub use block_processor::{
     BlockContext, BlockProcessor, BlockSource, ProcessResult, ProcessingQueue, RollbackResult,
 };
-pub use bootstrap::{BootstrapClient, BootstrapMessage, BootstrapServer};
+pub use bootstrap::{BootstrapMessage, BootstrapServer, Bootstrapper};
 pub use bounded_backlog::BoundedBacklog;
 pub use config::NodeConfig;
 pub use confirmation_processor::{

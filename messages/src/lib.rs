@@ -22,11 +22,11 @@ pub enum MessageType {
     ConfirmReq,
     ConfirmAck,
 
-    // Sync
-    FrontierReq,
-    FrontierResp,
-    BulkPull,
-    BulkPush,
+    // Sync — ascending bootstrap (the typed, id-correlated pull protocol lives
+    // in `burst_node::bootstrap`). The legacy serial FrontierReq/BulkPull/
+    // BulkPush scheme was removed.
+    AscPullReq,
+    AscPullAck,
 
     // Verification
     VerificationRequest,
@@ -79,29 +79,6 @@ pub struct KeepaliveMessage {
 pub struct PeerAddress {
     pub ip: String,
     pub port: u16,
-}
-
-/// Frontier request — ask for account chain heads.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct FrontierReqMessage {
-    pub header: MessageHeader,
-    pub start_account: WalletAddress,
-    pub count: u32,
-}
-
-/// Frontier response.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct FrontierRespMessage {
-    pub header: MessageHeader,
-    pub frontiers: Vec<(WalletAddress, BlockHash)>,
-}
-
-/// Bulk pull request — ask for blocks from an account.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct BulkPullMessage {
-    pub header: MessageHeader,
-    pub account: WalletAddress,
-    pub end_hash: BlockHash,
 }
 
 /// Node ID handshake for peer authentication.

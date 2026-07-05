@@ -3489,7 +3489,6 @@ impl BurstNode {
         let syn_cookies_p2p = Arc::clone(&self.syn_cookies);
         let message_dedup_p2p = Arc::clone(&self.message_dedup);
         let online_weight_sampler_p2p = Arc::clone(&self.online_weight_sampler);
-        let frontier_p2p = Arc::clone(&self.frontier);
         let store_p2p = Arc::clone(&self.store);
         let node_address_p2p = self.node_address.clone();
         let config_params_p2p = self.config.params.clone();
@@ -3534,7 +3533,6 @@ impl BurstNode {
                                 let rep_weights_c = Arc::clone(&rep_weights_p2p);
                                 let message_dedup_c = Arc::clone(&message_dedup_p2p);
                                 let online_weight_sampler_c = Arc::clone(&online_weight_sampler_p2p);
-                                let frontier_c = Arc::clone(&frontier_p2p);
                                 let store_c = Arc::clone(&store_p2p);
                                 let our_node_id = node_address_p2p.clone();
                                 let params_hash_c = params_hash_p2p;
@@ -3693,7 +3691,6 @@ impl BurstNode {
                                         online_weight_sampler_c,
                                         None,
                                         peer_ip,
-                                        frontier_c,
                                         store_c,
                                         params_hash_c,
                                         bootstrap_feedback_c,
@@ -3782,7 +3779,6 @@ impl BurstNode {
                         rep_weights: Arc::clone(&self.rep_weights),
                         message_dedup: Arc::clone(&self.message_dedup),
                         online_weight_sampler: Arc::clone(&self.online_weight_sampler),
-                        frontier: Arc::clone(&self.frontier),
                         store: Arc::clone(&self.store),
                         node_private_key: burst_types::PrivateKey(self.node_private_key.0),
                         node_address: self.node_address.clone(),
@@ -3856,7 +3852,6 @@ impl BurstNode {
                 rep_weights: Arc::clone(&self.rep_weights),
                 message_dedup: Arc::clone(&self.message_dedup),
                 online_weight_sampler: Arc::clone(&self.online_weight_sampler),
-                frontier: Arc::clone(&self.frontier),
                 store: Arc::clone(&self.store),
                 node_private_key: burst_types::PrivateKey(self.node_private_key.0),
                 node_address: self.node_address.clone(),
@@ -3995,7 +3990,6 @@ impl BurstNode {
                 rep_weights: Arc::clone(&self.rep_weights),
                 message_dedup: Arc::clone(&self.message_dedup),
                 online_weight_sampler: Arc::clone(&self.online_weight_sampler),
-                frontier: Arc::clone(&self.frontier),
                 store: Arc::clone(&self.store),
                 node_private_key: burst_types::PrivateKey(self.node_private_key.0),
                 node_address: self.node_address.clone(),
@@ -4181,7 +4175,6 @@ impl BurstNode {
                 rep_weights: Arc::clone(&self.rep_weights),
                 message_dedup: Arc::clone(&self.message_dedup),
                 online_weight_sampler: Arc::clone(&self.online_weight_sampler),
-                frontier: Arc::clone(&self.frontier),
                 store: Arc::clone(&self.store),
                 node_private_key: burst_types::PrivateKey(self.node_private_key.0),
                 node_address: self.node_address.clone(),

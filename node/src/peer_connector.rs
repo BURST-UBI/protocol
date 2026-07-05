@@ -11,7 +11,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Mutex, RwLock};
 
 use burst_consensus::{ActiveElections, OnlineWeightSampler, RepWeightCache};
-use burst_ledger::DagFrontier;
 use burst_messages::PeerAddress;
 use burst_network::{MessageDedup, PeerManager};
 use burst_store_lmdb::LmdbStore;
@@ -40,7 +39,6 @@ pub struct PeerConnectorContext {
     pub rep_weights: Arc<RwLock<RepWeightCache>>,
     pub message_dedup: Arc<Mutex<MessageDedup>>,
     pub online_weight_sampler: Arc<Mutex<OnlineWeightSampler>>,
-    pub frontier: Arc<RwLock<DagFrontier>>,
     pub store: Arc<LmdbStore>,
     pub node_private_key: burst_types::PrivateKey,
     pub node_address: burst_types::WalletAddress,
@@ -252,7 +250,6 @@ async fn connect_to_peer_inner(
         Arc::clone(&ctx.online_weight_sampler),
         None,
         ip.clone(),
-        Arc::clone(&ctx.frontier),
         Arc::clone(&ctx.store),
         ctx.params_hash,
         ctx.bootstrap_feedback.clone(),

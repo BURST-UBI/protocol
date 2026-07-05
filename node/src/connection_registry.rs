@@ -13,14 +13,14 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 
 use burst_consensus::{ActiveElections, OnlineWeightSampler, RepWeightCache};
 use burst_crypto::{decode_address, verify_signature};
-use burst_ledger::{DagFrontier, StateBlock};
+use burst_ledger::StateBlock;
 use burst_network::{BandwidthThrottle, MessageDedup, PeerManager, PeerTelemetry, SynCookies};
 use burst_store::account::AccountStore;
 use burst_store::block::BlockStore;
 use burst_store_lmdb::LmdbStore;
 use burst_types::{BlockHash, PublicKey, Signature, Timestamp, WalletAddress};
 
-use crate::bootstrap::{AscPullAckPayload, BootstrapClient, BootstrapMessage, BootstrapServer};
+use crate::bootstrap::{AscPullAckPayload, BootstrapMessage, BootstrapServer};
 use crate::metrics::NodeMetrics;
 use crate::priority_queue::BlockPriorityQueue;
 use crate::wire_message::{ConfirmAckMsg, TelemetryAckMessage, WireMessage, WireVote};
@@ -299,7 +299,6 @@ pub fn spawn_peer_read_loop(
     online_weight_sampler: Arc<Mutex<OnlineWeightSampler>>,
     syn_cookies: Option<Arc<Mutex<SynCookies>>>,
     peer_ip: String,
-    frontier: Arc<RwLock<DagFrontier>>,
     store: Arc<LmdbStore>,
     our_params_hash: burst_types::BlockHash,
     bootstrap_feedback: mpsc::Sender<crate::bootstrap::BootstrapFeedback>,
@@ -339,7 +338,6 @@ pub fn spawn_peer_read_loop(
             syn_cookies.as_deref(),
             &peer_ip,
             &connection_registry,
-            &frontier,
             &store,
             our_params_hash,
             &bootstrap_feedback,
@@ -391,7 +389,6 @@ async fn peer_read_loop(
     syn_cookies: Option<&Mutex<SynCookies>>,
     peer_ip: &str,
     connection_registry: &RwLock<ConnectionRegistry>,
-    frontier: &RwLock<DagFrontier>,
     store: &LmdbStore,
     our_params_hash: burst_types::BlockHash,
     bootstrap_feedback: &mpsc::Sender<crate::bootstrap::BootstrapFeedback>,
@@ -648,121 +645,6 @@ async fn peer_read_loop(
                 }
             }
             Ok(WireMessage::Bootstrap(msg)) => match msg {
-                BootstrapMessage::FrontierReq {
-                    start_account,
-                    max_count,
-                } => {
-                    tracing::debug!(peer = %peer_id, "received frontier request");
-                    let frontier_entries: Vec<_> = {
-                        let f = frontier.read().await;
-                        f.iter().map(|(a, h)| (a.clone(), *h)).collect()
-                    };
-                    let resp = BootstrapServer::handle_frontier_req(
-                        &start_account,
-                        max_count,
-                        &frontier_entries,
-                    );
-                    let wire_resp = WireMessage::Bootstrap(resp);
-                    if let Ok(bytes) = bincode::serialize(&wire_resp) {
-                        let registry = connection_registry.read().await;
-                        registry.send(peer_id, bytes);
-                    }
-                }
-                BootstrapMessage::FrontierResp {
-                    frontiers,
-                    has_more,
-                } => {
-                    tracing::info!(
-                        peer = %peer_id,
-                        count = frontiers.len(),
-                        has_more,
-                        "received frontier response"
-                    );
-                    let local_frontiers: Vec<_> = {
-                        let f = frontier.read().await;
-                        f.iter().map(|(a, h)| (a.clone(), *h)).collect()
-                    };
-                    let mut client = BootstrapClient::new(10_000);
-                    let requests =
-                        client.process_frontier_resp(&frontiers, has_more, &local_frontiers);
-                    for req in requests {
-                        let wire_req = WireMessage::Bootstrap(req);
-                        if let Ok(bytes) = bincode::serialize(&wire_req) {
-                            let registry = connection_registry.read().await;
-                            registry.send(peer_id, bytes);
-                        }
-                    }
-                }
-                BootstrapMessage::BulkPullReq { account, end } => {
-                    tracing::debug!(peer = %peer_id, %account, "received bulk pull request");
-                    let block_store = store.block_store();
-                    let resp = BootstrapServer::handle_bulk_pull_req(
-                        &account,
-                        &end,
-                        |hash| block_store.get_block(hash).ok(),
-                        |acct| block_store.get_account_blocks(acct).unwrap_or_default(),
-                    );
-                    let wire_resp = WireMessage::Bootstrap(resp);
-                    if let Ok(bytes) = bincode::serialize(&wire_resp) {
-                        let registry = connection_registry.read().await;
-                        registry.send(peer_id, bytes);
-                    }
-                }
-                BootstrapMessage::BulkPullResp { blocks } => {
-                    let client = BootstrapClient::new(10_000);
-                    let deserialized = client.process_bulk_pull_resp(&blocks);
-                    // Cheaply reject malformed bootstrap streams before they
-                    // reach the (expensive) block processor: cap the count and
-                    // require a contiguous chain — a well-behaved BulkPull walks
-                    // successors, so every block links to the previous one.
-                    // Anything non-contiguous or oversized is junk / a DoS
-                    // stream and is dropped wholesale. (rsnano verifies chain
-                    // linkage of received blocks; block_processor remains the
-                    // authoritative validator.)
-                    const MAX_BOOTSTRAP_BLOCKS: usize = 10_000;
-                    let chain_ok = deserialized.len() <= MAX_BOOTSTRAP_BLOCKS
-                        && deserialized.windows(2).all(|w| w[1].previous == w[0].hash);
-                    if !chain_ok {
-                        tracing::warn!(
-                            peer = %peer_id,
-                            count = deserialized.len(),
-                            "dropping malformed bootstrap block stream (non-contiguous or oversized)"
-                        );
-                    } else {
-                        tracing::info!(
-                            peer = %peer_id,
-                            count = deserialized.len(),
-                            "received bulk pull response"
-                        );
-                        for block in deserialized {
-                            if !block_queue.push(block).await {
-                                tracing::warn!(peer = %peer_id, "block queue full during bootstrap");
-                                break;
-                            }
-                        }
-                    }
-                }
-                BootstrapMessage::BlockReq { hash } => {
-                    tracing::debug!(peer = %peer_id, %hash, "received block request");
-                    let block_store = store.block_store();
-                    let resp =
-                        BootstrapServer::handle_block_req(&hash, |h| block_store.get_block(h).ok());
-                    let wire_resp = WireMessage::Bootstrap(resp);
-                    if let Ok(bytes) = bincode::serialize(&wire_resp) {
-                        let registry = connection_registry.read().await;
-                        registry.send(peer_id, bytes);
-                    }
-                }
-                BootstrapMessage::BlockResp { block } => {
-                    if let Some(bytes) = block {
-                        if let Ok(blk) = bincode::deserialize::<StateBlock>(&bytes) {
-                            tracing::debug!(peer = %peer_id, hash = %blk.hash, "received block response");
-                            if !block_queue.push(blk).await {
-                                tracing::warn!(peer = %peer_id, "block queue full during block fetch");
-                            }
-                        }
-                    }
-                }
                 BootstrapMessage::AscPullReq { id, payload } => {
                     let block_store = store.block_store();
                     let account_store = store.account_store();
