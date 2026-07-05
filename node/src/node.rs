@@ -582,7 +582,6 @@ impl BurstNode {
         let delegation_bp = Arc::clone(&self.delegation_engine);
         let delegation_store_bp = Arc::clone(&self.delegation_store);
         let vrf_client_bp = Arc::clone(&self.vrf_client);
-        let verifier_pool_bp = Arc::clone(&self.verifier_pool);
         let _verification_processor_bp = Arc::clone(&self.verification_processor);
         let verification_orch_bp = Arc::clone(&self.verification_orchestrator);
         let difficulty_adjuster_bp = Arc::clone(&self.difficulty_adjuster);
@@ -735,7 +734,9 @@ impl BurstNode {
                     None
                 };
 
-                // Enforce verification status for Send/Burn blocks
+                // Enforce verification status: these actions require a Verified
+                // account (incl. opting in as a verifier — only verified humans
+                // may verify others).
                 let verification_rejected = if matches!(
                     block.block_type,
                     BlockType::Send
@@ -743,6 +744,7 @@ impl BurstNode {
                         | BlockType::Merge
                         | BlockType::Endorse
                         | BlockType::Challenge
+                        | BlockType::VerifierOptIn
                 ) {
                     match prev_account.as_ref() {
                         // Account exists but isn't verified — cannot spend.
@@ -1286,10 +1288,10 @@ impl BurstNode {
 
                                 // Fetch VRF randomness and feed selected verifiers to the orchestrator
                                 let vrf = Arc::clone(&vrf_client_bp);
-                                let pool = Arc::clone(&verifier_pool_bp);
                                 let orch_vrf = Arc::clone(&verification_orch_bp);
                                 let target_for_vrf = target_addr.clone();
                                 let params_vrf = config_params_bp.clone();
+                                let store_vrf = Arc::clone(&store);
                                 tokio::spawn(async move {
                                     let client = vrf.lock().await;
                                     match client.fetch_latest().await {
@@ -1301,10 +1303,16 @@ impl BurstNode {
                                             rand_bytes[..copy_len]
                                                 .copy_from_slice(&randomness[..copy_len]);
 
-                                            let verifier_addrs = {
-                                                let p = pool.lock().await;
-                                                p.pool()
-                                            };
+                                            // Eligible verifier pool derived from
+                                            // CONFIRMED account state (opted in +
+                                            // verified + old enough) so every node
+                                            // computes the same set → deterministic
+                                            // VRF selection.
+                                            let verifier_addrs = eligible_verifiers(
+                                                &store_vrf,
+                                                &params_vrf,
+                                                unix_now_secs(),
+                                            );
 
                                             let mut orch = orch_vrf.lock().await;
                                             match orch.select_verifiers(
@@ -1861,6 +1869,7 @@ impl BurstNode {
                                                             expired_trst: 0,
                                                             revoked_trst: 0,
                                                             epoch: 0,
+                                                            verifier_opted_in_at: None,
                                                         }
                                                     });
                                                 let was_revoked = acct.state == burst_types::WalletState::Revoked;
@@ -3272,6 +3281,7 @@ impl BurstNode {
                     expired_trst: 0,
                     revoked_trst: 0,
                     epoch: 0,
+                    verifier_opted_in_at: None,
                 });
                 let is_new = base.head.is_zero();
                 let info = AccountInfo {
@@ -5069,6 +5079,38 @@ impl BurstNode {
 }
 
 /// Deterministic expiry-grouped auto-merge selection (whitepaper §Merging:
+/// Derive the eligible verifier pool from CONFIRMED account state: every wallet
+/// that (a) is Verified, (b) has opted in to the verifier pool
+/// (`verifier_opted_in_at`), and (c) has been verified for at least
+/// `min_verification_age_secs`. Because it is computed purely from committed
+/// account state that every node agrees on, all nodes derive the SAME pool — a
+/// prerequisite for deterministic VRF verifier selection. Excluded/penalized
+/// filtering is applied afterwards by the orchestrator.
+fn eligible_verifiers(
+    store: &LmdbStore,
+    params: &burst_types::ProtocolParams,
+    now_secs: u64,
+) -> Vec<burst_types::WalletAddress> {
+    let accounts = match store.account_store().iter_verified_accounts() {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::warn!("failed to list verified accounts for verifier pool: {e}");
+            return Vec::new();
+        }
+    };
+    accounts
+        .into_iter()
+        .filter(|a| {
+            let opted_in = a.verifier_opted_in_at.is_some();
+            let old_enough = a.verified_at.is_some_and(|v| {
+                now_secs.saturating_sub(v.as_secs()) >= params.min_verification_age_secs
+            });
+            opted_in && old_enough
+        })
+        .map(|a| a.address)
+        .collect()
+}
+
 /// Apply per-holder TRST revocation to the ledger. `revoke_by_origin` returns
 /// one [`burst_trst::RevocationEvent`] per affected live token, keyed by the
 /// CURRENT holder (which — via the merger graph — may be any downstream account,

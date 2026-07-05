@@ -44,6 +44,12 @@ pub enum BlockType {
     /// Governance activation block — records an on-chain parameter change
     /// (Tezos-style self-amendment). Placed on the genesis account's chain.
     GovernanceActivation,
+    /// Opt in to the verifier pool — a verified wallet volunteers to be
+    /// randomly selected (via VRF) to verify others. On-chain so every node
+    /// derives the same eligible pool (keeps VRF selection deterministic).
+    VerifierOptIn,
+    /// Opt out of the verifier pool (revokes a prior VerifierOptIn).
+    VerifierOptOut,
 }
 
 /// Current state block version.
@@ -166,6 +172,8 @@ impl StateBlock {
             BlockType::RejectReceive => 14,
             BlockType::VerificationVote => 15,
             BlockType::GovernanceActivation => 16,
+            BlockType::VerifierOptIn => 17,
+            BlockType::VerifierOptOut => 18,
         };
         buffer.push(block_type_byte);
 

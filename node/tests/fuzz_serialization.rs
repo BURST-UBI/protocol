@@ -170,6 +170,7 @@ fn arb_account_info() -> impl Strategy<Value = AccountInfo> {
                     expired_trst: expired,
                     revoked_trst: revoked,
                     epoch,
+                    verifier_opted_in_at: None,
                 }
             },
         )
@@ -419,6 +420,7 @@ fn stress_lmdb_1000_accounts() {
                 expired_trst: 0,
                 revoked_trst: 0,
                 epoch: 0,
+                verifier_opted_in_at: None,
             }
         })
         .collect();
@@ -491,6 +493,7 @@ fn stress_lmdb_account_pagination() {
             expired_trst: 0,
             revoked_trst: 0,
             epoch: 0,
+            verifier_opted_in_at: None,
         };
         store.put_account(&info).unwrap();
     }

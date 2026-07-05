@@ -177,6 +177,8 @@ pub struct AccountInfoResponse {
     pub block_count: u64,
     pub confirmation_height: u64,
     pub representative: String,
+    /// Unix seconds when this wallet opted in to the verifier pool, if it has.
+    pub verifier_opted_in_at: Option<u64>,
 }
 
 pub async fn handle_account_info(
@@ -219,6 +221,7 @@ pub async fn handle_account_info(
         block_count: account.block_count,
         confirmation_height: account.confirmation_height,
         representative: account.representative.to_string(),
+        verifier_opted_in_at: account.verifier_opted_in_at.map(|t| t.as_secs()),
     }))
 }
 
@@ -1540,6 +1543,7 @@ pub async fn handle_faucet(
             expired_trst: 0,
             revoked_trst: 0,
             epoch: 0,
+            verifier_opted_in_at: None,
         });
 
     account_info.state = burst_types::WalletState::Verified;
@@ -2215,6 +2219,7 @@ pub async fn handle_receive_simple(
             expired_trst: 0,
             revoked_trst: 0,
             epoch: 0,
+            verifier_opted_in_at: None,
         });
 
     let trst_before = account.trst_balance;
@@ -2435,6 +2440,125 @@ pub async fn handle_change_rep_simple(
         account: address.to_string(),
         old_representative: old_representative.to_string(),
         new_representative: req.new_representative,
+    }))
+}
+
+// ── verifier_opt_in / verifier_opt_out ───────────────────────────────
+// A verified wallet volunteers for (or leaves) the verifier pool. Published
+// on-chain so every node derives the same eligible set (deterministic VRF
+// selection). Not faucet-gated: opting in is a real protocol action needed for
+// decentralized verification after the genesis window. (Server-side signing
+// with the caller's key follows the same convenience pattern as the other
+// build-and-submit RPCs; a client-signed submission path is the mainnet ideal.)
+
+#[derive(Debug, Deserialize)]
+pub struct VerifierOptRequest {
+    pub private_key: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct VerifierOptResponse {
+    pub block_hash: String,
+    pub account: String,
+    pub opted_in: bool,
+}
+
+pub async fn handle_verifier_opt_in(
+    params: serde_json::Value,
+    state: &RpcState,
+) -> Result<serde_json::Value, RpcError> {
+    verifier_opt(params, state, true).await
+}
+
+pub async fn handle_verifier_opt_out(
+    params: serde_json::Value,
+    state: &RpcState,
+) -> Result<serde_json::Value, RpcError> {
+    verifier_opt(params, state, false).await
+}
+
+async fn verifier_opt(
+    params: serde_json::Value,
+    state: &RpcState,
+    opt_in: bool,
+) -> Result<serde_json::Value, RpcError> {
+    let req: VerifierOptRequest =
+        serde_json::from_value(params).map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
+    let private_key = parse_private_key(&req.private_key)?;
+    let public_key = burst_crypto::public_from_private(&private_key);
+    let address = burst_crypto::derive_address(&public_key);
+
+    let account = state
+        .account_store
+        .get_account(&address)
+        .map_err(|e| account_not_found(e, address.as_str()))?;
+
+    if account.head == BlockHash::ZERO {
+        return Err(RpcError::InvalidRequest(
+            "account has no blocks yet — receive or transact first".into(),
+        ));
+    }
+
+    let block_type = if opt_in {
+        burst_ledger::BlockType::VerifierOptIn
+    } else {
+        burst_ledger::BlockType::VerifierOptOut
+    };
+    let now = Timestamp::now();
+    let tx_hash = TxHash::new(burst_crypto::blake2b_256(
+        &[
+            address.as_str().as_bytes(),
+            &now.as_secs().to_be_bytes(),
+            if opt_in {
+                b"verifier_opt_in"
+            } else {
+                b"verifier_opt_out"
+            },
+        ]
+        .concat(),
+    ));
+
+    let spent_brn = prev_spent_brn(state, &account.head);
+    let pk_bytes = private_key.0;
+    let block = tokio::task::spawn_blocking({
+        let address = address.clone();
+        let representative = account.representative.clone();
+        let previous = account.head;
+        let trst_balance = account.trst_balance;
+        let work_gen = state.work_generator.clone();
+        let min_diff = state.params.min_work_difficulty;
+        let ph = state.params.params_hash();
+        move || {
+            let pk = burst_types::PrivateKey(pk_bytes);
+            build_and_sign_block(
+                block_type,
+                &address,
+                previous,
+                &representative,
+                spent_brn,
+                trst_balance,
+                BlockHash::ZERO,
+                TxHash::ZERO,
+                tx_hash,
+                &pk,
+                &work_gen,
+                min_diff,
+                ph,
+                Vec::new(),
+            )
+        }
+    })
+    .await
+    .map_err(|e| RpcError::Server(format!("block build task failed: {e}")))??;
+
+    // Single-writer: the block processor validates (requires Verified for
+    // opt-in), persists, and sets AccountInfo.verifier_opted_in_at.
+    submit_block(&block, state)?;
+
+    Ok(to_value(&VerifierOptResponse {
+        block_hash: format!("{}", block.hash),
+        account: address.to_string(),
+        opted_in: opt_in,
     }))
 }
 

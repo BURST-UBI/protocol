@@ -89,6 +89,7 @@ mod tests {
             expired_trst: 0,
             revoked_trst: 0,
             epoch: 0,
+            verifier_opted_in_at: None,
         }
     }
 

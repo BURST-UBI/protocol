@@ -42,6 +42,7 @@ pub fn update_account_on_block(
             expired_trst: 0,
             revoked_trst: 0,
             epoch: 0,
+            verifier_opted_in_at: None,
         }
     } else {
         let mut info = prev_account
@@ -81,6 +82,15 @@ pub fn update_account_on_block(
         // Epoch blocks upgrade the account version
         if block.block_type == BlockType::Epoch {
             info.epoch = block.version;
+        }
+
+        // Verifier pool opt-in/out. Recorded in confirmed account state so every
+        // node derives the same eligible verifier set (deterministic VRF
+        // selection). The opt-in timestamp also gates the minimum-age check.
+        match block.block_type {
+            BlockType::VerifierOptIn => info.verifier_opted_in_at = Some(block.timestamp),
+            BlockType::VerifierOptOut => info.verifier_opted_in_at = None,
+            _ => {}
         }
 
         info
@@ -293,6 +303,7 @@ mod tests {
             expired_trst: 0,
             revoked_trst: 0,
             epoch: 0,
+            verifier_opted_in_at: None,
         }
     }
 
@@ -391,6 +402,7 @@ mod tests {
             expired_trst: 0,
             revoked_trst: 0,
             epoch: 0,
+            verifier_opted_in_at: None,
         };
 
         assert_eq!(info.block_count, 1);

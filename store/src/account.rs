@@ -31,6 +31,13 @@ pub struct AccountInfo {
     /// Account epoch/version, upgraded by epoch blocks.
     #[serde(default)]
     pub epoch: u8,
+    /// When this wallet opted in to the verifier pool (`None` = not a verifier).
+    /// Set/cleared by on-chain VerifierOptIn / VerifierOptOut blocks. Because it
+    /// lives in confirmed account state, every node derives the SAME eligible
+    /// verifier set, keeping VRF verifier selection deterministic. Also gates the
+    /// minimum-verification-age eligibility check.
+    #[serde(default)]
+    pub verifier_opted_in_at: Option<Timestamp>,
 }
 
 /// Trait for account storage operations.

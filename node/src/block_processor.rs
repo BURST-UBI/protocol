@@ -858,7 +858,9 @@ impl BlockProcessor {
             BlockType::GovernanceProposal
             | BlockType::GovernanceVote
             | BlockType::Delegate
-            | BlockType::RevokeDelegation => {
+            | BlockType::RevokeDelegation
+            | BlockType::VerifierOptIn
+            | BlockType::VerifierOptOut => {
                 if block.brn_balance != prev_brn {
                     return Err(format!(
                         "{:?} block cannot change BRN balance",

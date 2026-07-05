@@ -141,6 +141,12 @@ pub struct ProtocolParams {
 
     /// Duration (seconds) that new-wallet rate limit applies.
     pub new_wallet_rate_limit_duration_secs: u64,
+
+    /// Minimum time (seconds) a wallet must have been verified before it is
+    /// eligible to be selected as a verifier (IMPLEMENTATION_DECISIONS §15.5).
+    /// Prevents freshly-verified (possibly sybil) wallets from immediately
+    /// gaining verification power. Default 30 days.
+    pub min_verification_age_secs: u64,
 }
 
 impl ProtocolParams {
@@ -207,6 +213,7 @@ impl ProtocolParams {
             min_work_difficulty: 0xffff_f000_0000_0000,
             new_wallet_tx_limit_per_day: 10,
             new_wallet_rate_limit_duration_secs: 30 * 24 * 3600, // 30 days
+            min_verification_age_secs: 30 * 24 * 3600,           // 30 days
         }
     }
 }
@@ -225,6 +232,7 @@ impl ProtocolParams {
         p.governance_supermajority_bps = 5100; // 51%
         p.governance_propagation_buffer_secs = 5;
         p.governance_proposal_window_secs = 30;
+        p.min_verification_age_secs = 0; // no age gate on testnet — fast verification
         p.min_work_difficulty = 0xffff_f000_0000_0000;
         p
     }
