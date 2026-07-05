@@ -2227,7 +2227,19 @@ impl BurstNode {
                                 "block confirmed by consensus"
                             );
 
-                            // TASK 3: Generate and broadcast a FINAL vote for the winner
+                            // TASK 3: Generate and broadcast a FINAL vote for the winner.
+                            //
+                            // TODO(consensus-port step 9): this emits the final
+                            // vote AFTER confirmation, which is backwards. rsnano
+                            // emits a final vote when an election reaches soft
+                            // quorum (`Election::has_quorum`), and confirmation
+                            // then requires a supermajority of those FINAL votes
+                            // (now enforced in `Election::try_confirm`). Until the
+                            // node vote-lifecycle is reworked to emit on
+                            // has_quorum, fork elections won't self-resolve — but
+                            // the non-fork hot path never creates an election, so
+                            // live operation is unaffected. This post-confirm
+                            // broadcast is now a harmless finalization echo.
                             {
                                 let mut vg = vote_generator_ct.lock().await;
                                 if vg.is_representative {

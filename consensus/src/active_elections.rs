@@ -147,7 +147,10 @@ impl ActiveElections {
             .values()
             .filter(|e| e.state == ElectionState::Confirmed)
             .filter_map(|e| {
-                let (winner, tally) = e.leading_block()?;
+                // The confirmed winner is the FINAL-tally leader (that's what
+                // cements a block), not the combined-tally leader.
+                let (winner, final_tally) = e.leading_final_block()?;
+                let tally = e.tally.get(&winner).copied().unwrap_or(final_tally);
                 let duration_ms = e
                     .state_changed_at
                     .as_secs()
@@ -156,7 +159,7 @@ impl ActiveElections {
                 Some(ElectionStatus {
                     winner,
                     tally,
-                    final_tally: tally,
+                    final_tally,
                     election_duration_ms: duration_ms,
                 })
             })
@@ -202,7 +205,10 @@ impl ActiveElections {
     pub fn get_fork_losers(&self, confirmed_root: &BlockHash) -> Vec<BlockHash> {
         if let Some(election) = self.elections.get(confirmed_root) {
             if election.is_confirmed() {
-                if let Some((winner, _)) = election.leading_block() {
+                // Losers = every candidate block except the FINAL-tally winner
+                // (the one that actually cemented). Using the combined-tally
+                // leader here could roll back the truly-confirmed block.
+                if let Some((winner, _)) = election.leading_final_block() {
                     return election
                         .tally
                         .keys()

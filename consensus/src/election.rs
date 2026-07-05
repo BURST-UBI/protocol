@@ -55,8 +55,15 @@ pub struct Election {
     pub state: ElectionState,
     /// Latest vote per representative (keyed by voter address).
     pub last_votes: HashMap<WalletAddress, VoteInfo>,
-    /// Per-block weight tally.
+    /// Per-block weight tally over ALL votes (final and non-final). Used for the
+    /// `has_quorum` margin signal (which tells the node it may start emitting
+    /// FINAL votes) — NOT for confirmation.
     pub tally: HashMap<BlockHash, u128>,
+    /// Per-block weight tally over FINAL votes only. Confirmation is gated on
+    /// this (rsnano parity): a block is cemented only when a supermajority of
+    /// *final* (irrevocable) weight backs it. Confirming on the combined
+    /// `tally` would let a block be cemented on soft, still-changeable votes.
+    pub final_tally: HashMap<BlockHash, u128>,
     /// When the election was created.
     pub created_at: Timestamp,
     /// When the state last changed.
@@ -78,6 +85,7 @@ impl Election {
             state: ElectionState::Passive,
             last_votes: HashMap::new(),
             tally: HashMap::new(),
+            final_tally: HashMap::new(),
             created_at: now,
             state_changed_at: now,
             confirmation_threshold,
@@ -133,10 +141,16 @@ impl Election {
 
             let new_sequence = existing.sequence + 1;
 
-            // Record the new vote
+            // Record the new vote. The old vote was necessarily non-final (a
+            // final vote can't be re-cast — guarded above), so only the
+            // combined `tally` needed the subtraction; `final_tally` gains the
+            // new weight iff this vote is final.
             let info = VoteInfo::new(voter.clone(), block, weight, is_final, now, new_sequence);
             self.last_votes.insert(voter.clone(), info);
             *self.tally.entry(block).or_insert(0) += weight;
+            if is_final {
+                *self.final_tally.entry(block).or_insert(0) += weight;
+            }
 
             // Transition from Passive to Active on first vote activity
             if self.state == ElectionState::Passive {
@@ -150,6 +164,9 @@ impl Election {
             let info = VoteInfo::new(voter.clone(), block, weight, is_final, now, 1);
             self.last_votes.insert(voter.clone(), info);
             *self.tally.entry(block).or_insert(0) += weight;
+            if is_final {
+                *self.final_tally.entry(block).or_insert(0) += weight;
+            }
 
             if self.state == ElectionState::Passive {
                 self.state = ElectionState::Active;
@@ -172,9 +189,15 @@ impl Election {
             return None;
         }
 
-        let (winner, winner_tally) = self.leading_block()?;
+        // Confirmation is gated on FINAL votes only (rsnano parity). A block
+        // is cemented only when a supermajority of irrevocable weight backs it;
+        // the combined `tally` (which includes soft, still-changeable votes)
+        // must never cement a block. Because a representative casts at most one
+        // final vote, two competing blocks can't each reach a final
+        // supermajority, so a final-tally threshold is fork-safe on its own.
+        let (winner, winner_final_tally) = self.leading_final_block()?;
 
-        if winner_tally >= self.confirmation_threshold {
+        if winner_final_tally >= self.confirmation_threshold {
             self.state = ElectionState::Confirmed;
             self.state_changed_at = now;
 
@@ -183,15 +206,36 @@ impl Election {
                 .saturating_sub(self.created_at.as_secs())
                 .saturating_mul(1000);
 
+            // Report the winner's total tally alongside its (confirming) final tally.
+            let winner_total = self
+                .tally
+                .get(&winner)
+                .copied()
+                .unwrap_or(winner_final_tally);
+
             Some(ElectionStatus {
                 winner,
-                tally: winner_tally,
-                final_tally: winner_tally,
+                tally: winner_total,
+                final_tally: winner_final_tally,
                 election_duration_ms: duration_ms,
             })
         } else {
             None
         }
+    }
+
+    /// Whether the election has a soft quorum: the leading block leads the
+    /// nearest competitor by at least the confirmation threshold across ALL
+    /// (final + non-final) votes. This is a *margin* test — it guarantees no
+    /// competing fork can simultaneously reach quorum — and it is the signal
+    /// the node uses to decide it may begin emitting FINAL votes (rsnano's
+    /// `has_quorum`). It does NOT by itself confirm the election.
+    pub fn has_quorum(&self) -> bool {
+        let mut tallies: Vec<u128> = self.tally.values().copied().collect();
+        tallies.sort_unstable_by(|a, b| b.cmp(a));
+        let first = tallies.first().copied().unwrap_or(0);
+        let second = tallies.get(1).copied().unwrap_or(0);
+        first.saturating_sub(second) >= self.confirmation_threshold
     }
 
     /// Check if the election has timed out.
@@ -226,9 +270,19 @@ impl Election {
         self.state == ElectionState::Expired
     }
 
-    /// Returns the block with the most voting weight, along with its tally.
+    /// Returns the block with the most voting weight (all votes), along with
+    /// its combined tally. Used for the `has_quorum` margin signal and reads.
     pub fn leading_block(&self) -> Option<(BlockHash, u128)> {
         self.tally
+            .iter()
+            .max_by_key(|(_, w)| *w)
+            .map(|(hash, w)| (*hash, *w))
+    }
+
+    /// Returns the block with the most FINAL voting weight, along with its
+    /// final tally. Confirmation is derived from this.
+    pub fn leading_final_block(&self) -> Option<(BlockHash, u128)> {
+        self.final_tally
             .iter()
             .max_by_key(|(_, w)| *w)
             .map(|(hash, w)| (*hash, *w))
@@ -540,5 +594,76 @@ mod tests {
         assert_eq!(r2, VoteResult::Ignored);
         // Only alice's vote should be tallied
         assert_eq!(e.tally.get(&make_hash(2)), Some(&500));
+    }
+
+    // --- Final-tally confirmation (soft votes must NOT cement) ---
+
+    #[test]
+    fn soft_votes_do_not_confirm_even_above_threshold() {
+        let mut e = Election::new(make_hash(1), 1000, ts(100));
+        // 900 of soft (non-final) weight — well over the 670 threshold.
+        e.vote(&make_voter("alice"), make_hash(2), 500, false, ts(101));
+        e.vote(&make_voter("bob"), make_hash(2), 400, false, ts(102));
+
+        // Combined tally is over threshold...
+        assert_eq!(e.tally.get(&make_hash(2)), Some(&900));
+        // ...but there are no FINAL votes, so it must NOT confirm.
+        assert!(e.try_confirm(ts(103)).is_none());
+        assert_ne!(e.state, ElectionState::Confirmed);
+        assert!(e.final_tally.is_empty());
+    }
+
+    #[test]
+    fn only_final_weight_counts_toward_confirmation() {
+        let mut e = Election::new(make_hash(1), 1000, ts(100));
+        // 400 soft + 300 final on block 2 = 700 combined, but only 300 final.
+        e.vote(&make_voter("alice"), make_hash(2), 400, false, ts(101));
+        e.vote(&make_voter("bob"), make_hash(2), 300, true, ts(102));
+
+        assert_eq!(e.tally.get(&make_hash(2)), Some(&700));
+        assert_eq!(e.final_tally.get(&make_hash(2)), Some(&300));
+        // 300 final < 670 → no confirmation despite 700 combined.
+        assert!(e.try_confirm(ts(103)).is_none());
+
+        // Carol adds 400 final → 700 final ≥ 670 → confirms.
+        e.vote(&make_voter("carol"), make_hash(2), 400, true, ts(104));
+        let status = e
+            .try_confirm(ts(105))
+            .expect("should confirm on final quorum");
+        assert_eq!(status.winner, make_hash(2));
+        assert_eq!(status.final_tally, 700);
+    }
+
+    #[test]
+    fn soft_upgraded_to_final_then_confirms() {
+        let mut e = Election::new(make_hash(1), 1000, ts(100));
+        e.vote(&make_voter("alice"), make_hash(2), 700, false, ts(101));
+        assert!(e.try_confirm(ts(102)).is_none()); // soft only
+                                                   // Upgrade to final
+        e.vote(&make_voter("alice"), make_hash(2), 700, true, ts(103));
+        assert_eq!(e.final_tally.get(&make_hash(2)), Some(&700));
+        assert!(e.try_confirm(ts(104)).is_some());
+    }
+
+    // --- has_quorum margin signal ---
+
+    #[test]
+    fn has_quorum_true_only_with_supermajority_margin() {
+        let mut e = Election::new(make_hash(1), 1000, ts(100));
+        // Single leader with 700 vs nothing → margin 700 ≥ 670.
+        e.vote(&make_voter("alice"), make_hash(2), 700, false, ts(101));
+        assert!(e.has_quorum());
+    }
+
+    #[test]
+    fn has_quorum_false_for_contested_forks() {
+        let mut e = Election::new(make_hash(1), 1000, ts(100));
+        // Two forks near 50/50 — neither leads by the threshold margin.
+        e.vote(&make_voter("alice"), make_hash(2), 500, false, ts(101));
+        e.vote(&make_voter("bob"), make_hash(3), 480, false, ts(102));
+        // margin = 20 < 670 → no soft quorum, so neither fork can go final.
+        assert!(!e.has_quorum());
+        // And of course nothing confirms.
+        assert!(e.try_confirm(ts(103)).is_none());
     }
 }
