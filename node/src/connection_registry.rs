@@ -18,9 +18,9 @@ use burst_network::{BandwidthThrottle, MessageDedup, PeerManager, PeerTelemetry,
 use burst_store::account::AccountStore;
 use burst_store::block::BlockStore;
 use burst_store_lmdb::LmdbStore;
-use burst_types::{PublicKey, Signature, Timestamp, WalletAddress};
+use burst_types::{BlockHash, PublicKey, Signature, Timestamp, WalletAddress};
 
-use crate::bootstrap::{BootstrapClient, BootstrapMessage, BootstrapServer};
+use crate::bootstrap::{AscPullAckPayload, BootstrapClient, BootstrapMessage, BootstrapServer};
 use crate::metrics::NodeMetrics;
 use crate::priority_queue::BlockPriorityQueue;
 use crate::wire_message::{ConfirmAckMsg, TelemetryAckMessage, WireMessage, WireVote};
@@ -760,6 +760,76 @@ async fn peer_read_loop(
                         }
                     }
                 }
+                BootstrapMessage::AscPullReq { id, payload } => {
+                    let block_store = store.block_store();
+                    let account_store = store.account_store();
+                    let resp = BootstrapServer::handle_asc_pull_req(
+                        id,
+                        &payload,
+                        |account, start, count| {
+                            let start_h = if start.is_zero() {
+                                0
+                            } else {
+                                block_store
+                                    .height_of_block(start)
+                                    .ok()
+                                    .flatten()
+                                    .unwrap_or(0)
+                            };
+                            let mut out = Vec::new();
+                            for h in (start_h + 1)..=(start_h + count as u64) {
+                                match block_store.block_at_height(account, h) {
+                                    Ok(Some(hash)) => match block_store.get_block(&hash) {
+                                        Ok(b) => out.push(b),
+                                        Err(_) => break,
+                                    },
+                                    _ => break,
+                                }
+                            }
+                            out
+                        },
+                        |account| match account_store.get_account(account) {
+                            Ok(info) => (info.head, info.block_count),
+                            Err(_) => (BlockHash::ZERO, 0),
+                        },
+                        |start_account, count| match account_store
+                            .iter_accounts_paged(Some(start_account), count as usize)
+                        {
+                            Ok(accts) => accts.into_iter().map(|a| (a.address, a.head)).collect(),
+                            Err(_) => Vec::new(),
+                        },
+                    );
+                    if let Ok(bytes) = bincode::serialize(&WireMessage::Bootstrap(resp)) {
+                        connection_registry.read().await.send(peer_id, bytes);
+                    }
+                }
+                BootstrapMessage::AscPullAck { id: _, payload } => match payload {
+                    AscPullAckPayload::Blocks(blocks) => {
+                        // Verify a contiguous ascending run before ingest (same
+                        // cheap pre-filter as legacy bulk-pull); block_processor
+                        // remains the authoritative validator.
+                        let decoded: Vec<StateBlock> = blocks
+                            .iter()
+                            .filter_map(|b| bincode::deserialize::<StateBlock>(b).ok())
+                            .collect();
+                        let chain_ok = decoded.len() == blocks.len()
+                            && decoded.windows(2).all(|w| w[1].previous == w[0].hash);
+                        if chain_ok {
+                            for blk in decoded {
+                                if !block_queue.push(blk).await {
+                                    tracing::warn!(peer = %peer_id, "block queue full during asc-pull");
+                                    break;
+                                }
+                            }
+                        } else {
+                            tracing::warn!(peer = %peer_id, "dropping malformed asc-pull block run");
+                        }
+                    }
+                    AscPullAckPayload::AccountInfo { .. } | AscPullAckPayload::Frontiers(_) => {
+                        // Consumed by the bootstrapper's discovery loop (next slice).
+                        tracing::trace!(peer = %peer_id, "received asc-pull account-info/frontiers ack");
+                    }
+                },
             },
             Ok(WireMessage::Handshake(hs)) => {
                 tracing::debug!(

@@ -54,6 +54,70 @@ pub enum BootstrapMessage {
         /// Serialized StateBlock (bincode-encoded), or None if not found.
         block: Option<Vec<u8>>,
     },
+
+    /// Ascending-bootstrap pull request (modern path): parallel, id-correlated,
+    /// typed (blocks / account-info / frontiers). Coexists with the legacy
+    /// Frontier/BulkPull/Block messages above during the migration.
+    AscPullReq {
+        /// Correlates the [`BootstrapMessage::AscPullAck`] to this request.
+        id: u64,
+        /// What to pull.
+        payload: AscPullReqPayload,
+    },
+    /// Ascending-bootstrap pull response, echoing the request `id`.
+    AscPullAck {
+        /// Echoes the request id.
+        id: u64,
+        /// The pulled data.
+        payload: AscPullAckPayload,
+    },
+}
+
+/// What an [`BootstrapMessage::AscPullReq`] asks for.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum AscPullReqPayload {
+    /// Up to `count` blocks for `account`, starting at the block AFTER `start`
+    /// (`start` = the requester's current frontier for the account, or
+    /// `BlockHash::ZERO` to start from the open block). Returns a contiguous
+    /// ascending run.
+    Blocks {
+        /// Account whose chain to pull.
+        account: WalletAddress,
+        /// Requester's current frontier (pull begins at its successor).
+        start: BlockHash,
+        /// Max blocks to return (server also caps at `ASC_PULL_MAX_BLOCKS`).
+        count: u16,
+    },
+    /// The account's current frontier head and block count.
+    AccountInfo {
+        /// Account to describe.
+        account: WalletAddress,
+    },
+    /// A page of up to `count` account frontiers from `start_account`.
+    Frontiers {
+        /// First account to return (inclusive).
+        start_account: WalletAddress,
+        /// Max frontier entries to return.
+        count: u16,
+    },
+}
+
+/// The data returned in an [`BootstrapMessage::AscPullAck`].
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum AscPullAckPayload {
+    /// A contiguous, ascending run of serialized blocks (bincode-encoded).
+    Blocks(Vec<Vec<u8>>),
+    /// Account frontier head + height (`ZERO`/`0` if the account is unknown).
+    AccountInfo {
+        /// The account described.
+        account: WalletAddress,
+        /// Its frontier head (`BlockHash::ZERO` if unknown).
+        head: BlockHash,
+        /// Its block count (`0` if unknown).
+        block_count: u64,
+    },
+    /// A page of `(account, head)` frontiers.
+    Frontiers(Vec<(WalletAddress, BlockHash)>),
 }
 
 /// Bootstrap client — syncs ledger data from peers.
@@ -262,7 +326,61 @@ impl BootstrapServer {
             block: get_block(hash),
         }
     }
+
+    /// Serve an ascending-bootstrap pull request, producing the matching
+    /// [`BootstrapMessage::AscPullAck`] (echoing `id`). Ledger access is
+    /// injected via closures so this stays pure/testable:
+    /// - `blocks_after(account, start, count)` → up to `count` serialized
+    ///   blocks for `account`, contiguous & ascending, beginning at the
+    ///   successor of `start` (or the open block if `start` is ZERO).
+    /// - `account_info(account)` → `(head, block_count)` (`ZERO`/`0` if unknown).
+    /// - `frontiers_from(start_account, count)` → a page of `(account, head)`.
+    pub fn handle_asc_pull_req<FB, FA, FF>(
+        id: u64,
+        payload: &AscPullReqPayload,
+        blocks_after: FB,
+        account_info: FA,
+        frontiers_from: FF,
+    ) -> BootstrapMessage
+    where
+        FB: FnOnce(&WalletAddress, &BlockHash, u16) -> Vec<Vec<u8>>,
+        FA: FnOnce(&WalletAddress) -> (BlockHash, u64),
+        FF: FnOnce(&WalletAddress, u16) -> Vec<(WalletAddress, BlockHash)>,
+    {
+        let payload = match payload {
+            AscPullReqPayload::Blocks {
+                account,
+                start,
+                count,
+            } => {
+                let c = (*count).min(ASC_PULL_MAX_BLOCKS);
+                AscPullAckPayload::Blocks(blocks_after(account, start, c))
+            }
+            AscPullReqPayload::AccountInfo { account } => {
+                let (head, block_count) = account_info(account);
+                AscPullAckPayload::AccountInfo {
+                    account: account.clone(),
+                    head,
+                    block_count,
+                }
+            }
+            AscPullReqPayload::Frontiers {
+                start_account,
+                count,
+            } => {
+                let c = (*count).min(ASC_PULL_MAX_FRONTIERS);
+                AscPullAckPayload::Frontiers(frontiers_from(start_account, c))
+            }
+        };
+        BootstrapMessage::AscPullAck { id, payload }
+    }
 }
+
+/// Max blocks served in one ascending-bootstrap Blocks response.
+pub const ASC_PULL_MAX_BLOCKS: u16 = 128;
+
+/// Max frontier entries served in one ascending-bootstrap Frontiers response.
+pub const ASC_PULL_MAX_FRONTIERS: u16 = 1000;
 
 #[cfg(test)]
 mod tests {
@@ -728,5 +846,103 @@ mod tests {
 
         // Step 5: Bootstrap is complete
         assert!(client.is_complete());
+    }
+
+    // ── Ascending-bootstrap responder tests ────────────────────────────
+
+    #[test]
+    fn asc_pull_blocks_caps_count_and_echoes_id() {
+        let acct = test_account_1();
+        let payload = AscPullReqPayload::Blocks {
+            account: acct.clone(),
+            start: BlockHash::ZERO,
+            count: 5000, // over the cap
+        };
+        let resp = BootstrapServer::handle_asc_pull_req(
+            7,
+            &payload,
+            |a, s, c| {
+                assert_eq!(a, &acct);
+                assert!(s.is_zero());
+                assert_eq!(c, ASC_PULL_MAX_BLOCKS, "count must be capped");
+                vec![vec![1, 2, 3], vec![4, 5, 6]]
+            },
+            |_| (BlockHash::ZERO, 0),
+            |_, _| Vec::new(),
+        );
+        match resp {
+            BootstrapMessage::AscPullAck {
+                id,
+                payload: AscPullAckPayload::Blocks(b),
+            } => {
+                assert_eq!(id, 7);
+                assert_eq!(b.len(), 2);
+            }
+            other => panic!("expected Blocks ack, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn asc_pull_account_info_response() {
+        let acct = test_account_2();
+        let payload = AscPullReqPayload::AccountInfo {
+            account: acct.clone(),
+        };
+        let resp = BootstrapServer::handle_asc_pull_req(
+            9,
+            &payload,
+            |_, _, _| Vec::new(),
+            |a| {
+                assert_eq!(a, &acct);
+                (BlockHash::new([7; 32]), 42)
+            },
+            |_, _| Vec::new(),
+        );
+        match resp {
+            BootstrapMessage::AscPullAck {
+                id,
+                payload:
+                    AscPullAckPayload::AccountInfo {
+                        account,
+                        head,
+                        block_count,
+                    },
+            } => {
+                assert_eq!(id, 9);
+                assert_eq!(account, acct);
+                assert_eq!(head, BlockHash::new([7; 32]));
+                assert_eq!(block_count, 42);
+            }
+            other => panic!("expected AccountInfo ack, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn asc_pull_frontiers_caps_and_returns_page() {
+        let payload = AscPullReqPayload::Frontiers {
+            start_account: test_account_1(),
+            count: 60_000, // over the cap (ASC_PULL_MAX_FRONTIERS), within u16
+        };
+        let resp = BootstrapServer::handle_asc_pull_req(
+            3,
+            &payload,
+            |_, _, _| Vec::new(),
+            |_| (BlockHash::ZERO, 0),
+            |start, c| {
+                assert_eq!(start, &test_account_1());
+                assert_eq!(c, ASC_PULL_MAX_FRONTIERS, "count must be capped");
+                vec![(test_account_1(), BlockHash::new([1; 32]))]
+            },
+        );
+        match resp {
+            BootstrapMessage::AscPullAck {
+                id,
+                payload: AscPullAckPayload::Frontiers(f),
+            } => {
+                assert_eq!(id, 3);
+                assert_eq!(f.len(), 1);
+            }
+            other => panic!("expected Frontiers ack, got {:?}", other),
+        }
     }
 }
