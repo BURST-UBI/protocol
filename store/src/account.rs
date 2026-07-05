@@ -38,6 +38,15 @@ pub struct AccountInfo {
     /// minimum-verification-age eligibility check.
     #[serde(default)]
     pub verifier_opted_in_at: Option<Timestamp>,
+    /// Whether this representative has been EVICTED from the ORV consensus set by
+    /// governance. An evicted rep contributes ZERO consensus weight (its own and
+    /// its delegators'), so its votes no longer count toward quorum. This is the
+    /// bad-actor backstop: the eviction decision is made by governance's
+    /// one-verified-human-one-vote process (NOT by ORV weight), so a rep that
+    /// amassed weight cannot veto its own eviction. Cleared by a reinstatement
+    /// proposal. Delegators regain their voice by re-delegating to an honest rep.
+    #[serde(default)]
+    pub orv_evicted: bool,
 }
 
 /// Trait for account storage operations.

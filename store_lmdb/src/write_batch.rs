@@ -500,6 +500,7 @@ mod tests {
             revoked_trst: 0,
             epoch: 0,
             verifier_opted_in_at: None,
+            orv_evicted: false,
         };
 
         let mut batch = env.tx_begin_write().expect("write_batch");

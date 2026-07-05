@@ -392,6 +392,9 @@ async fn dispatch_action(
         "governance_propose_simple" => {
             handlers::handle_governance_propose_simple(params, state).await
         }
+        "governance_propose_eviction" => {
+            handlers::handle_governance_propose_eviction(params, state).await
+        }
         "governance_vote_simple" => handlers::handle_governance_vote_simple(params, state).await,
         other => {
             warn!("unknown RPC action: {other}");

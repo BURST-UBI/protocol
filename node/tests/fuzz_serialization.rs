@@ -171,6 +171,7 @@ fn arb_account_info() -> impl Strategy<Value = AccountInfo> {
                     revoked_trst: revoked,
                     epoch,
                     verifier_opted_in_at: None,
+                    orv_evicted: false,
                 }
             },
         )
@@ -421,6 +422,7 @@ fn stress_lmdb_1000_accounts() {
                 revoked_trst: 0,
                 epoch: 0,
                 verifier_opted_in_at: None,
+                orv_evicted: false,
             }
         })
         .collect();
@@ -494,6 +496,7 @@ fn stress_lmdb_account_pagination() {
             revoked_trst: 0,
             epoch: 0,
             verifier_opted_in_at: None,
+            orv_evicted: false,
         };
         store.put_account(&info).unwrap();
     }

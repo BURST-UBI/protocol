@@ -38,7 +38,7 @@
 //! genesis bootstrap bridge), is preserved across rebuilds.
 
 use burst_types::WalletAddress;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Base consensus weight contributed by one verified human, before the
 /// contribution multiplier. Large enough to give the boost bps resolution.
@@ -72,6 +72,11 @@ pub struct RepWeightCache {
     /// Non-derived additive weight (the genesis bootstrap bridge). Preserved
     /// across rebuilds; see [`RepWeightCache::set_bonus`].
     bonus: HashMap<WalletAddress, u128>,
+    /// Representatives EVICTED from the ORV set by governance. An evicted rep
+    /// reports ZERO weight (derived and bonus alike), so its votes stop counting
+    /// toward quorum. Set by [`RepWeightCache::set_evicted`] from the on-chain
+    /// `orv_evicted` flags each rebuild.
+    evicted: HashSet<WalletAddress>,
 }
 
 /// The contribution boost in basis points for a given total expired TRST.
@@ -101,12 +106,16 @@ impl RepWeightCache {
         Self {
             reps: HashMap::new(),
             bonus: HashMap::new(),
+            evicted: HashSet::new(),
         }
     }
 
     /// A representative's current consensus weight (hybrid derived + bonus).
-    /// Returns 0 for an unknown representative.
+    /// Returns 0 for an unknown OR evicted representative.
     pub fn weight(&self, rep: &WalletAddress) -> u128 {
+        if self.evicted.contains(rep) {
+            return 0;
+        }
         let derived = self
             .reps
             .get(rep)
@@ -116,17 +125,34 @@ impl RepWeightCache {
     }
 
     /// Materialize every representative's weight as a map (used by the online
-    /// weight sampler and the `representatives` RPC).
+    /// weight sampler and the `representatives` RPC). Evicted reps are omitted.
     pub fn all_weights(&self) -> HashMap<WalletAddress, u128> {
         let mut out: HashMap<WalletAddress, u128> = HashMap::with_capacity(self.reps.len());
         for (rep, e) in &self.reps {
+            if self.evicted.contains(rep) {
+                continue;
+            }
             out.insert(rep.clone(), hybrid_weight(e.delegators, e.expired));
         }
         for (rep, b) in &self.bonus {
+            if self.evicted.contains(rep) {
+                continue;
+            }
             let entry = out.entry(rep.clone()).or_insert(0);
             *entry = entry.saturating_add(*b);
         }
         out
+    }
+
+    /// Replace the set of representatives evicted from the ORV consensus set.
+    /// Called from the rebuild with the current on-chain `orv_evicted` flags.
+    pub fn set_evicted(&mut self, evicted: HashSet<WalletAddress>) {
+        self.evicted = evicted;
+    }
+
+    /// Whether a representative is currently evicted.
+    pub fn is_evicted(&self, rep: &WalletAddress) -> bool {
+        self.evicted.contains(rep)
     }
 
     /// Total consensus weight across all representatives.
@@ -337,6 +363,35 @@ mod tests {
         assert_eq!(all.get(&account("human")), Some(&WEIGHT_PER_HUMAN));
         assert_eq!(all.get(&rep("seed")), Some(&42u128));
         assert_eq!(cache.rep_count(), 2);
+    }
+
+    #[test]
+    fn eviction_zeroes_a_reps_weight_including_bonus() {
+        // A rep with real delegators AND a bootstrap bonus is evicted → it
+        // reports zero weight and drops out of all_weights entirely, so its
+        // votes stop counting. Reinstatement restores it.
+        let mut cache = RepWeightCache::new();
+        let bad = rep("bad_rep");
+        cache.rebuild_from_accounts(
+            vec![
+                (true, bad.clone(), CONTRIBUTION_SCALE),
+                (true, bad.clone(), 0),
+            ]
+            .into_iter(),
+        );
+        cache.set_bonus(&bad, 999);
+        assert!(cache.weight(&bad) > 0);
+
+        // Evict.
+        cache.set_evicted(HashSet::from([bad.clone()]));
+        assert_eq!(cache.weight(&bad), 0);
+        assert!(cache.is_evicted(&bad));
+        assert!(!cache.all_weights().contains_key(&bad));
+
+        // Reinstate (empty evicted set) — weight returns.
+        cache.set_evicted(HashSet::new());
+        assert!(cache.weight(&bad) > 0);
+        assert!(cache.all_weights().contains_key(&bad));
     }
 
     #[test]

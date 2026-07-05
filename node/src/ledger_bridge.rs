@@ -6,7 +6,7 @@ use burst_governance::ProposalContent;
 use burst_ledger::{BlockType, StateBlock};
 use burst_transactions::governance::GovernanceVote;
 use burst_trst::{TrstEngine, TrstToken};
-use burst_types::{BlockHash, Timestamp, WalletAddress};
+use burst_types::{BlockHash, Timestamp, TxHash, WalletAddress};
 
 /// Process a confirmed block through the economic engines.
 ///
@@ -209,7 +209,7 @@ pub fn process_block_economics(
         },
         BlockType::GovernanceProposal => {
             let proposal_hash = block.transaction;
-            let content = decode_proposal_content_from_link(&block.link);
+            let content = decode_proposal_content(&block.link, &block.origin);
             EconomicResult::GovernanceProposal {
                 proposer: block.account.clone(),
                 proposal_hash,
@@ -338,13 +338,34 @@ fn decode_governance_vote(byte: u8) -> Option<GovernanceVote> {
     }
 }
 
-/// Try to decode a `ProposalContent` from a GovernanceProposal block's link field.
+/// Decode a `ProposalContent` from a GovernanceProposal block.
 ///
-/// The link field is expected to contain a bincode-serialized `ProposalContent`.
-/// Returns `None` if the link is all zeros or deserialization fails (e.g., the
-/// block was created before content encoding was implemented, or the content
-/// is too large to fit in 32 bytes).
-fn decode_proposal_content_from_link(link: &BlockHash) -> Option<ProposalContent> {
+/// Eviction/reinstatement proposals are recognised by the `origin` sentinel;
+/// their `link` holds the target representative's 32-byte pubkey (the on-chain
+/// justification `reason` is not carried — it is a UX/audit field only). All
+/// other proposals bincode-decode a `ProposalContent` directly from `link`
+/// (which fits compact contents like a parameter change). Returns `None` if the
+/// link is all zeros or decoding fails (e.g. content too large for 32 bytes).
+fn decode_proposal_content(link: &BlockHash, origin: &TxHash) -> Option<ProposalContent> {
+    let obytes = *origin.as_bytes();
+    if obytes == burst_governance::ORV_EVICT_MARKER {
+        return extract_receiver_from_link(link).map(|target| {
+            ProposalContent::RepresentativeEviction {
+                target,
+                evict: true,
+                reason: String::new(),
+            }
+        });
+    }
+    if obytes == burst_governance::ORV_REINSTATE_MARKER {
+        return extract_receiver_from_link(link).map(|target| {
+            ProposalContent::RepresentativeEviction {
+                target,
+                evict: false,
+                reason: String::new(),
+            }
+        });
+    }
     let bytes = link.as_bytes();
     if bytes.iter().all(|&b| b == 0) {
         return None;

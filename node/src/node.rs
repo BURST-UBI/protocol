@@ -1702,6 +1702,30 @@ impl BurstNode {
                                                 }
                                             }
                                         }
+                                        // ORV evictions/reinstatements: set or
+                                        // clear the target's `orv_evicted` flag in
+                                        // confirmed account state. Applied on EVERY
+                                        // node as it processes this activation block
+                                        // (so all nodes agree), and picked up by the
+                                        // periodic rep-weight rebuild. Idempotent.
+                                        let evictions = gov.drain_pending_evictions();
+                                        for (target, evict) in &evictions {
+                                            match store.account_store().get_account(target) {
+                                                Ok(mut acct) => {
+                                                    acct.orv_evicted = *evict;
+                                                    if let Err(e) =
+                                                        store.account_store().put_account(&acct)
+                                                    {
+                                                        tracing::warn!(%target, "failed to persist ORV eviction: {e}");
+                                                    } else {
+                                                        tracing::warn!(%target, evict = *evict, "representative ORV eviction/reinstatement applied via activation block");
+                                                    }
+                                                }
+                                                Err(_) => {
+                                                    tracing::warn!(%target, "ORV eviction target account not found — skipping");
+                                                }
+                                            }
+                                        }
                                         // Persist to LMDB
                                         if let Ok(bytes) = bincode::serialize(&config_params_bp) {
                                             let brn_store_meta = store.brn_store();
@@ -1893,6 +1917,7 @@ impl BurstNode {
                                                             revoked_trst: 0,
                                                             epoch: 0,
                                                             verifier_opted_in_at: None,
+                                                            orv_evicted: false,
                                                         }
                                                     });
                                                 let was_revoked = acct.state == burst_types::WalletState::Revoked;
@@ -3368,6 +3393,7 @@ impl BurstNode {
                     revoked_trst: 0,
                     epoch: 0,
                     verifier_opted_in_at: None,
+                    orv_evicted: false,
                 });
                 let is_new = base.head.is_zero();
                 let info = AccountInfo {
@@ -5167,6 +5193,12 @@ fn eligible_verifiers(
 async fn rebuild_rep_weights(store: &LmdbStore, rep_weights: &RwLock<RepWeightCache>) {
     match store.account_store().iter_accounts() {
         Ok(accounts) => {
+            // Reps evicted from the ORV set by governance contribute zero weight.
+            let evicted: std::collections::HashSet<burst_types::WalletAddress> = accounts
+                .iter()
+                .filter(|a| a.orv_evicted)
+                .map(|a| a.address.clone())
+                .collect();
             let mut rw = rep_weights.write().await;
             rw.rebuild_from_accounts(accounts.into_iter().map(|a| {
                 (
@@ -5175,6 +5207,7 @@ async fn rebuild_rep_weights(store: &LmdbStore, rep_weights: &RwLock<RepWeightCa
                     a.expired_trst,
                 )
             }));
+            rw.set_evicted(evicted);
             tracing::debug!(
                 reps = rw.rep_count(),
                 "rep weights rebuilt from account store"

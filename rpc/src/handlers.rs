@@ -179,6 +179,8 @@ pub struct AccountInfoResponse {
     pub representative: String,
     /// Unix seconds when this wallet opted in to the verifier pool, if it has.
     pub verifier_opted_in_at: Option<u64>,
+    /// Whether this representative has been evicted from the ORV consensus set.
+    pub orv_evicted: bool,
 }
 
 pub async fn handle_account_info(
@@ -222,6 +224,7 @@ pub async fn handle_account_info(
         confirmation_height: account.confirmation_height,
         representative: account.representative.to_string(),
         verifier_opted_in_at: account.verifier_opted_in_at.map(|t| t.as_secs()),
+        orv_evicted: account.orv_evicted,
     }))
 }
 
@@ -919,6 +922,17 @@ fn proposal_description(proposal: &Proposal) -> String {
         } => {
             format!("EMERGENCY {:?}: {}", param, description)
         }
+        burst_governance::ProposalContent::RepresentativeEviction {
+            target,
+            evict,
+            reason,
+        } => {
+            let verb = if *evict { "Evict" } else { "Reinstate" };
+            format!(
+                "{} representative {} from ORV set: {}",
+                verb, target, reason
+            )
+        }
     }
 }
 
@@ -1078,6 +1092,10 @@ pub async fn handle_governance_proposal_info(
         burst_governance::ProposalContent::Emergency {
             param, new_value, ..
         } => (format!("{:?}", param), new_value.to_string()),
+        burst_governance::ProposalContent::RepresentativeEviction { target, evict, .. } => (
+            if *evict { "evict_rep" } else { "reinstate_rep" }.to_string(),
+            target.to_string(),
+        ),
     };
 
     let (votes_yea, votes_nay, votes_abstain) = match proposal.phase {
@@ -1544,6 +1562,7 @@ pub async fn handle_faucet(
             revoked_trst: 0,
             epoch: 0,
             verifier_opted_in_at: None,
+            orv_evicted: false,
         });
 
     account_info.state = burst_types::WalletState::Verified;
@@ -2217,6 +2236,7 @@ pub async fn handle_receive_simple(
             revoked_trst: 0,
             epoch: 0,
             verifier_opted_in_at: None,
+            orv_evicted: false,
         });
 
     let trst_before = account.trst_balance;
@@ -2717,6 +2737,166 @@ pub async fn handle_governance_propose_simple(
         account: address.to_string(),
         param: req.param,
         new_value: req.new_value,
+    }))
+}
+
+// ── governance_propose_eviction (evict/reinstate an ORV representative) ──
+//
+// Opens a governance proposal to EVICT a representative from the ORV consensus
+// set (or REINSTATE one). Decided by the same one-verified-human-one-vote
+// process as every proposal — NOT by ORV weight — so a rep that amassed weight
+// cannot vote down its own eviction. On activation the target's `orv_evicted`
+// flag is set/cleared and it contributes zero consensus weight.
+//
+// Encoding: the target's 32-byte pubkey rides in the block `link`; the `origin`
+// field carries the evict/reinstate sentinel (the 32-byte link has no room for
+// both a target and a discriminant). `reason` is a UX/audit field only.
+
+#[derive(Debug, Deserialize)]
+pub struct GovernanceProposeEvictionRequest {
+    pub private_key: String,
+    /// The representative address to evict or reinstate.
+    pub target: String,
+    /// `true` to evict, `false` to reinstate.
+    pub evict: bool,
+    #[serde(default)]
+    pub reason: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GovernanceProposeEvictionResponse {
+    pub block_hash: String,
+    pub proposal_hash: String,
+    pub account: String,
+    pub target: String,
+    pub evict: bool,
+}
+
+pub async fn handle_governance_propose_eviction(
+    params: serde_json::Value,
+    state: &RpcState,
+) -> Result<serde_json::Value, RpcError> {
+    require_faucet(state)?;
+
+    let req: GovernanceProposeEvictionRequest =
+        serde_json::from_value(params).map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
+    let private_key = parse_private_key(&req.private_key)?;
+    let public_key = burst_crypto::public_from_private(&private_key);
+    let address = burst_crypto::derive_address(&public_key);
+
+    let account = state
+        .account_store
+        .get_account(&address)
+        .map_err(|e| account_not_found(e, address.as_str()))?;
+    if account.head == BlockHash::ZERO {
+        return Err(RpcError::InvalidRequest(
+            "account has no blocks yet — burn BRN first".into(),
+        ));
+    }
+
+    // Target address → 32-byte pubkey carried in the block `link`.
+    let target_addr = WalletAddress::new(req.target.clone());
+    let target_pubkey = burst_crypto::decode_address(&req.target).ok_or_else(|| {
+        RpcError::InvalidRequest(format!("invalid target address: {}", req.target))
+    })?;
+    let link = BlockHash::new(target_pubkey);
+    let origin = TxHash::new(if req.evict {
+        burst_governance::ORV_EVICT_MARKER
+    } else {
+        burst_governance::ORV_REINSTATE_MARKER
+    });
+
+    let content = burst_governance::ProposalContent::RepresentativeEviction {
+        target: target_addr.clone(),
+        evict: req.evict,
+        reason: req.reason.clone(),
+    };
+
+    let now = Timestamp::now();
+    let brn_state = brn_state_from_account(&account, state.params.brn_rate);
+    let brn_balance = {
+        let brn = state.brn_engine.lock().await;
+        brn.compute_balance(&brn_state, now)
+    };
+
+    let tx_hash = TxHash::new(burst_crypto::blake2b_256(
+        &[
+            address.as_str().as_bytes(),
+            &now.as_secs().to_be_bytes(),
+            b"governance_propose_eviction",
+            req.target.as_bytes(),
+        ]
+        .concat(),
+    ));
+
+    let spent_brn = prev_spent_brn(state, &account.head);
+    let pk_bytes = private_key.0;
+    let block = tokio::task::spawn_blocking({
+        let address = address.clone();
+        let representative = account.representative.clone();
+        let previous = account.head;
+        let trst_balance = account.trst_balance;
+        let work_gen = state.work_generator.clone();
+        let min_diff = state.params.min_work_difficulty;
+        let ph = state.params.params_hash();
+        move || {
+            let pk = burst_types::PrivateKey(pk_bytes);
+            build_and_sign_block(
+                burst_ledger::BlockType::GovernanceProposal,
+                &address,
+                previous,
+                &representative,
+                spent_brn,
+                trst_balance,
+                link,
+                origin,
+                tx_hash,
+                &pk,
+                &work_gen,
+                min_diff,
+                ph,
+                Vec::new(),
+            )
+        }
+    })
+    .await
+    .map_err(|e| RpcError::Server(format!("block build task failed: {e}")))??;
+
+    submit_block(&block, state)?;
+
+    if let Some(ref engine) = state.governance_engine {
+        let proposal = burst_governance::Proposal {
+            hash: tx_hash,
+            proposer: address.clone(),
+            content,
+            phase: burst_governance::GovernancePhase::Proposal,
+            created_at: now,
+            endorsement_count: 0,
+            exploration_votes_yea: 0,
+            exploration_votes_nay: 0,
+            exploration_votes_abstain: 0,
+            promotion_votes_yea: 0,
+            promotion_votes_nay: 0,
+            promotion_votes_abstain: 0,
+            exploration_started_at: None,
+            cooldown_started_at: None,
+            promotion_started_at: None,
+            activation_at: None,
+            total_eligible_voters: 1,
+            round: 0,
+        };
+        let mut gov = engine.lock().await;
+        if let Err(e) = gov.submit_proposal(proposal, brn_balance, true, &state.params) {
+            tracing::warn!("eviction proposal accepted as block but engine rejected: {e}");
+        }
+    }
+
+    Ok(to_value(&GovernanceProposeEvictionResponse {
+        block_hash: format!("{}", block.hash),
+        proposal_hash: format!("{}", tx_hash),
+        account: address.to_string(),
+        target: req.target,
+        evict: req.evict,
     }))
 }
 

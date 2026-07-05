@@ -46,6 +46,7 @@ pub fn update_account_on_block(
             revoked_trst: 0,
             epoch: 0,
             verifier_opted_in_at: None,
+            orv_evicted: false,
         }
     } else {
         let mut info = prev_account
@@ -284,6 +285,7 @@ mod tests {
             revoked_trst: 0,
             epoch: 0,
             verifier_opted_in_at: None,
+            orv_evicted: false,
         }
     }
 
@@ -330,6 +332,7 @@ mod tests {
             revoked_trst: 0,
             epoch: 0,
             verifier_opted_in_at: None,
+            orv_evicted: false,
         };
 
         assert_eq!(info.block_count, 1);

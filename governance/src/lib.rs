@@ -17,4 +17,6 @@ pub use delegation::{DelegationEngine, DelegationScope, DelegationSnapshot, Scop
 pub use engine::GovernanceEngine;
 pub use error::GovernanceError;
 pub use params::GovernableParam;
-pub use proposal::{GovernancePhase, Proposal, ProposalContent};
+pub use proposal::{
+    GovernancePhase, Proposal, ProposalContent, ORV_EVICT_MARKER, ORV_REINSTATE_MARKER,
+};

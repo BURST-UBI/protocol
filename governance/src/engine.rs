@@ -41,6 +41,10 @@ pub struct GovernanceEngine {
     pending_changes: Vec<(crate::params::GovernableParam, u128)>,
     /// Constitutional amendments that have been activated but not yet applied by the node.
     pending_amendments: Vec<ProposalContent>,
+    /// Activated ORV evictions/reinstatements not yet applied to account state:
+    /// `(target, evict)` where `evict = true` evicts and `false` reinstates.
+    #[serde(default)]
+    pending_evictions: Vec<(WalletAddress, bool)>,
 }
 
 impl GovernanceEngine {
@@ -53,6 +57,7 @@ impl GovernanceEngine {
             endorsement_counts: HashMap::new(),
             pending_changes: Vec::new(),
             pending_amendments: Vec::new(),
+            pending_evictions: Vec::new(),
         }
     }
 
@@ -441,6 +446,10 @@ impl GovernanceEngine {
                 _ => params.governance_supermajority_bps,
             },
             ProposalContent::ConstitutionalAmendment { .. } => params.consti_supermajority_bps,
+            // Evicting/reinstating a rep is a serious but ordinary governance
+            // action → the normal governance supermajority (a values choice, not
+            // a consti-level change).
+            ProposalContent::RepresentativeEviction { .. } => params.governance_supermajority_bps,
         }
     }
 
@@ -461,6 +470,7 @@ impl GovernanceEngine {
                 _ => params.governance_quorum_bps,
             },
             ProposalContent::ConstitutionalAmendment { .. } => params.consti_quorum_bps,
+            ProposalContent::RepresentativeEviction { .. } => params.governance_quorum_bps,
         }
     }
 
@@ -939,6 +949,12 @@ impl GovernanceEngine {
                 self.pending_changes.push((param.clone(), *new_value));
                 Ok(())
             }
+            ProposalContent::RepresentativeEviction { target, evict, .. } => {
+                // Recorded for the node to apply to account state (sets/clears
+                // `orv_evicted`). No ProtocolParams change.
+                self.pending_evictions.push((target.clone(), *evict));
+                Ok(())
+            }
         }
     }
 
@@ -953,6 +969,13 @@ impl GovernanceEngine {
     /// Drain activated constitutional amendments that need to be applied by the node.
     pub fn drain_activated_amendments(&mut self) -> Vec<ProposalContent> {
         std::mem::take(&mut self.pending_amendments)
+    }
+
+    /// Drain activated ORV evictions/reinstatements. Each `(target, evict)` tells
+    /// the node to set (`evict = true`) or clear (`false`) the target account's
+    /// `orv_evicted` flag, removing/restoring it from the consensus weight set.
+    pub fn drain_pending_evictions(&mut self) -> Vec<(WalletAddress, bool)> {
+        std::mem::take(&mut self.pending_evictions)
     }
 
     /// Count effective votes for a proposal, including transitively delegated votes.
@@ -2031,6 +2054,67 @@ mod tests {
 
         assert!(engine.activate(&proposal, &mut params).is_ok());
         assert_eq!(params.brn_rate, new_rate);
+    }
+
+    #[test]
+    fn test_activate_representative_eviction() {
+        let mut engine = GovernanceEngine::new();
+        let mut params = default_params();
+        let target = WalletAddress::new("brst_bad_rep");
+
+        let mut proposal = make_proposal(0, 10);
+        proposal.phase = GovernancePhase::Activation;
+        proposal.content = ProposalContent::RepresentativeEviction {
+            target: target.clone(),
+            evict: true,
+            reason: "double-signing".to_string(),
+        };
+
+        // Activation applies no ProtocolParams change but queues the eviction.
+        let params_before = params.params_hash();
+        assert!(engine.activate(&proposal, &mut params).is_ok());
+        assert_eq!(
+            params.params_hash(),
+            params_before,
+            "eviction must not change params"
+        );
+
+        let evictions = engine.drain_pending_evictions();
+        assert_eq!(evictions, vec![(target.clone(), true)]);
+        // Draining is one-shot.
+        assert!(engine.drain_pending_evictions().is_empty());
+
+        // A reinstatement queues the inverse.
+        let mut reinstate = make_proposal(1, 10);
+        reinstate.phase = GovernancePhase::Activation;
+        reinstate.content = ProposalContent::RepresentativeEviction {
+            target: target.clone(),
+            evict: false,
+            reason: String::new(),
+        };
+        assert!(engine.activate(&reinstate, &mut params).is_ok());
+        assert_eq!(engine.drain_pending_evictions(), vec![(target, false)]);
+    }
+
+    #[test]
+    fn test_eviction_uses_governance_threshold_not_consti() {
+        // Eviction is an ordinary governance action → normal governance
+        // supermajority/quorum (a values choice, not a consti-level change).
+        let params = default_params();
+        let mut proposal = make_proposal(0, 10);
+        proposal.content = ProposalContent::RepresentativeEviction {
+            target: WalletAddress::new("brst_x"),
+            evict: true,
+            reason: String::new(),
+        };
+        assert_eq!(
+            GovernanceEngine::get_required_supermajority(&proposal, &params),
+            params.governance_supermajority_bps
+        );
+        assert_eq!(
+            GovernanceEngine::get_required_quorum(&proposal, &params),
+            params.governance_quorum_bps
+        );
     }
 
     #[test]
