@@ -1,18 +1,35 @@
-//! Cached representative weights, updated incrementally on ChangeRep blocks.
+//! Cached representative weights for ORV consensus.
 //!
-//! Avoids scanning all accounts to compute a representative's total delegated
-//! weight. The cache is rebuilt once at node startup from the full account set,
-//! then maintained incrementally as `ChangeRepresentative` blocks are confirmed.
+//! Avoids scanning all accounts to compute a representative's total weight.
+//! The cache is rebuilt at node startup from the full account set, then
+//! maintained incrementally as accounts accrue weight and change rep.
 //!
-//! Weight is denominated in raw TRST (u128) — each account's delegated weight
-//! equals its TRST balance, matching the whitepaper's balance-weighted ORV.
+//! ## Weight = EXPIRED TRST (not spendable balance)
+//!
+//! An account's consensus weight equals its `expired_trst` — the cumulative
+//! amount of its TRST that has passed its expiry and become **non-transferable
+//! "virtue points"**. Spendable (transferable) balance carries ZERO consensus
+//! weight. This is deliberate and is the core of BURST's anti-plutocracy ORV:
+//!
+//! - **Un-buyable.** Expired TRST cannot be transferred, so consensus influence
+//!   cannot be bought, borrowed, or moved — only *earned* and held.
+//! - **Egalitarian baseline.** Anyone can accrue weight by letting their own
+//!   birthright-minted TRST expire in their ledger; since birthright accrues at
+//!   a per-human rate, this trends toward one-human-one-baseline over time.
+//! - **Meritocratic bonus.** Others route their soon-to-expire TRST to servers
+//!   they trust; that value expires in the recipient's ledger and lifts its
+//!   weight — trust, demonstrated by real economic flow, becomes consensus say.
+//!
+//! Weight is denominated in raw TRST units (u128). It changes when TRST expires
+//! (the expiry flush accrues `expired_trst`) and when an account changes its
+//! representative; it does NOT change on ordinary balance movements.
 
 use burst_types::WalletAddress;
 use std::collections::HashMap;
 
-/// Cached representative weights, updated incrementally on ChangeRep blocks.
+/// Cached representative weights for ORV (weight = delegated expired TRST).
 pub struct RepWeightCache {
-    /// representative_address → total delegated TRST balance.
+    /// representative_address → total delegated *expired* TRST.
     weights: HashMap<WalletAddress, u128>,
     /// Total weight across all representatives.
     total_weight: u128,
@@ -74,18 +91,19 @@ impl RepWeightCache {
 
     /// Rebuild cache from a full account iterator.
     ///
-    /// Called once during node startup. Each item yields
-    /// `(account_address, representative_address, trst_balance)` — every
-    /// account's TRST balance is delegated to its representative.
+    /// Called during node startup. Each item yields
+    /// `(account_address, representative_address, expired_trst)` — every
+    /// account delegates its *expired* TRST (its consensus weight) to its
+    /// representative. Spendable balance is intentionally NOT included.
     pub fn rebuild_from_accounts(
         &mut self,
         accounts: impl Iterator<Item = (WalletAddress, WalletAddress, u128)>,
     ) {
         self.weights.clear();
         self.total_weight = 0;
-        for (_account, rep, balance) in accounts {
-            *self.weights.entry(rep).or_insert(0) += balance;
-            self.total_weight = self.total_weight.saturating_add(balance);
+        for (_account, rep, expired_weight) in accounts {
+            *self.weights.entry(rep).or_insert(0) += expired_weight;
+            self.total_weight = self.total_weight.saturating_add(expired_weight);
         }
     }
 }
@@ -283,6 +301,33 @@ mod tests {
         assert_eq!(cache.weight(&rep("alice")), 1_000);
         assert_eq!(cache.weight(&rep("bob")), 0);
         assert_eq!(cache.total_weight(), 1_000);
+    }
+
+    #[test]
+    fn expired_trst_models_baseline_plus_trust_bonus() {
+        // Documents the ORV weight semantics: the third tuple field is each
+        // account's EXPIRED TRST. Two humans who each let their own birthright-
+        // minted TRST expire accrue an equal baseline; a trusted server that
+        // *also* received others' expiring TRST accrues a meritocratic bonus on
+        // top. All self-represent (rep == account).
+        let mut cache = RepWeightCache::new();
+        let alice = account("alice");
+        let bob = account("bob");
+        let server = account("server");
+        cache.rebuild_from_accounts(
+            vec![
+                // baseline: own birthright TRST that expired in-place
+                (alice.clone(), alice.clone(), 100),
+                (bob.clone(), bob.clone(), 100),
+                // baseline + trust routed in from others that expired here
+                (server.clone(), server.clone(), 100 + 900),
+            ]
+            .into_iter(),
+        );
+        assert_eq!(cache.weight(&alice), 100); // equal baseline
+        assert_eq!(cache.weight(&bob), 100); // equal baseline
+        assert_eq!(cache.weight(&server), 1000); // baseline + earned trust
+        assert_eq!(cache.total_weight(), 1200);
     }
 
     #[test]

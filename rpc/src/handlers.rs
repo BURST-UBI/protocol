@@ -1557,11 +1557,10 @@ pub async fn handle_faucet(
         .put_account(&account_info)
         .map_err(|e| RpcError::Store(format!("failed to update faucet account: {e}")))?;
 
-    {
-        let faucet_amount: u128 = 1_000_000_000_000_000_000;
-        let mut cache = state.rep_weight_cache.write().await;
-        cache.add_weight(&account_info.representative, faucet_amount);
-    }
+    // NB: faucet-minted TRST is transferable balance and carries NO ORV
+    // consensus weight. Weight is expired (non-transferable) TRST only, so we do
+    // not credit the representative here — the balance would otherwise show up as
+    // un-earned, buyable voting power.
 
     Ok(to_value(&FaucetResponse {
         account: req.account,
@@ -2146,10 +2145,8 @@ pub async fn handle_send_simple(
         )
         .map_err(|e| RpcError::Store(format!("failed to create pending: {e}")))?;
 
-    {
-        let mut cache = state.rep_weight_cache.write().await;
-        cache.remove_weight(&account.representative, amount);
-    }
+    // Sending transferable TRST moves no ORV consensus weight — weight is
+    // expired (non-transferable) TRST, which a send cannot touch.
 
     Ok(to_value(&SendSimpleResponse {
         block_hash: format!("{}", block.hash),
@@ -2301,10 +2298,9 @@ pub async fn handle_receive_simple(
         .delete_pending(&address, &send_tx_hash)
         .map_err(|e| RpcError::Store(format!("failed to delete pending: {e}")))?;
 
-    {
-        let mut cache = state.rep_weight_cache.write().await;
-        cache.add_weight(&account.representative, pending.amount);
-    }
+    // Received TRST is transferable balance — it carries NO ORV consensus
+    // weight. Weight accrues only when TRST expires in the ledger (see the
+    // expiry flush), so we deliberately do not credit the representative here.
 
     Ok(to_value(&ReceiveSimpleResponse {
         block_hash: format!("{}", block.hash),
@@ -2427,11 +2423,13 @@ pub async fn handle_change_rep_simple(
         .put_block_with_account(&block.hash, &block_bytes, &address);
 
     {
+        // Move only the account's EXPIRED-TRST stake (its ORV consensus weight)
+        // to the new representative — transferable balance carries no weight.
         let mut cache = state.rep_weight_cache.write().await;
         cache.change_rep(
             &old_representative,
             &new_representative,
-            account.trst_balance,
+            account.expired_trst,
         );
     }
 

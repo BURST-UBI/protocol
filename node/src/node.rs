@@ -1911,10 +1911,8 @@ impl BurstNode {
                                                     if !restored.is_empty() {
                                                         // Restore to each CURRENT HOLDER (mirror of
                                                         // revocation), not just the originator.
-                                                        let total_restored = {
-                                                            let mut rw = rep_weights_bp.write().await;
-                                                            apply_unrevocations_to_holders(&store, &mut rw, &restored)
-                                                        };
+                                                        let total_restored =
+                                                            apply_unrevocations_to_holders(&store, &restored);
                                                         tracing::info!(
                                                             %wallet,
                                                             restored_count = restored.len(),
@@ -1972,12 +1970,12 @@ impl BurstNode {
                                             // Charge each AFFECTED HOLDER (not just the
                                             // fraudulent originator): via the merger graph the
                                             // revoked TRST may now be held by any downstream
-                                            // account, so debit every holder's AccountInfo and
-                                            // rep weight. Returns the true total revoked.
-                                            let total_revoked = {
-                                                let mut rw = rep_weights_bp.write().await;
-                                                apply_revocations_to_holders(&store, &mut rw, &revocations)
-                                            };
+                                            // account, so debit every holder's AccountInfo
+                                            // (transferable balance). Returns the true total
+                                            // revoked. (Consensus weight is expired-TRST based
+                                            // and untouched here — see the helper's docs.)
+                                            let total_revoked =
+                                                apply_revocations_to_holders(&store, &revocations);
                                             if !revocations.is_empty() {
                                                 tracing::warn!(
                                                     %wallet,
@@ -2941,6 +2939,7 @@ impl BurstNode {
         let trst_engine_expiry = Arc::clone(&self.trst_engine);
         let orch_expiry = Arc::clone(&self.verification_orchestrator);
         let brn_engine_expiry = Arc::clone(&self.brn_engine);
+        let rep_weights_expiry = Arc::clone(&self.rep_weights);
         let challenge_duration_secs = self.config.params.challenge_duration_secs;
         let mut shutdown_rx_expiry = self.shutdown.subscribe();
 
@@ -2979,6 +2978,20 @@ impl BurstNode {
                                         store_expiry.account_store().put_account(&acct)
                                     {
                                         tracing::warn!(%holder, "failed to persist expired_trst: {e}");
+                                    } else {
+                                        // Newly-expired TRST becomes the holder's
+                                        // ORV consensus stake: credit it to the
+                                        // holder's representative. This is the sole
+                                        // path by which real (non-genesis) voting
+                                        // weight enters the network — the more
+                                        // trusted a server is (the more expiring
+                                        // TRST is routed to it), the more weight it
+                                        // earns. Un-buyable: the stake is the
+                                        // non-transferable expired TRST itself.
+                                        rep_weights_expiry
+                                            .write()
+                                            .await
+                                            .add_weight(&acct.representative, amount);
                                     }
                                 }
                             }
@@ -3487,41 +3500,36 @@ impl BurstNode {
             }
         }
 
-        // Restore representative weights from LMDB into the in-memory cache.
-        // If no persisted weights exist, rebuild from the full account set.
+        // Rebuild representative weights from the confirmed account set on every
+        // startup. Weight = each account's EXPIRED TRST delegated to its rep (the
+        // un-buyable consensus stake — see RepWeightCache docs). We deliberately
+        // do NOT restore a persisted rep-weight snapshot: (1) it would need a
+        // one-time migration off the old balance-based numbers, and (2) the
+        // snapshot used to be persisted *with* the genesis bootstrap weight baked
+        // in, so reloading it and then re-adding the bootstrap below double-
+        // counted genesis on every restart — diverging across nodes by restart
+        // count. Rebuilding from accounts (then adding the fixed bootstrap once)
+        // is deterministic and drift-proof at launch scale.
         {
-            let rw_store = self.store.rep_weight_store();
-            match rw_store.iter_rep_weights() {
-                Ok(entries) if !entries.is_empty() => {
+            let acct_store = self.store.account_store();
+            match acct_store.iter_accounts() {
+                Ok(accounts) => {
                     let mut rw = self.rep_weights.write().await;
-                    for (rep, weight) in &entries {
-                        rw.add_weight(rep, *weight);
-                    }
+                    rw.rebuild_from_accounts(
+                        accounts
+                            .into_iter()
+                            .map(|a| (a.address.clone(), a.representative.clone(), a.expired_trst)),
+                    );
                     tracing::info!(
-                        reps = entries.len(),
-                        "representative weights loaded from LMDB"
+                        reps = rw.rep_count(),
+                        "representative weights rebuilt from account store (expired-TRST stake)"
                     );
                 }
-                _ => {
-                    let acct_store = self.store.account_store();
-                    match acct_store.iter_accounts() {
-                        Ok(accounts) => {
-                            let mut rw = self.rep_weights.write().await;
-                            rw.rebuild_from_accounts(accounts.into_iter().map(|a| {
-                                (a.address.clone(), a.representative.clone(), a.trst_balance)
-                            }));
-                            tracing::info!(
-                                reps = rw.rep_count(),
-                                "representative weights rebuilt from account store"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                error = %e,
-                                "failed to rebuild rep weights from accounts — cache starts empty"
-                            );
-                        }
-                    }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "failed to rebuild rep weights from accounts — cache starts empty"
+                    );
                 }
             }
         }
@@ -4703,20 +4711,11 @@ impl BurstNode {
             }
         }
 
-        // Persist representative weights to LMDB.
-        {
-            let rw = self.rep_weights.read().await;
-            let rw_store = self.store.rep_weight_store();
-            let mut persisted = 0u64;
-            for (rep, weight) in rw.all_weights() {
-                if let Err(e) = rw_store.put_rep_weight(rep, *weight) {
-                    tracing::warn!(rep = %rep, error = %e, "failed to persist rep weight");
-                } else {
-                    persisted += 1;
-                }
-            }
-            tracing::info!(reps = persisted, "representative weights persisted to LMDB");
-        }
+        // NB: representative weights are intentionally NOT persisted here. They
+        // are a *derived* view of the account set (Σ expired TRST) plus the fixed
+        // genesis bootstrap weight, and are rebuilt deterministically from the
+        // ledger on every startup. Persisting them risked reloading a stale
+        // snapshot and double-counting the bootstrap weight across restarts.
 
         // Flush LMDB
         if let Err(e) = self.store.force_sync() {
@@ -5196,13 +5195,14 @@ fn eligible_verifiers(
 /// one [`burst_trst::RevocationEvent`] per affected live token, keyed by the
 /// CURRENT holder (which — via the merger graph — may be any downstream account,
 /// not just the fraudulent originator). This debits each affected holder's
-/// `AccountInfo` (transferable down, `revoked_trst` up) and removes the revoked
-/// weight from that holder's representative, so consensus weight and reported
-/// balances stay correct. Groups by holder so each account is written once.
-/// Returns the total revoked across all holders.
+/// `AccountInfo` (transferable down, `revoked_trst` up). It deliberately does
+/// NOT touch consensus (rep) weight: ORV weight is EXPIRED TRST, a separate
+/// axis from spendable balance, and the remedy for a bad-acting ORV participant
+/// is governance eviction from the verified-node set, not value-layer
+/// revocation. Groups by holder so each account is written once. Returns the
+/// total revoked across all holders.
 fn apply_revocations_to_holders(
     store: &LmdbStore,
-    rep_weights: &mut burst_consensus::RepWeightCache,
     revocations: &[burst_trst::RevocationEvent],
 ) -> u128 {
     use std::collections::HashMap;
@@ -5215,10 +5215,8 @@ fn apply_revocations_to_holders(
     for (holder, amount) in per_holder {
         total = total.saturating_add(amount);
         if let Ok(mut acct) = store.account_store().get_account(&holder) {
-            let reduction = amount.min(acct.trst_balance);
             acct.trst_balance = acct.trst_balance.saturating_sub(amount);
             acct.revoked_trst = acct.revoked_trst.saturating_add(amount);
-            rep_weights.remove_weight(&acct.representative, reduction);
             if let Err(e) = store.account_store().put_account(&acct) {
                 tracing::error!(%holder, "failed to persist revocation to holder: {e}");
             }
@@ -5228,12 +5226,13 @@ fn apply_revocations_to_holders(
 }
 
 /// Inverse of [`apply_revocations_to_holders`]: restore un-revoked TRST to each
-/// current holder (transferable up, `revoked_trst` down) and re-add the weight
-/// to their representative. Used when a revoked originator is re-verified
-/// (decision §6.15b). Returns the total restored.
+/// current holder (transferable up, `revoked_trst` down). Used when a revoked
+/// originator is re-verified (decision §6.15b). Like revocation it does not
+/// touch rep weight — any restored tokens that are past expiry re-accrue the
+/// holder's expired-TRST consensus stake through the normal expiry flush.
+/// Returns the total restored.
 fn apply_unrevocations_to_holders(
     store: &LmdbStore,
-    rep_weights: &mut burst_consensus::RepWeightCache,
     restored: &[burst_trst::UnRevocationResult],
 ) -> u128 {
     use std::collections::HashMap;
@@ -5248,7 +5247,6 @@ fn apply_unrevocations_to_holders(
         if let Ok(mut acct) = store.account_store().get_account(&holder) {
             acct.trst_balance = acct.trst_balance.saturating_add(amount);
             acct.revoked_trst = acct.revoked_trst.saturating_sub(amount);
-            rep_weights.add_weight(&acct.representative, amount);
             if let Err(e) = store.account_store().put_account(&acct) {
                 tracing::error!(%holder, "failed to persist un-revocation to holder: {e}");
             }

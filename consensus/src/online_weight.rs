@@ -19,14 +19,15 @@
 //! (~60M NANO, ≈45% of its ~133M premined supply). That works because Nano
 //! premines the ENTIRE supply into the genesis account, so from block one the
 //! genesis representative holds weight far above the floor and confirmation is
-//! immediate. BURST has NO premine — voting weight (TRST) is minted organically
-//! from burning BRN and starts near zero — so a fixed absolute floor would be
-//! unreachable at launch and would block ALL confirmation. Instead we scale the
-//! floor to the TOTAL voting weight currently in existence
-//! ([`MIN_ONLINE_WEIGHT_FRACTION_BPS`]): a small launch network (genesis holding
-//! ~all weight) can cement from block one, while the same safety property —
-//! "a substantial fraction of all weight must back a confirmation" — holds at
-//! every network size.
+//! immediate. BURST has NO premine, and its consensus weight is EXPIRED
+//! (non-transferable) TRST — which accrues only as minted TRST passes its
+//! expiry, starting at zero — so a fixed absolute floor would be unreachable at
+//! launch and would block ALL confirmation. Instead we scale the floor to the
+//! TOTAL voting weight currently in existence ([`MIN_ONLINE_WEIGHT_FRACTION_BPS`]):
+//! a small launch network (the genesis bootstrap weight holding ~all weight) can
+//! cement from block one, while the same safety property — "a substantial
+//! fraction of all weight must back a confirmation" — holds at every network
+//! size, as real expired-TRST weight accrues and decentralises consensus.
 
 use std::collections::HashMap;
 

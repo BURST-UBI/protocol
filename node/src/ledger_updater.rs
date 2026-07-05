@@ -49,20 +49,22 @@ pub fn update_account_on_block(
             .cloned()
             .ok_or_else(|| "previous account info not found".to_string())?;
 
-        let old_trst = info.trst_balance;
         let old_rep = info.representative.clone();
 
         info.head = block.hash;
         info.block_count += 1;
         info.trst_balance = block.trst_balance;
 
-        // Single atomic rep weight update: handles both rep change and balance change
-        if old_rep != block.representative || old_trst != block.trst_balance {
-            if old_trst > 0 {
-                rep_weights.remove_weight(&old_rep, old_trst);
-            }
-            if block.trst_balance > 0 {
-                rep_weights.add_weight(&block.representative, block.trst_balance);
+        // Rep-weight update. Consensus weight = this account's EXPIRED TRST (not
+        // its spendable balance — see RepWeightCache docs), and `expired_trst`
+        // is unchanged by an ordinary block (it only moves on the expiry flush).
+        // So a balance change alone touches NO weight; only a rep change moves
+        // the account's existing expired-TRST stake from the old rep to the new.
+        if old_rep != block.representative {
+            let stake = info.expired_trst;
+            if stake > 0 {
+                rep_weights.remove_weight(&old_rep, stake);
+                rep_weights.add_weight(&block.representative, stake);
             }
             info.representative = block.representative.clone();
         }
@@ -96,9 +98,11 @@ pub fn update_account_on_block(
         info
     };
 
-    // Update rep weight for open blocks
+    // Open blocks seed rep weight with the account's EXPIRED TRST (zero for a
+    // brand-new account — it accrues later via the expiry flush; spendable
+    // balance carries no consensus weight).
     if is_open {
-        rep_weights.add_weight(&block.representative, block.trst_balance);
+        rep_weights.add_weight(&block.representative, info.expired_trst);
     }
 
     // Serialize and put in batch
@@ -326,55 +330,34 @@ mod tests {
     // --- Rep weight tests (unit-testing the logic paths) ---
 
     #[test]
-    fn rep_weight_added_on_open_block() {
+    fn rep_weight_open_block_seeds_expired_stake_not_balance() {
+        // A brand-new account's open block seeds its rep with the account's
+        // EXPIRED TRST (zero for a fresh account — spendable balance carries no
+        // consensus weight). So an open block with a large balance adds nothing.
         let mut rw = RepWeightCache::new();
         let rep = test_rep();
-        let block = make_open_block(&test_account(), &rep, 1000);
+        let _block = make_open_block(&test_account(), &rep, 1000);
 
-        // Simulate the open-block path
-        rw.add_weight(&block.representative, block.trst_balance);
+        // Open-block path adds info.expired_trst, which is 0 for a new account.
+        rw.add_weight(&rep, 0);
 
-        assert_eq!(rw.weight(&rep), 1000);
-        assert_eq!(rw.total_weight(), 1000);
-    }
-
-    #[test]
-    fn rep_weight_adjusted_on_balance_increase() {
-        let mut rw = RepWeightCache::new();
-        let rep = test_rep();
-        rw.add_weight(&rep, 1000);
-
-        let old_balance = 1000u128;
-        let new_balance = 1500u128;
-        rw.add_weight(&rep, new_balance - old_balance);
-
-        assert_eq!(rw.weight(&rep), 1500);
-    }
-
-    #[test]
-    fn rep_weight_adjusted_on_balance_decrease() {
-        let mut rw = RepWeightCache::new();
-        let rep = test_rep();
-        rw.add_weight(&rep, 1000);
-
-        let old_balance = 1000u128;
-        let new_balance = 700u128;
-        rw.remove_weight(&rep, old_balance - new_balance);
-
-        assert_eq!(rw.weight(&rep), 700);
+        assert_eq!(rw.weight(&rep), 0);
+        assert_eq!(rw.total_weight(), 0);
     }
 
     #[test]
     fn rep_weight_transferred_on_rep_change() {
+        // A rep change moves the account's EXPIRED-TRST stake (not its balance)
+        // from the old representative to the new one.
         let mut rw = RepWeightCache::new();
         let old_rep = test_rep();
         let new_rep = test_rep2();
         rw.add_weight(&old_rep, 1000);
 
-        // Simulate rep change: remove from old, add to new
-        let balance = 1000u128;
-        rw.remove_weight(&old_rep, balance);
-        rw.add_weight(&new_rep, balance);
+        // Simulate rep change: move the account's expired stake old -> new.
+        let stake = 1000u128;
+        rw.remove_weight(&old_rep, stake);
+        rw.add_weight(&new_rep, stake);
 
         assert_eq!(rw.weight(&old_rep), 0);
         assert_eq!(rw.weight(&new_rep), 1000);

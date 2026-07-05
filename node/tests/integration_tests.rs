@@ -187,7 +187,9 @@ fn ledger_updater_open_then_send_updates_account_correctly() {
     assert_eq!(info.block_count, 1);
     assert_eq!(info.trst_balance, 1000);
     assert_eq!(info.representative, rep);
-    assert_eq!(rw.weight(&rep), 1000);
+    // Consensus weight = EXPIRED TRST, which is 0 for a fresh account — a large
+    // spendable balance contributes NO ORV weight.
+    assert_eq!(rw.weight(&rep), 0);
 
     let send_link = BlockHash::new(pubkey_bytes(&make_address(99)));
     let send = make_block(
@@ -210,7 +212,8 @@ fn ledger_updater_open_then_send_updates_account_correctly() {
     assert_eq!(info2.block_count, 2);
     assert_eq!(info2.trst_balance, 700);
     assert_eq!(info2.head, send.hash);
-    assert_eq!(rw.weight(&rep), 700);
+    // A balance change (send) moves no consensus weight — still 0.
+    assert_eq!(rw.weight(&rep), 0);
 }
 
 #[test]
@@ -237,9 +240,18 @@ fn ledger_updater_rep_change_moves_weight() {
     let info = burst_node::update_account_on_block(&mut batch, &open, None, 0, &mut rw).unwrap();
     batch.commit().unwrap();
 
-    assert_eq!(rw.weight(&rep1), 500);
+    // Fresh account has no expired TRST, so no consensus weight yet.
+    assert_eq!(rw.weight(&rep1), 0);
     assert_eq!(rw.weight(&rep2), 0);
 
+    // Simulate the account accruing an expired-TRST stake (what the expiry flush
+    // does): 500 units of its TRST expired in-place under rep1.
+    let mut info = info;
+    info.expired_trst = 500;
+    rw.add_weight(&rep1, 500);
+    assert_eq!(rw.weight(&rep1), 500);
+
+    // A rep change now moves that EXPIRED stake from rep1 to rep2.
     let change = make_block(
         BlockType::ChangeRepresentative,
         &account,
