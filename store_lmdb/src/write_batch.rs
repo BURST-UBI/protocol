@@ -17,21 +17,35 @@
 use heed::RwTxn;
 
 use burst_store::account::AccountInfo;
-use burst_store::StoreError;
+use burst_store::{ReadTxn, StoreError, WriteTxn};
 use burst_types::{BlockHash, Timestamp, TxHash, WalletAddress};
 
 use crate::environment::LmdbEnvironment;
 use crate::LmdbError;
 
-/// A write batch that groups multiple store operations into a single LMDB
-/// write transaction, amortising the cost of the fsync.
-pub struct WriteBatch<'a> {
+/// A caller-owned LMDB write transaction: all mutations made through it commit
+/// atomically on [`LmdbWriteTransaction::commit`], or roll back if it is dropped
+/// uncommitted. This is the primitive the rsnano-style port threads through
+/// store methods so an entire logical operation (e.g. applying a block: ledger
+/// + BRN + rep-weights + governance) commits as one transaction.
+///
+/// It also amortises fsync cost — a single commit per transaction.
+pub struct LmdbWriteTransaction<'a> {
     txn: RwTxn<'a>,
     env: &'a LmdbEnvironment,
 }
 
-impl<'a> WriteBatch<'a> {
-    /// Begin a new write batch.
+/// Backwards-compatible alias. `WriteBatch` was BURST's original name for this
+/// caller-owned write transaction; it is now [`LmdbWriteTransaction`]. Existing
+/// callers (`env.write_batch()`) keep working unchanged; new code threading a
+/// transaction through store methods should use `LmdbWriteTransaction`.
+pub type WriteBatch<'a> = LmdbWriteTransaction<'a>;
+
+impl ReadTxn for LmdbWriteTransaction<'_> {}
+impl WriteTxn for LmdbWriteTransaction<'_> {}
+
+impl<'a> LmdbWriteTransaction<'a> {
+    /// Begin a new write transaction.
     pub(crate) fn new(env: &'a LmdbEnvironment) -> Result<Self, StoreError> {
         let txn = env.env().write_txn().map_err(LmdbError::from)?;
         Ok(Self { txn, env })
