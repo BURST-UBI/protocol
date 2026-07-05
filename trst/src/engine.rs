@@ -1189,6 +1189,24 @@ impl TrstEngine {
         }
     }
 
+    /// Like [`flush_all_expired`](Self::flush_all_expired) but returns the amount
+    /// NEWLY expired this call, per wallet (only wallets with a non-zero flush).
+    /// Lets the node surface expiry into account-level `expired_trst` counters
+    /// (whitepaper §Expiry: the total stays as "virtue points"; only the
+    /// transferable portion shrinks). Amounts are newly-expired, so callers can
+    /// accumulate them without double-counting.
+    pub fn flush_all_expired_by_wallet(&mut self, now: Timestamp) -> Vec<(WalletAddress, u128)> {
+        let expiry_secs = self.expiry_secs;
+        let mut out = Vec::new();
+        for (addr, portfolio) in self.wallets.iter_mut() {
+            let flushed = portfolio.flush_expired(now, expiry_secs);
+            if flushed > 0 {
+                out.push((addr.clone(), flushed));
+            }
+        }
+        out
+    }
+
     /// Get a portfolio for a wallet (immutable).
     pub fn get_portfolio(&self, wallet: &WalletAddress) -> Option<&WalletPortfolio> {
         self.wallets.get(wallet)

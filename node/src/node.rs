@@ -1872,20 +1872,18 @@ impl BurstNode {
                                                     let restored = trst_inner.un_revoke_by_origin(wallet, Timestamp::now());
                                                     drop(trst_inner);
                                                     if !restored.is_empty() {
-                                                        let total_restored: u128 = restored.iter().map(|r| r.amount).sum();
+                                                        // Restore to each CURRENT HOLDER (mirror of
+                                                        // revocation), not just the originator.
+                                                        let total_restored = {
+                                                            let mut rw = rep_weights_bp.write().await;
+                                                            apply_unrevocations_to_holders(&store, &mut rw, &restored)
+                                                        };
                                                         tracing::info!(
                                                             %wallet,
                                                             restored_count = restored.len(),
                                                             total_restored,
                                                             "TRST un-revoked after re-verification"
                                                         );
-                                                        if let Ok(mut acct) = store.account_store().get_account(wallet) {
-                                                            acct.revoked_trst = acct.revoked_trst.saturating_sub(total_restored);
-                                                            acct.trst_balance = acct.trst_balance.saturating_add(total_restored);
-                                                            if let Err(e) = store.account_store().put_account(&acct) {
-                                                                tracing::error!(%wallet, "failed to persist un-revocation counters: {e}");
-                                                            }
-                                                        }
                                                     }
                                                 }
                                                 // Activate (or resume) BRN accrual. Endorsers
@@ -1934,7 +1932,15 @@ impl BurstNode {
                                             let mut trst_inner = trst_engine_bp.lock().await;
                                             let revocations = trst_inner.revoke_by_origin(wallet);
                                             drop(trst_inner);
-                                            let total_revoked: u128 = revocations.iter().map(|r| r.revoked_amount).sum();
+                                            // Charge each AFFECTED HOLDER (not just the
+                                            // fraudulent originator): via the merger graph the
+                                            // revoked TRST may now be held by any downstream
+                                            // account, so debit every holder's AccountInfo and
+                                            // rep weight. Returns the true total revoked.
+                                            let total_revoked = {
+                                                let mut rw = rep_weights_bp.write().await;
+                                                apply_revocations_to_holders(&store, &mut rw, &revocations)
+                                            };
                                             if !revocations.is_empty() {
                                                 tracing::warn!(
                                                     %wallet,
@@ -1951,10 +1957,10 @@ impl BurstNode {
                                                     ws.stop_accrual(Timestamp::now());
                                                 }
                                             }
+                                            // Mark the originator Revoked (its own holdings, if
+                                            // any, were already debited above as a holder).
                                             if let Ok(mut acct) = store.account_store().get_account(wallet) {
                                                 acct.state = burst_types::WalletState::Revoked;
-                                                acct.revoked_trst = acct.revoked_trst.saturating_add(total_revoked);
-                                                acct.trst_balance = acct.trst_balance.saturating_sub(total_revoked);
                                                 if let Err(e) = store.account_store().put_account(&acct) {
                                                     tracing::error!(%wallet, "failed to persist account Revoked state: {e}");
                                                 }
@@ -2849,10 +2855,29 @@ impl BurstNode {
                         let cutoff = Timestamp::new(now_secs);
 
                         // 1. Flush expired tokens in the engine so cached
-                        //    balances and account-facing state stay honest.
+                        //    balances and account-facing state stay honest, and
+                        //    surface the newly-expired amount into each account's
+                        //    `expired_trst` counter. Per whitepaper §Expiry, the
+                        //    total `trst_balance` is NOT reduced — it stays as a
+                        //    permanent record ("virtue points"); only the
+                        //    transferable portion (trst_balance − expired − revoked)
+                        //    shrinks.
                         {
-                            let mut trst = trst_engine_expiry.lock().await;
-                            trst.flush_all_expired(now);
+                            let newly_expired = {
+                                let mut trst = trst_engine_expiry.lock().await;
+                                trst.flush_all_expired_by_wallet(now)
+                            };
+                            for (holder, amount) in newly_expired {
+                                if let Ok(mut acct) = store_expiry.account_store().get_account(&holder)
+                                {
+                                    acct.expired_trst = acct.expired_trst.saturating_add(amount);
+                                    if let Err(e) =
+                                        store_expiry.account_store().put_account(&acct)
+                                    {
+                                        tracing::warn!(%holder, "failed to persist expired_trst: {e}");
+                                    }
+                                }
+                            }
                         }
 
                         // 2. Return expired pending TRST to senders (6.16a).
@@ -5027,6 +5052,71 @@ impl BurstNode {
 }
 
 /// Deterministic expiry-grouped auto-merge selection (whitepaper §Merging:
+/// Apply per-holder TRST revocation to the ledger. `revoke_by_origin` returns
+/// one [`burst_trst::RevocationEvent`] per affected live token, keyed by the
+/// CURRENT holder (which — via the merger graph — may be any downstream account,
+/// not just the fraudulent originator). This debits each affected holder's
+/// `AccountInfo` (transferable down, `revoked_trst` up) and removes the revoked
+/// weight from that holder's representative, so consensus weight and reported
+/// balances stay correct. Groups by holder so each account is written once.
+/// Returns the total revoked across all holders.
+fn apply_revocations_to_holders(
+    store: &LmdbStore,
+    rep_weights: &mut burst_consensus::RepWeightCache,
+    revocations: &[burst_trst::RevocationEvent],
+) -> u128 {
+    use std::collections::HashMap;
+    let mut per_holder: HashMap<burst_types::WalletAddress, u128> = HashMap::new();
+    for ev in revocations {
+        let e = per_holder.entry(ev.holder.clone()).or_insert(0);
+        *e = e.saturating_add(ev.revoked_amount);
+    }
+    let mut total = 0u128;
+    for (holder, amount) in per_holder {
+        total = total.saturating_add(amount);
+        if let Ok(mut acct) = store.account_store().get_account(&holder) {
+            let reduction = amount.min(acct.trst_balance);
+            acct.trst_balance = acct.trst_balance.saturating_sub(amount);
+            acct.revoked_trst = acct.revoked_trst.saturating_add(amount);
+            rep_weights.remove_weight(&acct.representative, reduction);
+            if let Err(e) = store.account_store().put_account(&acct) {
+                tracing::error!(%holder, "failed to persist revocation to holder: {e}");
+            }
+        }
+    }
+    total
+}
+
+/// Inverse of [`apply_revocations_to_holders`]: restore un-revoked TRST to each
+/// current holder (transferable up, `revoked_trst` down) and re-add the weight
+/// to their representative. Used when a revoked originator is re-verified
+/// (decision §6.15b). Returns the total restored.
+fn apply_unrevocations_to_holders(
+    store: &LmdbStore,
+    rep_weights: &mut burst_consensus::RepWeightCache,
+    restored: &[burst_trst::UnRevocationResult],
+) -> u128 {
+    use std::collections::HashMap;
+    let mut per_holder: HashMap<burst_types::WalletAddress, u128> = HashMap::new();
+    for r in restored {
+        let e = per_holder.entry(r.holder.clone()).or_insert(0);
+        *e = e.saturating_add(r.amount);
+    }
+    let mut total = 0u128;
+    for (holder, amount) in per_holder {
+        total = total.saturating_add(amount);
+        if let Ok(mut acct) = store.account_store().get_account(&holder) {
+            acct.trst_balance = acct.trst_balance.saturating_add(amount);
+            acct.revoked_trst = acct.revoked_trst.saturating_sub(amount);
+            rep_weights.add_weight(&acct.representative, amount);
+            if let Err(e) = store.account_store().put_account(&acct) {
+                tracing::error!(%holder, "failed to persist un-revocation to holder: {e}");
+            }
+        }
+    }
+    total
+}
+
 /// wallets group "tokens with similar expiry dates to maximize retained
 /// value"). Under the earliest-expiry floor rule, merging a fresh token with
 /// an old one destroys the fresh token's remaining lifetime — so the group is
