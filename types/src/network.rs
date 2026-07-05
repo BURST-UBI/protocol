@@ -3,13 +3,16 @@
 use serde::{Deserialize, Serialize};
 
 /// Identifies which BURST network a node is connected to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum NetworkId {
     /// The production network.
     Live,
     /// The public test network.
     Test,
-    /// Local development network.
+    /// Local development network. Default: an unspecified network is treated as
+    /// the isolated Dev network — never Live — so a missing/garbled network id
+    /// fails closed rather than leaking onto production.
+    #[default]
     Dev,
 }
 

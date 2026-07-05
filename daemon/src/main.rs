@@ -13,9 +13,10 @@ struct Cli {
     #[arg(long, env = "BURST_NETWORK")]
     network: Option<String>,
 
-    /// Data directory for ledger storage.
-    #[arg(long, default_value = "./burst_data", env = "BURST_DATA_DIR")]
-    data_dir: PathBuf,
+    /// Data directory for ledger storage (defaults to "./burst_data", or the
+    /// config-file value).
+    #[arg(long, env = "BURST_DATA_DIR")]
+    data_dir: Option<PathBuf>,
 
     /// Port for P2P connections (defaults to network default).
     #[arg(long, env = "BURST_P2P_PORT")]
@@ -25,17 +26,17 @@ struct Cli {
     #[arg(long, default_value_t = true, env = "BURST_ENABLE_RPC")]
     rpc: bool,
 
-    /// RPC server port.
-    #[arg(long, default_value_t = 7077, env = "BURST_RPC_PORT")]
-    rpc_port: u16,
+    /// RPC server port (defaults to 7077, or the config-file value).
+    #[arg(long, env = "BURST_RPC_PORT")]
+    rpc_port: Option<u16>,
 
     /// Enable WebSocket server.
     #[arg(long, env = "BURST_ENABLE_WEBSOCKET")]
     websocket: bool,
 
-    /// WebSocket server port.
-    #[arg(long, default_value_t = 7078, env = "BURST_WS_PORT")]
-    websocket_port: u16,
+    /// WebSocket server port (defaults to 7078, or the config-file value).
+    #[arg(long, env = "BURST_WS_PORT")]
+    websocket_port: Option<u16>,
 
     /// Bootstrap peer addresses (comma-separated: "1.2.3.4:17076,5.6.7.8:17076").
     #[arg(long, env = "BURST_BOOTSTRAP_PEERS", value_delimiter = ',')]
@@ -57,9 +58,9 @@ struct Cli {
     #[arg(long, env = "BURST_DISABLE_UPNP")]
     disable_upnp: bool,
 
-    /// Log level: "trace", "debug", "info", "warn", "error".
-    #[arg(long, default_value = "info", env = "BURST_LOG_LEVEL")]
-    log_level: String,
+    /// Log level: "trace", "debug", "info", "warn", "error" (defaults to "info", or the config-file value).
+    #[arg(long, env = "BURST_LOG_LEVEL")]
+    log_level: Option<String>,
 
     /// Path to a TOML configuration file. If provided, file settings
     /// are used as the base; CLI flags and env vars override them.
@@ -133,12 +134,12 @@ async fn main() -> anyhow::Result<()> {
         let network = cli_network.unwrap_or(file_cfg.network);
         NodeConfig {
             network,
-            data_dir: cli.data_dir,
+            data_dir: cli.data_dir.unwrap_or(file_cfg.data_dir),
             port: cli.port.unwrap_or(file_cfg.port),
             enable_rpc: cli.rpc,
-            rpc_port: cli.rpc_port,
+            rpc_port: cli.rpc_port.unwrap_or(file_cfg.rpc_port),
             enable_websocket: cli.websocket,
-            websocket_port: cli.websocket_port,
+            websocket_port: cli.websocket_port.unwrap_or(file_cfg.websocket_port),
             bootstrap_peers: if cli.bootstrap_peers.is_empty() {
                 file_cfg.bootstrap_peers
             } else {
@@ -148,25 +149,27 @@ async fn main() -> anyhow::Result<()> {
             enable_metrics: cli.metrics || file_cfg.enable_metrics,
             enable_faucet: cli.faucet || file_cfg.enable_faucet,
             enable_upnp: enable_upnp && file_cfg.enable_upnp,
-            log_level: cli.log_level,
+            log_level: cli.log_level.unwrap_or(file_cfg.log_level),
             ..file_cfg
         }
     } else {
         let network = cli_network.unwrap_or(NetworkId::Dev);
         NodeConfig {
             network,
-            data_dir: cli.data_dir,
+            data_dir: cli
+                .data_dir
+                .unwrap_or_else(|| PathBuf::from("./burst_data")),
             port: cli.port.unwrap_or(network.default_port()),
             enable_rpc: cli.rpc,
-            rpc_port: cli.rpc_port,
+            rpc_port: cli.rpc_port.unwrap_or(7077),
             enable_websocket: cli.websocket,
-            websocket_port: cli.websocket_port,
+            websocket_port: cli.websocket_port.unwrap_or(7078),
             bootstrap_peers: cli.bootstrap_peers,
             max_peers: cli.max_peers.unwrap_or(50),
             enable_metrics: cli.metrics,
             enable_faucet: cli.faucet,
             enable_upnp,
-            log_level: cli.log_level,
+            log_level: cli.log_level.unwrap_or_else(|| "info".to_string()),
             ..Default::default()
         }
     };

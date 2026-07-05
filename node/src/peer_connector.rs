@@ -15,7 +15,7 @@ use burst_ledger::DagFrontier;
 use burst_messages::PeerAddress;
 use burst_network::{MessageDedup, PeerManager};
 use burst_store_lmdb::LmdbStore;
-use burst_types::BlockHash;
+use burst_types::{BlockHash, NetworkId};
 
 use crate::connection_registry::{spawn_peer_read_loop, ConnectionRegistry, Direction};
 use crate::metrics::NodeMetrics;
@@ -45,6 +45,13 @@ pub struct PeerConnectorContext {
     pub node_private_key: burst_types::PrivateKey,
     pub node_address: burst_types::WalletAddress,
     pub params_hash: BlockHash,
+    /// Our network id. The peer's cookie challenge must carry a matching
+    /// `network_id` or we drop the connection — hard isolation between
+    /// Dev/Test/Live independent of `params_hash`.
+    pub network: NetworkId,
+    /// Our listening/peering port, sent in the handshake so the peer keys us by
+    /// our dialable address instead of the ephemeral source port.
+    pub peering_port: u16,
 }
 
 /// Result of a successful outbound connection.
@@ -107,6 +114,7 @@ async fn connect_to_peer_inner(
     // Read the cookie challenge from the peer
     let mut reader = tokio::io::BufReader::new(read_half);
     let mut remote_node_id: Option<burst_types::WalletAddress> = None;
+    let mut remote_network: Option<NetworkId> = None;
     let cookie_opt = {
         let mut len_buf = [0u8; 4];
         match tokio::time::timeout(HANDSHAKE_TIMEOUT, reader.read_exact(&mut len_buf)).await {
@@ -119,6 +127,7 @@ async fn connect_to_peer_inner(
                             bincode::deserialize::<WireMessage>(&body)
                         {
                             remote_node_id = Some(hs.node_id.clone());
+                            remote_network = Some(hs.network_id);
                             hs.cookie
                         } else {
                             None
@@ -133,6 +142,21 @@ async fn connect_to_peer_inner(
             _ => None,
         }
     };
+
+    // Reject peers on a different network (Dev/Test/Live) before doing any
+    // further work. Default params make `params_hash` identical across
+    // networks, so `network_id` is the authoritative isolation check.
+    if let Some(net) = remote_network {
+        if net != ctx.network {
+            tracing::debug!(
+                peer = %peer_id,
+                ours = ?ctx.network,
+                theirs = ?net,
+                "dropping peer on different network"
+            );
+            return Err("network mismatch".into());
+        }
+    }
 
     // Never peer with ourselves: if the handshake reveals our own node_id, the
     // address we dialed is really us (learned via gossip or our own advertised
@@ -151,6 +175,8 @@ async fn connect_to_peer_inner(
             cookie: None,
             cookie_signature: Some(sig),
             params_hash: ctx.params_hash,
+            network_id: ctx.network,
+            peering_port: ctx.peering_port,
         });
         if let Ok(bytes) = bincode::serialize(&response) {
             let len_bytes = (bytes.len() as u32).to_be_bytes();

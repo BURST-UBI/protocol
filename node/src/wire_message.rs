@@ -5,7 +5,7 @@
 //! if that fails it falls back to bare `StateBlock` for backward compat.
 
 use burst_ledger::StateBlock;
-use burst_types::{BlockHash, Signature, WalletAddress};
+use burst_types::{BlockHash, NetworkId, Signature, WalletAddress};
 use serde::{Deserialize, Serialize};
 
 use crate::bootstrap::BootstrapMessage;
@@ -81,6 +81,21 @@ pub struct HandshakeMsg {
     /// Peers compare this to detect protocol version divergence.
     #[serde(default)]
     pub params_hash: BlockHash,
+    /// Which BURST network this node belongs to. A peer whose `network_id`
+    /// differs from ours is on a different network (Dev/Test/Live) and must be
+    /// rejected during the handshake — otherwise, e.g., a Dev node could
+    /// establish a connection with a Live node (identical default params make
+    /// `params_hash` match across networks, so it can't be relied on for this).
+    #[serde(default)]
+    pub network_id: NetworkId,
+    /// The sender's listening/peering port. An inbound TCP connection arrives
+    /// from an *ephemeral* source port that nothing listens on; keying the peer
+    /// by `ip:ephemeral` would double-count it against the outbound connection
+    /// to the same node and gossip a non-dialable address. Peers key each other
+    /// by `ip:peering_port` (the dialable address) so both directions collapse
+    /// to one entry.
+    #[serde(default)]
+    pub peering_port: u16,
 }
 
 /// UHV verification request: an endorser vouches for a target wallet's humanity.
@@ -254,6 +269,8 @@ mod tests {
             cookie: Some([0xCC; 32]),
             cookie_signature: Some(Signature([0xDD; 64])),
             params_hash: burst_types::BlockHash::default(),
+            network_id: NetworkId::Live,
+            peering_port: 7076,
         });
         let bytes = bincode::serialize(&msg).unwrap();
         let decoded: WireMessage = bincode::deserialize(&bytes).unwrap();
@@ -262,6 +279,7 @@ mod tests {
                 assert_eq!(h.node_id, addr("node1"));
                 assert!(h.cookie.is_some());
                 assert!(h.cookie_signature.is_some());
+                assert_eq!(h.network_id, NetworkId::Live);
             }
             other => panic!("expected Handshake, got {:?}", other),
         }
@@ -274,6 +292,8 @@ mod tests {
             cookie: None,
             cookie_signature: None,
             params_hash: burst_types::BlockHash::default(),
+            network_id: NetworkId::Dev,
+            peering_port: 27076,
         });
         let bytes = bincode::serialize(&msg).unwrap();
         let decoded: WireMessage = bincode::deserialize(&bytes).unwrap();

@@ -3342,6 +3342,8 @@ impl BurstNode {
         let store_p2p = Arc::clone(&self.store);
         let node_address_p2p = self.node_address.clone();
         let config_params_p2p = self.config.params.clone();
+        let network_p2p = self.config.network;
+        let peering_port_p2p = self.config.port;
 
         let p2p_handle = tokio::spawn(async move {
             let listener = match tokio::net::TcpListener::bind(format!("0.0.0.0:{p2p_port}")).await
@@ -3384,6 +3386,8 @@ impl BurstNode {
                                 let store_c = Arc::clone(&store_p2p);
                                 let our_node_id = node_address_p2p.clone();
                                 let params_hash_c = params_hash_p2p;
+                                let network_c = network_p2p;
+                                let peering_port_c = peering_port_p2p;
 
                                 tokio::spawn(async move {
                                     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -3403,6 +3407,8 @@ impl BurstNode {
                                         cookie: Some(cookie),
                                         cookie_signature: None,
                                         params_hash: params_hash_c,
+                                        network_id: network_c,
+                                        peering_port: peering_port_c,
                                     });
                                     match bincode::serialize(&challenge) {
                                         Ok(bytes) => {
@@ -3432,19 +3438,48 @@ impl BurstNode {
                                         Ok(Ok(_)) => {}
                                         _ => return,
                                     }
-                                    let remote_node_id = match bincode::deserialize::<WireMessage>(&body) {
-                                        Ok(WireMessage::Handshake(hs)) => match &hs.cookie_signature {
-                                            Some(sig) => {
-                                                let ok = { syn_cookies_c.lock().await.verify(&peer_ip, &hs.node_id, sig) };
-                                                if !ok {
-                                                    tracing::warn!(peer = %peer_id, "SYN cookie verification failed");
-                                                    return;
-                                                }
-                                                hs.node_id
+                                    let (remote_node_id, remote_peering_port) = match bincode::deserialize::<WireMessage>(&body) {
+                                        Ok(WireMessage::Handshake(hs)) => {
+                                            // Reject peers on a different network before verifying
+                                            // the cookie — hard Dev/Test/Live isolation.
+                                            if hs.network_id != network_c {
+                                                tracing::debug!(
+                                                    peer = %peer_id,
+                                                    ours = ?network_c,
+                                                    theirs = ?hs.network_id,
+                                                    "dropping inbound peer on different network"
+                                                );
+                                                return;
                                             }
-                                            None => return,
-                                        },
+                                            match &hs.cookie_signature {
+                                                Some(sig) => {
+                                                    let ok = { syn_cookies_c.lock().await.verify(&peer_ip, &hs.node_id, sig) };
+                                                    if !ok {
+                                                        tracing::warn!(peer = %peer_id, "SYN cookie verification failed");
+                                                        return;
+                                                    }
+                                                    (hs.node_id, hs.peering_port)
+                                                }
+                                                None => return,
+                                            }
+                                        }
                                         _ => return,
+                                    };
+
+                                    // Re-key this peer by its *dialable* listening address
+                                    // (ip:peering_port) instead of the ephemeral TCP source
+                                    // port. This makes an inbound connection collapse onto the
+                                    // outbound connection to the same node (one peer_manager
+                                    // entry, correct count) and ensures gossip only advertises
+                                    // dialable addresses. Fall back to the ephemeral address if
+                                    // the peer didn't advertise a port (0).
+                                    let (peer_addr, peer_id) = if remote_peering_port != 0 {
+                                        (
+                                            PeerAddress { ip: peer_ip.clone(), port: remote_peering_port },
+                                            format!("{}:{}", peer_ip, remote_peering_port),
+                                        )
+                                    } else {
+                                        (peer_addr, peer_id)
                                     };
 
                                     // Never accept a connection claiming our own node_id.
@@ -3594,6 +3629,8 @@ impl BurstNode {
                         node_private_key: burst_types::PrivateKey(self.node_private_key.0),
                         node_address: self.node_address.clone(),
                         params_hash: self.config.params.params_hash(),
+                        network: self.config.network,
+                        peering_port: self.config.port,
                     };
                     let mut shutdown_rx_cache = self.shutdown.subscribe();
 
@@ -3665,6 +3702,8 @@ impl BurstNode {
                 node_private_key: burst_types::PrivateKey(self.node_private_key.0),
                 node_address: self.node_address.clone(),
                 params_hash: self.config.params.params_hash(),
+                network: self.config.network,
+                peering_port: self.config.port,
             };
             let frontier_bs = Arc::clone(&self.frontier);
             let conn_registry_bs = Arc::clone(&self.connection_registry);
@@ -3798,6 +3837,8 @@ impl BurstNode {
                 node_private_key: burst_types::PrivateKey(self.node_private_key.0),
                 node_address: self.node_address.clone(),
                 params_hash: self.config.params.params_hash(),
+                network: self.config.network,
+                peering_port: self.config.port,
             };
             let mut shutdown_rx_reach = self.shutdown.subscribe();
 
@@ -3990,6 +4031,8 @@ impl BurstNode {
                 node_private_key: burst_types::PrivateKey(self.node_private_key.0),
                 node_address: self.node_address.clone(),
                 params_hash: self.config.params.params_hash(),
+                network: self.config.network,
+                peering_port: self.config.port,
             };
             let mut shutdown_rx_ro = self.shutdown.subscribe();
 
@@ -4024,6 +4067,15 @@ impl BurstNode {
                                 {
                                     let pm = reachout_ctx.peer_manager.read().await;
                                     if pm.is_connected(&addr_str) || pm.is_banned(&addr_str) {
+                                        continue;
+                                    }
+                                    // Skip our own advertised address — peers gossip it
+                                    // back to us, and dialing it just churns a
+                                    // self-connection that the node_id check rejects.
+                                    if pm
+                                        .external_address()
+                                        .is_some_and(|ext| ext.to_string() == addr_str)
+                                    {
                                         continue;
                                     }
                                 }
