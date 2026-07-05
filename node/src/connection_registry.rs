@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 
 use burst_consensus::{ActiveElections, OnlineWeightSampler, RepWeightCache};
 use burst_crypto::{decode_address, verify_signature};
@@ -49,16 +49,44 @@ pub enum Direction {
 /// — NOT their IP — so nodes sharing an IP (localhost cluster, or several nodes
 /// behind one NAT) are treated as distinct, matching rsnano.
 struct Channel {
-    /// The TCP write half, behind a mutex so the outbound drain can write.
-    writer: Arc<Mutex<OwnedWriteHalf>>,
-    /// Per-connection outbound bandwidth throttle.
-    throttle: BandwidthThrottle,
+    /// Bounded outbound queue drained by this channel's own writer task. Sends
+    /// use `try_send` (drop-on-full), so a slow or stalled peer backs up only
+    /// its own queue and can never head-of-line-block writes to other peers
+    /// (the single sequential drain used to do exactly that). Ordering is
+    /// preserved (FIFO, one writer per channel).
+    outbound_tx: mpsc::Sender<Vec<u8>>,
     node_id: String,
     direction: Direction,
     /// Monotonic id distinguishing this physical connection from any prior one
     /// under the same peer_id, so a superseded socket's teardown can't evict
     /// the live entry.
     conn_id: u64,
+}
+
+/// Outbound queue depth per channel.
+const CHANNEL_QUEUE_CAP: usize = 256;
+
+/// Spawn a channel's dedicated writer task. It owns the TCP write half and a
+/// per-connection bandwidth throttle, drains the queue in order, and writes
+/// length-prefixed frames. It exits — closing the write half — on any write
+/// error or when the sender is dropped (channel removed); the peer's read loop
+/// then observes the close and cleans up.
+fn spawn_channel_writer(mut writer: OwnedWriteHalf, mut rx: mpsc::Receiver<Vec<u8>>) {
+    tokio::spawn(async move {
+        let mut throttle = BandwidthThrottle::default();
+        while let Some(payload) = rx.recv().await {
+            if !throttle.try_consume(payload.len() as u64) {
+                continue; // throttled — drop this message
+            }
+            let len = (payload.len() as u32).to_be_bytes();
+            if writer.write_all(&len).await.is_err()
+                || writer.write_all(&payload).await.is_err()
+                || writer.flush().await.is_err()
+            {
+                break;
+            }
+        }
+    });
 }
 
 /// Decide, on a simultaneous-connect conflict, whether the NEW connection
@@ -119,11 +147,12 @@ impl ConnectionRegistry {
     pub fn insert(&mut self, peer_id: String, writer: OwnedWriteHalf) -> u64 {
         let conn_id = self.next_conn_id;
         self.next_conn_id += 1;
+        let (tx, rx) = mpsc::channel(CHANNEL_QUEUE_CAP);
+        spawn_channel_writer(writer, rx);
         self.channels.insert(
             peer_id,
             Channel {
-                writer: Arc::new(Mutex::new(writer)),
-                throttle: BandwidthThrottle::default(),
+                outbound_tx: tx,
                 node_id: String::new(),
                 direction: Direction::Outbound,
                 conn_id,
@@ -178,11 +207,12 @@ impl ConnectionRegistry {
 
         let conn_id = self.next_conn_id;
         self.next_conn_id += 1;
+        let (tx, rx) = mpsc::channel(CHANNEL_QUEUE_CAP);
+        spawn_channel_writer(writer, rx);
         self.channels.insert(
             peer_id,
             Channel {
-                writer: Arc::new(Mutex::new(writer)),
-                throttle: BandwidthThrottle::default(),
+                outbound_tx: tx,
                 node_id: peer_node_id,
                 direction,
                 conn_id,
@@ -191,9 +221,11 @@ impl ConnectionRegistry {
         Some(conn_id)
     }
 
-    /// Remove a peer's channel, returning its write half if present.
-    pub fn remove(&mut self, peer_id: &str) -> Option<Arc<Mutex<OwnedWriteHalf>>> {
-        self.channels.remove(peer_id).map(|c| c.writer)
+    /// Remove a peer's channel. Dropping it drops the outbound sender, which
+    /// ends the channel's writer task (closing the write half). Returns whether
+    /// a channel was present.
+    pub fn remove(&mut self, peer_id: &str) -> bool {
+        self.channels.remove(peer_id).is_some()
     }
 
     /// Generation-guarded removal: only remove if the current entry is the
@@ -212,19 +244,16 @@ impl ConnectionRegistry {
         }
     }
 
-    /// Check the outbound throttle for a peer. Returns `true` if the message
-    /// can be sent (and consumes the bandwidth tokens), `false` if throttled.
-    pub fn try_consume_outbound(&mut self, peer_id: &str, bytes: u64) -> bool {
-        if let Some(channel) = self.channels.get_mut(peer_id) {
-            channel.throttle.try_consume(bytes)
-        } else {
-            true
+    /// Queue a framed message for a peer (non-blocking). Returns `true` if it
+    /// was enqueued, `false` if the peer is unknown or its outbound queue is
+    /// full (drop-on-full backpressure — a slow peer never stalls others).
+    /// Bandwidth throttling and the actual socket write happen in the channel's
+    /// writer task, so this never blocks on a slow/stalled peer.
+    pub fn send(&self, peer_id: &str, payload: Vec<u8>) -> bool {
+        match self.channels.get(peer_id) {
+            Some(c) => c.outbound_tx.try_send(payload).is_ok(),
+            None => false,
         }
-    }
-
-    /// Look up a peer's write half (returns a cheaply cloned `Arc`).
-    pub fn get(&self, peer_id: &str) -> Option<Arc<Mutex<OwnedWriteHalf>>> {
-        self.channels.get(peer_id).map(|c| Arc::clone(&c.writer))
     }
 
     /// Number of registered connections.
@@ -247,17 +276,6 @@ impl Default for ConnectionRegistry {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Write a length-prefixed frame (4-byte big-endian length + payload) to
-/// the given write half. Returns `Ok(())` on success.
-pub async fn write_framed(writer: &Mutex<OwnedWriteHalf>, payload: &[u8]) -> std::io::Result<()> {
-    let mut w = writer.lock().await;
-    let len_bytes = (payload.len() as u32).to_be_bytes();
-    w.write_all(&len_bytes).await?;
-    w.write_all(payload).await?;
-    w.flush().await?;
-    Ok(())
 }
 
 /// Spawn a background task that reads framed messages from a peer's read
@@ -304,13 +322,7 @@ pub fn spawn_peer_read_loop(
                     peers: self_peers,
                 });
             if let Ok(bytes) = bincode::serialize(&msg) {
-                let writer = {
-                    let registry = connection_registry.read().await;
-                    registry.get(&peer_id)
-                };
-                if let Some(writer) = writer {
-                    let _ = write_framed(&writer, &bytes).await;
-                }
+                let _ = connection_registry.read().await.send(&peer_id, bytes);
             }
         }
 
@@ -578,11 +590,7 @@ async fn peer_read_loop(
                     let ack = WireMessage::ConfirmAck(ConfirmAckMsg { vote });
                     if let Ok(bytes) = bincode::serialize(&ack) {
                         let registry = connection_registry.read().await;
-                        if let Some(writer) = registry.get(peer_id) {
-                            if let Err(e) = write_framed(&writer, &bytes).await {
-                                tracing::warn!(peer = %peer_id, "failed to send confirm_ack: {e}");
-                            }
-                        }
+                        registry.send(peer_id, bytes);
                     }
                 }
             }
@@ -654,11 +662,7 @@ async fn peer_read_loop(
                     let wire_resp = WireMessage::Bootstrap(resp);
                     if let Ok(bytes) = bincode::serialize(&wire_resp) {
                         let registry = connection_registry.read().await;
-                        if let Some(writer) = registry.get(peer_id) {
-                            if let Err(e) = write_framed(&writer, &bytes).await {
-                                tracing::warn!(peer = %peer_id, "failed to send frontier response: {e}");
-                            }
-                        }
+                        registry.send(peer_id, bytes);
                     }
                 }
                 BootstrapMessage::FrontierResp {
@@ -682,11 +686,7 @@ async fn peer_read_loop(
                         let wire_req = WireMessage::Bootstrap(req);
                         if let Ok(bytes) = bincode::serialize(&wire_req) {
                             let registry = connection_registry.read().await;
-                            if let Some(writer) = registry.get(peer_id) {
-                                if let Err(e) = write_framed(&writer, &bytes).await {
-                                    tracing::warn!(peer = %peer_id, "failed to send bootstrap request: {e}");
-                                }
-                            }
+                            registry.send(peer_id, bytes);
                         }
                     }
                 }
@@ -702,11 +702,7 @@ async fn peer_read_loop(
                     let wire_resp = WireMessage::Bootstrap(resp);
                     if let Ok(bytes) = bincode::serialize(&wire_resp) {
                         let registry = connection_registry.read().await;
-                        if let Some(writer) = registry.get(peer_id) {
-                            if let Err(e) = write_framed(&writer, &bytes).await {
-                                tracing::warn!(peer = %peer_id, "failed to send bulk pull response: {e}");
-                            }
-                        }
+                        registry.send(peer_id, bytes);
                     }
                 }
                 BootstrapMessage::BulkPullResp { blocks } => {
@@ -732,11 +728,7 @@ async fn peer_read_loop(
                     let wire_resp = WireMessage::Bootstrap(resp);
                     if let Ok(bytes) = bincode::serialize(&wire_resp) {
                         let registry = connection_registry.read().await;
-                        if let Some(writer) = registry.get(peer_id) {
-                            if let Err(e) = write_framed(&writer, &bytes).await {
-                                tracing::warn!(peer = %peer_id, "failed to send block response: {e}");
-                            }
-                        }
+                        registry.send(peer_id, bytes);
                     }
                 }
                 BootstrapMessage::BlockResp { block } => {
@@ -819,11 +811,7 @@ async fn peer_read_loop(
                 });
                 if let Ok(bytes) = bincode::serialize(&ack) {
                     let registry = connection_registry.read().await;
-                    if let Some(writer) = registry.get(peer_id) {
-                        if let Err(e) = write_framed(&writer, &bytes).await {
-                            tracing::warn!(peer = %peer_id, "failed to send telemetry ack: {e}");
-                        }
-                    }
+                    registry.send(peer_id, bytes);
                 }
             }
             Ok(WireMessage::TelemetryAck(msg)) => {

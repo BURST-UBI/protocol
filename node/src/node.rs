@@ -40,7 +40,7 @@ use crate::bounded_backlog::BoundedBacklog;
 use crate::config::NodeConfig;
 use crate::confirmation_processor::{CementResult, ConfirmationProcessor, LmdbChainWalker};
 use crate::confirming_set::ConfirmingSet;
-use crate::connection_registry::{spawn_peer_read_loop, write_framed, ConnectionRegistry};
+use crate::connection_registry::{spawn_peer_read_loop, ConnectionRegistry};
 use crate::error::NodeError;
 use crate::ledger_cache::LedgerCache;
 use crate::local_broadcaster::LocalBroadcaster;
@@ -2769,8 +2769,6 @@ impl BurstNode {
         let mut outbound_rx = outbound_rx;
         let mut shutdown_rx2 = self.shutdown.subscribe();
         let conn_registry_drain = Arc::clone(&self.connection_registry);
-        let peer_manager_drain = Arc::clone(&self.peer_manager);
-        let metrics_drain = Arc::clone(&self.metrics);
 
         let drain_handle = tokio::spawn(async move {
             loop {
@@ -2781,47 +2779,17 @@ impl BurstNode {
                         break;
                     }
                     Some((peer_id, msg_bytes)) = outbound_rx.recv() => {
-                        // Check outbound bandwidth throttle (requires write lock)
-                        let (writer, throttle_ok) = {
-                            let mut registry = conn_registry_drain.write().await;
-                            let ok = registry.try_consume_outbound(&peer_id, msg_bytes.len() as u64);
-                            (registry.get(&peer_id), ok)
-                        };
-
-                        if !throttle_ok {
+                        // Enqueue to the peer's channel (non-blocking). Bandwidth
+                        // throttling and the socket write happen in the channel's
+                        // own writer task, so a slow peer can't stall this drain
+                        // (no head-of-line blocking). A write error there closes
+                        // the socket and the read loop performs cleanup.
+                        let sent = conn_registry_drain.read().await.send(&peer_id, msg_bytes);
+                        if !sent {
                             tracing::trace!(
                                 peer = %peer_id,
-                                bytes = msg_bytes.len(),
-                                "outbound message throttled"
+                                "outbound message dropped: no connection or queue full"
                             );
-                            continue;
-                        }
-
-                        match writer {
-                            Some(writer) => {
-                                if let Err(e) = write_framed(&writer, &msg_bytes).await {
-                                    tracing::warn!(
-                                        peer = %peer_id,
-                                        error = %e,
-                                        "failed to send message, disconnecting peer"
-                                    );
-                                    {
-                                        let mut registry = conn_registry_drain.write().await;
-                                        registry.remove(&peer_id);
-                                    }
-                                    {
-                                        let mut pm = peer_manager_drain.write().await;
-                                        pm.mark_disconnected(&peer_id);
-                                        metrics_drain.peer_count.set(pm.connected_count() as i64);
-                                    }
-                                }
-                            }
-                            None => {
-                                tracing::trace!(
-                                    peer = %peer_id,
-                                    "outbound message dropped: no connection for peer"
-                                );
-                            }
                         }
                     }
                 }
@@ -3875,22 +3843,11 @@ impl BurstNode {
                                         }
                                     };
 
-                                    {
-                                        let registry = conn_registry_bs.read().await;
-                                        if let Some(writer) = registry.get(&peer_id) {
-                                            if let Err(e) = write_framed(&writer, &req_bytes).await
-                                            {
-                                                tracing::warn!(
-                                                    peer = %peer_id,
-                                                    "failed to send frontier request: {e}"
-                                                );
-                                            }
-                                        } else {
-                                            tracing::warn!(
-                                                peer = %peer_id,
-                                                "no writer found in registry for bootstrap peer"
-                                            );
-                                        }
+                                    if !conn_registry_bs.read().await.send(&peer_id, req_bytes) {
+                                        tracing::warn!(
+                                            peer = %peer_id,
+                                            "failed to queue frontier request (no connection / queue full)"
+                                        );
                                     }
 
                                     tracing::info!(
@@ -4113,16 +4070,7 @@ impl BurstNode {
                                     &random_bytes
                                 };
                                 if let Some(ref payload) = bytes {
-                                    let registry = conn_registry_ka.read().await;
-                                    if let Some(writer) = registry.get(pid) {
-                                        if let Err(e) = write_framed(&writer, payload).await {
-                                            tracing::debug!(
-                                                peer = %pid,
-                                                error = %e,
-                                                "keepalive send failed"
-                                            );
-                                        }
-                                    }
+                                    conn_registry_ka.read().await.send(pid, payload.clone());
                                 }
                             }
 
@@ -4264,11 +4212,7 @@ impl BurstNode {
                         };
                         let registry = conn_registry_telem.read().await;
                         for pid in &peer_ids {
-                            if let Some(writer) = registry.get(pid) {
-                                if let Err(e) = crate::connection_registry::write_framed(&writer, &bytes).await {
-                                    tracing::trace!(peer = %pid, "failed to send telemetry req: {e}");
-                                }
-                            }
+                            registry.send(pid, bytes.clone());
                         }
                         tracing::trace!(peers = peer_ids.len(), "sent telemetry requests");
                     }
