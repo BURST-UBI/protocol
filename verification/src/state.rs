@@ -42,6 +42,10 @@ pub enum VerificationPhase {
     Challenged,
     /// Previously verified but fraud confirmed via challenge.
     Unverified,
+    /// Previously verified but deactivated via a benign (inactivity) challenge —
+    /// distinct from `Unverified`: the holder was real and their TRST is NOT
+    /// revoked (whitepaper §Unverification Without Revocation).
+    Deactivated,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

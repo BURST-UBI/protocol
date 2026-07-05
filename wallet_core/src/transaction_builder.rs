@@ -199,6 +199,7 @@ pub fn build_challenge_tx(
     challenger: &WalletAddress,
     target: &WalletAddress,
     stake_amount: u128,
+    reason: burst_types::ChallengeReason,
     now: Timestamp,
 ) -> Result<burst_transactions::challenge::ChallengeTx, WalletError> {
     if stake_amount == 0 {
@@ -208,8 +209,8 @@ pub fn build_challenge_tx(
     }
 
     let hash_data = format!(
-        "challenge:{}:{}:{}:{}",
-        challenger, target, stake_amount, now
+        "challenge:{}:{}:{}:{:?}:{}",
+        challenger, target, stake_amount, reason, now
     );
     let hash = burst_crypto::hash_transaction(hash_data.as_bytes());
     Ok(burst_transactions::challenge::ChallengeTx {
@@ -217,6 +218,7 @@ pub fn build_challenge_tx(
         challenger: challenger.clone(),
         target: target.clone(),
         stake_amount,
+        reason,
         timestamp: now,
         work: 0,
         signature: Signature([0u8; 64]),
@@ -427,8 +429,11 @@ pub fn build_state_block(
 
     let representative = representative.unwrap_or_else(|| account_state.representative.clone());
 
-    let origin = match block_type {
-        BlockType::Burn => *transaction.hash(),
+    let origin = match transaction {
+        // A burn's origin IS its own hash (it mints TRST).
+        _ if block_type == BlockType::Burn => *transaction.hash(),
+        // A challenge encodes its reason (fraud vs benign inactivity) in origin.
+        burst_transactions::Transaction::Challenge(tx) => TxHash::new(tx.reason.to_origin()),
         _ => previous_origin,
     };
 
@@ -561,7 +566,14 @@ mod tests {
     fn build_challenge_tx_creates_valid_tx() {
         let challenger = test_address("challenger1");
         let target = test_address("target1");
-        let tx = build_challenge_tx(&challenger, &target, 1000, Timestamp::new(6000)).unwrap();
+        let tx = build_challenge_tx(
+            &challenger,
+            &target,
+            1000,
+            burst_types::ChallengeReason::Fraud,
+            Timestamp::new(6000),
+        )
+        .unwrap();
         assert_eq!(tx.challenger.as_str(), challenger.as_str());
         assert_eq!(tx.target.as_str(), target.as_str());
         assert_eq!(tx.stake_amount, 1000);
@@ -574,6 +586,7 @@ mod tests {
             &test_address("c1"),
             &test_address("t1"),
             0,
+            burst_types::ChallengeReason::Fraud,
             Timestamp::new(0),
         );
         assert!(result.is_err());

@@ -22,5 +22,5 @@ pub use hash::TxHash;
 pub use keys::{KeyPair, PrivateKey, PublicKey, Signature};
 pub use network::NetworkId;
 pub use params::ProtocolParams;
-pub use state::{TrstState, WalletState};
+pub use state::{ChallengeReason, TrstState, WalletState, INACTIVITY_CHALLENGE_MARKER};
 pub use time::Timestamp;

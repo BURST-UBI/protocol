@@ -298,6 +298,7 @@ impl VerificationOrchestrator {
         challenger: &WalletAddress,
         challenger_is_verified: bool,
         stake: u128,
+        reason: crate::challenge::ChallengeReason,
         params: &ProtocolParams,
     ) -> Result<(), VerificationError> {
         if !challenger_is_verified {
@@ -323,9 +324,13 @@ impl VerificationOrchestrator {
             )));
         }
 
-        let challenge =
-            self.challenges
-                .initiate(challenger.clone(), target.clone(), stake, Timestamp::now());
+        let challenge = self.challenges.initiate(
+            challenger.clone(),
+            target.clone(),
+            stake,
+            reason,
+            Timestamp::now(),
+        );
 
         self.active_challenges.insert(target.clone(), challenge);
         state.phase = VerificationPhase::Challenged;
@@ -426,12 +431,29 @@ impl VerificationOrchestrator {
             &verifiers,
         );
 
+        // "Upheld" means the wallet failed to re-clear the verification bar. What
+        // happens next depends on WHY it was challenged (same procedure, different
+        // consequence): Fraud → unverify + revoke TRST; Inactivity → deactivate
+        // (benign) with NO revocation. The challenger is rewarded in both upheld
+        // cases (compute_challenge_outcome returns the stake + pays correct
+        // verifiers); only Fraud additionally pays the revoked-TRST bounty.
         if fraud_confirmed {
-            state.phase = VerificationPhase::Unverified;
-            self.pending_events
-                .push(VerificationEvent::WalletUnverified {
-                    wallet: target.clone(),
-                });
+            match challenge.reason {
+                crate::challenge::ChallengeReason::Fraud => {
+                    state.phase = VerificationPhase::Unverified;
+                    self.pending_events
+                        .push(VerificationEvent::WalletUnverified {
+                            wallet: target.clone(),
+                        });
+                }
+                crate::challenge::ChallengeReason::Inactivity => {
+                    state.phase = VerificationPhase::Deactivated;
+                    self.pending_events
+                        .push(VerificationEvent::WalletDeactivated {
+                            wallet: target.clone(),
+                        });
+                }
+            }
         } else {
             state.phase = VerificationPhase::Verified;
         }
@@ -896,8 +918,15 @@ mod tests {
 
         // Initiate challenge
         let challenger = test_addr("challenger");
-        orch.initiate_challenge(&wallet, &challenger, true, 500, &params)
-            .unwrap();
+        orch.initiate_challenge(
+            &wallet,
+            &challenger,
+            true,
+            500,
+            crate::challenge::ChallengeReason::Fraud,
+            &params,
+        )
+        .unwrap();
 
         let state = orch.get_state(&wallet).unwrap();
         assert_eq!(state.phase, VerificationPhase::Challenged);
@@ -949,8 +978,15 @@ mod tests {
         orch.drain_events();
 
         let challenger = test_addr("challenger");
-        orch.initiate_challenge(&wallet, &challenger, true, 500, &params)
-            .unwrap();
+        orch.initiate_challenge(
+            &wallet,
+            &challenger,
+            true,
+            500,
+            crate::challenge::ChallengeReason::Fraud,
+            &params,
+        )
+        .unwrap();
 
         let verifiers: Vec<WalletAddress> =
             (10..=15).map(|i| test_addr(&format!("rv{i}"))).collect();
@@ -993,7 +1029,14 @@ mod tests {
 
         endorse_wallet(&mut orch, &wallet, &params);
 
-        let result = orch.initiate_challenge(&wallet, &test_addr("c"), true, 500, &params);
+        let result = orch.initiate_challenge(
+            &wallet,
+            &test_addr("c"),
+            true,
+            500,
+            crate::challenge::ChallengeReason::Fraud,
+            &params,
+        );
         assert!(result.is_err());
     }
 
@@ -1247,7 +1290,14 @@ mod tests {
         verify_wallet(&mut orch, &wallet, &params);
 
         let unverified_challenger = test_addr("unverified");
-        let result = orch.initiate_challenge(&wallet, &unverified_challenger, false, 500, &params);
+        let result = orch.initiate_challenge(
+            &wallet,
+            &unverified_challenger,
+            false,
+            500,
+            crate::challenge::ChallengeReason::Fraud,
+            &params,
+        );
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -1412,8 +1462,15 @@ mod tests {
 
         // Set up a verified wallet, then challenge it.
         verify_wallet(&mut orch, &target, &params);
-        orch.initiate_challenge(&target, &challenger, true, 1000, &params)
-            .unwrap();
+        orch.initiate_challenge(
+            &target,
+            &challenger,
+            true,
+            1000,
+            crate::challenge::ChallengeReason::Fraud,
+            &params,
+        )
+        .unwrap();
         let verifiers: Vec<WalletAddress> = (0..params.num_verifiers)
             .map(|i| test_addr(&format!("cv{i}")))
             .collect();
@@ -1449,5 +1506,56 @@ mod tests {
             .try_resolve_challenge(&target, &params)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn inactivity_challenge_deactivates_without_revoking() {
+        let mut orch = VerificationOrchestrator::new();
+        let params = test_params();
+        let target = test_addr("inactive");
+        let challenger = test_addr("hunter");
+
+        verify_wallet(&mut orch, &target, &params);
+        // Same procedure, but the reason is benign Inactivity, not Fraud.
+        orch.initiate_challenge(
+            &target,
+            &challenger,
+            true,
+            1000,
+            crate::challenge::ChallengeReason::Inactivity,
+            &params,
+        )
+        .unwrap();
+        let verifiers: Vec<WalletAddress> = (0..params.num_verifiers)
+            .map(|i| test_addr(&format!("iv{i}")))
+            .collect();
+        orch.select_verifiers(&target, &verifiers, &[9u8; 32], &params)
+            .unwrap();
+        orch.drain_events();
+        let selected = orch.get_state(&target).unwrap().selected_verifiers.clone();
+
+        // Verifiers agree the wallet is no longer an active human → challenge
+        // upheld → benign DEACTIVATION (not fraud revocation).
+        for v in &selected {
+            orch.process_vote(&target, v, Vote::Illegitimate, &params)
+                .unwrap();
+        }
+        assert!(orch
+            .try_resolve_challenge(&target, &params)
+            .unwrap()
+            .is_some());
+
+        let events = orch.drain_events();
+        // Upheld inactivity challenge → WalletDeactivated, NOT WalletUnverified.
+        assert!(events.iter().any(
+            |e| matches!(e, VerificationEvent::WalletDeactivated { wallet } if *wallet == target)
+        ));
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, VerificationEvent::WalletUnverified { .. })));
+        assert_eq!(
+            orch.get_state(&target).unwrap().phase,
+            VerificationPhase::Deactivated
+        );
     }
 }

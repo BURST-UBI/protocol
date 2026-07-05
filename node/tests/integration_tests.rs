@@ -2300,8 +2300,15 @@ fn full_protocol_lifecycle_simulation() {
         }
     ));
     assert_eq!(brn.get_wallet(&carol).unwrap().total_staked, 1000);
-    orch.initiate_challenge(&sybil, &carol, true, 1000, &params)
-        .unwrap();
+    orch.initiate_challenge(
+        &sybil,
+        &carol,
+        true,
+        1000,
+        burst_verification::ChallengeReason::Fraud,
+        &params,
+    )
+    .unwrap();
 
     // New random panel votes Illegitimate; resolution fires on the last vote.
     let cvs: Vec<_> = (0u8..3).map(|i| make_address(220 + i)).collect();

@@ -1429,7 +1429,13 @@ mod tests {
 
         // A votes Yea directly; B and C delegate to A and do NOT vote.
         engine
-            .cast_exploration_vote(&hash, &a, GovernanceVote::Yea, Timestamp::new(1000), &params)
+            .cast_exploration_vote(
+                &hash,
+                &a,
+                GovernanceVote::Yea,
+                Timestamp::new(1000),
+                &params,
+            )
             .unwrap();
         let mut del = crate::delegation::DelegationEngine::new(10);
         del.delegate(&b, &a).unwrap();
@@ -1623,7 +1629,9 @@ mod tests {
         let now = Timestamp::new(
             proposal.created_at.as_secs() + params.governance_proposal_duration_secs - 1,
         );
-        assert!(engine.try_advance(&mut proposal, now, &params, None).is_err());
+        assert!(engine
+            .try_advance(&mut proposal, now, &params, None)
+            .is_err());
 
         // After duration elapsed — should advance to Exploration
         let now = Timestamp::new(
@@ -1654,14 +1662,18 @@ mod tests {
         let now = Timestamp::new(
             exploration_started.as_secs() + params.governance_exploration_duration_secs - 1,
         );
-        assert!(engine.try_advance(&mut proposal, now, &params, None).is_err());
+        assert!(engine
+            .try_advance(&mut proposal, now, &params, None)
+            .is_err());
 
         // After duration elapsed but in propagation buffer — should fail
         let now = Timestamp::new(
             exploration_started.as_secs() + params.governance_exploration_duration_secs,
         );
         assert!(matches!(
-            engine.try_advance(&mut proposal, now, &params, None).unwrap_err(),
+            engine
+                .try_advance(&mut proposal, now, &params, None)
+                .unwrap_err(),
             GovernanceError::PropagationBuffer
         ));
 
@@ -1745,7 +1757,9 @@ mod tests {
         let now = Timestamp::new(
             cooldown_started.as_secs() + params.governance_cooldown_duration_secs - 1,
         );
-        assert!(engine.try_advance(&mut proposal, now, &params, None).is_err());
+        assert!(engine
+            .try_advance(&mut proposal, now, &params, None)
+            .is_err());
 
         // After duration elapsed — should advance to Promotion
         let now =
@@ -1779,7 +1793,9 @@ mod tests {
         let now = Timestamp::new(
             promotion_started.as_secs() + params.governance_promotion_duration_secs - 1,
         );
-        assert!(engine.try_advance(&mut proposal, now, &params, None).is_err());
+        assert!(engine
+            .try_advance(&mut proposal, now, &params, None)
+            .is_err());
 
         // After duration + propagation buffer — should advance to Activation
         let now = Timestamp::new(
@@ -2192,12 +2208,16 @@ mod tests {
 
         // Before 24h → should fail (PhaseNotExpired)
         let now = Timestamp::new(1000 + EMERGENCY_PHASE_DURATION_SECS - 1);
-        assert!(engine.try_advance(&mut proposal, now, &params, None).is_err());
+        assert!(engine
+            .try_advance(&mut proposal, now, &params, None)
+            .is_err());
 
         // At exactly 24h but before propagation buffer → should fail (PropagationBuffer)
         let now = Timestamp::new(1000 + EMERGENCY_PHASE_DURATION_SECS);
         assert!(matches!(
-            engine.try_advance(&mut proposal, now, &params, None).unwrap_err(),
+            engine
+                .try_advance(&mut proposal, now, &params, None)
+                .unwrap_err(),
             GovernanceError::PropagationBuffer
         ));
 
@@ -2205,7 +2225,9 @@ mod tests {
         let now = Timestamp::new(
             1000 + EMERGENCY_PHASE_DURATION_SECS + params.governance_propagation_buffer_secs,
         );
-        assert!(engine.try_advance(&mut proposal, now, &params, None).is_ok());
+        assert!(engine
+            .try_advance(&mut proposal, now, &params, None)
+            .is_ok());
     }
 
     #[test]
@@ -2275,7 +2297,9 @@ mod tests {
         let now = Timestamp::new(
             1000 + EMERGENCY_PHASE_DURATION_SECS + params.governance_propagation_buffer_secs,
         );
-        engine.try_advance(&mut proposal, now, &params, None).unwrap();
+        engine
+            .try_advance(&mut proposal, now, &params, None)
+            .unwrap();
 
         // Promotion → Activation
         proposal.promotion_votes_yea = 96;
@@ -2287,7 +2311,9 @@ mod tests {
                 + EMERGENCY_PHASE_DURATION_SECS
                 + params.governance_propagation_buffer_secs,
         );
-        engine.try_advance(&mut proposal, now, &params, None).unwrap();
+        engine
+            .try_advance(&mut proposal, now, &params, None)
+            .unwrap();
         assert_eq!(proposal.phase, GovernancePhase::Activation);
 
         // Activate — apply the parameter change

@@ -1368,12 +1368,19 @@ impl BurstNode {
                             let challenger_verified = prev_account
                                 .as_ref()
                                 .is_some_and(|a| a.state == burst_types::WalletState::Verified);
+                            // A Challenge block's `origin` field marks whether this
+                            // is a Fraud challenge (revoke on upheld) or a benign
+                            // Inactivity challenge (deactivate, no revoke).
+                            let reason = burst_verification::ChallengeReason::from_origin(
+                                block.origin.as_bytes(),
+                            );
                             let mut orch = verification_orch_bp.lock().await;
                             if let Err(e) = orch.initiate_challenge(
                                 target_addr,
                                 &block.account,
                                 challenger_verified,
                                 stake_amount,
+                                reason,
                                 &config_params_bp,
                             ) {
                                 tracing::warn!(

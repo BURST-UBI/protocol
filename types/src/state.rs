@@ -2,6 +2,49 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Why a wallet is being challenged. The same challenge procedure (stake →
+/// re-verification → verifier vote) removes a verified wallet either way; the
+/// reason only decides what happens to the wallet's TRST when the challenge is
+/// upheld (whitepaper §Handling Bad Actors vs §Unverification Without Revocation).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ChallengeReason {
+    /// The wallet is a fake / non-unique human. Upheld → wallet unverified AND
+    /// all TRST it originated is revoked (via the merger graph).
+    #[default]
+    Fraud,
+    /// The wallet's holder is dead / prolonged-inactive (a real person who
+    /// legitimately earned their TRST). Upheld → wallet deactivated (BRN accrual
+    /// and transaction rights stop) but TRST is NOT revoked. The challenger is
+    /// still rewarded for catching it (stake returned + correct verifiers paid).
+    Inactivity,
+}
+
+/// Sentinel placed in a Challenge block's `origin` field to mark it as an
+/// Inactivity (benign) challenge. A Challenge block never references a TRST
+/// origin, so this field is otherwise unused — encoding the reason here needs no
+/// new block field and no change to any block hash. Any other value (including
+/// the default zero) means a Fraud challenge.
+pub const INACTIVITY_CHALLENGE_MARKER: [u8; 32] = [0xCC; 32];
+
+impl ChallengeReason {
+    /// Decode the challenge reason from a Challenge block's `origin` bytes.
+    pub fn from_origin(origin: &[u8; 32]) -> Self {
+        if *origin == INACTIVITY_CHALLENGE_MARKER {
+            ChallengeReason::Inactivity
+        } else {
+            ChallengeReason::Fraud
+        }
+    }
+
+    /// The `origin` bytes a Challenge block should carry for this reason.
+    pub fn to_origin(self) -> [u8; 32] {
+        match self {
+            ChallengeReason::Fraud => [0u8; 32],
+            ChallengeReason::Inactivity => INACTIVITY_CHALLENGE_MARKER,
+        }
+    }
+}
+
 /// The verification state of a wallet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum WalletState {

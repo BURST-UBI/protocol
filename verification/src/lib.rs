@@ -20,7 +20,7 @@ pub mod state;
 pub mod verifier_selection;
 pub mod voting;
 
-pub use challenge::ChallengeEngine;
+pub use challenge::{ChallengeEngine, ChallengeReason};
 pub use endorsement::EndorsementEngine;
 pub use error::VerificationError;
 pub use method::VerificationMethod;

@@ -30,8 +30,9 @@ pub fn vote_signing_payload(
     block_hashes: &[BlockHash],
 ) -> Vec<u8> {
     let voter_bytes = voter.as_str().as_bytes();
-    let mut payload =
-        Vec::with_capacity(VOTE_DOMAIN.len() + voter_bytes.len() + 1 + 8 + 8 + block_hashes.len() * 32);
+    let mut payload = Vec::with_capacity(
+        VOTE_DOMAIN.len() + voter_bytes.len() + 1 + 8 + 8 + block_hashes.len() * 32,
+    );
     payload.extend_from_slice(VOTE_DOMAIN);
     payload.extend_from_slice(voter_bytes);
     payload.push(u8::from(is_final));

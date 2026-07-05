@@ -1,6 +1,6 @@
 //! Challenge transaction: challenger stakes BRN to contest a wallet's legitimacy.
 
-use burst_types::{Signature, Timestamp, TxHash, WalletAddress};
+use burst_types::{ChallengeReason, Signature, Timestamp, TxHash, WalletAddress};
 use serde::{Deserialize, Serialize};
 
 /// A challenge transaction.
@@ -16,6 +16,11 @@ pub struct ChallengeTx {
     pub target: WalletAddress,
     /// BRN staked by the challenger (lost if challenge fails).
     pub stake_amount: u128,
+    /// Why the wallet is being challenged. Fraud (default) → revoke TRST on
+    /// upheld; Inactivity → benign deactivation with no revocation. Carried into
+    /// the Challenge block's `origin` field by the transaction builder.
+    #[serde(default)]
+    pub reason: ChallengeReason,
     pub timestamp: Timestamp,
     pub work: u64,
     pub signature: Signature,

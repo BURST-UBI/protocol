@@ -1,5 +1,6 @@
 //! Challenge engine — any verified wallet can contest another's legitimacy.
 
+pub use burst_types::ChallengeReason;
 use burst_types::{Timestamp, WalletAddress};
 use serde::{Deserialize, Serialize};
 
@@ -15,6 +16,7 @@ pub struct Challenge {
     pub target: WalletAddress,
     pub stake_amount: u128,
     pub initiated_at: Timestamp,
+    pub reason: ChallengeReason,
 }
 
 pub struct ChallengeEngine;
@@ -28,6 +30,7 @@ impl ChallengeEngine {
         challenger: WalletAddress,
         target: WalletAddress,
         stake_amount: u128,
+        reason: ChallengeReason,
         now: Timestamp,
     ) -> Challenge {
         Challenge {
@@ -35,6 +38,7 @@ impl ChallengeEngine {
             target,
             stake_amount,
             initiated_at: now,
+            reason,
         }
     }
 
@@ -62,6 +66,7 @@ mod tests {
             addr("challenger"),
             addr("target"),
             500,
+            ChallengeReason::Fraud,
             Timestamp::new(1000),
         );
         assert_eq!(c.challenger, addr("challenger"));
@@ -73,7 +78,13 @@ mod tests {
     #[test]
     fn challenge_not_timed_out_before_deadline() {
         let engine = ChallengeEngine;
-        let c = engine.initiate(addr("a"), addr("b"), 100, Timestamp::new(1000));
+        let c = engine.initiate(
+            addr("a"),
+            addr("b"),
+            100,
+            ChallengeReason::Fraud,
+            Timestamp::new(1000),
+        );
         let still_within = Timestamp::new(1000 + CHALLENGE_TIMEOUT_SECS - 1);
         assert!(!engine.is_timed_out(&c, still_within));
     }
@@ -81,7 +92,13 @@ mod tests {
     #[test]
     fn challenge_timed_out_at_exactly_deadline() {
         let engine = ChallengeEngine;
-        let c = engine.initiate(addr("a"), addr("b"), 100, Timestamp::new(0));
+        let c = engine.initiate(
+            addr("a"),
+            addr("b"),
+            100,
+            ChallengeReason::Fraud,
+            Timestamp::new(0),
+        );
         let at_deadline = Timestamp::new(CHALLENGE_TIMEOUT_SECS);
         assert!(engine.is_timed_out(&c, at_deadline));
     }
@@ -89,7 +106,13 @@ mod tests {
     #[test]
     fn challenge_timed_out_well_past_deadline() {
         let engine = ChallengeEngine;
-        let c = engine.initiate(addr("a"), addr("b"), 100, Timestamp::new(0));
+        let c = engine.initiate(
+            addr("a"),
+            addr("b"),
+            100,
+            ChallengeReason::Fraud,
+            Timestamp::new(0),
+        );
         let way_past = Timestamp::new(CHALLENGE_TIMEOUT_SECS * 10);
         assert!(engine.is_timed_out(&c, way_past));
     }
