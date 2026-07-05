@@ -2151,6 +2151,7 @@ impl BurstNode {
         let vote_generator_ct = Arc::clone(&self.vote_generator);
         let broadcaster_ct = self.broadcaster.clone();
         let peer_manager_ct = Arc::clone(&self.peer_manager);
+        let rep_weights_ct = Arc::clone(&self.rep_weights);
         let block_processor_ct = Arc::clone(&self.block_processor);
         let frontier_ct = Arc::clone(&self.frontier);
         let store_ct = Arc::clone(&self.store);
@@ -2170,7 +2171,59 @@ impl BurstNode {
                         break;
                     }
                     _ = interval.tick() => {
-                        // Collect confirmed elections
+                        // Phase 1: emit FINAL votes for elections that reached
+                        // SOFT quorum (rsnano two-phase: soft quorum → final
+                        // votes → confirmation). Confirmation is gated on final
+                        // votes, so without this an election that reached soft
+                        // quorum would never cement.
+                        {
+                            let (our_rep, is_rep) = {
+                                let vg = vote_generator_ct.lock().await;
+                                (vg.representative.clone(), vg.is_representative)
+                            };
+                            if is_rep {
+                                let ready = {
+                                    let ae = active_elections_ct.read().await;
+                                    ae.soft_quorum_needing_final(&our_rep)
+                                };
+                                if !ready.is_empty() {
+                                    let our_weight =
+                                        { rep_weights_ct.read().await.weight(&our_rep) };
+                                    let now = Timestamp::new(unix_now_secs());
+                                    for (root, winner) in ready {
+                                        let fv = {
+                                            vote_generator_ct.lock().await.generate_final_vote(winner)
+                                        };
+                                        // Count our own final weight locally.
+                                        {
+                                            let mut ae = active_elections_ct.write().await;
+                                            let _ = ae.process_vote(
+                                                &root, &our_rep, winner, our_weight, true, now,
+                                            );
+                                        }
+                                        let wire = WireMessage::Vote(WireVote {
+                                            voter: fv.voter,
+                                            block_hashes: vec![fv.block_hash],
+                                            is_final: true,
+                                            timestamp: fv.timestamp,
+                                            sequence: fv.sequence,
+                                            signature: fv.signature,
+                                        });
+                                        if let Ok(bytes) = bincode::serialize(&wire) {
+                                            let peers: Vec<burst_network::PeerState> = {
+                                                let pm = peer_manager_ct.read().await;
+                                                pm.iter_connected().map(|(_, s)| s.clone()).collect()
+                                            };
+                                            let _ = broadcaster_ct
+                                                .broadcast_with_fanout(&bytes, &peers, 4)
+                                                .await;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Phase 2: collect confirmed elections
                         let confirmed = {
                             let ae = active_elections_ct.read().await;
                             ae.confirmed_elections()

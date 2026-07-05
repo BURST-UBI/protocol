@@ -88,6 +88,25 @@ impl ActiveElections {
         }
     }
 
+    /// `(root, winner)` for active elections that have reached SOFT quorum (a
+    /// supermajority margin over all votes — see [`Election::has_quorum`]) but
+    /// where `our_rep` has not yet cast a FINAL vote. The node emits a final
+    /// vote for each so the election can progress soft-quorum → final-quorum →
+    /// confirmation (rsnano's two-phase model). Confirmation itself is gated on
+    /// FINAL votes, so without this step an election that reached soft quorum
+    /// would never cement.
+    pub fn soft_quorum_needing_final(
+        &self,
+        our_rep: &WalletAddress,
+    ) -> Vec<(BlockHash, BlockHash)> {
+        self.elections
+            .iter()
+            .filter(|(_, e)| !e.is_confirmed() && !e.is_expired() && e.has_quorum())
+            .filter(|(_, e)| e.last_votes.get(our_rep).map(|v| v.is_final) != Some(true))
+            .filter_map(|(root, e)| e.leading_block().map(|(winner, _)| (*root, winner)))
+            .collect()
+    }
+
     /// Remove all elections that have timed out.
     ///
     /// Returns the root hashes of expired elections.
@@ -324,6 +343,32 @@ mod tests {
         let status = result.unwrap();
         assert_eq!(status.winner, make_hash(2));
         assert_eq!(status.tally, 700);
+    }
+
+    #[test]
+    fn soft_quorum_needing_final_flags_then_clears() {
+        let mut ae = ActiveElections::new(10, 1000);
+        let root = make_hash(1);
+        let block = make_hash(2);
+        let our_rep = make_voter("self");
+        ae.start_election(root, ts(100)).unwrap();
+
+        // No votes → nothing at soft quorum.
+        assert!(ae.soft_quorum_needing_final(&our_rep).is_empty());
+
+        // A non-final supermajority (700 ≥ 670 margin over 0) → soft quorum,
+        // and we haven't cast a final vote → flagged for us to finalize.
+        ae.process_vote(&root, &make_voter("alice"), block, 700, false, ts(101))
+            .unwrap();
+        assert_eq!(ae.soft_quorum_needing_final(&our_rep), vec![(root, block)]);
+
+        // We cast a small FINAL vote (100 < 670 → does NOT confirm), but now we
+        // HAVE final-voted → no longer flagged (excluded by the is_final check,
+        // not by confirmation).
+        ae.process_vote(&root, &our_rep, block, 100, true, ts(102))
+            .unwrap();
+        assert!(!ae.get_election(&root).unwrap().is_confirmed());
+        assert!(ae.soft_quorum_needing_final(&our_rep).is_empty());
     }
 
     #[test]
