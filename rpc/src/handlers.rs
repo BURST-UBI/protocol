@@ -1616,14 +1616,20 @@ pub async fn handle_genesis_endorse(
     }
 
     // Target → link (its public key bytes), same encoding the econ layer decodes.
-    let target_pubkey = burst_crypto::decode_address(target.as_str())
-        .ok_or_else(|| RpcError::InvalidRequest(format!("invalid target address: {}", target.as_str())))?;
+    let target_pubkey = burst_crypto::decode_address(target.as_str()).ok_or_else(|| {
+        RpcError::InvalidRequest(format!("invalid target address: {}", target.as_str()))
+    })?;
     let link = BlockHash::new(target_pubkey);
 
     // Genesis account current state: head (previous) + spent-BRN odometer.
-    let genesis_acct = state.account_store.get_account(&genesis_addr).map_err(|e| {
-        RpcError::Server(format!("genesis account not found (is this the authority node?): {e}"))
-    })?;
+    let genesis_acct = state
+        .account_store
+        .get_account(&genesis_addr)
+        .map_err(|e| {
+            RpcError::Server(format!(
+                "genesis account not found (is this the authority node?): {e}"
+            ))
+        })?;
     let previous = state
         .frontier_store
         .get_frontier(&genesis_addr)

@@ -470,7 +470,6 @@ pub fn create_returned_token(
     }
 }
 
-
 /// Grant a burn-backed TRST reward by creating a pending entry that the
 /// recipient claims with a normal Receive block — so the reward flows through
 /// the same on-chain validation as every other TRST (pending must exist and

@@ -657,9 +657,7 @@ fn trst_expiry_zeroes_old_tokens() {
 
     let before_expiry = Timestamp::new(5500);
     assert!(
-        trst.transferable_balance(&bob, before_expiry)
-            .unwrap()
-            > 0,
+        trst.transferable_balance(&bob, before_expiry).unwrap() > 0,
         "token should be active before expiry"
     );
 
@@ -899,7 +897,6 @@ fn trst_cannot_transfer_more_than_balance() {
         "overdraft should saturate to 0"
     );
 }
-
 
 #[test]
 fn brn_balance_monotonically_increases_with_time() {
@@ -1554,8 +1551,14 @@ fn create_received_token_single_provenance_preserves_origin() {
         burst_node::ledger_bridge::create_received_token(&receive_block, &pending, 86400 * 365);
     assert_eq!(token.amount, 400);
     assert_eq!(token.holder, receiver);
-    assert_eq!(token.origin, origin_hash, "origin should pass through from sender");
-    assert_eq!(token.origin_wallet, origin_wallet, "origin_wallet should pass through");
+    assert_eq!(
+        token.origin, origin_hash,
+        "origin should pass through from sender"
+    );
+    assert_eq!(
+        token.origin_wallet, origin_wallet,
+        "origin_wallet should pass through"
+    );
     assert_eq!(token.origin_timestamp, Timestamp::new(3000));
     assert_eq!(token.effective_origin_timestamp, Timestamp::new(3000));
     assert!(token.revoked_origin.is_none());
@@ -2032,7 +2035,10 @@ fn verifier_rewards_are_burn_backed_pending_entries() {
     assert_eq!(info.amount, 500);
     assert_eq!(info.provenance.len(), 1);
     // Conservation: minted reward == burned dissenter stake.
-    assert_eq!(info.amount, brn.get_wallet(&dissenter).unwrap().total_burned);
+    assert_eq!(
+        info.amount,
+        brn.get_wallet(&dissenter).unwrap().total_burned
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2086,21 +2092,38 @@ fn full_protocol_lifecycle_simulation() {
     // ── Act 2: two-phase burn — TRST only ever from burned BRN ─────────
     // Alice's open block: zero balances (birthright is computed, not claimed).
     let alice_open = make_block(
-        BlockType::Open, &alice, BlockHash::ZERO, &alice,
-        0, 0, BlockHash::ZERO, TxHash::ZERO, 1500,
+        BlockType::Open,
+        &alice,
+        BlockHash::ZERO,
+        &alice,
+        0,
+        0,
+        BlockHash::ZERO,
+        TxHash::ZERO,
+        1500,
     );
     assert!(burst_node::BlockProcessor::validate_open_block(&alice_open, None).is_ok());
 
     // Burn 600 to Bob: odometer 0 → 600, spend covered by computed BRN(w).
     let burn = make_block(
-        BlockType::Burn, &alice, alice_open.hash, &alice,
-        600, 0, BlockHash::new(pubkey_bytes(&bob)), TxHash::ZERO, 2000,
+        BlockType::Burn,
+        &alice,
+        alice_open.hash,
+        &alice,
+        600,
+        0,
+        BlockHash::new(pubkey_bytes(&bob)),
+        TxHash::ZERO,
+        2000,
     );
     assert!(burst_node::BlockProcessor::validate_balance_transition(&burn, 0, 0).is_ok());
     assert!(600 <= brn.compute_balance(&st, t2000));
     let econ = burst_node::process_block_economics(&burn, &mut brn, &mut trst, t2000, 10_000, 0);
     let minted = match &econ {
-        burst_node::EconomicResult::BurnAndMint { burn_amount, mint_token } => {
+        burst_node::EconomicResult::BurnAndMint {
+            burn_amount,
+            mint_token,
+        } => {
             assert_eq!(*burn_amount, 600);
             mint_token.clone().unwrap()
         }
@@ -2111,35 +2134,52 @@ fn full_protocol_lifecycle_simulation() {
     assert!(trst.get_portfolio(&bob).is_none());
     let burn_hash = TxHash::new(*burn.hash.as_bytes());
     pending_store
-        .put_pending(&bob, &burn_hash, &PendingInfo {
-            source: alice.clone(),
-            amount: minted.amount,
-            timestamp: t2000,
-            provenance: vec![PendingProvenance {
+        .put_pending(
+            &bob,
+            &burn_hash,
+            &PendingInfo {
+                source: alice.clone(),
                 amount: minted.amount,
-                origin: minted.origin,
-                origin_wallet: minted.origin_wallet.clone(),
-                origin_timestamp: minted.origin_timestamp,
-                effective_origin_timestamp: minted.effective_origin_timestamp,
-            }],
-        })
+                timestamp: t2000,
+                provenance: vec![PendingProvenance {
+                    amount: minted.amount,
+                    origin: minted.origin,
+                    origin_wallet: minted.origin_wallet.clone(),
+                    origin_timestamp: minted.origin_timestamp,
+                    effective_origin_timestamp: minted.effective_origin_timestamp,
+                }],
+            },
+        )
         .unwrap();
 
     // Bob receives: claimed amount must match the pending entry exactly.
     let bob_open = make_block(
-        BlockType::Open, &bob, BlockHash::ZERO, &bob,
-        0, 600, BlockHash::new(*burn_hash.as_bytes()), TxHash::ZERO, 2100,
+        BlockType::Open,
+        &bob,
+        BlockHash::ZERO,
+        &bob,
+        0,
+        600,
+        BlockHash::new(*burn_hash.as_bytes()),
+        TxHash::ZERO,
+        2100,
     );
     let pend = pending_store.get_pending(&bob, &burn_hash).unwrap();
     assert!(burst_node::BlockProcessor::validate_open_block(&bob_open, Some(pend.amount)).is_ok());
     let bob_token = burst_node::ledger_bridge::create_received_token(&bob_open, &pend, 10_000);
     trst.receive_token(bob_token, Timestamp::new(2100));
     pending_store.delete_pending(&bob, &burn_hash).unwrap();
-    assert_eq!(trst.transferable_balance(&bob, Timestamp::new(2100)), Some(600));
+    assert_eq!(
+        trst.transferable_balance(&bob, Timestamp::new(2100)),
+        Some(600)
+    );
 
     // ── Act 3: commerce — sends never cross origins ─────────────────────
     let origin_a = minted.origin;
-    assert_eq!(trst.origin_transferable(&bob, &origin_a, Timestamp::new(2200)), 600);
+    assert_eq!(
+        trst.origin_transferable(&bob, &origin_a, Timestamp::new(2200)),
+        600
+    );
     let prov = trst.debit_wallet_with_provenance(&bob, &origin_a, 200);
     assert_eq!(prov[0].amount, 200);
     let carol_recv = burst_trst::TrstToken {
@@ -2158,11 +2198,23 @@ fn full_protocol_lifecycle_simulation() {
 
     // Sybil (wrongly verified) burns 400 to Bob.
     let sybil_burn = make_block(
-        BlockType::Burn, &sybil, BlockHash::new([8u8; 32]), &sybil,
-        400, 0, BlockHash::new(pubkey_bytes(&bob)), TxHash::ZERO, 2500,
+        BlockType::Burn,
+        &sybil,
+        BlockHash::new([8u8; 32]),
+        &sybil,
+        400,
+        0,
+        BlockHash::new(pubkey_bytes(&bob)),
+        TxHash::ZERO,
+        2500,
     );
     let econ = burst_node::process_block_economics(
-        &sybil_burn, &mut brn, &mut trst, Timestamp::new(2500), 10_000, 0,
+        &sybil_burn,
+        &mut brn,
+        &mut trst,
+        Timestamp::new(2500),
+        10_000,
+        0,
     );
     let sybil_token = match &econ {
         burst_node::EconomicResult::BurnAndMint { mint_token, .. } => mint_token.clone().unwrap(),
@@ -2172,12 +2224,18 @@ fn full_protocol_lifecycle_simulation() {
 
     // Bob merges clean 400 (origin A) + tainted 400 (origin S) → M(800).
     let inputs: Vec<burst_trst::TrstToken> = trst
-        .get_portfolio(&bob).unwrap().tokens.iter()
+        .get_portfolio(&bob)
+        .unwrap()
+        .tokens
+        .iter()
         .filter(|t| t.state == burst_types::TrstState::Active)
-        .cloned().collect();
+        .cloned()
+        .collect();
     assert_eq!(inputs.len(), 2);
     let merge_tx = test_hash_sim(2);
-    let merged = trst.merge(&inputs, bob.clone(), merge_tx, Timestamp::new(2700)).unwrap();
+    let merged = trst
+        .merge(&inputs, bob.clone(), merge_tx, Timestamp::new(2700))
+        .unwrap();
     assert_eq!(merged.origin, merge_tx); // origin = merge tx hash (6.17b)
     let ids: std::collections::HashSet<TxHash> = inputs.iter().map(|t| t.id).collect();
     trst.bulk_untrack(&bob, &ids);
@@ -2190,41 +2248,76 @@ fn full_protocol_lifecycle_simulation() {
     // ── Act 4: the challenge ─────────────────────────────────────────────
     // Verify sybil in the orchestrator (endorse + vote) so it can be challenged.
     for i in 0..3 {
-        orch.process_endorsement(&sybil, &make_address(210 + i), 1000, &params).unwrap();
+        orch.process_endorsement(&sybil, &make_address(210 + i), 1000, &params)
+            .unwrap();
     }
     let vs: Vec<_> = (0u8..3).map(|i| make_address(214 + i)).collect();
-    let sel = orch.select_verifiers(&sybil, &vs, &[1u8; 32], &params).unwrap();
+    let sel = orch
+        .select_verifiers(&sybil, &vs, &[1u8; 32], &params)
+        .unwrap();
     for v in &sel {
-        orch.process_vote(&sybil, v, burst_verification::Vote::Legitimate, &params).unwrap();
+        orch.process_vote(&sybil, v, burst_verification::Vote::Legitimate, &params)
+            .unwrap();
     }
     orch.drain_events();
 
     // Carol stakes a challenge via a real Challenge block.
     let challenge = make_block(
-        BlockType::Challenge, &carol, BlockHash::new([7u8; 32]), &carol,
-        1000, 0, BlockHash::new(pubkey_bytes(&sybil)), TxHash::ZERO, 3000,
+        BlockType::Challenge,
+        &carol,
+        BlockHash::new([7u8; 32]),
+        &carol,
+        1000,
+        0,
+        BlockHash::new(pubkey_bytes(&sybil)),
+        TxHash::ZERO,
+        3000,
     );
     let econ = burst_node::process_block_economics(
-        &challenge, &mut brn, &mut trst, Timestamp::new(3000), 10_000, 0,
+        &challenge,
+        &mut brn,
+        &mut trst,
+        Timestamp::new(3000),
+        10_000,
+        0,
     );
-    assert!(matches!(econ, burst_node::EconomicResult::Challenge { stake_amount: 1000, .. }));
+    assert!(matches!(
+        econ,
+        burst_node::EconomicResult::Challenge {
+            stake_amount: 1000,
+            ..
+        }
+    ));
     assert_eq!(brn.get_wallet(&carol).unwrap().total_staked, 1000);
-    orch.initiate_challenge(&sybil, &carol, true, 1000, &params).unwrap();
+    orch.initiate_challenge(&sybil, &carol, true, 1000, &params)
+        .unwrap();
 
     // New random panel votes Illegitimate; resolution fires on the last vote.
     let cvs: Vec<_> = (0u8..3).map(|i| make_address(220 + i)).collect();
     for cv in &cvs {
-        brn.track_wallet(cv.clone(), burst_brn::BrnWalletState::new(Timestamp::new(1000)));
+        brn.track_wallet(
+            cv.clone(),
+            burst_brn::BrnWalletState::new(Timestamp::new(1000)),
+        );
         brn.get_wallet_mut(cv).unwrap().total_staked = params.verifier_stake_amount;
     }
-    let sel = orch.select_verifiers(&sybil, &cvs, &[2u8; 32], &params).unwrap();
+    let sel = orch
+        .select_verifiers(&sybil, &cvs, &[2u8; 32], &params)
+        .unwrap();
     for (i, v) in sel.iter().enumerate() {
-        orch.process_vote(&sybil, v, burst_verification::Vote::Illegitimate, &params).unwrap();
+        orch.process_vote(&sybil, v, burst_verification::Vote::Illegitimate, &params)
+            .unwrap();
         if i + 1 < sel.len() {
-            assert!(orch.try_resolve_challenge(&sybil, &params).unwrap().is_none());
+            assert!(orch
+                .try_resolve_challenge(&sybil, &params)
+                .unwrap()
+                .is_none());
         }
     }
-    let resolved = orch.try_resolve_challenge(&sybil, &params).unwrap().unwrap();
+    let resolved = orch
+        .try_resolve_challenge(&sybil, &params)
+        .unwrap()
+        .unwrap();
     let events = orch.drain_events();
     assert!(events.iter().any(|e| matches!(e,
         burst_verification::VerificationEvent::WalletUnverified { wallet } if *wallet == sybil)));
@@ -2234,17 +2327,27 @@ fn full_protocol_lifecycle_simulation() {
     let revoked_total: u128 = revocations.iter().map(|r| r.revoked_amount).sum();
     // Bob holds 500 of M (800 total, 400 tainted): ceil(500·400/800) = 250.
     assert_eq!(revoked_total, 250);
-    assert_eq!(trst.transferable_balance(&bob, Timestamp::new(3100)), Some(250));
+    assert_eq!(
+        trst.transferable_balance(&bob, Timestamp::new(3100)),
+        Some(250)
+    );
 
     // Settle the challenge like the node does.
     if let burst_verification::VerificationEvent::ChallengeResolved { outcome, .. } = &resolved {
-        assert_eq!(outcome.outcome, burst_verification::ChallengeResult::FraudConfirmed);
+        assert_eq!(
+            outcome.outcome,
+            burst_verification::ChallengeResult::FraudConfirmed
+        );
         // Challenger stake returned in full.
         let ws = brn.get_wallet_mut(&carol).unwrap();
         ws.total_staked = ws.total_staked.saturating_sub(outcome.challenger_stake);
         // Panel: unanimous → no dissenters → stakes unlocked, no TRST minted.
         burst_node::ledger_bridge::resolve_verifier_outcomes(
-            &mut brn, &pending_store, &outcome.verifier_outcomes, &sybil, Timestamp::new(3100),
+            &mut brn,
+            &pending_store,
+            &outcome.verifier_outcomes,
+            &sybil,
+            Timestamp::new(3100),
         );
         for cv in &cvs {
             assert_eq!(brn.get_wallet(cv).unwrap().total_staked, 0);
@@ -2258,12 +2361,25 @@ fn full_protocol_lifecycle_simulation() {
         );
         assert_eq!(reward, 2); // 1% of 250, integer math
         let reward_hash = burst_node::ledger_bridge::create_reward_pending(
-            &pending_store, &carol, &sybil, b"challenger-reward", reward, Timestamp::new(3100),
-        ).unwrap();
+            &pending_store,
+            &carol,
+            &sybil,
+            b"challenger-reward",
+            reward,
+            Timestamp::new(3100),
+        )
+        .unwrap();
         let pend = pending_store.get_pending(&carol, &reward_hash).unwrap();
         let reward_block = make_block(
-            BlockType::Receive, &carol, BlockHash::new([6u8; 32]), &carol,
-            0, 0, BlockHash::new(*reward_hash.as_bytes()), TxHash::ZERO, 3200,
+            BlockType::Receive,
+            &carol,
+            BlockHash::new([6u8; 32]),
+            &carol,
+            0,
+            0,
+            BlockHash::new(*reward_hash.as_bytes()),
+            TxHash::ZERO,
+            3200,
         );
         let tok = burst_node::ledger_bridge::create_received_token(&reward_block, &pend, 10_000);
         trst.receive_token(tok, Timestamp::new(3200));
@@ -2291,7 +2407,10 @@ fn full_protocol_lifecycle_simulation() {
     assert_eq!(evs.len(), 1);
     assert_eq!(evs[0].revoked_amount, 150);
     // Carol live: 200 (origin A) + 150 (clean M) + 2 (reward) = 352.
-    assert_eq!(trst.transferable_balance(&carol, Timestamp::new(3300)), Some(352));
+    assert_eq!(
+        trst.transferable_balance(&carol, Timestamp::new(3300)),
+        Some(352)
+    );
 
     // Conservation: everything in existence traces to destroyed value.
     // 600 (alice burn) + 400 (sybil burn) + 2 (reward, backed by revoked) = 1002.
@@ -2306,19 +2425,37 @@ fn full_protocol_lifecycle_simulation() {
     // ── Act 5: redemption — un-revoke on re-verification (6.15b) ───────
     let restored = trst.un_revoke_by_origin(&sybil, Timestamp::new(3400));
     assert_eq!(restored.len(), 2); // bob's 250 chunk + carol's 150 chunk
-    assert_eq!(trst.transferable_balance(&bob, Timestamp::new(3400)), Some(500));
-    assert_eq!(trst.transferable_balance(&carol, Timestamp::new(3400)), Some(502));
+    assert_eq!(
+        trst.transferable_balance(&bob, Timestamp::new(3400)),
+        Some(500)
+    );
+    assert_eq!(
+        trst.transferable_balance(&carol, Timestamp::new(3400)),
+        Some(502)
+    );
 
     // ── Act 6: time — expiry, then governance resurrection (6.9) ───────
     // M's effective timestamp is its earliest constituent (t=2000) → expires
     // at 12000. The reward token (t=3100) survives until 13100.
     trst.flush_all_expired(Timestamp::new(12_500));
-    assert_eq!(trst.transferable_balance(&bob, Timestamp::new(12_500)), Some(0));
-    assert_eq!(trst.transferable_balance(&carol, Timestamp::new(12_500)), Some(2));
+    assert_eq!(
+        trst.transferable_balance(&bob, Timestamp::new(12_500)),
+        Some(0)
+    );
+    assert_eq!(
+        trst.transferable_balance(&carol, Timestamp::new(12_500)),
+        Some(2)
+    );
     // Governance extends the expiry period — expired TRST becomes money again.
     trst.set_expiry_period(1_000_000, Timestamp::new(12_500));
-    assert_eq!(trst.transferable_balance(&bob, Timestamp::new(12_500)), Some(500));
-    assert_eq!(trst.transferable_balance(&carol, Timestamp::new(12_500)), Some(502));
+    assert_eq!(
+        trst.transferable_balance(&bob, Timestamp::new(12_500)),
+        Some(500)
+    );
+    assert_eq!(
+        trst.transferable_balance(&carol, Timestamp::new(12_500)),
+        Some(502)
+    );
 
     // Conservation still holds after the whole story.
     let total_tracked: u128 = [&alice, &bob, &carol, &sybil]

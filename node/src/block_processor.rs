@@ -889,9 +889,7 @@ impl BlockProcessor {
                 // Legitimate/Illegitimate votes stake BRN (odometer increases);
                 // "Neither" votes carry no stake (odometer unchanged).
                 if block.brn_balance < prev_brn {
-                    return Err(
-                        "verification-vote: cumulative spent BRN cannot decrease".into()
-                    );
+                    return Err("verification-vote: cumulative spent BRN cannot decrease".into());
                 }
                 if block.trst_balance != prev_trst {
                     return Err("verification-vote block cannot change TRST balance".into());

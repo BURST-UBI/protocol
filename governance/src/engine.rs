@@ -921,6 +921,7 @@ impl GovernanceEngine {
     /// 2. For each direct voter, walk reverse-delegation tree to count
     ///    non-voting delegators whose chain resolves to this voter: O(δ×d)
     ///    where δ = delegators and d = max delegation depth
+    ///
     /// Total: O(v × (δ/v) × d) ≈ O(δ×d), much less than O(w×d)
     fn count_votes_with_delegation(
         direct_votes: &HashMap<WalletAddress, GovernanceVote>,

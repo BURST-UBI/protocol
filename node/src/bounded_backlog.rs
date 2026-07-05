@@ -112,7 +112,7 @@ impl BoundedBacklog {
         }
         let overage = self.entries.len() - self.max_size;
         let mut to_evict = Vec::with_capacity(overage);
-        for ((_, hash), _) in self.by_priority.iter() {
+        for (_, hash) in self.by_priority.keys() {
             if to_evict.len() >= overage {
                 break;
             }

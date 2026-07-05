@@ -11,9 +11,7 @@ use burst_brn::state::{BrnWalletState, RateHistory, RateSegment};
 use burst_ledger::{BlockType, StateBlock, CURRENT_BLOCK_VERSION};
 use burst_store::account::AccountInfo;
 use burst_store::pending::{PendingInfo, PendingProvenance};
-use burst_types::{
-    BlockHash, Signature, Timestamp, TxHash, WalletAddress, WalletState,
-};
+use burst_types::{BlockHash, Signature, Timestamp, TxHash, WalletAddress, WalletState};
 
 // ---------------------------------------------------------------------------
 // Proptest strategies for core types
@@ -203,15 +201,13 @@ fn arb_pending_provenance() -> impl Strategy<Value = PendingProvenance> {
         arb_timestamp(),
         arb_timestamp(),
     )
-        .prop_map(
-            |(amt, origin, wallet, ots, eots)| PendingProvenance {
-                amount: amt,
-                origin,
-                origin_wallet: wallet,
-                origin_timestamp: ots,
-                effective_origin_timestamp: eots,
-            },
-        )
+        .prop_map(|(amt, origin, wallet, ots, eots)| PendingProvenance {
+            amount: amt,
+            origin,
+            origin_wallet: wallet,
+            origin_timestamp: ots,
+            effective_origin_timestamp: eots,
+        })
 }
 
 fn arb_pending_info() -> impl Strategy<Value = PendingInfo> {

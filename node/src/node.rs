@@ -666,10 +666,12 @@ impl BurstNode {
                 // to a real burn).
                 let receive_rejected = if block.block_type == BlockType::Receive {
                     let send_hash = burst_types::TxHash::new(*block.link.as_bytes());
-                    match store.pending_store().get_pending(&block.account, &send_hash) {
+                    match store
+                        .pending_store()
+                        .get_pending(&block.account, &send_hash)
+                    {
                         Ok(pending) => {
-                            let prev_trst =
-                                prev_block.as_ref().map_or(0, |b| b.trst_balance);
+                            let prev_trst = prev_block.as_ref().map_or(0, |b| b.trst_balance);
                             let claimed = block.trst_balance.saturating_sub(prev_trst);
                             if claimed != pending.amount {
                                 Some(format!(
@@ -783,10 +785,7 @@ impl BurstNode {
                 // The TrstEngine tracks per-wallet token portfolios in memory;
                 // if the sender is tracked, verify the send amount doesn't
                 // exceed the non-expired, non-revoked (transferable) balance.
-                let trst_transferable_rejected = if matches!(
-                    block.block_type,
-                    BlockType::Send
-                ) {
+                let trst_transferable_rejected = if matches!(block.block_type, BlockType::Send) {
                     let send_amount = prev_account
                         .as_ref()
                         .map(|acct| acct.trst_balance.saturating_sub(block.trst_balance))
@@ -815,11 +814,8 @@ impl BurstNode {
                                 // wallet must merge first (whitepaper §Merging).
                                 // Check the referenced origin actually covers
                                 // the amount.
-                                let origin_avail = trst.origin_transferable(
-                                    &block.account,
-                                    &block.origin,
-                                    now,
-                                );
+                                let origin_avail =
+                                    trst.origin_transferable(&block.account, &block.origin, now);
                                 if send_amount > origin_avail {
                                     tracing::warn!(
                                         account = %block.account,
@@ -954,14 +950,10 @@ impl BurstNode {
                                     origin: token.origin,
                                     origin_wallet: token.origin_wallet.clone(),
                                     origin_timestamp: token.origin_timestamp,
-                                    effective_origin_timestamp: token
-                                        .effective_origin_timestamp,
+                                    effective_origin_timestamp: token.effective_origin_timestamp,
                                 }];
-                                deferred_pending = Some((
-                                    token.amount,
-                                    token.holder.clone(),
-                                    provenance,
-                                ));
+                                deferred_pending =
+                                    Some((token.amount, token.holder.clone(), provenance));
                                 let expiry_ts = Timestamp::new(
                                     token
                                         .effective_origin_timestamp
@@ -979,8 +971,11 @@ impl BurstNode {
                                     let send_amount =
                                         acct.trst_balance.saturating_sub(*trst_balance_after);
                                     let token_origin = &block.origin;
-                                    let provenance =
-                                        trst.debit_wallet_with_provenance(sender, token_origin, send_amount);
+                                    let provenance = trst.debit_wallet_with_provenance(
+                                        sender,
+                                        token_origin,
+                                        send_amount,
+                                    );
                                     if let Some(destination) =
                                         crate::ledger_bridge::extract_receiver_from_link(
                                             &block.link,
@@ -1010,8 +1005,7 @@ impl BurstNode {
                                     // Applies any revocation that landed while the
                                     // send was in flight (O(1) graph lookup), then
                                     // tracks the token.
-                                    let revocations =
-                                        trst.receive_token(received_token, econ_now);
+                                    let revocations = trst.receive_token(received_token, econ_now);
                                     for ev in &revocations {
                                         tracing::warn!(
                                             %receiver,
@@ -1048,7 +1042,8 @@ impl BurstNode {
                                         .merge_sources
                                         .is_empty()
                                     {
-                                        let mut chosen = Vec::with_capacity(block.merge_sources.len());
+                                        let mut chosen =
+                                            Vec::with_capacity(block.merge_sources.len());
                                         let mut all_found = true;
                                         for id in &block.merge_sources {
                                             match portfolio.tokens.iter().find(|t| t.id == *id) {
@@ -1064,7 +1059,11 @@ impl BurstNode {
                                                 }
                                             }
                                         }
-                                        if all_found { chosen } else { Vec::new() }
+                                        if all_found {
+                                            chosen
+                                        } else {
+                                            Vec::new()
+                                        }
                                     } else {
                                         select_expiry_merge_group(
                                             portfolio,
@@ -3397,7 +3396,11 @@ impl BurstNode {
                                     let peer_id = format!("{}:{}", addr.ip(), addr.port());
 
                                     // Generate + send the SYN cookie challenge.
-                                    let cookie = match { syn_cookies_c.lock().await.generate(&peer_ip) } {
+                                    // Bind in a separate `let` so the mutex guard drops
+                                    // before the match (a match scrutinee's temporaries
+                                    // otherwise live until the whole match ends).
+                                    let cookie_opt = syn_cookies_c.lock().await.generate(&peer_ip);
+                                    let cookie = match cookie_opt {
                                         Some(c) => c,
                                         None => return,
                                     };
@@ -3822,7 +3825,7 @@ impl BurstNode {
         // deterministic initiator tie-break, and NAT reachability isn't
         // tracked). Enable once those land; until then use bootstrap_peers.
         if self.config.enable_peer_reachout {
-            let target_out = self.config.max_peers.min(8).max(3);
+            let target_out = self.config.max_peers.clamp(3, 8);
             let reach_ctx = crate::peer_connector::PeerConnectorContext {
                 peer_manager: Arc::clone(&self.peer_manager),
                 connection_registry: Arc::clone(&self.connection_registry),
@@ -4447,7 +4450,7 @@ impl BurstNode {
         }
 
         // Wait for all spawned tasks with a timeout
-        let handles: Vec<JoinHandle<()>> = self.task_handles.drain(..).collect();
+        let handles: Vec<JoinHandle<()>> = std::mem::take(&mut self.task_handles);
         let wait_all = async {
             for handle in handles {
                 let _ = handle.await;
@@ -4904,12 +4907,7 @@ fn select_expiry_merge_group(
     if live.len() < 2 {
         return Vec::new();
     }
-    live.sort_by_key(|t| {
-        (
-            t.effective_origin_timestamp.as_secs(),
-            *t.id.as_bytes(),
-        )
-    });
+    live.sort_by_key(|t| (t.effective_origin_timestamp.as_secs(), *t.id.as_bytes()));
 
     let window = expiry_secs / 10;
     let oldest = live[0].effective_origin_timestamp.as_secs();
@@ -4932,11 +4930,8 @@ fn select_expiry_merge_group(
 fn detect_outbound_ip(port: u16) -> Option<std::net::SocketAddrV4> {
     // TCP connect uses the route; local_addr() returns our source IP.
     let addr: std::net::SocketAddr = "8.8.8.8:80".parse().ok()?;
-    let stream = std::net::TcpStream::connect_timeout(
-        &addr,
-        std::time::Duration::from_secs(3),
-    )
-    .ok()?;
+    let stream =
+        std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(3)).ok()?;
     let local = stream.local_addr().ok()?;
     if let std::net::SocketAddr::V4(v4) = local {
         let ip = *v4.ip();

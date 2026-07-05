@@ -108,7 +108,7 @@ pub fn genesis_signing_key(network: NetworkId) -> Option<KeyPair> {
     };
     cell.get_or_init(|| resolve_seed(network))
         .as_ref()
-        .map(|s| burst_crypto::keypair_from_seed(s))
+        .map(burst_crypto::keypair_from_seed)
 }
 
 fn resolve_seed(network: NetworkId) -> Option<[u8; 32]> {
@@ -175,8 +175,14 @@ mod tests {
 
     #[test]
     fn genesis_address_is_deterministic_per_network() {
-        assert_eq!(genesis_address(NetworkId::Dev), genesis_address(NetworkId::Dev));
-        assert_ne!(genesis_address(NetworkId::Dev), genesis_address(NetworkId::Test));
+        assert_eq!(
+            genesis_address(NetworkId::Dev),
+            genesis_address(NetworkId::Dev)
+        );
+        assert_ne!(
+            genesis_address(NetworkId::Dev),
+            genesis_address(NetworkId::Test)
+        );
     }
 
     #[test]

@@ -369,11 +369,7 @@ impl PeerManager {
     pub fn random_known_peers(&self, count: usize) -> Vec<PeerAddress> {
         let mut result = Vec::with_capacity(count);
 
-        let known: Vec<&PeerState> = self
-            .peers
-            .values()
-            .filter(|p| !p.banned)
-            .collect();
+        let known: Vec<&PeerState> = self.peers.values().filter(|p| !p.banned).collect();
 
         let mut rng = rand::thread_rng();
         let mut indices: Vec<usize> = (0..known.len()).collect();

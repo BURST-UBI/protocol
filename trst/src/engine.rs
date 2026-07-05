@@ -150,9 +150,7 @@ impl WalletPortfolio {
 
     /// Whether any token tagged with this revoked origin remains.
     fn has_revoked_tag(&self, tag: &TxHash) -> bool {
-        self.tokens
-            .iter()
-            .any(|t| t.revoked_origin == Some(*tag))
+        self.tokens.iter().any(|t| t.revoked_origin == Some(*tag))
     }
 }
 
@@ -1233,7 +1231,13 @@ mod tests {
         let origin_wallet = test_address(2);
 
         let token = engine
-            .mint(burn_tx, receiver.clone(), 1000, origin_wallet.clone(), ts(1000))
+            .mint(
+                burn_tx,
+                receiver.clone(),
+                1000,
+                origin_wallet.clone(),
+                ts(1000),
+            )
             .unwrap();
 
         assert_eq!(token.id, burn_tx);
@@ -1257,7 +1261,15 @@ mod tests {
             .unwrap();
 
         let (recv, change) = engine
-            .transfer(&token, &sender, receiver.clone(), 600, test_hash(2), test_hash(3), ts(1500))
+            .transfer(
+                &token,
+                &sender,
+                receiver.clone(),
+                600,
+                test_hash(2),
+                test_hash(3),
+                ts(1500),
+            )
             .unwrap();
         assert_eq!(recv.amount, 600);
         assert_eq!(recv.origin, test_hash(1));
@@ -1292,10 +1304,22 @@ mod tests {
         let mut engine = TrstEngine::with_expiry(3600);
         let holder = test_address(5);
         let t1 = engine
-            .mint(test_hash(1), holder.clone(), 500, test_address(10), ts(1000))
+            .mint(
+                test_hash(1),
+                holder.clone(),
+                500,
+                test_address(10),
+                ts(1000),
+            )
             .unwrap();
         let t2 = engine
-            .mint(test_hash(2), holder.clone(), 300, test_address(11), ts(1100))
+            .mint(
+                test_hash(2),
+                holder.clone(),
+                300,
+                test_address(11),
+                ts(1100),
+            )
             .unwrap();
 
         let merge_tx = test_hash(10);
@@ -1324,17 +1348,35 @@ mod tests {
         let mut engine = TrstEngine::with_expiry(u64::MAX);
         let holder = test_address(5);
         let t1 = engine
-            .mint(test_hash(1), holder.clone(), 500, test_address(10), ts(1000))
+            .mint(
+                test_hash(1),
+                holder.clone(),
+                500,
+                test_address(10),
+                ts(1000),
+            )
             .unwrap();
         let t2 = engine
-            .mint(test_hash(2), holder.clone(), 300, test_address(11), ts(1100))
+            .mint(
+                test_hash(2),
+                holder.clone(),
+                300,
+                test_address(11),
+                ts(1100),
+            )
             .unwrap();
         let merged1 = engine
             .merge(&[t1, t2], holder.clone(), test_hash(20), ts(1500))
             .unwrap();
 
         let t3 = engine
-            .mint(test_hash(3), holder.clone(), 200, test_address(12), ts(1600))
+            .mint(
+                test_hash(3),
+                holder.clone(),
+                200,
+                test_address(12),
+                ts(1600),
+            )
             .unwrap();
         let merged2 = engine
             .merge(&[merged1, t3], holder.clone(), test_hash(21), ts(1700))
@@ -1382,10 +1424,22 @@ mod tests {
         let mut engine = TrstEngine::with_expiry(100);
         let holder = test_address(1);
         let t1 = engine
-            .mint(test_hash(1), holder.clone(), 500, test_address(10), ts(1000))
+            .mint(
+                test_hash(1),
+                holder.clone(),
+                500,
+                test_address(10),
+                ts(1000),
+            )
             .unwrap();
         let t2 = engine
-            .mint(test_hash(2), holder.clone(), 300, test_address(10), ts(1010))
+            .mint(
+                test_hash(2),
+                holder.clone(),
+                300,
+                test_address(10),
+                ts(1010),
+            )
             .unwrap();
         // Both expired by now.
         let merged = engine
@@ -1402,10 +1456,22 @@ mod tests {
         let mut engine = TrstEngine::with_expiry(100);
         let holder = test_address(1);
         let expired = engine
-            .mint(test_hash(1), holder.clone(), 500, test_address(10), ts(1000))
+            .mint(
+                test_hash(1),
+                holder.clone(),
+                500,
+                test_address(10),
+                ts(1000),
+            )
             .unwrap();
         let live = engine
-            .mint(test_hash(2), holder.clone(), 300, test_address(10), ts(4990))
+            .mint(
+                test_hash(2),
+                holder.clone(),
+                300,
+                test_address(10),
+                ts(4990),
+            )
             .unwrap();
         // At t=5000: token 1 (born 1000, expiry 100s) is expired; token 2 is live.
         let result = engine.merge(&[expired, live], holder, test_hash(10), ts(5000));
@@ -1417,10 +1483,22 @@ mod tests {
         let mut engine = TrstEngine::with_expiry(u64::MAX);
         let holder = test_address(1);
         let t1 = engine
-            .mint(test_hash(1), holder.clone(), 500, test_address(10), ts(1000))
+            .mint(
+                test_hash(1),
+                holder.clone(),
+                500,
+                test_address(10),
+                ts(1000),
+            )
             .unwrap();
         let mut t2 = engine
-            .mint(test_hash(2), holder.clone(), 300, test_address(10), ts(1010))
+            .mint(
+                test_hash(2),
+                holder.clone(),
+                300,
+                test_address(10),
+                ts(1010),
+            )
             .unwrap();
         t2.state = TrstState::Revoked;
         t2.revoked_origin = Some(t2.origin);
@@ -1435,7 +1513,13 @@ mod tests {
         let mut engine = TrstEngine::with_expiry(100);
         let holder = test_address(1);
         let token = engine
-            .mint(test_hash(1), holder.clone(), 500, test_address(10), ts(1000))
+            .mint(
+                test_hash(1),
+                holder.clone(),
+                500,
+                test_address(10),
+                ts(1000),
+            )
             .unwrap();
         engine.track_token(token);
 
@@ -1457,7 +1541,13 @@ mod tests {
         let b = test_address(2);
 
         let token = engine
-            .mint(test_hash(1), a.clone(), 500, origin_wallet.clone(), ts(1000))
+            .mint(
+                test_hash(1),
+                a.clone(),
+                500,
+                origin_wallet.clone(),
+                ts(1000),
+            )
             .unwrap();
         engine.track_token(token);
 
@@ -1523,8 +1613,16 @@ mod tests {
         let p = engine.get_portfolio(&holder).unwrap();
         // Two tokens now: the clean remainder (400, Active) and the revoked chunk (600).
         assert_eq!(p.tokens.len(), 2);
-        let live = p.tokens.iter().find(|t| t.state == TrstState::Active).unwrap();
-        let dead = p.tokens.iter().find(|t| t.state == TrstState::Revoked).unwrap();
+        let live = p
+            .tokens
+            .iter()
+            .find(|t| t.state == TrstState::Active)
+            .unwrap();
+        let dead = p
+            .tokens
+            .iter()
+            .find(|t| t.state == TrstState::Revoked)
+            .unwrap();
         assert_eq!(live.amount, 400);
         assert_eq!(live.origin, test_hash(10));
         assert_eq!(dead.amount, 600);
@@ -1554,7 +1652,13 @@ mod tests {
         engine.track_token(m1.clone());
 
         let t3 = engine
-            .mint(test_hash(3), holder.clone(), 100, test_address(12), ts(1600))
+            .mint(
+                test_hash(3),
+                holder.clone(),
+                100,
+                test_address(12),
+                ts(1600),
+            )
             .unwrap();
         engine.track_token(t3.clone());
         let m2 = engine
@@ -1679,7 +1783,12 @@ mod tests {
         let p = engine.get_portfolio(&holder).unwrap();
         assert_eq!(p.cached_transferable, 1000);
         assert!(p.tokens.iter().all(|t| t.state == TrstState::Active));
-        assert!(engine.merger_graph.get_merge(&test_hash(10)).unwrap().revoked_contribs.is_empty());
+        assert!(engine
+            .merger_graph
+            .get_merge(&test_hash(10))
+            .unwrap()
+            .revoked_contribs
+            .is_empty());
     }
 
     #[test]
@@ -1752,10 +1861,22 @@ mod tests {
         let mut engine = TrstEngine::with_expiry(u64::MAX);
         let holder = test_address(1);
         let t1 = engine
-            .mint(test_hash(1), holder.clone(), 300, test_address(10), ts(1000))
+            .mint(
+                test_hash(1),
+                holder.clone(),
+                300,
+                test_address(10),
+                ts(1000),
+            )
             .unwrap();
         let t2 = engine
-            .mint(test_hash(2), holder.clone(), 500, test_address(10), ts(1100))
+            .mint(
+                test_hash(2),
+                holder.clone(),
+                500,
+                test_address(10),
+                ts(1100),
+            )
             .unwrap();
         engine.track_token(t1);
         engine.track_token(t2);
@@ -1770,16 +1891,37 @@ mod tests {
         let mut engine = TrstEngine::with_expiry(u64::MAX);
         let holder = test_address(1);
         let t1 = engine
-            .mint(test_hash(1), holder.clone(), 300, test_address(10), ts(1000))
+            .mint(
+                test_hash(1),
+                holder.clone(),
+                300,
+                test_address(10),
+                ts(1000),
+            )
             .unwrap();
         let t2 = engine
-            .mint(test_hash(2), holder.clone(), 500, test_address(10), ts(1100))
+            .mint(
+                test_hash(2),
+                holder.clone(),
+                500,
+                test_address(10),
+                ts(1100),
+            )
             .unwrap();
         engine.track_token(t1);
         engine.track_token(t2);
-        assert_eq!(engine.origin_transferable(&holder, &test_hash(1), ts(1200)), 300);
-        assert_eq!(engine.origin_transferable(&holder, &test_hash(2), ts(1200)), 500);
-        assert_eq!(engine.origin_transferable(&holder, &test_hash(9), ts(1200)), 0);
+        assert_eq!(
+            engine.origin_transferable(&holder, &test_hash(1), ts(1200)),
+            300
+        );
+        assert_eq!(
+            engine.origin_transferable(&holder, &test_hash(2), ts(1200)),
+            500
+        );
+        assert_eq!(
+            engine.origin_transferable(&holder, &test_hash(9), ts(1200)),
+            0
+        );
     }
 
     #[test]
@@ -1817,7 +1959,9 @@ mod tests {
 
         // And un-revocation later restores the received token too.
         let restored = engine.un_revoke_by_origin(&ow, ts(1300));
-        assert!(restored.iter().any(|r| r.holder == receiver && r.amount == 500));
+        assert!(restored
+            .iter()
+            .any(|r| r.holder == receiver && r.amount == 500));
     }
 
     #[test]
@@ -1831,7 +1975,13 @@ mod tests {
             .mint(test_hash(1), holder.clone(), 600, ow1.clone(), ts(1000))
             .unwrap();
         let t2 = engine
-            .mint(test_hash(2), holder.clone(), 400, test_address(11), ts(1100))
+            .mint(
+                test_hash(2),
+                holder.clone(),
+                400,
+                test_address(11),
+                ts(1100),
+            )
             .unwrap();
         engine.track_token(t1.clone());
         engine.track_token(t2.clone());
@@ -1874,13 +2024,22 @@ mod tests {
         let mut engine = TrstEngine::with_expiry(100);
         let holder = test_address(1);
         let token = engine
-            .mint(test_hash(1), holder.clone(), 500, test_address(10), ts(1000))
+            .mint(
+                test_hash(1),
+                holder.clone(),
+                500,
+                test_address(10),
+                ts(1000),
+            )
             .unwrap();
         engine.track_token(token);
 
         // Expire it.
         engine.flush_all_expired(ts(1200));
-        assert_eq!(engine.get_portfolio(&holder).unwrap().cached_transferable, 0);
+        assert_eq!(
+            engine.get_portfolio(&holder).unwrap().cached_transferable,
+            0
+        );
         assert_eq!(
             engine.get_portfolio(&holder).unwrap().tokens[0].state,
             TrstState::Expired
@@ -1923,15 +2082,33 @@ mod tests {
         let origin_wallet = test_address(10);
 
         let t1 = engine
-            .mint(test_hash(1), holder.clone(), 1000, origin_wallet.clone(), ts(100))
+            .mint(
+                test_hash(1),
+                holder.clone(),
+                1000,
+                origin_wallet.clone(),
+                ts(100),
+            )
             .unwrap();
         engine.track_token(t1.clone());
         let t2 = engine
-            .mint(test_hash(2), holder.clone(), 500, origin_wallet.clone(), ts(200))
+            .mint(
+                test_hash(2),
+                holder.clone(),
+                500,
+                origin_wallet.clone(),
+                ts(200),
+            )
             .unwrap();
         engine.track_token(t2.clone());
         let t3 = engine
-            .mint(test_hash(3), holder.clone(), 300, origin_wallet.clone(), ts(300))
+            .mint(
+                test_hash(3),
+                holder.clone(),
+                300,
+                origin_wallet.clone(),
+                ts(300),
+            )
             .unwrap();
         engine.track_token(t3);
 
@@ -1957,7 +2134,12 @@ mod tests {
             .cloned()
             .unwrap();
         let merged = engine
-            .merge(&[remaining_t1.clone(), t2.clone()], holder.clone(), test_hash(20), now)
+            .merge(
+                &[remaining_t1.clone(), t2.clone()],
+                holder.clone(),
+                test_hash(20),
+                now,
+            )
             .unwrap();
         let ids: HashSet<TxHash> = [remaining_t1.id, t2.id].into_iter().collect();
         engine.bulk_untrack(&holder, &ids);

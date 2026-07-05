@@ -1441,9 +1441,9 @@ mod tests {
         assert!(resolved.is_some());
         // Unanimous Illegitimate → fraud confirmed → WalletUnverified queued.
         let events = orch.drain_events();
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, VerificationEvent::WalletUnverified { wallet } if *wallet == target)));
+        assert!(events.iter().any(
+            |e| matches!(e, VerificationEvent::WalletUnverified { wallet } if *wallet == target)
+        ));
         // Second call is a no-op (challenge consumed).
         assert!(orch
             .try_resolve_challenge(&target, &params)

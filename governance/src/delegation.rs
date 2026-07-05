@@ -210,7 +210,7 @@ impl DelegationEngine {
         category: Option<&str>,
     ) -> u32 {
         let mut power = 1u32; // Own vote
-        // BFS through reverse-delegation index to find candidates
+                              // BFS through reverse-delegation index to find candidates
         let mut candidates = HashSet::new();
         let mut queue = std::collections::VecDeque::new();
         queue.push_back(address.clone());
