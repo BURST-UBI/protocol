@@ -96,6 +96,13 @@ const RECENTLY_CONFIRMED_CAPACITY: usize = 65_536;
 const MAX_ACTIVE_ELECTIONS: usize = 5000;
 /// Default initial online weight estimate.
 const DEFAULT_ONLINE_WEIGHT: u128 = 1_000_000;
+/// Bootstrap voting weight granted to the genesis representative on every node
+/// (the analog of Nano's genesis premine, for VOTING WEIGHT only — not spendable
+/// TRST). Consistent across nodes, so genesis's votes aggregate network-wide and
+/// consensus can confirm at launch before TRST circulates. 1000 TRST-equivalent:
+/// dominant at launch, overtaken as real delegated TRST grows past it, so
+/// consensus decentralises organically.
+const GENESIS_BOOTSTRAP_WEIGHT: u128 = 1_000 * burst_types::TRST_UNIT;
 /// Default vote cache size.
 /// A running BURST node.
 pub struct BurstNode {
@@ -243,10 +250,23 @@ impl BurstNode {
         // Vote generator — produce votes when acting as a representative.
         // Generate a transient node key; in production the key would come
         // from persistent configuration.
-        let vote_kp = burst_crypto::generate_keypair();
+        //
+        // Nano-style: a node votes AS A REAL LEDGER ACCOUNT so its voting weight
+        // is consistent across the whole network (weight = confirmed balance of
+        // that account's delegators). The genesis-authority node (the one holding
+        // the genesis seed) votes as the GENESIS account, which carries the
+        // bootstrap voting weight every node agrees on (seeded below). Any other
+        // node votes as its own key and only carries weight once real TRST is
+        // delegated to it — so a weightless node's votes are correctly ignored.
         let vote_generator = {
-            let rep_addr = burst_crypto::derive_address(&vote_kp.public);
-            let mut vg = VoteGenerator::new(rep_addr.clone(), vote_kp.private.0);
+            let (rep_addr, rep_key) = match genesis_key::genesis_signing_key(config.network) {
+                Some(kp) => (genesis_key::genesis_address(config.network), kp.private.0),
+                None => {
+                    let kp = burst_crypto::generate_keypair();
+                    (burst_crypto::derive_address(&kp.public), kp.private.0)
+                }
+            };
+            let mut vg = VoteGenerator::new(rep_addr.clone(), rep_key);
             if config.enable_representative {
                 vg.set_representative(true);
                 tracing::info!(representative = %rep_addr, "node voting as representative (enabled)");
@@ -2168,11 +2188,23 @@ impl BurstNode {
                                         sequence: vote.sequence,
                                         signature: vote.signature,
                                     });
+                                    let peers: Vec<burst_network::PeerState> = {
+                                        let pm = peer_manager_bp.read().await;
+                                        pm.iter_connected().map(|(_, s)| s.clone()).collect()
+                                    };
+                                    // Flood the BLOCK itself (Nano-style block
+                                    // publishing) so peers have it and can vote —
+                                    // without this, peers only got blocks via the
+                                    // slow ~30s bootstrap pull. Receive-side
+                                    // message dedup breaks re-flood loops.
+                                    if let Ok(block_bytes) = bincode::serialize(
+                                        &WireMessage::Block(Box::new(block.clone())),
+                                    ) {
+                                        let _ = broadcaster_bp
+                                            .broadcast_with_fanout(&block_bytes, &peers, 4)
+                                            .await;
+                                    }
                                     if let Ok(msg_bytes) = bincode::serialize(&wire_msg) {
-                                        let peers: Vec<burst_network::PeerState> = {
-                                            let pm = peer_manager_bp.read().await;
-                                            pm.iter_connected().map(|(_, s)| s.clone()).collect()
-                                        };
                                         let _ = broadcaster_bp
                                             .broadcast_with_fanout(&msg_bytes, &peers, 4)
                                             .await;
@@ -3481,26 +3513,29 @@ impl BurstNode {
             }
         }
 
-        // Seed the representative weight cache for this node's voting key.
-        // On a fresh testnet the genesis account is the only account, and its
-        // representative is itself (with zero TRST balance).  Without explicit
-        // weight, votes from this node would be rejected as zero-weight.
-        // Give each voting node a bootstrap weight so the first elections can
-        // reach quorum.
-        if self.config.enable_representative {
-            let vg = self.vote_generator.lock().await;
-            let rep_addr = vg.representative.clone();
-            drop(vg);
+        // Give the GENESIS representative a consistent bootstrap voting weight —
+        // BURST's analog of Nano's genesis premine, but for VOTING WEIGHT ONLY
+        // (not spendable TRST, so it doesn't violate "no premine"). Nano's
+        // genesis holds the whole supply, so real ledger-derived weight exists
+        // from block one; BURST mints TRST organically from ~zero, so without
+        // this there is no weight to confirm with at launch. Crucially this is
+        // seeded for the WELL-KNOWN genesis account on EVERY node (deterministic
+        // — the rep-weight cache is rebuilt from confirmed balances first), so
+        // all nodes agree on genesis's weight and its votes aggregate correctly
+        // across the network. (The old code seeded each node's OWN random rep
+        // locally, which no other node knew about → cross-node votes were
+        // zero-weight-ignored.) As real TRST is minted and delegated, other reps
+        // gain weight and this fixed bootstrap weight becomes a shrinking
+        // fraction — consensus decentralises organically.
+        {
+            let genesis_rep = genesis_key::genesis_address(self.config.network);
             let mut rw = self.rep_weights.write().await;
-            if rw.weight(&rep_addr) == 0 {
-                let bootstrap_weight: u128 = 1_000_000;
-                rw.add_weight(&rep_addr, bootstrap_weight);
-                tracing::info!(
-                    representative = %rep_addr,
-                    weight = bootstrap_weight,
-                    "seeded bootstrap representative weight for voting"
-                );
-            }
+            rw.add_weight(&genesis_rep, GENESIS_BOOTSTRAP_WEIGHT);
+            tracing::info!(
+                representative = %genesis_rep,
+                weight = GENESIS_BOOTSTRAP_WEIGHT,
+                "seeded genesis bootstrap voting weight (consistent across nodes)"
+            );
         }
 
         // Perform initial NTP clock synchronization
