@@ -708,15 +708,34 @@ async fn peer_read_loop(
                 BootstrapMessage::BulkPullResp { blocks } => {
                     let client = BootstrapClient::new(10_000);
                     let deserialized = client.process_bulk_pull_resp(&blocks);
-                    tracing::info!(
-                        peer = %peer_id,
-                        count = deserialized.len(),
-                        "received bulk pull response"
-                    );
-                    for block in deserialized {
-                        if !block_queue.push(block).await {
-                            tracing::warn!(peer = %peer_id, "block queue full during bootstrap");
-                            break;
+                    // Cheaply reject malformed bootstrap streams before they
+                    // reach the (expensive) block processor: cap the count and
+                    // require a contiguous chain — a well-behaved BulkPull walks
+                    // successors, so every block links to the previous one.
+                    // Anything non-contiguous or oversized is junk / a DoS
+                    // stream and is dropped wholesale. (rsnano verifies chain
+                    // linkage of received blocks; block_processor remains the
+                    // authoritative validator.)
+                    const MAX_BOOTSTRAP_BLOCKS: usize = 10_000;
+                    let chain_ok = deserialized.len() <= MAX_BOOTSTRAP_BLOCKS
+                        && deserialized.windows(2).all(|w| w[1].previous == w[0].hash);
+                    if !chain_ok {
+                        tracing::warn!(
+                            peer = %peer_id,
+                            count = deserialized.len(),
+                            "dropping malformed bootstrap block stream (non-contiguous or oversized)"
+                        );
+                    } else {
+                        tracing::info!(
+                            peer = %peer_id,
+                            count = deserialized.len(),
+                            "received bulk pull response"
+                        );
+                        for block in deserialized {
+                            if !block_queue.push(block).await {
+                                tracing::warn!(peer = %peer_id, "block queue full during bootstrap");
+                                break;
+                            }
                         }
                     }
                 }
