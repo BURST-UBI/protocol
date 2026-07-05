@@ -1951,28 +1951,19 @@ pub async fn handle_burn_simple(
     .await
     .map_err(|e| RpcError::Server(format!("block build task failed: {e}")))??;
 
+    // The block processor is the single authoritative writer: it persists the
+    // block (with a consistent per-account height index), updates the account
+    // record, applies the BRN burn, and updates rep weights. The handler must
+    // NOT also write the block/account directly — doing both double-counted
+    // block_count and corrupted the height index, which made the account chain
+    // unservable to the ascending-bootstrap responder.
     submit_block(&block, state)?;
-
-    let mut updated = account.clone();
-    updated.head = block.hash;
-    updated.block_count += 1;
-    updated.total_brn_burned += amount;
-    updated.trst_balance = trst_after;
-
-    state
-        .account_store
-        .put_account(&updated)
-        .map_err(|e| RpcError::Store(format!("failed to update account: {e}")))?;
-
-    let block_bytes = bincode::serialize(&block)
-        .map_err(|e| RpcError::Server(format!("block serialization failed: {e}")))?;
-    let _ = state
-        .block_store
-        .put_block_with_account(&block.hash, &block_bytes, &address);
 
     // Dev-faucet self-conversion: put the freshly minted TRST into pending,
     // claimable with a normal Receive block (two-phase, 8.4a). Backed 1:1 by
-    // the BRN burned in the block above.
+    // the BRN burned in the block above. The real burn economics (via the
+    // processor) is BurnOnly for a zero-link burn, so this pending is what makes
+    // the burned value claimable on dev/test.
     let pending_info = burst_store::pending::PendingInfo {
         source: address.clone(),
         amount,
@@ -1991,11 +1982,6 @@ pub async fn handle_burn_simple(
         .put_pending(&address, &pending_key, &pending_info)
     {
         tracing::warn!(error = %e, "failed to create faucet pending entry");
-    }
-
-    {
-        let mut cache = state.rep_weight_cache.write().await;
-        cache.add_weight(&account.representative, amount);
     }
 
     Ok(to_value(&BurnSimpleResponse {
@@ -2115,6 +2101,11 @@ pub async fn handle_send_simple(
     .await
     .map_err(|e| RpcError::Server(format!("block build task failed: {e}")))??;
 
+    // Dev-faucet convenience: this path intentionally writes the sender/pending
+    // state directly rather than relying solely on the block processor, because
+    // the processor enforces the full TRST origin/merge tokenomics that a simple
+    // curl-driven testnet transfer doesn't set up. `submit_block` still routes
+    // the block to consensus for propagation. (Faucet-only; never live.)
     submit_block(&block, state)?;
 
     let mut updated = account.clone();
@@ -2133,11 +2124,15 @@ pub async fn handle_send_simple(
         .block_store
         .put_block_with_account(&block.hash, &block_bytes, &address);
 
+    // Key the pending by the SEND BLOCK hash — that is what the receiver
+    // references (`receive_simple` passes this block's hash as `send_block_hash`
+    // and both the handler and the processor look the pending up by it). Keying
+    // it by the internal `tx_hash` instead left the receive unable to find it.
     state
         .pending_store
         .put_pending(
             &destination,
-            &tx_hash,
+            &TxHash::new(*block.hash.as_bytes()),
             &burst_store::pending::PendingInfo {
                 source: address.clone(),
                 amount,
@@ -2276,6 +2271,8 @@ pub async fn handle_receive_simple(
     .await
     .map_err(|e| RpcError::Server(format!("block build task failed: {e}")))??;
 
+    // Dev-faucet convenience: writes receiver state directly (see send_simple).
+    // `submit_block` routes the block to consensus for propagation.
     submit_block(&block, state)?;
 
     let mut updated = account.clone();

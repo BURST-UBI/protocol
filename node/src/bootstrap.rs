@@ -384,6 +384,28 @@ pub const ASC_PULL_MAX_BLOCKS: u16 = 128;
 /// Max frontier entries served in one ascending-bootstrap Frontiers response.
 pub const ASC_PULL_MAX_FRONTIERS: u16 = 1000;
 
+/// Feedback from the network read loop to the bootstrap task about received
+/// ascending-pull acks. Decouples the [`Bootstrapper`] from the read loop: the
+/// read loop only holds an `mpsc::Sender<BootstrapFeedback>`, and the bootstrap
+/// task owns the `Bootstrapper` and applies these.
+#[derive(Clone, Debug)]
+pub enum BootstrapFeedback {
+    /// Result of a Blocks pull: query `id`, the last accepted block hash
+    /// (None if the run was empty/invalid), and whether it was a full batch
+    /// (⇒ the account probably has more to pull).
+    Blocks {
+        /// The query id being answered.
+        id: u64,
+        /// Hash of the last accepted block (advances the account's frontier).
+        last: Option<BlockHash>,
+        /// Whether the run filled the batch (more likely to follow).
+        full_batch: bool,
+    },
+    /// Frontiers discovered from a peer: `(account, remote_head)` pairs, used to
+    /// find accounts we're behind on and enqueue them.
+    Frontiers(Vec<(WalletAddress, BlockHash)>),
+}
+
 /// Client-side ascending bootstrapper: drives catch-up by pulling blocks for
 /// accounts we're behind on, from peers in parallel, with id-correlated
 /// requests and per-query timeouts.

@@ -302,6 +302,7 @@ pub fn spawn_peer_read_loop(
     frontier: Arc<RwLock<DagFrontier>>,
     store: Arc<LmdbStore>,
     our_params_hash: burst_types::BlockHash,
+    bootstrap_feedback: mpsc::Sender<crate::bootstrap::BootstrapFeedback>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // Immediately gossip our known peers to this freshly-connected peer so
@@ -341,6 +342,7 @@ pub fn spawn_peer_read_loop(
             &frontier,
             &store,
             our_params_hash,
+            &bootstrap_feedback,
         )
         .await;
         match &result {
@@ -392,6 +394,7 @@ async fn peer_read_loop(
     frontier: &RwLock<DagFrontier>,
     store: &LmdbStore,
     our_params_hash: burst_types::BlockHash,
+    bootstrap_feedback: &mpsc::Sender<crate::bootstrap::BootstrapFeedback>,
 ) -> Result<(), std::io::Error> {
     // SYN cookie validation: inbound peers must respond with a signed cookie
     if let Some(cookies) = syn_cookies {
@@ -803,7 +806,7 @@ async fn peer_read_loop(
                         connection_registry.read().await.send(peer_id, bytes);
                     }
                 }
-                BootstrapMessage::AscPullAck { id: _, payload } => match payload {
+                BootstrapMessage::AscPullAck { id, payload } => match payload {
                     AscPullAckPayload::Blocks(blocks) => {
                         // Verify a contiguous ascending run before ingest (same
                         // cheap pre-filter as legacy bulk-pull); block_processor
@@ -814,20 +817,35 @@ async fn peer_read_loop(
                             .collect();
                         let chain_ok = decoded.len() == blocks.len()
                             && decoded.windows(2).all(|w| w[1].previous == w[0].hash);
-                        if chain_ok {
+                        let (last, full_batch) = if chain_ok {
+                            let last = decoded.last().map(|b| b.hash);
+                            let full =
+                                decoded.len() as u16 >= crate::bootstrap::ASC_PULL_MAX_BLOCKS;
                             for blk in decoded {
                                 if !block_queue.push(blk).await {
                                     tracing::warn!(peer = %peer_id, "block queue full during asc-pull");
                                     break;
                                 }
                             }
+                            (last, full)
                         } else {
                             tracing::warn!(peer = %peer_id, "dropping malformed asc-pull block run");
-                        }
+                            (None, false)
+                        };
+                        let _ = bootstrap_feedback.try_send(
+                            crate::bootstrap::BootstrapFeedback::Blocks {
+                                id,
+                                last,
+                                full_batch,
+                            },
+                        );
                     }
-                    AscPullAckPayload::AccountInfo { .. } | AscPullAckPayload::Frontiers(_) => {
-                        // Consumed by the bootstrapper's discovery loop (next slice).
-                        tracing::trace!(peer = %peer_id, "received asc-pull account-info/frontiers ack");
+                    AscPullAckPayload::Frontiers(entries) => {
+                        let _ = bootstrap_feedback
+                            .try_send(crate::bootstrap::BootstrapFeedback::Frontiers(entries));
+                    }
+                    AscPullAckPayload::AccountInfo { .. } => {
+                        tracing::trace!(peer = %peer_id, "received asc-pull account-info ack");
                     }
                 },
             },

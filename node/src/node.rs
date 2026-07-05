@@ -528,8 +528,12 @@ impl BurstNode {
             .store
             .write_batch()
             .map_err(|e| NodeError::Other(format!("failed to start write batch: {e}")))?;
+        // Height 1 for the genesis block so the per-account height index has an
+        // entry for it — the ascending-bootstrap responder walks this index
+        // (block_at_height) to serve an account's chain, and a missing height-1
+        // entry would make genesis (and everything after it) unservable.
         batch
-            .put_block(&genesis_block.hash, &block_bytes)
+            .put_block_with_account(&genesis_block.hash, &block_bytes, &genesis_account, 1)
             .map_err(|e| NodeError::Other(format!("failed to batch genesis block: {e}")))?;
         batch
             .put_frontier(&genesis_account, &genesis_block.hash)
@@ -740,26 +744,22 @@ impl BurstNode {
                         | BlockType::Endorse
                         | BlockType::Challenge
                 ) {
-                    prev_account
-                        .as_ref()
-                        .and_then(|acct| {
-                            if acct.state != burst_types::WalletState::Verified {
-                                Some(format!(
+                    match prev_account.as_ref() {
+                        // Account exists but isn't verified — cannot spend.
+                        Some(acct) if acct.state != burst_types::WalletState::Verified => {
+                            Some(format!(
                                 "account must be verified to perform {:?} (current state: {:?})",
                                 block.block_type, acct.state
                             ))
-                            } else {
-                                None
-                            }
-                        })
-                        .or_else(|| {
-                            // New account (no prev_account) trying to Send/Burn — reject
-                            if block.previous.is_zero() {
-                                None // Open blocks don't need verification
-                            } else {
-                                Some("account not found for verification check".to_string())
-                            }
-                        })
+                        }
+                        // Account exists and is verified — allowed.
+                        Some(_) => None,
+                        // No account record: only an opening block (zero previous)
+                        // may establish a chain; a non-open spend from an unknown
+                        // account is invalid.
+                        None if block.previous.is_zero() => None,
+                        None => Some("account not found for verification check".to_string()),
+                    }
                 } else {
                     None
                 };
@@ -1200,6 +1200,30 @@ impl BurstNode {
                                 expiry = expiry_ts.as_secs(),
                                 "TRST token indices persisted to LMDB"
                             );
+                        }
+
+                        // Release unchecked dependents: any blocks that arrived
+                        // before this one (gap-previous) or before its linked send
+                        // (gap-source) were parked in the unchecked map. Now that
+                        // this block is in the ledger, drain them and re-enqueue for
+                        // full processing. This is what lets a bootstrap batch that
+                        // the PoW priority queue reordered converge — each accepted
+                        // block releases the next, cascading down the chain.
+                        if persisted {
+                            let released = {
+                                let mut processor = bp.lock().await;
+                                let mut deps = processor.process_unchecked(&block.hash);
+                                deps.extend(processor.process_unchecked_source(&block.hash));
+                                deps
+                            };
+                            for dep in released {
+                                if !block_queue.push(dep).await {
+                                    tracing::warn!(
+                                        parent = %block.hash,
+                                        "block queue full re-enqueuing unchecked dependent"
+                                    );
+                                }
+                            }
                         }
 
                         // Post-commit: verification, governance, etc. (can await)
@@ -3152,6 +3176,12 @@ impl BurstNode {
             "BURST node starting"
         );
 
+        // Ascending-bootstrap feedback channel: peer read loops report AscPullAck
+        // results here; the bootstrap task owns the receiver and drives the
+        // Bootstrapper from them.
+        let (bootstrap_feedback_tx, bootstrap_feedback_rx) =
+            mpsc::channel::<crate::bootstrap::BootstrapFeedback>(1024);
+
         // Initialize genesis if needed
         self.initialize_genesis()?;
 
@@ -3160,17 +3190,37 @@ impl BurstNode {
             use burst_store::account::AccountInfo;
             let genesis_addr = genesis_key::genesis_address(self.config.network);
             let acct_store = self.store.account_store();
-            let already_verified = acct_store
-                .get_account(&genesis_addr)
-                .map(|a| a.state == burst_types::WalletState::Verified)
-                .unwrap_or(false);
+            let existing = acct_store.get_account(&genesis_addr).ok();
 
-            if !already_verified {
-                let info = AccountInfo {
+            // The genesis block IS the account's first block, so the account
+            // record's head must point to it (block_count=1). Reading it back
+            // from the frontier `initialize_genesis` just wrote keeps head and
+            // block_count consistent — otherwise head==ZERO makes the account
+            // look empty, and the first genesis transaction (endorse/burn) gets
+            // built as an Open block that spends BRN, which every other node
+            // correctly rejects (breaking genesis-chain bootstrap).
+            let genesis_head = self
+                .store
+                .frontier_store()
+                .get_frontier(&genesis_addr)
+                .unwrap_or(BlockHash::ZERO);
+
+            // Write the record when genesis is unverified OR when a stale record
+            // still has head==ZERO (the pre-fix bug) while a genesis block
+            // exists — repair it in place, preserving any real chain counters.
+            let needs_write = match &existing {
+                None => true,
+                Some(a) => {
+                    a.state != burst_types::WalletState::Verified
+                        || (a.head.is_zero() && !genesis_head.is_zero())
+                }
+            };
+            if needs_write {
+                let base = existing.unwrap_or(AccountInfo {
                     address: genesis_addr.clone(),
                     state: burst_types::WalletState::Verified,
                     verified_at: Some(Timestamp::new(0)),
-                    head: BlockHash::ZERO,
+                    head: genesis_head,
                     block_count: 1,
                     confirmation_height: 0,
                     representative: genesis_addr.clone(),
@@ -3180,12 +3230,26 @@ impl BurstNode {
                     expired_trst: 0,
                     revoked_trst: 0,
                     epoch: 0,
+                });
+                let is_new = base.head.is_zero();
+                let info = AccountInfo {
+                    state: burst_types::WalletState::Verified,
+                    verified_at: base.verified_at.or(Some(Timestamp::new(0))),
+                    head: if base.head.is_zero() {
+                        genesis_head
+                    } else {
+                        base.head
+                    },
+                    block_count: base.block_count.max(1),
+                    ..base
                 };
                 if let Err(e) = acct_store.put_account(&info) {
                     tracing::error!("failed to auto-verify genesis creator: {e}");
                 } else {
-                    self.ledger_cache.inc_account_count();
-                    tracing::info!(%genesis_addr, "genesis creator auto-verified for bootstrap");
+                    if is_new {
+                        self.ledger_cache.inc_account_count();
+                    }
+                    tracing::info!(%genesis_addr, head = %info.head, "genesis creator auto-verified for bootstrap");
                 }
             }
 
@@ -3431,6 +3495,7 @@ impl BurstNode {
         let config_params_p2p = self.config.params.clone();
         let network_p2p = self.config.network;
         let peering_port_p2p = self.config.port;
+        let bootstrap_feedback_p2p = bootstrap_feedback_tx.clone();
 
         let p2p_handle = tokio::spawn(async move {
             let listener = match tokio::net::TcpListener::bind(format!("0.0.0.0:{p2p_port}")).await
@@ -3475,6 +3540,7 @@ impl BurstNode {
                                 let params_hash_c = params_hash_p2p;
                                 let network_c = network_p2p;
                                 let peering_port_c = peering_port_p2p;
+                                let bootstrap_feedback_c = bootstrap_feedback_p2p.clone();
 
                                 tokio::spawn(async move {
                                     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -3630,6 +3696,7 @@ impl BurstNode {
                                         frontier_c,
                                         store_c,
                                         params_hash_c,
+                                        bootstrap_feedback_c,
                                     );
 
                                     tracing::info!(peer = %peer_id, "inbound peer connected");
@@ -3722,6 +3789,7 @@ impl BurstNode {
                         params_hash: self.config.params.params_hash(),
                         network: self.config.network,
                         peering_port: self.config.port,
+                        bootstrap_feedback: bootstrap_feedback_tx.clone(),
                     };
                     let mut shutdown_rx_cache = self.shutdown.subscribe();
 
@@ -3795,99 +3863,114 @@ impl BurstNode {
                 params_hash: self.config.params.params_hash(),
                 network: self.config.network,
                 peering_port: self.config.port,
+                bootstrap_feedback: bootstrap_feedback_tx.clone(),
             };
             let frontier_bs = Arc::clone(&self.frontier);
             let conn_registry_bs = Arc::clone(&self.connection_registry);
-            let store_bs = Arc::clone(&self.store);
+            let peer_manager_bs = Arc::clone(&self.peer_manager);
             let mut shutdown_rx_bs = self.shutdown.subscribe();
+            let mut bs_feedback_rx = bootstrap_feedback_rx;
+            let genesis_addr_bs = genesis_key::genesis_address(self.config.network);
 
             let bs_handle = tokio::spawn(async move {
+                use crate::bootstrap::{
+                    AscPullReqPayload, BootstrapFeedback, BootstrapMessage, Bootstrapper,
+                    ASC_PULL_MAX_BLOCKS, ASC_PULL_MAX_FRONTIERS,
+                };
+                // Ascending bootstrap: keep bootstrap peers connected, discover
+                // accounts via a periodic frontier scan, and pull each behind
+                // account's chain in parallel with id-correlated requests.
+                let mut bootstrapper = Bootstrapper::new(16, 20, ASC_PULL_MAX_BLOCKS);
+                let mut seeded = false;
+                let mut ticks: u64 = 0;
+                let mut interval = tokio::time::interval(Duration::from_secs(2));
+
                 loop {
-                    for addr_str in &bootstrap_peers {
-                        if crate::peer_connector::is_peer_connected(addr_str, &bs_ctx.peer_manager)
-                            .await
-                        {
-                            continue;
-                        }
-
-                        tracing::info!(peer = %addr_str, "connecting to bootstrap peer");
-                        match crate::peer_connector::connect_to_peer(addr_str, &bs_ctx).await {
-                            Ok(connected) => {
-                                let peer_id = connected.peer_id;
-                                tracing::info!(peer = %peer_id, "bootstrap peer connected");
-
-                                // Check if we need to bootstrap — if our frontier
-                                // is empty, we have no ledger data and need to pull
-                                // everything from this peer.
-                                let local_frontier_count =
-                                    { frontier_bs.read().await.account_count() };
-
-                                if local_frontier_count == 0 {
-                                    tracing::info!(
-                                        peer = %peer_id,
-                                        "local frontier is empty — initiating bootstrap sync"
-                                    );
-
-                                    let mut bootstrap_client =
-                                        crate::bootstrap::BootstrapClient::new(10_000);
-
-                                    let frontier_req = bootstrap_client.start_frontier_scan();
-                                    let wire_req = WireMessage::Bootstrap(frontier_req);
-                                    let req_bytes = match bincode::serialize(&wire_req) {
-                                        Ok(b) => b,
-                                        Err(e) => {
-                                            tracing::error!(
-                                                "failed to serialize frontier req: {e}"
-                                            );
-                                            continue;
-                                        }
-                                    };
-
-                                    if !conn_registry_bs.read().await.send(&peer_id, req_bytes) {
-                                        tracing::warn!(
-                                            peer = %peer_id,
-                                            "failed to queue frontier request (no connection / queue full)"
-                                        );
-                                    }
-
-                                    tracing::info!(
-                                        peer = %peer_id,
-                                        "bootstrap frontier request sent — blocks will arrive via read loop"
-                                    );
-                                } else {
-                                    tracing::debug!(
-                                        peer = %peer_id,
-                                        frontier_accounts = local_frontier_count,
-                                        "frontier not empty — skipping bootstrap for this peer"
-                                    );
-                                }
-
-                                if let Ok(block_count) = store_bs.block_store().block_count() {
-                                    if block_count < 10 && local_frontier_count > 0 {
-                                        tracing::info!(
-                                            peer = %peer_id,
-                                            block_count = block_count,
-                                            "very few blocks in store — may need catch-up sync"
-                                        );
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(peer = %addr_str, "bootstrap connection failed: {e}");
-                            }
-                        }
-                    }
-
-                    // Wait 30s before retrying disconnected bootstrap peers
                     tokio::select! {
                         biased;
                         _ = shutdown_rx_bs.recv() => {
-                            tracing::debug!("bootstrap reconnect task shutting down");
+                            tracing::debug!("bootstrap task shutting down");
                             break;
                         }
-                        _ = tokio::time::sleep(Duration::from_secs(30)) => {}
+                        Some(fb) = bs_feedback_rx.recv() => match fb {
+                            BootstrapFeedback::Blocks { id, last, full_batch } => {
+                                bootstrapper.on_blocks_ack(id, last, full_batch);
+                            }
+                            BootstrapFeedback::Frontiers(entries) => {
+                                let f = frontier_bs.read().await;
+                                for (account, _remote) in entries {
+                                    let our = f
+                                        .get_head(&account)
+                                        .copied()
+                                        .unwrap_or(BlockHash::ZERO);
+                                    bootstrapper.enqueue(account, our);
+                                }
+                            }
+                        },
+                        _ = interval.tick() => {
+                            ticks += 1;
+                            // Keep bootstrap peers connected.
+                            for addr_str in &bootstrap_peers {
+                                if !crate::peer_connector::is_peer_connected(
+                                    addr_str,
+                                    &bs_ctx.peer_manager,
+                                )
+                                .await
+                                {
+                                    let _ =
+                                        crate::peer_connector::connect_to_peer(addr_str, &bs_ctx)
+                                            .await;
+                                }
+                            }
+                            // Seed the genesis account once (always known/baked).
+                            if !seeded {
+                                let our = frontier_bs
+                                    .read()
+                                    .await
+                                    .get_head(&genesis_addr_bs)
+                                    .copied()
+                                    .unwrap_or(BlockHash::ZERO);
+                                bootstrapper.enqueue(genesis_addr_bs.clone(), our);
+                                seeded = true;
+                            }
+                            let now = unix_now_secs();
+                            bootstrapper.tick_timeouts(now);
+
+                            // Pull from any connected peer.
+                            let peer_id = {
+                                let pm = peer_manager_bs.read().await;
+                                let first = pm.iter_connected().next().map(|(id, _)| id.clone());
+                                first
+                            };
+                            if let Some(peer_id) = peer_id {
+                                // Periodic frontier-scan discovery (~every 30s).
+                                if ticks % 15 == 1 {
+                                    let msg = WireMessage::Bootstrap(
+                                        BootstrapMessage::AscPullReq {
+                                            id: 0,
+                                            payload: AscPullReqPayload::Frontiers {
+                                                start_account: genesis_addr_bs.clone(),
+                                                count: ASC_PULL_MAX_FRONTIERS,
+                                            },
+                                        },
+                                    );
+                                    if let Ok(bytes) = bincode::serialize(&msg) {
+                                        conn_registry_bs.read().await.send(&peer_id, bytes);
+                                    }
+                                }
+                                // Send queued block pulls.
+                                for (id, payload) in bootstrapper.next_requests(now) {
+                                    let msg = WireMessage::Bootstrap(
+                                        BootstrapMessage::AscPullReq { id, payload },
+                                    );
+                                    if let Ok(bytes) = bincode::serialize(&msg) {
+                                        conn_registry_bs.read().await.send(&peer_id, bytes);
+                                    }
+                                }
+                            }
+                        }
                     }
-                } // end loop
+                }
             });
             self.task_handles.push(bs_handle);
         }
@@ -3919,6 +4002,7 @@ impl BurstNode {
                 params_hash: self.config.params.params_hash(),
                 network: self.config.network,
                 peering_port: self.config.port,
+                bootstrap_feedback: bootstrap_feedback_tx.clone(),
             };
             let mut shutdown_rx_reach = self.shutdown.subscribe();
 
@@ -4104,6 +4188,7 @@ impl BurstNode {
                 params_hash: self.config.params.params_hash(),
                 network: self.config.network,
                 peering_port: self.config.port,
+                bootstrap_feedback: bootstrap_feedback_tx.clone(),
             };
             let mut shutdown_rx_ro = self.shutdown.subscribe();
 

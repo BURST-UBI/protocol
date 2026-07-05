@@ -426,20 +426,30 @@ impl BlockProcessor {
                     return ProcessResult::Accepted;
                 }
 
-                // block.previous != frontier_head: either a gap or a fork
-                // Stage 5: Fork check — if the block claims a different previous than
-                // the current frontier head, it's a fork (two blocks competing for the
-                // same slot). In a full implementation we would check whether previous
-                // is an ancestor; here we conservatively flag it as a fork.
-                // Stage 4: Gap check — if previous is zero-hash (not an open block) or
-                // completely unknown, treat as gap and queue unchecked.
+                // block.previous != frontier_head: either a gap or a fork.
                 if block.previous.is_zero() {
                     return ProcessResult::Rejected("non-open block has zero previous hash".into());
                 }
 
-                // The block references a previous that isn't the frontier head.
-                // This is a fork — two blocks compete for the same account position.
-                ProcessResult::Fork
+                // Distinguish gap from fork by whether `previous` is KNOWN:
+                //
+                // - Unknown previous → gap: we're simply missing ancestors (the
+                //   common case during bootstrap, where a PoW-priority queue can
+                //   deliver a chain out of order). Park it in the unchecked map so
+                //   it's retried once its predecessor lands — NOT a fork.
+                // - Known previous that isn't the tip → genuine fork: two blocks
+                //   compete for the same account slot; resolve via election.
+                //
+                // The old code flagged every non-tip block as a fork, which sent
+                // out-of-order bootstrap blocks to the fork cache (never retried)
+                // instead of the unchecked map — so a reordered chain could never
+                // converge.
+                if self.source_known(&block.previous) {
+                    ProcessResult::Fork
+                } else {
+                    self.queue_unchecked(block.previous, block.clone());
+                    ProcessResult::Gap
+                }
             }
             None => {
                 // Account does not exist in the frontier
@@ -1310,12 +1320,45 @@ mod tests {
             ProcessResult::Accepted
         );
 
-        // A block that claims a different previous than the frontier head
-        let wrong_prev = BlockHash::new([0x99; 32]);
-        let fork_block = make_fork_block(wrong_prev, 0);
+        // Advance the head past `open` so that `open.hash` is a KNOWN block that
+        // is no longer the frontier tip.
+        let send1 = make_send_block(open.hash, 0);
+        assert_eq!(
+            processor.process(&send1, &mut frontier),
+            ProcessResult::Accepted
+        );
 
-        let result = processor.process(&fork_block, &mut frontier);
-        assert_eq!(result, ProcessResult::Fork);
+        // A block whose previous is a known block that isn't the current tip is
+        // a genuine fork (two blocks competing for the same slot). Contrast with
+        // an unknown previous, which is a gap — see `gap_when_previous_unknown`.
+        let fork_block = make_fork_block(open.hash, 0);
+        assert_eq!(
+            processor.process(&fork_block, &mut frontier),
+            ProcessResult::Fork
+        );
+    }
+
+    #[test]
+    fn gap_when_previous_unknown() {
+        let mut processor = test_processor(0);
+        let mut frontier = DagFrontier::new();
+
+        let open = make_open_block(0);
+        assert_eq!(
+            processor.process(&open, &mut frontier),
+            ProcessResult::Accepted
+        );
+
+        // A block referencing an unknown previous (never seen) is a gap, not a
+        // fork — we're simply missing ancestors. It must be parked as unchecked
+        // so bootstrap can retry it once the predecessor arrives.
+        let unknown_prev = BlockHash::new([0x99; 32]);
+        let orphan = make_fork_block(unknown_prev, 0);
+        assert_eq!(
+            processor.process(&orphan, &mut frontier),
+            ProcessResult::Gap
+        );
+        assert_eq!(processor.unchecked_count(), 1);
     }
 
     #[test]
@@ -1480,13 +1523,21 @@ mod tests {
             processor.process(&open, &mut frontier),
             ProcessResult::Accepted
         );
-        let head_after_open = *frontier.get_head(&test_account()).unwrap();
 
-        let fork = make_fork_block(BlockHash::new([0x77; 32]), 0);
+        // Advance past `open` so a fork off it (known, non-head previous) is a
+        // genuine fork rather than a gap.
+        let send1 = make_send_block(open.hash, 0);
+        assert_eq!(
+            processor.process(&send1, &mut frontier),
+            ProcessResult::Accepted
+        );
+        let head_after = *frontier.get_head(&test_account()).unwrap();
+
+        let fork = make_fork_block(open.hash, 0);
         assert_eq!(processor.process(&fork, &mut frontier), ProcessResult::Fork);
 
         // Frontier should be unchanged after a fork
-        assert_eq!(frontier.get_head(&test_account()), Some(&head_after_open));
+        assert_eq!(frontier.get_head(&test_account()), Some(&head_after));
     }
 
     // ── Integration-style: process block, then replay unchecked ─────────
@@ -1507,15 +1558,27 @@ mod tests {
         let send1 = make_send_block(open.hash, 0);
         let send2 = make_send_block(send1.hash, 0);
 
-        // Process send2 first — frontier head is open.hash, send2.previous is send1.hash → fork
-        // (because account exists but previous doesn't match frontier)
-        let result = processor.process(&send2, &mut frontier);
-        assert_eq!(result, ProcessResult::Fork);
+        // Process send2 first — its previous (send1) is unknown, so this is a
+        // GAP (missing ancestor), not a fork. It is parked as unchecked.
+        assert_eq!(processor.process(&send2, &mut frontier), ProcessResult::Gap);
+        assert_eq!(processor.unchecked_count(), 1);
 
-        // Process send1 — this should succeed (chains from open.hash)
-        let result = processor.process(&send1, &mut frontier);
-        assert_eq!(result, ProcessResult::Accepted);
+        // Process send1 — chains from open.hash (the tip) → accepted.
+        assert_eq!(
+            processor.process(&send1, &mut frontier),
+            ProcessResult::Accepted
+        );
         assert_eq!(frontier.get_head(&test_account()), Some(&send1.hash));
+
+        // send1 unblocks send2: drain the unchecked dependents and process them.
+        let dependents = processor.process_unchecked(&send1.hash);
+        assert_eq!(dependents.len(), 1);
+        assert_eq!(dependents[0].hash, send2.hash);
+        assert_eq!(
+            processor.process(&dependents[0], &mut frontier),
+            ProcessResult::Accepted
+        );
+        assert_eq!(frontier.get_head(&test_account()), Some(&send2.hash));
     }
 
     // ── Epoch block processing ───────────────────────────────────────────

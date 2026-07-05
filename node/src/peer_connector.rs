@@ -52,6 +52,9 @@ pub struct PeerConnectorContext {
     /// Our listening/peering port, sent in the handshake so the peer keys us by
     /// our dialable address instead of the ephemeral source port.
     pub peering_port: u16,
+    /// Channel for the read loop to report ascending-bootstrap ack results to
+    /// the bootstrap task.
+    pub bootstrap_feedback: tokio::sync::mpsc::Sender<crate::bootstrap::BootstrapFeedback>,
 }
 
 /// Result of a successful outbound connection.
@@ -252,6 +255,7 @@ async fn connect_to_peer_inner(
         Arc::clone(&ctx.frontier),
         Arc::clone(&ctx.store),
         ctx.params_hash,
+        ctx.bootstrap_feedback.clone(),
     );
 
     Ok(ConnectedPeer { peer_id, peer_addr })

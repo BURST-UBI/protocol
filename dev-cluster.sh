@@ -248,9 +248,9 @@ fi
 info "Test 3: account_info on seed node"
 ACCT_INFO=$(rpc "$SEED_RPC" "{\"action\":\"account_info\",\"account\":\"$ADDRESS\"}")
 TRST_BAL=$(echo "$ACCT_INFO" | jq -r '.result.trst_balance // "0"')
-ACCT_STATE=$(echo "$ACCT_INFO" | jq -r '.result.state // empty')
+ACCT_STATE=$(echo "$ACCT_INFO" | jq -r '.result.verification_state // empty')
 
-if [ "$ACCT_STATE" = "Verified" ] && [ "$TRST_BAL" != "0" ]; then
+if [ "$ACCT_STATE" = "verified" ] && [ "$TRST_BAL" != "0" ]; then
     pass "Account verified, TRST balance: $TRST_BAL"
 else
     test_fail "account_info unexpected: state=$ACCT_STATE balance=$TRST_BAL"
@@ -313,9 +313,9 @@ if [ "$NUM_NODES" -ge 2 ]; then
     sleep 2  # allow time for block propagation
 
     ACCT2=$(rpc "$NODE2_RPC" "{\"action\":\"account_info\",\"account\":\"$ADDRESS\"}")
-    STATE2=$(echo "$ACCT2" | jq -r '.result.state // empty')
+    STATE2=$(echo "$ACCT2" | jq -r '.result.verification_state // empty')
 
-    if [ "$STATE2" = "Verified" ]; then
+    if [ "$STATE2" = "verified" ]; then
         pass "Account synced to node 2"
     else
         # Faucet is local-only (not broadcast), so this is expected to fail
