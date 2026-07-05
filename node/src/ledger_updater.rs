@@ -66,9 +66,14 @@ pub fn update_account_on_block(
             info.representative = block.representative.clone();
         }
 
-        // Track BRN burns. `brn_balance` is an ascending odometer of
-        // cumulative spent BRN, so the delta is the burn amount.
-        if block.block_type == BlockType::Burn {
+        // Track PERMANENT BRN burns. `brn_balance` is an ascending odometer of
+        // cumulative spent BRN, so the delta is the amount spent by this block.
+        // Burn and Endorse are permanent burns (endorsers permanently burn their
+        // BRN, whitepaper §356), so both accumulate into `total_brn_burned`.
+        // Challenge / VerificationVote deltas are *temporary stakes* (returned or
+        // forfeited later) — those are tracked authoritatively by the BRN engine
+        // (`total_staked`), not folded into the permanent-burn counter here.
+        if matches!(block.block_type, BlockType::Burn | BlockType::Endorse) {
             let burned = block.brn_balance.saturating_sub(prev_brn_balance);
             info.total_brn_burned = info.total_brn_burned.saturating_add(burned);
         }

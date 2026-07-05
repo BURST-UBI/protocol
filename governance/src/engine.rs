@@ -438,6 +438,26 @@ impl GovernanceEngine {
         }
     }
 
+    /// The quorum (participation) threshold required for a proposal, in bps.
+    ///
+    /// Mirrors [`get_required_supermajority`](Self::get_required_supermajority):
+    /// constitutional amendments (and changes to the consti thresholds
+    /// themselves) require the separately-governable consti quorum
+    /// (`consti_quorum_bps`); everything else uses the normal governance quorum.
+    /// The whitepaper (§Governance Process) requires BOTH a supermajority AND a
+    /// quorum — previously the consti quorum was never enforced.
+    fn get_required_quorum(proposal: &Proposal, params: &ProtocolParams) -> u32 {
+        match &proposal.content {
+            ProposalContent::ParameterChange { param, .. }
+            | ProposalContent::Emergency { param, .. } => match param {
+                crate::params::GovernableParam::ConstiSupermajorityBps
+                | crate::params::GovernableParam::ConstiQuorumBps => params.consti_quorum_bps,
+                _ => params.governance_quorum_bps,
+            },
+            ProposalContent::ConstitutionalAmendment { .. } => params.consti_quorum_bps,
+        }
+    }
+
     /// Calculate adaptive quorum based on historical participation (Tezos-style EMA).
     ///
     /// Formula: `adjusted_quorum = max(base_quorum, ema_participation * 0.8)`
@@ -522,7 +542,7 @@ impl GovernanceEngine {
         }
 
         let effective_quorum = self.adaptive_quorum(
-            params.governance_quorum_bps,
+            Self::get_required_quorum(proposal, params),
             params.governance_ema_participation_bps,
         );
 
@@ -612,7 +632,7 @@ impl GovernanceEngine {
         }
 
         let effective_quorum = self.adaptive_quorum(
-            params.governance_quorum_bps,
+            Self::get_required_quorum(proposal, params),
             params.governance_ema_participation_bps,
         );
 

@@ -80,7 +80,8 @@ pub struct ProtocolParams {
     /// Used for adaptive quorum biasing. Updated after each vote.
     pub governance_ema_participation_bps: u32,
 
-    /// BRN cost (raw) to submit a governance proposal. Default: 336 BRN.
+    /// BRN cost (raw) to submit a governance proposal. Default: 100 BRN
+    /// (IMPLEMENTATION_DECISIONS §20.1).
     pub governance_proposal_cost: u128,
 
     /// Maximum rounds a proposal can be reset to Proposal phase after failure
@@ -163,7 +164,11 @@ impl ProtocolParams {
     pub fn burst_defaults() -> Self {
         Self {
             brn_rate: Self::BRN_RATE_1_PER_HOUR,
-            trst_expiry_secs: 365 * 24 * 3600, // 1 year
+            // Launch as "normal money": TRST never expires. BRN/UBI still accrues
+            // and mints TRST 1:1; governance can enable a finite expiry later
+            // (whitepaper §720 bootstrapping path, decision §6.2). `has_expired`
+            // saturates, so u64::MAX means nothing ever expires (no overflow).
+            trst_expiry_secs: u64::MAX,
 
             endorsement_threshold: 3,
             endorsement_burn_amount: 336 * BRN_UNIT,
@@ -183,7 +188,7 @@ impl ProtocolParams {
             governance_quorum_bps: 3000,                      // 30%
             governance_proposal_endorsements: 10,
             governance_ema_participation_bps: 5000, // 50% initial assumption
-            governance_proposal_cost: 336 * BRN_UNIT,
+            governance_proposal_cost: 100 * BRN_UNIT,
             governance_max_rounds: 3,
             governance_proposal_window_secs: 7 * 24 * 3600, // 7 days
             governance_propagation_buffer_secs: 3600,       // 1 hour
