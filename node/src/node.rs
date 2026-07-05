@@ -2599,6 +2599,7 @@ impl BurstNode {
         //    The actual param change is applied when that block is processed. ──
         let governance_tick = Arc::clone(&self.governance);
         let store_gov = Arc::clone(&self.store);
+        let delegation_gov = Arc::clone(&self.delegation_engine);
         let block_queue_gov = Arc::clone(&self.block_queue);
         let frontier_gov = Arc::clone(&self.frontier);
         let mut shutdown_rx_gov = self.shutdown.subscribe();
@@ -2616,8 +2617,17 @@ impl BurstNode {
                     }
                     _ = interval.tick() => {
                         let now = Timestamp::new(unix_now_secs());
+                        // Lock order gov → del matches the governance-vote path
+                        // (no deadlock). The tally resolves delegated votes and
+                        // uses the live verified-wallet count as the denominator.
                         let mut gov = governance_tick.lock().await;
-                        let activated = gov.tick(now, &mut gov_params);
+                        let verified_count = store_gov
+                            .account_store()
+                            .verified_account_count()
+                            .unwrap_or(0) as u32;
+                        let del = delegation_gov.lock().await;
+                        let activated = gov.tick(now, &mut gov_params, &del, verified_count);
+                        drop(del);
                         if !activated.is_empty() {
                             // For each activated proposal, create a GovernanceActivation
                             // block on the genesis chain. The block processing loop
