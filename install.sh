@@ -219,6 +219,9 @@ port = ${NET_PORT}
 max_peers = 50
 enable_rpc = true
 rpc_port = 7077
+# Bind RPC to localhost only — the RPC surface includes genesis_endorse.
+# Set to "0.0.0.0" only behind a firewall that restricts this port.
+rpc_bind = "127.0.0.1"
 enable_websocket = true
 websocket_port = 7078
 ${BOOTSTRAP_LINE}

@@ -30,6 +30,12 @@ struct Cli {
     #[arg(long, env = "BURST_RPC_PORT")]
     rpc_port: Option<u16>,
 
+    /// Address the RPC server binds to (defaults to "127.0.0.1", or the
+    /// config-file value). Use "0.0.0.0" to expose on all interfaces — only
+    /// behind a firewall, since the RPC includes genesis_endorse.
+    #[arg(long, env = "BURST_RPC_BIND")]
+    rpc_bind: Option<String>,
+
     /// Enable WebSocket server.
     #[arg(long, env = "BURST_ENABLE_WEBSOCKET")]
     websocket: bool,
@@ -138,6 +144,7 @@ async fn main() -> anyhow::Result<()> {
             port: cli.port.unwrap_or(file_cfg.port),
             enable_rpc: cli.rpc,
             rpc_port: cli.rpc_port.unwrap_or(file_cfg.rpc_port),
+            rpc_bind: cli.rpc_bind.unwrap_or(file_cfg.rpc_bind),
             enable_websocket: cli.websocket,
             websocket_port: cli.websocket_port.unwrap_or(file_cfg.websocket_port),
             bootstrap_peers: if cli.bootstrap_peers.is_empty() {
@@ -162,6 +169,7 @@ async fn main() -> anyhow::Result<()> {
             port: cli.port.unwrap_or(network.default_port()),
             enable_rpc: cli.rpc,
             rpc_port: cli.rpc_port.unwrap_or(7077),
+            rpc_bind: cli.rpc_bind.unwrap_or_else(|| "127.0.0.1".to_string()),
             enable_websocket: cli.websocket,
             websocket_port: cli.websocket_port.unwrap_or(7078),
             bootstrap_peers: cli.bootstrap_peers,

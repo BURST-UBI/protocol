@@ -45,6 +45,13 @@ pub struct NodeConfig {
     #[serde(default = "default_rpc_port")]
     pub rpc_port: u16,
 
+    /// Address the RPC server binds to. Defaults to `127.0.0.1` (localhost
+    /// only) because the RPC surface includes powerful operations such as
+    /// `genesis_endorse`; exposing it on all interfaces (`0.0.0.0`) requires an
+    /// explicit opt-in and an external firewall.
+    #[serde(default = "default_rpc_bind")]
+    pub rpc_bind: String,
+
     /// Whether to enable the WebSocket server.
     #[serde(default)]
     pub enable_websocket: bool,
@@ -130,6 +137,10 @@ fn default_rpc_port() -> u16 {
     7077
 }
 
+fn default_rpc_bind() -> String {
+    "127.0.0.1".to_string()
+}
+
 fn default_ws_port() -> u16 {
     7078
 }
@@ -178,6 +189,7 @@ impl Default for NodeConfig {
             enable_verification: false,
             enable_rpc: default_true(),
             rpc_port: default_rpc_port(),
+            rpc_bind: default_rpc_bind(),
             enable_websocket: false,
             websocket_port: default_ws_port(),
             bootstrap_peers: Vec::new(),

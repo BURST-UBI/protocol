@@ -106,6 +106,8 @@ pub trait BlockProcessorCallback: Send + Sync {
 /// Top-level RPC server handle.
 pub struct RpcServer {
     pub port: u16,
+    /// Address to bind to (e.g. `127.0.0.1` or `0.0.0.0`).
+    pub bind: String,
     pub state: Arc<RpcState>,
 }
 
@@ -201,14 +203,20 @@ impl RpcResponse {
 // ── Server impl ─────────────────────────────────────────────────────────
 
 impl RpcServer {
-    /// Create a server with custom shared state.
+    /// Create a server bound to localhost (`127.0.0.1`) with custom shared
+    /// state. Use [`RpcServer::with_bind`] to bind a different address.
     pub fn new(port: u16, state: Arc<RpcState>) -> Self {
-        Self { port, state }
+        Self::with_bind(port, "127.0.0.1".to_string(), state)
     }
 
-    /// Alias for `new` — create a server with custom shared state.
+    /// Alias for `new` — create a localhost-bound server with custom state.
     pub fn with_state(port: u16, state: Arc<RpcState>) -> Self {
         Self::new(port, state)
+    }
+
+    /// Create a server bound to an explicit address with custom shared state.
+    pub fn with_bind(port: u16, bind: String, state: Arc<RpcState>) -> Self {
+        Self { port, bind, state }
     }
 
     /// Start listening. Blocks until the server is shut down.
@@ -219,7 +227,15 @@ impl RpcServer {
             .route("/", post(handle_rpc))
             .with_state(Arc::clone(&self.state));
 
-        let addr = format!("0.0.0.0:{}", self.port);
+        let addr = format!("{}:{}", self.bind, self.port);
+        if self.bind == "0.0.0.0" {
+            warn!(
+                "RPC server binding to 0.0.0.0:{} — exposed on ALL interfaces. \
+                 The RPC surface includes genesis_endorse; ensure a firewall \
+                 restricts this port. Prefer rpc_bind = \"127.0.0.1\".",
+                self.port
+            );
+        }
         info!("RPC server listening on {}", addr);
 
         let listener = tokio::net::TcpListener::bind(&addr)

@@ -4225,6 +4225,7 @@ impl BurstNode {
         // ── RPC server (optional) ─────────────────────────────────────────
         if self.config.enable_rpc {
             let rpc_port = self.config.rpc_port;
+            let rpc_bind = self.config.rpc_bind.clone();
             let metrics_registry = if self.config.enable_metrics {
                 Some(self.metrics.registry.clone())
             } else {
@@ -4261,7 +4262,7 @@ impl BurstNode {
                 genesis_seed: genesis_key::genesis_seed(self.config.network),
             });
 
-            let rpc_server = RpcServer::with_state(rpc_port, rpc_state);
+            let rpc_server = RpcServer::with_bind(rpc_port, rpc_bind, rpc_state);
             let mut shutdown_rx_rpc = self.shutdown.subscribe();
 
             let rpc_handle = tokio::spawn(async move {
