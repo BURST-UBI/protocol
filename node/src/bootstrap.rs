@@ -10,6 +10,8 @@
 //! The protocol uses a request/response pattern over the existing P2P TCP
 //! connections with serialized messages.
 
+use std::collections::{HashMap, HashSet, VecDeque};
+
 use burst_ledger::StateBlock;
 use burst_types::{BlockHash, WalletAddress};
 use serde::{Deserialize, Serialize};
@@ -381,6 +383,142 @@ pub const ASC_PULL_MAX_BLOCKS: u16 = 128;
 
 /// Max frontier entries served in one ascending-bootstrap Frontiers response.
 pub const ASC_PULL_MAX_FRONTIERS: u16 = 1000;
+
+/// Client-side ascending bootstrapper: drives catch-up by pulling blocks for
+/// accounts we're behind on, from peers in parallel, with id-correlated
+/// requests and per-query timeouts.
+///
+/// The ascending model (vs one serial frontier+bulk-pull): keep a priority
+/// queue of accounts to sync, issue up to `max_in_flight` concurrent
+/// `AscPullReq::Blocks`, advance each account's frontier as verified blocks
+/// arrive, and re-queue accounts that still have more to pull. Timed-out
+/// queries are re-queued so a slow/dead peer can't stall progress.
+pub struct Bootstrapper {
+    /// Accounts waiting to be pulled (round-robin priority).
+    queue: VecDeque<WalletAddress>,
+    /// Membership mirror of `queue` to avoid duplicate enqueues.
+    queued: HashSet<WalletAddress>,
+    /// Our current frontier per account — where the next pull starts.
+    frontier: HashMap<WalletAddress, BlockHash>,
+    /// In-flight queries: `id -> (account, sent_at_secs)`.
+    in_flight: HashMap<u64, (WalletAddress, u64)>,
+    next_id: u64,
+    max_in_flight: usize,
+    query_timeout_secs: u64,
+    blocks_per_pull: u16,
+}
+
+impl Bootstrapper {
+    pub fn new(max_in_flight: usize, query_timeout_secs: u64, blocks_per_pull: u16) -> Self {
+        Self {
+            queue: VecDeque::new(),
+            queued: HashSet::new(),
+            frontier: HashMap::new(),
+            in_flight: HashMap::new(),
+            next_id: 1,
+            max_in_flight,
+            query_timeout_secs,
+            blocks_per_pull,
+        }
+    }
+
+    /// Queue an account for syncing, starting from `our_frontier` (the last
+    /// block we have for it; `ZERO` if none). No-op if already queued or
+    /// in-flight (but the start frontier is always refreshed).
+    pub fn enqueue(&mut self, account: WalletAddress, our_frontier: BlockHash) {
+        self.frontier.insert(account.clone(), our_frontier);
+        let in_flight = self.in_flight.values().any(|(a, _)| a == &account);
+        if !self.queued.contains(&account) && !in_flight {
+            self.queued.insert(account.clone());
+            self.queue.push_back(account);
+        }
+    }
+
+    /// Produce the next batch of pull requests, up to the in-flight budget.
+    /// Each `(id, payload)` is sent to a peer; the `id` correlates the ack via
+    /// [`on_blocks_ack`](Self::on_blocks_ack).
+    pub fn next_requests(&mut self, now_secs: u64) -> Vec<(u64, AscPullReqPayload)> {
+        let mut out = Vec::new();
+        while self.in_flight.len() < self.max_in_flight {
+            let Some(account) = self.queue.pop_front() else {
+                break;
+            };
+            self.queued.remove(&account);
+            let start = self
+                .frontier
+                .get(&account)
+                .copied()
+                .unwrap_or(BlockHash::ZERO);
+            let id = self.next_id;
+            self.next_id += 1;
+            self.in_flight.insert(id, (account.clone(), now_secs));
+            out.push((
+                id,
+                AscPullReqPayload::Blocks {
+                    account,
+                    start,
+                    count: self.blocks_per_pull,
+                },
+            ));
+        }
+        out
+    }
+
+    /// Handle a blocks ack for query `id`. `new_frontier` = hash of the last
+    /// block we accepted from the run (None if none/invalid). `full_batch` =
+    /// the response was a full `blocks_per_pull` (⇒ likely more to pull).
+    pub fn on_blocks_ack(&mut self, id: u64, new_frontier: Option<BlockHash>, full_batch: bool) {
+        let Some((account, _)) = self.in_flight.remove(&id) else {
+            return;
+        };
+        if let Some(head) = new_frontier {
+            self.frontier.insert(account.clone(), head);
+        }
+        if full_batch {
+            let start = self
+                .frontier
+                .get(&account)
+                .copied()
+                .unwrap_or(BlockHash::ZERO);
+            self.enqueue(account, start);
+        }
+    }
+
+    /// Re-queue queries that exceeded the timeout (peer didn't answer).
+    pub fn tick_timeouts(&mut self, now_secs: u64) {
+        let timed_out: Vec<u64> = self
+            .in_flight
+            .iter()
+            .filter(|(_, (_, sent))| now_secs.saturating_sub(*sent) >= self.query_timeout_secs)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in timed_out {
+            if let Some((account, _)) = self.in_flight.remove(&id) {
+                let start = self
+                    .frontier
+                    .get(&account)
+                    .copied()
+                    .unwrap_or(BlockHash::ZERO);
+                self.enqueue(account, start);
+            }
+        }
+    }
+
+    /// Number of in-flight queries.
+    pub fn in_flight_count(&self) -> usize {
+        self.in_flight.len()
+    }
+
+    /// Number of accounts waiting in the queue.
+    pub fn queued_count(&self) -> usize {
+        self.queue.len()
+    }
+
+    /// Whether there is no work left (nothing queued or in-flight).
+    pub fn is_idle(&self) -> bool {
+        self.queue.is_empty() && self.in_flight.is_empty()
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -944,5 +1082,76 @@ mod tests {
             }
             other => panic!("expected Frontiers ack, got {:?}", other),
         }
+    }
+
+    // ── Bootstrapper (client) tests ─────────────────────────────────────
+
+    #[test]
+    fn bootstrapper_respects_in_flight_budget_and_correlates() {
+        let mut bs = Bootstrapper::new(2, 30, 128);
+        bs.enqueue(test_account_1(), BlockHash::ZERO);
+        bs.enqueue(test_account_2(), BlockHash::new([9; 32]));
+        bs.enqueue(test_account_3(), BlockHash::ZERO);
+
+        // Only 2 may be in flight at once.
+        let reqs = bs.next_requests(100);
+        assert_eq!(reqs.len(), 2);
+        assert_eq!(bs.in_flight_count(), 2);
+        assert_eq!(bs.queued_count(), 1);
+        // ids are distinct; the start frontier is threaded through.
+        assert_ne!(reqs[0].0, reqs[1].0);
+        match &reqs[1].1 {
+            AscPullReqPayload::Blocks { account, start, .. } if account == &test_account_2() => {
+                assert_eq!(*start, BlockHash::new([9; 32]));
+            }
+            AscPullReqPayload::Blocks { .. } => {} // order not guaranteed for acct1
+            other => panic!("expected Blocks req, got {:?}", other),
+        }
+
+        // No more slots until an ack frees one.
+        assert!(bs.next_requests(100).is_empty());
+    }
+
+    #[test]
+    fn bootstrapper_advances_frontier_and_requeues_on_full_batch() {
+        let mut bs = Bootstrapper::new(4, 30, 128);
+        bs.enqueue(test_account_1(), BlockHash::ZERO);
+        let reqs = bs.next_requests(100);
+        let id = reqs[0].0;
+
+        // Full batch → frontier advances AND the account is re-queued for more.
+        bs.on_blocks_ack(id, Some(BlockHash::new([5; 32])), true);
+        assert_eq!(bs.in_flight_count(), 0);
+        assert_eq!(bs.queued_count(), 1);
+        // Next request for it starts from the advanced frontier.
+        let reqs2 = bs.next_requests(101);
+        match &reqs2[0].1 {
+            AscPullReqPayload::Blocks { start, .. } => {
+                assert_eq!(*start, BlockHash::new([5; 32]))
+            }
+            other => panic!("expected Blocks req, got {:?}", other),
+        }
+
+        // A non-full batch (end of chain) → done, no re-queue.
+        let id2 = reqs2[0].0;
+        bs.on_blocks_ack(id2, Some(BlockHash::new([6; 32])), false);
+        assert!(bs.is_idle());
+    }
+
+    #[test]
+    fn bootstrapper_requeues_timed_out_queries() {
+        let mut bs = Bootstrapper::new(4, 30, 128);
+        bs.enqueue(test_account_1(), BlockHash::ZERO);
+        let _ = bs.next_requests(100);
+        assert_eq!(bs.in_flight_count(), 1);
+
+        // Not yet timed out.
+        bs.tick_timeouts(120);
+        assert_eq!(bs.in_flight_count(), 1);
+
+        // Past the 30s timeout → re-queued.
+        bs.tick_timeouts(131);
+        assert_eq!(bs.in_flight_count(), 0);
+        assert_eq!(bs.queued_count(), 1);
     }
 }
