@@ -2,10 +2,18 @@
 //!
 //! When the leading candidate changes in an election, a node should not
 //! immediately flip its vote. Vote spacing enforces a minimum time gap
-//! between vote changes for the same account root, preventing vote
+//! between vote changes for the same *election root*, preventing vote
 //! oscillation attacks where an adversary rapidly alternates the winner.
+//!
+//! The root is the frontier position being voted on (a block's `previous`),
+//! NOT the account. Fork candidates at the same position share a `previous`
+//! and so contend for the same spacing slot — that is exactly the flip-flop
+//! we want to rate-limit. Sequential (non-forking) blocks on one account each
+//! extend a distinct `previous`, so they get distinct roots and are voted on
+//! back-to-back without artificial suppression. (Keying by account instead
+//! throttled honest high-throughput accounts, which is not the point.)
 
-use burst_types::{BlockHash, WalletAddress};
+use burst_types::BlockHash;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -13,7 +21,7 @@ const MIN_VOTE_SPACING: Duration = Duration::from_millis(1500);
 
 /// Tracks per-root vote timing to prevent rapid vote flipping.
 pub struct VoteSpacing {
-    last_vote: HashMap<WalletAddress, (Instant, BlockHash)>,
+    last_vote: HashMap<BlockHash, (Instant, BlockHash)>,
 }
 
 impl VoteSpacing {
@@ -23,10 +31,10 @@ impl VoteSpacing {
         }
     }
 
-    /// Check if a vote can be generated for this account root.
+    /// Check if a vote can be generated for this election root.
     /// Returns true if enough time has passed since the last vote on this root,
     /// or if the candidate is the same block (reconfirmation is always OK).
-    pub fn votable(&self, root: &WalletAddress, candidate: &BlockHash) -> bool {
+    pub fn votable(&self, root: &BlockHash, candidate: &BlockHash) -> bool {
         match self.last_vote.get(root) {
             None => true,
             Some((last_time, last_hash)) => {
@@ -39,7 +47,7 @@ impl VoteSpacing {
     }
 
     /// Record that a vote was cast for this root.
-    pub fn record(&mut self, root: WalletAddress, hash: BlockHash) {
+    pub fn record(&mut self, root: BlockHash, hash: BlockHash) {
         self.last_vote.insert(root, (Instant::now(), hash));
     }
 
@@ -71,8 +79,10 @@ mod tests {
     use super::*;
     use std::thread;
 
-    fn make_root(name: &str) -> WalletAddress {
-        WalletAddress::new(format!("brst_{name}"))
+    fn make_root(name: &str) -> BlockHash {
+        // Distinct root per name (roots are frontier-position block hashes).
+        let seed = name.bytes().next().unwrap_or(0);
+        BlockHash::new([seed.wrapping_add(100); 32])
     }
 
     fn make_hash(byte: u8) -> BlockHash {
@@ -180,5 +190,37 @@ mod tests {
     fn default_impl() {
         let spacing = VoteSpacing::default();
         assert!(spacing.is_empty());
+    }
+
+    #[test]
+    fn sequential_chain_all_votable_back_to_back() {
+        // A single account extending its chain rapidly: each block's root is
+        // the previous block's hash, so every step is a DISTINCT root and must
+        // be votable immediately — no 1500ms throttle. This is the per-election
+        // -root fix: keying by account previously suppressed these.
+        let mut spacing = VoteSpacing::new();
+        let b1 = make_hash(1);
+        let b2 = make_hash(2);
+        let b3 = make_hash(3);
+        // root of b2 is b1's hash; root of b3 is b2's hash; etc.
+        assert!(spacing.votable(&b1, &b2));
+        spacing.record(b1, b2);
+        assert!(spacing.votable(&b2, &b3)); // immediately votable — different root
+        spacing.record(b2, b3);
+        assert!(spacing.votable(&b3, &make_hash(4)));
+    }
+
+    #[test]
+    fn fork_at_same_root_is_rate_limited() {
+        // Two competing blocks at the SAME frontier position (shared root) —
+        // this is the flip-flop we throttle.
+        let mut spacing = VoteSpacing::new();
+        let root = make_hash(10);
+        let fork_a = make_hash(11);
+        let fork_b = make_hash(12);
+        assert!(spacing.votable(&root, &fork_a));
+        spacing.record(root, fork_a);
+        // Switching to the competing fork at the same root immediately: blocked.
+        assert!(!spacing.votable(&root, &fork_b));
     }
 }

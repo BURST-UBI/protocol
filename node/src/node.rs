@@ -2144,8 +2144,21 @@ impl BurstNode {
                             let mut vg = vote_generator_bp.lock().await;
                             if vg.is_representative {
                                 let mut vs = vote_spacing_bp.lock().await;
-                                if vs.votable(&block.account, &block.hash) {
-                                    vs.record(block.account.clone(), block.hash);
+                                // Space votes by the election ROOT (the frontier
+                                // position = `previous`), not the account. Rapid
+                                // sequential blocks on one account each extend a
+                                // distinct `previous`, so they're all votable;
+                                // only genuine forks at the same position share a
+                                // root and get rate-limited. Open blocks have no
+                                // `previous` (ZERO), so key them by their own hash
+                                // to avoid cross-account collisions on ZERO.
+                                let spacing_root = if block.previous.is_zero() {
+                                    block.hash
+                                } else {
+                                    block.previous
+                                };
+                                if vs.votable(&spacing_root, &block.hash) {
+                                    vs.record(spacing_root, block.hash);
                                     drop(vs);
                                     let vote = vg.generate_vote(block.hash);
                                     drop(vg);
