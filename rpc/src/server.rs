@@ -242,6 +242,19 @@ impl RpcServer {
             .await
             .map_err(|e| RpcError::Server(e.to_string()))?;
 
+        // Periodically evict stale rate-limiter buckets so the per-client-IP
+        // map can't grow unbounded over the node's lifetime.
+        {
+            let rate_limiter = Arc::clone(&self.state.rate_limiter);
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+                loop {
+                    interval.tick().await;
+                    rate_limiter.cleanup();
+                }
+            });
+        }
+
         axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
