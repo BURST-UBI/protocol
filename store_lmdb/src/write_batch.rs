@@ -4,14 +4,14 @@
 //! # Usage
 //!
 //! ```ignore
-//! let mut batch = env.write_batch()?;
+//! let mut batch = env.tx_begin_write()?;
 //! batch.put_block(&hash, &block_bytes)?;
 //! batch.put_frontier(&account, &head)?;
 //! batch.put_account_info(&account_info, false)?;
 //! batch.commit()?;
 //! ```
 //!
-//! If the batch is dropped without calling [`WriteBatch::commit`], all
+//! If the batch is dropped without calling [`LmdbWriteTransaction::commit`], all
 //! operations are rolled back (the underlying LMDB transaction is aborted).
 
 use heed::{RoTxn, RwTxn};
@@ -59,12 +59,6 @@ pub struct LmdbWriteTransaction<'a> {
     txn: RwTxn<'a>,
     env: &'a LmdbEnvironment,
 }
-
-/// Backwards-compatible alias. `WriteBatch` was BURST's original name for this
-/// caller-owned write transaction; it is now [`LmdbWriteTransaction`]. Existing
-/// callers (`env.write_batch()`) keep working unchanged; new code threading a
-/// transaction through store methods should use `LmdbWriteTransaction`.
-pub type WriteBatch<'a> = LmdbWriteTransaction<'a>;
 
 impl ReadTxn for LmdbWriteTransaction<'_> {}
 impl WriteTxn for LmdbWriteTransaction<'_> {}
@@ -395,7 +389,7 @@ mod tests {
         let block_bytes = b"fake-block-data";
 
         // Write via batch
-        let mut batch = env.write_batch().expect("write_batch");
+        let mut batch = env.tx_begin_write().expect("write_batch");
         batch.put_block(&hash, block_bytes).expect("put_block");
         batch.put_frontier(&account, &hash).expect("put_frontier");
         batch.commit().expect("commit");
@@ -420,7 +414,7 @@ mod tests {
 
         // Start a batch but drop it without committing
         {
-            let mut batch = env.write_batch().expect("write_batch");
+            let mut batch = env.tx_begin_write().expect("write_batch");
             batch.put_block(&hash, block_bytes).expect("put_block");
             // batch is dropped here — implicit rollback
         }
@@ -435,7 +429,7 @@ mod tests {
     fn batch_multiple_blocks() {
         let (_dir, env) = temp_env();
 
-        let mut batch = env.write_batch().expect("write_batch");
+        let mut batch = env.tx_begin_write().expect("write_batch");
 
         let hashes: Vec<BlockHash> = (0..10)
             .map(|i| {
@@ -469,7 +463,7 @@ mod tests {
         );
         let data = b"account-info-bytes";
 
-        let mut batch = env.write_batch().expect("write_batch");
+        let mut batch = env.tx_begin_write().expect("write_batch");
         batch.put_account(&address, data).expect("put_account");
         batch.commit().expect("commit");
 
@@ -507,7 +501,7 @@ mod tests {
             epoch: 0,
         };
 
-        let mut batch = env.write_batch().expect("write_batch");
+        let mut batch = env.tx_begin_write().expect("write_batch");
         batch
             .put_account_info(&info, false)
             .expect("put_account_info");
@@ -531,7 +525,7 @@ mod tests {
         let source_hash = [0xABu8; 32];
         let data = b"pending-info-bytes";
 
-        let mut batch = env.write_batch().expect("write_batch");
+        let mut batch = env.tx_begin_write().expect("write_batch");
         batch
             .put_pending(&dest, &source_hash, data)
             .expect("put_pending");
@@ -556,12 +550,12 @@ mod tests {
         let block_bytes = b"to-be-deleted";
 
         // First commit the block
-        let mut batch = env.write_batch().expect("write_batch");
+        let mut batch = env.tx_begin_write().expect("write_batch");
         batch.put_block(&hash, block_bytes).expect("put_block");
         batch.commit().expect("commit");
 
         // Delete in a new batch
-        let mut batch = env.write_batch().expect("write_batch");
+        let mut batch = env.tx_begin_write().expect("write_batch");
         batch.delete_block(&hash).expect("delete_block");
         batch.commit().expect("commit");
 
@@ -573,7 +567,7 @@ mod tests {
     fn batch_put_meta() {
         let (_dir, env) = temp_env();
 
-        let mut batch = env.write_batch().expect("write_batch");
+        let mut batch = env.tx_begin_write().expect("write_batch");
         batch.put_meta("schema_version", b"42").expect("put_meta");
         batch.commit().expect("commit");
 

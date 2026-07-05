@@ -19,7 +19,7 @@ use crate::rep_weights::LmdbRepWeightStore;
 use crate::transaction::LmdbTransactionStore;
 use crate::trst_index::LmdbTrstIndexStore;
 use crate::verification::LmdbVerificationStore;
-use crate::write_batch::{LmdbReadTransaction, LmdbWriteTransaction, WriteBatch};
+use crate::write_batch::{LmdbReadTransaction, LmdbWriteTransaction};
 use crate::LmdbError;
 
 /// Wraps the LMDB environment and all database handles.
@@ -179,15 +179,6 @@ impl LmdbEnvironment {
     /// grouped reads. Thread it through store `*_txn` read methods.
     pub fn tx_begin_read(&self) -> Result<LmdbReadTransaction<'_>, burst_store::StoreError> {
         LmdbReadTransaction::new(self)
-    }
-
-    /// Begin a write batch for grouping multiple store operations into a
-    /// single LMDB write transaction, amortising the fsync cost.
-    ///
-    /// Alias for [`tx_begin_write`](Self::tx_begin_write); `WriteBatch` is now
-    /// [`LmdbWriteTransaction`]. Retained for existing callers.
-    pub fn write_batch(&self) -> Result<WriteBatch<'_>, burst_store::StoreError> {
-        LmdbWriteTransaction::new(self)
     }
 
     /// Create an account store backed by this environment.

@@ -127,7 +127,7 @@ fn lmdb_frontier_tracks_head() {
         1000,
     );
 
-    let mut batch = env.write_batch().unwrap();
+    let mut batch = env.tx_begin_write().unwrap();
     let bytes = bincode::serialize(&open).unwrap();
     batch.put_block(&open.hash, &bytes).unwrap();
     batch.put_frontier(&account, &open.hash).unwrap();
@@ -148,7 +148,7 @@ fn lmdb_frontier_tracks_head() {
         2000,
     );
 
-    let mut batch = env.write_batch().unwrap();
+    let mut batch = env.tx_begin_write().unwrap();
     let bytes = bincode::serialize(&send).unwrap();
     batch.put_block(&send.hash, &bytes).unwrap();
     batch.put_frontier(&account, &send.hash).unwrap();
@@ -180,7 +180,7 @@ fn ledger_updater_open_then_send_updates_account_correctly() {
     );
 
     let mut rw = RepWeightCache::new();
-    let mut batch = env.write_batch().unwrap();
+    let mut batch = env.tx_begin_write().unwrap();
     let info = burst_node::update_account_on_block(&mut batch, &open, None, 0, &mut rw).unwrap();
     batch.commit().unwrap();
 
@@ -202,7 +202,7 @@ fn ledger_updater_open_then_send_updates_account_correctly() {
         2000,
     );
 
-    let mut batch = env.write_batch().unwrap();
+    let mut batch = env.tx_begin_write().unwrap();
     let info2 =
         burst_node::update_account_on_block(&mut batch, &send, Some(&info), 0, &mut rw).unwrap();
     batch.commit().unwrap();
@@ -233,7 +233,7 @@ fn ledger_updater_rep_change_moves_weight() {
     );
 
     let mut rw = RepWeightCache::new();
-    let mut batch = env.write_batch().unwrap();
+    let mut batch = env.tx_begin_write().unwrap();
     let info = burst_node::update_account_on_block(&mut batch, &open, None, 0, &mut rw).unwrap();
     batch.commit().unwrap();
 
@@ -252,7 +252,7 @@ fn ledger_updater_rep_change_moves_weight() {
         2000,
     );
 
-    let mut batch = env.write_batch().unwrap();
+    let mut batch = env.tx_begin_write().unwrap();
     burst_node::update_account_on_block(&mut batch, &change, Some(&info), 0, &mut rw).unwrap();
     batch.commit().unwrap();
 
@@ -279,7 +279,7 @@ fn ledger_updater_burn_tracks_brn_correctly() {
     );
 
     let mut rw = RepWeightCache::new();
-    let mut batch = env.write_batch().unwrap();
+    let mut batch = env.tx_begin_write().unwrap();
     let info = burst_node::update_account_on_block(&mut batch, &open, None, 0, &mut rw).unwrap();
     batch.commit().unwrap();
 
@@ -297,7 +297,7 @@ fn ledger_updater_burn_tracks_brn_correctly() {
     );
 
     let prev_brn: u128 = 500;
-    let mut batch = env.write_batch().unwrap();
+    let mut batch = env.tx_begin_write().unwrap();
     let info2 =
         burst_node::update_account_on_block(&mut batch, &burn, Some(&info), prev_brn, &mut rw)
             .unwrap();
@@ -939,7 +939,7 @@ fn pending_entry_create_read_delete_roundtrip() {
         2000,
     );
 
-    let mut batch = env.write_batch().unwrap();
+    let mut batch = env.tx_begin_write().unwrap();
     burst_node::create_pending_entry(&mut batch, &send_block, 300, &receiver, Vec::new()).unwrap();
     batch.commit().unwrap();
 
@@ -961,7 +961,7 @@ fn pending_entry_create_read_delete_roundtrip() {
         3000,
     );
 
-    let mut batch = env.write_batch().unwrap();
+    let mut batch = env.tx_begin_write().unwrap();
     burst_node::delete_pending_entry(&mut batch, &receive_block).unwrap();
     batch.commit().unwrap();
 
@@ -992,7 +992,7 @@ fn write_batch_rollback_on_drop() {
     );
 
     {
-        let mut batch = env.write_batch().unwrap();
+        let mut batch = env.tx_begin_write().unwrap();
         let bytes = bincode::serialize(&block).unwrap();
         batch.put_block(&block.hash, &bytes).unwrap();
         batch.put_frontier(&account, &block.hash).unwrap();
@@ -1745,7 +1745,7 @@ fn unified_path_burn_persists_account_and_pending() {
     );
 
     let mut rw = burst_consensus::RepWeightCache::new();
-    let mut batch = env.write_batch().unwrap();
+    let mut batch = env.tx_begin_write().unwrap();
     let bytes = bincode::serialize(&open).unwrap();
     batch.put_block(&open.hash, &bytes).unwrap();
     batch.put_frontier(&alice, &open.hash).unwrap();
@@ -1798,7 +1798,7 @@ fn unified_path_burn_persists_account_and_pending() {
     };
 
     // Persist burn block + account update atomically
-    let mut batch = env.write_batch().unwrap();
+    let mut batch = env.tx_begin_write().unwrap();
     let bytes = bincode::serialize(&burn).unwrap();
     batch.put_block(&burn.hash, &bytes).unwrap();
     batch.put_frontier(&alice, &burn.hash).unwrap();

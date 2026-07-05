@@ -526,7 +526,7 @@ impl BurstNode {
             bincode::serialize(&genesis_block).map_err(|e| NodeError::Other(e.to_string()))?;
         let mut batch = self
             .store
-            .write_batch()
+            .tx_begin_write()
             .map_err(|e| NodeError::Other(format!("failed to start write batch: {e}")))?;
         // Height 1 for the genesis block so the per-account height index has an
         // entry for it — the ascending-bootstrap responder walks this index
@@ -1104,7 +1104,7 @@ impl BurstNode {
                         // All block, frontier, account, pending, and TRST index
                         // writes are batched into one LMDB transaction.
                         let persisted = 'persist: {
-                            let mut batch = match store.write_batch() {
+                            let mut batch = match store.tx_begin_write() {
                                 Ok(b) => b,
                                 Err(e) => {
                                     tracing::error!(hash = %block.hash, "failed to start write batch: {e}");

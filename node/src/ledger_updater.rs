@@ -6,7 +6,7 @@
 use burst_consensus::RepWeightCache;
 use burst_ledger::{BlockType, StateBlock};
 use burst_store::account::AccountInfo;
-use burst_store_lmdb::WriteBatch;
+use burst_store_lmdb::LmdbWriteTransaction;
 use burst_types::{WalletAddress, WalletState};
 
 /// Update ledger state after a block is accepted.
@@ -19,7 +19,7 @@ use burst_types::{WalletAddress, WalletState};
 /// the account chain (needed for burn tracking since `AccountInfo` does not
 /// store raw BRN balance).
 pub fn update_account_on_block(
-    batch: &mut WriteBatch<'_>,
+    batch: &mut LmdbWriteTransaction<'_>,
     block: &StateBlock,
     prev_account: Option<&AccountInfo>,
     prev_brn_balance: u128,
@@ -104,7 +104,7 @@ pub fn update_account_on_block(
 /// `provenance` carries origin info from the consumed tokens so receivers
 /// get properly tracked TRST with lineage for expiry and revocation.
 pub fn create_pending_entry(
-    batch: &mut WriteBatch<'_>,
+    batch: &mut LmdbWriteTransaction<'_>,
     block: &StateBlock,
     amount: u128,
     destination: &WalletAddress,
@@ -146,7 +146,10 @@ pub fn create_pending_entry(
 /// account's first block pockets a pending send), and `RejectReceive`
 /// (returning pending TRST to sender). Uses binary composite key
 /// `account_bytes ++ link_bytes` matching `create_pending_entry`.
-pub fn delete_pending_entry(batch: &mut WriteBatch<'_>, block: &StateBlock) -> Result<(), String> {
+pub fn delete_pending_entry(
+    batch: &mut LmdbWriteTransaction<'_>,
+    block: &StateBlock,
+) -> Result<(), String> {
     let claims_pending = matches!(
         block.block_type,
         BlockType::Receive | BlockType::RejectReceive

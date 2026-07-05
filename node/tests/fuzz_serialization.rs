@@ -530,7 +530,7 @@ fn write_batch_partial_failure_does_not_corrupt() {
     let hash2 = BlockHash::new([2u8; 32]);
 
     {
-        let mut batch = env.write_batch().unwrap();
+        let mut batch = env.tx_begin_write().unwrap();
         batch.put_block(&hash1, &[0xAA; 64]).unwrap();
         batch.put_block(&hash2, &[0xBB; 64]).unwrap();
         batch.commit().unwrap();
@@ -542,7 +542,7 @@ fn write_batch_partial_failure_does_not_corrupt() {
     assert_eq!(b2[0], 0xBB);
 
     {
-        let mut batch = env.write_batch().unwrap();
+        let mut batch = env.tx_begin_write().unwrap();
         batch
             .put_block(&BlockHash::new([3u8; 32]), &[0xCC; 64])
             .unwrap();

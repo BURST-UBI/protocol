@@ -307,8 +307,6 @@ impl Bootstrapper {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burst_ledger::{BlockType, StateBlock, CURRENT_BLOCK_VERSION};
-    use burst_types::{Signature, Timestamp, TxHash};
 
     fn test_account_1() -> WalletAddress {
         WalletAddress::new(
@@ -326,37 +324,6 @@ mod tests {
         WalletAddress::new(
             "brst_3333333333333333333333333333333333333333333333333333333333333333333",
         )
-    }
-
-    fn make_test_block(account: &WalletAddress, previous: BlockHash) -> StateBlock {
-        let mut block = StateBlock {
-            version: CURRENT_BLOCK_VERSION,
-            block_type: if previous.is_zero() {
-                BlockType::Open
-            } else {
-                BlockType::Send
-            },
-            account: account.clone(),
-            previous,
-            representative: account.clone(),
-            brn_balance: 100,
-            trst_balance: 50,
-            link: BlockHash::ZERO,
-            origin: TxHash::ZERO,
-            transaction: TxHash::ZERO,
-            timestamp: Timestamp::new(1000),
-            params_hash: BlockHash::ZERO,
-            merge_sources: Vec::new(),
-            work: 0,
-            signature: Signature([1u8; 64]),
-            hash: BlockHash::ZERO,
-        };
-        block.hash = block.compute_hash();
-        block
-    }
-
-    fn serialize_block(block: &StateBlock) -> Vec<u8> {
-        bincode::serialize(block).unwrap()
     }
 
     // ── Ascending-bootstrap responder tests ────────────────────────────

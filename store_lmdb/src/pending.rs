@@ -31,7 +31,7 @@ fn pending_key(destination: &WalletAddress, source_hash: &TxHash) -> Vec<u8> {
     key
 }
 
-/// Build the binary composite key from raw bytes (used by WriteBatch).
+/// Build the binary composite key from raw bytes (used by LmdbWriteTransaction).
 pub(crate) fn pending_key_raw(
     destination: &WalletAddress,
     source_hash_bytes: &[u8; 32],
