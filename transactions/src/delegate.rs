@@ -1,12 +1,19 @@
 //! Delegation transactions: delegate and revoke voting power.
+//!
+//! BURST uses a plain, revocable, on-chain delegation POINTER rather than the
+//! whitepaper's encrypted-secondary-key handoff. The delegate never needs the
+//! delegator's key: they vote with their OWN key and the governance tally
+//! attributes the delegated weight through the delegation graph
+//! (`count_effective_*`), with a directly-voting delegator overriding its
+//! delegation (no double counting). This is simpler, needs no key escrow, and
+//! is authorized to diverge from the whitepaper.
 
 use burst_types::{Signature, Timestamp, TxHash, WalletAddress};
 use serde::{Deserialize, Serialize};
 
-/// A delegation transaction.
-///
-/// The delegator generates a secondary key pair and encrypts the private key
-/// with the delegate's public key, then broadcasts it.
+/// A delegation transaction: `delegator` entrusts its vote to `delegate`.
+/// Authority is proven by the delegator's own signature on this transaction;
+/// no secondary/encrypted key is involved.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DelegateTx {
     pub hash: TxHash,
@@ -14,28 +21,17 @@ pub struct DelegateTx {
     pub delegator: WalletAddress,
     /// The wallet receiving delegation authority.
     pub delegate: WalletAddress,
-    /// The delegation public key (secondary key pair).
-    pub delegation_public_key: Vec<u8>,
-    /// The delegation private key, encrypted with the delegate's public key.
-    pub encrypted_delegation_key: Vec<u8>,
-    /// The delegator's X25519 public key (needed by delegate to decrypt).
-    #[serde(default)]
-    pub delegator_x25519_public: Vec<u8>,
     pub timestamp: Timestamp,
     pub work: u64,
     pub signature: Signature,
 }
 
-/// Revoke a previously delegated vote.
-///
-/// Broadcasts a new delegation key signed by the primary private key,
-/// invalidating the previous delegation.
+/// Revoke a previously delegated vote. Signed by the delegator's primary key,
+/// which proves authority to revoke.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RevokeDelegationTx {
     pub hash: TxHash,
     pub delegator: WalletAddress,
-    /// New delegation public key (invalidates the old one).
-    pub new_delegation_public_key: Vec<u8>,
     pub timestamp: Timestamp,
     pub work: u64,
     /// Signed by the primary private key (proves authority to revoke).
