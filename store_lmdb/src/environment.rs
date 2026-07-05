@@ -19,7 +19,7 @@ use crate::rep_weights::LmdbRepWeightStore;
 use crate::transaction::LmdbTransactionStore;
 use crate::trst_index::LmdbTrstIndexStore;
 use crate::verification::LmdbVerificationStore;
-use crate::write_batch::{LmdbWriteTransaction, WriteBatch};
+use crate::write_batch::{LmdbReadTransaction, LmdbWriteTransaction, WriteBatch};
 use crate::LmdbError;
 
 /// Wraps the LMDB environment and all database handles.
@@ -173,6 +173,12 @@ impl LmdbEnvironment {
     /// operation commits as one transaction.
     pub fn tx_begin_write(&self) -> Result<LmdbWriteTransaction<'_>, burst_store::StoreError> {
         LmdbWriteTransaction::new(self)
+    }
+
+    /// Begin a caller-owned read transaction — a consistent snapshot for
+    /// grouped reads. Thread it through store `*_txn` read methods.
+    pub fn tx_begin_read(&self) -> Result<LmdbReadTransaction<'_>, burst_store::StoreError> {
+        LmdbReadTransaction::new(self)
     }
 
     /// Begin a write batch for grouping multiple store operations into a

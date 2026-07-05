@@ -14,7 +14,7 @@
 //! If the batch is dropped without calling [`WriteBatch::commit`], all
 //! operations are rolled back (the underlying LMDB transaction is aborted).
 
-use heed::RwTxn;
+use heed::{RoTxn, RwTxn};
 
 use burst_store::account::AccountInfo;
 use burst_store::{ReadTxn, StoreError, WriteTxn};
@@ -22,6 +22,31 @@ use burst_types::{BlockHash, Timestamp, TxHash, WalletAddress};
 
 use crate::environment::LmdbEnvironment;
 use crate::LmdbError;
+
+/// A caller-owned read-only LMDB transaction: a consistent snapshot across many
+/// store reads. Threaded through store `*_txn` read methods (rsnano model) so a
+/// composite read (e.g. account info + its frontier + latest block) sees one
+/// atomic view. The self-committing trait methods each open a short-lived one
+/// internally via [`LmdbReadTransaction::from_ro`].
+pub struct LmdbReadTransaction<'a> {
+    pub(crate) txn: RoTxn<'a>,
+}
+
+impl<'a> LmdbReadTransaction<'a> {
+    /// Begin a new read transaction against the environment.
+    pub(crate) fn new(env: &'a LmdbEnvironment) -> Result<Self, StoreError> {
+        let txn = env.env().read_txn().map_err(LmdbError::from)?;
+        Ok(Self { txn })
+    }
+
+    /// Wrap an already-opened heed read transaction. Used by self-committing
+    /// store methods to delegate to their `*_txn` counterparts.
+    pub(crate) fn from_ro(txn: RoTxn<'a>) -> Self {
+        Self { txn }
+    }
+}
+
+impl ReadTxn for LmdbReadTransaction<'_> {}
 
 /// A caller-owned LMDB write transaction: all mutations made through it commit
 /// atomically on [`LmdbWriteTransaction::commit`], or roll back if it is dropped

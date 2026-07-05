@@ -14,6 +14,7 @@ use burst_store::block::BlockStore;
 use burst_store::StoreError;
 use burst_types::{BlockHash, WalletAddress};
 
+use crate::write_batch::LmdbReadTransaction;
 use crate::LmdbError;
 
 pub struct LmdbBlockStore {
@@ -72,6 +73,38 @@ pub(crate) fn increment_prefix(prefix: &mut Vec<u8>) {
     prefix.push(0);
 }
 
+impl LmdbBlockStore {
+    /// Read a block within a caller-owned read transaction. The composable
+    /// counterpart to [`BlockStore::get_block`] — lets callers read several
+    /// stores under one consistent snapshot (rsnano txn-threading model).
+    pub fn get_block_txn(
+        &self,
+        rtxn: &LmdbReadTransaction<'_>,
+        hash: &BlockHash,
+    ) -> Result<Vec<u8>, StoreError> {
+        let val = self
+            .blocks_db
+            .get(&rtxn.txn, hash.as_bytes().as_slice())
+            .map_err(LmdbError::from)?
+            .ok_or_else(|| LmdbError::NotFound(format!("block {:?}", hash)))?;
+        Ok(val.to_vec())
+    }
+
+    /// Existence check within a caller-owned read transaction.
+    pub fn exists_txn(
+        &self,
+        rtxn: &LmdbReadTransaction<'_>,
+        hash: &BlockHash,
+    ) -> Result<bool, StoreError> {
+        let exists = self
+            .blocks_db
+            .get(&rtxn.txn, hash.as_bytes().as_slice())
+            .map_err(LmdbError::from)?
+            .is_some();
+        Ok(exists)
+    }
+}
+
 impl BlockStore for LmdbBlockStore {
     fn put_block(&self, hash: &BlockHash, block_bytes: &[u8]) -> Result<(), StoreError> {
         let mut wtxn = self.env.write_txn().map_err(LmdbError::from)?;
@@ -109,23 +142,13 @@ impl BlockStore for LmdbBlockStore {
     }
 
     fn get_block(&self, hash: &BlockHash) -> Result<Vec<u8>, StoreError> {
-        let rtxn = self.env.read_txn().map_err(LmdbError::from)?;
-        let val = self
-            .blocks_db
-            .get(&rtxn, hash.as_bytes().as_slice())
-            .map_err(LmdbError::from)?
-            .ok_or_else(|| LmdbError::NotFound(format!("block {:?}", hash)))?;
-        Ok(val.to_vec())
+        let rtxn = LmdbReadTransaction::from_ro(self.env.read_txn().map_err(LmdbError::from)?);
+        self.get_block_txn(&rtxn, hash)
     }
 
     fn exists(&self, hash: &BlockHash) -> Result<bool, StoreError> {
-        let rtxn = self.env.read_txn().map_err(LmdbError::from)?;
-        let exists = self
-            .blocks_db
-            .get(&rtxn, hash.as_bytes().as_slice())
-            .map_err(LmdbError::from)?
-            .is_some();
-        Ok(exists)
+        let rtxn = LmdbReadTransaction::from_ro(self.env.read_txn().map_err(LmdbError::from)?);
+        self.exists_txn(&rtxn, hash)
     }
 
     fn delete_block(&self, hash: &BlockHash) -> Result<(), StoreError> {
