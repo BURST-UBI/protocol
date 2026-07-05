@@ -2116,19 +2116,74 @@ impl BurstNode {
                         }
                         // Fork detected — start an election on the root (previous block)
                         let now = Timestamp::new(unix_now_secs());
-                        let mut ae = active_elections_bp.write().await;
-                        if let Err(e) = ae.start_election(block.previous, now) {
-                            tracing::debug!(
-                                root = %block.previous,
-                                error = %e,
-                                "could not start election for fork"
-                            );
-                        } else {
-                            tracing::info!(
-                                root = %block.previous,
-                                fork_hash = %block.hash,
-                                "election started for fork"
-                            );
+                        let root = block.previous;
+                        {
+                            let mut ae = active_elections_bp.write().await;
+                            if let Err(e) = ae.start_election(root, now) {
+                                tracing::debug!(root = %root, error = %e, "could not start election for fork");
+                            } else {
+                                tracing::info!(root = %root, fork_hash = %block.hash, "election started for fork");
+                            }
+                        }
+
+                        // Vote for the block WE accepted at this root (the fork's
+                        // competitor already in our ledger), so the election can
+                        // resolve. The competitor is the successor of `previous`
+                        // in this account's chain: block_at_height(previous+1).
+                        // Without seeding our own vote a fork election never gets
+                        // any votes (fork blocks aren't voted on via the normal
+                        // accept path), so it could never confirm.
+                        let competitor = {
+                            let bs = store.block_store();
+                            match bs.height_of_block(&root) {
+                                Ok(Some(h)) => {
+                                    bs.block_at_height(&block.account, h + 1).ok().flatten()
+                                }
+                                // Open-block fork (no `previous`): the competitor
+                                // is the account's first block (height 1).
+                                _ if root.is_zero() => {
+                                    bs.block_at_height(&block.account, 1).ok().flatten()
+                                }
+                                _ => None,
+                            }
+                        };
+                        if let Some(accepted) = competitor {
+                            if accepted != block.hash {
+                                let (our_rep, is_rep) = {
+                                    let vg = vote_generator_bp.lock().await;
+                                    (vg.representative.clone(), vg.is_representative)
+                                };
+                                if is_rep {
+                                    let our_weight =
+                                        { rep_weights_bp.read().await.weight(&our_rep) };
+                                    let vote =
+                                        { vote_generator_bp.lock().await.generate_vote(accepted) };
+                                    {
+                                        let mut ae = active_elections_bp.write().await;
+                                        let _ = ae.process_vote(
+                                            &root, &our_rep, accepted, our_weight, false, now,
+                                        );
+                                    }
+                                    let wire = WireMessage::Vote(WireVote {
+                                        voter: vote.voter,
+                                        block_hashes: vec![vote.block_hash],
+                                        is_final: false,
+                                        timestamp: vote.timestamp,
+                                        sequence: vote.sequence,
+                                        signature: vote.signature,
+                                    });
+                                    if let Ok(bytes) = bincode::serialize(&wire) {
+                                        let peers: Vec<burst_network::PeerState> = {
+                                            let pm = peer_manager_bp.read().await;
+                                            pm.iter_connected().map(|(_, s)| s.clone()).collect()
+                                        };
+                                        let _ = broadcaster_bp
+                                            .broadcast_with_fanout(&bytes, &peers, 4)
+                                            .await;
+                                    }
+                                    tracing::info!(root = %root, voted_for = %accepted, "cast vote for accepted block in fork election");
+                                }
+                            }
                         }
                     }
                     _ => {
