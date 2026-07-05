@@ -39,6 +39,17 @@ impl ConstiEngine {
         }
     }
 
+    /// Like [`new`](Self::new) but seeded with the minimal launch constitution
+    /// (fraud / evidence / rights) instead of an empty document
+    /// (IMPLEMENTATION_DECISIONS §21.2). Used by the node at startup.
+    pub fn bootstrap() -> Self {
+        Self {
+            amendments: HashMap::new(),
+            votes: HashMap::new(),
+            document: ConstiDocument::bootstrap(),
+        }
+    }
+
     /// Submit a constitutional amendment.
     ///
     /// Validates that the amendment operations are well-formed against the

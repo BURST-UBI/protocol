@@ -64,6 +64,54 @@ impl ConstiDocument {
         }
     }
 
+    /// The minimal launch constitution (IMPLEMENTATION_DECISIONS §21.2): a
+    /// bootstrap document defining fraud, acceptable verification evidence, and
+    /// basic participant rights. The community amends it from here via the
+    /// standard governance process. Still version 0 (the seed).
+    pub fn bootstrap() -> Self {
+        let seed = [
+            (
+                "Legitimacy and Fraud",
+                "A legitimate participant is one unique living human holding exactly \
+                 one wallet. Fraud is the creation or operation of a wallet that does \
+                 not correspond to a unique living human — duplicate wallets, wallets \
+                 for non-existent people, or wallets operated on behalf of a person \
+                 without their consent. Fraud is grounds for a challenge that, if \
+                 upheld, unverifies the wallet and revokes all TRST it originated.",
+            ),
+            (
+                "Standards of Evidence for Verification",
+                "Verifiers must independently assess whether a wallet holder is a \
+                 unique living human. The protocol fixes no single method; acceptable \
+                 evidence and its interpretation are decided by the community and may \
+                 evolve. A verifier who cannot form a judgment should abstain rather \
+                 than approve.",
+            ),
+            (
+                "Rights and Responsibilities of Participants",
+                "Every verified human has one vote and accrues BRN at the same rate. \
+                 Any verified participant may challenge another's legitimacy by \
+                 staking BRN, and may be challenged in turn. A holder deactivated for \
+                 inactivity (not fraud) keeps the TRST they legitimately earned and \
+                 may re-verify. Delegation of a vote is always revocable by its owner.",
+            ),
+        ];
+        let mut doc = Self::genesis();
+        for (title, text) in seed {
+            let number = doc.next_number;
+            doc.articles.push(Article {
+                number,
+                title: title.to_string(),
+                text: text.to_string(),
+                introduced_by_amendment: 0,
+                repealed: false,
+            });
+            doc.next_number += 1;
+        }
+        doc.rebuild_index();
+        doc
+    }
+
     /// Rebuild internal indexes from the articles Vec.
     /// Call this after deserialization if indexes are empty.
     pub fn rebuild_index(&mut self) {

@@ -37,7 +37,6 @@ pub mod vote_info;
 pub mod vote_rebroadcast;
 pub mod vote_solicitor;
 pub mod vote_spacing;
-pub mod voting;
 
 pub use active_elections::ActiveElections;
 pub use backlog_scanner::BacklogScanner;
@@ -59,4 +58,3 @@ pub use vote_info::{VoteInfo, VoteResult};
 pub use vote_rebroadcast::VoteRebroadcaster;
 pub use vote_solicitor::VoteSolicitor;
 pub use vote_spacing::VoteSpacing;
-pub use voting::RepresentativeVoting;

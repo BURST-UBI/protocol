@@ -431,7 +431,7 @@ impl BurstNode {
                 100,
                 10000,
             ))),
-            consti_engine: Arc::new(Mutex::new(burst_consti::ConstiEngine::new())),
+            consti_engine: Arc::new(Mutex::new(burst_consti::ConstiEngine::bootstrap())),
             priority_scheduler: Arc::new(Mutex::new(PriorityScheduler::new(MAX_ACTIVE_ELECTIONS))),
             online_weight_tracker: Arc::new(Mutex::new(OnlineWeightTracker::new(
                 DEFAULT_ONLINE_WEIGHT,
