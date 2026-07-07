@@ -72,7 +72,7 @@ axum = { version = "0.7", features = ["ws"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-tokio-tungstenite = "0.24"
+tokio-tungstenite = "0.28"
 futures-util = "0.3"
 prost = "0.13"
 
