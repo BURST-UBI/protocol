@@ -64,7 +64,7 @@ blst = "0.3"
 
 # Storage
 heed = "0.20"
-bincode = "1"
+bincode = "3"
 
 # Networking
 igd-next = { version = "0.15", features = ["aio_tokio"] }
