@@ -185,3 +185,15 @@ other ballot case affected by the shared fixture change:
   deliberate ordinary-vote seal. This does not change that safety fence or claim
   to qualify arbitrary in-flight payment recovery. Checkpoint diagnostics remain
   enabled if the installation barrier itself fails.
+
+Run 39318707291 passes both ballot journeys and constitution activation/reopen/
+fresh catch-up. Its runtime fixture then exposed missing applied verification
+state: the old helper had advanced only the epoch marker over deliberately bad
+economic caches. It now uses `PreparedInstallation` to install the complete
+certified state rather than adding individual cache fields.
+
+Run 39319652694 passes runtime candidate discovery with late nodes (16.81s),
+seven-of-nine quorum (41.89s), and expired-minority recovery (75.10s). The known
+failures have targeted passing evidence. Next: the consolidated full main CI,
+including both ignored snapshot CLI tests and all network shard cases. Until
+that run finishes, the complete protocol workflow is not claimed green.
