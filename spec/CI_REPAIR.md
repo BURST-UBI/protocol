@@ -64,11 +64,12 @@ The hosted dashboard frontend and Linux native-command jobs pass at e6cd90c.
 The deck build and server syntax check pass at 6e40a1c. Wallet's first hosted
 unit job exposed its undocumented sibling-dashboard fixture dependency. The
 workflow now checks out the pinned dashboard beside the wallet; the local 30-test
-contract suite passes. Hosted wallet browser/native results are still pending.
+contract suite passes. Wallet f721634 now passes the full frontend and Linux
+native-command jobs in run 39317237388.
 
 Protocol d5a899a passes hosted format, Clippy, WASM, inventory, workspace tests,
-compile and daemon health checks. Network and full integration results remain
-pending; none of those claims is inferred from the small local checks.
+compile and daemon health checks. Its full component/network run failed; the
+targeted repair results below do not replace the final full integration boundary.
 
 The follow-up workflow compiles the node test binary once and distributes the
 same SHA-addressed artifact to all six component/network workers. Downloads
@@ -162,3 +163,25 @@ verify this in both Cargo and prebuilt modes.
 The GitHub API reports main is not branch-protected. CI reports failures but does
 not itself prevent a direct push. Changing repository governance is separate from
 repairing the workflow; no protection policy has been silently imposed.
+
+Dependency security is another coverage gap: the deck's passing build coexists
+with 16 open Dependabot alerts (including high-severity alerts) reported by GitHub
+on October 19. This repair does not qualify those dependencies or claim that a
+successful build is a security review.
+
+## Latest focused result
+
+Run 39317355166 passes the eight snapshot/startup/wire regressions, compact
+challenge-outcome recovery, and the ballot-cut replay without fresh catch-up.
+It leaves three failures. Run 39318707291 targets their corrections plus the
+other ballot case affected by the shared fixture change:
+
+- Start the witness service in the nine-node runtime fixture. The previous
+  timeout was an exited worker: `historical witness service is not running`.
+- Replay the constitution with its actual certified events. Remove the now-unused
+  single-account legacy simulator instead of keeping two competing replay paths.
+- Wait for the newly verified human's roster epoch to be installed across the
+  governance fixture before funding it. The prior immediate burn raced the
+  deliberate ordinary-vote seal. This does not change that safety fence or claim
+  to qualify arbitrary in-flight payment recovery. Checkpoint diagnostics remain
+  enabled if the installation barrier itself fails.

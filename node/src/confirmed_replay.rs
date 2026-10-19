@@ -2657,18 +2657,15 @@ mod tests {
                 .parent()
                 .advance(first.certificate(), first.replayed().roster().clone())
                 .unwrap();
-            // These drivers test agreement with preloaded history, not live
-            // economic installation. Supply the certified signing context.
-            let mut batch = store.tx_begin_write().unwrap();
-            batch
-                .advance_payment_epoch(
-                    &first.parent().hash(),
-                    &first.parent().hash(),
-                    &anchor.hash(),
-                    first.replayed().history_hashes().unwrap(),
-                )
-                .unwrap();
-            batch.commit().unwrap();
+            // Runtime recovery needs the complete installed projection, not
+            // an epoch marker over the fixture's deliberately invalid caches.
+            let installed =
+                installation::PreparedInstallation::next(&store, NetworkId::Dev, &fixture.params)
+                    .unwrap()
+                    .unwrap()
+                    .commit(&store)
+                    .unwrap();
+            assert_eq!(installed.anchor.hash(), anchor.hash());
             assert_eq!(anchor.required_humans(), 7);
             if anchor.proposer(0) == &address(seed) {
                 leader = Some(seed as usize);
