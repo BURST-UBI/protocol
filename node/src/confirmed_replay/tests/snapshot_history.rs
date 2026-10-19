@@ -247,7 +247,7 @@ pub(super) fn suffix_store(blocks: &[StateBlock]) -> (tempfile::TempDir, LmdbSto
 #[test]
 fn snapshot_history_tail_reads_only_suffix_and_matches_full_history_commitment() {
     let mut fixture = Fixture::selection();
-    let (_base_dir, _base_store, snapshot) = snapshot(&fixture);
+    let (_base_dir, base_store, snapshot) = snapshot(&fixture);
     let start = fixture.blocks.len();
     let cutoff = snapshot.anchor().cutoff() + 10;
     let burn = fixture.push(0, BlockType::Burn, cutoff, |block| {
@@ -266,8 +266,9 @@ fn snapshot_history_tail_reads_only_suffix_and_matches_full_history_commitment()
     });
     let full = fixture.history(cutoff);
     let (_tail_dir, tail_store) = suffix_store(&fixture.blocks[start..]);
+    let proofs = || compact::retained(&snapshot, &fixture, &base_store, &[]);
     let tail = snapshot
-        .read_tail(&tail_store, cutoff, full.heads(), vec![])
+        .read_tail(&tail_store, cutoff, full.heads(), proofs())
         .unwrap();
     assert_eq!(tail.block_count(), 3);
     assert_eq!(tail.commitment(), full.commitment());
@@ -278,7 +279,7 @@ fn snapshot_history_tail_reads_only_suffix_and_matches_full_history_commitment()
         tail.context().state_hash,
         snapshot.certificate().manifest.state_hash
     );
-    assert!(tail.retained().is_empty());
+    assert_eq!(tail.retained().len(), proofs().len());
     let order: Vec<_> = tail.block_hashes().collect();
     assert!(
         order.iter().position(|hash| *hash == burn).unwrap()
@@ -290,7 +291,7 @@ fn snapshot_history_tail_reads_only_suffix_and_matches_full_history_commitment()
     let mut reversed = full.heads().to_vec();
     reversed.reverse();
     let reordered = snapshot
-        .read_tail(&tail_store, cutoff, &reversed, vec![])
+        .read_tail(&tail_store, cutoff, &reversed, proofs())
         .unwrap();
     assert_eq!(reordered.commitment(), tail.commitment());
     assert_eq!(
@@ -302,7 +303,7 @@ fn snapshot_history_tail_reads_only_suffix_and_matches_full_history_commitment()
 #[test]
 fn snapshot_history_tail_rejects_rollback_omission_and_bad_suffix_before_replay() {
     let mut fixture = Fixture::selection();
-    let (_dir, _store, snapshot) = snapshot(&fixture);
+    let (_dir, store, snapshot) = snapshot(&fixture);
     let original = fixture.history(snapshot.anchor().cutoff());
     let cutoff = snapshot.anchor().cutoff() + 10;
     fixture.push(0, BlockType::ChangeRepresentative, cutoff, |block| {
@@ -312,6 +313,7 @@ fn snapshot_history_tail_rejects_rollback_omission_and_bad_suffix_before_replay(
     let full = fixture.history(cutoff);
     let valid = fixture.blocks.last().unwrap().clone();
     let (_tail_dir, tail_store) = suffix_store(std::slice::from_ref(&valid));
+    let proofs = || compact::retained(&snapshot, &fixture, &store, &[]);
     for case in 0..6 {
         let mut heads = full.heads().to_vec();
         match case {
@@ -332,7 +334,7 @@ fn snapshot_history_tail_rejects_rollback_omission_and_bad_suffix_before_replay(
         }
         assert!(
             snapshot
-                .read_tail(&tail_store, cutoff, &heads, vec![])
+                .read_tail(&tail_store, cutoff, &heads, proofs())
                 .is_err(),
             "manifest case {case}"
         );
@@ -342,7 +344,7 @@ fn snapshot_history_tail_rejects_rollback_omission_and_bad_suffix_before_replay(
             &tail_store,
             snapshot.anchor().cutoff() - 1,
             original.heads(),
-            vec![]
+            proofs()
         )
         .is_err());
     let empty = snapshot
@@ -350,7 +352,7 @@ fn snapshot_history_tail_rejects_rollback_omission_and_bad_suffix_before_replay(
             &tail_store,
             snapshot.anchor().cutoff(),
             original.heads(),
-            vec![],
+            proofs(),
         )
         .unwrap();
     assert_eq!(empty.block_count(), 0);
@@ -378,14 +380,14 @@ fn snapshot_history_tail_rejects_rollback_omission_and_bad_suffix_before_replay(
         let (_bad_dir, bad_store) = suffix_store(&[bad]);
         assert!(
             snapshot
-                .read_tail(&bad_store, cutoff, &heads, vec![])
+                .read_tail(&bad_store, cutoff, &heads, proofs())
                 .is_err(),
             "suffix case {case}"
         );
     }
     assert_eq!(
         snapshot
-            .read_tail(&tail_store, cutoff, full.heads(), vec![])
+            .read_tail(&tail_store, cutoff, full.heads(), proofs())
             .unwrap()
             .block_count(),
         1
@@ -410,8 +412,11 @@ fn snapshot_history_tail_requires_snapshot_bound_witness_for_old_cross_account_s
     let full = fixture.history(cutoff);
     let (_tail_dir, tail_store) =
         suffix_store(std::slice::from_ref(fixture.blocks.last().unwrap()));
+    let proofs = || compact::retained(&snapshot, &fixture, &store, &[burn]);
+    let mut missing = proofs();
+    missing.retain(|proof| proof.block().hash != burn);
     assert!(snapshot
-        .read_tail(&tail_store, cutoff, full.heads(), vec![])
+        .read_tail(&tail_store, cutoff, full.heads(), missing)
         .is_err());
     let recover = || {
         let mut cursor = snapshot.history_cursor(&address(0)).unwrap().unwrap();
@@ -423,25 +428,23 @@ fn snapshot_history_tail_requires_snapshot_bound_witness_for_old_cross_account_s
             .unwrap()
     };
     let tail = snapshot
-        .read_tail(&tail_store, cutoff, full.heads(), vec![recover()])
+        .read_tail(&tail_store, cutoff, full.heads(), proofs())
         .unwrap();
     assert_eq!(tail.block_count(), 1);
-    assert_eq!(tail.retained().len(), 1);
+    assert_eq!(tail.retained().len(), proofs().len());
     assert_eq!(tail.commitment(), full.commitment());
+    let mut duplicate = proofs();
+    duplicate.push(recover());
     assert!(snapshot
-        .read_tail(
-            &tail_store,
-            cutoff,
-            full.heads(),
-            vec![recover(), recover()]
-        )
+        .read_tail(&tail_store, cutoff, full.heads(), duplicate)
         .is_err());
     let other_fixture = Fixture::selection();
     let (_other_dir, other_store, other) = self::snapshot(&other_fixture);
     let mut cursor = other.history_cursor(&address(0)).unwrap().unwrap();
-    let wrong = cursor
+    let mut wrong = cursor
         .accept(&read_chunk(&other_store, cursor.next().unwrap().hash, 1).unwrap())
         .unwrap();
+    wrong.extend(proofs());
     assert!(snapshot
         .read_tail(&tail_store, cutoff, full.heads(), wrong)
         .is_err());

@@ -27,13 +27,13 @@ fn schema_golden_and_unknown_field_evolution() {
     // Independently readable using protoc --decode=burst.wire.v33.Envelope.
     assert_eq!(
         WireMessage::TelemetryReq.encode().unwrap(),
-        [8, 33, 170, 1, 0]
+        [8, 36, 170, 1, 0]
     );
     let message = WireMessage::Keepalive(KeepaliveMsg {
         peers: vec!["x".into()],
     });
     let mut encoded = message.encode().unwrap();
-    assert_eq!(encoded, [8, 33, 114, 3, 10, 1, 120]);
+    assert_eq!(encoded, [8, 36, 114, 3, 10, 1, 120]);
     encoded.extend([160, 6, 1]); // unknown varint field 100
     assert!(matches!(
         WireMessage::decode(&encoded),

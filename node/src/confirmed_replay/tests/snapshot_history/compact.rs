@@ -282,9 +282,16 @@ fn compact_snapshot_rejects_missing_certificates_witnesses_and_semantic_double_c
         }
         let full = fixture.history(cutoff);
         let (_tail_dir, tail_store) = suffix_store(&fixture.blocks[start..]);
-        let tail = snapshot
-            .read_tail(&tail_store, cutoff, full.heads(), retained)
-            .unwrap();
+        let tail = snapshot.read_tail(&tail_store, cutoff, full.heads(), retained);
+        if case == 1 {
+            assert!(tail
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("missing a required historical witness"));
+            continue;
+        }
+        let tail = tail.unwrap();
         let certificates = if case == 0 {
             vec![]
         } else if case == 2 {
@@ -334,18 +341,15 @@ fn compact_snapshot_requires_earlier_governance_ordering_witnesses() {
         });
         let full = fixture.history(cutoff);
         let (_tail_dir, tail_store) = suffix_store(&fixture.blocks[start..]);
-        let tail = snapshot
-            .read_tail(&tail_store, cutoff, full.heads(), witnesses)
-            .unwrap();
-        let compact = snapshot.replay_tail(tail, &certificates);
+        let tail = snapshot.read_tail(&tail_store, cutoff, full.heads(), witnesses);
         if omit {
-            assert!(compact
+            assert!(tail
                 .err()
                 .unwrap()
                 .to_string()
-                .contains("ordering history"));
+                .contains("missing a required historical witness"));
         } else {
-            let compact = compact.unwrap();
+            let compact = snapshot.replay_tail(tail.unwrap(), &certificates).unwrap();
             let full = ConfirmedReplay::replay_with_certificates(
                 &full,
                 NetworkId::Dev,

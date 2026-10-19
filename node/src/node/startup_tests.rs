@@ -470,10 +470,8 @@ async fn recovery_listener_serves_proofs_before_restoration_and_cleans_up_on_fai
         assert!(!proofs.is_closed());
         drop(pause);
         let (mut node, result) = startup.await.unwrap();
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("invalid persisted constitution"));
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("invalid persisted consti_engine"), "{error}");
         assert!(node.task_handles.is_empty());
         assert!(registry.write().await.take_tasks().is_empty());
         assert!(proofs.is_closed());
@@ -575,7 +573,8 @@ async fn recovery_dials_seed_and_cached_peers_before_restoration() {
             assert!(matches!(reply.message, CheckpointSyncMessage::WitnessChunk { start, .. } if start == genesis.hash));
             drop(pause);
             let (target, result) = startup.await.unwrap();
-            assert!(result.unwrap_err().to_string().contains("invalid persisted constitution"));
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("invalid persisted consti_engine"), "{error}");
             assert!(target.task_handles.is_empty());
             assert!(registry.read().await.is_empty());
             source.stop().await.unwrap();

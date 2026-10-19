@@ -11,12 +11,16 @@ on:
       suite:
         type: choice
         default: all
-        options: [all, windows, integration]
+        options: [all, windows, integration, node]
         description: Full validation or isolated failure diagnosis
       integration_target:
         type: string
         default: '*'
         description: Cargo integration target; used only by manual integration runs
+      node_tests:
+        type: string
+        default: ''
+        description: Exact test names, one per line; required for manual node diagnosis
 
 concurrency:
   group: ${{ github.workflow }}-validation-${{ github.ref }}
@@ -162,7 +166,7 @@ jobs:
   node-test-build:
     name: Build node test executable once
     needs: scope
-    if: needs.scope.outputs.runtime == 'true'
+    if: needs.scope.outputs.runtime == 'true' || (github.event_name == 'workflow_dispatch' && inputs.suite == 'node')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -194,6 +198,33 @@ jobs:
           name: node-tests-${{ github.sha }}
           path: target/ci-node-tests
           retention-days: 3
+
+  node-focused:
+    name: Selected node regressions
+    needs: node-test-build
+    if: github.event_name == 'workflow_dispatch' && inputs.suite == 'node'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: node-tests-${{ github.sha }}
+          path: target/ci-node-tests
+      - name: Run exact regressions from the shared executable
+        env:
+          NODE_TESTS: ${{ inputs.node_tests }}
+          BURST_NODE_TEST_BINARY: ${{ github.workspace }}/target/ci-node-tests/burst-node-tests
+        run: |
+          (cd target/ci-node-tests && sha256sum --check SHA256SUMS)
+          chmod +x "$BURST_NODE_TEST_BINARY"
+          [[ -n "$NODE_TESTS" ]]
+          failed=0
+          while IFS= read -r test; do
+            [[ -n "$test" ]] || continue
+            bash tools/test-node.sh focused "$test" || failed=1
+          done <<< "$NODE_TESTS"
+          exit "$failed"
 
   node-components:
     needs: [scope, node-test-build]

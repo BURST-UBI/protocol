@@ -444,7 +444,13 @@ pub(in crate::confirmed_replay::tests) async fn assert_service(
             .unwrap();
         let decision = state.decision().unwrap();
         if index == 0 {
-            observer::assert_observer(fixture, source.clone(), &manifest, decision).await;
+            Box::pin(observer::assert_observer(
+                fixture,
+                source.clone(),
+                &manifest,
+                decision,
+            ))
+            .await;
         }
         base.anchor().verify_certificate(decision).unwrap();
         assert_eq!(&decision.checkpoint, manifest.checkpoint());

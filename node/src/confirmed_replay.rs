@@ -2864,6 +2864,11 @@ mod tests {
             if stage == 0 {
                 tokio::time::timeout(Duration::from_secs(60), async {
                     loop {
+                        if let Some(index) = workers.iter().position(|worker| worker.is_finished())
+                        {
+                            let result = workers.remove(index).await;
+                            panic!("checkpoint worker exited before agreement: {result:?}");
+                        }
                         if active[..6].iter().all(|&index| {
                             crate::checkpoint_agreement::read_state(
                                 stores[index].as_ref().unwrap(),

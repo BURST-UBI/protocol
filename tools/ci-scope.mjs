@@ -12,7 +12,7 @@ export function needsRuntime(paths) {
 }
 
 export function selectChecks(runtime, suite = 'all') {
-  if (!['all', 'windows', 'integration'].includes(suite)) throw Error('Unknown CI suite');
+  if (!['all', 'windows', 'integration', 'node'].includes(suite)) throw Error('Unknown CI suite');
   const full = suite === 'all' && runtime;
   return { runtime: full, windows: suite === 'windows' || full, integration: suite === 'integration' || full };
 }
