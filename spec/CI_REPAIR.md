@@ -232,3 +232,24 @@ These results establish specific regression evidence, not specification sign-off
 Wallet 6754a5f passes frontend and native-command jobs in run 39320752406. Manual
 filtered browser runs now reject the unsupported all-file combination before
 starting a browser. The original hook-level hang remains unexplained.
+
+Run 39325702668 executes every integration binary instead of stopping at the
+first failure. Default payment replay and experimental certified fresh-observer
+catch-up both pass (the latter in 85.89s). Missing merger-graph startup errors now
+include backup/re-sync guidance, matching the other economic recovery errors;
+all economic snapshot recovery tests pass. Governance activation/fresh catch-up,
+parallel authentication, payment epochs and release-gate rejection tests pass.
+
+Two remaining integration failures concern obsolete aggregate-storage fixtures:
+fork readiness waited for a key removed by startup migration, and outcome restart
+read that key after migration. Readiness now checks the durable genesis payment
+epoch. Outcome tests decode current wallet/graph rows, persist their deliberately
+inconsistent graph through the existing storage path, and retain the rejection
+and no-repair assertions. Run 39327318763 passes the affected recovery binaries,
+including all six fork-replacement cases and outcome restart. Neither change
+restores obsolete aggregate data or weakens startup validation.
+
+All observed failures now have passing targeted evidence. The final main push
+supersedes 39325130505's remaining duplicate network jobs; all four shards passed
+in 39320394988, and no consensus code changed afterward. The final full main
+workflow remains the last check before claiming a green protocol CI revision.
