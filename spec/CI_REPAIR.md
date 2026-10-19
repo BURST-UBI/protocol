@@ -1,5 +1,29 @@
 # CI repair, 2026-10-19
 
+## Final result
+
+All repaired repository workflows pass:
+
+| Repository | Validated revision | Passing run |
+| --- | --- | --- |
+| Protocol | c2515a6 | [39327819540](https://github.com/BURST-UBI/protocol/actions/runs/39327819540) |
+| Wallet | 6754a5f | [39320752406](https://github.com/BURST-UBI/wallet/actions/runs/39320752406) |
+| Node dashboard | e6cd90c | [39313068986](https://github.com/BURST-UBI/node-gui/actions/runs/39313068986) |
+| Deck | 6e40a1c | [39313226579](https://github.com/BURST-UBI/deck/actions/runs/39313226579) |
+
+The final protocol run passes all normal jobs, including every network shard,
+both snapshot operator journeys, Windows service lifecycle, default integration
+binaries and experimental certified catch-up. Only the explicitly manual
+selected-regressions job is skipped. Earlier pending/failure statements below
+are chronological diagnostic records, superseded by this result.
+
+CI is repaired, not a complete public-release qualification. Keep the 335 unsigned
+specification entries, signed desktop packaging, external services/NAT/deployment
+qualification, dependency-security findings and repository protection policy
+separate from regression results. The release conformance gate remains closed.
+
+## Baseline
+
 Baseline: protocol a565af3, CI run 39311525690; the preceding code run was
 39310102263. Wallet 0054a6d and dashboard a07323d have no Actions workflows.
 Passing CI is regression evidence, not whitepaper sign-off or release approval.
@@ -252,4 +276,5 @@ restores obsolete aggregate data or weakens startup validation.
 All observed failures now have passing targeted evidence. The final main push
 supersedes 39325130505's remaining duplicate network jobs; all four shards passed
 in 39320394988, and no consensus code changed afterward. The final full main
-workflow remains the last check before claiming a green protocol CI revision.
+workflow was the last check before claiming a green protocol CI revision; its
+passing result is recorded at the top of this document.
