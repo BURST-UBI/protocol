@@ -362,7 +362,9 @@ jobs:
         env:
           INTEGRATION_TARGET: ${{ github.event_name == 'workflow_dispatch' && inputs.suite == 'integration' && inputs.integration_target || '*' }}
         run: |
-          cargo test -p burst-node --locked --test "$INTEGRATION_TARGET" -- --test-threads=1
+          status=0
+          cargo test -p burst-node --locked --no-fail-fast --test "$INTEGRATION_TARGET" -- --test-threads=1 || status=1
           if [[ "$INTEGRATION_TARGET" == '*' || "$INTEGRATION_TARGET" == 'confirmed_replay_network' ]]; then
-            cargo test -p burst-node --locked --features experimental-testnet --test confirmed_replay_network certified_selection_catches_up_after_payment_replay -- --exact --test-threads=1
+            cargo test -p burst-node --locked --features experimental-testnet --test confirmed_replay_network certified_selection_catches_up_after_payment_replay -- --exact --test-threads=1 || status=1
           fi
+          exit "$status"

@@ -324,7 +324,10 @@ async fn initialized_ledgers_never_replace_missing_economic_snapshots_with_empty
                 error.to_string().contains("missing persisted"),
                 "{key}: {error}"
             );
-            assert!(error.to_string().contains("known-good backup"));
+            assert!(
+                error.to_string().contains("known-good backup"),
+                "{key}: {error}"
+            );
             assert!(matches!(
                 node.store.meta_store().get_meta(key),
                 Err(burst_store::StoreError::NotFound(_))

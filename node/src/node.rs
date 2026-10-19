@@ -2981,7 +2981,7 @@ impl BurstNode {
                 let graph = {
                     let batch = self.store.tx_begin_write()?;
                     crate::graph_storage::load(&batch).map_err(|error| {
-                        NodeError::Other(format!("cannot restore persisted merger graph: {error}"))
+                        NodeError::Other(format!("cannot restore persisted merger graph: {error}; restore a known-good backup or re-sync into a new data directory"))
                     })?
                 };
                 self.trst_engine.lock().await.merger_graph = graph;
