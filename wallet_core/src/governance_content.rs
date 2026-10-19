@@ -60,7 +60,8 @@ mod tests {
             new_value: 0,
         };
         for missing in 0..5 {
-            let mut state = AccountState { signing_grant: burst_types::BlockHash::ZERO,
+            let mut state = AccountState {
+                signing_grant: burst_types::BlockHash::ZERO,
                 head: BlockHash::new([1; 32]),
                 block_count: 1,
                 payment_epoch: BlockHash::new([2; 32]),

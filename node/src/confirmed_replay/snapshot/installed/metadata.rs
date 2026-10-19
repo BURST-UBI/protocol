@@ -331,7 +331,15 @@ pub(crate) async fn recover_metadata_with_cache(
 ) -> Result<Option<RecoveredInstalledMetadata>, StoreError> {
     // Recovery is nested inside live checkpoint-worker futures. Keep its state
     // off their stacks, including in unoptimized builds.
-    Box::pin(recover_metadata(store, network, initial_params, registry, cached, None)).await
+    Box::pin(recover_metadata(
+        store,
+        network,
+        initial_params,
+        registry,
+        cached,
+        None,
+    ))
+    .await
 }
 
 /// Retain only authenticated replay progress if later installed-state checks

@@ -2,8 +2,8 @@
 //! Peer history is not persisted here; replay obtains cursor-checked witnesses.
 
 use super::*;
-use crate::{confirmed_replay::snapshot::installed, connection_registry::ConnectionRegistry};
 use crate::confirmed_replay::snapshot::SelectionSource;
+use crate::{confirmed_replay::snapshot::installed, connection_registry::ConnectionRegistry};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -45,7 +45,9 @@ pub(crate) struct Session {
 impl Session {
     #[cfg(test)]
     pub(crate) fn recovery_anchor(&self) -> Option<BlockHash> {
-        self.cached.as_ref().map(|cache| cache.recovered.continuation.anchor().hash())
+        self.cached
+            .as_ref()
+            .map(|cache| cache.recovered.continuation.anchor().hash())
     }
 
     pub(crate) fn from_recovery(cached: Option<installed::ReplayCache>) -> Self {
@@ -116,7 +118,9 @@ impl Session {
                 let mut receipt = base
                     .recover_selection(height)
                     .map_err(invalid)?
-                    .filter(|selection| selection.certificate().checkpoint == certificate.checkpoint)
+                    .filter(|selection| {
+                        selection.certificate().checkpoint == certificate.checkpoint
+                    })
                     .ok_or_else(|| {
                         invalid("checkpoint transfer has no authenticated selection receipt")
                     })?;
@@ -165,18 +169,33 @@ impl Session {
             return Ok(None);
         };
         let replay_started = std::time::Instant::now();
-        tracing::debug!(height, known, has_beacon = beacon.is_some(),
-            cached_height = self.cached.as_ref().map(|cache| cache.recovered.continuation.anchor().height()),
-            "checkpoint import selected recovery input");
+        tracing::debug!(
+            height,
+            known,
+            has_beacon = beacon.is_some(),
+            cached_height =
+                self.cached
+                    .as_ref()
+                    .map(|cache| cache.recovered.continuation.anchor().height()),
+            "checkpoint import selected recovery input"
+        );
         if known
-            && matches!(&manifest, crate::checkpoint_agreement::ReplayManifest::Selection(_))
+            && matches!(
+                &manifest,
+                crate::checkpoint_agreement::ReplayManifest::Selection(_)
+            )
         {
             if let Some(cached) = self.cached.take() {
                 // Import keeps the replay parent until the accepted successor
                 // is needed. Advance it once before refreshing an older receipt.
                 let cached = installed::recover_current_tip_with_cache(
-                    store.clone(), network, params.clone(), registry.clone(), Some(cached),
-                ).await?;
+                    store.clone(),
+                    network,
+                    params.clone(),
+                    registry.clone(),
+                    Some(cached),
+                )
+                .await?;
                 let source = store.clone();
                 let checked_certificate = certificate.clone();
                 let checked_manifest = manifest.clone();
@@ -184,15 +203,24 @@ impl Session {
                 let checked_params = params.clone();
                 let (cached, checked) = tokio::task::spawn_blocking(move || {
                     let checked = cached.refresh_known_selection(
-                        &source, cached.base, &checked_certificate, &checked_manifest,
-                        checked_beacon.as_ref(), &checked_params,
+                        &source,
+                        cached.base,
+                        &checked_certificate,
+                        &checked_manifest,
+                        checked_beacon.as_ref(),
+                        &checked_params,
                     );
                     (cached, checked)
-                }).await.map_err(invalid)?;
+                })
+                .await
+                .map_err(invalid)?;
                 self.cached = Some(cached);
                 if checked? {
-                    tracing::debug!(height, elapsed_ms = replay_started.elapsed().as_millis(),
-                        "checkpoint refresh reused authenticated receipt");
+                    tracing::debug!(
+                        height,
+                        elapsed_ms = replay_started.elapsed().as_millis(),
+                        "checkpoint refresh reused authenticated receipt"
+                    );
                     // Beacon persistence uses the checked receipt. Subsequent
                     // reuse still checks the durable records before advancing.
                     return Ok(None);
@@ -210,7 +238,9 @@ impl Session {
             let initial = params.params_hash();
             let installed = tokio::task::spawn_blocking(move || {
                 handoff.replay(&source, network, initial, commitment, target)
-            }).await.map_err(invalid)??;
+            })
+            .await
+            .map_err(invalid)??;
             if let Some(installed) = installed {
                 // Publication supplied this exact parent. The normal recover
                 // path below still checks its durable observations and base.
@@ -247,8 +277,12 @@ impl Session {
                 .await?
             }
         };
-        tracing::debug!(height, known, elapsed_ms = replay_started.elapsed().as_millis(),
-            "checkpoint import recovered replay input");
+        tracing::debug!(
+            height,
+            known,
+            elapsed_ms = replay_started.elapsed().as_millis(),
+            "checkpoint import recovered replay input"
+        );
         if known {
             recovered.verify_replayed_decision(&certificate, &manifest)?;
             return tokio::task::spawn_blocking(move || {
@@ -257,7 +291,8 @@ impl Session {
                         .selections
                         .find_selection(|selection| {
                             selection.certificate().checkpoint == certificate.checkpoint
-                        }).map_err(invalid)?
+                        })
+                        .map_err(invalid)?
                         .ok_or_else(|| invalid("replayed checkpoint has no selection receipt"))?
                         .into_owned();
                     receipt.attach_beacon_checked(&store, &params, beacon, |batch| {

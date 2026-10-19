@@ -20,7 +20,27 @@ env:
   SEGMENT_DOWNLOAD_TIMEOUT_MINS: 2
 
 jobs:
+  scope:
+    name: Select affected checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      runtime: ${{ steps.scope.outputs.runtime }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - id: scope
+        run: node tools/ci-scope.mjs
+        env:
+          CI_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || '' }}
+
   windows-installer:
+    needs: scope
+    if: needs.scope.outputs.runtime == 'true'
     name: Windows installer contracts
     runs-on: windows-latest
     timeout-minutes: 5
@@ -37,6 +57,8 @@ jobs:
           ./tools/install-checksum.tests.ps1
 
   windows-service:
+    needs: scope
+    if: needs.scope.outputs.runtime == 'true'
     name: Windows service lifecycle
     runs-on: windows-latest
     timeout-minutes: 30
@@ -62,10 +84,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: node --test tools/check-spec-coverage.test.mjs tools/test-node.test.mjs tools/install-download.test.mjs tools/update-node.test.mjs tools/validation-reuse.test.mjs
+      - run: node --test tools/ci-scope.test.mjs tools/check-spec-coverage.test.mjs tools/test-node.test.mjs tools/install-download.test.mjs tools/update-node.test.mjs tools/validation-reuse.test.mjs
       - run: node tools/check-spec-coverage.mjs
 
   check:
+    needs: scope
+    if: needs.scope.outputs.runtime == 'true'
     name: Check
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -81,6 +105,8 @@ jobs:
       - run: cargo check --workspace --locked
 
   wasm:
+    needs: scope
+    if: needs.scope.outputs.runtime == 'true'
     name: Browser wallet core
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -97,6 +123,8 @@ jobs:
       - run: cargo clippy -p burst-wallet-core -p burst-groups -p burst-browser --locked --target wasm32-unknown-unknown -- -D warnings
 
   test:
+    needs: scope
+    if: needs.scope.outputs.runtime == 'true'
     name: Test
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -117,6 +145,8 @@ jobs:
           cargo test -p burst-node --test protobuf_schema --locked -- --ignored
 
   node-components:
+    needs: scope
+    if: needs.scope.outputs.runtime == 'true'
     name: Node components (${{ matrix.group }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -139,9 +169,12 @@ jobs:
         if: matrix.group == 'fast'
         run: |
           cargo build -p burst-daemon --locked
-          BURST_SNAPSHOT_DAEMON="$PWD/target/debug/burst-daemon" cargo test -p burst-node --lib --locked confirmed_replay::tests::snapshot_export::daemon_snapshot_attest_export_verify_journey -- --exact --ignored --test-threads=1
+          BURST_SNAPSHOT_DAEMON="$PWD/target/debug/burst-daemon" cargo test -p burst-node --lib --locked --profile validation confirmed_replay::tests::snapshot_export::daemon_snapshot_attest_export_verify_journey -- --exact --ignored --test-threads=1
+          BURST_SNAPSHOT_DAEMON="$PWD/target/debug/burst-daemon" cargo test -p burst-node --lib --locked --profile validation confirmed_replay::tests::snapshot_export::framed_archive::daemon_verifies_framed_archive_beyond_legacy_header_limit -- --exact --ignored --test-threads=1
 
   node-network:
+    needs: scope
+    if: needs.scope.outputs.runtime == 'true'
     name: Node network (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -164,6 +197,8 @@ jobs:
           BURST_TEST_NETWORK_SHARD: ${{ matrix.shard }}
 
   clippy:
+    needs: scope
+    if: needs.scope.outputs.runtime == 'true'
     name: Clippy
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -180,6 +215,8 @@ jobs:
       - run: cargo clippy --workspace --locked -- -D warnings
 
   fmt:
+    needs: scope
+    if: needs.scope.outputs.runtime == 'true'
     name: Format
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -192,6 +229,8 @@ jobs:
       - run: cargo fmt --all -- --check
 
   health-check:
+    needs: scope
+    if: needs.scope.outputs.runtime == 'true'
     name: Health Check
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -213,6 +252,8 @@ jobs:
         run: node tools/daemon-smoke.mjs ./target/release/burst-daemon
 
   integration-test:
+    needs: scope
+    if: needs.scope.outputs.runtime == 'true'
     name: Integration Tests
     runs-on: ubuntu-latest
     timeout-minutes: 30

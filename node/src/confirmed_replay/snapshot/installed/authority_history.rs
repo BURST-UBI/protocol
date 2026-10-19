@@ -290,7 +290,10 @@ mod tests {
         let mut fork = history.fork(directory.path()).unwrap();
         advance(&mut fork, 2, 3);
         assert_eq!(fork.iter().collect::<Result<Vec<_>, _>>().unwrap().len(), 5);
-        assert_eq!(history.iter().collect::<Result<Vec<_>, _>>().unwrap().len(), 4);
+        assert_eq!(
+            history.iter().collect::<Result<Vec<_>, _>>().unwrap().len(),
+            4
+        );
         let mut first = history.iter();
         let mut second = history.iter();
         for hash in expected {

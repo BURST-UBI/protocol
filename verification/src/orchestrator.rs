@@ -1862,16 +1862,44 @@ mod tests {
         let mut forward = VerificationOrchestrator::new();
         let mut reverse = VerificationOrchestrator::new();
         for index in 1..=3 {
-            forward.process_endorsement_at(&target, &test_addr(&index.to_string()), 1000, &params, Timestamp::new(index * 10)).unwrap();
+            forward
+                .process_endorsement_at(
+                    &target,
+                    &test_addr(&index.to_string()),
+                    1000,
+                    &params,
+                    Timestamp::new(index * 10),
+                )
+                .unwrap();
         }
         for index in (1..=3).rev() {
-            reverse.process_endorsement_at(&target, &test_addr(&index.to_string()), 1000, &params, Timestamp::new(index * 10)).unwrap();
+            reverse
+                .process_endorsement_at(
+                    &target,
+                    &test_addr(&index.to_string()),
+                    1000,
+                    &params,
+                    Timestamp::new(index * 10),
+                )
+                .unwrap();
         }
-        assert_eq!(forward.snapshot().encode().unwrap(), reverse.snapshot().encode().unwrap());
-        assert_eq!(reverse.get_state(&target).unwrap().started_at, Timestamp::new(10));
+        assert_eq!(
+            forward.snapshot().encode().unwrap(),
+            reverse.snapshot().encode().unwrap()
+        );
+        assert_eq!(
+            reverse.get_state(&target).unwrap().started_at,
+            Timestamp::new(10)
+        );
         let before = reverse.snapshot().encode().unwrap();
-        assert!(reverse.process_endorsement_at(&target, &test_addr("1"), 1000, &params, Timestamp::new(1)).is_err());
-        assert_eq!(reverse.snapshot().encode().unwrap(), before, "rejected duplicate must not change the start time");
+        assert!(reverse
+            .process_endorsement_at(&target, &test_addr("1"), 1000, &params, Timestamp::new(1))
+            .is_err());
+        assert_eq!(
+            reverse.snapshot().encode().unwrap(),
+            before,
+            "rejected duplicate must not change the start time"
+        );
     }
 
     #[test]

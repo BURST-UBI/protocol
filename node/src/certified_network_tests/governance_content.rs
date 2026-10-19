@@ -51,6 +51,14 @@ pub(super) async fn launch(
     tokio::task::JoinHandle<()>,
 ) {
     let mut node = BurstNode::new(config).await.unwrap();
+    // Exercise certified governance and historical recovery even in the
+    // default-feature test binary. Keep the real clock and timestamp bounds.
+    node.verification_fixture_clock = Some(Arc::new(|| {
+        Some(SigningClock {
+            now: Timestamp::now().as_secs(),
+            error_bound: 0,
+        })
+    }));
     let stop = node.shutdown.clone();
     (
         stop,

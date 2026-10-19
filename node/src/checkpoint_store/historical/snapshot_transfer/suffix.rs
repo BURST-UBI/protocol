@@ -49,12 +49,18 @@ pub(super) async fn fetch(
     }
     let mut tail = TransferredTail::new(store.env().path())?;
     let mut used = 0usize;
-    tracing::debug!(single_heads = single_heads.len(), long_suffixes = requests.len(),
-        "checkpoint suffix transfer planned");
+    tracing::debug!(
+        single_heads = single_heads.len(),
+        long_suffixes = requests.len(),
+        "checkpoint suffix transfer planned"
+    );
     for batch in single_heads.chunks(crate::checkpoint_sync::witness::MAX_EXACT_HEADS) {
-        let proofs = crate::checkpoint_sync::witness::fetch_exact_heads(registry, batch.to_vec())
-            .await?;
-        let incoming = proofs.into_iter().map(|proof| proof.block().clone()).collect();
+        let proofs =
+            crate::checkpoint_sync::witness::fetch_exact_heads(registry, batch.to_vec()).await?;
+        let incoming = proofs
+            .into_iter()
+            .map(|proof| proof.block().clone())
+            .collect();
         (tail, used) = append(tail, used, incoming).await?;
     }
     for (mut cursor, floor) in requests {

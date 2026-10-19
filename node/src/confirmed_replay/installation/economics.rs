@@ -24,7 +24,10 @@ pub(crate) fn validate_retired(
             || governance::supports(&block.block_type)
             || matches!(
                 block.block_type,
-                BlockType::Epoch | BlockType::Endorse | BlockType::VerificationVote | BlockType::Challenge
+                BlockType::Epoch
+                    | BlockType::Endorse
+                    | BlockType::VerificationVote
+                    | BlockType::Challenge
             ))
         {
             return Err(error(

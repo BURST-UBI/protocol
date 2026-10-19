@@ -26,74 +26,164 @@ async fn consumer_history_lookup_proves_membership_without_installing_blocks() {
     let fixture = Fixture::selection();
     let (_source_dir, source, snapshot) = snapshot(&fixture);
     let export = SnapshotExport::prepare(
-        &source, NetworkId::Dev, &fixture.params, snapshot.anchor().hash(),
-    ).unwrap();
+        &source,
+        NetworkId::Dev,
+        &fixture.params,
+        snapshot.anchor().hash(),
+    )
+    .unwrap();
     let signatures = (0..32)
         .filter(|seed| snapshot.anchor().roster().weight(&address(*seed)) > 0)
-        .map(|seed| export.attest(&source, &burst_crypto::keypair_from_seed(&[seed; 32]).private).unwrap())
+        .map(|seed| {
+            export
+                .attest(
+                    &source,
+                    &burst_crypto::keypair_from_seed(&[seed; 32]).private,
+                )
+                .unwrap()
+        })
         .collect::<Vec<_>>();
     let mut bytes = Vec::new();
     export.write(&signatures, &mut bytes).unwrap();
     let (_local_dir, local) = suffix_store(&[]);
-    local.meta_store().put_meta(
-        crate::confirmed_replay::snapshot::installed::BASE_KEY, &bytes,
-    ).unwrap();
-    let before = local.tx_begin_write().unwrap().checkpoint_metadata(b"").unwrap();
+    local
+        .meta_store()
+        .put_meta(
+            crate::confirmed_replay::snapshot::installed::BASE_KEY,
+            &bytes,
+        )
+        .unwrap();
+    let before = local
+        .tx_begin_write()
+        .unwrap()
+        .checkpoint_metadata(b"")
+        .unwrap();
     let local = Arc::new(local);
-    let service = super::installed_recovery::Service::start(Arc::new(source), local.clone(), 0).await;
+    let service =
+        super::installed_recovery::Service::start(Arc::new(source), local.clone(), 0).await;
     let mut reader = crate::historical_lookup::Reader {
-        store: local.clone(), registry: service.registry.clone(), network: NetworkId::Dev,
-        initial_params: fixture.params.clone(), active: Arc::new(tokio::sync::Mutex::new(())),
+        store: local.clone(),
+        registry: service.registry.clone(),
+        network: NetworkId::Dev,
+        initial_params: fixture.params.clone(),
+        active: Arc::new(tokio::sync::Mutex::new(())),
         admitted: Arc::new(tokio::sync::Semaphore::new(3)),
     };
     let expected = &fixture.blocks[1];
     let recovered = reader.read(expected.hash).await.unwrap().unwrap();
-    assert_eq!(bincode::serialize(&recovered).unwrap(), bincode::serialize(expected).unwrap());
-    let head = snapshot.history_cursor(&expected.account).unwrap().unwrap().next().unwrap();
-    let expected_chain: Vec<_> = fixture.blocks.iter()
+    assert_eq!(
+        bincode::serialize(&recovered).unwrap(),
+        bincode::serialize(expected).unwrap()
+    );
+    let head = snapshot
+        .history_cursor(&expected.account)
+        .unwrap()
+        .unwrap()
+        .next()
+        .unwrap();
+    let expected_chain: Vec<_> = fixture
+        .blocks
+        .iter()
         .filter(|block| block.account == expected.account)
-        .take(head.height as usize).collect();
+        .take(head.height as usize)
+        .collect();
     assert_eq!(expected_chain.len() as u64, head.height);
     for (offset, block) in expected_chain.iter().enumerate() {
-        let page = reader.account_page(expected.account.clone(), offset as u64 + 1, 1).await.unwrap();
+        let page = reader
+            .account_page(expected.account.clone(), offset as u64 + 1, 1)
+            .await
+            .unwrap();
         assert_eq!(page.len(), 1);
         assert_eq!(page[0].0, offset as u64 + 1);
-        assert_eq!(bincode::serialize(&page[0].1).unwrap(), bincode::serialize(block).unwrap());
+        assert_eq!(
+            bincode::serialize(&page[0].1).unwrap(),
+            bincode::serialize(block).unwrap()
+        );
     }
-    let page = reader.account_page(expected.account.clone(), 1, 1000).await.unwrap();
+    let page = reader
+        .account_page(expected.account.clone(), 1, 1000)
+        .await
+        .unwrap();
     assert_eq!(page.len(), expected_chain.len());
-    assert!(page.windows(2).all(|pair| pair[0].0 + 1 == pair[1].0 && pair[1].1.previous == pair[0].1.hash));
-    assert!(reader.account_page(expected.account.clone(), head.height + 1, 1).await.unwrap().is_empty());
-    assert!(reader.account_page(expected.account.clone(), 0, 1).await.is_err());
-    assert!(reader.account_page(expected.account.clone(), 1, 1001).await.is_err());
+    assert!(page
+        .windows(2)
+        .all(|pair| pair[0].0 + 1 == pair[1].0 && pair[1].1.previous == pair[0].1.hash));
+    assert!(reader
+        .account_page(expected.account.clone(), head.height + 1, 1)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(reader
+        .account_page(expected.account.clone(), 0, 1)
+        .await
+        .is_err());
+    assert!(reader
+        .account_page(expected.account.clone(), 1, 1001)
+        .await
+        .is_err());
     reader.network = NetworkId::Test;
     assert!(reader.read(expected.hash).await.is_err());
-    assert!(reader.account_page(expected.account.clone(), 1, 1).await.is_err());
+    assert!(reader
+        .account_page(expected.account.clone(), 1, 1)
+        .await
+        .is_err());
     reader.network = NetworkId::Dev;
     let (recovered, page) = tokio::join!(
-        reader.read(expected.hash), reader.account_page(expected.account.clone(), 1, 1),
+        reader.read(expected.hash),
+        reader.account_page(expected.account.clone(), 1, 1),
     );
     assert_eq!(recovered.unwrap().unwrap().hash, expected.hash);
     assert_eq!(page.unwrap()[0].1.hash, expected_chain[0].hash);
     // Cancelled waiters must return their admission slot without starting work.
     let active = reader.active.lock().await;
-    assert!(tokio::time::timeout(Duration::from_millis(20), reader.read(expected.hash)).await.is_err());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), reader.read(expected.hash))
+            .await
+            .is_err()
+    );
     assert_eq!(reader.admitted.available_permits(), 3);
     drop(active);
     let guard = reader.admitted.acquire_many(3).await.unwrap();
-    assert!(reader.read(expected.hash).await.unwrap_err().contains("busy"));
-    assert!(reader.account_page(expected.account.clone(), 1, 1).await.err().unwrap().contains("busy"));
+    assert!(reader
+        .read(expected.hash)
+        .await
+        .unwrap_err()
+        .contains("busy"));
+    assert!(reader
+        .account_page(expected.account.clone(), 1, 1)
+        .await
+        .err()
+        .unwrap()
+        .contains("busy"));
     drop(guard);
-    local.meta_store().put_meta(
-        crate::confirmed_replay::snapshot::installed::BASE_KEY, b"corrupt",
-    ).unwrap();
+    local
+        .meta_store()
+        .put_meta(
+            crate::confirmed_replay::snapshot::installed::BASE_KEY,
+            b"corrupt",
+        )
+        .unwrap();
     assert!(reader.read(expected.hash).await.is_err());
-    assert!(reader.account_page(expected.account.clone(), 1, 1).await.is_err());
-    local.meta_store().put_meta(
-        crate::confirmed_replay::snapshot::installed::BASE_KEY, &bytes,
-    ).unwrap();
+    assert!(reader
+        .account_page(expected.account.clone(), 1, 1)
+        .await
+        .is_err());
+    local
+        .meta_store()
+        .put_meta(
+            crate::confirmed_replay::snapshot::installed::BASE_KEY,
+            &bytes,
+        )
+        .unwrap();
     assert_eq!(local.block_store().block_count().unwrap(), 0);
-    assert_eq!(local.tx_begin_write().unwrap().checkpoint_metadata(b"").unwrap(), before);
+    assert_eq!(
+        local
+            .tx_begin_write()
+            .unwrap()
+            .checkpoint_metadata(b"")
+            .unwrap(),
+        before
+    );
     drop(reader);
     assert!(service.stop().await > 0);
 }
@@ -426,15 +516,16 @@ async fn suffix_fetch_resumes_bounded_batches_without_installing_blocks() {
         .map(|cursor| cursor.next().unwrap().hash)
         .collect();
     assert!(expected_heads.len() > 1);
-    let proofs = crate::checkpoint_sync::witness::fetch_exact_heads(
-        &service.registry,
-        head_cursors.clone(),
-    )
-    .await
-    .unwrap();
+    let proofs =
+        crate::checkpoint_sync::witness::fetch_exact_heads(&service.registry, head_cursors.clone())
+            .await
+            .unwrap();
     assert_eq!(proofs.len(), expected_heads.len());
     assert_eq!(
-        proofs.iter().map(|proof| proof.block().hash).collect::<std::collections::HashSet<_>>(),
+        proofs
+            .iter()
+            .map(|proof| proof.block().hash)
+            .collect::<std::collections::HashSet<_>>(),
         expected_heads,
     );
     assert!(crate::checkpoint_sync::witness::fetch_exact_heads(
@@ -551,16 +642,27 @@ fn discovered_head_is_authenticated_without_a_duplicate_download() {
         let mut client = Transfer::new(now);
         let mut server = Transfer::new(now);
         let (result, mut received) = oneshot::channel();
-        client.start(Command {
-            roots: Roots::Plan(vec![cursor.clone()]),
-            wanted: vec![head.hash],
-            result,
-        }, now);
+        client.start(
+            Command {
+                roots: Roots::Plan(vec![cursor.clone()]),
+                wanted: vec![head.hash],
+                result,
+            },
+            now,
+        );
         let request = client.poll(vec!["source".into()], now).unwrap();
-        let mut response = server.handle(&source, wire("client", request.message), now)
-            .unwrap().unwrap();
+        let mut response = server
+            .handle(&source, wire("client", request.message), now)
+            .unwrap()
+            .unwrap();
         if corrupt {
-            let Message::WitnessChunk { data, digest, total, .. } = &mut response.message else {
+            let Message::WitnessChunk {
+                data,
+                digest,
+                total,
+                ..
+            } = &mut response.message
+            else {
                 panic!("expected witness chunk");
             };
             assert_eq!(data.len(), *total as usize);
@@ -575,32 +677,59 @@ fn discovered_head_is_authenticated_without_a_duplicate_download() {
         }
         let outcome = client.handle(&local, wire("source", response.message), now);
         if corrupt {
-            assert!(outcome.is_err(), "matching hash must not bypass signature validation");
+            assert!(
+                outcome.is_err(),
+                "matching hash must not bypass signature validation"
+            );
             assert!(received.try_recv().is_err());
-            let retry = client.poll(vec!["source".into(), "z-fallback".into()], now).unwrap();
-            assert_eq!(retry.peer, "z-fallback", "invalid proof must not earn peer preference");
+            let retry = client
+                .poll(vec!["source".into(), "z-fallback".into()], now)
+                .unwrap();
+            assert_eq!(
+                retry.peer, "z-fallback",
+                "invalid proof must not earn peer preference"
+            );
         } else {
-            assert!(outcome.unwrap().is_none(), "head must not be requested twice");
+            assert!(
+                outcome.unwrap().is_none(),
+                "head must not be requested twice"
+            );
             let proofs = received.try_recv().unwrap().unwrap();
             assert_eq!(proofs.len(), 1);
             assert_eq!(proofs[0].block().hash, head.hash);
             assert_eq!(proofs[0].context(), cursor.context());
-            let other = snapshot.confirmed_heads().into_iter()
+            let other = snapshot
+                .confirmed_heads()
+                .into_iter()
                 .find(|other| other.account != head.account)
                 .expect("another authenticated account");
             let other_cursor = snapshot.history_cursor(&other.account).unwrap().unwrap();
             let (result, _other_received) = oneshot::channel();
-            client.start(Command {
-                roots: Roots::Account(other_cursor),
-                wanted: vec![other.hash],
-                result,
-            }, now);
-            let next = client.poll(vec!["source".into(), "z-fallback".into()], now).unwrap();
-            assert_eq!(next.peer, "source", "reuse a provider only after cursor validation");
-            let retry = client.poll(
-                vec!["source".into(), "z-fallback".into()], now + Duration::from_secs(5),
-            ).unwrap();
-            assert_eq!(retry.peer, "z-fallback", "a preferred provider cannot stall recovery");
+            client.start(
+                Command {
+                    roots: Roots::Account(other_cursor),
+                    wanted: vec![other.hash],
+                    result,
+                },
+                now,
+            );
+            let next = client
+                .poll(vec!["source".into(), "z-fallback".into()], now)
+                .unwrap();
+            assert_eq!(
+                next.peer, "source",
+                "reuse a provider only after cursor validation"
+            );
+            let retry = client
+                .poll(
+                    vec!["source".into(), "z-fallback".into()],
+                    now + Duration::from_secs(5),
+                )
+                .unwrap();
+            assert_eq!(
+                retry.peer, "z-fallback",
+                "a preferred provider cannot stall recovery"
+            );
         }
         assert_eq!(local.block_store().block_count().unwrap(), 0);
     }
@@ -868,8 +997,14 @@ fn cached_ancestry_bodies_are_reauthenticated_for_a_new_checkpoint_context() {
     let oldest: StateBlock = bincode::deserialize(chain.last().unwrap()).unwrap();
     let now = Instant::now();
     let mut client = Transfer::new(now);
-    exchange_with(&mut client, Roots::Account(cursor.clone()), vec![oldest.hash], &source, &local)
-        .unwrap();
+    exchange_with(
+        &mut client,
+        Roots::Account(cursor.clone()),
+        vec![oldest.hash],
+        &source,
+        &local,
+    )
+    .unwrap();
 
     let mut changed = Fixture::selection();
     changed.push(1, BlockType::ChangeRepresentative, 1_595_434_041, |_| {});
@@ -878,8 +1013,18 @@ fn cached_ancestry_bodies_are_reauthenticated_for_a_new_checkpoint_context() {
     assert_ne!(next.context(), cursor.context());
     assert_eq!(next.next().unwrap().hash, head.hash);
     let (result, mut received) = oneshot::channel();
-    client.start(Command { roots: Roots::Account(next.clone()), wanted: vec![oldest.hash], result }, now);
-    assert!(received.try_recv().is_err(), "old-context proofs cannot be returned directly");
+    client.start(
+        Command {
+            roots: Roots::Account(next.clone()),
+            wanted: vec![oldest.hash],
+            result,
+        },
+        now,
+    );
+    assert!(
+        received.try_recv().is_err(),
+        "old-context proofs cannot be returned directly"
+    );
     assert!(client.local_progress(&local, now));
     let proofs = received.try_recv().unwrap().unwrap();
     assert_eq!(proofs.len(), 1);
@@ -889,9 +1034,18 @@ fn cached_ancestry_bodies_are_reauthenticated_for_a_new_checkpoint_context() {
 
     let (_fork_dir, _, fork) = snapshot_with_extra_head();
     let (result, mut received) = oneshot::channel();
-    client.start(Command { roots: Roots::Account(fork.history_cursor(&address(0)).unwrap().unwrap()),
-        wanted: vec![oldest.hash], result }, now);
-    assert!(!client.local_progress(&local, now), "a different head needs its own ancestry");
+    client.start(
+        Command {
+            roots: Roots::Account(fork.history_cursor(&address(0)).unwrap().unwrap()),
+            wanted: vec![oldest.hash],
+            result,
+        },
+        now,
+    );
+    assert!(
+        !client.local_progress(&local, now),
+        "a different head needs its own ancestry"
+    );
     assert!(received.try_recv().is_err());
     assert!(client.poll(vec!["source".into()], now).is_some());
     assert_eq!(local.block_store().block_count().unwrap(), 0);
@@ -909,24 +1063,50 @@ fn local_witness_reads_do_not_evict_peer_recovery_proofs() {
     let mut client = Transfer::new(now);
     let cursor = snapshot.history_cursor(&address(0)).unwrap().unwrap();
     let hash = cursor.next().unwrap().hash;
-    exchange_with(&mut client, Roots::Account(cursor.clone()), vec![hash], &source, &local)
-        .unwrap();
+    exchange_with(
+        &mut client,
+        Roots::Account(cursor.clone()),
+        vec![hash],
+        &source,
+        &local,
+    )
+    .unwrap();
 
     // Disk-resident heads must not displace proofs that required a peer walk.
     for seeds in (40..170).collect::<Vec<_>>().chunks(64) {
-        let cursors: Vec<_> = seeds.iter().map(|seed|
-            snapshot.history_cursor(&address(*seed)).unwrap().unwrap()
-        ).collect();
-        let wanted: Vec<_> = cursors.iter().map(|cursor| cursor.next().unwrap().hash).collect();
+        let cursors: Vec<_> = seeds
+            .iter()
+            .map(|seed| snapshot.history_cursor(&address(*seed)).unwrap().unwrap())
+            .collect();
+        let wanted: Vec<_> = cursors
+            .iter()
+            .map(|cursor| cursor.next().unwrap().hash)
+            .collect();
         let (result, mut received) = oneshot::channel();
-        client.start(Command { roots: Roots::Exact(cursors), wanted: wanted.clone(), result }, now);
+        client.start(
+            Command {
+                roots: Roots::Exact(cursors),
+                wanted: wanted.clone(),
+                result,
+            },
+            now,
+        );
         assert!(client.local_progress(&source, now));
         let proofs = received.try_recv().unwrap().unwrap();
         assert_eq!(proofs.len(), wanted.len());
-        assert!(proofs.iter().all(|proof| wanted.contains(&proof.block().hash)));
+        assert!(proofs
+            .iter()
+            .all(|proof| wanted.contains(&proof.block().hash)));
     }
     let (result, mut received) = oneshot::channel();
-    client.start(Command { roots: Roots::Account(cursor.clone()), wanted: vec![hash], result }, now);
+    client.start(
+        Command {
+            roots: Roots::Account(cursor.clone()),
+            wanted: vec![hash],
+            result,
+        },
+        now,
+    );
     let proof = received.try_recv().unwrap().unwrap().remove(0);
     assert_eq!(proof.block().hash, hash);
     assert_eq!(proof.context(), cursor.context());
@@ -1004,25 +1184,51 @@ fn mixed_local_and_cached_witnesses_do_not_refetch_peer_bodies() {
     let local_cursor = snapshot.history_cursor(&address(1)).unwrap().unwrap();
     let cached_hash = cached.next().unwrap().hash;
     let local_hash = local_cursor.next().unwrap().hash;
-    let local_body: StateBlock = bincode::deserialize(
-        &read_chunk(&source, local_hash, 1).unwrap()[0],
-    ).unwrap();
+    let local_body: StateBlock =
+        bincode::deserialize(&read_chunk(&source, local_hash, 1).unwrap()[0]).unwrap();
     let (_local_dir, local) = suffix_store(&[local_body]);
-    let before = local.tx_begin_write().unwrap().checkpoint_metadata(b"").unwrap();
+    let before = local
+        .tx_begin_write()
+        .unwrap()
+        .checkpoint_metadata(b"")
+        .unwrap();
     for exact in [false, true] {
         let now = Instant::now();
         let mut client = Transfer::new(now);
-        exchange_with(&mut client, Roots::Account(cached.clone()), vec![cached_hash], &source, &local)
-            .unwrap();
+        exchange_with(
+            &mut client,
+            Roots::Account(cached.clone()),
+            vec![cached_hash],
+            &source,
+            &local,
+        )
+        .unwrap();
         for _ in 0..2 {
             let cursors = vec![cached.clone(), local_cursor.clone()];
-            let roots = if exact { Roots::Exact(cursors) } else { Roots::Plan(cursors) };
+            let roots = if exact {
+                Roots::Exact(cursors)
+            } else {
+                Roots::Plan(cursors)
+            };
             let (result, mut received) = oneshot::channel();
-            client.start(Command { roots, wanted: vec![cached_hash, local_hash], result }, now);
-            assert!(received.try_recv().is_err(), "the local proof is still required");
+            client.start(
+                Command {
+                    roots,
+                    wanted: vec![cached_hash, local_hash],
+                    result,
+                },
+                now,
+            );
+            assert!(
+                received.try_recv().is_err(),
+                "the local proof is still required"
+            );
             let mut completed = None;
             for _ in 0..4 {
-                assert!(client.local_progress(&local, now), "cached peer proof must not be refetched");
+                assert!(
+                    client.local_progress(&local, now),
+                    "cached peer proof must not be refetched"
+                );
                 if let Ok(proofs) = received.try_recv() {
                     completed = Some(proofs.unwrap());
                     break;
@@ -1030,13 +1236,27 @@ fn mixed_local_and_cached_witnesses_do_not_refetch_peer_bodies() {
             }
             let proofs = completed.expect("mixed proof request must finish without a peer");
             assert_eq!(proofs.len(), 2);
-            assert_eq!(proofs.iter().map(|proof| proof.block().hash).collect::<HashSet<_>>(),
-                HashSet::from([cached_hash, local_hash]));
-            assert!(proofs.iter().all(|proof| proof.context() == cached.context()));
+            assert_eq!(
+                proofs
+                    .iter()
+                    .map(|proof| proof.block().hash)
+                    .collect::<HashSet<_>>(),
+                HashSet::from([cached_hash, local_hash])
+            );
+            assert!(proofs
+                .iter()
+                .all(|proof| proof.context() == cached.context()));
             assert!(client.poll(Vec::new(), now).is_none());
         }
     }
-    assert_eq!(local.tx_begin_write().unwrap().checkpoint_metadata(b"").unwrap(), before);
+    assert_eq!(
+        local
+            .tx_begin_write()
+            .unwrap()
+            .checkpoint_metadata(b"")
+            .unwrap(),
+        before
+    );
 }
 
 #[test]
@@ -1062,20 +1282,43 @@ fn completed_witness_plan_keeps_requested_peer_proofs_after_larger_ancestry_walk
     let now = Instant::now();
     let mut client = Transfer::new(now);
     let proofs = exchange_with(
-        &mut client, Roots::Plan(cursors.clone()), wanted.clone(), &source, &local,
-    ).unwrap();
+        &mut client,
+        Roots::Plan(cursors.clone()),
+        wanted.clone(),
+        &source,
+        &local,
+    )
+    .unwrap();
     assert_eq!(proofs.len(), wanted.len());
     let intervening = exchange_with(
         &mut client,
         Roots::Account(snapshot.history_cursor(&address(0)).unwrap().unwrap()),
-        vec![other], &source, &local,
-    ).unwrap();
+        vec![other],
+        &source,
+        &local,
+    )
+    .unwrap();
     assert_eq!(intervening[0].block().hash, other);
     let (result, mut received) = oneshot::channel();
-    client.start(Command { roots: Roots::Plan(cursors), wanted: wanted.clone(), result }, now);
-    let repeated = received.try_recv().expect("requested proofs must survive ancestor eviction").unwrap();
-    assert_eq!(repeated.iter().map(|proof| proof.block().hash).collect::<HashSet<_>>(),
-        wanted.into_iter().collect());
+    client.start(
+        Command {
+            roots: Roots::Plan(cursors),
+            wanted: wanted.clone(),
+            result,
+        },
+        now,
+    );
+    let repeated = received
+        .try_recv()
+        .expect("requested proofs must survive ancestor eviction")
+        .unwrap();
+    assert_eq!(
+        repeated
+            .iter()
+            .map(|proof| proof.block().hash)
+            .collect::<HashSet<_>>(),
+        wanted.into_iter().collect()
+    );
     assert!(client.poll(Vec::new(), now).is_none());
     assert_eq!(local.block_store().block_count().unwrap(), 0);
 }
@@ -1190,38 +1433,76 @@ async fn witness_plan_discovers_accounts_and_authenticates_every_requested_body(
     // There is no witness service: complete reuse must not request any peers.
     let mut available = proofs.clone();
     available.extend(proofs.clone());
-    let reused = crate::checkpoint_sync::witness::fetch_plan_reusing(
-        &registry, &base, &plan, available,
-    ).await.unwrap();
+    let reused =
+        crate::checkpoint_sync::witness::fetch_plan_reusing(&registry, &base, &plan, available)
+            .await
+            .unwrap();
     assert_eq!(reused.len(), expected.len());
-    assert_eq!(reused.iter().map(|proof| proof.block().hash).collect::<HashSet<_>>(), expected);
+    assert_eq!(
+        reused
+            .iter()
+            .map(|proof| proof.block().hash)
+            .collect::<HashSet<_>>(),
+        expected
+    );
     // Partial evidence cannot silently satisfy the remaining dependencies.
     assert!(crate::checkpoint_sync::witness::fetch_plan_reusing(
-        &registry, &base, &plan, proofs.iter().take(1).cloned().collect(),
-    ).await.is_err());
+        &registry,
+        &base,
+        &plan,
+        proofs.iter().take(1).cloned().collect(),
+    )
+    .await
+    .is_err());
     let mut changed = Fixture::selection();
     changed.push(1, BlockType::ChangeRepresentative, 1_595_434_041, |_| {});
     let (_changed_dir, changed_source, changed) = super::snapshot(&changed);
-    let accounts: HashSet<_> = proofs.iter().map(|proof| proof.block().account.clone()).collect();
-    let cursors = accounts.iter().map(|account|
-        changed.history_cursor(account).unwrap().unwrap()
-    ).collect();
+    let accounts: HashSet<_> = proofs
+        .iter()
+        .map(|proof| proof.block().account.clone())
+        .collect();
+    let cursors = accounts
+        .iter()
+        .map(|account| changed.history_cursor(account).unwrap().unwrap())
+        .collect();
     let wrong_context = exchange(
-        Roots::Plan(cursors), plan.witness_hashes().to_vec(), &changed_source, &local,
-    ).unwrap();
-    assert!(wrong_context.iter().all(|proof| proof.context() != plan.context()));
+        Roots::Plan(cursors),
+        plan.witness_hashes().to_vec(),
+        &changed_source,
+        &local,
+    )
+    .unwrap();
+    assert!(wrong_context
+        .iter()
+        .all(|proof| proof.context() != plan.context()));
     assert!(crate::checkpoint_sync::witness::fetch_plan_reusing(
-        &registry, &base, &plan, wrong_context,
-    ).await.is_err());
+        &registry,
+        &base,
+        &plan,
+        wrong_context,
+    )
+    .await
+    .is_err());
     let local = std::sync::Arc::new(local);
-    let service = super::installed_recovery::Service::start(
-        std::sync::Arc::new(source), local.clone(), 0,
-    ).await;
+    let service =
+        super::installed_recovery::Service::start(std::sync::Arc::new(source), local.clone(), 0)
+            .await;
     let combined = crate::checkpoint_sync::witness::fetch_plan_reusing(
-        &service.registry, &base, &plan, proofs.iter().take(1).cloned().collect(),
-    ).await.unwrap();
+        &service.registry,
+        &base,
+        &plan,
+        proofs.iter().take(1).cloned().collect(),
+    )
+    .await
+    .unwrap();
     assert_eq!(combined.len(), expected.len());
-    assert_eq!(combined.iter().map(|proof| proof.block().hash).collect::<HashSet<_>>(), expected);
+    assert_eq!(
+        combined
+            .iter()
+            .map(|proof| proof.block().hash)
+            .collect::<HashSet<_>>(),
+        expected
+    );
     assert!(service.stop().await > 0);
     let tail = plan.finish(proofs).unwrap();
     assert_eq!(tail.block_count(), 0);

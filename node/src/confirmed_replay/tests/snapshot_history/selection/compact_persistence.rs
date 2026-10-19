@@ -559,7 +559,13 @@ async fn compact_transfer_replays_legacy_and_sparse_exports_with_a_beacon() {
             manifest.checkpoint.hash()
         );
         assert_eq!(
-            recovered.selections.read_selection(recovered.selections.len() - 1).unwrap().beacon().unwrap().round,
+            recovered
+                .selections
+                .read_selection(recovered.selections.len() - 1)
+                .unwrap()
+                .beacon()
+                .unwrap()
+                .round,
             beacon.round
         );
         transfer = CertifiedCheckpoint::export_transfer(

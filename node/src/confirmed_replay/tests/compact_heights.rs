@@ -11,13 +11,26 @@ fn unchanged_roster_recovery_cut_uses_separate_domain_and_old_quorum() {
     let state = fixture.replay(1).unwrap();
     let anchor = ReplayedCheckpoint::genesis_anchor(NetworkId::Dev, &fixture.params).unwrap();
     let root = BlockHash::new([9; 32]);
-    let build = |cutoff| crate::checkpoint_roster::PreparedRoster::manifest_for_cut(
-        &anchor, cutoff, root, &[], &state);
+    let build = |cutoff| {
+        crate::checkpoint_roster::PreparedRoster::manifest_for_cut(
+            &anchor,
+            cutoff,
+            root,
+            &[],
+            &state,
+        )
+    };
     assert!(build(anchor.cutoff() + 59).is_err());
     let (manifest, roster) = build(anchor.cutoff() + 60).unwrap();
     assert_eq!(roster, *anchor.roster());
-    assert_eq!(manifest.checkpoint.selection_root, crate::checkpoint_recovery::commitment());
-    assert_ne!(manifest.checkpoint.selection_root, crate::checkpoint_roster::commitment());
+    assert_eq!(
+        manifest.checkpoint.selection_root,
+        crate::checkpoint_recovery::commitment()
+    );
+    assert_ne!(
+        manifest.checkpoint.selection_root,
+        crate::checkpoint_roster::commitment()
+    );
     let certificate = certified_votes::certify(&manifest.checkpoint, &[0]);
     anchor.verify_certificate(&certificate).unwrap();
     let next = anchor.advance(&certificate, roster).unwrap();

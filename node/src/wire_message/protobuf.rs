@@ -401,8 +401,14 @@ fn sync(value: &Sync) -> p::CheckpointSync {
     p::CheckpointSync {
         body: Some(match value {
             Sync::TipRequest { nonce } => B::TipRequest(p::TipRequest { nonce: *nonce }),
-            Sync::TipObservation { nonce, height, epoch } => B::TipObservation(p::TipObservation {
-                nonce: *nonce, height: *height, epoch: epoch.as_bytes().to_vec(),
+            Sync::TipObservation {
+                nonce,
+                height,
+                epoch,
+            } => B::TipObservation(p::TipObservation {
+                nonce: *nonce,
+                height: *height,
+                epoch: epoch.as_bytes().to_vec(),
             }),
             Sync::WitnessHeadsRequest {
                 starts,
@@ -506,7 +512,11 @@ fn read_sync(value: p::CheckpointSync) -> Result<Sync, ProtocolError> {
             .ok_or_else(|| invalid("missing checkpoint sync body"))?
         {
             B::TipRequest(v) => Sync::TipRequest { nonce: v.nonce },
-            B::TipObservation(v) => Sync::TipObservation { nonce: v.nonce, height: v.height, epoch: hash(v.epoch)? },
+            B::TipObservation(v) => Sync::TipObservation {
+                nonce: v.nonce,
+                height: v.height,
+                epoch: hash(v.epoch)?,
+            },
             B::WitnessHeadsRequest(v) => Sync::WitnessHeadsRequest {
                 starts: v.starts.into_iter().map(hash).collect::<Result<_, _>>()?,
                 offset: v.offset,

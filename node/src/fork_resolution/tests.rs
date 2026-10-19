@@ -5,10 +5,10 @@ use burst_ledger::BlockType;
 use burst_store::{account::AccountStore, block::BlockStore, meta::MetaStore};
 use std::time::Duration;
 
-mod network;
-mod governance;
 mod full_content;
+mod governance;
 mod key_ballot;
+mod network;
 
 fn sign(block: &mut StateBlock, seed: u8) {
     block.hash = block.compute_hash();

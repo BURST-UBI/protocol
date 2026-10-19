@@ -664,10 +664,18 @@ impl BlockProcessor {
         );
     }
 
-    pub(crate) fn release_retained(&mut self, hash: &BlockHash) -> Vec<crate::block_retention::RetainedBlock> {
+    pub(crate) fn release_retained(
+        &mut self,
+        hash: &BlockHash,
+    ) -> Vec<crate::block_retention::RetainedBlock> {
         let now = Some(burst_types::Timestamp::now().as_secs());
-        let mut ready = self.unchecked.take_retained(hash, crate::unchecked::GapType::Previous, now);
-        ready.extend(self.unchecked.take_retained(hash, crate::unchecked::GapType::Source, now));
+        let mut ready =
+            self.unchecked
+                .take_retained(hash, crate::unchecked::GapType::Previous, now);
+        ready.extend(
+            self.unchecked
+                .take_retained(hash, crate::unchecked::GapType::Source, now),
+        );
         ready
     }
 

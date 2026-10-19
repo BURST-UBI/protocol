@@ -9,9 +9,9 @@ use std::collections::BinaryHeap;
 
 use tokio::sync::{Mutex, Notify};
 
+use crate::block_retention::{BlockRetention, RetainedBlock, Slot};
 use burst_ledger::StateBlock;
 use burst_types::BlockHash;
-use crate::block_retention::{BlockRetention, RetainedBlock, Slot};
 use std::sync::Arc;
 
 /// A block wrapped with its PoW difficulty score for priority ordering.
@@ -88,7 +88,8 @@ impl BlockPriorityQueue {
     ///
     /// If the queue is at capacity the block is dropped and `false` is returned.
     pub async fn push(&self, block: StateBlock) -> bool {
-        self.push_retained(RetainedBlock { block, slot: None }).await
+        self.push_retained(RetainedBlock { block, slot: None })
+            .await
     }
 
     pub(crate) async fn push_retained(&self, mut retained: RetainedBlock) -> bool {
@@ -104,7 +105,9 @@ impl BlockPriorityQueue {
         }
         if retained.slot.is_none() {
             if let Some(budget) = &self.retention {
-                let Some(slot) = budget.acquire() else { return false; };
+                let Some(slot) = budget.acquire() else {
+                    return false;
+                };
                 retained.slot = Some(slot);
             }
         }
@@ -142,7 +145,9 @@ impl BlockPriorityQueue {
         }
         if retained.slot.is_none() {
             if let Some(budget) = &self.retention {
-                let Some(slot) = budget.acquire() else { return false; };
+                let Some(slot) = budget.acquire() else {
+                    return false;
+                };
                 retained.slot = Some(slot);
             }
         }
@@ -170,7 +175,10 @@ impl BlockPriorityQueue {
             {
                 let mut guard = self.heap.lock().await;
                 if let Some(entry) = guard.0.pop() {
-                    return RetainedBlock { block: entry.block, slot: entry.slot };
+                    return RetainedBlock {
+                        block: entry.block,
+                        slot: entry.slot,
+                    };
                 }
             }
             // Queue is empty — wait for a producer to notify us.
@@ -185,7 +193,10 @@ impl BlockPriorityQueue {
 
     pub(crate) async fn try_pop_retained(&self) -> Option<RetainedBlock> {
         let mut guard = self.heap.lock().await;
-        guard.0.pop().map(|entry| RetainedBlock { block: entry.block, slot: entry.slot })
+        guard.0.pop().map(|entry| RetainedBlock {
+            block: entry.block,
+            slot: entry.slot,
+        })
     }
 
     /// Current number of blocks in the queue.
@@ -317,18 +328,22 @@ mod tests {
         let budget = BlockRetention::new(3);
         let queue = BlockPriorityQueue::with_retention(1, budget.clone());
         let recovered = RetainedBlock {
-            block: make_block_with_work(1), slot: Some(budget.acquire().unwrap()),
+            block: make_block_with_work(1),
+            slot: Some(budget.acquire().unwrap()),
         };
         assert!(queue.push(make_block_with_work(2)).await);
         assert!(!queue.push(make_block_with_work(3)).await);
         assert!(queue.push_retained(recovered).await);
         let recovered = RetainedBlock {
-            block: make_block_with_work(4), slot: Some(budget.acquire().unwrap()),
+            block: make_block_with_work(4),
+            slot: Some(budget.acquire().unwrap()),
         };
         assert!(queue.try_push_retained(recovered));
         assert!(budget.acquire().is_none());
         assert_eq!(queue.len().await, 3);
-        for _ in 0..3 { drop(queue.try_pop_retained().await.unwrap()); }
+        for _ in 0..3 {
+            drop(queue.try_pop_retained().await.unwrap());
+        }
         assert!(queue.push(make_block_with_work(5)).await);
         assert_eq!(queue.len().await, 1);
     }

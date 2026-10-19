@@ -66,7 +66,9 @@ impl JournalGuard {
     ) -> Result<Self, StoreError> {
         let anchors = accepted
             .as_ref()
-            .map_or(&installed.selections.authority, |state| &state.selections.authority);
+            .map_or(&installed.selections.authority, |state| {
+                &state.selections.authority
+            });
         let fingerprint = observe(batch)?;
         validate(batch, || anchors.iter(), installed.continuation.anchor())?;
         Ok(Self {

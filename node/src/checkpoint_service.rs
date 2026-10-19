@@ -21,8 +21,8 @@ use crate::{
 pub const INBOX_CAPACITY: usize = 32;
 pub type Clock = Arc<dyn Fn() -> Option<SigningClock> + std::marker::Send + Sync>;
 
-mod compact;
 mod candidate;
+mod compact;
 pub(crate) use candidate::discover_candidate;
 pub(crate) mod compact_authority;
 pub use compact::CompactStart;
@@ -33,10 +33,10 @@ pub(crate) mod compact_observer;
 pub use compact_observer::{run_compact_height, run_compact_observer};
 mod input;
 mod runtime;
+pub(crate) use runtime::run_node_with_recovery;
 #[cfg(test)]
 pub(crate) use runtime::Runtime;
 pub use runtime::{run_node, Settings};
-pub(crate) use runtime::run_node_with_recovery;
 
 pub struct Session {
     driver: CheckpointDriver,

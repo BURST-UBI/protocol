@@ -11,14 +11,18 @@ fn compact_snapshot_preserves_device_grant_without_retaining_the_handoff_block()
     let (_dir, source, snapshot) = snapshot(&fixture);
     let witnesses = retained(&snapshot, &fixture, &source, &[]);
     assert!(!witnesses.iter().any(|proof| proof.block().hash == grant));
-    let certificates = vec![CertifiedCheckpoint::load(&source, NetworkId::Dev, &fixture.params)
-        .unwrap().unwrap()];
+    let certificates = vec![
+        CertifiedCheckpoint::load(&source, NetworkId::Dev, &fixture.params)
+            .unwrap()
+            .unwrap(),
+    ];
     let base = snapshot.into_continuation();
     let (_sparse_dir, sparse) = cemented::sparse(&base, &source);
     use burst_store::block::BlockStore;
     assert!(!sparse.block_store().exists(&grant).unwrap());
     let head = base.state().account(&address(0)).unwrap().head;
-    let retained_head: StateBlock = bincode::deserialize(&sparse.block_store().get_block(&head).unwrap()).unwrap();
+    let retained_head: StateBlock =
+        bincode::deserialize(&sparse.block_store().get_block(&head).unwrap()).unwrap();
     assert_eq!(retained_head.active_signing_grant(), grant);
     let cutoff = base.anchor().cutoff() + 1;
     fixture.push(0, BlockType::Burn, cutoff, |block| {
@@ -30,10 +34,17 @@ fn compact_snapshot_preserves_device_grant_without_retaining_the_handoff_block()
     assert_eq!(valid.signing_grant, grant);
     let full_history = fixture.history(cutoff);
     let (_tail_dir, tail_store) = suffix_store(std::slice::from_ref(&valid));
-    let tail = base.read_tail(&tail_store, cutoff, full_history.heads(), witnesses).unwrap();
+    let tail = base
+        .read_tail(&tail_store, cutoff, full_history.heads(), witnesses)
+        .unwrap();
     let compact = base.clone().replay_tail(tail, &certificates).unwrap();
-    let full = ConfirmedReplay::replay_with_certificates(&full_history, NetworkId::Dev,
-        &fixture.params, &certificates).unwrap();
+    let full = ConfirmedReplay::replay_with_certificates(
+        &full_history,
+        NetworkId::Dev,
+        &fixture.params,
+        &certificates,
+    )
+    .unwrap();
     assert_same(&compact, &full);
 
     let stale = fixture.blocks.last_mut().unwrap();
@@ -44,7 +55,9 @@ fn compact_snapshot_preserves_device_grant_without_retaining_the_handoff_block()
     let snapshot = authenticate(&source, &fixture.params, base.anchor().hash());
     let witnesses = retained(&snapshot, &fixture, &source, &[]);
     let (_tail_dir, tail_store) = suffix_store(std::slice::from_ref(&stale));
-    let tail = base.read_tail(&tail_store, cutoff, stale_history.heads(), witnesses).unwrap();
+    let tail = base
+        .read_tail(&tail_store, cutoff, stale_history.heads(), witnesses)
+        .unwrap();
     assert!(base.replay_tail(tail, &certificates).is_err());
     assert!(!sparse.block_store().exists(&valid.hash).unwrap());
     assert!(!sparse.block_store().exists(&stale.hash).unwrap());

@@ -60,7 +60,9 @@ pub(crate) fn stage(
     if (block.block_type == BlockType::Open) != block.previous.is_zero() {
         return Err("invalid opening position".into());
     }
-    block.validate_signing_grant(previous.as_ref()).map_err(str::to_owned)?;
+    block
+        .validate_signing_grant(previous.as_ref())
+        .map_err(str::to_owned)?;
     let previous_brn = previous.as_ref().map_or(0, |p| p.brn_balance);
     if let Some(previous) = &previous {
         BlockProcessor::validate_balance_transition(block, previous_brn, previous.trst_balance)?;

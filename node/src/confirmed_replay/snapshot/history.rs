@@ -251,8 +251,10 @@ impl HistoryCursor {
                     block.hash.as_bytes(),
                     &block.signature,
                     &crate::block_processor::signing_key(
-                        &block, &crate::genesis_key::genesis_address(self.context.network),
-                    ).map_err(invalid)?,
+                        &block,
+                        &crate::genesis_key::genesis_address(self.context.network),
+                    )
+                    .map_err(invalid)?,
                 )
             {
                 return Err(invalid(

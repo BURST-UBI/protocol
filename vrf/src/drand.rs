@@ -10,8 +10,8 @@ use bincode::Options;
 use futures_util::{stream::FuturesUnordered, StreamExt};
 use sha2::{Digest, Sha256};
 
-mod verified_signatures;
 mod policy;
+mod verified_signatures;
 pub use policy::DrandPolicy;
 
 /// Default drand mainnet relay URL.
@@ -106,7 +106,8 @@ impl DrandVerifier {
     fn require_beacon(&self, beacon: &DrandBeacon) -> Result<(), VrfError> {
         if !self.verify_beacon(beacon)? {
             return Err(VrfError::BlsVerification(format!(
-                "beacon round {} failed BLS signature verification", beacon.round,
+                "beacon round {} failed BLS signature verification",
+                beacon.round,
             )));
         }
         Ok(())
@@ -698,7 +699,9 @@ mod tests {
                 0 => output.round += 1,
                 1 => output.value[0] ^= 1,
                 2 => output.proof.push(0),
-                3 => { output.proof.pop(); },
+                3 => {
+                    output.proof.pop();
+                }
                 4 => {
                     let mut changed = beacon.clone();
                     changed.previous_signature = None;
@@ -986,8 +989,10 @@ mod tests {
         assert!(verifier.verify_beacon(&changed).is_err());
         let other_key = blst::min_sig::SecretKey::key_gen(&[17; 32], &[]).unwrap();
         let other = DrandVerifier::new(
-            &hex::encode(other_key.sk_to_pk().to_bytes()), DrandScheme::Unchained,
-        ).unwrap();
+            &hex::encode(other_key.sk_to_pk().to_bytes()),
+            DrandScheme::Unchained,
+        )
+        .unwrap();
         assert!(!other.verify_beacon(&beacon).unwrap());
         changed = beacon.clone();
         changed.signature = "00".repeat(48);

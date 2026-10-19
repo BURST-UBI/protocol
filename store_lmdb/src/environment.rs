@@ -527,7 +527,10 @@ mod lifecycle_tests {
             .checkpoint_metadata(b"")
             .unwrap();
         assert!(LmdbEnvironment::open(dir.path(), 32, 1 << 20).is_err());
-        assert_eq!(env.meta_store().get_schema_version().unwrap(), crate::CURRENT_SCHEMA_VERSION);
+        assert_eq!(
+            env.meta_store().get_schema_version().unwrap(),
+            crate::CURRENT_SCHEMA_VERSION
+        );
         assert_eq!(
             env.tx_begin_write()
                 .unwrap()

@@ -9,13 +9,21 @@ pub(crate) struct Authority {
 }
 
 impl Authority {
-    pub async fn replay_copy(&self, store: &burst_store_lmdb::LmdbStore) -> Result<ReplayCache, StoreError> {
+    pub async fn replay_copy(
+        &self,
+        store: &burst_store_lmdb::LmdbStore,
+    ) -> Result<ReplayCache, StoreError> {
         let base = self.base.clone();
         let commitment = self.commitment;
         let directory = store.env().path().to_path_buf();
         tokio::task::spawn_blocking(move || {
-            Ok(ReplayCache { base: commitment, recovered: base.fork(&directory)? })
-        }).await.map_err(|error| StoreError::Corruption(error.to_string()))?
+            Ok(ReplayCache {
+                base: commitment,
+                recovered: base.fork(&directory)?,
+            })
+        })
+        .await
+        .map_err(|error| StoreError::Corruption(error.to_string()))?
     }
 }
 
@@ -27,7 +35,9 @@ pub async fn recover_compact_authority(
     registry: Arc<RwLock<ConnectionRegistry>>,
     previous: Option<CheckpointAnchor>,
 ) -> Result<Option<Arc<RecoveredSnapshot>>, StoreError> {
-    Ok(recover_authority(settings, registry, previous, None).await?.map(|authority| authority.base))
+    Ok(recover_authority(settings, registry, previous, None)
+        .await?
+        .map(|authority| authority.base))
 }
 
 pub(crate) async fn recover_authority(
@@ -39,9 +49,9 @@ pub(crate) async fn recover_authority(
     loop {
         let revision = settings.store.env().info().last_txn_id;
         let result = recover_once(settings, registry.clone(), previous.clone(), &mut cached).await;
-        if result.as_ref().is_err_and(|error| retry_changed_inputs(
-            error, revision, settings.store.env().info().last_txn_id,
-        )) {
+        if result.as_ref().is_err_and(|error| {
+            retry_changed_inputs(error, revision, settings.store.env().info().last_txn_id)
+        }) {
             // Peer retrieval releases storage locks. Payments and successor
             // installation can invalidate the captured history or journals.
             // Recheck retained replay progress, then reconstruct installed
@@ -67,9 +77,21 @@ mod tests {
 
     #[test]
     fn stale_observations_retry_without_hiding_unchanged_corruption() {
-        assert!(retry_changed_inputs(&StoreError::StaleRead("inventory changed".into()), 7, 7));
-        assert!(retry_changed_inputs(&StoreError::Corruption("changed during read".into()), 7, 8));
-        assert!(!retry_changed_inputs(&StoreError::Corruption("invalid proof".into()), 7, 7));
+        assert!(retry_changed_inputs(
+            &StoreError::StaleRead("inventory changed".into()),
+            7,
+            7
+        ));
+        assert!(retry_changed_inputs(
+            &StoreError::Corruption("changed during read".into()),
+            7,
+            8
+        ));
+        assert!(!retry_changed_inputs(
+            &StoreError::Corruption("invalid proof".into()),
+            7,
+            7
+        ));
     }
 }
 
@@ -99,10 +121,12 @@ async fn recover_once(
     tokio::task::spawn_blocking(move || {
         recovered
             .into_checkpoint_recovery(&store, previous.as_ref())
-            .map(|cache| Some(Authority {
-                base: Arc::new(cache.recovered),
-                commitment: cache.base,
-            }))
+            .map(|cache| {
+                Some(Authority {
+                    base: Arc::new(cache.recovered),
+                    commitment: cache.base,
+                })
+            })
     })
     .await
     .map_err(|error| StoreError::Corruption(error.to_string()))?

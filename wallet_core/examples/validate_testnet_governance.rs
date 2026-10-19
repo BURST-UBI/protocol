@@ -162,8 +162,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             assert!(expected.contains_key("min_verifier_brn_balance"));
             assert!(expected.contains_key("min_verification_age_secs"));
             for (name, value) in expected {
-                let actual = params["governable_parameters"].as_array().unwrap()
-                    .iter().find(|row| row["name"] == name.as_str())
+                let actual = params["governable_parameters"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|row| row["name"] == name.as_str())
                     .ok_or("expected parameter absent from node")?;
                 assert_eq!(&actual["current"], value, "governed value changed: {name}");
             }
@@ -222,7 +225,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .ok_or("missing governed age")?;
             assert_eq!(
                 age["current"].as_str(),
-                Some(saved["expected_parameters"]["min_verification_age_secs"].as_str().unwrap_or("1"))
+                Some(
+                    saved["expected_parameters"]["min_verification_age_secs"]
+                        .as_str()
+                        .unwrap_or("1")
+                )
             );
         }
     }

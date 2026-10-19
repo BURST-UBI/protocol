@@ -11,7 +11,8 @@ pub(in crate::certified_network_tests) async fn offline_panel(
     let runner = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../wallet/tests/native-session.mjs");
     let output = tokio::process::Command::new("node")
-        .arg(runner).arg("--offline-panel-fixture")
+        .arg(runner)
+        .arg("--offline-panel-fixture")
         .env("NATIVE_FIXTURE_RPC_URL", client.node_url())
         .env("NATIVE_OFFLINE_ACTION", "panel")
         .env("NATIVE_PANEL_TARGET", vote.target_wallet.as_str())
@@ -20,10 +21,16 @@ pub(in crate::certified_network_tests) async fn offline_panel(
         .env("NATIVE_PANEL_STAKE", vote.stake_amount.to_string())
         .env("NATIVE_APPEAL_TIME", vote.timestamp.as_secs().to_string())
         .env("NATIVE_RESULT_PATH", &result_path)
-        .kill_on_drop(true).output().await.unwrap();
+        .kill_on_drop(true)
+        .output()
+        .await
+        .unwrap();
     eprintln!("{}", String::from_utf8_lossy(&output.stdout));
     eprintln!("{}", String::from_utf8_lossy(&output.stderr));
-    assert!(output.status.success(), "installed offline panel journey failed");
+    assert!(
+        output.status.success(),
+        "installed offline panel journey failed"
+    );
     serde_json::from_slice(&std::fs::read(result_path).unwrap()).unwrap()
 }
 

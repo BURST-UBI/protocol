@@ -21,8 +21,8 @@ use crate::wire_message::WireMessage;
 
 pub(crate) mod authority;
 mod input;
-pub(crate) mod tip;
 pub mod snapshot;
+pub(crate) mod tip;
 pub mod witness;
 
 const CHUNK_BYTES: usize = 16 * 1024;
@@ -33,8 +33,14 @@ const TRANSFER_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum CheckpointSyncMessage {
-    TipRequest { nonce: u64 },
-    TipObservation { nonce: u64, height: u64, epoch: BlockHash },
+    TipRequest {
+        nonce: u64,
+    },
+    TipObservation {
+        nonce: u64,
+        height: u64,
+        epoch: BlockHash,
+    },
     Request {
         height: u64,
         offset: u32,
@@ -400,15 +406,28 @@ impl Driver {
                 if !self.tip_served.allow(&incoming.peer, now) {
                     return Ok(None);
                 }
-                let height = CertifiedCheckpoint::stored_tip(&self.store, self.network, &self.params)?;
+                let height =
+                    CertifiedCheckpoint::stored_tip(&self.store, self.network, &self.params)?;
                 let epoch = self.store.meta_store().payment_epoch()?;
-                if epoch.is_zero() { return Ok(None); }
-                Ok(Some(Incoming { peer: incoming.peer, message: CheckpointSyncMessage::TipObservation {
-                    nonce: *nonce, height, epoch,
-                }}))
+                if epoch.is_zero() {
+                    return Ok(None);
+                }
+                Ok(Some(Incoming {
+                    peer: incoming.peer,
+                    message: CheckpointSyncMessage::TipObservation {
+                        nonce: *nonce,
+                        height,
+                        epoch,
+                    },
+                }))
             }
-            CheckpointSyncMessage::TipObservation { nonce, height, epoch } => {
-                self.tip.receive(&incoming.peer, *nonce, *height, *epoch, now);
+            CheckpointSyncMessage::TipObservation {
+                nonce,
+                height,
+                epoch,
+            } => {
+                self.tip
+                    .receive(&incoming.peer, *nonce, *height, *epoch, now);
                 Ok(None)
             }
             CheckpointSyncMessage::WitnessRequest { .. }
@@ -459,12 +478,19 @@ impl Driver {
                         &mut self.export_recovery,
                     )?
                     else {
-                        tracing::debug!(height, elapsed_ms = export_started.elapsed().as_millis(),
-                            "checkpoint export unavailable");
+                        tracing::debug!(
+                            height,
+                            elapsed_ms = export_started.elapsed().as_millis(),
+                            "checkpoint export unavailable"
+                        );
                         return Ok(None);
                     };
-                    tracing::debug!(height, bytes = bytes.len(), elapsed_ms = export_started.elapsed().as_millis(),
-                        "checkpoint export finished");
+                    tracing::debug!(
+                        height,
+                        bytes = bytes.len(),
+                        elapsed_ms = export_started.elapsed().as_millis(),
+                        "checkpoint export finished"
+                    );
                     self.export = Some(Export::completed(*height, *record_only, bytes));
                 }
                 let cached = self
@@ -505,9 +531,12 @@ impl Driver {
                     .ok_or_else(|| invalid("checkpoint download missing"))?;
                 self.next_poll = now + PEER_TIMEOUT;
                 if download.append(&incoming.message, now)? {
-                    tracing::debug!(height, bytes = download.bytes.len(),
+                    tracing::debug!(
+                        height,
+                        bytes = download.bytes.len(),
                         elapsed_ms = now.duration_since(download.started).as_millis(),
-                        "checkpoint download complete");
+                        "checkpoint download complete"
+                    );
                     if download.record_only
                         || crate::checkpoint_store::uses_incremental_replay(
                             &self.store,
@@ -602,7 +631,9 @@ pub(crate) async fn run(
         u64,
         Result<Option<BlockHash>, StoreError>,
     );
-    let mut importing: Option<std::pin::Pin<Box<dyn std::future::Future<Output = ImportResult> + Send>>> = None;
+    let mut importing: Option<
+        std::pin::Pin<Box<dyn std::future::Future<Output = ImportResult> + Send>>,
+    > = None;
     let (mut driver, imports) = match tokio::task::spawn_blocking(move || {
         let base = crate::checkpoint_replay::ReplayedCheckpoint::genesis_anchor(
             settings.network,
@@ -611,10 +642,16 @@ pub(crate) async fn run(
         let snapshots = snapshot::Transfer::new(settings.snapshots, base, &snapshot_staging)?;
         let mut driver = Driver::authenticated(authority, admissions);
         driver.export_recovery = crate::checkpoint_store::ExportRecovery::from_recovery(
-            recovery.as_ref(), &driver.store, driver.network, &driver.params,
+            recovery.as_ref(),
+            &driver.store,
+            driver.network,
+            &driver.params,
         )?;
         driver.snapshots = Some(snapshots);
-        let imports = crate::checkpoint_store::historical::snapshot_transfer::Session::from_recovery(recovery);
+        let imports =
+            crate::checkpoint_store::historical::snapshot_transfer::Session::from_recovery(
+                recovery,
+            );
         Ok::<_, StoreError>((driver, imports))
     })
     .await
@@ -715,14 +752,23 @@ pub(crate) async fn run(
             let params = driver.params.clone();
             let registry = registry.clone();
             importing = Some(Box::pin(async move {
-                let result = session.import(store, network, params, height, bytes, registry).await;
+                let result = session
+                    .import(store, network, params, height, bytes, registry)
+                    .await;
                 (session, height, result)
             }));
         }
-        if let (Ok(epoch), Ok(height)) = (driver.store.meta_store().payment_epoch(),
-            CertifiedCheckpoint::stored_tip(&driver.store, driver.network, &driver.params)) {
+        if let (Ok(epoch), Ok(height)) = (
+            driver.store.meta_store().payment_epoch(),
+            CertifiedCheckpoint::stored_tip(&driver.store, driver.network, &driver.params),
+        ) {
             let now = Instant::now();
-            published.update(driver.tip.expires(now), driver.tip.view(now, epoch, height, driver.awaiting_install.is_some()));
+            published.update(
+                driver.tip.expires(now),
+                driver
+                    .tip
+                    .view(now, epoch, height, driver.awaiting_install.is_some()),
+            );
         }
         match reply {
             Ok(replies) => {
@@ -750,10 +796,14 @@ mod tests {
         let store = Arc::new(LmdbStore::open(dir.path(), 32, 32 << 20).unwrap());
         let params = ProtocolParams::default();
         let epoch = crate::genesis_state::block(NetworkId::Dev, &params).hash;
-        store.meta_store().put_meta(burst_store::meta::PAYMENT_EPOCH_KEY, epoch.as_bytes()).unwrap();
+        store
+            .meta_store()
+            .put_meta(burst_store::meta::PAYMENT_EPOCH_KEY, epoch.as_bytes())
+            .unwrap();
         let mut driver = Driver::new(store, NetworkId::Dev, params, Arc::default()).unwrap();
         let now = Instant::now();
-        let height = CertifiedCheckpoint::stored_tip(&driver.store, driver.network, &driver.params).unwrap();
+        let height =
+            CertifiedCheckpoint::stored_tip(&driver.store, driver.network, &driver.params).unwrap();
         let requests = driver.poll_network(vec!["peer".into()], now, true).unwrap();
         assert_eq!(requests.len(), 1);
         let CheckpointSyncMessage::TipRequest { nonce } = requests[0].message else {
@@ -761,31 +811,88 @@ mod tests {
         };
         assert!(driver.download.is_none());
         assert!(driver.completed.is_none());
-        driver.handle(Incoming { peer: "peer".into(), message:
-            CheckpointSyncMessage::TipObservation { nonce, height, epoch } }, now).unwrap();
-        assert_eq!(driver.tip.view(now, epoch, height, false)["phase"], "peer_matches");
-        let reply = driver.handle(Incoming { peer: "peer".into(), message:
-            CheckpointSyncMessage::TipRequest { nonce: 99 } }, now).unwrap().unwrap();
-        assert!(matches!(reply.message, CheckpointSyncMessage::TipObservation {
+        driver
+            .handle(
+                Incoming {
+                    peer: "peer".into(),
+                    message: CheckpointSyncMessage::TipObservation {
+                        nonce,
+                        height,
+                        epoch,
+                    },
+                },
+                now,
+            )
+            .unwrap();
+        assert_eq!(
+            driver.tip.view(now, epoch, height, false)["phase"],
+            "peer_matches"
+        );
+        let reply = driver
+            .handle(
+                Incoming {
+                    peer: "peer".into(),
+                    message: CheckpointSyncMessage::TipRequest { nonce: 99 },
+                },
+                now,
+            )
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(reply.message, CheckpointSyncMessage::TipObservation {
             nonce: 99, epoch: actual, ..
-        } if actual == epoch));
-        assert!(driver.handle(Incoming { peer: "peer".into(), message:
-            CheckpointSyncMessage::TipRequest { nonce: 100 } }, now).unwrap().is_none());
-        let other = driver.handle(Incoming { peer: "other".into(), message:
-            CheckpointSyncMessage::TipRequest { nonce: 101 } }, now).unwrap().unwrap();
+        } if actual == epoch)
+        );
+        assert!(driver
+            .handle(
+                Incoming {
+                    peer: "peer".into(),
+                    message: CheckpointSyncMessage::TipRequest { nonce: 100 }
+                },
+                now
+            )
+            .unwrap()
+            .is_none());
+        let other = driver
+            .handle(
+                Incoming {
+                    peer: "other".into(),
+                    message: CheckpointSyncMessage::TipRequest { nonce: 101 },
+                },
+                now,
+            )
+            .unwrap()
+            .unwrap();
         assert_eq!(other.peer, "other");
-        assert!(matches!(other.message, CheckpointSyncMessage::TipObservation {
+        assert!(
+            matches!(other.message, CheckpointSyncMessage::TipObservation {
             nonce: 101, epoch: actual, ..
-        } if actual == epoch), "one peer must not consume another peer's reply allowance");
+        } if actual == epoch),
+            "one peer must not consume another peer's reply allowance"
+        );
         let later = now + PEER_TIMEOUT * 4;
-        let requests = driver.poll_network(vec!["peer".into()], later, true).unwrap();
-        assert!(requests.iter().all(|request| matches!(request.message, CheckpointSyncMessage::TipRequest { .. })));
+        let requests = driver
+            .poll_network(vec!["peer".into()], later, true)
+            .unwrap();
+        assert!(requests
+            .iter()
+            .all(|request| matches!(request.message, CheckpointSyncMessage::TipRequest { .. })));
         assert!(driver.download.is_none());
-        assert_eq!(driver.tip.view(later, epoch, height, false)["phase"], "unknown",
-            "an active import must not extend the lifetime of a peer observation");
-        let requests = driver.poll_network(vec!["peer".into()], later, false).unwrap();
-        assert!(requests.iter().any(|request| matches!(request.message, CheckpointSyncMessage::Request { .. })));
-        assert!(driver.download.is_some(), "downloads resume once the import finishes");
+        assert_eq!(
+            driver.tip.view(later, epoch, height, false)["phase"],
+            "unknown",
+            "an active import must not extend the lifetime of a peer observation"
+        );
+        let requests = driver
+            .poll_network(vec!["peer".into()], later, false)
+            .unwrap();
+        assert!(requests
+            .iter()
+            .any(|request| matches!(request.message, CheckpointSyncMessage::Request { .. })));
+        assert!(
+            driver.download.is_some(),
+            "downloads resume once the import finishes"
+        );
     }
 
     fn download(now: Instant) -> Download {
@@ -867,8 +974,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(LmdbStore::open(dir.path(), 32, 32 << 20).unwrap());
         let mut driver = Driver::new(
-            store, NetworkId::Dev, ProtocolParams::default(), Arc::default(),
-        ).unwrap();
+            store,
+            NetworkId::Dev,
+            ProtocolParams::default(),
+            Arc::default(),
+        )
+        .unwrap();
         // Simulate a request whose export took longer than the retry interval.
         // No sleeping is needed: completion must stamp its own current time.
         let requested = Instant::now() - RETRY * 6;
@@ -881,11 +992,17 @@ mod tests {
         let request = || Incoming {
             peer: "peer".into(),
             message: CheckpointSyncMessage::Request {
-                height: 1, offset: 0, digest: None, record_only: true,
+                height: 1,
+                offset: 0,
+                digest: None,
+                record_only: true,
             },
         };
         for elapsed in [Duration::ZERO, RETRY / 2] {
-            let response = driver.handle(request(), completed + elapsed).unwrap().unwrap();
+            let response = driver
+                .handle(request(), completed + elapsed)
+                .unwrap()
+                .unwrap();
             assert!(matches!(response.message, CheckpointSyncMessage::Chunk {
                 data, digest: actual, ..
             } if data == bytes && actual == digest));
@@ -893,7 +1010,10 @@ mod tests {
         }
         // An expired first-chunk request still reloads. The empty fixture has
         // no durable record, so it must not serve the old bytes indefinitely.
-        assert!(driver.handle(request(), completed + RETRY).unwrap().is_none());
+        assert!(driver
+            .handle(request(), completed + RETRY)
+            .unwrap()
+            .is_none());
         assert_eq!(driver.loaded, 1);
     }
 

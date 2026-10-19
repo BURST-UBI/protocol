@@ -193,10 +193,16 @@ impl Rows {
             b"verified_count",
             verified.to_be_bytes().to_vec(),
         )?;
-        for (token, at) in state.minted_burns.iter()
-            .take(if include_recorded { usize::MAX } else { 0 }) {
+        for (token, at) in
+            state
+                .minted_burns
+                .iter()
+                .take(if include_recorded { usize::MAX } else { 0 })
+        {
             for (table, key, value) in crate::confirmed_replay::mutations::mint_rows(
-                *token, *at, state.params.trst_expiry_secs,
+                *token,
+                *at,
+                state.params.trst_expiry_secs,
             ) {
                 rows.put(table, &key, value)?;
             }
@@ -211,8 +217,13 @@ impl Rows {
             key.extend_from_slice(source.as_bytes());
             rows.encoded(UndoTable::Pending, &key, pending)?;
         }
-        for (address, wallet) in state.brn.wallets.iter()
-            .take(if include_recorded { usize::MAX } else { 0 }) {
+        for (address, wallet) in
+            state
+                .brn
+                .wallets
+                .iter()
+                .take(if include_recorded { usize::MAX } else { 0 })
+        {
             rows.encoded(UndoTable::BrnWallets, address.as_str().as_bytes(), wallet)?;
         }
         rows.encoded(UndoTable::BrnMeta, b"rate_history", &state.brn.rate_history)?;
@@ -531,7 +542,9 @@ mod tests {
         for n in 0..1024 {
             let mut token = [0; 32];
             token[..8].copy_from_slice(&(n as u64).to_be_bytes());
-            state.minted_burns.insert(burst_types::TxHash::new(token), at);
+            state
+                .minted_burns
+                .insert(burst_types::TxHash::new(token), at);
             let holder = burst_types::WalletAddress::new(format!("brst_unrelated_{n}"));
             state.accounts.insert(
                 holder.clone(),
@@ -561,8 +574,12 @@ mod tests {
                 assert_eq!(before.values.get(table, &key)?.as_ref(), Some(&value));
                 assert!(!matches!(
                     table,
-                    UndoTable::Accounts | UndoTable::Frontiers | UndoTable::Pending
-                        | UndoTable::TrstOrigins | UndoTable::TrstExpiry | UndoTable::TrstReverse
+                    UndoTable::Accounts
+                        | UndoTable::Frontiers
+                        | UndoTable::Pending
+                        | UndoTable::TrstOrigins
+                        | UndoTable::TrstExpiry
+                        | UndoTable::TrstReverse
                 ));
                 Ok(())
             })

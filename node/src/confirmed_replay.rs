@@ -347,8 +347,7 @@ impl ConfirmedReplay {
     ) -> Result<(), ReplayError> {
         let authenticated = if block.block_type == BlockType::Epoch {
             crate::payment_transition::authenticate_epoch_contents(block, params, genesis)
-        } else if self.governance.is_some() && governance::supports(&block.block_type)
-        {
+        } else if self.governance.is_some() && governance::supports(&block.block_type) {
             crate::payment_transition::authenticate_signed_contents(block, params)
         } else {
             crate::payment_transition::authenticate_contents(block, params)
@@ -389,10 +388,14 @@ impl ConfirmedReplay {
 
     fn record_minted_burn(&mut self, token: TxHash, at: Timestamp) -> Result<(), ReplayError> {
         if let Some(mutations) = &mut self.mutations {
-            mutations.record_mint(
-                token, self.minted_burns.get(&token).copied(), at,
-                self.params.trst_expiry_secs,
-            ).map_err(|error| invalid(error.to_string()))?;
+            mutations
+                .record_mint(
+                    token,
+                    self.minted_burns.get(&token).copied(),
+                    at,
+                    self.params.trst_expiry_secs,
+                )
+                .map_err(|error| invalid(error.to_string()))?;
         }
         self.minted_burns.insert(token, at);
         Ok(())
@@ -603,7 +606,9 @@ impl ConfirmedReplay {
         let previous = applied
             .get(&block.previous)
             .map_err(|error| invalid(error.to_string()))?;
-        block.validate_signing_grant(previous.as_deref()).map_err(invalid)?;
+        block
+            .validate_signing_grant(previous.as_deref())
+            .map_err(invalid)?;
         let previous_brn = previous.as_ref().map_or(0, |block| block.brn_balance);
         let previous_trst = previous.as_ref().map_or(0, |block| block.trst_balance);
         if previous.is_some() {
@@ -1112,7 +1117,8 @@ mod tests {
             block.account = account.clone();
             block.representative = previous.map_or(account, |block| block.representative.clone());
             block.previous = previous.map_or(BlockHash::ZERO, |block| block.hash);
-            block.signing_grant = previous.map_or(BlockHash::ZERO, StateBlock::active_signing_grant);
+            block.signing_grant =
+                previous.map_or(BlockHash::ZERO, StateBlock::active_signing_grant);
             block.brn_balance = previous.map_or(0, |block| block.brn_balance);
             block.trst_balance = previous.map_or(0, |block| block.trst_balance);
             block.timestamp = Timestamp::new(time);

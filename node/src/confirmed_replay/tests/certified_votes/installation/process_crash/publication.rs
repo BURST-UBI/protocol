@@ -324,7 +324,12 @@ async fn check_governance_counting(node: &BurstNode) {
     }
 }
 
-fn accept_publication(fixture: &Fixture, store: &LmdbStore, heads: Vec<HistoryHead>, governance: bool) {
+fn accept_publication(
+    fixture: &Fixture,
+    store: &LmdbStore,
+    heads: Vec<HistoryHead>,
+    governance: bool,
+) {
     if governance {
         let candidate = crate::checkpoint_governance::PreparedGovernance::prepare_next(
             store,

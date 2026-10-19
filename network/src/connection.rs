@@ -215,7 +215,9 @@ mod tests {
     #[tokio::test]
     async fn peer_socket_configuration_survives_split_and_preserves_framing() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let client = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
         let (server, _) = listener.accept().await.unwrap();
         for stream in [&client, &server] {
             stream.set_nodelay(false).unwrap();

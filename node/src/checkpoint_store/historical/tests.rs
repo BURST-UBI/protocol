@@ -18,7 +18,8 @@ fn fixture() -> (
         ..ProtocolParams::default()
     };
     let genesis = crate::genesis_state::block(NetworkId::Dev, &params);
-    let account = AccountState { signing_grant: burst_types::BlockHash::ZERO,
+    let account = AccountState {
+        signing_grant: burst_types::BlockHash::ZERO,
         payment_epoch: genesis.hash,
         head: genesis.hash,
         block_count: 1,

@@ -78,8 +78,14 @@ impl PreparedCompactInstallation {
             .installation_blocks(|hash| store.block_store().get_block_txn(&read, hash))
             .map(|row| {
                 let row = row?;
-                supplied.insert(row.hash, (row.account.clone(), row.height,
-                    burst_crypto::blake2b_256(&row.bytes)));
+                supplied.insert(
+                    row.hash,
+                    (
+                        row.account.clone(),
+                        row.height,
+                        burst_crypto::blake2b_256(&row.bytes),
+                    ),
+                );
                 Ok(row)
             });
         let anchor = self.next.continuation.anchor().clone();
@@ -102,23 +108,50 @@ impl PreparedCompactInstallation {
             transaction.advance_snapshot_payment_epoch(&parent, &anchor.hash())?;
         let ledger_counts = transaction.ledger_counts()?;
         let inventory = Arc::new(self.installed.inventory.capture_successor(
-            &transaction, self.installed.recovered.continuation.state(), &supplied)?);
-        let cemented = Arc::new(super::super::super::tail::cemented::capture_installed::<true>(
-            &self.next.continuation, &transaction, store.env().path(), self.witnesses.clone())?);
-        let applied = Arc::new(super::super::super::tail::cemented::capture_installed::<false>(
-            &self.next.continuation, &transaction, store.env().path(), self.witnesses)?);
+            &transaction,
+            self.installed.recovered.continuation.state(),
+            &supplied,
+        )?);
+        let cemented = Arc::new(super::super::super::tail::cemented::capture_installed::<
+            true,
+        >(
+            &self.next.continuation,
+            &transaction,
+            store.env().path(),
+            self.witnesses.clone(),
+        )?);
+        let applied = Arc::new(super::super::super::tail::cemented::capture_installed::<
+            false,
+        >(
+            &self.next.continuation,
+            &transaction,
+            store.env().path(),
+            self.witnesses,
+        )?);
         let ordering = super::super::order::read(&transaction, &applied, &self.next.continuation)?;
         if !ordering.is_empty() {
-            return Err(invalid("installed checkpoint retains provisional application order"));
+            return Err(invalid(
+                "installed checkpoint retains provisional application order",
+            ));
         }
         let economics = Arc::new(super::super::economics::AppliedEconomics {
-            state: state.clone(), ordering,
+            state: state.clone(),
+            ordering,
         });
         economics.verify_unchanged(&transaction)?;
-        self.next.continuation.verify_installed_metadata_in(&transaction, &cemented)?;
+        self.next
+            .continuation
+            .verify_installed_metadata_in(&transaction, &cemented)?;
         let handoff = super::super::CommittedProjection {
-            network: anchor.network(), initial: self.installed.initial, epoch: anchor.hash(),
-            projection: super::super::projection_cache::Projection { cemented, applied, inventory, economics },
+            network: anchor.network(),
+            initial: self.installed.initial,
+            epoch: anchor.hash(),
+            projection: super::super::projection_cache::Projection {
+                cemented,
+                applied,
+                inventory,
+                economics,
+            },
             replay: Arc::new(ReplayCache {
                 base: self.installed.base_commitment.commitment(),
                 recovered: self.next.fork(store.env().path())?,
@@ -206,7 +239,11 @@ impl RecoveredInstalledMetadata {
                 plan.witness_hashes().iter().copied().collect();
             let mut available = Vec::new();
             let mut seen = std::collections::HashSet::new();
-            for proof in self.applied.tail().retained().iter()
+            for proof in self
+                .applied
+                .tail()
+                .retained()
+                .iter()
                 .chain(self.cemented.tail().retained().iter())
             {
                 let proof = proof?;
@@ -225,25 +262,38 @@ impl RecoveredInstalledMetadata {
                 recovered: installed.recovered,
             })));
         };
-        let retained =
-            witness::fetch_plan_reusing(
-                &registry, &installed.recovered.continuation, &plan, available,
-            ).await?;
+        let retained = witness::fetch_plan_reusing(
+            &registry,
+            &installed.recovered.continuation,
+            &plan,
+            available,
+        )
+        .await?;
         let source = store.clone();
-        let (installed, next, cut, observations, witness_plan) = tokio::task::spawn_blocking(move || {
-            let tail = plan.finish(retained).map_err(invalid)?;
-            let (next, cut) =
-                installed
-                    .recovered
-                    .installation_successor(&source, record, &observations, tail)?;
-            let witness_plan = super::super::super::tail::cemented::plan_installed(
-                &next.continuation, source.env().path()).map_err(invalid)?;
-            Ok::<_, StoreError>((installed, next, cut, observations, witness_plan))
-        }).await.map_err(invalid)??;
+        let (installed, next, cut, observations, witness_plan) =
+            tokio::task::spawn_blocking(move || {
+                let tail = plan.finish(retained).map_err(invalid)?;
+                let (next, cut) = installed.recovered.installation_successor(
+                    &source,
+                    record,
+                    &observations,
+                    tail,
+                )?;
+                let witness_plan = super::super::super::tail::cemented::plan_installed(
+                    &next.continuation,
+                    source.env().path(),
+                )
+                .map_err(invalid)?;
+                Ok::<_, StoreError>((installed, next, cut, observations, witness_plan))
+            })
+            .await
+            .map_err(invalid)??;
         let witnesses = witness::fetch_plan(&registry, &next.continuation, &witness_plan).await?;
         tokio::task::spawn_blocking(move || {
             let witnesses = Arc::new(super::super::super::history::HistoricalBlocks::stage(
-                store.env().path(), witnesses)?);
+                store.env().path(),
+                witnesses,
+            )?);
             let prepared = PreparedCompactInstallation {
                 installed,
                 next,

@@ -219,9 +219,16 @@ mod tests {
         batch.put_meta(&sequence_key, &0u64.to_be_bytes()).unwrap();
         assert!(sequences.verify(&batch).is_err());
         batch.put_meta(&sequence_key, &2u64.to_be_bytes()).unwrap();
-        let promise_key = format!("consensus_final/v2/{}/{}/{}/{}",
-            anchor.hash(), signer(0), signer(0), BlockHash::new([7; 32]));
-        batch.put_meta(&promise_key, BlockHash::new([9; 32]).as_bytes()).unwrap();
+        let promise_key = format!(
+            "consensus_final/v2/{}/{}/{}/{}",
+            anchor.hash(),
+            signer(0),
+            signer(0),
+            BlockHash::new([7; 32])
+        );
+        batch
+            .put_meta(&promise_key, BlockHash::new([9; 32]).as_bytes())
+            .unwrap();
         assert_ne!(super::super::observe(&batch).unwrap(), fingerprint);
         drop(batch);
         drop(store);

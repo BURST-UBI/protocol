@@ -38,7 +38,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
                 let readiness = node.rpc_call("params_hash", json!({})).await?;
-                if matches!(readiness["online_signing"].as_str(), Some("local" | "peer_matches")) {
+                if matches!(
+                    readiness["online_signing"].as_str(),
+                    Some("local" | "peer_matches")
+                ) {
                     break;
                 }
             }
@@ -54,15 +57,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sender = if let Some(path) = std::env::var_os("VALIDATION_DEVICE_BINDING") {
         let account = burst_crypto::derive_address(&keys.public);
         let grant = burst_wallet_core::signing_device::load(std::path::Path::new(&path), &account)?;
-        assert!(!grant.is_zero(), "explicit fixture binding must be enrolled");
+        assert!(
+            !grant.is_zero(),
+            "explicit fixture binding must be enrolled"
+        );
         nodes[0].clone().with_signing_grant(grant)
     } else {
         nodes[0].clone()
     };
     let amount = 1_000_000_000_000u128;
-    let payment = sender
-        .pay_signed(&keys, &recipient.address, amount)
-        .await?;
+    let payment = sender.pay_signed(&keys, &recipient.address, amount).await?;
     for node in &nodes {
         node.wait_confirmed(&payment.hash, Duration::from_secs(40))
             .await?;
@@ -92,15 +96,30 @@ async fn protocol_epoch(mode: &str, url: &str) -> Result<(), Box<dyn std::error:
     use burst_ledger::{BlockType, StateBlock};
     use burst_types::{BlockHash, Timestamp, TxHash};
     let node = NodeClient::new(url)?;
-    assert_eq!(node.rpc_call("node_info", json!({})).await?["network"], "dev");
+    assert_eq!(
+        node.rpc_call("node_info", json!({})).await?["network"],
+        "dev"
+    );
     let keys = burst_crypto::keypair_from_seed(&[0; 32]);
     let account = burst_crypto::derive_address(&keys.public);
     let state = node.inspect_signing_state(&account).await?;
-    assert!(state.signing_grant.is_zero(), "requires an unenrolled disposable creator");
-    let response = node.rpc_call("block_info", json!({
-        "hash":state.head.to_string(), "include_signed_block":true,
-    })).await?;
-    let previous: StateBlock = serde_json::from_str(response["signed_block"].as_str().ok_or("missing signed predecessor")?)?;
+    assert!(
+        state.signing_grant.is_zero(),
+        "requires an unenrolled disposable creator"
+    );
+    let response = node
+        .rpc_call(
+            "block_info",
+            json!({
+                "hash":state.head.to_string(), "include_signed_block":true,
+            }),
+        )
+        .await?;
+    let previous: StateBlock = serde_json::from_str(
+        response["signed_block"]
+            .as_str()
+            .ok_or("missing signed predecessor")?,
+    )?;
     assert_eq!(previous.account, account);
     assert_eq!((previous.brn_balance, previous.trst_balance), (0, 0));
     let kind = match mode {
@@ -120,30 +139,54 @@ async fn protocol_epoch(mode: &str, url: &str) -> Result<(), Box<dyn std::error:
     block.block_type = kind;
     block.previous = previous.hash;
     block.payment_epoch = state.payment_epoch;
-    block.params_hash = burst_wallet_core::signed_client::parse_hash(params["params_hash"].as_str().ok_or("missing params hash")?)?;
+    block.params_hash = burst_wallet_core::signed_client::parse_hash(
+        params["params_hash"]
+            .as_str()
+            .ok_or("missing params hash")?,
+    )?;
     block.timestamp = Timestamp::now();
     block.link = BlockHash::ZERO;
     block.origin = TxHash::ZERO;
     block.transaction = TxHash::ZERO;
     block.hash = block.compute_hash();
     block.signature = burst_crypto::sign_message(block.hash.as_bytes(), &keys.private);
-    let work = node.rpc_call("work_generate", json!({
-        "hash":block.work_root().to_string(), "block_type":block.block_type,
-    })).await?;
+    let work = node
+        .rpc_call(
+            "work_generate",
+            json!({
+                "hash":block.work_root().to_string(), "block_type":block.block_type,
+            }),
+        )
+        .await?;
     block.work = u64::from_str_radix(
-        work["work"].as_str().ok_or("missing work nonce")?.trim_start_matches("0x"), 16,
+        work["work"]
+            .as_str()
+            .ok_or("missing work nonce")?
+            .trim_start_matches("0x"),
+        16,
     )?;
     let signed = serde_json::to_string(&block)?;
     let result = node.process(&signed).await?;
-    assert!(result.accepted, "protocol epoch action rejected: {result:?}");
+    assert!(
+        result.accepted,
+        "protocol epoch action rejected: {result:?}"
+    );
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
-            if node.inspect_signing_state(&account).await.is_ok_and(|state| state.head == block.hash) {
+            if node
+                .inspect_signing_state(&account)
+                .await
+                .is_ok_and(|state| state.head == block.hash)
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    }).await?;
-    println!("{}", json!({"account":account.to_string(), "hash":block.hash.to_string(), "signedBlock":signed}));
+    })
+    .await?;
+    println!(
+        "{}",
+        json!({"account":account.to_string(), "hash":block.hash.to_string(), "signedBlock":signed})
+    );
     Ok(())
 }

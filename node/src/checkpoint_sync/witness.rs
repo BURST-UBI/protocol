@@ -26,8 +26,8 @@ use tokio::sync::{oneshot, RwLock};
 mod cache;
 mod exact;
 mod service;
-pub(crate) use service::start;
 pub(crate) use exact::{fetch as fetch_exact_heads, MAX_HEADS as MAX_EXACT_HEADS};
+pub(crate) use service::start;
 
 const MAX_BATCH: usize = history::MAX_WITNESS_BYTES + 4 * history::MAX_WITNESS_BLOCKS + 4;
 const MAX_WALK_BYTES: usize = 64 * 1024 * 1024;
@@ -137,7 +137,9 @@ pub(crate) async fn fetch_plan_reusing(
         if !missing.contains(&proof.block().hash) {
             continue;
         }
-        let cursor = base.history_cursor(&proof.block().account).map_err(invalid)?;
+        let cursor = base
+            .history_cursor(&proof.block().account)
+            .map_err(invalid)?;
         let belongs = proof.context() == plan.context()
             && cursor.and_then(|cursor| cursor.next()).is_some_and(|head| {
                 proof.height() <= head.height
@@ -151,11 +153,13 @@ pub(crate) async fn fetch_plan_reusing(
     if missing.is_empty() {
         return Ok(retained);
     }
-    let wanted: Vec<_> = plan.witness_hashes().iter().copied()
-        .filter(|hash| missing.contains(hash)).collect();
-    let committed = base
-        .committed_history_cursors(&wanted)
-        .map_err(invalid)?;
+    let wanted: Vec<_> = plan
+        .witness_hashes()
+        .iter()
+        .copied()
+        .filter(|hash| missing.contains(hash))
+        .collect();
+    let committed = base.committed_history_cursors(&wanted).map_err(invalid)?;
     retained.extend(request_with_committed(registry, roots, wanted, committed).await?);
     Ok(retained)
 }
@@ -606,7 +610,8 @@ impl Transfer {
         }
         let proofs = self.cache.available(&command.roots, &command.wanted);
         let retained_bytes = match proofs.iter().try_fold(0usize, |bytes, proof| {
-            bytes.checked_add(bincode::serialized_size(proof.block()).map_err(invalid)? as usize)
+            bytes
+                .checked_add(bincode::serialized_size(proof.block()).map_err(invalid)? as usize)
                 .filter(|bytes| *bytes <= MAX_TAIL_BYTES)
                 .ok_or_else(|| invalid("cached witnesses exceed byte budget"))
         }) {
@@ -617,11 +622,18 @@ impl Transfer {
             }
         };
         if proofs.len() == command.wanted.len() {
-            tracing::debug!(wanted = command.wanted.len(), "historical witness cache satisfied request");
+            tracing::debug!(
+                wanted = command.wanted.len(),
+                "historical witness cache satisfied request"
+            );
             let _ = command.result.send(Ok(proofs));
             return;
         }
-        tracing::debug!(cached = proofs.len(), wanted = command.wanted.len(), "historical witness partial cache reuse");
+        tracing::debug!(
+            cached = proofs.len(),
+            wanted = command.wanted.len(),
+            "historical witness partial cache reuse"
+        );
         let mut wanted: HashSet<_> = command.wanted.into_iter().collect();
         for proof in &proofs {
             wanted.remove(&proof.block().hash);
@@ -752,7 +764,10 @@ impl Transfer {
                 Some(starts) => exact::read(store, starts)?,
                 None => match history::read_chunk(store, start, history::MAX_WITNESS_BLOCKS) {
                     Ok(blocks) => blocks,
-                    Err(error) => self.cache.read_chunk(start)?.ok_or_else(|| invalid(error))?,
+                    Err(error) => self
+                        .cache
+                        .read_chunk(start)?
+                        .ok_or_else(|| invalid(error))?,
                 },
             };
             let bytes = encode(&blocks)?;
@@ -910,7 +925,8 @@ impl Transfer {
                             .remove(&proof.block().hash);
                         job.wanted.remove(&proof.block().hash);
                         job.retained.push(proof);
-                        job.retained_from_peer.push(incoming.peer != LOCAL_WITNESS_PEER);
+                        job.retained_from_peer
+                            .push(incoming.peer != LOCAL_WITNESS_PEER);
                     }
                     if job.wanted.is_empty() {
                         let job = self.job.take().expect("active exact witness job");
@@ -991,7 +1007,8 @@ impl Transfer {
                             return Ok(None);
                         }
                         job.retained.push(witness);
-                        job.retained_from_peer.push(incoming.peer != LOCAL_WITNESS_PEER);
+                        job.retained_from_peer
+                            .push(incoming.peer != LOCAL_WITNESS_PEER);
                     }
                 }
                 let complete = match job.floor {
@@ -1051,7 +1068,12 @@ mod tests {
         for _ in 0..3 {
             assert_eq!(transfer.select_peer(&mut peers, now).as_deref(), Some("b"));
         }
-        assert_eq!(transfer.select_peer(&mut peers, now + PEER_TIMEOUT * 3).as_deref(), Some("c"));
+        assert_eq!(
+            transfer
+                .select_peer(&mut peers, now + PEER_TIMEOUT * 3)
+                .as_deref(),
+            Some("c")
+        );
         assert!(transfer.preferred_peer.is_none());
         transfer.preferred_peer = Some(("b".into(), now));
         assert_eq!(transfer.select_peer(&mut peers, now).as_deref(), Some("b"));

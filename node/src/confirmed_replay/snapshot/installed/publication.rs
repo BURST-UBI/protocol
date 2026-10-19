@@ -1,5 +1,5 @@
 use super::*;
-use crate::confirmed_replay::{ConfirmedReplay, snapshot::SelectionSource};
+use crate::confirmed_replay::{snapshot::SelectionSource, ConfirmedReplay};
 use burst_verification::{OrchestratorSnapshot, VerificationEvent, VerificationOrchestrator};
 
 /// A local snapshot may name a published committee before certified activation.

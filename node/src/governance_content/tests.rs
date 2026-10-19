@@ -21,7 +21,8 @@ fn content() -> ProposalContent {
 fn proposal() -> (StateBlock, EncodedContent) {
     let params = ProtocolParams::default();
     let genesis = crate::genesis_state::block(NetworkId::Dev, &params);
-    let state = AccountState { signing_grant: burst_types::BlockHash::ZERO,
+    let state = AccountState {
+        signing_grant: burst_types::BlockHash::ZERO,
         payment_epoch: genesis.hash,
         head: genesis.hash,
         block_count: 1,

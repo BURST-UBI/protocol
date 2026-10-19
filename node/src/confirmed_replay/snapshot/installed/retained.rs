@@ -46,21 +46,31 @@ impl RetainedInventory {
         supplied: &HashMap<BlockHash, (WalletAddress, u64, [u8; 32])>,
     ) -> Result<Self, StoreError> {
         let old: HashMap<_, _> = self.rows.iter().map(|row| (row.hash, row)).collect();
-        let rows = batch.indexed_block_entries(MAX_ROWS, MAX_BYTES)?
+        let rows = batch
+            .indexed_block_entries(MAX_ROWS, MAX_BYTES)?
             .map(|row| {
                 let row = Observation::from(&row?);
                 let inherited = old.get(&row.hash).is_some_and(|old| **old == row)
-                    && previous.account(&row.account)
+                    && previous
+                        .account(&row.account)
                         .is_some_and(|account| row.height <= account.block_count);
-                let installed = supplied.get(&row.hash)
-                    .is_some_and(|(account, height, digest)|
-                        *account == row.account && *height == row.height && *digest == row.digest);
+                let installed = supplied
+                    .get(&row.hash)
+                    .is_some_and(|(account, height, digest)| {
+                        *account == row.account && *height == row.height && *digest == row.digest
+                    });
                 if !inherited && !installed {
-                    return Err(invalid("post-install retained row has no authenticated origin"));
+                    return Err(invalid(
+                        "post-install retained row has no authenticated origin",
+                    ));
                 }
                 Ok(row)
-            }).collect::<Result<Vec<_>, StoreError>>()?;
-        Ok(Self { rows, accounts: AccountInventory::read(batch.account_entries()?)? })
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        Ok(Self {
+            rows,
+            accounts: AccountInventory::read(batch.account_entries()?)?,
+        })
     }
 
     pub(super) fn verify_unchanged(

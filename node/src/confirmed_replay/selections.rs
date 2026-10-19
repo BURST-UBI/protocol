@@ -36,10 +36,7 @@ pub(super) struct Selections<'a, S: SelectionSource + ?Sized> {
 }
 
 impl<'a, S: SelectionSource + ?Sized> Selections<'a, S> {
-    pub(super) fn new(
-        certificates: &'a S,
-        blocks: &[StateBlock],
-    ) -> Result<Self, ReplayError> {
+    pub(super) fn new(certificates: &'a S, blocks: &[StateBlock]) -> Result<Self, ReplayError> {
         Self::build(
             certificates,
             blocks
@@ -102,8 +99,9 @@ impl<'a, S: SelectionSource + ?Sized> Selections<'a, S> {
                     if previous[4..] != [0; 28] {
                         return Err(invalid("invalid staged lifecycle attempt"));
                     }
-                    Ok(u32::from_be_bytes(previous[..4].try_into()
-                        .map_err(|_| invalid("invalid staged lifecycle attempt"))?))
+                    Ok(u32::from_be_bytes(previous[..4].try_into().map_err(
+                        |_| invalid("invalid staged lifecycle attempt"),
+                    )?))
                 })
                 .transpose()?;
             let expected_attempt =
@@ -229,13 +227,16 @@ impl<'a, S: SelectionSource + ?Sized> Selections<'a, S> {
         budget: usize,
     ) -> Result<Vec<BlockHash>, ReplayError> {
         let vote_panel = if block.block_type == BlockType::VerificationVote {
-            Some(self
-                .panels
-                .require(&BlockHash::new(*block.origin.as_bytes()))?)
+            Some(
+                self.panels
+                    .require(&BlockHash::new(*block.origin.as_bytes()))?,
+            )
         } else {
             None
         };
-        let heads = vote_panel.as_ref().map_or(&[][..], |panel| panel.certificate.heads());
+        let heads = vote_panel
+            .as_ref()
+            .map_or(&[][..], |panel| panel.certificate.heads());
         let context = if matches!(
             block.block_type,
             BlockType::Open | BlockType::Receive | BlockType::RejectReceive

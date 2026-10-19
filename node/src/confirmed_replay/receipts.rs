@@ -1,6 +1,10 @@
 use super::{invalid, scratch_records::ScratchRecords, ReplayError};
 use crate::checkpoint_replay::SelectionReceipt;
-use serde::{de::{DeserializeOwned, SeqAccess}, ser::SerializeSeq, Deserialize, Serialize};
+use serde::{
+    de::{DeserializeOwned, SeqAccess},
+    ser::SerializeSeq,
+    Deserialize, Serialize,
+};
 use std::{borrow::Cow, path::Path, sync::Arc};
 
 #[derive(Clone)]
@@ -51,10 +55,7 @@ impl<T: Clone + Serialize + DeserializeOwned> OrderedHistory<T> {
         Ok(())
     }
 
-    pub(super) fn get(
-        &self,
-        index: usize,
-    ) -> Result<Option<Cow<'_, T>>, ReplayError> {
+    pub(super) fn get(&self, index: usize) -> Result<Option<Cow<'_, T>>, ReplayError> {
         match self {
             Self::Memory(rows) => Ok(rows.get(index).map(Cow::Borrowed)),
             Self::Disk { rows, len } => {
@@ -69,9 +70,7 @@ impl<T: Clone + Serialize + DeserializeOwned> OrderedHistory<T> {
         }
     }
 
-    pub(super) fn iter(
-        &self,
-    ) -> impl Iterator<Item = Result<Cow<'_, T>, ReplayError>> {
+    pub(super) fn iter(&self) -> impl Iterator<Item = Result<Cow<'_, T>, ReplayError>> {
         (0..self.len()).map(|index| {
             self.get(index)?
                 .ok_or_else(|| invalid("missing history row"))
@@ -114,10 +113,7 @@ impl<T: Clone + Serialize + DeserializeOwned> OrderedHistory<T> {
         match (self, other) {
             (Self::Disk { rows: a, .. }, Self::Disk { rows: b, .. }) => Arc::ptr_eq(a, b),
             (Self::Memory(a), Self::Memory(b)) => {
-                a.len() == b.len()
-                    && a.iter()
-                        .zip(b)
-                        .all(|(a, b)| std::ptr::eq(a, b))
+                a.len() == b.len() && a.iter().zip(b).all(|(a, b)| std::ptr::eq(a, b))
             }
             _ => false,
         }

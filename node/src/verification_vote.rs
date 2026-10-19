@@ -113,7 +113,8 @@ mod tests {
         );
         let transaction =
             build_verification_vote_tx(&voter, &target, context, vote, stake, time(1000)).unwrap();
-        let state = AccountState { signing_grant: burst_types::BlockHash::ZERO,
+        let state = AccountState {
+            signing_grant: burst_types::BlockHash::ZERO,
             payment_epoch: burst_types::BlockHash::new([1; 32]),
             release_sources: Vec::new(),
             head: BlockHash::new([1; 32]),

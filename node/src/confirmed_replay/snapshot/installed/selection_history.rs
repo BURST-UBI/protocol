@@ -44,7 +44,12 @@ impl SelectionHistory {
     }
 
     pub(super) fn new(authority: AuthorityHistory, directory: &Path) -> Result<Self, StoreError> {
-        Ok(Self { authority, rows: ScratchRecords::new(directory)?, count: 0, last_height: 0 })
+        Ok(Self {
+            authority,
+            rows: ScratchRecords::new(directory)?,
+            count: 0,
+            last_height: 0,
+        })
     }
 
     pub(super) fn fork(&self, directory: &Path) -> Result<Self, StoreError> {
@@ -61,7 +66,10 @@ impl SelectionHistory {
         if height <= self.last_height {
             return Err(invalid("selection history is not strictly ordered"));
         }
-        let count = self.count.checked_add(1).ok_or_else(|| invalid("selection history overflow"))?;
+        let count = self
+            .count
+            .checked_add(1)
+            .ok_or_else(|| invalid("selection history overflow"))?;
         let row = Row {
             certificate: selection.certificate().clone(),
             receipt: selection.replayed().receipt(),
@@ -79,7 +87,9 @@ impl SelectionHistory {
         if position >= self.count {
             return Err(invalid("selection history position is out of bounds"));
         }
-        self.rows.get(&key(position))?.ok_or_else(|| invalid("missing selection history row"))
+        self.rows
+            .get(&key(position))?
+            .ok_or_else(|| invalid("missing selection history row"))
     }
 
     pub(crate) fn attach_beacon(
@@ -95,7 +105,8 @@ impl SelectionHistory {
                 found = Some((position, selection.beacon().cloned()));
             }
         }
-        let (position, beacon) = found.ok_or_else(|| invalid("beacon has no recovered selection"))?;
+        let (position, beacon) =
+            found.ok_or_else(|| invalid("beacon has no recovered selection"))?;
         let mut row = self.row(position)?;
         if row.beacon.is_some() {
             return Ok(());
@@ -128,7 +139,9 @@ impl SelectionHistory {
                 }
             } else {
                 pending.put(hash, &beacon)?;
-                count = count.checked_add(1).ok_or_else(|| invalid("beacon count overflow"))?;
+                count = count
+                    .checked_add(1)
+                    .ok_or_else(|| invalid("beacon count overflow"))?;
             }
         }
         if count == 0 {
@@ -160,13 +173,17 @@ impl SelectionHistory {
 }
 
 impl SelectionSource for SelectionHistory {
-    fn len(&self) -> usize { self.count }
+    fn len(&self) -> usize {
+        self.count
+    }
 
     fn read_selection(&self, position: usize) -> Result<Cow<'_, CertifiedCheckpoint>, ReplayError> {
         let mut found = None;
         for (index, selection) in self.read_all().enumerate() {
             let selection = selection?;
-            if position == index { found = Some(selection); }
+            if position == index {
+                found = Some(selection);
+            }
         }
         found.ok_or_else(|| super::super::super::invalid("missing authenticated selection"))
     }
@@ -177,31 +194,53 @@ impl SelectionSource for SelectionHistory {
         let mut position = 0;
         let mut finished = false;
         std::iter::from_fn(move || {
-            if finished { return None; }
+            if finished {
+                return None;
+            }
             let result: Result<Option<Cow<'_, CertifiedCheckpoint>>, StoreError> = (|| {
                 if position == self.count {
-                    for anchor in anchors.by_ref() { anchor?; }
+                    for anchor in anchors.by_ref() {
+                        anchor?;
+                    }
                     finished = true;
                     return Ok(None);
                 }
                 let row = self.row(position)?;
-                let parent_height = row.certificate.checkpoint.height.checked_sub(1)
+                let parent_height = row
+                    .certificate
+                    .checkpoint
+                    .height
+                    .checked_sub(1)
                     .ok_or_else(|| invalid("selection history includes genesis"))?;
-                while current.as_ref().is_none_or(|anchor| anchor.height() < parent_height) {
-                    current = Some(anchors.next().ok_or_else(|| invalid("missing historical parent"))??);
+                while current
+                    .as_ref()
+                    .is_none_or(|anchor| anchor.height() < parent_height)
+                {
+                    current = Some(
+                        anchors
+                            .next()
+                            .ok_or_else(|| invalid("missing historical parent"))??,
+                    );
                 }
-                let parent = current.as_ref().ok_or_else(|| invalid("missing historical parent"))?;
+                let parent = current
+                    .as_ref()
+                    .ok_or_else(|| invalid("missing historical parent"))?;
                 if parent.height() != parent_height {
                     return Err(invalid("selection history is out of authority order"));
                 }
-                let next = anchors.next().ok_or_else(|| invalid("missing selection authority"))??;
+                let next = anchors
+                    .next()
+                    .ok_or_else(|| invalid("missing selection authority"))??;
                 if next.hash() != row.certificate.checkpoint.hash() {
                     return Err(invalid("selection differs from historical authority"));
                 }
                 row.receipt.validate_at(&next)?;
                 let replay = row.receipt.restore(parent)?;
-                let mut selection = CertifiedCheckpoint::from_compact(parent.clone(), row.certificate, replay)?;
-                if let Some(beacon) = row.beacon { selection.attach_compact_beacon(beacon)?; }
+                let mut selection =
+                    CertifiedCheckpoint::from_compact(parent.clone(), row.certificate, replay)?;
+                if let Some(beacon) = row.beacon {
+                    selection.attach_compact_beacon(beacon)?;
+                }
                 current = Some(next);
                 position += 1;
                 Ok(Some(Cow::Owned(selection)))

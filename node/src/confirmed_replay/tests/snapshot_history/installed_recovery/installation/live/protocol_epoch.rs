@@ -3,19 +3,29 @@ use super::*;
 async fn stored(node: &Running, hash: BlockHash) {
     tokio::time::timeout(Duration::from_secs(90), async {
         while !node.store.block_store().exists(&hash).unwrap() {
-            assert!(!node.task.as_ref().unwrap().is_finished(), "node exited: {:?}", node.stop.failure());
+            assert!(
+                !node.task.as_ref().unwrap().is_finished(),
+                "node exited: {:?}",
+                node.stop.failure()
+            );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    }).await.expect("protocol epoch action did not reach the ledger");
+    })
+    .await
+    .expect("protocol epoch action did not reach the ledger");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn saturated_ingress_recovers_dependency_and_persists_owner_chain() {
-    let _permit = crate::verification_test_support::NETWORK_FIXTURE.acquire().await.unwrap();
+    let _permit = crate::verification_test_support::NETWORK_FIXTURE
+        .acquire()
+        .await
+        .unwrap();
     let prepared = prepare();
     let store = LmdbStore::open(&prepared.source_config.data_dir, 32, 64 * 1024 * 1024).unwrap();
     let before = store.account_store().get_account(&address(1)).unwrap();
-    let previous: StateBlock = bincode::deserialize(&store.block_store().get_block(&before.head).unwrap()).unwrap();
+    let previous: StateBlock =
+        bincode::deserialize(&store.block_store().get_block(&before.head).unwrap()).unwrap();
     drop(store);
     let mut parent = previous.clone();
     parent.block_type = BlockType::ChangeRepresentative;
@@ -36,12 +46,16 @@ async fn saturated_ingress_recovers_dependency_and_persists_owner_chain() {
     child.previous = parent.hash;
     child.representative = address(2);
     sign(1, &mut child);
-    let source = Running::start_prefilled(prepared.source_config.clone(), prepared.now, Some(&child)).await;
+    let source =
+        Running::start_prefilled(prepared.source_config.clone(), prepared.now, Some(&child)).await;
     source.ready(prepared.epoch).await;
     let target = Running::start(prepared.target_config.clone(), prepared.now).await;
     target.ready(prepared.epoch).await;
     let response = submit(&source, &serde_json::to_string(&parent).unwrap()).await;
-    assert!(response.accepted, "parent could not progress after ingress pressure: {response:?}");
+    assert!(
+        response.accepted,
+        "parent could not progress after ingress pressure: {response:?}"
+    );
     stored(&source, child.hash).await;
     stored(&target, child.hash).await;
     for node in [&source, &target] {
@@ -54,15 +68,24 @@ async fn saturated_ingress_recovers_dependency_and_persists_owner_chain() {
     drop(source.stop().await);
     let source = Running::start(prepared.source_config.clone(), prepared.now + 1).await;
     source.ready(prepared.epoch).await;
-    assert_eq!(source.client.signing_state(&address(1)).await.unwrap().head, child.hash);
-    assert_eq!(source.store.block_store().get_block(&child.hash).unwrap(), bincode::serialize(&child).unwrap());
+    assert_eq!(
+        source.client.signing_state(&address(1)).await.unwrap().head,
+        child.hash
+    );
+    assert_eq!(
+        source.store.block_store().get_block(&child.hash).unwrap(),
+        bincode::serialize(&child).unwrap()
+    );
     source.stop().await;
     target.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn protocol_epoch_crosses_peer_transport_and_restarts_with_owner_successor() {
-    let _permit = crate::verification_test_support::NETWORK_FIXTURE.acquire().await.unwrap();
+    let _permit = crate::verification_test_support::NETWORK_FIXTURE
+        .acquire()
+        .await
+        .unwrap();
     let prepared = prepare();
     let source = Running::start(prepared.source_config.clone(), prepared.now).await;
     source.ready(prepared.epoch).await;
@@ -70,9 +93,8 @@ async fn protocol_epoch_crosses_peer_transport_and_restarts_with_owner_successor
     target.ready(prepared.epoch).await;
     let owner = address(1);
     let before = source.store.account_store().get_account(&owner).unwrap();
-    let previous: StateBlock = bincode::deserialize(
-        &source.store.block_store().get_block(&before.head).unwrap(),
-    ).unwrap();
+    let previous: StateBlock =
+        bincode::deserialize(&source.store.block_store().get_block(&before.head).unwrap()).unwrap();
     let mut marker = previous.clone();
     marker.block_type = BlockType::Epoch;
     marker.previous = previous.hash;
@@ -110,7 +132,15 @@ async fn protocol_epoch_crosses_peer_transport_and_restarts_with_owner_successor
     let state = target.client.signing_state(&owner).await.unwrap();
     assert_eq!(state.head, marker.hash);
     assert_eq!(state.signing_grant, marker.signing_grant);
-    assert_eq!(target.store.account_store().get_account(&owner).unwrap().epoch, marker.version);
+    assert_eq!(
+        target
+            .store
+            .account_store()
+            .get_account(&owner)
+            .unwrap()
+            .epoch,
+        marker.version
+    );
 
     let mut successor = marker.clone();
     successor.block_type = BlockType::ChangeRepresentative;
@@ -122,12 +152,31 @@ async fn protocol_epoch_crosses_peer_transport_and_restarts_with_owner_successor
     assert!(response.accepted, "owner successor rejected: {response:?}");
     stored(&target, successor.hash).await;
     stored(&source, successor.hash).await;
-    assert_eq!(target.store.account_store().get_account(&owner).unwrap().representative, address(2));
+    assert_eq!(
+        target
+            .store
+            .account_store()
+            .get_account(&owner)
+            .unwrap()
+            .representative,
+        address(2)
+    );
     drop(target.stop().await);
     let target = Running::start(prepared.target_config.clone(), prepared.now + 2).await;
     target.ready(prepared.epoch).await;
-    assert_eq!(target.client.signing_state(&owner).await.unwrap().head, successor.hash);
-    assert_eq!(target.store.account_store().get_account(&owner).unwrap().epoch, marker.version);
+    assert_eq!(
+        target.client.signing_state(&owner).await.unwrap().head,
+        successor.hash
+    );
+    assert_eq!(
+        target
+            .store
+            .account_store()
+            .get_account(&owner)
+            .unwrap()
+            .epoch,
+        marker.version
+    );
     target.stop().await;
     source.stop().await;
 }

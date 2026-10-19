@@ -36,11 +36,15 @@ impl Prepared {
         StoreError,
     > {
         match self {
-            Self::Full(candidate) => candidate.commit(store).map(|installed| (installed, None, None)),
+            Self::Full(candidate) => candidate
+                .commit(store)
+                .map(|installed| (installed, None, None)),
             Self::Compact(candidate) => candidate
                 .commit_with_recovery(store)
                 .map(|(installed, cache, projection)| (installed, Some(cache), Some(projection))),
-            Self::Snapshot(candidate) => candidate.commit(store).map(|installed| (installed, None, None)),
+            Self::Snapshot(candidate) => candidate
+                .commit(store)
+                .map(|installed| (installed, None, None)),
         }
     }
 }
@@ -98,7 +102,9 @@ impl Runtime {
                 .prepare_next_with_recovery(store, self.registry.clone())
                 .await?
             {
-                installed::CompactPreparation::Ready(candidate) => Some(Prepared::Compact(candidate)),
+                installed::CompactPreparation::Ready(candidate) => {
+                    Some(Prepared::Compact(candidate))
+                }
                 installed::CompactPreparation::CaughtUp(recovery) => {
                     self.recovery = Some(*recovery);
                     None

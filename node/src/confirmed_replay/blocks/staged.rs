@@ -53,10 +53,13 @@ impl StagedBlocks {
         &self.directory
     }
 
-    pub(in crate::confirmed_replay) fn hashes(&self) -> impl Iterator<Item = Result<BlockHash, StoreError>> + '_ {
+    pub(in crate::confirmed_replay) fn hashes(
+        &self,
+    ) -> impl Iterator<Item = Result<BlockHash, StoreError>> + '_ {
         (0..self.count).map(|position| {
             self.ready()?;
-            self.order.get(&Self::position_key(position)?)?
+            self.order
+                .get(&Self::position_key(position)?)?
                 .ok_or_else(|| invalid("missing staged block position"))
         })
     }
@@ -68,7 +71,16 @@ impl StagedBlocks {
     }
 
     fn ready(&self) -> Result<(), StoreError> {
-        if self.failed || self.file.lock().map_err(invalid)?.metadata().map_err(invalid)?.len() != self.length {
+        if self.failed
+            || self
+                .file
+                .lock()
+                .map_err(invalid)?
+                .metadata()
+                .map_err(invalid)?
+                .len()
+                != self.length
+        {
             return Err(invalid("staged replay block write previously failed"));
         }
         Ok(())
@@ -115,7 +127,10 @@ impl StagedBlocks {
             .length
             .checked_add(length)
             .ok_or_else(|| invalid("staged replay length overflow"))?;
-        let count = self.count.checked_add(1).ok_or_else(|| invalid("staged block count overflow"))?;
+        let count = self
+            .count
+            .checked_add(1)
+            .ok_or_else(|| invalid("staged block count overflow"))?;
         let position = Self::position_key(self.count)?;
         self.failed = true;
         let file = self.file.get_mut().map_err(invalid)?;
@@ -227,8 +242,10 @@ mod tests {
         assert!(crate::confirmed_replay::governance::streamed_dependencies(&source).is_err());
         assert!(
             crate::confirmed_replay::selections::Selections::for_certified_epoch(
-                &[] as &[&crate::checkpoint_store::CertifiedCheckpoint], &source)
-                .is_err()
+                &[] as &[&crate::checkpoint_store::CertifiedCheckpoint],
+                &source
+            )
+            .is_err()
         );
     }
 
@@ -241,7 +258,10 @@ mod tests {
             blocks.insert_encoded(hash, hash.as_bytes()).unwrap();
         }
         for _ in 0..2 {
-            assert_eq!(blocks.hashes().collect::<Result<Vec<_>, _>>().unwrap(), expected);
+            assert_eq!(
+                blocks.hashes().collect::<Result<Vec<_>, _>>().unwrap(),
+                expected
+            );
             for hash in expected {
                 assert_eq!(blocks.encoded(&hash).unwrap(), hash.as_bytes());
             }

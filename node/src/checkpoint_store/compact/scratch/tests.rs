@@ -104,7 +104,10 @@ fn observations_reject_changed_truncated_appended_and_oversized_frames() {
             }
         }
         assert!(rows.visit(|_| Ok(())).is_err(), "case {case}");
-        assert!(rows.fork().is_err(), "fork accepted damaged observations: {case}");
+        assert!(
+            rows.fork().is_err(),
+            "fork accepted damaged observations: {case}"
+        );
         assert!(rows.retain_through(0).is_err(), "case {case}");
     }
     let mut rows = RecordObservations::new(dir.path()).unwrap();

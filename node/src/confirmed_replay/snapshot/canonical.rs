@@ -62,7 +62,9 @@ impl<K: Serialize + Eq + std::hash::Hash> Field for BlobMap<'_, '_, K> {
 
 pub(super) struct Bytes<'a>(pub &'a [u8]);
 
-pub(super) struct OrderedSequence<'a, T>(pub &'a crate::confirmed_replay::receipts::OrderedHistory<T>);
+pub(super) struct OrderedSequence<'a, T>(
+    pub &'a crate::confirmed_replay::receipts::OrderedHistory<T>,
+);
 
 impl<T: Clone + Serialize + serde::de::DeserializeOwned> Field for OrderedSequence<'_, T> {
     fn encode_field(&self, mut output: &mut dyn Write) -> Result<(), ReplayError> {

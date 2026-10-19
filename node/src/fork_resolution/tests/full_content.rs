@@ -29,7 +29,8 @@ async fn full_proposal_fork_survives_pre_election_restart_and_replacement() {
                 text: "🌍".repeat(MAX_AMENDMENT_CHARS),
             }],
         };
-        let state = burst_wallet_core::transaction_builder::AccountState { signing_grant: burst_types::BlockHash::ZERO,
+        let state = burst_wallet_core::transaction_builder::AccountState {
+            signing_grant: burst_types::BlockHash::ZERO,
             head: genesis,
             block_count: 1,
             representative: creator.clone(),

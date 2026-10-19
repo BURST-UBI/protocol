@@ -1,8 +1,8 @@
 //! BRN balance computation (client-side).
 
+use crate::WalletError;
 use burst_brn::state::RateHistory;
 use burst_types::Timestamp;
-use crate::WalletError;
 
 /// Compute BRN balance using the full rate history (piecewise integration).
 ///
@@ -17,7 +17,8 @@ pub fn compute_balance_with_history(
     total_burned: u128,
     total_staked: u128,
 ) -> Result<u128, WalletError> {
-    let accrued = rate_history.total_accrued_checked(verified_at, now)
+    let accrued = rate_history
+        .total_accrued_checked(verified_at, now)
         .ok_or_else(|| WalletError::Other("BRN accrual overflow".into()))?;
     Ok(accrued
         .saturating_sub(total_burned)
@@ -40,7 +41,8 @@ pub fn compute_display_balance(
     total_staked: u128,
 ) -> Result<u128, WalletError> {
     let elapsed = verified_at.elapsed_since(now) as u128;
-    let accrued = rate.checked_mul(elapsed)
+    let accrued = rate
+        .checked_mul(elapsed)
         .ok_or_else(|| WalletError::Other("BRN accrual overflow".into()))?;
     Ok(accrued
         .saturating_sub(total_burned)
@@ -150,6 +152,9 @@ mod tests {
         let history = RateHistory::new(u128::MAX, start);
         assert!(compute_balance_with_history(start, now, &history, 0, 0).is_err());
         assert!(compute_display_balance(start, now, u128::MAX, 0, 0).is_err());
-        assert_eq!(compute_display_balance(start, Timestamp::new(1), u128::MAX, 0, 0).unwrap(), u128::MAX);
+        assert_eq!(
+            compute_display_balance(start, Timestamp::new(1), u128::MAX, 0, 0).unwrap(),
+            u128::MAX
+        );
     }
 }

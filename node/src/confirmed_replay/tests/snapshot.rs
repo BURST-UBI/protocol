@@ -113,11 +113,16 @@ fn authenticated_economic_snapshot_matches_independent_replays_and_restores_all_
     assert_eq!(requested, foreign_marker.hash);
     let mut wrong_signer = foreign_marker.clone();
     wrong_signer.signature = burst_crypto::sign_message(
-        wrong_signer.hash.as_bytes(), &burst_crypto::keypair_from_seed(&[1; 32]).private,
+        wrong_signer.hash.as_bytes(),
+        &burst_crypto::keypair_from_seed(&[1; 32]).private,
     );
-    assert!(cursor.accept(&[bincode::serialize(&wrong_signer).unwrap()]).is_err());
+    assert!(cursor
+        .accept(&[bincode::serialize(&wrong_signer).unwrap()])
+        .is_err());
     assert_eq!(cursor.next().unwrap().hash, requested);
-    let proof = cursor.accept(&[bincode::serialize(&foreign_marker).unwrap()]).unwrap();
+    let proof = cursor
+        .accept(&[bincode::serialize(&foreign_marker).unwrap()])
+        .unwrap();
     assert_eq!(proof[0].block().hash, foreign_marker.hash);
     assert_eq!(
         imported
@@ -200,7 +205,10 @@ fn authenticated_economic_snapshot_matches_independent_replays_and_restores_all_
     let restored =
         ConfirmedReplay::from_authenticated_snapshot(&anchor, &certificate, snapshot.bytes())
             .unwrap();
-    assert_eq!(restored.account(&address(0)).unwrap().epoch, burst_ledger::CURRENT_BLOCK_VERSION);
+    assert_eq!(
+        restored.account(&address(0)).unwrap().epoch,
+        burst_ledger::CURRENT_BLOCK_VERSION
+    );
     let legacy = restored.legacy_snapshot_bytes().unwrap();
     let mut manifest = burst_consensus::snapshot::SnapshotManifest::new(&anchor, &legacy).unwrap();
     manifest.state_format = burst_consensus::snapshot::LEGACY_STATE_FORMAT;
@@ -271,7 +279,8 @@ fn authenticated_economic_snapshot_matches_independent_replays_and_restores_all_
     });
     assert_eq!(fixture.blocks.last().unwrap().signing_grant, grant);
     let tail = fixture.history(cutoff + 31);
-    let continued = restored.clone()
+    let continued = restored
+        .clone()
         .replay_snapshot_tail(
             &anchor,
             &record.certificate().checkpoint,

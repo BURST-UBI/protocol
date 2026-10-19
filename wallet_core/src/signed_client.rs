@@ -104,85 +104,149 @@ impl NodeClient {
     /// A trusted node may prove exclusion from a permanently closed epoch while
     /// the account still ends at the signed predecessor, or remains unopened.
     /// Never infer this from an absent block, an advanced head, or an RPC error.
-    pub async fn excluded_offline_payment(&self, block: &StateBlock) -> Result<Option<BlockHash>, WalletError> {
+    pub async fn excluded_offline_payment(
+        &self,
+        block: &StateBlock,
+    ) -> Result<Option<BlockHash>, WalletError> {
         crate::offline::validate_signed_action(block)?;
         let query = burst_types::payment_recovery::ExclusionQuery {
-            account: block.account.to_string(), previous: block.previous.to_string(),
+            account: block.account.to_string(),
+            previous: block.previous.to_string(),
             payment_epoch: block.payment_epoch.to_string(),
         };
-        let response = self.rpc_call("payment_exclusion", serde_json::to_value(&query)
-            .map_err(|error| WalletError::Other(error.to_string()))?).await?;
-        let review: burst_types::payment_recovery::ExclusionReview = serde_json::from_value(response)
-            .map_err(|error| WalletError::Node(error.to_string()))?;
-        if review.account != query.account || review.previous != query.previous || review.payment_epoch != query.payment_epoch {
-            return Err(WalletError::Node("payment exclusion response does not match the saved draft".into()));
+        let response = self
+            .rpc_call(
+                "payment_exclusion",
+                serde_json::to_value(&query)
+                    .map_err(|error| WalletError::Other(error.to_string()))?,
+            )
+            .await?;
+        let review: burst_types::payment_recovery::ExclusionReview =
+            serde_json::from_value(response)
+                .map_err(|error| WalletError::Node(error.to_string()))?;
+        if review.account != query.account
+            || review.previous != query.previous
+            || review.payment_epoch != query.payment_epoch
+        {
+            return Err(WalletError::Node(
+                "payment exclusion response does not match the saved draft".into(),
+            ));
         }
         let installed = parse_hash(&review.installed_epoch)?;
         if installed.is_zero() || (review.excluded && installed == block.payment_epoch) {
-            return Err(WalletError::Node("invalid payment exclusion authority".into()));
+            return Err(WalletError::Node(
+                "invalid payment exclusion authority".into(),
+            ));
         }
         Ok(review.excluded.then_some(installed))
     }
 
-    pub async fn review_offline_payment(&self, block: &StateBlock) -> Result<crate::offline::OfflinePaymentReview, WalletError> {
+    pub async fn review_offline_payment(
+        &self,
+        block: &StateBlock,
+    ) -> Result<crate::offline::OfflinePaymentReview, WalletError> {
         crate::offline::validate_signed_payment(block)?;
         if matches!(block.block_type, BlockType::Receive | BlockType::Open) {
-            let (receipt, confirmed) = self.pending_receipt(&block.account, &block.link.to_string()).await?;
+            let (receipt, confirmed) = self
+                .pending_receipt(&block.account, &block.link.to_string())
+                .await?;
             if !confirmed || receipt.origin != block.origin {
-                return Err(WalletError::Node("cannot verify the saved receipt's source".into()));
+                return Err(WalletError::Node(
+                    "cannot verify the saved receipt's source".into(),
+                ));
             }
-            let transaction = build_receive_tx(&block.account, receipt.source, receipt.amount, block.timestamp)?;
+            let transaction = build_receive_tx(
+                &block.account,
+                receipt.source,
+                receipt.amount,
+                block.timestamp,
+            )?;
             if transaction.hash.as_bytes() != block.transaction.as_bytes() {
-                return Err(WalletError::Node("saved receipt amount differs from the pending payment".into()));
+                return Err(WalletError::Node(
+                    "saved receipt amount differs from the pending payment".into(),
+                ));
             }
             return Ok(crate::offline::OfflinePaymentReview {
-                kind: "receive", hash: block.hash.to_string(), provider: receipt.sender.to_string(),
-                amount: receipt.amount.to_string(), payment: Some(receipt.source.to_string()),
+                kind: "receive",
+                hash: block.hash.to_string(),
+                provider: receipt.sender.to_string(),
+                amount: receipt.amount.to_string(),
+                payment: Some(receipt.source.to_string()),
             });
         }
         if block.block_type != BlockType::Burn || block.previous.is_zero() {
-            return Err(WalletError::TransactionBuild("this payment needs a different review flow".into()));
+            return Err(WalletError::TransactionBuild(
+                "this payment needs a different review flow".into(),
+            ));
         }
-        let previous = self.rpc_call("block_info", json!({"hash":block.previous.to_string()})).await?;
-        if previous["account"].as_str() != Some(block.account.as_str()) || previous["confirmed"] != true {
-            return Err(WalletError::Node("cannot verify the saved payment's previous balance".into()));
+        let previous = self
+            .rpc_call("block_info", json!({"hash":block.previous.to_string()}))
+            .await?;
+        if previous["account"].as_str() != Some(block.account.as_str())
+            || previous["confirmed"] != true
+        {
+            return Err(WalletError::Node(
+                "cannot verify the saved payment's previous balance".into(),
+            ));
         }
-        let amount = block.brn_balance.checked_sub(raw(&previous, "brn_balance")?)
-            .filter(|amount| *amount > 0).ok_or_else(|| WalletError::TransactionBuild("invalid saved payment amount".into()))?;
-        Ok(crate::offline::OfflinePaymentReview { kind: "burn", payment: None, hash: block.hash.to_string(),
-            provider: burst_crypto::derive_address(&burst_types::PublicKey(*block.link.as_bytes())).to_string(), amount: amount.to_string() })
+        let amount = block
+            .brn_balance
+            .checked_sub(raw(&previous, "brn_balance")?)
+            .filter(|amount| *amount > 0)
+            .ok_or_else(|| WalletError::TransactionBuild("invalid saved payment amount".into()))?;
+        Ok(crate::offline::OfflinePaymentReview {
+            kind: "burn",
+            payment: None,
+            hash: block.hash.to_string(),
+            provider: burst_crypto::derive_address(&burst_types::PublicKey(*block.link.as_bytes()))
+                .to_string(),
+            amount: amount.to_string(),
+        })
     }
 
     /// Find a confirmed transaction occupying this draft's exact account slot.
     /// Missing history or old nodes without successor lookup leave it unresolved.
-    pub async fn confirmed_offline_successor(&self, block: &StateBlock) -> Result<Option<BlockHash>, WalletError> {
+    pub async fn confirmed_offline_successor(
+        &self,
+        block: &StateBlock,
+    ) -> Result<Option<BlockHash>, WalletError> {
         crate::offline::validate_signed_action(block)?;
         self.confirmed_account_slot(block).await
     }
 
     /// Resolve the draft or a confirmed conflict in its saved predecessor chain.
     /// An RPC error or missing ancestor is never evidence of exclusion.
-    pub async fn confirmed_offline_resolution(&self, block: &StateBlock, ancestry: &[StateBlock]) -> Result<Option<BlockHash>, WalletError> {
+    pub async fn confirmed_offline_resolution(
+        &self,
+        block: &StateBlock,
+        ancestry: &[StateBlock],
+    ) -> Result<Option<BlockHash>, WalletError> {
         crate::offline::validate_signed_action(block)?;
         crate::offline::validate_ancestry(&block.account, block.previous, ancestry)?;
         let direct = self.confirmed_indexed_slot(block).await;
-        if matches!(direct, Ok(Some(_))) { return direct; }
+        if matches!(direct, Ok(Some(_))) {
+            return direct;
+        }
         // Start at the retained chain's oldest slot. A missing or unconfirmed
         // anchor cannot justify walking further, and a disconnected node must
         // not incur one full RPC timeout for every saved predecessor.
         for ancestor in ancestry.iter().rev() {
             match self.confirmed_indexed_slot(ancestor).await? {
                 Some(winner) if winner != ancestor.hash => return Ok(Some(winner)),
-                Some(_) => {},
+                Some(_) => {}
                 None => return Ok(None),
             }
         }
         direct
     }
 
-    async fn confirmed_indexed_slot(&self, block: &StateBlock) -> Result<Option<BlockHash>, WalletError> {
+    async fn confirmed_indexed_slot(
+        &self,
+        block: &StateBlock,
+    ) -> Result<Option<BlockHash>, WalletError> {
         let query = burst_types::payment_recovery::SlotQuery {
-            account:block.account.to_string(), previous:block.previous.to_string(),
+            account: block.account.to_string(),
+            previous: block.previous.to_string(),
         };
         let response = match self.rpc_call("confirmed_account_slot",serde_json::to_value(&query)
             .map_err(|e|WalletError::Other(e.to_string()))?).await {
@@ -193,42 +257,80 @@ impl NodeClient {
             }
             Err(error) => return Err(error),
         };
-        let review: burst_types::payment_recovery::SlotReview = serde_json::from_value(response)
-            .map_err(|e|WalletError::Node(e.to_string()))?;
+        let review: burst_types::payment_recovery::SlotReview =
+            serde_json::from_value(response).map_err(|e| WalletError::Node(e.to_string()))?;
         if review.account != query.account || review.previous != query.previous {
-            return Err(WalletError::Node("confirmed account slot response does not match the saved draft".into()));
+            return Err(WalletError::Node(
+                "confirmed account slot response does not match the saved draft".into(),
+            ));
         }
-        review.successor.map(|value| {
-            let hash = parse_hash(&value)?;
-            if hash.is_zero() { return Err(WalletError::Node("invalid confirmed account slot successor".into())); }
-            Ok(hash)
-        }).transpose()
+        review
+            .successor
+            .map(|value| {
+                let hash = parse_hash(&value)?;
+                if hash.is_zero() {
+                    return Err(WalletError::Node(
+                        "invalid confirmed account slot successor".into(),
+                    ));
+                }
+                Ok(hash)
+            })
+            .transpose()
     }
 
-    async fn confirmed_account_slot(&self, block: &StateBlock) -> Result<Option<BlockHash>, WalletError> {
+    async fn confirmed_account_slot(
+        &self,
+        block: &StateBlock,
+    ) -> Result<Option<BlockHash>, WalletError> {
         let anchor = if block.previous.is_zero() {
-            let info = self.rpc_call("account_info", json!({"account":block.account.as_str()})).await?;
+            let info = self
+                .rpc_call("account_info", json!({"account":block.account.as_str()}))
+                .await?;
             if info["address"].as_str() != Some(block.account.as_str()) {
-                return Err(WalletError::Node("node returned a different opening account".into()));
+                return Err(WalletError::Node(
+                    "node returned a different opening account".into(),
+                ));
             }
-            if info["confirmation_height"].as_u64().unwrap_or(0) == 0 { return Ok(None); }
+            if info["confirmation_height"].as_u64().unwrap_or(0) == 0 {
+                return Ok(None);
+            }
             info
         } else {
-            let anchor = self.rpc_call("block_info", json!({"hash":block.previous.to_string()})).await?;
-            if anchor["confirmed"] != true || anchor["account"].as_str() != Some(block.account.as_str()) {
-                return Err(WalletError::Node("node cannot confirm the saved payment's account position".into()));
+            let anchor = self
+                .rpc_call("block_info", json!({"hash":block.previous.to_string()}))
+                .await?;
+            if anchor["confirmed"] != true
+                || anchor["account"].as_str() != Some(block.account.as_str())
+            {
+                return Err(WalletError::Node(
+                    "node cannot confirm the saved payment's account position".into(),
+                ));
             }
             anchor
         };
-        let field = if block.previous.is_zero() { "confirmed_open" } else { "confirmed_successor" };
-        let Some(successor) = anchor[field].as_str() else { return Ok(None); };
+        let field = if block.previous.is_zero() {
+            "confirmed_open"
+        } else {
+            "confirmed_successor"
+        };
+        let Some(successor) = anchor[field].as_str() else {
+            return Ok(None);
+        };
         let hash = parse_hash(successor)?;
-        if hash.is_zero() { return Err(WalletError::Node("invalid confirmed successor".into())); }
-        let candidate = self.rpc_call("block_info", json!({"hash":hash.to_string()})).await?;
+        if hash.is_zero() {
+            return Err(WalletError::Node("invalid confirmed successor".into()));
+        }
+        let candidate = self
+            .rpc_call("block_info", json!({"hash":hash.to_string()}))
+            .await?;
         if candidate["confirmed"] != true
             || candidate["account"].as_str() != Some(block.account.as_str())
-            || candidate["previous"].as_str() != Some(block.previous.to_string().as_str()) {
-            return Err(WalletError::Node("node returned an unconfirmed or unrelated successor; keep the saved payment".into()));
+            || candidate["previous"].as_str() != Some(block.previous.to_string().as_str())
+        {
+            return Err(WalletError::Node(
+                "node returned an unconfirmed or unrelated successor; keep the saved payment"
+                    .into(),
+            ));
         }
         Ok(Some(hash))
     }
@@ -243,14 +345,18 @@ impl NodeClient {
     ) -> Result<ProcessResult, WalletError> {
         let block = crate::offline::load_payment(path)?;
         if &block.account != expected_account {
-            return Err(WalletError::Signing("saved payment belongs to another wallet".into()));
+            return Err(WalletError::Signing(
+                "saved payment belongs to another wallet".into(),
+            ));
         }
         let hash = block.hash;
         // This draft already owns its reservation and recovery ancestry. Keep
         // the device binding, but do not reserve/archive it as a new action.
         let mut resumed = self.clone();
         resumed.payment_journal = None;
-        resumed.submit_offline_payment_before(block, || crate::offline::record_submission(path, &hash)).await
+        resumed
+            .submit_offline_payment_before(block, || crate::offline::record_submission(path, &hash))
+            .await
     }
 
     /// Submit a journaled action and its committed content without signing again.
@@ -263,14 +369,18 @@ impl NodeClient {
     ) -> Result<ProcessResult, WalletError> {
         let (block, content) = crate::offline::load_action_with_content(path)?;
         if &block.account != expected_account {
-            return Err(WalletError::Signing("saved action belongs to another wallet".into()));
+            return Err(WalletError::Signing(
+                "saved action belongs to another wallet".into(),
+            ));
         }
         let hash = block.hash;
         let mut resumed = self.clone();
         resumed.payment_journal = None;
-        resumed.submit_offline_action_before(block, content.as_deref(), || {
-            crate::offline::record_submission(path, &hash)
-        }).await
+        resumed
+            .submit_offline_action_before(block, content.as_deref(), || {
+                crate::offline::record_submission(path, &hash)
+            })
+            .await
     }
 
     /// Capture public signing inputs without releasing stakes or signing anything.
@@ -283,48 +393,80 @@ impl NodeClient {
         let (state, more) = self.signing_state_with_releases(account).await?;
         if more {
             return Err(WalletError::TransactionBuild(
-                "finish pending stake-release batches online before preparing offline payments".into(),
+                "finish pending stake-release batches online before preparing offline payments"
+                    .into(),
             ));
         }
         let params = self.rpc_call("params_hash", json!({})).await?;
         let threshold = work_parameters(&params)?;
         require_payment_epoch(&params, state.payment_epoch)?;
-        let params_hash = parse_hash(params["params_hash"].as_str()
-            .ok_or_else(|| WalletError::Node("missing params_hash".into()))?)?;
+        let params_hash = parse_hash(
+            params["params_hash"]
+                .as_str()
+                .ok_or_else(|| WalletError::Node("missing params_hash".into()))?,
+        )?;
         let root = StateBlock::work_root_for(account, state.head);
         let work = self.work_generate(&root.to_string()).await?;
         let nonce = u64::from_str_radix(work.work.trim_start_matches("0x"), 16)
             .map_err(|_| WalletError::Node("invalid prepared work nonce".into()))?;
         if work.hash != root.to_string() || !burst_work::validate_work(&root, nonce, threshold) {
-            return Err(WalletError::Node("node returned invalid prepared work".into()));
+            return Err(WalletError::Node(
+                "node returned invalid prepared work".into(),
+            ));
         }
         let ancestry = self.recovery_ancestry(account, state.head).await?;
         Ok(crate::offline::OfflinePaymentContext {
             ancestry,
-            account: account.clone(), state, params_hash, threshold,
+            account: account.clone(),
+            state,
+            params_hash,
+            threshold,
             work: PreparedWork { root, nonce },
         })
     }
 
-    async fn recovery_ancestry(&self, account: &WalletAddress, mut previous: BlockHash) -> Result<Vec<StateBlock>, WalletError> {
+    async fn recovery_ancestry(
+        &self,
+        account: &WalletAddress,
+        mut previous: BlockHash,
+    ) -> Result<Vec<StateBlock>, WalletError> {
         let mut ancestry = Vec::new();
         let mut ancestry_bytes = 2;
         while !previous.is_zero() {
-            let info = self.rpc_call("block_info", json!({"hash":previous.to_string(), "include_signed_block":true})).await?;
+            let info = self
+                .rpc_call(
+                    "block_info",
+                    json!({"hash":previous.to_string(), "include_signed_block":true}),
+                )
+                .await?;
             if info["account"].as_str() != Some(account.as_str()) {
-                return Err(WalletError::Node("offline recovery node returned a different account".into()));
+                return Err(WalletError::Node(
+                    "offline recovery node returned a different account".into(),
+                ));
             }
-            if info["confirmed"] == true { break; }
-            let encoded = info["signed_block"].as_str().ok_or_else(|| WalletError::Node(
-                "node cannot supply lossless signed recovery ancestry; update the node".into()))?;
+            if info["confirmed"] == true {
+                break;
+            }
+            let encoded = info["signed_block"].as_str().ok_or_else(|| {
+                WalletError::Node(
+                    "node cannot supply lossless signed recovery ancestry; update the node".into(),
+                )
+            })?;
             let ancestor: StateBlock = serde_json::from_str(encoded)
                 .map_err(|_| WalletError::Node("node cannot supply signed offline recovery ancestry; wait for confirmation or update the node".into()))?;
             crate::offline::validate_signed_block(&ancestor)?;
             if ancestor.hash != previous || &ancestor.account != account {
-                return Err(WalletError::Node("offline recovery node returned a different predecessor".into()));
+                return Err(WalletError::Node(
+                    "offline recovery node returned a different predecessor".into(),
+                ));
             }
-            ancestry_bytes += serde_json::to_vec(&ancestor).map_err(|e| WalletError::Other(e.to_string()))?.len() + 1;
-            if ancestry.len() >= crate::offline::MAX_ANCESTRY_BLOCKS || ancestry_bytes > crate::offline::MAX_ANCESTRY_BYTES {
+            ancestry_bytes += serde_json::to_vec(&ancestor)
+                .map_err(|e| WalletError::Other(e.to_string()))?
+                .len()
+                + 1;
+            if ancestry.len() >= crate::offline::MAX_ANCESTRY_BLOCKS
+                || ancestry_bytes > crate::offline::MAX_ANCESTRY_BYTES
+            {
                 return Err(WalletError::Node("unconfirmed ancestry is too large to save offline; wait for frontier confirmation".into()));
             }
             previous = ancestor.previous;
@@ -335,7 +477,9 @@ impl NodeClient {
 
     /// Capture public action review and signing inputs without signing or submitting.
     pub async fn prepare_offline_action(
-        &self, account: &WalletAddress, action: crate::offline::OfflineAction,
+        &self,
+        account: &WalletAddress,
+        action: crate::offline::OfflineAction,
     ) -> Result<crate::offline::OfflineActionContext, WalletError> {
         use crate::offline::OfflineAction;
         parse_address(account.as_str())?;
@@ -345,73 +489,150 @@ impl NodeClient {
         let review = match &action {
             OfflineAction::Transfer { to, amount, origin } => {
                 parse_address(to.as_str())?;
-                let portfolio = self.rpc_call("trst_portfolio", json!({"account":account.as_str()})).await?;
-                let batches = portfolio["batches"].as_array().ok_or_else(|| WalletError::Node("missing TRST portfolio".into()))?;
-                crate::portfolio::select_transfer_origin(batches, *amount, Some(&origin.to_string())).map_err(WalletError::TransactionBuild)?;
+                let portfolio = self
+                    .rpc_call("trst_portfolio", json!({"account":account.as_str()}))
+                    .await?;
+                let batches = portfolio["batches"]
+                    .as_array()
+                    .ok_or_else(|| WalletError::Node("missing TRST portfolio".into()))?;
+                crate::portfolio::select_transfer_origin(
+                    batches,
+                    *amount,
+                    Some(&origin.to_string()),
+                )
+                .map_err(WalletError::TransactionBuild)?;
                 json!({"batches":batches.iter().filter(|batch|batch["origin"].as_str()==Some(origin.to_string().as_str()) && batch["status"]=="active").collect::<Vec<_>>()})
             }
             OfflineAction::Merge { selected } => {
-                let portfolio = self.rpc_call("trst_portfolio", json!({"account":account.as_str()})).await?;
-                let batches = portfolio["batches"].as_array().ok_or_else(|| WalletError::Node("missing TRST portfolio".into()))?;
-                crate::portfolio::reviewed_merge_sources(batches, selected).map_err(WalletError::TransactionBuild)?;
+                let portfolio = self
+                    .rpc_call("trst_portfolio", json!({"account":account.as_str()}))
+                    .await?;
+                let batches = portfolio["batches"]
+                    .as_array()
+                    .ok_or_else(|| WalletError::Node("missing TRST portfolio".into()))?;
+                crate::portfolio::reviewed_merge_sources(batches, selected)
+                    .map_err(WalletError::TransactionBuild)?;
                 json!({"batches":batches.iter().filter(|batch|selected.iter().any(|selection|batch["id"].as_str()==Some(selection.id.as_str()))).collect::<Vec<_>>()})
             }
             OfflineAction::Reject { payment } => {
-                let entry = self.account_pending_source(account.as_str(), &payment.to_string()).await?
-                    .ok_or_else(|| WalletError::Node("payment is no longer pending; refresh before trying again".into()))?;
-                if entry.return_credit { return Err(WalletError::TransactionBuild("returned funds are already yours; receive the credit instead".into())); }
-                let source = self.rpc_call("block_info", json!({"hash":payment.to_string()})).await?;
-                if source["confirmed"] != true { return Err(WalletError::Node("wait for the incoming payment to confirm before preparing its return offline".into())); }
+                let entry = self
+                    .account_pending_source(account.as_str(), &payment.to_string())
+                    .await?
+                    .ok_or_else(|| {
+                        WalletError::Node(
+                            "payment is no longer pending; refresh before trying again".into(),
+                        )
+                    })?;
+                if entry.return_credit {
+                    return Err(WalletError::TransactionBuild(
+                        "returned funds are already yours; receive the credit instead".into(),
+                    ));
+                }
+                let source = self
+                    .rpc_call("block_info", json!({"hash":payment.to_string()}))
+                    .await?;
+                if source["confirmed"] != true {
+                    return Err(WalletError::Node("wait for the incoming payment to confirm before preparing its return offline".into()));
+                }
                 json!({"payment":payment.to_string(),"sender":entry.source,"amount":entry.amount})
             }
             OfflineAction::Endorse { target, burn } => {
                 parse_address(target.as_str())?;
-                if *burn == 0 { return Err(WalletError::TransactionBuild("endorsement burn must be positive".into())); }
+                if *burn == 0 {
+                    return Err(WalletError::TransactionBuild(
+                        "endorsement burn must be positive".into(),
+                    ));
+                }
                 target_head = Some(self.inspect_signing_state(target).await?.head);
-                self.rpc_call("verification_status", json!({"account":target.as_str()})).await?
+                self.rpc_call("verification_status", json!({"account":target.as_str()}))
+                    .await?
             }
             OfflineAction::Challenge { target, stake, .. } => {
                 parse_address(target.as_str())?;
-                if *stake == 0 { return Err(WalletError::TransactionBuild("challenge stake must be positive".into())); }
-                self.rpc_call("verification_status", json!({"account":target.as_str()})).await?
+                if *stake == 0 {
+                    return Err(WalletError::TransactionBuild(
+                        "challenge stake must be positive".into(),
+                    ));
+                }
+                self.rpc_call("verification_status", json!({"account":target.as_str()}))
+                    .await?
             }
             OfflineAction::Appeal { reviewed } => {
-                let current = self.appeal_review(&parse_address(&reviewed.account)?).await?;
+                let current = self
+                    .appeal_review(&parse_address(&reviewed.account)?)
+                    .await?;
                 crate::appeals::prepare(&current, reviewed, account, Timestamp::now())?;
-                serde_json::to_value(current).map_err(|error| WalletError::Other(error.to_string()))?
+                serde_json::to_value(current)
+                    .map_err(|error| WalletError::Other(error.to_string()))?
             }
-            OfflineAction::VerificationVote { target, context, vote, stake } => {
+            OfflineAction::VerificationVote {
+                target,
+                context,
+                vote,
+                stake,
+            } => {
                 parse_address(target.as_str())?;
-                let status = self.rpc_call("verification_status", json!({"account":target.as_str()})).await?;
+                let status = self
+                    .rpc_call("verification_status", json!({"account":target.as_str()}))
+                    .await?;
                 let rules = self.rpc_call("protocol_params", json!({})).await?;
-                let selected = status["selected_verifiers"].as_array()
+                let selected = status["selected_verifiers"]
+                    .as_array()
                     .ok_or_else(|| WalletError::Node("missing selected verifier panel".into()))?;
-                let votes = status["verifier_votes"].as_array()
+                let votes = status["verifier_votes"]
+                    .as_array()
                     .ok_or_else(|| WalletError::Node("missing panel votes".into()))?;
-                if context.is_zero() || !(1..=3).contains(vote)
+                if context.is_zero()
+                    || !(1..=3).contains(vote)
                     || status["selection_available"] != true
                     || status["selection_context"].as_str() != Some(context.to_string().as_str())
                     || !matches!(status["phase"].as_str(), Some("voting" | "challenged"))
-                    || !selected.iter().any(|value| value.as_str() == Some(account.as_str()))
-                    || votes.iter().any(|value| value["verifier"].as_str() == Some(account.as_str()))
-                    || if *vote == 3 { *stake != 0 } else { rules["verifier_stake_amount"].as_str() != Some(stake.to_string().as_str()) } {
-                    return Err(WalletError::TransactionBuild("verification assignment or stake changed; review it again".into()));
+                    || !selected
+                        .iter()
+                        .any(|value| value.as_str() == Some(account.as_str()))
+                    || votes
+                        .iter()
+                        .any(|value| value["verifier"].as_str() == Some(account.as_str()))
+                    || if *vote == 3 {
+                        *stake != 0
+                    } else {
+                        rules["verifier_stake_amount"].as_str() != Some(stake.to_string().as_str())
+                    }
+                {
+                    return Err(WalletError::TransactionBuild(
+                        "verification assignment or stake changed; review it again".into(),
+                    ));
                 }
                 json!({"assignment":status,"stake":stake.to_string()})
             }
             OfflineAction::Proposal { content } => {
                 if capabilities["full_governance_content"] != true {
-                    return Err(WalletError::Node("full governance content is unavailable".into()));
+                    return Err(WalletError::Node(
+                        "full governance content is unavailable".into(),
+                    ));
                 }
-                content.validate_content().map_err(|error| WalletError::TransactionBuild(error.to_string()))?;
+                content
+                    .validate_content()
+                    .map_err(|error| WalletError::TransactionBuild(error.to_string()))?;
                 self.rpc_call("consti", json!({})).await?
             }
             OfflineAction::GovernanceVote { proposal, .. }
-                | OfflineAction::GovernanceEndorse { proposal, .. }
-                | OfflineAction::GovernanceWithdraw { proposal } => {
-                if proposal.is_zero() { return Err(WalletError::TransactionBuild("missing proposal".into())); }
-                let info = self.rpc_call("governance_proposal_info", json!({"hash":proposal.to_string()})).await?;
-                let phase = if matches!(&action, OfflineAction::GovernanceVote { .. }) { "Exploration" } else { "Proposal" };
+            | OfflineAction::GovernanceEndorse { proposal, .. }
+            | OfflineAction::GovernanceWithdraw { proposal } => {
+                if proposal.is_zero() {
+                    return Err(WalletError::TransactionBuild("missing proposal".into()));
+                }
+                let info = self
+                    .rpc_call(
+                        "governance_proposal_info",
+                        json!({"hash":proposal.to_string()}),
+                    )
+                    .await?;
+                let phase = if matches!(&action, OfflineAction::GovernanceVote { .. }) {
+                    "Exploration"
+                } else {
+                    "Proposal"
+                };
                 if info["hash"].as_str() != Some(proposal.to_string().as_str())
                     || !info["phase_deadline"].as_u64().is_some_and(|deadline| Timestamp::now().as_secs() < deadline)
                     || info["phase"].as_str() != Some(phase) || info["phase_projected"].as_bool().is_none()
@@ -419,47 +640,88 @@ impl NodeClient {
                     // admitted in that window before its result is certified.
                     || !matches!(&action, OfflineAction::GovernanceVote { .. }) && info["phase_projected"] != false
                     || matches!(&action, OfflineAction::GovernanceWithdraw { .. })
-                        && info["proposer"].as_str() != Some(account.as_str()) {
-                    return Err(WalletError::TransactionBuild("proposal is not available for this action".into()));
+                        && info["proposer"].as_str() != Some(account.as_str())
+                {
+                    return Err(WalletError::TransactionBuild(
+                        "proposal is not available for this action".into(),
+                    ));
                 }
                 info
             }
-            OfflineAction::VerifierParticipation { .. } =>
-                self.rpc_call("verification_status", json!({"account":account.as_str()})).await?,
-            OfflineAction::Delegation { scope, generation, genesis, .. } => {
+            OfflineAction::VerifierParticipation { .. } => {
+                self.rpc_call("verification_status", json!({"account":account.as_str()}))
+                    .await?
+            }
+            OfflineAction::Delegation {
+                scope,
+                generation,
+                genesis,
+                ..
+            } => {
                 if capabilities["delegation_key_journal"] != true {
-                    return Err(WalletError::Node("delegation key registration is unavailable".into()));
+                    return Err(WalletError::Node(
+                        "delegation key registration is unavailable".into(),
+                    ));
                 }
-                let page = self.delegation_keys(&crate::delegation::view::Query {
-                    account:account.to_string(), direction:crate::delegation::view::Direction::Outgoing,
-                    scope:Some(scope.clone()), cursor:None,
-                }).await?;
+                let page = self
+                    .delegation_keys(&crate::delegation::view::Query {
+                        account: account.to_string(),
+                        direction: crate::delegation::view::Direction::Outgoing,
+                        scope: Some(scope.clone()),
+                        cursor: None,
+                    })
+                    .await?;
                 crate::delegation::require_review(&page, generation)?;
                 if parse_hash(&page.genesis)? != parse_hash(genesis)? {
-                    return Err(WalletError::TransactionBuild("delegation network changed; review again".into()));
+                    return Err(WalletError::TransactionBuild(
+                        "delegation network changed; review again".into(),
+                    ));
                 }
                 serde_json::to_value(page).map_err(|error| WalletError::Other(error.to_string()))?
             }
-            OfflineAction::DelegatedVote { entry, proposal, .. } => {
+            OfflineAction::DelegatedVote {
+                entry, proposal, ..
+            } => {
                 if capabilities["delegation_key_journal"] != true {
-                    return Err(WalletError::Node("delegation key registration is unavailable".into()));
+                    return Err(WalletError::Node(
+                        "delegation key registration is unavailable".into(),
+                    ));
                 }
-                let page = self.delegation_keys(&crate::delegation::view::Query {
-                    account:entry.owner.clone(), direction:crate::delegation::view::Direction::Outgoing,
-                    scope:Some(entry.scope.clone()), cursor:None,
-                }).await?;
+                let page = self
+                    .delegation_keys(&crate::delegation::view::Query {
+                        account: entry.owner.clone(),
+                        direction: crate::delegation::view::Direction::Outgoing,
+                        scope: Some(entry.scope.clone()),
+                        cursor: None,
+                    })
+                    .await?;
                 crate::delegation::require_review(&page, &entry.generation)?;
-                let current = page.entries.first()
-                    .ok_or_else(|| WalletError::TransactionBuild("delegation was removed".into()))?;
+                let current = page.entries.first().ok_or_else(|| {
+                    WalletError::TransactionBuild("delegation was removed".into())
+                })?;
                 if serde_json::to_value(current).ok() != serde_json::to_value(entry).ok()
-                    || current.delegate.as_deref() != Some(account.as_str()) {
-                    return Err(WalletError::TransactionBuild("delegation changed; review again".into()));
+                    || current.delegate.as_deref() != Some(account.as_str())
+                {
+                    return Err(WalletError::TransactionBuild(
+                        "delegation changed; review again".into(),
+                    ));
                 }
-                let info = self.rpc_call("governance_proposal_info", json!({"hash":proposal.to_string()})).await?;
+                let info = self
+                    .rpc_call(
+                        "governance_proposal_info",
+                        json!({"hash":proposal.to_string()}),
+                    )
+                    .await?;
                 if info["hash"].as_str() != Some(proposal.to_string().as_str())
-                    || !info["phase_deadline"].as_u64().is_some_and(|deadline| Timestamp::now().as_secs() < deadline)
-                    || info["phase"].as_str() != Some("Exploration") || info["phase_projected"].as_bool().is_none() {
-                    return Err(WalletError::TransactionBuild("proposal is not available for voting".into()));
+                    || !info["phase_deadline"]
+                        .as_u64()
+                        .is_some_and(|deadline| Timestamp::now().as_secs() < deadline)
+                    || info["phase"].as_str() != Some("Exploration")
+                    || info["phase_projected"].as_bool().is_none()
+                {
+                    return Err(WalletError::TransactionBuild(
+                        "proposal is not available for voting".into(),
+                    ));
                 }
                 info
             }
@@ -467,54 +729,86 @@ impl NodeClient {
         let signing = self.prepare_offline_payment(account).await?;
         require_payment_epoch(&capabilities, signing.state.payment_epoch)?;
         if capabilities["params_hash"].as_str() != Some(signing.params_hash.to_string().as_str()) {
-            return Err(WalletError::TransactionBuild("network rules changed while preparing the action".into()));
+            return Err(WalletError::TransactionBuild(
+                "network rules changed while preparing the action".into(),
+            ));
         }
         if signing.state.head.is_zero() {
-            return Err(WalletError::TransactionBuild("open the account before preparing this action".into()));
+            return Err(WalletError::TransactionBuild(
+                "open the account before preparing this action".into(),
+            ));
         }
-        Ok(crate::offline::OfflineActionContext { signing, action, target_head, review })
+        Ok(crate::offline::OfflineActionContext {
+            signing,
+            action,
+            target_head,
+            review,
+        })
     }
 
     /// Capture one confirmed pending receipt and its offline account context.
     pub async fn prepare_offline_receive(
-        &self, account: &WalletAddress, payment: &str,
+        &self,
+        account: &WalletAddress,
+        payment: &str,
     ) -> Result<crate::offline::OfflineReceiveContext, WalletError> {
         let (receipt, confirmed) = self.pending_receipt(account, payment).await?;
         if !confirmed {
-            return Err(WalletError::Node("wait for the incoming payment to confirm before preparing it offline".into()));
+            return Err(WalletError::Node(
+                "wait for the incoming payment to confirm before preparing it offline".into(),
+            ));
         }
         let signing = self.prepare_offline_payment(account).await?;
         Ok(crate::offline::OfflineReceiveContext { signing, receipt })
     }
 
     /// Submit exact offline-signed bytes. Never rebase, sign or generate work.
-    pub async fn submit_offline_payment(&self, block: StateBlock) -> Result<ProcessResult, WalletError> {
+    pub async fn submit_offline_payment(
+        &self,
+        block: StateBlock,
+    ) -> Result<ProcessResult, WalletError> {
         self.submit_offline_payment_before(block, || Ok(())).await
     }
 
-    async fn submit_offline_payment_before(&self, block: StateBlock, before_submit: impl FnOnce() -> Result<(), WalletError>) -> Result<ProcessResult, WalletError> {
+    async fn submit_offline_payment_before(
+        &self,
+        block: StateBlock,
+        before_submit: impl FnOnce() -> Result<(), WalletError>,
+    ) -> Result<ProcessResult, WalletError> {
         crate::offline::validate_signed_payment(&block)?;
-        self.submit_offline_action_before(block, None, before_submit).await
+        self.submit_offline_action_before(block, None, before_submit)
+            .await
     }
 
     async fn submit_offline_action_before(
-        &self, block: StateBlock, content: Option<&[u8]>,
+        &self,
+        block: StateBlock,
+        content: Option<&[u8]>,
         before_submit: impl FnOnce() -> Result<(), WalletError>,
     ) -> Result<ProcessResult, WalletError> {
         crate::offline::validate_signed_action(&block)?;
         // A previous response may have been lost. Check the exact hash before
         // rejecting an advanced frontier, including one advanced by this block.
-        if let Ok(info) = self.rpc_call("block_info", json!({"hash":block.hash.to_string()})).await {
+        if let Ok(info) = self
+            .rpc_call("block_info", json!({"hash":block.hash.to_string()}))
+            .await
+        {
             if info["confirmed"] == true {
-                return Ok(ProcessResult { hash: block.hash.to_string(), accepted: true, detail: None });
+                return Ok(ProcessResult {
+                    hash: block.hash.to_string(),
+                    accepted: true,
+                    detail: None,
+                });
             }
         }
         let state = self.signing_state(&block.account).await?;
         let params = self.rpc_call("params_hash", json!({})).await?;
         let threshold = work_parameters(&params)?;
         require_payment_epoch(&params, block.payment_epoch)?;
-        if state.payment_epoch != block.payment_epoch || state.head != block.previous
-            || state.signing_grant != block.signing_grant {
+        if state.payment_epoch != block.payment_epoch
+            || state.head != block.previous
+            || state.signing_grant != block.signing_grant
+        {
             return Err(WalletError::TransactionBuild(
                 format!("offline payment {} is stale; check this hash in history before preparing a replacement", block.hash),
             ));
@@ -525,7 +819,9 @@ impl NodeClient {
             ));
         }
         if !burst_work::validate_work(&block.work_root(), block.work, threshold) {
-            return Err(WalletError::TransactionBuild("offline payment work is no longer valid".into()));
+            return Err(WalletError::TransactionBuild(
+                "offline payment work is no longer valid".into(),
+            ));
         }
         before_submit()?;
         self.submit_ready_block_with_content(block, content).await
@@ -817,45 +1113,73 @@ impl NodeClient {
     }
 
     /// Read-only state for explicit takeover review; does not adopt its grant.
-    pub async fn inspect_signing_state(&self, account: &WalletAddress) -> Result<AccountState, WalletError> {
-        self.query_signing_state_with_releases(account).await.map(|result| result.0)
+    pub async fn inspect_signing_state(
+        &self,
+        account: &WalletAddress,
+    ) -> Result<AccountState, WalletError> {
+        self.query_signing_state_with_releases(account)
+            .await
+            .map(|result| result.0)
     }
 
     /// Submit exactly the reviewed authority transition. Confirmation and local
     /// role activation are separate: an RPC acceptance is not a completed takeover.
     pub async fn handoff_signing_device(
-        &self, keys: &KeyPair, reviewed_head: BlockHash, reviewed_grant: BlockHash,
-        reviewed_params: BlockHash, nonce: BlockHash,
+        &self,
+        keys: &KeyPair,
+        reviewed_head: BlockHash,
+        reviewed_grant: BlockHash,
+        reviewed_params: BlockHash,
+        nonce: BlockHash,
     ) -> Result<ProcessResult, WalletError> {
         let account = burst_crypto::derive_address(&keys.public);
         let mut state = self.inspect_signing_state(&account).await?;
         if state.head != reviewed_head || state.signing_grant != reviewed_grant {
-            return Err(WalletError::Signing("Account changed; review the device takeover again.".into()));
+            return Err(WalletError::Signing(
+                "Account changed; review the device takeover again.".into(),
+            ));
         }
         let params = self.rpc_call("params_hash", json!({})).await?;
         work_parameters(&params)?;
         require_payment_epoch(&params, state.payment_epoch)?;
         if params["params_hash"].as_str() != Some(reviewed_params.to_string().as_str()) {
-            return Err(WalletError::Signing("Network rules changed; review the device takeover again.".into()));
+            return Err(WalletError::Signing(
+                "Network rules changed; review the device takeover again.".into(),
+            ));
         }
         if state.head.is_zero() {
-            self.clone().with_signing_grant(BlockHash::ZERO).open_empty_account(keys)
-                .await.map_err(|error| WalletError::Preparation(Box::new(error)))?;
+            self.clone()
+                .with_signing_grant(BlockHash::ZERO)
+                .open_empty_account(keys)
+                .await
+                .map_err(|error| WalletError::Preparation(Box::new(error)))?;
             state = self.inspect_signing_state(&account).await?;
-            if state.head.is_zero() || state.block_count != 1 || !state.signing_grant.is_zero()
-                || state.brn_balance != 0 || state.trst_balance != 0 {
-                return Err(WalletError::Signing("Account changed during enrollment; review the device again.".into()));
+            if state.head.is_zero()
+                || state.block_count != 1
+                || !state.signing_grant.is_zero()
+                || state.brn_balance != 0
+                || state.trst_balance != 0
+            {
+                return Err(WalletError::Signing(
+                    "Account changed during enrollment; review the device again.".into(),
+                ));
             }
             require_payment_epoch(&params, state.payment_epoch)?;
         }
         let block = crate::transaction_builder::build_signing_handoff(
-            &state, &account, nonce, reviewed_params, Timestamp::now(),
+            &state,
+            &account,
+            nonce,
+            reviewed_params,
+            Timestamp::now(),
         )?;
-        self.submit_with_work(sign_state_block(block, &keys.private)).await
+        self.submit_with_work(sign_state_block(block, &keys.private))
+            .await
     }
 
     async fn query_signing_state_with_releases(
-        &self, account: &WalletAddress,
+        &self,
+        account: &WalletAddress,
     ) -> Result<(AccountState, bool), WalletError> {
         let info = match self
             .rpc_call("account_info", json!({"account":account.as_str()}))
@@ -868,7 +1192,8 @@ impl NodeClient {
                 let params = self.rpc_call("params_hash", json!({})).await?;
                 work_parameters(&params)?;
                 return Ok((
-                    AccountState { signing_grant: burst_types::BlockHash::ZERO,
+                    AccountState {
+                        signing_grant: burst_types::BlockHash::ZERO,
                         payment_epoch: payment_epoch(&params)?,
                         head: BlockHash::ZERO,
                         block_count: 0,
@@ -888,15 +1213,20 @@ impl NodeClient {
                 .ok_or_else(|| WalletError::Node("missing head".into()))?,
         )?;
         // Account RPC balance is spendable BRN, NOT the signed block odometer.
-        let (spent, signing_grant) = if head.is_zero() {
-            (0, BlockHash::ZERO)
-        } else {
-            let block = self
-                .rpc_call("block_info", json!({"hash":head.to_string()}))
-                .await?;
-            (raw(&block, "brn_balance")?, parse_hash(block["active_signing_grant"].as_str()
-                .ok_or_else(|| WalletError::Node("missing signing-device grant".into()))?)?)
-        };
+        let (spent, signing_grant) =
+            if head.is_zero() {
+                (0, BlockHash::ZERO)
+            } else {
+                let block = self
+                    .rpc_call("block_info", json!({"hash":head.to_string()}))
+                    .await?;
+                (
+                    raw(&block, "brn_balance")?,
+                    parse_hash(block["active_signing_grant"].as_str().ok_or_else(|| {
+                        WalletError::Node("missing signing-device grant".into())
+                    })?)?,
+                )
+            };
         let release_sources = info["release_sources"]
             .as_array()
             .filter(|sources| sources.len() <= burst_ledger::state_block::MAX_RELEASE_SOURCES)
@@ -922,7 +1252,8 @@ impl NodeClient {
             .as_bool()
             .ok_or_else(|| WalletError::Node("missing stake-release pagination state".into()))?;
         Ok((
-            AccountState { signing_grant,
+            AccountState {
+                signing_grant,
                 payment_epoch: payment_epoch(&info)?,
                 head,
                 block_count: info["block_count"].as_u64().unwrap_or(0),
@@ -1080,7 +1411,9 @@ impl NodeClient {
             serde_json::to_string(&block).map_err(|e| WalletError::Other(e.to_string()))?;
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(path) = &self.payment_journal {
-            let ancestry = self.recovery_ancestry(&block.account, block.previous).await?;
+            let ancestry = self
+                .recovery_ancestry(&block.account, block.previous)
+                .await?;
             crate::offline::save_signed_action(path, &block, &ancestry, content)?;
             crate::offline::record_submission(path, &block.hash)?;
         }
@@ -1166,10 +1499,19 @@ impl NodeClient {
     ) -> Result<ProcessResult, WalletError> {
         let address = burst_crypto::derive_address(&keys.public);
         let (receipt, _) = self.pending_receipt(&address, hash).await?;
-        self.submit_signed(keys, &receipt.transaction(&address, Timestamp::now())?, receipt.origin).await
+        self.submit_signed(
+            keys,
+            &receipt.transaction(&address, Timestamp::now())?,
+            receipt.origin,
+        )
+        .await
     }
 
-    async fn pending_receipt(&self, address: &WalletAddress, hash: &str) -> Result<(crate::offline::Receipt, bool), WalletError> {
+    async fn pending_receipt(
+        &self,
+        address: &WalletAddress,
+        hash: &str,
+    ) -> Result<(crate::offline::Receipt, bool), WalletError> {
         let source = parse_hash(hash)?.into_tx_hash();
         let entry = self
             .account_pending_source(address.as_str(), hash)
@@ -1190,7 +1532,15 @@ impl NodeClient {
             )?
             .into_tx_hash()
         };
-        Ok((crate::offline::Receipt { source, origin, amount, sender: parse_address(&entry.source)? }, send["confirmed"] == true))
+        Ok((
+            crate::offline::Receipt {
+                source,
+                origin,
+                amount,
+                sender: parse_address(&entry.source)?,
+            },
+            send["confirmed"] == true,
+        ))
     }
 
     /// Decline without receiving first, including a wallet with no account chain.
@@ -1311,91 +1661,202 @@ mod submission_tests {
     async fn online_action_journal_precedes_submission_and_survives_uncertainty() {
         let keys = burst_crypto::keypair_from_seed(&[68; 32]);
         let account = burst_crypto::derive_address(&keys.public);
-        let state = AccountState { signing_grant: burst_types::BlockHash::ZERO,
-            payment_epoch: BlockHash::new([1;32]), head: BlockHash::new([2;32]),
-            block_count: 1, representative: account.clone(), brn_balance: 0,
-            trst_balance: 0, release_sources: vec![],
+        let state = AccountState {
+            signing_grant: burst_types::BlockHash::ZERO,
+            payment_epoch: BlockHash::new([1; 32]),
+            head: BlockHash::new([2; 32]),
+            block_count: 1,
+            representative: account.clone(),
+            brn_balance: 0,
+            trst_balance: 0,
+            release_sources: vec![],
         };
         let tx = Transaction::Burn(build_burn_tx(&account, &account, 1, Timestamp::now()).unwrap());
-        let block = build_and_sign_state_block(&state, &tx, &keys.private, TxHash::ZERO, BlockHash::new([3;32])).unwrap();
-        let vote = Transaction::GovernanceVote(build_governance_vote_tx(&account,
-            TxHash::new([4;32]), burst_transactions::governance::GovernanceVote::Yea, Timestamp::now()).unwrap());
-        let vote = build_and_sign_state_block(&state, &vote, &keys.private, TxHash::ZERO, BlockHash::new([3;32])).unwrap();
+        let block = build_and_sign_state_block(
+            &state,
+            &tx,
+            &keys.private,
+            TxHash::ZERO,
+            BlockHash::new([3; 32]),
+        )
+        .unwrap();
+        let vote = Transaction::GovernanceVote(
+            build_governance_vote_tx(
+                &account,
+                TxHash::new([4; 32]),
+                burst_transactions::governance::GovernanceVote::Yea,
+                Timestamp::now(),
+            )
+            .unwrap(),
+        );
+        let vote = build_and_sign_state_block(
+            &state,
+            &vote,
+            &keys.private,
+            TxHash::ZERO,
+            BlockHash::new([3; 32]),
+        )
+        .unwrap();
         let content = burst_governance::ProposalContent::ParameterChange {
-            param: burst_governance::GovernableParam::BrnRate, new_value: 1,
+            param: burst_governance::GovernableParam::BrnRate,
+            new_value: 1,
         };
         let (proposal, _) = crate::governance_content::build_signed_proposal(
-            &state, &keys, &content, BlockHash::new([3;32]), Timestamp::now()).unwrap();
-        let handoff = sign_state_block(crate::transaction_builder::build_signing_handoff(
-            &state, &account, BlockHash::new([5;32]), BlockHash::new([3;32]), Timestamp::now()).unwrap(), &keys.private);
-        for (block, content) in [(block, None), (vote, None), (proposal, Some(content.encode_content().unwrap())), (handoff, None)] {
-        for confirmed in [false, true] {
-            let directory = tempfile::tempdir().unwrap();
-            let path = directory.path().join("payment.json");
-            let inspect_path = path.clone();
-            let expected = block.clone();
-            let expected_content = content.as_ref().map(hex::encode);
-            let mut script = vec![
-                ("block_info", json!({"account":account.as_str(),"confirmed":true})),
-                ("process", if confirmed { json!({"hash":block.hash.to_string(),"accepted":true}) } else { json!({"malformed":true}) }),
-            ];
-            if confirmed { script.push(("block_info", json!({"confirmed":true}))); }
-            let (client, server) = offline_rpc_script_check(script, move |request| {
-                if request["action"] == "process" {
-                    assert_eq!(request["proposal_content"].as_str(), expected_content.as_deref());
-                    let saved = crate::offline::load_payment(&inspect_path).unwrap();
-                    assert_eq!(serde_json::to_string(&saved).unwrap(), serde_json::to_string(&expected).unwrap());
-                    assert!(crate::offline::payment_was_submitted(&inspect_path, &saved.hash).unwrap());
+            &state,
+            &keys,
+            &content,
+            BlockHash::new([3; 32]),
+            Timestamp::now(),
+        )
+        .unwrap();
+        let handoff = sign_state_block(
+            crate::transaction_builder::build_signing_handoff(
+                &state,
+                &account,
+                BlockHash::new([5; 32]),
+                BlockHash::new([3; 32]),
+                Timestamp::now(),
+            )
+            .unwrap(),
+            &keys.private,
+        );
+        for (block, content) in [
+            (block, None),
+            (vote, None),
+            (proposal, Some(content.encode_content().unwrap())),
+            (handoff, None),
+        ] {
+            for confirmed in [false, true] {
+                let directory = tempfile::tempdir().unwrap();
+                let path = directory.path().join("payment.json");
+                let inspect_path = path.clone();
+                let expected = block.clone();
+                let expected_content = content.as_ref().map(hex::encode);
+                let mut script = vec![
+                    (
+                        "block_info",
+                        json!({"account":account.as_str(),"confirmed":true}),
+                    ),
+                    (
+                        "process",
+                        if confirmed {
+                            json!({"hash":block.hash.to_string(),"accepted":true})
+                        } else {
+                            json!({"malformed":true})
+                        },
+                    ),
+                ];
+                if confirmed {
+                    script.push(("block_info", json!({"confirmed":true})));
                 }
-            });
-            let result = client.with_payment_journal(path.clone()).submit_ready_block_with_content(block.clone(), content.as_deref()).await;
-            server.join().unwrap();
-            if confirmed {
-                assert!(result.is_ok());
-                if block.block_type == BlockType::ChangeSigner {
-                    assert_eq!(crate::offline::load_payment(&path).unwrap().hash, block.hash);
-                    let binding = directory.path().join("device.json");
-                    assert_eq!(crate::signing_device::load(&binding, &account).unwrap(), BlockHash::ZERO);
-                    crate::signing_device::activate(&binding, &account, &block).unwrap();
-                    crate::offline::archive_payment(&path, "confirmed").unwrap();
-                    assert_eq!(crate::signing_device::load(&binding, &account).unwrap(), block.hash);
+                let (client, server) = offline_rpc_script_check(script, move |request| {
+                    if request["action"] == "process" {
+                        assert_eq!(
+                            request["proposal_content"].as_str(),
+                            expected_content.as_deref()
+                        );
+                        let saved = crate::offline::load_payment(&inspect_path).unwrap();
+                        assert_eq!(
+                            serde_json::to_string(&saved).unwrap(),
+                            serde_json::to_string(&expected).unwrap()
+                        );
+                        assert!(
+                            crate::offline::payment_was_submitted(&inspect_path, &saved.hash)
+                                .unwrap()
+                        );
+                    }
+                });
+                let result = client
+                    .with_payment_journal(path.clone())
+                    .submit_ready_block_with_content(block.clone(), content.as_deref())
+                    .await;
+                server.join().unwrap();
+                if confirmed {
+                    assert!(result.is_ok());
+                    if block.block_type == BlockType::ChangeSigner {
+                        assert_eq!(
+                            crate::offline::load_payment(&path).unwrap().hash,
+                            block.hash
+                        );
+                        let binding = directory.path().join("device.json");
+                        assert_eq!(
+                            crate::signing_device::load(&binding, &account).unwrap(),
+                            BlockHash::ZERO
+                        );
+                        crate::signing_device::activate(&binding, &account, &block).unwrap();
+                        crate::offline::archive_payment(&path, "confirmed").unwrap();
+                        assert_eq!(
+                            crate::signing_device::load(&binding, &account).unwrap(),
+                            block.hash
+                        );
+                    }
+                    assert!(!path.exists());
+                    let archive = path
+                        .parent()
+                        .unwrap()
+                        .join("completed")
+                        .join(block.account.as_str())
+                        .join(format!("confirmed-{}.json", block.hash));
+                    assert_eq!(
+                        crate::offline::load_payment(&archive).unwrap().hash,
+                        block.hash
+                    );
+                } else {
+                    assert!(result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("confirmation pending"));
+                    assert_eq!(
+                        crate::offline::load_payment(&path).unwrap().hash,
+                        block.hash
+                    );
+                    assert!(crate::offline::payment_was_submitted(&path, &block.hash).unwrap());
                 }
-                assert!(!path.exists());
-                let archive = path.parent().unwrap().join("completed").join(block.account.as_str())
-                    .join(format!("confirmed-{}.json", block.hash));
-                assert_eq!(crate::offline::load_payment(&archive).unwrap().hash, block.hash);
-            } else {
-                assert!(result.unwrap_err().to_string().contains("confirmation pending"));
-                assert_eq!(crate::offline::load_payment(&path).unwrap().hash, block.hash);
-                assert!(crate::offline::payment_was_submitted(&path, &block.hash).unwrap());
             }
-        }
         }
     }
 
     #[tokio::test]
     async fn online_payment_journal_failure_sends_no_process_request() {
-        let keys = burst_crypto::keypair_from_seed(&[69;32]);
+        let keys = burst_crypto::keypair_from_seed(&[69; 32]);
         let account = burst_crypto::derive_address(&keys.public);
-        let state = AccountState { signing_grant: burst_types::BlockHash::ZERO,
-            payment_epoch: BlockHash::new([1;32]), head: BlockHash::ZERO,
-            block_count: 0, representative: account.clone(), brn_balance: 0,
-            trst_balance: 0, release_sources: vec![],
+        let state = AccountState {
+            signing_grant: burst_types::BlockHash::ZERO,
+            payment_epoch: BlockHash::new([1; 32]),
+            head: BlockHash::ZERO,
+            block_count: 0,
+            representative: account.clone(),
+            brn_balance: 0,
+            trst_balance: 0,
+            release_sources: vec![],
         };
         let tx = Transaction::Burn(build_burn_tx(&account, &account, 1, Timestamp::now()).unwrap());
-        let block = build_and_sign_state_block(&state, &tx, &keys.private, TxHash::ZERO, BlockHash::new([3;32])).unwrap();
+        let block = build_and_sign_state_block(
+            &state,
+            &tx,
+            &keys.private,
+            TxHash::ZERO,
+            BlockHash::new([3; 32]),
+        )
+        .unwrap();
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("payment.json");
         std::fs::write(&path, b"existing reservation").unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
-        let client = NodeClient::new(format!("http://{}", listener.local_addr().unwrap())).unwrap().with_payment_journal(path.clone());
+        let client = NodeClient::new(format!("http://{}", listener.local_addr().unwrap()))
+            .unwrap()
+            .with_payment_journal(path.clone());
         assert!(client.submit_ready_block(block).await.is_err());
-        assert!(matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+        );
         assert_eq!(std::fs::read(path).unwrap(), b"existing reservation");
     }
 
-    fn offline_rpc_script(script: Vec<(&'static str, Value)>) -> (NodeClient, std::thread::JoinHandle<Vec<Value>>) {
+    fn offline_rpc_script(
+        script: Vec<(&'static str, Value)>,
+    ) -> (NodeClient, std::thread::JoinHandle<Vec<Value>>) {
         offline_rpc_script_check(script, |_| {})
     }
 
@@ -1417,14 +1878,27 @@ mod submission_tests {
             let neither = projected.is_none();
             let mut review = review.clone();
             review["phase_projected"] = json!(projected.unwrap_or(false));
-            let action = if neither { OfflineAction::VerificationVote {target:account.clone(),context:panel,vote:3,stake:0} }
-                else { OfflineAction::GovernanceVote {proposal,vote:burst_transactions::governance::GovernanceVote::Yea} };
-            let mut script = vec![("params_hash",params.clone())];
+            let action = if neither {
+                OfflineAction::VerificationVote {
+                    target: account.clone(),
+                    context: panel,
+                    vote: 3,
+                    stake: 0,
+                }
+            } else {
+                OfflineAction::GovernanceVote {
+                    proposal,
+                    vote: burst_transactions::governance::GovernanceVote::Yea,
+                }
+            };
+            let mut script = vec![("params_hash", params.clone())];
             if neither {
                 script.extend([("verification_status",json!({"selected_verifiers":[account.as_str()],"verifier_votes":[],
                     "selection_available":true,"selection_context":panel.to_string(),"phase":"voting"})),
                     ("protocol_params",json!({"verifier_stake_amount":"1000000000000000000"}))]);
-            } else { script.push(("governance_proposal_info",review.clone())); }
+            } else {
+                script.push(("governance_proposal_info", review.clone()));
+            }
             script.extend([
                 ("account_info",json!({"head":head.to_string(),"payment_epoch":epoch.to_string(),"block_count":1,
                     "representative":account.as_str(),"trst_balance":"0","release_sources":[],"has_more_releases":false})),
@@ -1434,20 +1908,42 @@ mod submission_tests {
                 ("block_info",json!({"account":account.as_str(),"confirmed":true})),
             ]);
             let (client, server) = offline_rpc_script(script);
-            let context = client.prepare_offline_action(&account, action).await.unwrap();
+            let context = client
+                .prepare_offline_action(&account, action)
+                .await
+                .unwrap();
             let requests = server.join().unwrap();
-            assert!(requests.iter().all(|request| request["action"] != "process"));
+            assert!(requests
+                .iter()
+                .all(|request| request["action"] != "process"));
             drop(client);
             let signed = context.sign(&keys, Timestamp::now()).unwrap();
             assert_eq!(signed.block().brn_balance, 7);
-            assert_eq!(signed.block().transaction.as_bytes()[0], if neither {3} else {0});
-            if !neither { assert_eq!(context.review(), &review); }
+            assert_eq!(
+                signed.block().transaction.as_bytes()[0],
+                if neither { 3 } else { 0 }
+            );
+            if !neither {
+                assert_eq!(context.review(), &review);
+            }
         }
         for field in ["hash", "phase_deadline", "phase_projected"] {
             let mut invalid = review.clone();
             invalid[field] = Value::Null;
-            let (client, server) = offline_rpc_script(vec![("params_hash",params.clone()),("governance_proposal_info",invalid)]);
-            assert!(client.prepare_offline_action(&account, OfflineAction::GovernanceVote {proposal,vote:burst_transactions::governance::GovernanceVote::Yea}).await.is_err());
+            let (client, server) = offline_rpc_script(vec![
+                ("params_hash", params.clone()),
+                ("governance_proposal_info", invalid),
+            ]);
+            assert!(client
+                .prepare_offline_action(
+                    &account,
+                    OfflineAction::GovernanceVote {
+                        proposal,
+                        vote: burst_transactions::governance::GovernanceVote::Yea
+                    }
+                )
+                .await
+                .is_err());
             assert_eq!(server.join().unwrap().len(), 2);
         }
     }
@@ -1456,30 +1952,65 @@ mod submission_tests {
     async fn saved_offline_actions_preserve_content_and_recover_without_resigning() {
         let keys = burst_crypto::keypair_from_seed(&[71; 32]);
         let account = burst_crypto::derive_address(&keys.public);
-        let state = AccountState { signing_grant: BlockHash::ZERO,
-            payment_epoch: BlockHash::new([1; 32]), head: BlockHash::new([2; 32]),
-            block_count: 1, representative: account.clone(), brn_balance: 11,
-            trst_balance: 20, release_sources: vec![],
+        let state = AccountState {
+            signing_grant: BlockHash::ZERO,
+            payment_epoch: BlockHash::new([1; 32]),
+            head: BlockHash::new([2; 32]),
+            block_count: 1,
+            representative: account.clone(),
+            brn_balance: 11,
+            trst_balance: 20,
+            release_sources: vec![],
         };
         let params_hash = BlockHash::new([3; 32]);
         let now = Timestamp::new(42);
-        let vote = Transaction::GovernanceVote(build_governance_vote_tx(&account,
-            TxHash::new([4; 32]), burst_transactions::governance::GovernanceVote::Yea, now).unwrap());
-        let endorsement = Transaction::Endorse(build_endorse_tx(&account, &account, 1, now).unwrap());
+        let vote = Transaction::GovernanceVote(
+            build_governance_vote_tx(
+                &account,
+                TxHash::new([4; 32]),
+                burst_transactions::governance::GovernanceVote::Yea,
+                now,
+            )
+            .unwrap(),
+        );
+        let endorsement =
+            Transaction::Endorse(build_endorse_tx(&account, &account, 1, now).unwrap());
         let content = burst_governance::ProposalContent::ParameterChange {
-            param: burst_governance::GovernableParam::BrnRate, new_value: 1,
+            param: burst_governance::GovernableParam::BrnRate,
+            new_value: 1,
         };
         let (proposal, encoded) = crate::governance_content::build_signed_proposal(
-            &state, &keys, &content, params_hash, now).unwrap();
+            &state,
+            &keys,
+            &content,
+            params_hash,
+            now,
+        )
+        .unwrap();
         let actions = [
-            (build_and_sign_state_block(&state, &vote, &keys.private, TxHash::ZERO, params_hash).unwrap(), None),
-            (build_and_sign_state_block(&state, &endorsement, &keys.private, TxHash::ZERO, params_hash).unwrap(), None),
+            (
+                build_and_sign_state_block(&state, &vote, &keys.private, TxHash::ZERO, params_hash)
+                    .unwrap(),
+                None,
+            ),
+            (
+                build_and_sign_state_block(
+                    &state,
+                    &endorsement,
+                    &keys.private,
+                    TxHash::ZERO,
+                    params_hash,
+                )
+                .unwrap(),
+                None,
+            ),
             (proposal, Some(encoded.bytes().to_vec())),
         ];
         let info = json!({"head":state.head.to_string(), "payment_epoch":state.payment_epoch.to_string(),
             "block_count":1, "representative":account.as_str(), "trst_balance":"20",
             "release_sources":[], "has_more_releases":false});
-        let predecessor = json!({"active_signing_grant":BlockHash::ZERO.to_string(), "brn_balance":"11"});
+        let predecessor =
+            json!({"active_signing_grant":BlockHash::ZERO.to_string(), "brn_balance":"11"});
         let params = json!({"online_signing":"peer_matches", "block_version":burst_ledger::CURRENT_BLOCK_VERSION,
             "payment_epoch":state.payment_epoch.to_string(), "params_hash":params_hash.to_string(),
             "min_work_difficulty":"0"});
@@ -1494,29 +2025,51 @@ mod submission_tests {
                 let inspect_path = path.clone();
                 let mut script = vec![
                     ("block_info", json!({"confirmed":false})),
-                    ("account_info", info.clone()), ("block_info", predecessor.clone()),
+                    ("account_info", info.clone()),
+                    ("block_info", predecessor.clone()),
                     ("params_hash", params.clone()),
-                    ("process", if lost_response { json!({"malformed":true}) }
-                        else { json!({"accepted":true,"hash":block.hash.to_string()}) }),
+                    (
+                        "process",
+                        if lost_response {
+                            json!({"malformed":true})
+                        } else {
+                            json!({"accepted":true,"hash":block.hash.to_string()})
+                        },
+                    ),
                 ];
-                if !lost_response { script.push(("block_info", json!({"confirmed":true}))); }
+                if !lost_response {
+                    script.push(("block_info", json!({"confirmed":true})));
+                }
                 let saved_hash = block.hash;
                 let (client, server) = offline_rpc_script_check(script, move |request| {
                     if request["action"] == "process" {
                         assert_eq!(request["block"].as_str(), Some(expected_block.as_str()));
-                        assert_eq!(request["proposal_content"].as_str(), expected_content.as_deref());
-                        assert!(crate::offline::payment_was_submitted(&inspect_path, &saved_hash).unwrap());
+                        assert_eq!(
+                            request["proposal_content"].as_str(),
+                            expected_content.as_deref()
+                        );
+                        assert!(
+                            crate::offline::payment_was_submitted(&inspect_path, &saved_hash)
+                                .unwrap()
+                        );
                     }
                 });
                 let result = client.submit_saved_offline_action(&path, &account).await;
                 assert_eq!(result.is_ok(), !lost_response);
                 let requests = server.join().unwrap();
-                assert_eq!(requests.iter().filter(|r| r["action"] == "process").count(), 1);
+                assert_eq!(
+                    requests.iter().filter(|r| r["action"] == "process").count(),
+                    1
+                );
                 assert_eq!(std::fs::read(&path).unwrap(), original);
                 // A new client resolves an accepted-but-unanswered action without
                 // fetching a fresh signing context or issuing another process call.
-                let (client, server) = offline_rpc_script(vec![("block_info", json!({"confirmed":true}))]);
-                let result = client.submit_saved_offline_action(&path, &account).await.unwrap();
+                let (client, server) =
+                    offline_rpc_script(vec![("block_info", json!({"confirmed":true}))]);
+                let result = client
+                    .submit_saved_offline_action(&path, &account)
+                    .await
+                    .unwrap();
                 assert_eq!(result.hash, block.hash.to_string());
                 assert_eq!(server.join().unwrap().len(), 1);
                 assert_eq!(std::fs::read(&path).unwrap(), original);
@@ -1527,23 +2080,40 @@ mod submission_tests {
                 crate::offline::save_signed_action(&path, &block, &[], content.as_deref()).unwrap();
                 let mut changed_info = info.clone();
                 let mut changed_params = params.clone();
-                let grant = if stale == "grant" { BlockHash::new([10; 32]) } else { BlockHash::ZERO };
-                if stale == "head" { changed_info["head"] = json!(BlockHash::new([9; 32]).to_string()); }
-                if stale == "params" { changed_params["params_hash"] = json!(BlockHash::new([9; 32]).to_string()); }
+                let grant = if stale == "grant" {
+                    BlockHash::new([10; 32])
+                } else {
+                    BlockHash::ZERO
+                };
+                if stale == "head" {
+                    changed_info["head"] = json!(BlockHash::new([9; 32]).to_string());
+                }
+                if stale == "params" {
+                    changed_params["params_hash"] = json!(BlockHash::new([9; 32]).to_string());
+                }
                 let mut changed_predecessor = predecessor.clone();
                 changed_predecessor["active_signing_grant"] = json!(grant.to_string());
                 let (client, server) = offline_rpc_script(vec![
-                    ("block_info", json!({"confirmed":false})), ("account_info", changed_info),
-                    ("block_info", changed_predecessor), ("params_hash", changed_params),
+                    ("block_info", json!({"confirmed":false})),
+                    ("account_info", changed_info),
+                    ("block_info", changed_predecessor),
+                    ("params_hash", changed_params),
                 ]);
-                assert!(client.with_signing_grant(grant).submit_saved_offline_action(&path, &account).await.is_err());
+                assert!(client
+                    .with_signing_grant(grant)
+                    .submit_saved_offline_action(&path, &account)
+                    .await
+                    .is_err());
                 assert_eq!(server.join().unwrap().len(), 4);
                 assert!(!crate::offline::payment_was_submitted(&path, &block.hash).unwrap());
             }
         }
     }
 
-    fn offline_rpc_script_check(script: Vec<(&'static str, Value)>, inspect: impl Fn(&Value) + Send + 'static) -> (NodeClient, std::thread::JoinHandle<Vec<Value>>) {
+    fn offline_rpc_script_check(
+        script: Vec<(&'static str, Value)>,
+        inspect: impl Fn(&Value) + Send + 'static,
+    ) -> (NodeClient, std::thread::JoinHandle<Vec<Value>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let client = NodeClient::new(format!("http://{}", listener.local_addr().unwrap())).unwrap();
@@ -1555,7 +2125,10 @@ mod submission_tests {
                     match listener.accept() {
                         Ok((stream, _)) => break stream,
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                            assert!(started.elapsed() < Duration::from_secs(5), "missing RPC {action}");
+                            assert!(
+                                started.elapsed() < Duration::from_secs(5),
+                                "missing RPC {action}"
+                            );
                             std::thread::sleep(Duration::from_millis(5));
                         }
                         Err(error) => panic!("{error}"),
@@ -1575,103 +2148,207 @@ mod submission_tests {
 
     #[tokio::test]
     async fn offline_ancestry_survives_restart_and_resolves_only_a_confirmed_conflict() {
-        let keys = burst_crypto::keypair_from_seed(&[67;32]);
+        let keys = burst_crypto::keypair_from_seed(&[67; 32]);
         let account = burst_crypto::derive_address(&keys.public);
-        let anchor = BlockHash::new([7;32]);
-        let epoch = BlockHash::new([8;32]);
-        let params_hash = BlockHash::new([9;32]);
-        let state = AccountState { signing_grant: burst_types::BlockHash::ZERO, payment_epoch:epoch, release_sources:vec![], head:anchor,
-            block_count:1, representative:account.clone(), brn_balance:u64::MAX as u128 + 1, trst_balance:0 };
-        let tx = Transaction::Burn(build_burn_tx(&account, &account, 1, Timestamp::new(42)).unwrap());
-        let ancestor = build_and_sign_state_block(&state, &tx, &keys.private, TxHash::ZERO, params_hash).unwrap();
-        let tip_state = AccountState { head:ancestor.hash, block_count:2, brn_balance:ancestor.brn_balance, ..state.clone() };
-        let tip = build_and_sign_state_block(&tip_state, &tx, &keys.private, TxHash::ZERO, params_hash).unwrap();
+        let anchor = BlockHash::new([7; 32]);
+        let epoch = BlockHash::new([8; 32]);
+        let params_hash = BlockHash::new([9; 32]);
+        let state = AccountState {
+            signing_grant: burst_types::BlockHash::ZERO,
+            payment_epoch: epoch,
+            release_sources: vec![],
+            head: anchor,
+            block_count: 1,
+            representative: account.clone(),
+            brn_balance: u64::MAX as u128 + 1,
+            trst_balance: 0,
+        };
+        let tx =
+            Transaction::Burn(build_burn_tx(&account, &account, 1, Timestamp::new(42)).unwrap());
+        let ancestor =
+            build_and_sign_state_block(&state, &tx, &keys.private, TxHash::ZERO, params_hash)
+                .unwrap();
+        let tip_state = AccountState {
+            head: ancestor.hash,
+            block_count: 2,
+            brn_balance: ancestor.brn_balance,
+            ..state.clone()
+        };
+        let tip =
+            build_and_sign_state_block(&tip_state, &tx, &keys.private, TxHash::ZERO, params_hash)
+                .unwrap();
         let info = json!({"head":tip.hash.to_string(),"payment_epoch":epoch.to_string(),
             "block_count":3,"representative":account.as_str(),"trst_balance":"0",
             "release_sources":[],"has_more_releases":false});
         let params = json!({"online_signing":"peer_matches", "block_version":burst_ledger::CURRENT_BLOCK_VERSION,
             "payment_epoch":epoch.to_string(),"params_hash":params_hash.to_string(),"min_work_difficulty":"0"});
         let (client, server) = offline_rpc_script(vec![
-            ("account_info",info), ("block_info",json!({"active_signing_grant":BlockHash::ZERO.to_string(), "brn_balance":tip.brn_balance.to_string()})),
-            ("params_hash",params),
-            ("work_generate",json!({"hash":tip.hash.to_string(),"work":"0","difficulty":"0"})),
-            ("block_info",json!({"account":account.as_str(),"confirmed":false,"signed_block":serde_json::to_string(&tip).unwrap()})),
-            ("block_info",json!({"account":account.as_str(),"confirmed":false,"signed_block":serde_json::to_string(&ancestor).unwrap()})),
-            ("block_info",json!({"account":account.as_str(),"confirmed":true})),
+            ("account_info", info),
+            (
+                "block_info",
+                json!({"active_signing_grant":BlockHash::ZERO.to_string(), "brn_balance":tip.brn_balance.to_string()}),
+            ),
+            ("params_hash", params),
+            (
+                "work_generate",
+                json!({"hash":tip.hash.to_string(),"work":"0","difficulty":"0"}),
+            ),
+            (
+                "block_info",
+                json!({"account":account.as_str(),"confirmed":false,"signed_block":serde_json::to_string(&tip).unwrap()}),
+            ),
+            (
+                "block_info",
+                json!({"account":account.as_str(),"confirmed":false,"signed_block":serde_json::to_string(&ancestor).unwrap()}),
+            ),
+            (
+                "block_info",
+                json!({"account":account.as_str(),"confirmed":true}),
+            ),
         ]);
         let context = client.prepare_offline_payment(&account).await.unwrap();
         let requests = server.join().unwrap();
-        assert_eq!(requests[4]["include_signed_block"],true);
-        assert_eq!(requests[5]["hash"],ancestor.hash.to_string());
-        assert_eq!(requests[6]["hash"],anchor.to_string());
-        let draft = context.sign(&keys,&tx,TxHash::ZERO).unwrap();
+        assert_eq!(requests[4]["include_signed_block"], true);
+        assert_eq!(requests[5]["hash"], ancestor.hash.to_string());
+        assert_eq!(requests[6]["hash"], anchor.to_string());
+        let draft = context.sign(&keys, &tx, TxHash::ZERO).unwrap();
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("draft.json");
-        context.save_payment(&path,&draft).unwrap();
+        context.save_payment(&path, &draft).unwrap();
         drop(context);
         let (draft, ancestry) = crate::offline::load_payment_with_ancestry(&path).unwrap();
-        assert_eq!(ancestry.len(),2);
-        assert_eq!(ancestry[0].hash,tip.hash);
-        assert_eq!(ancestry[1].hash,ancestor.hash);
+        assert_eq!(ancestry.len(), 2);
+        assert_eq!(ancestry[0].hash, tip.hash);
+        assert_eq!(ancestry[1].hash, ancestor.hash);
         assert_eq!(ancestry[0].brn_balance, tip.brn_balance);
         assert_eq!(ancestry[1].brn_balance, ancestor.brn_balance);
         assert!(ancestry[1].brn_balance > u64::MAX as u128);
         let original = std::fs::read(&path).unwrap();
-        let winner = BlockHash::new([10;32]);
-        let slot = |previous: BlockHash, successor: Option<BlockHash>| json!({"account":account.as_str(),
-            "previous":previous.to_string(),"successor":successor.map(|hash|hash.to_string())});
-        let missing = slot(draft.previous,None);
-        let confirmed_anchor = slot(anchor,Some(winner));
+        let winner = BlockHash::new([10; 32]);
+        let slot = |previous: BlockHash, successor: Option<BlockHash>| {
+            json!({"account":account.as_str(),
+            "previous":previous.to_string(),"successor":successor.map(|hash|hash.to_string())})
+        };
+        let missing = slot(draft.previous, None);
+        let confirmed_anchor = slot(anchor, Some(winner));
         let (client, server) = offline_rpc_script(vec![
-            ("confirmed_account_slot",missing.clone()), ("confirmed_account_slot",confirmed_anchor.clone()),
+            ("confirmed_account_slot", missing.clone()),
+            ("confirmed_account_slot", confirmed_anchor.clone()),
         ]);
-        assert_eq!(client.confirmed_offline_resolution(&draft,&ancestry).await.unwrap(),Some(winner));
+        assert_eq!(
+            client
+                .confirmed_offline_resolution(&draft, &ancestry)
+                .await
+                .unwrap(),
+            Some(winner)
+        );
         server.join().unwrap();
         let (client, server) = offline_rpc_script(vec![
-            ("confirmed_account_slot",missing.clone()), ("confirmed_account_slot",slot(anchor,Some(ancestor.hash))),
-            ("confirmed_account_slot",slot(ancestor.hash,None)),
+            ("confirmed_account_slot", missing.clone()),
+            ("confirmed_account_slot", slot(anchor, Some(ancestor.hash))),
+            ("confirmed_account_slot", slot(ancestor.hash, None)),
         ]);
-        assert_eq!(client.confirmed_offline_resolution(&draft,&ancestry).await.unwrap(),None);
+        assert_eq!(
+            client
+                .confirmed_offline_resolution(&draft, &ancestry)
+                .await
+                .unwrap(),
+            None
+        );
         server.join().unwrap();
-        for (field,value) in [("successor",json!(BlockHash::ZERO.to_string())), ("successor",json!("invalid")), ("previous",json!(draft.hash.to_string())), ("account",json!("unrelated"))] {
+        for (field, value) in [
+            ("successor", json!(BlockHash::ZERO.to_string())),
+            ("successor", json!("invalid")),
+            ("previous", json!(draft.hash.to_string())),
+            ("account", json!("unrelated")),
+        ] {
             let mut invalid = confirmed_anchor.clone();
             invalid[field] = value;
             let (client, server) = offline_rpc_script(vec![
-                ("confirmed_account_slot",missing.clone()), ("confirmed_account_slot",invalid),
+                ("confirmed_account_slot", missing.clone()),
+                ("confirmed_account_slot", invalid),
             ]);
-            assert!(client.confirmed_offline_resolution(&draft,&ancestry).await.is_err());
+            assert!(client
+                .confirmed_offline_resolution(&draft, &ancestry)
+                .await
+                .is_err());
             server.join().unwrap();
         }
-        let (client, server) = offline_rpc_script(vec![("confirmed_account_slot",missing.clone()),("confirmed_account_slot",json!({"error":"recovery unavailable"}))]);
-        assert!(client.confirmed_offline_resolution(&draft,&ancestry).await.is_err());
+        let (client, server) = offline_rpc_script(vec![
+            ("confirmed_account_slot", missing.clone()),
+            (
+                "confirmed_account_slot",
+                json!({"error":"recovery unavailable"}),
+            ),
+        ]);
+        assert!(client
+            .confirmed_offline_resolution(&draft, &ancestry)
+            .await
+            .is_err());
         server.join().unwrap();
         let (client, server) = offline_rpc_script(vec![
-            ("confirmed_account_slot",json!({"error":"invalid request: unknown action: confirmed_account_slot"})),
-            ("block_info",json!({"account":account.as_str(),"confirmed":true,"confirmed_successor":winner.to_string()})),
-            ("block_info",json!({"account":account.as_str(),"previous":draft.previous.to_string(),"confirmed":true})),
+            (
+                "confirmed_account_slot",
+                json!({"error":"invalid request: unknown action: confirmed_account_slot"}),
+            ),
+            (
+                "block_info",
+                json!({"account":account.as_str(),"confirmed":true,"confirmed_successor":winner.to_string()}),
+            ),
+            (
+                "block_info",
+                json!({"account":account.as_str(),"previous":draft.previous.to_string(),"confirmed":true}),
+            ),
         ]);
-        assert_eq!(client.confirmed_offline_resolution(&draft,&ancestry).await.unwrap(),Some(winner));
+        assert_eq!(
+            client
+                .confirmed_offline_resolution(&draft, &ancestry)
+                .await
+                .unwrap(),
+            Some(winner)
+        );
         server.join().unwrap();
         let (client, server) = offline_rpc_script(vec![]);
         let mut invalid = ancestry.clone();
         invalid[0].previous = BlockHash::ZERO;
-        assert!(client.confirmed_offline_resolution(&draft,&invalid).await.is_err());
+        assert!(client
+            .confirmed_offline_resolution(&draft, &invalid)
+            .await
+            .is_err());
         server.join().unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(),original);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
     }
 
     #[tokio::test]
     async fn offline_review_preserves_exact_amount_and_requires_confirmed_account_balance() {
         let keys = burst_crypto::keypair_from_seed(&[62; 32]);
         let account = burst_crypto::derive_address(&keys.public);
-        let provider = burst_crypto::derive_address(&burst_crypto::keypair_from_seed(&[64; 32]).public);
+        let provider =
+            burst_crypto::derive_address(&burst_crypto::keypair_from_seed(&[64; 32]).public);
         let previous = BlockHash::new([7; 32]);
         let burned = 1_000_000_000_000_000_003_u128;
         let amount = 1_000_000_000_000_000_001_u128;
-        let state = AccountState { signing_grant: burst_types::BlockHash::ZERO, payment_epoch: BlockHash::new([8; 32]), release_sources: vec![],
-            head: previous, block_count: 1, representative: account.clone(), brn_balance: burned, trst_balance: 0 };
-        let tx = Transaction::Burn(build_burn_tx(&account, &provider, amount, Timestamp::new(42)).unwrap());
-        let block = build_and_sign_state_block(&state, &tx, &keys.private, TxHash::ZERO, BlockHash::new([9; 32])).unwrap();
+        let state = AccountState {
+            signing_grant: burst_types::BlockHash::ZERO,
+            payment_epoch: BlockHash::new([8; 32]),
+            release_sources: vec![],
+            head: previous,
+            block_count: 1,
+            representative: account.clone(),
+            brn_balance: burned,
+            trst_balance: 0,
+        };
+        let tx = Transaction::Burn(
+            build_burn_tx(&account, &provider, amount, Timestamp::new(42)).unwrap(),
+        );
+        let block = build_and_sign_state_block(
+            &state,
+            &tx,
+            &keys.private,
+            TxHash::ZERO,
+            BlockHash::new([9; 32]),
+        )
+        .unwrap();
         let anchor = json!({"account": account.as_str(), "confirmed": true, "brn_balance": burned.to_string()});
         let (client, server) = offline_rpc_script(vec![("block_info", anchor.clone())]);
         let review = client.review_offline_payment(&block).await.unwrap();
@@ -1682,7 +2359,10 @@ mod submission_tests {
         let exclusion = json!({"account": account.as_str(), "previous": previous.to_string(),
             "payment_epoch": block.payment_epoch.to_string(), "installed_epoch": BlockHash::new([10; 32]).to_string(), "excluded": true});
         let (client, server) = offline_rpc_script(vec![("payment_exclusion", exclusion.clone())]);
-        assert_eq!(client.excluded_offline_payment(&block).await.unwrap(), Some(BlockHash::new([10; 32])));
+        assert_eq!(
+            client.excluded_offline_payment(&block).await.unwrap(),
+            Some(BlockHash::new([10; 32]))
+        );
         let request = &server.join().unwrap()[0];
         assert_eq!(request["account"], account.as_str());
         assert_eq!(request["previous"], previous.to_string());
@@ -1693,7 +2373,8 @@ mod submission_tests {
         assert_eq!(client.excluded_offline_payment(&block).await.unwrap(), None);
         server.join().unwrap();
         for (field, value) in [
-            ("account", json!(provider.as_str())), ("previous", json!(BlockHash::ZERO.to_string())),
+            ("account", json!(provider.as_str())),
+            ("previous", json!(BlockHash::ZERO.to_string())),
             ("payment_epoch", json!(BlockHash::ZERO.to_string())),
             ("installed_epoch", json!(BlockHash::ZERO.to_string())),
             ("installed_epoch", json!(block.payment_epoch.to_string())),
@@ -1705,10 +2386,12 @@ mod submission_tests {
             server.join().unwrap();
         }
         for (field, value) in [
-            ("account", json!(provider.as_str())), ("confirmed", json!(false)),
+            ("account", json!(provider.as_str())),
+            ("confirmed", json!(false)),
             ("brn_balance", json!(block.brn_balance.to_string())),
             ("brn_balance", json!(u128::MAX.to_string())),
-            ("brn_balance", json!(burned)), ("brn_balance", Value::Null),
+            ("brn_balance", json!(burned)),
+            ("brn_balance", Value::Null),
         ] {
             let mut invalid = anchor.clone();
             invalid[field] = value;
@@ -1720,23 +2403,42 @@ mod submission_tests {
 
     #[tokio::test]
     async fn offline_opening_recovers_confirmed_slot_or_closed_epoch_only() {
-        let keys = burst_crypto::keypair_from_seed(&[65;32]);
+        let keys = burst_crypto::keypair_from_seed(&[65; 32]);
         let account = burst_crypto::derive_address(&keys.public);
-        let epoch = BlockHash::new([8;32]);
+        let epoch = BlockHash::new([8; 32]);
         let context = crate::offline::OfflinePaymentContext {
             ancestry: Vec::new(),
             account: account.clone(),
-            state: AccountState { signing_grant: burst_types::BlockHash::ZERO, payment_epoch: epoch, release_sources: vec![],
-                head: BlockHash::ZERO, block_count: 0, representative: account.clone(), brn_balance: 0, trst_balance: 0 },
-            params_hash: BlockHash::new([9;32]), threshold: 0,
-            work: PreparedWork { root: StateBlock::work_root_for(&account, BlockHash::ZERO), nonce: 0 },
+            state: AccountState {
+                signing_grant: burst_types::BlockHash::ZERO,
+                payment_epoch: epoch,
+                release_sources: vec![],
+                head: BlockHash::ZERO,
+                block_count: 0,
+                representative: account.clone(),
+                brn_balance: 0,
+                trst_balance: 0,
+            },
+            params_hash: BlockHash::new([9; 32]),
+            threshold: 0,
+            work: PreparedWork {
+                root: StateBlock::work_root_for(&account, BlockHash::ZERO),
+                nonce: 0,
+            },
         };
-        let tx = Transaction::Receive(build_receive_tx(&account, TxHash::new([5;32]), 7, Timestamp::new(42)).unwrap());
-        let block = context.sign(&keys, &tx, TxHash::new([6;32])).unwrap();
-        let sender = burst_crypto::derive_address(&burst_crypto::keypair_from_seed(&[66;32]).public);
+        let tx = Transaction::Receive(
+            build_receive_tx(&account, TxHash::new([5; 32]), 7, Timestamp::new(42)).unwrap(),
+        );
+        let block = context.sign(&keys, &tx, TxHash::new([6; 32])).unwrap();
+        let sender =
+            burst_crypto::derive_address(&burst_crypto::keypair_from_seed(&[66; 32]).public);
         let pending = json!({"pending":[{"hash":block.link.to_string(),"source":sender.as_str(),"amount":"7"}]});
-        let source = json!({"block_type":"Send", "origin":block.origin.to_string(), "confirmed":true});
-        let (client, server) = offline_rpc_script(vec![("account_pending",pending.clone()),("block_info",source.clone())]);
+        let source =
+            json!({"block_type":"Send", "origin":block.origin.to_string(), "confirmed":true});
+        let (client, server) = offline_rpc_script(vec![
+            ("account_pending", pending.clone()),
+            ("block_info", source.clone()),
+        ]);
         let review = client.review_offline_payment(&block).await.unwrap();
         assert_eq!(review.kind, "receive");
         assert_eq!(review.amount, "7");
@@ -1748,82 +2450,141 @@ mod submission_tests {
         let mut unconfirmed = source.clone();
         unconfirmed["confirmed"] = json!(false);
         for (pending, source) in [(wrong_amount, source.clone()), (pending, unconfirmed)] {
-            let (client, server) = offline_rpc_script(vec![("account_pending",pending),("block_info",source)]);
+            let (client, server) =
+                offline_rpc_script(vec![("account_pending", pending), ("block_info", source)]);
             assert!(client.review_offline_payment(&block).await.is_err());
             server.join().unwrap();
         }
-        for successor in [block.hash, BlockHash::new([10;32])] {
+        for successor in [block.hash, BlockHash::new([10; 32])] {
             let info = json!({"address":account.as_str(), "confirmation_height":1, "confirmed_open":successor.to_string()});
             let candidate = json!({"account":account.as_str(), "confirmed":true, "previous":BlockHash::ZERO.to_string()});
-            let (client, server) = offline_rpc_script(vec![("account_info",info.clone()),("block_info",candidate.clone())]);
-            assert_eq!(client.confirmed_offline_successor(&block).await.unwrap(), Some(successor));
+            let (client, server) = offline_rpc_script(vec![
+                ("account_info", info.clone()),
+                ("block_info", candidate.clone()),
+            ]);
+            assert_eq!(
+                client.confirmed_offline_successor(&block).await.unwrap(),
+                Some(successor)
+            );
             let requests = server.join().unwrap();
             assert_eq!(requests[0]["account"], account.as_str());
             assert_eq!(requests[1]["hash"], successor.to_string());
-            for (field, value) in [("confirmed", json!(false)), ("account",json!("unrelated")), ("previous",json!(epoch.to_string()))] {
+            for (field, value) in [
+                ("confirmed", json!(false)),
+                ("account", json!("unrelated")),
+                ("previous", json!(epoch.to_string())),
+            ] {
                 let mut invalid = candidate.clone();
                 invalid[field] = value;
-                let (client, server) = offline_rpc_script(vec![("account_info",info.clone()),("block_info",invalid)]);
+                let (client, server) = offline_rpc_script(vec![
+                    ("account_info", info.clone()),
+                    ("block_info", invalid),
+                ]);
                 assert!(client.confirmed_offline_successor(&block).await.is_err());
                 server.join().unwrap();
             }
             let mut unconfirmed = info.clone();
             unconfirmed["confirmation_height"] = json!(0);
-            let (client, server) = offline_rpc_script(vec![("account_info",unconfirmed)]);
-            assert_eq!(client.confirmed_offline_successor(&block).await.unwrap(), None);
+            let (client, server) = offline_rpc_script(vec![("account_info", unconfirmed)]);
+            assert_eq!(
+                client.confirmed_offline_successor(&block).await.unwrap(),
+                None
+            );
             server.join().unwrap();
             let mut old_node = info;
             old_node.as_object_mut().unwrap().remove("confirmed_open");
-            let (client, server) = offline_rpc_script(vec![("account_info",old_node)]);
-            assert_eq!(client.confirmed_offline_successor(&block).await.unwrap(), None);
+            let (client, server) = offline_rpc_script(vec![("account_info", old_node)]);
+            assert_eq!(
+                client.confirmed_offline_successor(&block).await.unwrap(),
+                None
+            );
             server.join().unwrap();
         }
         let review = json!({"account":account.as_str(), "previous":BlockHash::ZERO.to_string(),
             "payment_epoch":epoch.to_string(), "installed_epoch":BlockHash::new([11;32]).to_string(), "excluded":true});
-        let (client, server) = offline_rpc_script(vec![("payment_exclusion",review.clone())]);
-        assert_eq!(client.excluded_offline_payment(&block).await.unwrap(), Some(BlockHash::new([11;32])));
+        let (client, server) = offline_rpc_script(vec![("payment_exclusion", review.clone())]);
+        assert_eq!(
+            client.excluded_offline_payment(&block).await.unwrap(),
+            Some(BlockHash::new([11; 32]))
+        );
         server.join().unwrap();
         let mut current = review;
         current["installed_epoch"] = json!(epoch.to_string());
-        let (client, server) = offline_rpc_script(vec![("payment_exclusion",current)]);
+        let (client, server) = offline_rpc_script(vec![("payment_exclusion", current)]);
         assert!(client.excluded_offline_payment(&block).await.is_err());
         server.join().unwrap();
     }
 
     #[tokio::test]
     async fn offline_recovery_requires_confirmed_successor_of_exact_anchor() {
-        let keys = burst_crypto::keypair_from_seed(&[63;32]);
+        let keys = burst_crypto::keypair_from_seed(&[63; 32]);
         let account = burst_crypto::derive_address(&keys.public);
-        let previous = BlockHash::new([7;32]);
-        let state = AccountState { signing_grant: burst_types::BlockHash::ZERO, payment_epoch: BlockHash::new([8;32]), release_sources: vec![],
-            head: previous, block_count: 1, representative: account.clone(), brn_balance: 0, trst_balance: 0 };
-        let tx = Transaction::Burn(build_burn_tx(&account, &account, 1, Timestamp::new(42)).unwrap());
-        let block = build_and_sign_state_block(&state, &tx, &keys.private, TxHash::ZERO, BlockHash::new([9;32])).unwrap();
-        for successor in [block.hash, BlockHash::new([10;32])] {
+        let previous = BlockHash::new([7; 32]);
+        let state = AccountState {
+            signing_grant: burst_types::BlockHash::ZERO,
+            payment_epoch: BlockHash::new([8; 32]),
+            release_sources: vec![],
+            head: previous,
+            block_count: 1,
+            representative: account.clone(),
+            brn_balance: 0,
+            trst_balance: 0,
+        };
+        let tx =
+            Transaction::Burn(build_burn_tx(&account, &account, 1, Timestamp::new(42)).unwrap());
+        let block = build_and_sign_state_block(
+            &state,
+            &tx,
+            &keys.private,
+            TxHash::ZERO,
+            BlockHash::new([9; 32]),
+        )
+        .unwrap();
+        for successor in [block.hash, BlockHash::new([10; 32])] {
             let anchor = json!({"account":account.as_str(),"confirmed":true,"confirmed_successor":successor.to_string()});
             let candidate = json!({"account":account.as_str(),"confirmed":true,"previous":previous.to_string()});
-            let (client, server) = offline_rpc_script(vec![("block_info",anchor.clone()),("block_info",candidate.clone())]);
-            assert_eq!(client.confirmed_offline_successor(&block).await.unwrap(), Some(successor));
+            let (client, server) = offline_rpc_script(vec![
+                ("block_info", anchor.clone()),
+                ("block_info", candidate.clone()),
+            ]);
+            assert_eq!(
+                client.confirmed_offline_successor(&block).await.unwrap(),
+                Some(successor)
+            );
             let requests = server.join().unwrap();
             assert_eq!(requests[0]["hash"], previous.to_string());
             assert_eq!(requests[1]["hash"], successor.to_string());
             for field in ["confirmed", "account", "previous"] {
                 let mut invalid = candidate.clone();
-                invalid[field] = if field == "confirmed" { json!(false) } else { json!("unrelated") };
-                let (client, server) = offline_rpc_script(vec![("block_info",anchor.clone()),("block_info",invalid)]);
+                invalid[field] = if field == "confirmed" {
+                    json!(false)
+                } else {
+                    json!("unrelated")
+                };
+                let (client, server) = offline_rpc_script(vec![
+                    ("block_info", anchor.clone()),
+                    ("block_info", invalid),
+                ]);
                 assert!(client.confirmed_offline_successor(&block).await.is_err());
                 server.join().unwrap();
             }
         }
-        for anchor in [json!({"account":account.as_str(),"confirmed":true}),
-            json!({"account":account.as_str(),"confirmed":true,"confirmed_successor":null})] {
-            let (client, server) = offline_rpc_script(vec![("block_info",anchor)]);
-            assert_eq!(client.confirmed_offline_successor(&block).await.unwrap(), None);
+        for anchor in [
+            json!({"account":account.as_str(),"confirmed":true}),
+            json!({"account":account.as_str(),"confirmed":true,"confirmed_successor":null}),
+        ] {
+            let (client, server) = offline_rpc_script(vec![("block_info", anchor)]);
+            assert_eq!(
+                client.confirmed_offline_successor(&block).await.unwrap(),
+                None
+            );
             server.join().unwrap();
         }
-        for anchor in [json!({"account":account.as_str(),"confirmed":false}),
-            json!({"account":"unrelated","confirmed":true})] {
-            let (client, server) = offline_rpc_script(vec![("block_info",anchor)]);
+        for anchor in [
+            json!({"account":account.as_str(),"confirmed":false}),
+            json!({"account":"unrelated","confirmed":true}),
+        ] {
+            let (client, server) = offline_rpc_script(vec![("block_info", anchor)]);
             assert!(client.confirmed_offline_successor(&block).await.is_err());
             server.join().unwrap();
         }
@@ -1831,20 +2592,29 @@ mod submission_tests {
 
     #[tokio::test]
     async fn signing_device_does_not_adopt_another_devices_grant() {
-        let account = burst_crypto::derive_address(&burst_crypto::keypair_from_seed(&[60; 32]).public);
+        let account =
+            burst_crypto::derive_address(&burst_crypto::keypair_from_seed(&[60; 32]).public);
         let grant = BlockHash::new([10; 32]);
         let info = json!({"head":BlockHash::new([7;32]).to_string(),
             "payment_epoch":BlockHash::new([8;32]).to_string(), "block_count":1,
             "representative":account.as_str(),"trst_balance":"20",
             "release_sources":[],"has_more_releases":false});
-        for local in [BlockHash::ZERO, BlockHash::new([9;32]), grant] {
+        for local in [BlockHash::ZERO, BlockHash::new([9; 32]), grant] {
             let (client, server) = offline_rpc_script(vec![
                 ("account_info", info.clone()),
-                ("block_info", json!({"brn_balance":"11", "active_signing_grant":grant.to_string()})),
+                (
+                    "block_info",
+                    json!({"brn_balance":"11", "active_signing_grant":grant.to_string()}),
+                ),
             ]);
-            let result = client.with_signing_grant(local).signing_state(&account).await;
+            let result = client
+                .with_signing_grant(local)
+                .signing_state(&account)
+                .await;
             assert_eq!(result.is_ok(), local == grant);
-            if let Ok(state) = result { assert_eq!(state.signing_grant, grant); }
+            if let Ok(state) = result {
+                assert_eq!(state.signing_grant, grant);
+            }
             server.join().unwrap();
         }
     }
@@ -1862,13 +2632,25 @@ mod submission_tests {
             "payment_epoch":epoch.to_string(),"params_hash":BlockHash::new([9;32]).to_string(),
             "min_work_difficulty":"0"});
         let (online, prepare_server) = offline_rpc_script(vec![
-            ("account_info", info.clone()), ("block_info", json!({"active_signing_grant":BlockHash::ZERO.to_string(), "brn_balance":"11"})),
-            ("params_hash", params.clone()), ("work_generate", json!({"hash":head.to_string(),"work":"0","difficulty":"0"})),
-            ("block_info", json!({"account":account.as_str(),"confirmed":true})),
+            ("account_info", info.clone()),
+            (
+                "block_info",
+                json!({"active_signing_grant":BlockHash::ZERO.to_string(), "brn_balance":"11"}),
+            ),
+            ("params_hash", params.clone()),
+            (
+                "work_generate",
+                json!({"hash":head.to_string(),"work":"0","difficulty":"0"}),
+            ),
+            (
+                "block_info",
+                json!({"account":account.as_str(),"confirmed":true}),
+            ),
         ]);
         let context = online.prepare_offline_payment(&account).await.unwrap();
         prepare_server.join().unwrap(); // Listener is gone before choosing the payment.
-        let tx = Transaction::Burn(build_burn_tx(&account, &account, 7, Timestamp::new(42)).unwrap());
+        let tx =
+            Transaction::Burn(build_burn_tx(&account, &account, 7, Timestamp::new(42)).unwrap());
         let block = context.sign(&keys, &tx, TxHash::ZERO).unwrap();
         let drafts = tempfile::tempdir().unwrap();
         let draft_path = drafts.path().join("payment.json");
@@ -1879,68 +2661,140 @@ mod submission_tests {
         let expected = serde_json::to_string(&block).unwrap();
         let inspected_path = draft_path.clone();
         let inspected_hash = block.hash;
-        let (reconnected, submit_server) = offline_rpc_script_check(vec![
-            ("block_info", json!({"confirmed":false})),
-            ("account_info", info.clone()), ("block_info", json!({"active_signing_grant":BlockHash::ZERO.to_string(), "brn_balance":"11"})),
-            ("params_hash", params.clone()),
-            ("process", json!({"accepted":true,"hash":block.hash.to_string()})),
-            ("block_info", json!({"confirmed":true})),
-        ], move |request| {
-            if request["action"] == "process" {
-                assert!(crate::offline::payment_was_submitted(&inspected_path, &inspected_hash).unwrap());
-            }
-        });
-        let other_account = burst_crypto::derive_address(&burst_crypto::keypair_from_seed(&[62;32]).public);
+        let (reconnected, submit_server) = offline_rpc_script_check(
+            vec![
+                ("block_info", json!({"confirmed":false})),
+                ("account_info", info.clone()),
+                (
+                    "block_info",
+                    json!({"active_signing_grant":BlockHash::ZERO.to_string(), "brn_balance":"11"}),
+                ),
+                ("params_hash", params.clone()),
+                (
+                    "process",
+                    json!({"accepted":true,"hash":block.hash.to_string()}),
+                ),
+                ("block_info", json!({"confirmed":true})),
+            ],
+            move |request| {
+                if request["action"] == "process" {
+                    assert!(crate::offline::payment_was_submitted(
+                        &inspected_path,
+                        &inspected_hash
+                    )
+                    .unwrap());
+                }
+            },
+        );
+        let other_account =
+            burst_crypto::derive_address(&burst_crypto::keypair_from_seed(&[62; 32]).public);
         let reconnected = reconnected.with_payment_journal(draft_path.clone());
         let original_draft = std::fs::read(&draft_path).unwrap();
-        assert!(reconnected.submit_saved_offline_payment(&draft_path, &other_account).await.unwrap_err().to_string().contains("another wallet"));
-        assert_eq!(reconnected.submit_saved_offline_payment(&draft_path, &account).await.unwrap().hash, block.hash.to_string());
+        assert!(reconnected
+            .submit_saved_offline_payment(&draft_path, &other_account)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("another wallet"));
+        assert_eq!(
+            reconnected
+                .submit_saved_offline_payment(&draft_path, &account)
+                .await
+                .unwrap()
+                .hash,
+            block.hash.to_string()
+        );
         let requests = submit_server.join().unwrap();
         assert_eq!(requests[4]["block"].as_str(), Some(expected.as_str()));
         assert_eq!(std::fs::read(&draft_path).unwrap(), original_draft);
 
         // Retrying an already confirmed payment does not generate a replacement.
-        let (retry, retry_server) = offline_rpc_script(vec![("block_info", json!({"confirmed":true}))]);
-        retry.submit_saved_offline_payment(&draft_path, &account).await.unwrap();
+        let (retry, retry_server) =
+            offline_rpc_script(vec![("block_info", json!({"confirmed":true}))]);
+        retry
+            .submit_saved_offline_payment(&draft_path, &account)
+            .await
+            .unwrap();
         assert_eq!(retry_server.join().unwrap().len(), 1);
 
         let mut changed = info.clone();
-        changed["head"] = json!(BlockHash::new([10;32]).to_string());
+        changed["head"] = json!(BlockHash::new([10; 32]).to_string());
         let (stale, stale_server) = offline_rpc_script(vec![
-            ("block_info", json!({"confirmed":false})), ("account_info", changed),
-            ("block_info", json!({"active_signing_grant":BlockHash::ZERO.to_string(), "brn_balance":"12"})), ("params_hash", params.clone()),
+            ("block_info", json!({"confirmed":false})),
+            ("account_info", changed),
+            (
+                "block_info",
+                json!({"active_signing_grant":BlockHash::ZERO.to_string(), "brn_balance":"12"}),
+            ),
+            ("params_hash", params.clone()),
         ]);
         let stale_directory = tempfile::tempdir().unwrap();
         let stale_path = stale_directory.path().join("payment.json");
         crate::offline::save_payment(&stale_path, &block).unwrap();
-        assert!(stale.submit_saved_offline_payment(&stale_path, &account).await.unwrap_err().to_string().contains("stale"));
+        assert!(stale
+            .submit_saved_offline_payment(&stale_path, &account)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("stale"));
         assert!(!crate::offline::payment_was_submitted(&stale_path, &block.hash).unwrap());
-        assert!(stale_server.join().unwrap().iter().all(|request| request["action"] != "process"));
+        assert!(stale_server
+            .join()
+            .unwrap()
+            .iter()
+            .all(|request| request["action"] != "process"));
 
         for field in ["params_hash", "payment_epoch", "min_work_difficulty"] {
             let mut changed = params.clone();
-            changed[field] = if field == "min_work_difficulty" { json!("ffffffffffffffff") }
-                else { json!(BlockHash::new([10;32]).to_string()) };
+            changed[field] = if field == "min_work_difficulty" {
+                json!("ffffffffffffffff")
+            } else {
+                json!(BlockHash::new([10; 32]).to_string())
+            };
             let (stale, server) = offline_rpc_script(vec![
-                ("block_info", json!({"confirmed":false})), ("account_info", info.clone()),
-                ("block_info", json!({"active_signing_grant":BlockHash::ZERO.to_string(), "brn_balance":"11"})), ("params_hash", changed),
+                ("block_info", json!({"confirmed":false})),
+                ("account_info", info.clone()),
+                (
+                    "block_info",
+                    json!({"active_signing_grant":BlockHash::ZERO.to_string(), "brn_balance":"11"}),
+                ),
+                ("params_hash", changed),
             ]);
-            assert!(stale.submit_offline_payment(block.clone()).await.is_err(), "{field}");
+            assert!(
+                stale.submit_offline_payment(block.clone()).await.is_err(),
+                "{field}"
+            );
             assert_eq!(server.join().unwrap().len(), 4);
         }
 
         // The node may accept a block but lose its receipt. Preserve its exact
         // hash for reconciliation; no replacement signature or work request.
         let (uncertain, server) = offline_rpc_script(vec![
-            ("block_info", json!({"confirmed":false})), ("account_info", info),
-            ("block_info", json!({"active_signing_grant":BlockHash::ZERO.to_string(), "brn_balance":"11"})), ("params_hash", params),
+            ("block_info", json!({"confirmed":false})),
+            ("account_info", info),
+            (
+                "block_info",
+                json!({"active_signing_grant":BlockHash::ZERO.to_string(), "brn_balance":"11"}),
+            ),
+            ("params_hash", params),
             ("process", json!({"malformed_receipt":true})),
         ]);
-        let error = uncertain.with_payment_journal(draft_path.clone()).submit_saved_offline_payment(&draft_path, &account).await.unwrap_err().to_string();
+        let error = uncertain
+            .with_payment_journal(draft_path.clone())
+            .submit_saved_offline_payment(&draft_path, &account)
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("confirmation pending"));
         assert!(error.contains(&block.hash.to_string()));
-        assert_eq!(server.join().unwrap()[4]["block"].as_str(), Some(expected.as_str()));
-        assert_eq!(serde_json::to_string(&crate::offline::load_payment(&draft_path).unwrap()).unwrap(), expected);
+        assert_eq!(
+            server.join().unwrap()[4]["block"].as_str(),
+            Some(expected.as_str())
+        );
+        assert_eq!(
+            serde_json::to_string(&crate::offline::load_payment(&draft_path).unwrap()).unwrap(),
+            expected
+        );
     }
 
     fn read_request(stream: &mut std::net::TcpStream) -> Value {
@@ -2103,7 +2957,8 @@ mod submission_tests {
     fn prepared_work_rechecks_root_version_and_current_threshold() {
         let keys = burst_crypto::keypair_from_seed(&[21; 32]);
         let account = burst_crypto::derive_address(&keys.public);
-        let state = AccountState { signing_grant: burst_types::BlockHash::ZERO,
+        let state = AccountState {
+            signing_grant: burst_types::BlockHash::ZERO,
             payment_epoch: burst_types::BlockHash::new([1; 32]),
             head: BlockHash::new([8; 32]),
             block_count: 1,
@@ -2145,7 +3000,10 @@ mod submission_tests {
     }
 
     async fn account_control_attempt(
-        opened: bool, pending: bool, lose_open_response: bool, handoff: bool,
+        opened: bool,
+        pending: bool,
+        lose_open_response: bool,
+        handoff: bool,
     ) -> (Result<ProcessResult, WalletError>, Vec<StateBlock>) {
         let keys = burst_crypto::keypair_from_seed(&[57; 32]);
         let account = burst_crypto::derive_address(&keys.public);
@@ -2194,7 +3052,9 @@ mod submission_tests {
                         "representative":account.as_str(),"trst_balance":if opened {"5"} else {"0"},
                         "release_sources":[],"has_more_releases":false})
                     }
-                    "block_info" => json!({"account":account.as_str(), "active_signing_grant":blocks.last().map_or(BlockHash::ZERO, StateBlock::active_signing_grant).to_string(), "confirmed":true,"brn_balance":"0"}),
+                    "block_info" => {
+                        json!({"account":account.as_str(), "active_signing_grant":blocks.last().map_or(BlockHash::ZERO, StateBlock::active_signing_grant).to_string(), "confirmed":true,"brn_balance":"0"})
+                    }
                     "params_hash" => {
                         json!({"online_signing":"peer_matches", "payment_epoch":BlockHash::new([1;32]).to_string(), "block_version":burst_ledger::CURRENT_BLOCK_VERSION,
                         "params_hash":BlockHash::new([99;32]).to_string(),"min_work_difficulty":"0"})
@@ -2221,13 +3081,25 @@ mod submission_tests {
                             assert_eq!(block.origin, TxHash::ZERO);
                             assert_eq!(block.transaction, TxHash::ZERO);
                         } else {
-                            assert_eq!(block.block_type, if handoff {BlockType::ChangeSigner} else {BlockType::RejectReceive});
+                            assert_eq!(
+                                block.block_type,
+                                if handoff {
+                                    BlockType::ChangeSigner
+                                } else {
+                                    BlockType::RejectReceive
+                                }
+                            );
                             assert_eq!(block.link, source);
                         }
-                        block.validate_signing_grant(blocks.last()).unwrap_or_else(|error| {
-                            // An already-open fixture starts with an external head.
-                            assert!(opened && blocks.is_empty() && block.signing_grant.is_zero(), "{error}");
-                        });
+                        block
+                            .validate_signing_grant(blocks.last())
+                            .unwrap_or_else(|error| {
+                                // An already-open fixture starts with an external head.
+                                assert!(
+                                    opened && blocks.is_empty() && block.signing_grant.is_zero(),
+                                    "{error}"
+                                );
+                            });
                         head = block.hash;
                         let opening = block.block_type == BlockType::Open;
                         blocks.push(block);
@@ -2242,9 +3114,14 @@ mod submission_tests {
                 write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
                 if (!handoff && !pending)
                     || (action == "block_info"
-                        && blocks
-                            .last()
-                            .is_some_and(|block| block.block_type == if handoff {BlockType::ChangeSigner} else {BlockType::RejectReceive}))
+                        && blocks.last().is_some_and(|block| {
+                            block.block_type
+                                == if handoff {
+                                    BlockType::ChangeSigner
+                                } else {
+                                    BlockType::RejectReceive
+                                }
+                        }))
                 {
                     return blocks;
                 }
@@ -2252,14 +3129,36 @@ mod submission_tests {
         });
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("pending.json");
-        let client = NodeClient::new(url).unwrap().with_payment_journal(path.clone());
+        let client = NodeClient::new(url)
+            .unwrap()
+            .with_payment_journal(path.clone());
         let result = if handoff {
-            client.handoff_signing_device(&keys, if opened {BlockHash::new([88;32])} else {BlockHash::ZERO},
-                BlockHash::ZERO, BlockHash::new([99;32]), source).await
-        } else { client.reject_signed(&keys, &source.to_string()).await };
+            client
+                .handoff_signing_device(
+                    &keys,
+                    if opened {
+                        BlockHash::new([88; 32])
+                    } else {
+                        BlockHash::ZERO
+                    },
+                    BlockHash::ZERO,
+                    BlockHash::new([99; 32]),
+                    source,
+                )
+                .await
+        } else {
+            client.reject_signed(&keys, &source.to_string()).await
+        };
         if handoff {
             let saved = crate::offline::load_payment(&path).unwrap();
-            assert_eq!(saved.block_type, if lose_open_response {BlockType::Open} else {BlockType::ChangeSigner});
+            assert_eq!(
+                saved.block_type,
+                if lose_open_response {
+                    BlockType::Open
+                } else {
+                    BlockType::ChangeSigner
+                }
+            );
             assert!(crate::offline::payment_was_submitted(&path, &saved.hash).unwrap());
         }
         (result, server.join().unwrap())
@@ -2270,11 +3169,17 @@ mod submission_tests {
         for (opened, lose_response) in [(false, false), (true, false), (false, true)] {
             let (result, blocks) = account_control_attempt(opened, true, lose_response, true).await;
             if lose_response {
-                assert!(result.unwrap_err().to_string().contains(&blocks[0].hash.to_string()));
+                assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains(&blocks[0].hash.to_string()));
                 assert_eq!(blocks.len(), 1);
             } else {
-                assert_eq!(result.unwrap().hash, blocks.last().unwrap().hash.to_string());
-                assert_eq!(blocks.len(), if opened {1} else {2});
+                assert_eq!(
+                    result.unwrap().hash,
+                    blocks.last().unwrap().hash.to_string()
+                );
+                assert_eq!(blocks.len(), if opened { 1 } else { 2 });
                 assert_eq!(blocks.last().unwrap().block_type, BlockType::ChangeSigner);
             }
         }
@@ -2316,7 +3221,10 @@ mod submission_tests {
     #[test]
     fn old_or_missing_node_work_rules_fail_explicitly() {
         assert!(work_parameters(&json!({})).is_err());
-        assert!(work_parameters(&json!({"online_signing":"peer_matches", "block_version":1,"min_work_difficulty":"0"})).is_err());
+        assert!(work_parameters(
+            &json!({"online_signing":"peer_matches", "block_version":1,"min_work_difficulty":"0"})
+        )
+        .is_err());
         assert_eq!(work_parameters(&json!({"online_signing":"peer_matches", "payment_epoch":BlockHash::new([1;32]).to_string(), "block_version":burst_ledger::CURRENT_BLOCK_VERSION,"min_work_difficulty":"ff"})).unwrap(), 255);
     }
 
@@ -2326,13 +3234,37 @@ mod submission_tests {
         let address = burst_crypto::derive_address(&keys.public);
         for (epoch, readiness, expected) in [
             (Value::Null, json!("peer_matches"), "payment epoch"),
-            (json!(BlockHash::ZERO.to_string()), json!("peer_matches"), "payment epoch"),
-            (json!(BlockHash::new([2; 32]).to_string()), json!("peer_matches"), "payment epoch"),
+            (
+                json!(BlockHash::ZERO.to_string()),
+                json!("peer_matches"),
+                "payment epoch",
+            ),
+            (
+                json!(BlockHash::new([2; 32]).to_string()),
+                json!("peer_matches"),
+                "payment epoch",
+            ),
             (json!("malformed"), json!("peer_matches"), "32-byte hash"),
-            (json!(BlockHash::new([1; 32]).to_string()), json!("catching_up"), "synchronization is not ready"),
-            (json!(BlockHash::new([1; 32]).to_string()), json!("peer_differs"), "synchronization is not ready"),
-            (json!(BlockHash::new([1; 32]).to_string()), json!("unknown"), "synchronization is not ready"),
-            (json!(BlockHash::new([1; 32]).to_string()), Value::Null, "supported signing readiness"),
+            (
+                json!(BlockHash::new([1; 32]).to_string()),
+                json!("catching_up"),
+                "synchronization is not ready",
+            ),
+            (
+                json!(BlockHash::new([1; 32]).to_string()),
+                json!("peer_differs"),
+                "synchronization is not ready",
+            ),
+            (
+                json!(BlockHash::new([1; 32]).to_string()),
+                json!("unknown"),
+                "synchronization is not ready",
+            ),
+            (
+                json!(BlockHash::new([1; 32]).to_string()),
+                Value::Null,
+                "supported signing readiness",
+            ),
         ] {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
@@ -2344,7 +3276,10 @@ mod submission_tests {
                     "representative":address.as_str(), "trst_balance":"0",
                     "release_sources":[], "has_more_releases":false}),
                 ),
-                ("block_info", json!({"active_signing_grant":BlockHash::ZERO.to_string(), "brn_balance":"0", "confirmed":true})),
+                (
+                    "block_info",
+                    json!({"active_signing_grant":BlockHash::ZERO.to_string(), "brn_balance":"0", "confirmed":true}),
+                ),
                 (
                     "params_hash",
                     json!({"payment_epoch":epoch,
@@ -2370,10 +3305,7 @@ mod submission_tests {
                 .await
                 .unwrap_err();
             let message = error.to_string();
-            assert!(
-                message.contains(expected),
-                "{message}"
-            );
+            assert!(message.contains(expected), "{message}");
             let listener = server.join().unwrap();
             assert!(
                 matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
@@ -2394,7 +3326,8 @@ mod submission_tests {
         let keys = burst_crypto::generate_keypair();
         let sender = burst_crypto::derive_address(&keys.public);
         let receiver = burst_crypto::derive_address(&burst_crypto::generate_keypair().public);
-        let state = AccountState { signing_grant: burst_types::BlockHash::ZERO,
+        let state = AccountState {
+            signing_grant: burst_types::BlockHash::ZERO,
             payment_epoch: burst_types::BlockHash::new([1; 32]),
             head: BlockHash::ZERO,
             block_count: 0,

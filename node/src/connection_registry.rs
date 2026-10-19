@@ -131,7 +131,8 @@ pub struct ConnectionRegistry {
     recovery_content: Option<Arc<crate::governance_content::transfer::Transfers>>,
     pub(crate) checkpoint_accepted: Arc<tokio::sync::Notify>,
     pub(crate) checkpoint_installed: Arc<tokio::sync::Notify>,
-    pub(crate) recovery_projection: Arc<crate::confirmed_replay::snapshot::installed::ProjectionCache>,
+    pub(crate) recovery_projection:
+        Arc<crate::confirmed_replay::snapshot::installed::ProjectionCache>,
     pub(crate) checkpoint_sync_status: Arc<crate::checkpoint_sync::tip::Published>,
     #[cfg(test)]
     pub(crate) recovery_probe: Option<fn(&str)>,
@@ -810,7 +811,8 @@ async fn peer_read_loop(
             let mut dedup = message_dedup.lock().await;
             // Admission may defer a block until its committee or dependencies
             // arrive. Suppress immediate loops, not later identical retries.
-            if dedup.is_duplicate_for(&msg_hash, Duration::from_secs(1), std::time::Instant::now()) {
+            if dedup.is_duplicate_for(&msg_hash, Duration::from_secs(1), std::time::Instant::now())
+            {
                 tracing::trace!(
                     peer = %peer_id,
                     "dropped duplicate message"

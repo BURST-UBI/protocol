@@ -12,8 +12,8 @@ use crate::checkpoint_store::{
     chain::{self, CertifiedEvent},
     CertifiedCheckpoint,
 };
-use crate::shutdown::ShutdownController;
 use crate::confirmed_replay::snapshot::SelectionSource;
+use crate::shutdown::ShutdownController;
 
 enum SelectionQueue {
     Recovered(Box<crate::confirmed_replay::snapshot::installed::ReplayCache>),
@@ -31,7 +31,8 @@ impl SelectionSource for SelectionQueue {
     fn read_selection(
         &self,
         position: usize,
-    ) -> Result<std::borrow::Cow<'_, CertifiedCheckpoint>, crate::confirmed_replay::ReplayError> {
+    ) -> Result<std::borrow::Cow<'_, CertifiedCheckpoint>, crate::confirmed_replay::ReplayError>
+    {
         match self {
             Self::Recovered(cache) => cache.recovered.selections.read_selection(position),
             Self::Full(selections) => selections.read_selection(position),
@@ -198,7 +199,8 @@ pub(crate) async fn run(
                     let beacon = checkpoint.beacon().cloned().expect("checked beacon");
                     checkpoint.attach_beacon(&source, &replay_params, beacon)?;
                     Ok::<_, burst_store::StoreError>(checkpoint)
-                }).await;
+                })
+                .await;
                 checkpoint = match refreshed {
                     Ok(Ok(checkpoint)) => checkpoint,
                     Ok(Err(error)) => {

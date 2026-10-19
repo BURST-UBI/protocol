@@ -241,9 +241,11 @@ pub(super) fn assert_candidate_signing(
     changed_keys.insert(record_key.into_bytes());
     changed_keys
         .insert(format!("checkpoint_chain/v1/dev/{}/head", anchor.genesis_hash()).into_bytes());
-    if let crate::checkpoint_agreement::ReplayManifest::Activation(manifest) = candidates[0].manifest()
+    if let crate::checkpoint_agreement::ReplayManifest::Activation(manifest) =
+        candidates[0].manifest()
     {
-        let key = crate::checkpoint_store::archive_selection::beacon_key(manifest.activation.selection);
+        let key =
+            crate::checkpoint_store::archive_selection::beacon_key(manifest.activation.selection);
         let expected = bincode::serialize(&manifest.activation.beacon()).unwrap();
         assert_eq!(
             local.meta_store().get_meta(&key).unwrap(),

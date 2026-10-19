@@ -172,19 +172,24 @@ mod tests {
     #[test]
     fn decision_31_2_includes_ninety_to_one_hundred_days_without_chaining() {
         let day = 86_400;
-        let groups = compute_merge_groups(&[
-            holding("latest", 3, 100 * day),
-            holding("earliest", 2, 90 * day),
-            holding("too_late", 5, 100 * day + 1),
-            holding("chained", 7, 110 * day),
-        ], &AutoMergeConfig::default());
+        let groups = compute_merge_groups(
+            &[
+                holding("latest", 3, 100 * day),
+                holding("earliest", 2, 90 * day),
+                holding("too_late", 5, 100 * day + 1),
+                holding("chained", 7, 110 * day),
+            ],
+            &AutoMergeConfig::default(),
+        );
         assert_eq!(groups[0].token_ids, vec!["earliest", "latest"]);
         assert_eq!(groups[0].earliest_expiry_secs, 90 * day);
         assert_eq!(groups[0].total_amount, 5);
         assert_eq!(groups[1].token_ids, vec!["too_late", "chained"]);
-        assert!(compute_merge_groups(&[
-            holding("a", 1, 90 * day - 1), holding("b", 1, 100 * day),
-        ], &AutoMergeConfig::default()).is_empty());
+        assert!(compute_merge_groups(
+            &[holding("a", 1, 90 * day - 1), holding("b", 1, 100 * day),],
+            &AutoMergeConfig::default()
+        )
+        .is_empty());
     }
 
     #[test]

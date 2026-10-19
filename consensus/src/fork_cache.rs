@@ -26,9 +26,11 @@ impl ForkCache {
 
     /// Cache a fork block.
     pub fn insert(&mut self, root: BlockHash, fork_hash: BlockHash) {
-        if self.entries.get(&root).is_some_and(|forks| {
-            forks.contains(&fork_hash) || forks.len() >= MAX_FORKS_PER_ROOT
-        }) {
+        if self
+            .entries
+            .get(&root)
+            .is_some_and(|forks| forks.contains(&fork_hash) || forks.len() >= MAX_FORKS_PER_ROOT)
+        {
             return;
         }
         while self.total_count >= MAX_ENTRIES {
@@ -264,6 +266,9 @@ mod tests {
         assert_eq!(cache.len(), MAX_ENTRIES);
         assert_eq!(cache.root_count(), MAX_ENTRIES);
         assert_eq!(cache.insertion_order.len(), MAX_ENTRIES);
-        assert_eq!(cache.get_forks(&BlockHash::ZERO), Some([BlockHash::ZERO].as_slice()));
+        assert_eq!(
+            cache.get_forks(&BlockHash::ZERO),
+            Some([BlockHash::ZERO].as_slice())
+        );
     }
 }

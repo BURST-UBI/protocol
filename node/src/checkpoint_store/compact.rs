@@ -307,10 +307,16 @@ impl RecordObservation {
         // in the selection receipt. Only that exact absent-to-identical change
         // preserves replay; a new proof or changed existing value stays stale.
         if matches!(self.value, ObservedValue::Record(None)) {
-            if let Some(selection) = selections.find_selection(|selection| {
-                self.height == Some(selection.certificate().checkpoint.height)
-                    && self.key == archive_selection::beacon_key(selection.certificate().checkpoint.hash())
-            }).map_err(invalid)? {
+            if let Some(selection) = selections
+                .find_selection(|selection| {
+                    self.height == Some(selection.certificate().checkpoint.height)
+                        && self.key
+                            == archive_selection::beacon_key(
+                                selection.certificate().checkpoint.hash(),
+                            )
+                })
+                .map_err(invalid)?
+            {
                 if let Some(beacon) = selection.beacon() {
                     let expected = bincode::serialize(beacon).map_err(invalid)?;
                     if batch.get_meta(&self.key)?.as_deref() == Some(expected.as_slice()) {
@@ -330,17 +336,26 @@ impl RecordObservation {
                 || self.key == archived_record_key(anchor, height)
             {
                 if let Some(bytes) = batch.get_meta(&self.key)? {
-                    if let Ok(chain::ParsedRecord::Selection(mut record)) = chain::decode_record(&bytes) {
+                    if let Ok(chain::ParsedRecord::Selection(mut record)) =
+                        chain::decode_record(&bytes)
+                    {
                         if let Some(beacon) = record.beacon.take() {
                             let original = encode(&record)?;
-                            if burst_types::BlockHash::new(burst_crypto::blake2b_256(&original)) == *expected {
-                                if let Some(receipt) = selections.find_selection(|receipt| {
-                                    receipt.certificate().checkpoint == record.certificate.checkpoint
-                                }).map_err(invalid)? {
+                            if burst_types::BlockHash::new(burst_crypto::blake2b_256(&original))
+                                == *expected
+                            {
+                                if let Some(receipt) = selections
+                                    .find_selection(|receipt| {
+                                        receipt.certificate().checkpoint
+                                            == record.certificate.checkpoint
+                                    })
+                                    .map_err(invalid)?
+                                {
                                     receipt.into_owned().attach_compact_beacon(beacon)?;
-                                    self.value = ObservedValue::Record(Some(burst_types::BlockHash::new(
-                                        burst_crypto::blake2b_256(&bytes),
-                                    )));
+                                    self.value =
+                                        ObservedValue::Record(Some(burst_types::BlockHash::new(
+                                            burst_crypto::blake2b_256(&bytes),
+                                        )));
                                     return Ok(None);
                                 }
                             }
@@ -362,7 +377,8 @@ impl RecordObservation {
             }
         }
         Err(StoreError::StaleRead(format!(
-            "cached checkpoint bytes changed or disappeared: {}", self.key,
+            "cached checkpoint bytes changed or disappeared: {}",
+            self.key,
         )))
     }
 
@@ -453,7 +469,11 @@ pub(crate) fn read_after(
         &prefix,
         inventory.keys().copied(),
     ))?;
-    observations.push(RecordObservation::new(None, head_key, head_bytes.as_deref()))?;
+    observations.push(RecordObservation::new(
+        None,
+        head_key,
+        head_bytes.as_deref(),
+    ))?;
     let mut result = RecoveryRecords {
         successors: RecoveryReferences::new(store.env().path())?,
         beacons: RecoveryBeacons::new(store.env().path())?,
@@ -577,7 +597,9 @@ pub(crate) fn read_after(
             }
             parent.verify_certificate(certificate).map_err(invalid)?;
             if let Some(beacon) = beacon {
-                result.beacons.push((certificate.checkpoint.hash(), beacon))?;
+                result
+                    .beacons
+                    .push((certificate.checkpoint.hash(), beacon))?;
             }
             if let ReplayManifest::Activation(manifest) = record.manifest() {
                 result

@@ -272,11 +272,17 @@ fn staged_checkpoint_inventory_preserves_wire_encoding_and_fork_isolation() {
     let snapshot = authenticate(&store, &fixture.params, certificate.checkpoint.hash());
     let anchor = snapshot.anchor().clone();
     let state = snapshot.into_state();
-    let hashes: Vec<_> = state.selection_checkpoints.iter()
-        .map(|hash| *hash.unwrap()).collect();
+    let hashes: Vec<_> = state
+        .selection_checkpoints
+        .iter()
+        .map(|hash| *hash.unwrap())
+        .collect();
     assert!(!hashes.is_empty());
     let encoded = bincode::serialize(&hashes).unwrap();
-    assert_eq!(bincode::serialize(&state.selection_checkpoints).unwrap(), encoded);
+    assert_eq!(
+        bincode::serialize(&state.selection_checkpoints).unwrap(),
+        encoded
+    );
     let mut decoded: CheckpointHistory = bincode::deserialize(&encoded).unwrap();
     assert_eq!(bincode::serialize(&decoded).unwrap(), encoded);
     let sibling = decoded.clone();
@@ -285,7 +291,10 @@ fn staged_checkpoint_inventory_preserves_wire_encoding_and_fork_isolation() {
     assert_eq!(bincode::serialize(&sibling).unwrap(), encoded);
     let mut memory = state.clone();
     memory.selection_checkpoints = CheckpointHistory::Memory(hashes);
-    assert_eq!(memory.snapshot_bytes().unwrap(), state.snapshot_bytes().unwrap());
+    assert_eq!(
+        memory.snapshot_bytes().unwrap(),
+        state.snapshot_bytes().unwrap()
+    );
     state.prepare_snapshot(&anchor).unwrap();
     state.selection_checkpoints.truncate_for_test();
     assert!(state.selection_checkpoints.get(0).is_err());

@@ -112,7 +112,10 @@ pub trait BlockProcessorCallback: Send + Sync {
     /// Authenticated account-prefix entries, keyed by their original heights.
     /// Missing entries are unavailable, not proof that the account has no history.
     fn historical_account_page(
-        &self, _account: burst_types::WalletAddress, _first: u64, _count: u32,
+        &self,
+        _account: burst_types::WalletAddress,
+        _first: u64,
+        _count: u32,
     ) -> HistoricalAccountPageFuture<'_> {
         Box::pin(async { Ok(Vec::new()) })
     }
@@ -120,11 +123,18 @@ pub trait BlockProcessorCallback: Send + Sync {
     fn historical_block(
         &self,
         _hash: burst_types::BlockHash,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<burst_ledger::StateBlock>, String>> + Send + '_>> {
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Option<burst_ledger::StateBlock>, String>>
+                + Send
+                + '_,
+        >,
+    > {
         Box::pin(async { Ok(None) })
     }
     fn confirmed_account_slot(
-        &self, _query: burst_types::payment_recovery::SlotQuery,
+        &self,
+        _query: burst_types::payment_recovery::SlotQuery,
     ) -> Result<burst_types::payment_recovery::SlotReview, String> {
         Err("confirmed account slot recovery is unavailable on this node".into())
     }
@@ -479,14 +489,23 @@ async fn dispatch_action(
         "confirmed_account_slot" => {
             let query = serde_json::from_value(params)
                 .map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
-            let review = state.block_processor.confirmed_account_slot(query).map_err(RpcError::Server)?;
+            let review = state
+                .block_processor
+                .confirmed_account_slot(query)
+                .map_err(RpcError::Server)?;
             serde_json::to_value(review).map_err(|e| RpcError::Server(e.to_string()))
         }
-        "checkpoint_sync_status" => state.block_processor.checkpoint_sync_status().map_err(RpcError::Server),
+        "checkpoint_sync_status" => state
+            .block_processor
+            .checkpoint_sync_status()
+            .map_err(RpcError::Server),
         "payment_exclusion" => {
             let query = serde_json::from_value(params)
                 .map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
-            let review = state.block_processor.payment_exclusion(query).map_err(RpcError::Server)?;
+            let review = state
+                .block_processor
+                .payment_exclusion(query)
+                .map_err(RpcError::Server)?;
             serde_json::to_value(review).map_err(|e| RpcError::Server(e.to_string()))
         }
         "delegation_info" => handlers::handle_delegation_info(params, state).await,

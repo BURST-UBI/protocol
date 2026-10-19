@@ -161,7 +161,13 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value["groups"][0]["id"], "a");
         assert_eq!(value["groups"][1]["id"], "z");
-        assert_eq!(GroupRegistry::from_directory(&bytes).unwrap().to_directory().unwrap(), bytes);
+        assert_eq!(
+            GroupRegistry::from_directory(&bytes)
+                .unwrap()
+                .to_directory()
+                .unwrap(),
+            bytes
+        );
         for index in 0..300 {
             let mut entry = group(&format!("group-{index}"));
             entry.description = "x".repeat(4096);

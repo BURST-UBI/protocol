@@ -201,21 +201,38 @@ async fn retention_budget_follows_authentication_gap_and_requeue() {
     dependent.previous = parent;
     resign(&mut dependent);
     assert!(queue.push(dependent).await);
-    let mut validation = BlockValidationQueue::with_workers(
-        queue.clone(), processor.authentication_rules(), 1,
-    );
+    let mut validation =
+        BlockValidationQueue::with_workers(queue.clone(), processor.authentication_rules(), 1);
     let authenticated = validation.next().await.unwrap();
     assert!(queue.push(block(3)).await);
-    assert!(!queue.push(block(4)).await, "authentication must retain its slot");
-    assert_eq!(processor.validate_authenticated_candidate(&authenticated, &DagFrontier::new()), ProcessResult::Gap);
+    assert!(
+        !queue.push(block(4)).await,
+        "authentication must retain its slot"
+    );
+    assert_eq!(
+        processor.validate_authenticated_candidate(&authenticated, &DagFrontier::new()),
+        ProcessResult::Gap
+    );
     drop(authenticated);
-    assert!(!queue.push(block(4)).await, "unchecked must inherit the slot");
+    assert!(
+        !queue.push(block(4)).await,
+        "unchecked must inherit the slot"
+    );
     let mut released = processor.release_retained(&parent);
     assert_eq!(released.len(), 1);
-    assert!(!queue.push(block(4)).await, "recovery batch must retain the slot");
-    assert!(queue.push_retained(released.pop().unwrap()).await, "moving a slot must not allocate twice");
+    assert!(
+        !queue.push(block(4)).await,
+        "recovery batch must retain the slot"
+    );
+    assert!(
+        queue.push_retained(released.pop().unwrap()).await,
+        "moving a slot must not allocate twice"
+    );
     drop(queue.try_pop_retained().await.unwrap());
-    assert!(queue.push(block(5)).await, "completed work returns capacity");
+    assert!(
+        queue.push(block(5)).await,
+        "completed work returns capacity"
+    );
     drop(queue.try_pop_retained().await.unwrap());
     drop(queue.try_pop_retained().await.unwrap());
     assert!(queue.push(block(6)).await);

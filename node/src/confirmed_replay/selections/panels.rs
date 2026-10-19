@@ -83,8 +83,12 @@ impl<'a, S: SelectionSource + ?Sized> Panels<'a, S> {
         let Some(state) = state else {
             return Ok(None);
         };
-        let cached = self.last_certificate.lock().map_err(|error| invalid(error.to_string()))?
-            .as_ref().filter(|(position, _)| *position == state.position)
+        let cached = self
+            .last_certificate
+            .lock()
+            .map_err(|error| invalid(error.to_string()))?
+            .as_ref()
+            .filter(|(position, _)| *position == state.position)
             .map(|(_, certificate)| certificate.clone());
         let cache_miss = cached.is_none();
         let certificate = match cached {
@@ -102,7 +106,10 @@ impl<'a, S: SelectionSource + ?Sized> Panels<'a, S> {
             return Err(invalid("stored panel differs from authenticated selection"));
         }
         if cache_miss {
-            *self.last_certificate.lock().map_err(|error| invalid(error.to_string()))? =
+            *self
+                .last_certificate
+                .lock()
+                .map_err(|error| invalid(error.to_string()))? =
                 Some((state.position, certificate.clone()));
         }
         Ok(Some(Panel { certificate, state }))
@@ -152,48 +159,99 @@ impl<'a, S: SelectionSource + ?Sized> Panels<'a, S> {
 #[cfg(test)]
 pub(in crate::confirmed_replay) fn assert_scoped_reuse(certificate: &CertifiedCheckpoint) {
     use std::{borrow::Cow, cell::Cell};
-    struct Counted<'a> { certificate: &'a CertifiedCheckpoint, reads: Cell<usize> }
+    struct Counted<'a> {
+        certificate: &'a CertifiedCheckpoint,
+        reads: Cell<usize>,
+    }
     impl SelectionSource for Counted<'_> {
-        fn len(&self) -> usize { 1 }
-        fn read_selection(&self, position: usize) -> Result<Cow<'_, CertifiedCheckpoint>, ReplayError> {
+        fn len(&self) -> usize {
+            1
+        }
+        fn read_selection(
+            &self,
+            position: usize,
+        ) -> Result<Cow<'_, CertifiedCheckpoint>, ReplayError> {
             self.reads.set(self.reads.get() + 1);
-            if position != 0 { return Err(invalid("missing selection")); }
+            if position != 0 {
+                return Err(invalid("missing selection"));
+            }
             Ok(Cow::Owned(self.certificate.clone()))
         }
     }
-    let context = certificate.replayed().request()
-        .vote_context(&certificate.certificate().checkpoint).unwrap();
+    let context = certificate
+        .replayed()
+        .request()
+        .vote_context(&certificate.certificate().checkpoint)
+        .unwrap();
     for disk in [false, true] {
         let directory = tempfile::tempdir().unwrap();
-        let source = Counted { certificate, reads: Cell::new(0) };
+        let source = Counted {
+            certificate,
+            reads: Cell::new(0),
+        };
         let path = disk.then_some(directory.path());
         let mut panels = Panels::new(&source, path).unwrap();
-        panels.insert(context, 0, certificate.certificate().checkpoint.hash(), None).unwrap();
-        for _ in 0..32 { panels.require(&context).unwrap(); }
-        assert_eq!(source.reads.get(), 1, "repeated panel access reauthenticates history");
+        panels
+            .insert(
+                context,
+                0,
+                certificate.certificate().checkpoint.hash(),
+                None,
+            )
+            .unwrap();
+        for _ in 0..32 {
+            panels.require(&context).unwrap();
+        }
+        assert_eq!(
+            source.reads.get(),
+            1,
+            "repeated panel access reauthenticates history"
+        );
         let original = panels.require(&context).unwrap().state;
         let mut wrong = original.clone();
         wrong.checkpoint = BlockHash::new([255; 32]);
         panels.put(context, wrong).unwrap();
-        assert!(panels.require(&context).is_err(), "cached certificate bypassed row identity");
+        assert!(
+            panels.require(&context).is_err(),
+            "cached certificate bypassed row identity"
+        );
         let other_context = BlockHash::new([254; 32]);
         panels.put(other_context, original.clone()).unwrap();
-        assert!(panels.require(&other_context).is_err(), "cached certificate bypassed context");
+        assert!(
+            panels.require(&other_context).is_err(),
+            "cached certificate bypassed context"
+        );
         let mut wrong = original.clone();
         wrong.position = 1;
         panels.put(context, wrong).unwrap();
-        assert!(panels.require(&context).is_err(), "cache ignored source position");
+        assert!(
+            panels.require(&context).is_err(),
+            "cache ignored source position"
+        );
         panels.put(context, original).unwrap();
         panels.require(&context).unwrap();
         if let Records::Disk(records) = &panels.records {
             records.truncate_for_test();
-            assert!(panels.require(&context).is_err(), "cache hid corrupt panel storage");
+            assert!(
+                panels.require(&context).is_err(),
+                "cache hid corrupt panel storage"
+            );
         }
         drop(panels);
         let before = source.reads.get();
         let mut next = Panels::new(&source, path).unwrap();
-        next.insert(context, 0, certificate.certificate().checkpoint.hash(), None).unwrap();
+        next.insert(
+            context,
+            0,
+            certificate.certificate().checkpoint.hash(),
+            None,
+        )
+        .unwrap();
         next.require(&context).unwrap();
-        assert_eq!(source.reads.get(), before + 1, "certificate leaked across replay scopes");
+        assert_eq!(
+            source.reads.get(),
+            before + 1,
+            "certificate leaked across replay scopes"
+        );
     }
 }

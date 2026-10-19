@@ -414,8 +414,8 @@ mod tests {
     use burst_types::{BlockHash, NetworkId, Signature, Timestamp, TxHash};
 
     mod bootstrap_exit;
-    mod scoped_undo;
     mod key_fork_dependencies;
+    mod scoped_undo;
 
     fn candidate() -> CandidateGovernance {
         CandidateGovernance {
@@ -572,27 +572,62 @@ mod tests {
             let mut state = candidate();
             let proposal = block(BlockType::GovernanceProposal);
             let account = crate::genesis_state::account_to_write(
-                None, proposal.account.clone(), proposal.hash,
-            ).unwrap();
+                None,
+                proposal.account.clone(),
+                proposal.hash,
+            )
+            .unwrap();
             let mut brn = BrnEngine::with_rate(rate, Timestamp::EPOCH);
-            brn.track_wallet(proposal.account.clone(), burst_brn::BrnWalletState::new(Timestamp::EPOCH));
+            brn.track_wallet(
+                proposal.account.clone(),
+                burst_brn::BrnWalletState::new(Timestamp::EPOCH),
+            );
             let before = bincode::serialize(&(
-                brn.get_wallet(&proposal.account), &brn.rate_history, brn.next_stake_id(),
-            )).unwrap();
+                brn.get_wallet(&proposal.account),
+                &brn.rate_history,
+                brn.next_stake_id(),
+            ))
+            .unwrap();
             let mut trst = TrstEngine::new();
             let mut batch = store.tx_begin_write().unwrap();
-            crate::ledger_updater::stage_block(&mut batch, &proposal, Some(&account), 0, None, None).unwrap();
-            state.apply(&mut batch, &proposal, &EconomicResult::GovernanceProposal {
-                proposer: proposal.account.clone(),
-                proposal_hash: proposal.hash.into_tx_hash(),
-                content: Some(ProposalContent::ParameterChange {
-                    param: GovernableParam::BrnRate, new_value: 2,
-                }),
-            }, &mut brn, &mut trst).unwrap();
-            assert!(state.governance.get_proposal(&proposal.hash.into_tx_hash()).is_some());
-            assert_eq!(bincode::serialize(&(
-                brn.get_wallet(&proposal.account), &brn.rate_history, brn.next_stake_id(),
-            )).unwrap(), before);
+            crate::ledger_updater::stage_block(
+                &mut batch,
+                &proposal,
+                Some(&account),
+                0,
+                None,
+                None,
+            )
+            .unwrap();
+            state
+                .apply(
+                    &mut batch,
+                    &proposal,
+                    &EconomicResult::GovernanceProposal {
+                        proposer: proposal.account.clone(),
+                        proposal_hash: proposal.hash.into_tx_hash(),
+                        content: Some(ProposalContent::ParameterChange {
+                            param: GovernableParam::BrnRate,
+                            new_value: 2,
+                        }),
+                    },
+                    &mut brn,
+                    &mut trst,
+                )
+                .unwrap();
+            assert!(state
+                .governance
+                .get_proposal(&proposal.hash.into_tx_hash())
+                .is_some());
+            assert_eq!(
+                bincode::serialize(&(
+                    brn.get_wallet(&proposal.account),
+                    &brn.rate_history,
+                    brn.next_stake_id(),
+                ))
+                .unwrap(),
+                before
+            );
         }
     }
 

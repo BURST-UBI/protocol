@@ -37,13 +37,37 @@ pub(in crate::confirmed_replay::snapshot) fn plan_installed(
     directory: &std::path::Path,
 ) -> Result<SnapshotTailPlan, ReplayError> {
     let state = continuation.state();
-    let heads: Vec<_> = state.accounts.values().filter(|account| account.block_count > 0)
-        .map(|account| HistoryHead { account: account.address.clone(), height: account.block_count,
-            hash: account.head }).collect();
-    let base = Base { anchor: continuation.anchor(), context: continuation.history_context(), state };
-    SnapshotTailPlan::read(base, directory, u64::MAX, &heads,
-        |_| Err(super::invalid("installed witness plan unexpectedly reads a suffix")),
-        |_| Err(StoreError::Corruption("installed witness plan unexpectedly reads content".into())))
+    let heads: Vec<_> = state
+        .accounts
+        .values()
+        .filter(|account| account.block_count > 0)
+        .map(|account| HistoryHead {
+            account: account.address.clone(),
+            height: account.block_count,
+            hash: account.head,
+        })
+        .collect();
+    let base = Base {
+        anchor: continuation.anchor(),
+        context: continuation.history_context(),
+        state,
+    };
+    SnapshotTailPlan::read(
+        base,
+        directory,
+        u64::MAX,
+        &heads,
+        |_| {
+            Err(super::invalid(
+                "installed witness plan unexpectedly reads a suffix",
+            ))
+        },
+        |_| {
+            Err(StoreError::Corruption(
+                "installed witness plan unexpectedly reads content".into(),
+            ))
+        },
+    )
 }
 
 /// Capture the empty suffix of a fully installed checkpoint from its writer view.
@@ -62,34 +86,71 @@ pub(in crate::confirmed_replay::snapshot) fn capture_installed<const CONFIRMED: 
     for account in batch.account_entries()? {
         let account = account?;
         count += 1;
-        let expected = state.account(&account.address)
+        let expected = state
+            .account(&account.address)
             .ok_or_else(|| invalid("post-install account has no replayed origin"))?;
-        if account.head != expected.head || account.block_count != expected.block_count
-            || account.confirmation_height != account.block_count {
+        if account.head != expected.head
+            || account.block_count != expected.block_count
+            || account.confirmation_height != account.block_count
+        {
             return Err(invalid("post-install account differs from replayed cut"));
         }
-        if account.block_count == 0 { continue; }
+        if account.block_count == 0 {
+            continue;
+        }
         if batch.block_at_height(&account.address, account.block_count)? != Some(account.head)
-            || batch.block_height(&account.address, &account.head)? != account.block_count {
-            return Err(invalid("post-install account head index differs from replay"));
+            || batch.block_height(&account.address, &account.head)? != account.block_count
+        {
+            return Err(invalid(
+                "post-install account head index differs from replay",
+            ));
         }
         let bytes = batch.get_block(&account.head)?;
-        rows.push(Row { account: account.address.clone(), height: account.block_count,
-            hash: account.head, length: bytes.len(), digest: burst_crypto::blake2b_256(&bytes) });
-        heads.push(HistoryHead { account: account.address, height: account.block_count, hash: account.head });
+        rows.push(Row {
+            account: account.address.clone(),
+            height: account.block_count,
+            hash: account.head,
+            length: bytes.len(),
+            digest: burst_crypto::blake2b_256(&bytes),
+        });
+        heads.push(HistoryHead {
+            account: account.address,
+            height: account.block_count,
+            hash: account.head,
+        });
     }
     if count != state.accounts.len() {
-        return Err(invalid("post-install account inventory differs from replay"));
+        return Err(invalid(
+            "post-install account inventory differs from replay",
+        ));
     }
-    let base = Base { anchor: continuation.anchor(), context: continuation.history_context(), state };
-    let plan = SnapshotTailPlan::read(base, directory, u64::MAX, &heads,
+    let base = Base {
+        anchor: continuation.anchor(),
+        context: continuation.history_context(),
+        state,
+    };
+    let plan = SnapshotTailPlan::read(
+        base,
+        directory,
+        u64::MAX,
+        &heads,
         |hash| batch.get_block(&hash).map_err(super::invalid),
-        |key| batch.get_meta(key)).map_err(|error| StoreError::Corruption(error.to_string()))?;
-    let tail = plan.finish_staged(witnesses).map_err(|error| StoreError::Corruption(error.to_string()))?;
+        |key| batch.get_meta(key),
+    )
+    .map_err(|error| StoreError::Corruption(error.to_string()))?;
+    let tail = plan
+        .finish_staged(witnesses)
+        .map_err(|error| StoreError::Corruption(error.to_string()))?;
     if tail.block_count() != 0 {
-        return Err(invalid("post-install capture contains an uninstalled suffix"));
+        return Err(invalid(
+            "post-install capture contains an uninstalled suffix",
+        ));
     }
-    Ok(IndexedTail { tail, rows, accounts: AccountInventory::read(batch.account_entries()?)? })
+    Ok(IndexedTail {
+        tail,
+        rows,
+        accounts: AccountInventory::read(batch.account_entries()?)?,
+    })
 }
 
 impl<const CONFIRMED: bool> IndexedTailPlan<CONFIRMED> {
@@ -291,9 +352,8 @@ fn plan_indexed<const CONFIRMED: bool>(
                 .map_err(invalid)?
                 .ok_or_else(|| invalid("staged tail block missing"))?;
             if block.block_type == burst_ledger::BlockType::Epoch {
-                crate::payment_transition::authenticate_epoch_contents(
-                    &block, &params, &genesis,
-                ).map_err(invalid)?;
+                crate::payment_transition::authenticate_epoch_contents(&block, &params, &genesis)
+                    .map_err(invalid)?;
             } else {
                 crate::payment_transition::authenticate_signed_contents(&block, &params)
                     .map_err(invalid)?;

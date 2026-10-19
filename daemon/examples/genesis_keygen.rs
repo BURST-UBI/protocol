@@ -20,7 +20,7 @@
 use burst_ledger::{BlockType, StateBlock, CURRENT_BLOCK_VERSION};
 use burst_types::{BlockHash, NetworkId, ProtocolParams, Signature, Timestamp, TxHash};
 use clap::{ArgGroup, Parser, ValueEnum};
-use std::{io::Write, path::PathBuf};
+use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum Network {
@@ -45,7 +45,7 @@ struct Options {
 fn save_seed(path: &std::path::Path, seed: &[u8; 32]) -> std::io::Result<()> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
+        use std::{io::Write, os::unix::fs::OpenOptionsExt};
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)

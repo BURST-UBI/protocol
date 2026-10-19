@@ -37,7 +37,16 @@ pub async fn run_compact_height(
     shutdown: Arc<ShutdownController>,
     step_timeout: Duration,
 ) -> Result<(), StoreError> {
-    run_compact_height_with_authority(settings, HeightAuthority::Recovered(base), registry, inbox, clock, shutdown, step_timeout).await
+    run_compact_height_with_authority(
+        settings,
+        HeightAuthority::Recovered(base),
+        registry,
+        inbox,
+        clock,
+        shutdown,
+        step_timeout,
+    )
+    .await
 }
 
 pub(crate) async fn run_compact_height_with_authority(
@@ -283,8 +292,12 @@ async fn run_height(
                                 None => None,
                             };
                             super::compact_authority::recover_authority(
-                                &signer.settings, registry.clone(), None, cached,
-                            ).await
+                                &signer.settings,
+                                registry.clone(),
+                                None,
+                                cached,
+                            )
+                            .await
                         };
                         let recovered = tokio::select! {
                             biased;

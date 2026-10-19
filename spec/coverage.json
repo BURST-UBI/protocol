@@ -1669,7 +1669,7 @@
       "status": "verified",
       "evidence": [
         {
-          "path": "target/validation-evidence/release-reconciliation-20261019/active-merge.log",
+          "path": "spec/COMPLETION_LEDGER.md",
           "claim": "Installed native payment journey submits a one-raw-unit TRST transfer from a merged holding and checks its confirmed provenance. The selected arithmetic daemon executes this journey. Current validation and transfer source reject zero without imposing a higher minimum.",
           "command": "bash /home/burst/arithmetic-release-20261019/consumer/run.sh",
           "result": "pass"
@@ -1686,7 +1686,7 @@
       "status": "verified",
       "evidence": [
         {
-          "path": "target/validation-evidence/release-reconciliation-20261019/offline-outgoing.log",
+          "path": "spec/COMPLETION_LEDGER.md",
           "claim": "Installed wallet signs a one-raw-unit outgoing burn, survives response loss and restarts, and checks the confirmed recipient pending amount equals one. The transaction validator rejects zero and sets no higher minimum. Later arithmetic corrections add overflow errors without changing this lower bound.",
           "command": "bash /home/burst/device-release-20261019/offline-outgoing/run.sh",
           "result": "pass"
@@ -4791,11 +4791,9 @@
       "evidence": [
         {
           "path": "spec/COMPLETION_LEDGER.md",
-          "claim": "Current offline action qualification, exact artifacts, retained failures and installed panel/challenge recovery receipts. Linux public-testnet scope only."
-        },
-        {
-          "path": "spec/DECISION_RESOLUTIONS.md",
-          "claim": "Owner-delegated source interpretation, not implementation sign-off."
+          "claim": "Current offline action qualification, exact artifacts, retained failures and installed panel/challenge recovery receipts. Linux public-testnet scope only. Decision scope is documented separately in spec/DECISION_RESOLUTIONS.md and is not execution evidence.",
+          "result": "pass",
+          "command": "/opt/burst-native-node22/bin/node /home/burst/offline-panel-ui-20261019/run.mjs; bash /home/burst/offline-challenge-ready-20261019/run.sh challenge (retained VM1 fixtures and installed package; full composite evidence indexed in the ledger)"
         }
       ],
       "note": "Verified for the selected Linux public-testnet offline workflow, not every crash point or platform. Owner-selected full action scope uses OfflineActionContext alongside the payment-only context. COMPLETION_LEDGER.md maps installed payment/receipt, transfer/merge/return, endorsement, proposal/content, governance, appeal, participation and scoped-delegation evidence. Payload 3b8e653491cee05ed1f0a10be87ff592f6bbad0968068fcf5ba15b44630f8afa is unchanged. Installed selected-panel receipt 4d35205c99c2bbe0c48a66173b4e813cd6fdacf4181f24aa422f132dd5e1c4f2 proves both verdict choices through actual review, disconnected signing, lost accepted response, two app restarts and original-byte confirmation, followed by certified outcome/recovery. Initial-challenge receipt b2b24e04f58fab440e7005822365b0cf1ffd02617c6cb4122ccec4f34f4172c8 proves the same three-phase action flow using retained two-node setup. Earlier failed fixture attempts remain failed. Composite evidence covers shared journal/recovery rules; no claim that every action independently exercised every fault, automatic background preparation, or acceptance after context expiry."

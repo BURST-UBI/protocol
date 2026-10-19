@@ -290,9 +290,7 @@ impl AuthenticatedSnapshot {
         Ok(found)
     }
 
-    pub(in crate::confirmed_replay) fn validate_selections(
-        &self,
-    ) -> Result<(), ReplayError> {
+    pub(in crate::confirmed_replay) fn validate_selections(&self) -> Result<(), ReplayError> {
         self.try_visit_selections(|_| Ok(()))
     }
 
@@ -312,13 +310,12 @@ impl AuthenticatedSnapshot {
             if let Some(receipt) = state.selection_receipts.get(restored)? {
                 if receipt.checkpoint().hash() == step.certificate.checkpoint.hash() {
                     let replay = receipt.restore(&parent).map_err(invalid)?;
-                    let mut selection =
-                        crate::checkpoint_store::CertifiedCheckpoint::from_compact(
-                            parent.clone(),
-                            step.certificate.clone(),
-                            replay,
-                        )
-                        .map_err(invalid)?;
+                    let mut selection = crate::checkpoint_store::CertifiedCheckpoint::from_compact(
+                        parent.clone(),
+                        step.certificate.clone(),
+                        replay,
+                    )
+                    .map_err(invalid)?;
                     if let Some((hash, beacon)) = beacons.get(next_beacon) {
                         if *hash == step.certificate.checkpoint.hash() {
                             selection

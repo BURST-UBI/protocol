@@ -1,5 +1,8 @@
 use super::{DrandScheme, VrfError};
-use std::{collections::VecDeque, sync::{Mutex, OnceLock}};
+use std::{
+    collections::VecDeque,
+    sync::{Mutex, OnceLock},
+};
 
 const CAPACITY: usize = 256;
 
@@ -81,10 +84,16 @@ mod tests {
     fn only_successes_are_reused_and_eviction_rechecks() {
         let cache = Mutex::default();
         assert!(!verify_cached(&cache, key(0), || Ok(false)).unwrap());
-        assert!(verify_cached(&cache, key(0), || Err(VrfError::InvalidProof("test".into()))).is_err());
+        assert!(verify_cached(&cache, key(0), || Err(VrfError::InvalidProof(
+            "test".into()
+        )))
+        .is_err());
         assert!(cache.lock().unwrap().is_empty());
         assert!(verify_cached(&cache, key(0), || Ok(true)).unwrap());
-        assert!(verify_cached(&cache, key(0), || panic!("exact successful check was repeated")).unwrap());
+        assert!(verify_cached(&cache, key(0), || panic!(
+            "exact successful check was repeated"
+        ))
+        .unwrap());
         for number in 1..=CAPACITY as u64 {
             assert!(verify_cached(&cache, key(number), || Ok(true)).unwrap());
         }

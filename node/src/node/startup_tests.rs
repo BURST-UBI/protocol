@@ -178,21 +178,42 @@ async fn synchronous_submission_uses_bounded_queue_without_publishing_acceptance
     let mut node = BurstNode::new(config(directory.path(), 0)).await.unwrap();
     node.initialize_genesis().unwrap();
     let budget = crate::block_retention::BlockRetention::new(1);
-    node.block_processor.lock().await.set_retention(budget.clone());
+    node.block_processor
+        .lock()
+        .await
+        .set_retention(budget.clone());
     node.block_queue = Arc::new(BlockPriorityQueue::with_retention(1, budget));
     let genesis = crate::genesis_state::block(node.config.network, &node.initial_params);
-    let before = node.frontier.read().await.get_head(&genesis.account).copied();
+    let before = node
+        .frontier
+        .read()
+        .await
+        .get_head(&genesis.account)
+        .copied();
     let mut candidate = genesis.clone();
     candidate.previous = genesis.hash;
     candidate.block_type = BlockType::ChangeRepresentative;
     candidate.timestamp = Timestamp::now();
     candidate.hash = candidate.compute_hash();
-    assert_eq!(node.process_block(&candidate).unwrap(), ProcessResult::Queued);
+    assert_eq!(
+        node.process_block(&candidate).unwrap(),
+        ProcessResult::Queued
+    );
     assert!(node.process_block(&candidate).is_err());
     assert!(!node.store.block_store().exists(&candidate.hash).unwrap());
-    assert_eq!(node.frontier.read().await.get_head(&genesis.account).copied(), before);
+    assert_eq!(
+        node.frontier
+            .read()
+            .await
+            .get_head(&genesis.account)
+            .copied(),
+        before
+    );
     assert_eq!(node.block_queue.pop_retained().await.hash, candidate.hash);
-    assert_eq!(node.process_block(&candidate).unwrap(), ProcessResult::Queued);
+    assert_eq!(
+        node.process_block(&candidate).unwrap(),
+        ProcessResult::Queued
+    );
 }
 
 #[tokio::test]

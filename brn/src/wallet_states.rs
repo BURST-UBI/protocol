@@ -23,10 +23,12 @@ mod tests {
 
     fn changes(states: &WalletStates) -> Vec<(WalletAddress, Option<Vec<u8>>, Option<Vec<u8>>)> {
         let mut rows = Vec::new();
-        states.visit_recorded(|key, before, after| {
-            rows.push((key.clone(), before.map(<[u8]>::to_vec), after));
-            Ok(())
-        }).unwrap();
+        states
+            .visit_recorded(|key, before, after| {
+                rows.push((key.clone(), before.map(<[u8]>::to_vec), after));
+                Ok(())
+            })
+            .unwrap();
         rows.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
         rows
     }
@@ -35,7 +37,10 @@ mod tests {
     fn records_first_before_and_final_after_without_unchanged_wallets() {
         let mut states = WalletStates::default();
         for i in 0..1024 {
-            states.insert(WalletAddress::new(format!("brst_wallet_{i}")), BrnWalletState::new(Timestamp::EPOCH));
+            states.insert(
+                WalletAddress::new(format!("brst_wallet_{i}")),
+                BrnWalletState::new(Timestamp::EPOCH),
+            );
         }
         let key = WalletAddress::new("brst_wallet_1");
         let removed = WalletAddress::new("brst_wallet_2");
@@ -51,7 +56,14 @@ mod tests {
         states.remove(&transient);
         let rows = changes(&states);
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0], (key.clone(), Some(before), Some(bincode::serialize(&states[&key]).unwrap())));
+        assert_eq!(
+            rows[0],
+            (
+                key.clone(),
+                Some(before),
+                Some(bincode::serialize(&states[&key]).unwrap())
+            )
+        );
         assert_eq!(rows[1].0, removed);
         assert!(rows[1].1.is_some());
         assert!(rows[1].2.is_none());
@@ -76,7 +88,10 @@ mod tests {
         states.get_mut(&key).unwrap().total_burned -= 7;
         assert!(changes(&states).is_empty());
         assert_eq!(states, original);
-        assert_eq!(bincode::serialize(&states).unwrap(), bincode::serialize(&states.values).unwrap());
+        assert_eq!(
+            bincode::serialize(&states).unwrap(),
+            bincode::serialize(&states.values).unwrap()
+        );
         states.record_transition(false);
         assert!(states.visit_recorded(|_, _, _| Ok(())).is_err());
     }
@@ -86,10 +101,18 @@ mod tests {
         let mut states = WalletStates::default();
         states.record_transition(true);
         states.recording.as_mut().unwrap().bytes = MAX_RECORDED_BYTES;
-        states.insert(WalletAddress::new("brst_new"), BrnWalletState::new(Timestamp::EPOCH));
+        states.insert(
+            WalletAddress::new("brst_new"),
+            BrnWalletState::new(Timestamp::EPOCH),
+        );
         assert!(states.recording.as_ref().unwrap().before.is_empty());
         let mut emitted = false;
-        assert!(states.visit_recorded(|_, _, _| { emitted = true; Ok(()) }).is_err());
+        assert!(states
+            .visit_recorded(|_, _, _| {
+                emitted = true;
+                Ok(())
+            })
+            .is_err());
         assert!(!emitted);
     }
 }
@@ -111,7 +134,10 @@ impl Eq for WalletStates {}
 
 impl From<HashMap<WalletAddress, BrnWalletState>> for WalletStates {
     fn from(values: HashMap<WalletAddress, BrnWalletState>) -> Self {
-        Self { values, recording: None }
+        Self {
+            values,
+            recording: None,
+        }
     }
 }
 
@@ -139,7 +165,9 @@ impl WalletStates {
     }
 
     fn remember(&mut self, address: &WalletAddress) {
-        let Some(recording) = &mut self.recording else { return };
+        let Some(recording) = &mut self.recording else {
+            return;
+        };
         if recording.error.is_some() || recording.before.contains_key(address) {
             return;
         }
@@ -148,16 +176,23 @@ impl WalletStates {
                 return Err("BRN mutation row budget exceeded".into());
             }
             let state = self.values.get(address);
-            let size = state.map(bincode::serialized_size).transpose()
-                .map_err(|error| error.to_string())?.unwrap_or(0);
-            let available = MAX_RECORDED_BYTES.saturating_sub(recording.bytes)
+            let size = state
+                .map(bincode::serialized_size)
+                .transpose()
+                .map_err(|error| error.to_string())?
+                .unwrap_or(0);
+            let available = MAX_RECORDED_BYTES
+                .saturating_sub(recording.bytes)
                 .saturating_sub(address.as_str().len());
             if address.as_str().len() > MAX_RECORDED_BYTES.saturating_sub(recording.bytes)
                 || size > available as u64
             {
                 return Err("BRN mutation byte budget exceeded".into());
             }
-            state.map(bincode::serialize).transpose().map_err(|error| error.to_string())
+            state
+                .map(bincode::serialize)
+                .transpose()
+                .map_err(|error| error.to_string())
         };
         match capture() {
             Ok(before) => {
@@ -168,7 +203,11 @@ impl WalletStates {
         }
     }
 
-    pub fn insert(&mut self, address: WalletAddress, state: BrnWalletState) -> Option<BrnWalletState> {
+    pub fn insert(
+        &mut self,
+        address: WalletAddress,
+        state: BrnWalletState,
+    ) -> Option<BrnWalletState> {
         self.remember(&address);
         self.values.insert(address, state)
     }
@@ -188,18 +227,28 @@ impl WalletStates {
         &self,
         mut emit: impl FnMut(&WalletAddress, Option<&[u8]>, Option<Vec<u8>>) -> Result<(), String>,
     ) -> Result<(), String> {
-        let recording = self.recording.as_ref().ok_or("BRN transition recording is disabled")?;
+        let recording = self
+            .recording
+            .as_ref()
+            .ok_or("BRN transition recording is disabled")?;
         if let Some(error) = &recording.error {
             return Err(error.clone());
         }
         for (address, before) in &recording.before {
             let after = self.values.get(address);
-            if after.map(bincode::serialized_size).transpose()
-                .map_err(|error| error.to_string())?.unwrap_or(0) > MAX_RECORDED_BYTES as u64
+            if after
+                .map(bincode::serialized_size)
+                .transpose()
+                .map_err(|error| error.to_string())?
+                .unwrap_or(0)
+                > MAX_RECORDED_BYTES as u64
             {
                 return Err("BRN mutation after-image exceeds byte budget".into());
             }
-            let after = after.map(bincode::serialize).transpose().map_err(|error| error.to_string())?;
+            let after = after
+                .map(bincode::serialize)
+                .transpose()
+                .map_err(|error| error.to_string())?;
             if before != &after {
                 emit(address, before.as_deref(), after)?;
             }

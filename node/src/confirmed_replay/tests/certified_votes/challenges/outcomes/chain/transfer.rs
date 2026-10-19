@@ -13,36 +13,77 @@ fn genesis_export_reuses_history_across_selections_and_rechecks_earlier_proofs()
     let mut epochs = Vec::new();
     for event in events {
         if let CertifiedEvent::Selection(selection) = event {
-            let proof = selection.beacon().expect("completed selection has a beacon");
+            let proof = selection
+                .beacon()
+                .expect("completed selection has a beacon");
             let key = crate::checkpoint_store::archive_selection::beacon_key(
                 selection.certificate().checkpoint.hash(),
             );
-            source.meta_store().put_meta(&key, &bincode::serialize(proof).unwrap()).unwrap();
+            source
+                .meta_store()
+                .put_meta(&key, &bincode::serialize(proof).unwrap())
+                .unwrap();
             heights.push(selection.certificate().checkpoint.height);
             epochs.push(selection.certificate().checkpoint.hash());
             proof_keys.push(key);
         }
     }
-    assert!(heights.len() >= 2, "fixture must exercise advancement, not just a repeated read");
-    let expected: Vec<_> = heights.iter().map(|height| {
-        CertifiedCheckpoint::export_record(&source, NetworkId::Dev, &fixture.params, *height)
-            .unwrap().unwrap()
-    }).collect();
-    let before = source.tx_begin_write().unwrap().checkpoint_metadata(b"").unwrap();
+    assert!(
+        heights.len() >= 2,
+        "fixture must exercise advancement, not just a repeated read"
+    );
+    let expected: Vec<_> = heights
+        .iter()
+        .map(|height| {
+            CertifiedCheckpoint::export_record(&source, NetworkId::Dev, &fixture.params, *height)
+                .unwrap()
+                .unwrap()
+        })
+        .collect();
+    let before = source
+        .tx_begin_write()
+        .unwrap()
+        .checkpoint_metadata(b"")
+        .unwrap();
     let mut recovery = crate::checkpoint_store::ExportRecovery::default();
     for (height, bytes) in heights.iter().zip(&expected) {
-        assert_eq!(CertifiedCheckpoint::export_record_with_recovery(
-            &source, NetworkId::Dev, &fixture.params, *height, &mut recovery,
-        ).unwrap().unwrap(), *bytes);
+        assert_eq!(
+            CertifiedCheckpoint::export_record_with_recovery(
+                &source,
+                NetworkId::Dev,
+                &fixture.params,
+                *height,
+                &mut recovery,
+            )
+            .unwrap()
+            .unwrap(),
+            *bytes
+        );
         assert_eq!(recovery.height(), Some(*height));
     }
     for (height, bytes) in heights.iter().zip(&expected).rev() {
-        assert_eq!(CertifiedCheckpoint::export_record_with_recovery(
-            &source, NetworkId::Dev, &fixture.params, *height, &mut recovery,
-        ).unwrap().unwrap(), *bytes);
+        assert_eq!(
+            CertifiedCheckpoint::export_record_with_recovery(
+                &source,
+                NetworkId::Dev,
+                &fixture.params,
+                *height,
+                &mut recovery,
+            )
+            .unwrap()
+            .unwrap(),
+            *bytes
+        );
         assert_eq!(recovery.height(), heights.last().copied());
     }
-    assert_eq!(source.tx_begin_write().unwrap().checkpoint_metadata(b"").unwrap(), before);
+    assert_eq!(
+        source
+            .tx_begin_write()
+            .unwrap()
+            .checkpoint_metadata(b"")
+            .unwrap(),
+        before
+    );
     let startup = crate::confirmed_replay::snapshot::installed::ReplayCache {
         base: None,
         recovered: crate::confirmed_replay::snapshot::installed::RecoveredSnapshot::recover_genesis_locally(
@@ -50,25 +91,67 @@ fn genesis_export_reuses_history_across_selections_and_rechecks_earlier_proofs()
         ).unwrap(),
     };
     let mut seeded = crate::checkpoint_store::ExportRecovery::from_recovery(
-        Some(&startup), &source, NetworkId::Dev, &fixture.params,
-    ).unwrap();
+        Some(&startup),
+        &source,
+        NetworkId::Dev,
+        &fixture.params,
+    )
+    .unwrap();
     assert_eq!(seeded.height(), heights.last().copied());
     for (height, bytes) in heights.iter().zip(&expected) {
-        assert_eq!(CertifiedCheckpoint::export_record_with_recovery(
-            &source, NetworkId::Dev, &fixture.params, *height, &mut seeded,
-        ).unwrap().unwrap(), *bytes);
+        assert_eq!(
+            CertifiedCheckpoint::export_record_with_recovery(
+                &source,
+                NetworkId::Dev,
+                &fixture.params,
+                *height,
+                &mut seeded,
+            )
+            .unwrap()
+            .unwrap(),
+            *bytes
+        );
         assert_eq!(seeded.height(), heights.last().copied());
     }
-    assert_eq!(startup.recovered.continuation.anchor().hash(), *epochs.last().unwrap());
-    assert_eq!(source.tx_begin_write().unwrap().checkpoint_metadata(b"").unwrap(), before);
-    source.meta_store().put_meta(&proof_keys[0], b"changed earlier beacon").unwrap();
+    assert_eq!(
+        startup.recovered.continuation.anchor().hash(),
+        *epochs.last().unwrap()
+    );
+    assert_eq!(
+        source
+            .tx_begin_write()
+            .unwrap()
+            .checkpoint_metadata(b"")
+            .unwrap(),
+        before
+    );
+    source
+        .meta_store()
+        .put_meta(&proof_keys[0], b"changed earlier beacon")
+        .unwrap();
+    assert!(
+        CertifiedCheckpoint::export_record_with_recovery(
+            &source,
+            NetworkId::Dev,
+            &fixture.params,
+            *heights.last().unwrap(),
+            &mut seeded,
+        )
+        .is_err(),
+        "startup handoff must not conceal a changed earlier proof"
+    );
     assert!(CertifiedCheckpoint::export_record_with_recovery(
-        &source, NetworkId::Dev, &fixture.params, *heights.last().unwrap(), &mut seeded,
-    ).is_err(), "startup handoff must not conceal a changed earlier proof");
-    assert!(CertifiedCheckpoint::export_record_with_recovery(
-        &source, NetworkId::Dev, &fixture.params, *heights.last().unwrap(), &mut recovery,
-    ).is_err());
-    assert_eq!(source.meta_store().get_meta(&proof_keys[0]).unwrap(), b"changed earlier beacon");
+        &source,
+        NetworkId::Dev,
+        &fixture.params,
+        *heights.last().unwrap(),
+        &mut recovery,
+    )
+    .is_err());
+    assert_eq!(
+        source.meta_store().get_meta(&proof_keys[0]).unwrap(),
+        b"changed earlier beacon"
+    );
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]

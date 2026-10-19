@@ -34,8 +34,14 @@ fn protocol_epoch_replays_creator_signature_and_preserves_account_rights() {
     drop(store);
     let reopened = LmdbStore::open(dir.path(), 32, 32 << 20).unwrap();
     let history = ConfirmedHistory::read(
-        &reopened, NetworkId::Dev, fixture.blocks[0].hash, 20, &heads, &[],
-    ).unwrap();
+        &reopened,
+        NetworkId::Dev,
+        fixture.blocks[0].hash,
+        20,
+        &heads,
+        &[],
+    )
+    .unwrap();
     let restored = ConfirmedReplay::replay(&history, NetworkId::Dev, &fixture.params).unwrap();
     assert_eq!(
         bincode::serialize(restored.account(&address(1)).unwrap()).unwrap(),
@@ -63,9 +69,21 @@ fn protocol_epoch_rejects_owner_signature_and_creator_account_actions() {
         if matches!(case, 2 | 3) {
             let (_dir, store, heads) = fixture.store();
             let error = ConfirmedHistory::read(
-                &store, NetworkId::Dev, fixture.blocks[0].hash, 20, &heads, &[],
-            ).err().expect("malformed epoch must fail history decoding");
-            assert!(error.to_string().contains("epoch marker cannot contain an account action"), "{error}");
+                &store,
+                NetworkId::Dev,
+                fixture.blocks[0].hash,
+                20,
+                &heads,
+                &[],
+            )
+            .err()
+            .expect("malformed epoch must fail history decoding");
+            assert!(
+                error
+                    .to_string()
+                    .contains("epoch marker cannot contain an account action"),
+                "{error}"
+            );
         } else {
             fixture.assert_rejected(if case == 4 {
                 "signing-device grant is no longer active"

@@ -1,7 +1,7 @@
-use super::*;
 use super::super::tail::cemented::{AppliedTail, CementedTail};
-use std::sync::{Arc, Mutex, Weak};
+use super::*;
 use burst_types::BlockHash;
+use std::sync::{Arc, Mutex, Weak};
 
 struct Entry {
     store: Weak<LmdbStore>,
@@ -13,9 +13,19 @@ struct Entry {
 }
 
 impl Entry {
-    fn matches(&self, store: &Arc<LmdbStore>, network: NetworkId, initial: BlockHash, epoch: BlockHash) -> bool {
-        self.store.upgrade().is_some_and(|old| Arc::ptr_eq(&old, store))
-            && self.network == network && self.initial == initial && self.epoch == epoch
+    fn matches(
+        &self,
+        store: &Arc<LmdbStore>,
+        network: NetworkId,
+        initial: BlockHash,
+        epoch: BlockHash,
+    ) -> bool {
+        self.store
+            .upgrade()
+            .is_some_and(|old| Arc::ptr_eq(&old, store))
+            && self.network == network
+            && self.initial == initial
+            && self.epoch == epoch
     }
 }
 
@@ -37,8 +47,19 @@ pub(crate) struct CommittedProjection {
 }
 
 impl CommittedProjection {
-    pub(crate) fn publish(self, cache: &ProjectionCache, store: &Arc<LmdbStore>) -> Result<(), StoreError> {
-        cache.publish_inner(store, self.network, self.initial, self.epoch, self.projection, Some(self.replay))
+    pub(crate) fn publish(
+        self,
+        cache: &ProjectionCache,
+        store: &Arc<LmdbStore>,
+    ) -> Result<(), StoreError> {
+        cache.publish_inner(
+            store,
+            self.network,
+            self.initial,
+            self.epoch,
+            self.projection,
+            Some(self.replay),
+        )
     }
 }
 
@@ -67,11 +88,15 @@ impl ProjectionCache {
     ) -> Result<Option<ReplayCache>, StoreError> {
         let replay = {
             let cached = self.0.lock().map_err(invalid)?;
-            cached.as_ref().filter(|entry| entry.matches(store, network, initial, epoch))
+            cached
+                .as_ref()
+                .filter(|entry| entry.matches(store, network, initial, epoch))
                 .and_then(|entry| entry.replay.clone())
                 .filter(|replay| replay.base == base)
         };
-        let replay = replay.map(|replay| replay.fork(store.env().path())).transpose()?;
+        let replay = replay
+            .map(|replay| replay.fork(store.env().path()))
+            .transpose()?;
         #[cfg(test)]
         if replay.is_some() {
             self.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -89,8 +114,12 @@ impl ProjectionCache {
         batch: &LmdbWriteTransaction<'_>,
     ) -> Result<Option<Projection>, StoreError> {
         let mut cached = self.0.lock().map_err(invalid)?;
-        let Some(entry) = cached.as_ref() else { return Ok(None); };
-        if !entry.matches(store, network, initial, epoch) { return Ok(None); }
+        let Some(entry) = cached.as_ref() else {
+            return Ok(None);
+        };
+        if !entry.matches(store, network, initial, epoch) {
+            return Ok(None);
+        }
         // A changed projection takes the full replay path. That path must still
         // reject corruption; a cache miss is never permission to publish it.
         let projection = &entry.projection;
@@ -128,11 +157,19 @@ impl ProjectionCache {
         replay: Option<Arc<ReplayCache>>,
     ) -> Result<(), StoreError> {
         let mut cached = self.0.lock().map_err(invalid)?;
-        let replay = replay.or_else(|| cached.as_ref()
-            .filter(|entry| entry.matches(store, network, initial, epoch))
-            .and_then(|entry| entry.replay.clone()));
+        let replay = replay.or_else(|| {
+            cached
+                .as_ref()
+                .filter(|entry| entry.matches(store, network, initial, epoch))
+                .and_then(|entry| entry.replay.clone())
+        });
         *cached = Some(Entry {
-            store: Arc::downgrade(store), network, initial, epoch, projection, replay,
+            store: Arc::downgrade(store),
+            network,
+            initial,
+            epoch,
+            projection,
+            replay,
         });
         Ok(())
     }

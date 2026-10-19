@@ -692,8 +692,10 @@ pub(crate) fn causal_fallible_hash_order_after(
     applied: &HashSet<BlockHash>,
     mut dependencies: impl FnMut(&BlockHash) -> Result<Vec<BlockHash>, StoreError>,
 ) -> Result<Vec<BlockHash>, StoreError> {
-    let hashes: std::collections::BTreeSet<_> =
-        hashes.into_iter().map(|hash| hash.map(|hash| *hash.as_bytes())).collect::<Result<_, _>>()?;
+    let hashes: std::collections::BTreeSet<_> = hashes
+        .into_iter()
+        .map(|hash| hash.map(|hash| *hash.as_bytes()))
+        .collect::<Result<_, _>>()?;
     let mut replay = Vec::with_capacity(hashes.len());
     let mut visited = HashSet::new();
     let mut visiting = HashSet::new();

@@ -16,8 +16,8 @@ use crate::confirmed_replay::snapshot::SelectionSource;
 pub(crate) mod archive_selection;
 pub(crate) mod chain;
 pub(crate) mod compact;
-pub(crate) mod historical;
 mod export_recovery;
+pub(crate) mod historical;
 pub(crate) use export_recovery::ExportRecovery;
 mod inventory;
 mod mode;
@@ -248,7 +248,13 @@ impl CertifiedCheckpoint {
         initial_params: &ProtocolParams,
         height: u64,
     ) -> Result<Option<Vec<u8>>, StoreError> {
-        Self::export_record_with_recovery(store, network, initial_params, height, &mut ExportRecovery::default())
+        Self::export_record_with_recovery(
+            store,
+            network,
+            initial_params,
+            height,
+            &mut ExportRecovery::default(),
+        )
     }
 
     pub(crate) fn export_record_with_recovery(
@@ -312,27 +318,28 @@ impl CertifiedCheckpoint {
                                             )?;
                                             &fresh
                                         }
-                                        None => {
-                                            recovery.genesis_selection(
-                                                store,
-                                                network,
-                                                initial_params,
-                                                &record.certificate,
-                                            )?
-                                        }
+                                        None => recovery.genesis_selection(
+                                            store,
+                                            network,
+                                            initial_params,
+                                            &record.certificate,
+                                        )?,
                                     };
                                     let batch = store.tx_begin_write()?;
                                     if !recovered.uses_snapshot_archive()
                                         && batch.get_meta(installed::BASE_KEY)?.is_some()
                                     {
-                                        return Err(StoreError::StaleRead("snapshot base appeared during export".into()));
+                                        return Err(StoreError::StaleRead(
+                                            "snapshot base appeared during export".into(),
+                                        ));
                                     }
                                     recovered.verify_records_unchanged(&batch)?;
                                     let receipt = recovered
                                         .selections
                                         .find_selection(|selection| {
                                             selection.certificate().checkpoint.hash() == epoch
-                                        }).map_err(invalid)?
+                                        })
+                                        .map_err(invalid)?
                                         .ok_or_else(|| {
                                             invalid("archived beacon has no replayed selection")
                                         })?;
@@ -401,9 +408,7 @@ impl CertifiedCheckpoint {
                 if height > archive.anchor().height() {
                     return Err(invalid("checkpoint export has a missing successor"));
                 }
-                let Some(mut selection) = archive
-                    .recover_selection(height)
-                    .map_err(invalid)?
+                let Some(mut selection) = archive.recover_selection(height).map_err(invalid)?
                 else {
                     return Ok(None);
                 };

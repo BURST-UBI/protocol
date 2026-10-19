@@ -464,14 +464,27 @@ mod tests {
         sign(&mut stale);
         {
             let mut batch = fixture.store.tx_begin_write().unwrap();
-            let error = apply(&mut batch, &stale, &fixture.params, stale.timestamp).err().unwrap();
-            assert!(error.to_string().contains("signing-device grant is no longer active"), "{error}");
-            assert_eq!(batch.get_account(&fixture.address).unwrap().head, handoff.hash);
+            let error = apply(&mut batch, &stale, &fixture.params, stale.timestamp)
+                .err()
+                .unwrap();
+            assert!(
+                error
+                    .to_string()
+                    .contains("signing-device grant is no longer active"),
+                "{error}"
+            );
+            assert_eq!(
+                batch.get_account(&fixture.address).unwrap().head,
+                handoff.hash
+            );
             assert!(batch.get_block(&stale.hash).is_err());
         }
         fixture.commit(&mut successor);
         let batch = fixture.store.tx_begin_write().unwrap();
-        assert_eq!(batch.get_account(&fixture.address).unwrap().head, successor.hash);
+        assert_eq!(
+            batch.get_account(&fixture.address).unwrap().head,
+            successor.hash
+        );
     }
 
     #[test]

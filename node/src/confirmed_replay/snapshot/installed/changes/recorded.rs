@@ -6,8 +6,13 @@ use std::collections::HashSet;
 pub(super) fn owns(table: UndoTable, key: &[u8]) -> bool {
     matches!(
         table,
-        UndoTable::Accounts | UndoTable::Frontiers | UndoTable::Pending | UndoTable::BrnWallets
-            | UndoTable::TrstOrigins | UndoTable::TrstExpiry | UndoTable::TrstReverse
+        UndoTable::Accounts
+            | UndoTable::Frontiers
+            | UndoTable::Pending
+            | UndoTable::BrnWallets
+            | UndoTable::TrstOrigins
+            | UndoTable::TrstExpiry
+            | UndoTable::TrstReverse
     ) || (table == UndoTable::Meta
         && std::str::from_utf8(key).is_ok_and(|key| {
             key != crate::endorsement_commit::SNAPSHOT_KEY
@@ -28,14 +33,19 @@ pub(super) fn visit(
         .as_ref()
         .ok_or_else(|| crate::confirmed_replay::invalid("recovery omitted transition mutations"))?;
     let mut written_accounts = HashSet::new();
-    state.brn.wallets.visit_recorded(|address, before, after| {
-        emit(UndoChange {
-            table: UndoTable::BrnWallets,
-            key: address.as_str().as_bytes().to_vec(),
-            before: before.map(<[u8]>::to_vec),
-            after,
-        }).map_err(|error| error.to_string())
-    }).map_err(replay_error)?;
+    state
+        .brn
+        .wallets
+        .visit_recorded(|address, before, after| {
+            emit(UndoChange {
+                table: UndoTable::BrnWallets,
+                key: address.as_str().as_bytes().to_vec(),
+                before: before.map(<[u8]>::to_vec),
+                after,
+            })
+            .map_err(|error| error.to_string())
+        })
+        .map_err(replay_error)?;
     for change in mutations.changes() {
         if change.table == UndoTable::Meta
             && change.key == crate::endorsement_commit::SNAPSHOT_KEY.as_bytes()
@@ -114,12 +124,18 @@ mod tests {
     #[test]
     fn minted_index_recording_matches_full_projection_without_old_mints() {
         let mut state = crate::confirmed_replay::snapshot::SnapshotContinuation::from_genesis(
-            NetworkId::Dev, &ProtocolParams::default(),
-        ).unwrap().state().clone();
+            NetworkId::Dev,
+            &ProtocolParams::default(),
+        )
+        .unwrap()
+        .state()
+        .clone();
         let directory = tempfile::tempdir().unwrap();
         let at = Timestamp::new(100);
         for n in 0..32 {
-            state.record_minted_burn(TxHash::new([n; 32]), Timestamp::EPOCH).unwrap();
+            state
+                .record_minted_burn(TxHash::new([n; 32]), Timestamp::EPOCH)
+                .unwrap();
         }
         let before = Rows::capture(&state, at, directory.path()).unwrap();
         state.mutations = Some(Default::default());
@@ -127,36 +143,59 @@ mod tests {
         state.record_minted_burn(TxHash::new([67; 32]), at).unwrap();
         let after = Rows::capture(&state, at, directory.path()).unwrap();
         let mut changes = Vec::new();
-        visit(&state, &before.trst, &after.trst, at, &HashSet::new(), |change| {
-            changes.push(change);
-            Ok(())
-        }).unwrap();
+        visit(
+            &state,
+            &before.trst,
+            &after.trst,
+            at,
+            &HashSet::new(),
+            |change| {
+                changes.push(change);
+                Ok(())
+            },
+        )
+        .unwrap();
         changes.sort_by(|a, b| (a.table, &a.key).cmp(&(b.table, &b.key)));
         assert_eq!(changes.len(), 3);
         assert!(changes.iter().all(|row| row.before.is_none()));
         compare_full_projection(&before, &after, &changes).unwrap();
-        Rows::capture_projection(&state, at, directory.path(), false).unwrap().values
+        Rows::capture_projection(&state, at, directory.path(), false)
+            .unwrap()
+            .values
             .visit(|table, _, _| {
-                assert!(!matches!(table, UndoTable::TrstOrigins | UndoTable::TrstExpiry | UndoTable::TrstReverse));
+                assert!(!matches!(
+                    table,
+                    UndoTable::TrstOrigins | UndoTable::TrstExpiry | UndoTable::TrstReverse
+                ));
                 Ok(())
-            }).unwrap();
+            })
+            .unwrap();
     }
 
     #[test]
     fn brn_recording_matches_full_projection_and_omits_untouched_wallets() {
         let mut state = crate::confirmed_replay::snapshot::SnapshotContinuation::from_genesis(
-            NetworkId::Dev, &ProtocolParams::default(),
-        ).unwrap().state().clone();
+            NetworkId::Dev,
+            &ProtocolParams::default(),
+        )
+        .unwrap()
+        .state()
+        .clone();
         let directory = tempfile::tempdir().unwrap();
         let at = Timestamp::new(100);
         let changed = WalletAddress::new("brst_changed");
         let removed = WalletAddress::new("brst_removed");
         for address in [&changed, &removed] {
-            state.brn.track_wallet(address.clone(), burst_brn::BrnWalletState::new(Timestamp::EPOCH));
+            state.brn.track_wallet(
+                address.clone(),
+                burst_brn::BrnWalletState::new(Timestamp::EPOCH),
+            );
         }
         for i in 0..100 {
-            state.brn.track_wallet(WalletAddress::new(format!("brst_untouched_{i}")),
-                burst_brn::BrnWalletState::new(Timestamp::EPOCH));
+            state.brn.track_wallet(
+                WalletAddress::new(format!("brst_untouched_{i}")),
+                burst_brn::BrnWalletState::new(Timestamp::EPOCH),
+            );
         }
         let before = Rows::capture(&state, at, directory.path()).unwrap();
         state.mutations = Some(Default::default());
@@ -167,18 +206,31 @@ mod tests {
         state.brn.deactivate_wallet(&changed, at).unwrap();
         state.brn.wallets.remove(&removed);
         let added = WalletAddress::new("brst_added");
-        state.brn.track_wallet(added, burst_brn::BrnWalletState::new(at));
+        state
+            .brn
+            .track_wallet(added, burst_brn::BrnWalletState::new(at));
         let after = Rows::capture(&state, at, directory.path()).unwrap();
         let partial = Rows::capture_projection(&state, at, directory.path(), false).unwrap();
-        partial.values.visit(|table, _, _| {
-            assert_ne!(table, UndoTable::BrnWallets);
-            Ok(())
-        }).unwrap();
+        partial
+            .values
+            .visit(|table, _, _| {
+                assert_ne!(table, UndoTable::BrnWallets);
+                Ok(())
+            })
+            .unwrap();
         let mut changes = Vec::new();
-        visit(&state, &before.trst, &after.trst, at, &HashSet::new(), |change| {
-            changes.push(change);
-            Ok(())
-        }).unwrap();
+        visit(
+            &state,
+            &before.trst,
+            &after.trst,
+            at,
+            &HashSet::new(),
+            |change| {
+                changes.push(change);
+                Ok(())
+            },
+        )
+        .unwrap();
         changes.sort_by(|a, b| (a.table, &a.key).cmp(&(b.table, &b.key)));
         assert_eq!(changes.len(), 3);
         compare_full_projection(&before, &after, &changes).unwrap();

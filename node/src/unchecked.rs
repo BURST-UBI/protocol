@@ -5,10 +5,10 @@
 //! Once that dependency is confirmed, all waiting blocks are drained and
 //! re-submitted to the block processor.
 
+use crate::block_retention::{BlockRetention, RetainedBlock, Slot};
 use burst_ledger::StateBlock;
 use burst_types::BlockHash;
 use std::collections::{HashMap, HashSet};
-use crate::block_retention::{BlockRetention, RetainedBlock, Slot};
 use std::sync::Arc;
 
 /// Implementation decision 26.2: retain missing-dependency blocks for 15 minutes.
@@ -78,7 +78,9 @@ impl UncheckedMap {
     }
 
     fn slot(&self) -> Option<Option<Slot>> {
-        if let Some(slot) = &self.admission_slot { return Some(Some(slot.clone())); }
+        if let Some(slot) = &self.admission_slot {
+            return Some(Some(slot.clone()));
+        }
         match &self.retention {
             Some(budget) => budget.acquire().map(Some),
             None => Some(None),
@@ -96,7 +98,9 @@ impl UncheckedMap {
         if self.count >= self.max_size {
             return false;
         }
-        let Some(slot) = self.slot() else { return false; };
+        let Some(slot) = self.slot() else {
+            return false;
+        };
         self.queued.insert(block.hash);
         let entry = UncheckedEntry {
             block,
@@ -119,7 +123,9 @@ impl UncheckedMap {
         if self.count >= self.max_size {
             return false;
         }
-        let Some(slot) = self.slot() else { return false; };
+        let Some(slot) = self.slot() else {
+            return false;
+        };
         self.queued.insert(block.hash);
         let entry = UncheckedEntry {
             block,
@@ -161,7 +167,10 @@ impl UncheckedMap {
         gap: GapType,
         now: Option<u64>,
     ) -> Vec<StateBlock> {
-        self.take_retained(hash, gap, now).into_iter().map(|entry| entry.block).collect()
+        self.take_retained(hash, gap, now)
+            .into_iter()
+            .map(|entry| entry.block)
+            .collect()
     }
 
     pub(crate) fn take_retained(
@@ -181,7 +190,10 @@ impl UncheckedMap {
             .filter_map(|entry| {
                 self.queued.remove(&entry.block.hash);
                 now.is_none_or(|now| now.saturating_sub(entry.received_at) < MAX_AGE_SECS)
-                    .then_some(RetainedBlock { block: entry.block, slot: entry.slot })
+                    .then_some(RetainedBlock {
+                        block: entry.block,
+                        slot: entry.slot,
+                    })
             })
             .collect()
     }

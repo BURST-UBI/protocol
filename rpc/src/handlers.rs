@@ -19,9 +19,9 @@ use burst_types::{BlockHash, Signature, Timestamp, TxHash, WalletAddress};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
+mod confirmed_successor;
 mod governance_projection;
 pub(crate) mod provenance;
-mod confirmed_successor;
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -133,7 +133,8 @@ fn checked_brn_balance(
     wallet: &BrnWalletState,
     now: Timestamp,
 ) -> Result<u128, RpcError> {
-    engine.compute_balance_checked(wallet, now)
+    engine
+        .compute_balance_checked(wallet, now)
         .map_err(|error| RpcError::Server(error.to_string()))
 }
 
@@ -271,11 +272,21 @@ mod portfolio_tests {
     fn linear_reference_does_not_change_face_amount_or_expiry_state() {
         let owner = WalletAddress::new("brst_reference");
         let mut engine = burst_trst::TrstEngine::with_expiry(100);
-        let token = engine.mint(TxHash::new([1; 32]), owner.clone(), 1_000,
-            owner.clone(), Timestamp::new(100)).unwrap();
+        let token = engine
+            .mint(
+                TxHash::new([1; 32]),
+                owner.clone(),
+                1_000,
+                owner.clone(),
+                Timestamp::new(100),
+            )
+            .unwrap();
         engine.track_token(token);
-        for (now, bps, active, expired) in [(100, 10_000, "1000", "0"),
-            (150, 5_000, "1000", "0"), (200, 0, "0", "1000")] {
+        for (now, bps, active, expired) in [
+            (100, 10_000, "1000", "0"),
+            (150, 5_000, "1000", "0"),
+            (200, 0, "0", "1000"),
+        ] {
             let result = portfolio_response(&engine, &owner, Timestamp::new(now), &[]).unwrap();
             assert_eq!(result["batches"][0]["reference_value_bps"], bps);
             assert_eq!(result["batches"][0]["amount"], "1000");
@@ -690,8 +701,12 @@ fn is_block_confirmed(block_hash: &BlockHash, account: &WalletAddress, state: &R
         return false;
     }
     confirmed_successor::confirmed(
-        state.block_store.as_ref(), block_hash, account, acct.confirmation_height,
-    ).unwrap_or(false)
+        state.block_store.as_ref(),
+        block_hash,
+        account,
+        acct.confirmation_height,
+    )
+    .unwrap_or(false)
 }
 
 /// Deserialize stored block bytes to a `StateBlock`, trying JSON then bincode.
@@ -789,7 +804,10 @@ pub async fn handle_account_info(
 
     Ok(to_value(&AccountInfoResponse {
         confirmed_open: if account.confirmation_height > 0 {
-            state.block_store.block_at_height(&address, 1)?.map(|hash| hash.to_string())
+            state
+                .block_store
+                .block_at_height(&address, 1)?
+                .map(|hash| hash.to_string())
         } else {
             None
         },
@@ -870,7 +888,9 @@ pub async fn handle_account_history(
                 Ok(bytes) => {
                     let block = deserialize_block(&bytes)?;
                     if block.hash != hash || block.account != address {
-                        return Err(RpcError::Store("account history index/body mismatch".into()));
+                        return Err(RpcError::Store(
+                            "account history index/body mismatch".into(),
+                        ));
                     }
                     entries.insert(height, block);
                 }
@@ -880,35 +900,50 @@ pub async fn handle_account_history(
         }
     }
     if entries.len() as u64 != end - start {
-        let recovered = state.block_processor
+        let recovered = state
+            .block_processor
             .historical_account_page(address.clone(), start + 1, (end - start) as u32)
-            .await.map_err(RpcError::Node)?;
+            .await
+            .map_err(RpcError::Node)?;
         for (height, block) in recovered {
-            if height <= start || height > end || block.account != address
+            if height <= start
+                || height > end
+                || block.account != address
                 || indexed.get(&height).is_some_and(|hash| *hash != block.hash)
-                || entries.get(&height).is_some_and(|local| local.hash != block.hash)
+                || entries
+                    .get(&height)
+                    .is_some_and(|local| local.hash != block.hash)
             {
-                return Err(RpcError::Node("historical account page disagrees with requested chain".into()));
+                return Err(RpcError::Node(
+                    "historical account page disagrees with requested chain".into(),
+                ));
             }
             entries.insert(height, block);
         }
         if entries.len() as u64 != end - start {
-            return Err(RpcError::Node("account history is unavailable; reconnect to an archival peer and retry".into()));
+            return Err(RpcError::Node(
+                "account history is unavailable; reconnect to an archival peer and retry".into(),
+            ));
         }
     }
     if let Some(before) = account {
         let after = state.account_store.get_account(&address)?;
         if before.head != after.head || before.block_count != after.block_count {
-            return Err(RpcError::Node("account changed during history lookup; retry".into()));
+            return Err(RpcError::Node(
+                "account changed during history lookup; retry".into(),
+            ));
         }
     }
-    let history = entries.into_values().map(|block| HistoryEntry {
-        hash: block.hash.to_string(),
-        block_type: format!("{:?}", block.block_type),
-        account: block.account.to_string(),
-        amount: block.trst_balance.to_string(),
-        timestamp: block.timestamp.as_secs(),
-    }).collect();
+    let history = entries
+        .into_values()
+        .map(|block| HistoryEntry {
+            hash: block.hash.to_string(),
+            block_type: format!("{:?}", block.block_type),
+            account: block.account.to_string(),
+            amount: block.trst_balance.to_string(),
+            timestamp: block.timestamp.as_secs(),
+        })
+        .collect();
 
     let cursor = if end < total {
         Some(pagination::encode_cursor(end))
@@ -954,7 +989,11 @@ pub async fn handle_account_balance(
     let brn_state = brn_state_from_account(&account, state.current_params()?.brn_rate);
     let brn_balance = {
         let brn = state.brn_engine.lock().await;
-        checked_brn_balance(&brn, brn.get_wallet(&account.address).unwrap_or(&brn_state), now)?
+        checked_brn_balance(
+            &brn,
+            brn.get_wallet(&account.address).unwrap_or(&brn_state),
+            now,
+        )?
     };
 
     Ok(to_value(&AccountBalanceResponse {
@@ -1385,11 +1424,16 @@ pub async fn handle_block_info(
     let (block, historical) = match state.block_store.get_block(&block_hash) {
         Ok(bytes) => (deserialize_block(&bytes)?, false),
         Err(StoreError::NotFound(_)) => {
-            let block = state.block_processor.historical_block(block_hash).await
+            let block = state
+                .block_processor
+                .historical_block(block_hash)
+                .await
                 .map_err(RpcError::Node)?
                 .ok_or_else(|| RpcError::BlockNotFound(req.hash.clone()))?;
             if block.hash != block_hash {
-                return Err(RpcError::Node("historical lookup returned a different block".into()));
+                return Err(RpcError::Node(
+                    "historical lookup returned a different block".into(),
+                ));
             }
             (block, true)
         }
@@ -1401,7 +1445,8 @@ pub async fn handle_block_info(
 
     Ok(to_value(&BlockInfoResponse {
         active_signing_grant: block.active_signing_grant().to_string(),
-        signed_block: req.include_signed_block
+        signed_block: req
+            .include_signed_block
             .then(|| serde_json::to_string(&block))
             .transpose()
             .map_err(|error| RpcError::Server(format!("cannot encode signed block: {error}")))?,
@@ -1493,7 +1538,8 @@ pub async fn handle_blocks_info(
             Ok(block_bytes) => match deserialize_block(&block_bytes) {
                 Ok(block) => {
                     let confirmed = is_block_confirmed(&block_hash, &block.account, state);
-                    let confirmed_successor = confirmed_successor::lookup(&block_hash, &block.account, state)?;
+                    let confirmed_successor =
+                        confirmed_successor::lookup(&block_hash, &block.account, state)?;
 
                     blocks.push(BlocksInfoEntry {
                         hash: h.clone(),
@@ -1624,12 +1670,24 @@ pub struct ParamsHashResponse {
     pub min_work_difficulty: String,
 }
 
-fn online_signing_phase(network: burst_types::NetworkId, epoch: BlockHash, observed: &serde_json::Value) -> &'static str {
-    if network == burst_types::NetworkId::Dev { return "local"; }
-    if observed["payment_epoch"] != epoch.to_string() { return "unknown"; }
+fn online_signing_phase(
+    network: burst_types::NetworkId,
+    epoch: BlockHash,
+    observed: &serde_json::Value,
+) -> &'static str {
+    if network == burst_types::NetworkId::Dev {
+        return "local";
+    }
+    if observed["payment_epoch"] != epoch.to_string() {
+        return "unknown";
+    }
     match observed["phase"].as_str() {
-        Some("peer_matches") if observed["observed_epoch"] == epoch.to_string()
-            && observed["observed_height"].as_u64().is_some() => "peer_matches",
+        Some("peer_matches")
+            if observed["observed_epoch"] == epoch.to_string()
+                && observed["observed_height"].as_u64().is_some() =>
+        {
+            "peer_matches"
+        }
         Some("catching_up") => "catching_up",
         Some("peer_differs") => "peer_differs",
         _ => "unknown",
@@ -1642,8 +1700,14 @@ pub async fn handle_params_hash(
 ) -> Result<serde_json::Value, RpcError> {
     let current = state.current_params()?;
     let epoch = state.meta_store.payment_epoch()?;
-    let observed = if state.network == burst_types::NetworkId::Dev { serde_json::Value::Null }
-        else { state.block_processor.checkpoint_sync_status().map_err(RpcError::Server)? };
+    let observed = if state.network == burst_types::NetworkId::Dev {
+        serde_json::Value::Null
+    } else {
+        state
+            .block_processor
+            .checkpoint_sync_status()
+            .map_err(RpcError::Server)?
+    };
     let online_signing = online_signing_phase(state.network, epoch, &observed).to_string();
     Ok(to_value(&ParamsHashResponse {
         online_signing,
@@ -1664,18 +1728,33 @@ mod signing_readiness_tests {
     fn only_dev_can_use_local_mode_and_matching_observations_bind_to_epoch() {
         let epoch = BlockHash::new([1; 32]);
         let mut view = serde_json::json!({"payment_epoch":epoch.to_string(), "phase":"local"});
-        assert_eq!(online_signing_phase(burst_types::NetworkId::Dev, epoch, &view), "local");
+        assert_eq!(
+            online_signing_phase(burst_types::NetworkId::Dev, epoch, &view),
+            "local"
+        );
         for network in [burst_types::NetworkId::Test, burst_types::NetworkId::Live] {
             assert_eq!(online_signing_phase(network, epoch, &view), "unknown");
         }
         view["phase"] = serde_json::json!("peer_matches");
-        assert_eq!(online_signing_phase(burst_types::NetworkId::Test, epoch, &view), "unknown");
+        assert_eq!(
+            online_signing_phase(burst_types::NetworkId::Test, epoch, &view),
+            "unknown"
+        );
         view["observed_epoch"] = serde_json::json!(epoch.to_string());
         view["observed_height"] = serde_json::json!(0);
-        assert_eq!(online_signing_phase(burst_types::NetworkId::Test, epoch, &view), "peer_matches");
-        assert_eq!(online_signing_phase(burst_types::NetworkId::Test, BlockHash::new([2; 32]), &view), "unknown");
+        assert_eq!(
+            online_signing_phase(burst_types::NetworkId::Test, epoch, &view),
+            "peer_matches"
+        );
+        assert_eq!(
+            online_signing_phase(burst_types::NetworkId::Test, BlockHash::new([2; 32]), &view),
+            "unknown"
+        );
         view["phase"] = serde_json::json!("catching_up");
-        assert_eq!(online_signing_phase(burst_types::NetworkId::Test, epoch, &view), "catching_up");
+        assert_eq!(
+            online_signing_phase(burst_types::NetworkId::Test, epoch, &view),
+            "catching_up"
+        );
     }
 }
 
@@ -2211,14 +2290,20 @@ pub async fn handle_verifier_assignments(
     state: &RpcState,
 ) -> Result<serde_json::Value, RpcError> {
     #[derive(Deserialize)]
-    struct Request { account: String, cursor: Option<String> }
-    let request: Request = serde_json::from_value(params)
-        .map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
+    struct Request {
+        account: String,
+        cursor: Option<String>,
+    }
+    let request: Request =
+        serde_json::from_value(params).map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
     validate_account(&request.account)?;
-    if let Some(cursor) = &request.cursor { validate_account(cursor)?; }
+    if let Some(cursor) = &request.cursor {
+        validate_account(cursor)?;
+    }
     let verifier = WalletAddress::new(request.account);
     let engine = state.verification_engine.lock().await;
-    let (targets, cursor) = verifier_assignment_page(engine.states(), &verifier, request.cursor.as_deref());
+    let (targets, cursor) =
+        verifier_assignment_page(engine.states(), &verifier, request.cursor.as_deref());
     Ok(serde_json::json!({"targets": targets, "cursor": cursor}))
 }
 
@@ -2230,11 +2315,15 @@ fn verifier_assignment_page<'a>(
     let mut targets = Vec::with_capacity(21);
     for process in processes {
         use burst_verification::state::VerificationPhase;
-        if !matches!(process.phase, VerificationPhase::Voting | VerificationPhase::Challenged)
-            || !process.selected_verifiers.contains(verifier)
+        if !matches!(
+            process.phase,
+            VerificationPhase::Voting | VerificationPhase::Challenged
+        ) || !process.selected_verifiers.contains(verifier)
             || process.votes.iter().any(|vote| &vote.verifier == verifier)
             || after.is_some_and(|cursor| process.target.as_str() <= cursor)
-        { continue; }
+        {
+            continue;
+        }
         let target = process.target.as_str();
         let index = targets.binary_search(&target).unwrap_or_else(|index| index);
         if index < 21 {
@@ -2255,27 +2344,53 @@ mod verifier_assignment_tests {
     #[test]
     fn assignment_pages_are_ordered_bounded_and_only_include_pending_panel_votes() {
         let voter = WalletAddress::new("brst_voter");
-        let mut processes: Vec<_> = (0..25).rev().map(|index| VerificationState {
-            target: WalletAddress::new(format!("brst_target{index:02}")),
-            phase: VerificationPhase::Voting,
-            endorsements: Vec::new(), endorser_set: Default::default(),
-            selected_verifiers: vec![voter.clone()], votes: Vec::new(),
-            revote_count: 0, excluded_verifiers: Default::default(), started_at: Timestamp::new(1),
-        }).collect();
+        let mut processes: Vec<_> = (0..25)
+            .rev()
+            .map(|index| VerificationState {
+                target: WalletAddress::new(format!("brst_target{index:02}")),
+                phase: VerificationPhase::Voting,
+                endorsements: Vec::new(),
+                endorser_set: Default::default(),
+                selected_verifiers: vec![voter.clone()],
+                votes: Vec::new(),
+                revote_count: 0,
+                excluded_verifiers: Default::default(),
+                started_at: Timestamp::new(1),
+            })
+            .collect();
         let (first, cursor) = verifier_assignment_page(processes.iter(), &voter, None);
         assert_eq!(first.len(), 20);
         assert_eq!(first.first(), Some(&"brst_target00"));
         assert_eq!(cursor.as_deref(), Some("brst_target19"));
         let (second, end) = verifier_assignment_page(processes.iter(), &voter, cursor.as_deref());
-        assert_eq!(second, vec!["brst_target20", "brst_target21", "brst_target22", "brst_target23", "brst_target24"]);
+        assert_eq!(
+            second,
+            vec![
+                "brst_target20",
+                "brst_target21",
+                "brst_target22",
+                "brst_target23",
+                "brst_target24"
+            ]
+        );
         assert!(end.is_none());
         processes[0].phase = VerificationPhase::Endorsing;
         processes[1].selected_verifiers.clear();
-        processes[2].votes.push(VerifierVote { verifier: voter.clone(), vote: burst_verification::voting::Vote::Neither, stake_amount: 0, timestamp: Timestamp::new(2) });
+        processes[2].votes.push(VerifierVote {
+            verifier: voter.clone(),
+            vote: burst_verification::voting::Vote::Neither,
+            stake_amount: 0,
+            timestamp: Timestamp::new(2),
+        });
         processes[3].phase = VerificationPhase::Challenged;
-        let (remaining, _) = verifier_assignment_page(processes.iter(), &voter, Some("brst_target19"));
+        let (remaining, _) =
+            verifier_assignment_page(processes.iter(), &voter, Some("brst_target19"));
         assert_eq!(remaining, vec!["brst_target20", "brst_target21"]);
-        assert!(verifier_assignment_page(processes.iter(), &voter, Some("brst_target24")).0.is_empty());
+        assert!(
+            verifier_assignment_page(processes.iter(), &voter, Some("brst_target24"))
+                .0
+                .is_empty()
+        );
     }
 }
 
@@ -2323,15 +2438,16 @@ pub async fn handle_verification_status(
         .is_some();
 
     // Get verification state from account store
-    let (mut status, verified_at, verifier_opted_in) = match state.account_store.get_account(&address) {
-        Ok(account) => {
-            let status = format!("{:?}", account.state).to_lowercase();
-            let verified_at = account.verified_at.map(|t| t.as_secs());
-            (status, verified_at, account.verifier_opted_in_at.is_some())
-        }
-        Err(StoreError::NotFound(_)) => ("unverified".to_string(), None, false),
-        Err(error) => return Err(error.into()),
-    };
+    let (mut status, verified_at, verifier_opted_in) =
+        match state.account_store.get_account(&address) {
+            Ok(account) => {
+                let status = format!("{:?}", account.state).to_lowercase();
+                let verified_at = account.verified_at.map(|t| t.as_secs());
+                (status, verified_at, account.verifier_opted_in_at.is_some())
+            }
+            Err(StoreError::NotFound(_)) => ("unverified".to_string(), None, false),
+            Err(error) => return Err(error.into()),
+        };
 
     let mut endorsers = Vec::new();
     let mut verifier_votes = Vec::new();
@@ -2339,7 +2455,11 @@ pub async fn handle_verification_status(
     let mut selected_verifiers = Vec::new();
     let verification = state.verification_engine.lock().await;
     if let Some(process) = verification.get_state(&address) {
-        selected_verifiers = process.selected_verifiers.iter().map(ToString::to_string).collect();
+        selected_verifiers = process
+            .selected_verifiers
+            .iter()
+            .map(ToString::to_string)
+            .collect();
         endorsers = process
             .endorsements
             .iter()
@@ -2874,7 +2994,8 @@ async fn genesis_endorse_locked(
             &genesis_for_build,
             previous,
             &genesis_rep,
-            prev_spent.checked_add(burn_amount)
+            prev_spent
+                .checked_add(burn_amount)
                 .ok_or_else(|| RpcError::Server("BRN spend overflow".into()))?,
             genesis_acct.trst_balance,
             link,
@@ -3040,7 +3161,9 @@ fn build_and_sign_block(
 // These root-key authoring helpers are test-tools-only, not device wallets.
 // A missing or corrupt predecessor must not silently reset their grant.
 fn prev_signing_grant(state: &RpcState, head: &BlockHash) -> Result<BlockHash, RpcError> {
-    if head.is_zero() { return Ok(BlockHash::ZERO); }
+    if head.is_zero() {
+        return Ok(BlockHash::ZERO);
+    }
     let bytes = state.block_store.get_block(head)?;
     let block: burst_ledger::StateBlock = bincode::deserialize(&bytes)
         .map_err(|e| RpcError::Server(format!("invalid signing predecessor: {e}")))?;
@@ -3218,7 +3341,11 @@ pub async fn handle_burn_simple(
     let brn_state = brn_state_from_account(&account, state.current_params()?.brn_rate);
     let brn_balance = {
         let brn = state.brn_engine.lock().await;
-        checked_brn_balance(&brn, brn.get_wallet(&account.address).unwrap_or(&brn_state), now)?
+        checked_brn_balance(
+            &brn,
+            brn.get_wallet(&account.address).unwrap_or(&brn_state),
+            now,
+        )?
     };
 
     if brn_balance < amount {
@@ -3285,7 +3412,8 @@ pub async fn handle_burn_simple(
                 &address,
                 previous,
                 &representative,
-                spent_brn.checked_add(amount)
+                spent_brn
+                    .checked_add(amount)
                     .ok_or_else(|| RpcError::Server("BRN spend overflow".into()))?,
                 trst_after,
                 destination,

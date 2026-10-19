@@ -36,7 +36,9 @@ impl Session {
                 Ok(None)
             };
             (self, cut)
-        }).await.map_err(|error| StoreError::Corruption(error.to_string()))?;
+        })
+        .await
+        .map_err(|error| StoreError::Corruption(error.to_string()))?;
         let cutoff = match cut {
             Ok(Some(cutoff)) => cutoff,
             Ok(None) => return Ok(session),
@@ -45,10 +47,15 @@ impl Session {
                 return Ok(session);
             }
         };
-        let context = session.compact_context.as_ref().expect("compact session context");
-        let candidate = context.base.clone().discover_cemented_selection_from_peers(
-            context.store.clone(), registry, cutoff,
-        ).await;
+        let context = session
+            .compact_context
+            .as_ref()
+            .expect("compact session context");
+        let candidate = context
+            .base
+            .clone()
+            .discover_cemented_selection_from_peers(context.store.clone(), registry, cutoff)
+            .await;
         let candidate = match candidate {
             Ok(Some(candidate)) => candidate,
             Ok(None) => return Ok(session),
@@ -67,7 +74,9 @@ impl Session {
                 Err(error) => tracing::debug!(%error, "compact proposal refresh deferred"),
             }
             session
-        }).await.map_err(|error| StoreError::Corruption(error.to_string()))
+        })
+        .await
+        .map_err(|error| StoreError::Corruption(error.to_string()))
     }
 
     /// Construct a single-height compact worker only after retained journal

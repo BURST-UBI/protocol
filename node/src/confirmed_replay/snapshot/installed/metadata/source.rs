@@ -57,10 +57,15 @@ impl RecoverySource {
         // Choose before constructing the future, so polling does not move a
         // second recovery state machine onto the caller's stack.
         match self {
-            Self::Archive(snapshot) =>
-                Box::pin(snapshot.recover_stored_epoch_from_peers(store, registry, target)),
+            Self::Archive(snapshot) => {
+                Box::pin(snapshot.recover_stored_epoch_from_peers(store, registry, target))
+            }
             Self::Genesis => Box::pin(RecoveredSnapshot::recover_genesis_from_peers(
-                store, network, params, registry, Some(target),
+                store,
+                network,
+                params,
+                registry,
+                Some(target),
             )),
         }
     }

@@ -1,6 +1,6 @@
 //! One slot follows a queued block through authentication and dependency recovery.
-use std::sync::Arc;
 use burst_ledger::StateBlock;
+use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub(crate) const MAX_RETAINED_BLOCKS: usize = 65_536;
@@ -26,5 +26,7 @@ pub(crate) struct RetainedBlock {
 
 impl std::ops::Deref for RetainedBlock {
     type Target = StateBlock;
-    fn deref(&self) -> &StateBlock { &self.block }
+    fn deref(&self) -> &StateBlock {
+        &self.block
+    }
 }

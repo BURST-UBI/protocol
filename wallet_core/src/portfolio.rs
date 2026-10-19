@@ -59,7 +59,11 @@ impl AutoMergePolicy {
 
     pub fn config(&self) -> crate::auto_merge::AutoMergeConfig {
         crate::auto_merge::AutoMergeConfig {
-            similarity_pct: if self.aggressiveness >= 100 { 100 } else { self.aggressiveness / 5 },
+            similarity_pct: if self.aggressiveness >= 100 {
+                100
+            } else {
+                self.aggressiveness / 5
+            },
             enabled: self.is_enabled(),
             ..Default::default()
         }
@@ -68,7 +72,9 @@ impl AutoMergePolicy {
     /// Maximum loss relative to the longest remaining lifetime in a group.
     pub fn max_expiry_diff_secs(&self, longest_remaining_secs: u64) -> u64 {
         let config = self.config();
-        if config.similarity_pct == 100 { return u64::MAX; }
+        if config.similarity_pct == 100 {
+            return u64::MAX;
+        }
         ((longest_remaining_secs as u128 * config.similarity_pct as u128) / 100) as u64
     }
 
@@ -83,7 +89,9 @@ impl AutoMergePolicy {
         _trst_expiry_secs: u64,
     ) -> Vec<Vec<String>> {
         crate::auto_merge::compute_merge_groups(holdings, &self.config())
-            .into_iter().map(|group| group.token_ids).collect()
+            .into_iter()
+            .map(|group| group.token_ids)
+            .collect()
     }
 }
 

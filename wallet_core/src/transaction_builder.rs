@@ -630,11 +630,15 @@ pub fn build_signing_handoff(
     now: Timestamp,
 ) -> Result<StateBlock, WalletError> {
     if state.head.is_zero() || state.block_count == 0 || nonce.is_zero() {
-        return Err(WalletError::TransactionBuild("handoff requires an open account and a fresh device nonce".into()));
+        return Err(WalletError::TransactionBuild(
+            "handoff requires an open account and a fresh device nonce".into(),
+        ));
     }
-    let transaction = burst_transactions::Transaction::ChangeRepresentative(
-        build_change_rep_tx(account, &state.representative, now)?,
-    );
+    let transaction = burst_transactions::Transaction::ChangeRepresentative(build_change_rep_tx(
+        account,
+        &state.representative,
+        now,
+    )?);
     let mut block = build_state_block(state, &transaction, TxHash::ZERO, params_hash)?;
     block.block_type = BlockType::ChangeSigner;
     block.link = nonce;
@@ -642,7 +646,9 @@ pub fn build_signing_handoff(
     // Stake release is a separate action; takeover must leave the odometer intact.
     block.release_sources.clear();
     block.brn_balance = state.brn_balance;
-    block.validate_format().map_err(|error| WalletError::TransactionBuild(error.into()))?;
+    block
+        .validate_format()
+        .map_err(|error| WalletError::TransactionBuild(error.into()))?;
     block.hash = block.compute_hash();
     Ok(block)
 }
@@ -685,7 +691,8 @@ mod tests {
     }
 
     fn test_account_state() -> AccountState {
-        AccountState { signing_grant: burst_types::BlockHash::ZERO,
+        AccountState {
+            signing_grant: burst_types::BlockHash::ZERO,
             payment_epoch: burst_types::BlockHash::new([1; 32]),
             release_sources: Vec::new(),
             head: BlockHash::ZERO,
@@ -704,18 +711,37 @@ mod tests {
         state.signing_grant = BlockHash::new([3; 32]);
         let account = test_address("handoff");
         let params = BlockHash::new([4; 32]);
-        let handoff = build_signing_handoff(&state, &account, BlockHash::new([5; 32]), params, Timestamp::new(100)).unwrap();
+        let handoff = build_signing_handoff(
+            &state,
+            &account,
+            BlockHash::new([5; 32]),
+            params,
+            Timestamp::new(100),
+        )
+        .unwrap();
         assert_eq!(handoff.block_type, BlockType::ChangeSigner);
         assert_eq!(handoff.signing_grant, state.signing_grant);
         assert_eq!(handoff.account, account);
         assert_eq!(handoff.representative, state.representative);
-        assert_eq!((handoff.brn_balance, handoff.trst_balance), (state.brn_balance, state.trst_balance));
+        assert_eq!(
+            (handoff.brn_balance, handoff.trst_balance),
+            (state.brn_balance, state.trst_balance)
+        );
         state.head = handoff.hash;
         state.signing_grant = handoff.active_signing_grant();
-        let tx = burst_transactions::Transaction::Burn(build_burn_tx(&account, &account, 1, Timestamp::new(101)).unwrap());
+        let tx = burst_transactions::Transaction::Burn(
+            build_burn_tx(&account, &account, 1, Timestamp::new(101)).unwrap(),
+        );
         let next = build_state_block(&state, &tx, TxHash::ZERO, params).unwrap();
         next.validate_signing_grant(Some(&handoff)).unwrap();
-        assert!(build_signing_handoff(&state, &account, BlockHash::ZERO, params, Timestamp::new(102)).is_err());
+        assert!(build_signing_handoff(
+            &state,
+            &account,
+            BlockHash::ZERO,
+            params,
+            Timestamp::new(102)
+        )
+        .is_err());
     }
 
     #[test]
@@ -892,7 +918,8 @@ mod tests {
         )
         .unwrap();
         assert_ne!(appeal.hash, other.hash);
-        let state = AccountState { signing_grant: burst_types::BlockHash::ZERO,
+        let state = AccountState {
+            signing_grant: burst_types::BlockHash::ZERO,
             head: BlockHash::new([2; 32]),
             ..test_account_state()
         };
@@ -1110,7 +1137,8 @@ mod tests {
         // the wallet cannot check BRN sufficiency from it (nodes validate
         // the spend against the computed BRN(w)). Building always succeeds
         // and records the spend as the odometer delta.
-        let state = AccountState { signing_grant: burst_types::BlockHash::ZERO,
+        let state = AccountState {
+            signing_grant: burst_types::BlockHash::ZERO,
             payment_epoch: burst_types::BlockHash::new([1; 32]),
             brn_balance: 50,
             ..test_account_state()
@@ -1150,7 +1178,8 @@ mod tests {
     fn build_and_sign_produces_valid_signature() {
         let kp = burst_crypto::generate_keypair();
         let address = burst_crypto::derive_address(&kp.public);
-        let state = AccountState { signing_grant: burst_types::BlockHash::ZERO,
+        let state = AccountState {
+            signing_grant: burst_types::BlockHash::ZERO,
             payment_epoch: burst_types::BlockHash::new([1; 32]),
             release_sources: Vec::new(),
             head: BlockHash::ZERO,

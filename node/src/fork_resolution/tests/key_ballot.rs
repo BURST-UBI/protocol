@@ -5,7 +5,8 @@ use burst_governance::key_delegation::{
 use burst_wallet_core::transaction_builder::*;
 
 fn account(block: &StateBlock, height: u64) -> AccountState {
-    AccountState { signing_grant: burst_types::BlockHash::ZERO,
+    AccountState {
+        signing_grant: burst_types::BlockHash::ZERO,
         head: block.hash,
         block_count: height,
         representative: block.representative.clone(),

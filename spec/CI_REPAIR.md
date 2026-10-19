@@ -1,0 +1,59 @@
+# CI repair, 2026-10-19
+
+Baseline: protocol a565af3, CI run 39311525690; the preceding code run was
+39310102263. Wallet 0054a6d and dashboard a07323d have no Actions workflows.
+Passing CI is regression evidence, not whitepaper sign-off or release approval.
+
+## Change impact and validation plan
+
+| Changed input | Requirement/check | Existing evidence | Next check and reason |
+| --- | --- | --- | --- |
+| Offline delegated-action representation and accessors | Native and WASM compilation, unchanged signed actions | Native workspace tests pass; WASM and Clippy fail | Focused offline tests, WASM check and Clippy. Boxing must preserve serialized intent. |
+| Unix-only example import | Windows builds must compile without unused imports | Windows compiler diagnostic | Windows service job; no lifecycle redesign. |
+| Replay fixture bootstrap threshold | Selection must follow bootstrap exit | Integration fails at explicit selection preparation | Run the affected integration test with a two-human threshold; keep the guard. |
+| Governance fixture certified runtime | Closed ballots survive restart and fresh catch-up | Old shard 3 rejects historical blocks after 60 seconds | Enable the existing test clock hook with wall time. Run the two ballot journeys and content journey. Do not relax timestamp validation or enlarge waits. |
+| Coverage evidence references | Fresh clones can inspect the sign-off record | Local ignored logs and committed ledger references | Check retained hashes, reference durable reviewed summaries, then run inventory contracts. No runtime replay needed. |
+| Formatting | Repository formatting contract | Format job diffs | One mechanical format pass and check. |
+| Workflow scheduling | Changes receive relevant checks without duplicate publication attempts | Documentation push repeated all jobs | Test workflow routing; make release manual, preserve conformance prerequisites. |
+| Missing app workflows | Wallet/dashboard build and browser contracts | Existing local test drivers, no hosted checks | Add reproducible frontend CI using those drivers. Native installation remains a separate qualification. |
+
+The next broad boundary is one coherent repair push. Reuse unaffected passing
+workspace and installer results for diagnosis; hosted CI still validates the
+new revision. Do not rebuild the release daemon for fixture or metadata edits.
+The desktop limits remain unchanged. Full node test compilation stays off the
+desktop.
+
+## Release blockers and coverage limits
+
+The inventory has 335 unsigned sections. Some may be stale records, but CI must
+not infer sign-off from test counts. The release conformance gate remains closed.
+The fresh-catch-up and replay failures remain unresolved until their positive
+journeys pass. Browser mocks do not prove native signing, recovery, packaging,
+cross-host networking or real VPS deployment. Those checks retain their own
+evidence and cannot be replaced by a green frontend job.
+
+Routine checks are useful: formatting, lint, platform compilation, tool
+contracts, crate tests, network journeys and integration tests cover different
+failure modes. Repeated compilation of the same node test profile and automatic
+release attempts on documentation pushes do not add that coverage.
+
+## Local results
+
+- 43 workflow-routing, inventory, installer/updater, sharding and evidence-reuse
+  contracts pass through the desktop resource wrapper.
+- Four offline action tests pass, including serialized delegation, signing,
+  durable journal readback and TRST provenance. WASM Clippy passes with warnings
+  denied. These checks do not qualify a new installed wallet package.
+- The inventory now reports zero structural errors, still 335 unsigned sections.
+  The two retained log digests match their recorded values. Panel and challenge
+  receipt digests match the ledger; both receipts record pass/exit 0. CI references
+  the committed review, not a machine-local ignored path. Raw logs remain local.
+- Rust formatting is applied mechanically across the workspace. No runtime
+  sign-off is inferred from formatting.
+
+Ignored-test review found a second daemon snapshot CLI test that was never
+scheduled. It now runs beside the existing snapshot export test, using the same
+validation-profile executable. Subprocess helpers are invoked by their parent
+tests; they must not be run indiscriminately with `--ignored`. Installed-wallet,
+public NTS/drand, large-state and performance probes still require their named
+validation environments. Routine CI is not a substitute for those release checks.

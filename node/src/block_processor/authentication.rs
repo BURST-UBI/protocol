@@ -1,7 +1,13 @@
 use super::*;
 
-pub(crate) fn signing_key(block: &StateBlock, genesis: &WalletAddress) -> Result<PublicKey, String> {
-    let signer = if matches!(block.block_type, BlockType::Epoch | BlockType::GovernanceActivation) {
+pub(crate) fn signing_key(
+    block: &StateBlock,
+    genesis: &WalletAddress,
+) -> Result<PublicKey, String> {
+    let signer = if matches!(
+        block.block_type,
+        BlockType::Epoch | BlockType::GovernanceActivation
+    ) {
         genesis
     } else {
         &block.account

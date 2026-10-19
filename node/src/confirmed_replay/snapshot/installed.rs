@@ -28,11 +28,11 @@ pub use selection_history::SelectionHistory;
 mod retained;
 mod runtime;
 pub use changes::ReplayedEconomicChange;
-pub(crate) use metadata::{recover_metadata_retaining_progress, CompactPreparation};
 pub use metadata::{
     recover_metadata_from_peers, PreparedCompactInstallation, RecoveredIndexProjection,
     RecoveredInstalledMetadata, RecoveredUndoProjection,
 };
+pub(crate) use metadata::{recover_metadata_retaining_progress, CompactPreparation};
 pub use recovery::RecoveredSnapshot;
 pub(crate) use recovery::ReplayCache;
 pub use runtime::RecoveredRuntime;

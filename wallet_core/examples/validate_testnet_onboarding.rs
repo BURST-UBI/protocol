@@ -81,10 +81,7 @@ async fn main() -> Result<(), Error> {
         } else {
             node.signing_state(&founder.address).await?
         };
-        assert!(
-            !founder_state.head.is_zero(),
-            "wrong Test fixture identity"
-        );
+        assert!(!founder_state.head.is_zero(), "wrong Test fixture identity");
         let parameters = node.rpc_call("protocol_params", json!({})).await?;
         assert_eq!(
             parameters["brn_rate"],
@@ -147,7 +144,10 @@ async fn main() -> Result<(), Error> {
                     "helpers":helpers.iter().map(|wallet| wallet.address.as_str()).collect::<Vec<_>>(),
                     "verified_helpers":49,"opted_in_helpers":7,
                     "subject_verified":false});
-                let mut output = std::fs::OpenOptions::new().write(true).create_new(true).open(&report)?;
+                let mut output = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&report)?;
                 output.write_all(&serde_json::to_vec_pretty(&evidence)?)?;
                 output.sync_all()?;
                 println!("PASS certified helper baseline only; consumer onboarding has not run");
@@ -307,16 +307,15 @@ async fn main() -> Result<(), Error> {
         return Err("expected advance, continue-selection, verify or verify-joining".into());
     }
     let expected: Value = serde_json::from_slice(&std::fs::read(&report)?)?;
-    let account = expected["subject_status"]["account"].as_str().ok_or("missing verification account")?;
+    let account = expected["subject_status"]["account"]
+        .as_str()
+        .ok_or("missing verification account")?;
     // A cold join downloads the whole bootstrap history before the payment.
     // Keep ordinary confirmation/restart checks at their shorter deadline.
     let recovery_wait = Duration::from_secs(if mode == "verify-joining" { 180 } else { 60 });
     for node in &nodes {
-        node.wait_confirmed(
-            expected["payment"].as_str().unwrap(),
-            recovery_wait,
-        )
-        .await?;
+        node.wait_confirmed(expected["payment"].as_str().unwrap(), recovery_wait)
+            .await?;
         node.wait_confirmed(
             expected["receive"].as_str().unwrap(),
             Duration::from_secs(60),
@@ -329,14 +328,23 @@ async fn main() -> Result<(), Error> {
             }
         }
         assert_eq!(
-            comparable_status(node.rpc_call("verification_status", json!({"account":account})).await?),
+            comparable_status(
+                node.rpc_call("verification_status", json!({"account":account}))
+                    .await?
+            ),
             comparable_status(expected["subject_status"].clone()),
             "verification state changed across recovery"
         );
         if let Some(balance) = expected.get("receiver_balance") {
-            let portfolio = node.rpc_call("trst_portfolio", json!({"account":expected["receiver"]})).await?;
+            let portfolio = node
+                .rpc_call("trst_portfolio", json!({"account":expected["receiver"]}))
+                .await?;
             for field in ["active", "expired", "revoked", "pending"] {
-                assert_eq!(portfolio[format!("total_{field}")], balance[field], "receiver {field} changed across recovery");
+                assert_eq!(
+                    portfolio[format!("total_{field}")],
+                    balance[field],
+                    "receiver {field} changed across recovery"
+                );
             }
         }
     }

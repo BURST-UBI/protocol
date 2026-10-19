@@ -114,10 +114,9 @@ fn ordinary_library_rejects_outcome_records_before_import_or_recovery() {
         target: burst_crypto::derive_address(&burst_crypto::keypair_from_seed(&[20; 32]).public),
     };
     let bytes = bincode::serialize(&record).unwrap();
-    let error =
-        CertifiedChallengeOutcome::import_record(&store, GATED_NETWORK, &params, 2, &bytes)
-            .err()
-            .expect("ordinary library must keep outcome imports gated");
+    let error = CertifiedChallengeOutcome::import_record(&store, GATED_NETWORK, &params, 2, &bytes)
+        .err()
+        .expect("ordinary library must keep outcome imports gated");
     assert!(
         error
             .to_string()

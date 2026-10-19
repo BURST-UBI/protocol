@@ -312,7 +312,8 @@ pub(crate) async fn run_node_with_recovery(
     if compact {
         return super::compact_runtime::run_compact_node_with_initial(
             settings, registry, inbox, clock, shutdown, None, cached,
-        ).await;
+        )
+        .await;
     }
     let mut stop = shutdown.subscribe();
     let initial_settings = settings.clone();

@@ -1,7 +1,7 @@
 use burst_store::StoreError;
 use burst_store_lmdb::block_undo::{UndoChange, UndoTable};
-use std::collections::BTreeMap;
 use burst_types::{Timestamp, TxHash};
+use std::collections::BTreeMap;
 
 pub(super) fn mint_rows(
     token: TxHash,
@@ -40,12 +40,18 @@ impl Mutations {
         let old = before.map(|at| mint_rows(token, at, expiry_secs));
         let new = mint_rows(token, after, expiry_secs);
         for (table, key, value) in old.iter().flatten() {
-            let after = new.iter().find(|(t, k, _)| t == table && k == key)
+            let after = new
+                .iter()
+                .find(|(t, k, _)| t == table && k == key)
                 .map(|(_, _, value)| value.clone());
             self.record(*table, key.clone(), Some(value.clone()), after)?;
         }
         for (table, key, value) in new {
-            if !old.iter().flatten().any(|(t, k, _)| *t == table && *k == key) {
+            if !old
+                .iter()
+                .flatten()
+                .any(|(t, k, _)| *t == table && *k == key)
+            {
                 self.record(table, key, None, Some(value))?;
             }
         }
@@ -137,18 +143,46 @@ mod tests {
     fn mint_updates_preserve_first_before_and_replace_only_changed_expiry_keys() {
         let token = TxHash::new([18; 32]);
         let mut writes = Mutations::default();
-        writes.record_mint(token, None, Timestamp::new(10), 20).unwrap();
-        writes.record_mint(token, Some(Timestamp::new(10)), Timestamp::new(10), 20).unwrap();
+        writes
+            .record_mint(token, None, Timestamp::new(10), 20)
+            .unwrap();
+        writes
+            .record_mint(token, Some(Timestamp::new(10)), Timestamp::new(10), 20)
+            .unwrap();
         assert_eq!(writes.changes().count(), 3);
         assert!(writes.changes().all(|row| row.before.is_none()));
         let mut replaced = Mutations::default();
-        replaced.record_mint(token, Some(Timestamp::new(10)), Timestamp::new(11), 20).unwrap();
+        replaced
+            .record_mint(token, Some(Timestamp::new(10)), Timestamp::new(11), 20)
+            .unwrap();
         let changes: Vec<_> = replaced.changes().collect();
         assert_eq!(changes.len(), 3);
-        assert!(!changes.iter().any(|row| row.table == UndoTable::TrstOrigins));
-        assert_eq!(changes.iter().filter(|row| row.table == UndoTable::TrstExpiry && row.after.is_none()).count(), 1);
-        assert_eq!(changes.iter().filter(|row| row.table == UndoTable::TrstExpiry && row.before.is_none()).count(), 1);
-        assert_eq!(changes.iter().filter(|row| row.table == UndoTable::TrstReverse && row.before.is_some() && row.after.is_some()).count(), 1);
+        assert!(!changes
+            .iter()
+            .any(|row| row.table == UndoTable::TrstOrigins));
+        assert_eq!(
+            changes
+                .iter()
+                .filter(|row| row.table == UndoTable::TrstExpiry && row.after.is_none())
+                .count(),
+            1
+        );
+        assert_eq!(
+            changes
+                .iter()
+                .filter(|row| row.table == UndoTable::TrstExpiry && row.before.is_none())
+                .count(),
+            1
+        );
+        assert_eq!(
+            changes
+                .iter()
+                .filter(|row| row.table == UndoTable::TrstReverse
+                    && row.before.is_some()
+                    && row.after.is_some())
+                .count(),
+            1
+        );
     }
 
     #[test]

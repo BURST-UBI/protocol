@@ -132,17 +132,41 @@ async fn compact_installation_publishes_live_engines_and_preserves_old_promises(
         publication_probe: None,
     };
     let bad_journal = "consensus_final/unsupported";
-    node.store.meta_store().put_meta(bad_journal, b"invalid promise").unwrap();
-    let before = node.store.tx_begin_write().unwrap().checkpoint_metadata(b"").unwrap();
+    node.store
+        .meta_store()
+        .put_meta(bad_journal, b"invalid promise")
+        .unwrap();
+    let before = node
+        .store
+        .tx_begin_write()
+        .unwrap()
+        .checkpoint_metadata(b"")
+        .unwrap();
     for _ in 0..2 {
         assert!(runtime.install_next().await.is_err());
         assert_eq!(
-            runtime.recovery.as_ref().expect("retain authenticated replay after a failed check")
-                .recovered.continuation.anchor().hash(),
+            runtime
+                .recovery
+                .as_ref()
+                .expect("retain authenticated replay after a failed check")
+                .recovered
+                .continuation
+                .anchor()
+                .hash(),
             old.anchor().hash(),
         );
-        assert_eq!(node.store.meta_store().payment_epoch().unwrap(), old.anchor().hash());
-        assert_eq!(node.store.tx_begin_write().unwrap().checkpoint_metadata(b"").unwrap(), before);
+        assert_eq!(
+            node.store.meta_store().payment_epoch().unwrap(),
+            old.anchor().hash()
+        );
+        assert_eq!(
+            node.store
+                .tx_begin_write()
+                .unwrap()
+                .checkpoint_metadata(b"")
+                .unwrap(),
+            before
+        );
         assert!(runtime.last_complete.is_none());
     }
     node.store.meta_store().delete_meta(bad_journal).unwrap();
@@ -236,13 +260,32 @@ async fn compact_installation_publishes_live_engines_and_preserves_old_promises(
         .checkpoint_metadata(b"")
         .unwrap();
     assert!(runtime.install_next().await.unwrap().is_none());
-    let cached_epoch = runtime.recovery.as_ref().expect("idle installer retains replay")
-        .recovered.continuation.anchor().hash();
-    assert_eq!(cached_epoch, node.store.meta_store().payment_epoch().unwrap());
+    let cached_epoch = runtime
+        .recovery
+        .as_ref()
+        .expect("idle installer retains replay")
+        .recovered
+        .continuation
+        .anchor()
+        .hash();
+    assert_eq!(
+        cached_epoch,
+        node.store.meta_store().payment_epoch().unwrap()
+    );
     // Force another observation rather than taking last_complete's fast path.
     runtime.last_complete = None;
     assert!(runtime.install_next().await.unwrap().is_none());
-    assert_eq!(runtime.recovery.as_ref().unwrap().recovered.continuation.anchor().hash(), cached_epoch);
+    assert_eq!(
+        runtime
+            .recovery
+            .as_ref()
+            .unwrap()
+            .recovered
+            .continuation
+            .anchor()
+            .hash(),
+        cached_epoch
+    );
     assert_eq!(
         node.store
             .tx_begin_write()

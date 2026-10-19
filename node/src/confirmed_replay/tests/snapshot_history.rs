@@ -1,10 +1,10 @@
 use super::*;
 use crate::checkpoint_store::CertifiedCheckpoint;
 use crate::confirmed_replay::snapshot::{
-    SelectionSource,
     archive::AuthenticatedSnapshot,
     export::SnapshotExport,
     history::{read_chunk, MAX_WITNESS_BLOCKS, MAX_WITNESS_BYTES},
+    SelectionSource,
 };
 
 mod archive_selection;

@@ -57,27 +57,41 @@ async fn live_child() {
 }
 
 fn baseline(fixture: &Fixture, store: &LmdbStore, governance: bool) {
-    let state = fixture.replay(if governance { 140 } else { CUTOFF }).unwrap();
+    let state = fixture
+        .replay(if governance { 140 } else { CUTOFF })
+        .unwrap();
     let mut batch = store.tx_begin_write().unwrap();
     if governance {
         // Model a node that initialized genesis before admitting its governance
         // tail. Startup must still authenticate both the authority and schedule.
         let genesis = crate::checkpoint_replay::ReplayedCheckpoint::genesis_anchor(
-            NetworkId::Dev, &fixture.params,
-        ).unwrap();
+            NetworkId::Dev,
+            &fixture.params,
+        )
+        .unwrap();
         let cutoff = fixture.blocks[0].timestamp.as_secs();
         assert_eq!(batch.payment_epoch().unwrap(), genesis.hash());
-        batch.put_meta(INSTALLED_KEY, &crate::confirmed_replay::installation::authority_bytes(
-            &genesis, cutoff,
-        ).unwrap()).unwrap();
+        batch
+            .put_meta(
+                INSTALLED_KEY,
+                &crate::confirmed_replay::installation::authority_bytes(&genesis, cutoff).unwrap(),
+            )
+            .unwrap();
         batch.put_meta(CUTOFF_KEY, &cutoff.to_be_bytes()).unwrap();
-        batch.put_meta(burst_store::meta::PAYMENT_VOTE_LIMIT_KEY,
-            &crate::confirmed_replay::installation::vote_limit_bytes(
-                genesis.hash(), cutoff, None,
-            ).unwrap(),
-        ).unwrap();
+        batch
+            .put_meta(
+                burst_store::meta::PAYMENT_VOTE_LIMIT_KEY,
+                &crate::confirmed_replay::installation::vote_limit_bytes(
+                    genesis.hash(),
+                    cutoff,
+                    None,
+                )
+                .unwrap(),
+            )
+            .unwrap();
         let mut schedule = crate::confirmed_governance::ConfirmedGovernance::initial(
-            genesis.hash(), fixture.params.clone(),
+            genesis.hash(),
+            fixture.params.clone(),
         );
         for block in &fixture.blocks {
             schedule.promote(&batch, block).unwrap();
@@ -258,7 +272,10 @@ async fn live_publication_crashes(governance: bool) {
             .unwrap();
         assert_eq!(status.signal(), Some(9));
         let store = open(crashed.path());
-        assert_contents(&projection(&store, fixture.params.trst_expiry_secs), &expected);
+        assert_contents(
+            &projection(&store, fixture.params.trst_expiry_secs),
+            &expected,
+        );
         drop(store);
         restart_and_admit(crashed.path(), &fixture, epoch).await;
         eprintln!(

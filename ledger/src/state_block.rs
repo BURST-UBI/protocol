@@ -173,15 +173,20 @@ impl StateBlock {
             return Err("unsupported block version");
         }
         if self.block_type == BlockType::Epoch
-            && (!self.link.is_zero() || !self.origin.is_zero()
-                || !self.transaction.is_zero() || !self.release_sources.is_empty()
+            && (!self.link.is_zero()
+                || !self.origin.is_zero()
+                || !self.transaction.is_zero()
+                || !self.release_sources.is_empty()
                 || !self.delegation_payload.is_empty())
         {
             return Err("epoch marker cannot contain an account action");
         }
         if self.block_type == BlockType::ChangeSigner
-            && (self.previous.is_zero() || self.link.is_zero() || !self.origin.is_zero()
-                || !self.transaction.is_zero() || !self.release_sources.is_empty()
+            && (self.previous.is_zero()
+                || self.link.is_zero()
+                || !self.origin.is_zero()
+                || !self.transaction.is_zero()
+                || !self.release_sources.is_empty()
                 || !self.delegation_payload.is_empty())
         {
             return Err("invalid signing-device handoff");
@@ -249,14 +254,25 @@ impl StateBlock {
 
     /// The grant carried by successors, derived from authenticated chain state.
     pub fn active_signing_grant(&self) -> BlockHash {
-        if self.block_type == BlockType::ChangeSigner { self.hash } else { self.signing_grant }
+        if self.block_type == BlockType::ChangeSigner {
+            self.hash
+        } else {
+            self.signing_grant
+        }
     }
 
     /// Shared by live admission, branch replacement and confirmed replay.
     /// The caller must authenticate the predecessor, not trust an RPC afterimage.
-    pub fn validate_signing_grant(&self, previous: Option<&StateBlock>) -> Result<(), &'static str> {
+    pub fn validate_signing_grant(
+        &self,
+        previous: Option<&StateBlock>,
+    ) -> Result<(), &'static str> {
         let expected = match previous {
-            Some(previous) if previous.account == self.account && previous.hash == self.previous => previous.active_signing_grant(),
+            Some(previous)
+                if previous.account == self.account && previous.hash == self.previous =>
+            {
+                previous.active_signing_grant()
+            }
             Some(_) => return Err("signing grant predecessor mismatch"),
             None if self.previous.is_zero() => BlockHash::ZERO,
             None => return Err("signing grant predecessor missing"),

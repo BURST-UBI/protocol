@@ -1885,30 +1885,76 @@ mod tests {
     fn self_transfer_preserves_value_and_does_not_bypass_spending_rules() {
         let mut engine = TrstEngine::with_expiry(3600);
         let owner = test_address(1);
-        let token = engine.mint(test_hash(1), owner.clone(), 1000, owner.clone(), ts(1000)).unwrap();
+        let token = engine
+            .mint(test_hash(1), owner.clone(), 1000, owner.clone(), ts(1000))
+            .unwrap();
         for amount in [1, 600, 1000] {
-            let (received, change) = engine.transfer(&token, &owner, owner.clone(), amount,
-                test_hash(2), test_hash(3), ts(1500)).unwrap();
-            assert_eq!(received.amount + change.as_ref().map_or(0, |t| t.amount), 1000);
+            let (received, change) = engine
+                .transfer(
+                    &token,
+                    &owner,
+                    owner.clone(),
+                    amount,
+                    test_hash(2),
+                    test_hash(3),
+                    ts(1500),
+                )
+                .unwrap();
+            assert_eq!(
+                received.amount + change.as_ref().map_or(0, |t| t.amount),
+                1000
+            );
             assert_eq!(change.is_none(), amount == 1000);
             for output in std::iter::once(&received).chain(change.as_ref()) {
                 assert_eq!(output.holder, owner);
                 assert_eq!(output.origin, token.origin);
                 assert_eq!(output.link, token.id);
-                assert_eq!(output.effective_origin_timestamp, token.effective_origin_timestamp);
+                assert_eq!(
+                    output.effective_origin_timestamp,
+                    token.effective_origin_timestamp
+                );
                 assert_eq!(output.basis, token.basis);
             }
         }
         for amount in [0, 1001] {
-            assert!(engine.transfer(&token, &owner, owner.clone(), amount,
-                test_hash(2), test_hash(3), ts(1500)).is_err());
+            assert!(engine
+                .transfer(
+                    &token,
+                    &owner,
+                    owner.clone(),
+                    amount,
+                    test_hash(2),
+                    test_hash(3),
+                    ts(1500)
+                )
+                .is_err());
         }
-        assert!(matches!(engine.transfer(&token, &owner, owner.clone(), 500,
-            test_hash(2), test_hash(3), ts(5000)), Err(TrstError::NotTransferable(_))));
+        assert!(matches!(
+            engine.transfer(
+                &token,
+                &owner,
+                owner.clone(),
+                500,
+                test_hash(2),
+                test_hash(3),
+                ts(5000)
+            ),
+            Err(TrstError::NotTransferable(_))
+        ));
         let mut revoked = token;
         revoked.state = TrstState::Revoked;
-        assert!(matches!(engine.transfer(&revoked, &owner, owner.clone(), 500,
-            test_hash(2), test_hash(3), ts(1500)), Err(TrstError::NotTransferable(_))));
+        assert!(matches!(
+            engine.transfer(
+                &revoked,
+                &owner,
+                owner.clone(),
+                500,
+                test_hash(2),
+                test_hash(3),
+                ts(1500)
+            ),
+            Err(TrstError::NotTransferable(_))
+        ));
     }
 
     #[test]
@@ -2056,18 +2102,31 @@ mod tests {
             h[0] = (i % 256) as u8;
             h[1] = (i / 256) as u8;
             h[2] = 7;
-            tokens.push(engine.mint(TxHash::new(h), holder.clone(), 1,
-                holder.clone(), ts(1000)).unwrap());
+            tokens.push(
+                engine
+                    .mint(TxHash::new(h), holder.clone(), 1, holder.clone(), ts(1000))
+                    .unwrap(),
+            );
         }
         let result = engine.merge(&tokens, holder.clone(), test_hash(99), ts(1500));
         assert!(result.is_err());
         assert!(engine.merger_graph.get_merge(&test_hash(99)).is_none());
         tokens.pop();
-        let merged = engine.merge(&tokens, holder.clone(), test_hash(99), ts(1500)).unwrap();
+        let merged = engine
+            .merge(&tokens, holder.clone(), test_hash(99), ts(1500))
+            .unwrap();
         assert_eq!(merged.amount, MAX_MERGE_SOURCES as u128);
         assert_eq!(merged.holder, holder);
         assert_eq!(merged.effective_origin_timestamp, ts(1000));
-        assert_eq!(engine.merger_graph.get_merge(&test_hash(99)).unwrap().source_origins.len(), MAX_MERGE_SOURCES);
+        assert_eq!(
+            engine
+                .merger_graph
+                .get_merge(&test_hash(99))
+                .unwrap()
+                .source_origins
+                .len(),
+            MAX_MERGE_SOURCES
+        );
     }
 
     #[test]

@@ -17,7 +17,11 @@ impl Cache {
         let mut bytes = 0usize;
         let mut blocks = Vec::new();
         while !hash.is_zero() && blocks.len() < history::MAX_WITNESS_BLOCKS {
-            let Some((proof, _, _)) = self.entries.iter().find(|(proof, _, _)| proof.block().hash == hash) else {
+            let Some((proof, _, _)) = self
+                .entries
+                .iter()
+                .find(|(proof, _, _)| proof.block().hash == hash)
+            else {
                 break;
             };
             let block = bincode::serialize(proof.block()).map_err(invalid)?;
@@ -93,7 +97,10 @@ impl Cache {
                     None if requested => 0,
                     None => continue 'proofs,
                 };
-                let (_, removed, _) = self.entries.remove(index).expect("bounded cache is nonempty");
+                let (_, removed, _) = self
+                    .entries
+                    .remove(index)
+                    .expect("bounded cache is nonempty");
                 self.bytes -= removed;
             }
             self.entries.push_back((proof.clone(), size, requested));

@@ -134,7 +134,10 @@ async fn pending_receipt_moves_ownership_once_and_recovers_after_restart_and_fre
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires installed native wallet, WebKitWebDriver and libfaketime"]
 async fn desktop_expired_merge_preserves_reputation_across_node_restart() {
-    let _permit = crate::verification_test_support::NETWORK_FIXTURE.acquire().await.unwrap();
+    let _permit = crate::verification_test_support::NETWORK_FIXTURE
+        .acquire()
+        .await
+        .unwrap();
     let directory = tempfile::tempdir().unwrap();
     let clock = Arc::new(AtomicU64::new(time(10).as_secs()));
     let params = ProtocolParams {
@@ -153,82 +156,147 @@ async fn desktop_expired_merge_preserves_reputation_across_node_restart() {
         let config = NodeConfig {
             network: NetworkId::Dev,
             data_dir: directory.path().join(format!("node-{index}")),
-            port: ports[index], rpc_port: port(),
+            port: ports[index],
+            rpc_port: port(),
             enable_representative: index == 0,
-            enable_upnp: false, nts_sources: vec![], params: params.clone(),
-            bootstrap_peers: vec![format!("127.0.0.1:{}", ports[1-index])],
+            enable_upnp: false,
+            nts_sources: vec![],
+            params: params.clone(),
+            bootstrap_peers: vec![format!("127.0.0.1:{}", ports[1 - index])],
             ..NodeConfig::default()
         };
         clients.push(NodeClient::new(format!("http://127.0.0.1:{}", config.rpc_port)).unwrap());
         configs.push(config.clone());
         let mut node = fixture_node(config, &clock, "http://127.0.0.1:1").await;
-        workers.push((node.shutdown.clone(), tokio::spawn(async move {
-            node.start().await.unwrap(); node.stop().await.unwrap();
-        })));
+        workers.push((
+            node.shutdown.clone(),
+            tokio::spawn(async move {
+                node.start().await.unwrap();
+                node.stop().await.unwrap();
+            }),
+        ));
     }
     let result = tokio::time::timeout(Duration::from_secs(230), async {
         for client in &clients {
-            while !client.rpc_call("peers", json!({})).await
-                .is_ok_and(|peers| peers["count"].as_u64().unwrap_or(0) >= 1) {
+            while !client
+                .rpc_call("peers", json!({}))
+                .await
+                .is_ok_and(|peers| peers["count"].as_u64().unwrap_or(0) >= 1)
+            {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
         let key = burst_crypto::keypair_from_seed(&[0; 32]);
         let owner = burst_crypto::derive_address(&key.public);
         for amount in [7, 11] {
-            let burn = signed_block(&clients[0], &key, Transaction::Burn(
-                build_burn_tx(&owner, &owner, amount, time(10)).unwrap()
-            ), &params).await;
+            let burn = signed_block(
+                &clients[0],
+                &key,
+                Transaction::Burn(build_burn_tx(&owner, &owner, amount, time(10)).unwrap()),
+                &params,
+            )
+            .await;
             submit(&clients, &burn).await;
-            let receive = signed_block(&clients[0], &key, Transaction::Receive(
-                build_receive_tx(&owner, burn.hash.into_tx_hash(), amount, time(10)).unwrap()
-            ), &params).await;
+            let receive = signed_block(
+                &clients[0],
+                &key,
+                Transaction::Receive(
+                    build_receive_tx(&owner, burn.hash.into_tx_hash(), amount, time(10)).unwrap(),
+                ),
+                &params,
+            )
+            .await;
             submit(&clients, &receive).await;
         }
         clock.store(time(11).as_secs(), Ordering::SeqCst);
         let result_path = directory.path().join("native-result.json");
         let runner = std::env::var_os("NATIVE_WALLET_TEST_RUNNER")
             .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../wallet/tests/native-session.mjs"));
+            .unwrap_or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../wallet/tests/native-session.mjs")
+            });
         let output = tokio::process::Command::new("node")
-            .arg(runner).args(["--expired-merge-fixture", "--embedded"])
+            .arg(runner)
+            .args(["--expired-merge-fixture", "--embedded"])
             .env("NATIVE_FIXTURE_RPC_URL", clients[0].node_url())
             .env("NATIVE_RESULT_PATH", &result_path)
             .env("NATIVE_RETURN_TIME", time(11).as_secs().to_string())
-            .kill_on_drop(true).output().await.unwrap();
+            .kill_on_drop(true)
+            .output()
+            .await
+            .unwrap();
         eprintln!("{}", String::from_utf8_lossy(&output.stdout));
         eprintln!("{}", String::from_utf8_lossy(&output.stderr));
-        assert!(output.status.success(), "native expired-merge journey failed");
-        let report: serde_json::Value = serde_json::from_slice(&std::fs::read(result_path).unwrap()).unwrap();
+        assert!(
+            output.status.success(),
+            "native expired-merge journey failed"
+        );
+        let report: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(result_path).unwrap()).unwrap();
         assert_eq!(report["address"], owner.as_str());
         for client in &clients {
-            client.wait_confirmed(report["hash"].as_str().unwrap(), Duration::from_secs(25)).await.unwrap();
-            assert_eq!(client.rpc_call("trst_portfolio", json!({"account":owner.as_str()})).await.unwrap(), report["portfolio"]);
+            client
+                .wait_confirmed(report["hash"].as_str().unwrap(), Duration::from_secs(25))
+                .await
+                .unwrap();
+            assert_eq!(
+                client
+                    .rpc_call("trst_portfolio", json!({"account":owner.as_str()}))
+                    .await
+                    .unwrap(),
+                report["portfolio"]
+            );
         }
         report
-    }).await;
+    })
+    .await;
     super::governance_certified::stop(&mut workers).await;
     let report = result.expect("expired-merge native journey timed out");
     clients.clear();
     for config in configs {
         clients.push(NodeClient::new(format!("http://127.0.0.1:{}", config.rpc_port)).unwrap());
         let mut node = fixture_node(config, &clock, "http://127.0.0.1:1").await;
-        workers.push((node.shutdown.clone(), tokio::spawn(async move {
-            node.start().await.unwrap(); node.stop().await.unwrap();
-        })));
+        workers.push((
+            node.shutdown.clone(),
+            tokio::spawn(async move {
+                node.start().await.unwrap();
+                node.stop().await.unwrap();
+            }),
+        ));
     }
     let recovered = tokio::time::timeout(Duration::from_secs(45), async {
         for client in clients {
             loop {
-                if client.rpc_call("block_info", json!({"hash":report["hash"]})).await
-                    .is_ok_and(|block| block["confirmed"] == true) { break; }
+                if client
+                    .rpc_call("block_info", json!({"hash":report["hash"]}))
+                    .await
+                    .is_ok_and(|block| block["confirmed"] == true)
+                {
+                    break;
+                }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            assert_eq!(client.rpc_call("trst_portfolio", json!({"account":report["address"]})).await.unwrap(), report["portfolio"]);
-            assert_eq!(client.rpc_call("trst_origins", json!({"origin":report["portfolio"]["batches"][0]["origin"]})).await.unwrap(), report["origins"]);
+            assert_eq!(
+                client
+                    .rpc_call("trst_portfolio", json!({"account":report["address"]}))
+                    .await
+                    .unwrap(),
+                report["portfolio"]
+            );
+            assert_eq!(
+                client
+                    .rpc_call(
+                        "trst_origins",
+                        json!({"origin":report["portfolio"]["batches"][0]["origin"]})
+                    )
+                    .await
+                    .unwrap(),
+                report["origins"]
+            );
         }
-    }).await;
+    })
+    .await;
     super::governance_certified::stop(&mut workers).await;
     recovered.expect("expired merge did not survive node restart");
 }

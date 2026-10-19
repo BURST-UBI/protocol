@@ -6,8 +6,8 @@ use std::{sync::atomic::AtomicU64, time::Duration};
 pub(in crate::confirmed_replay::tests) mod bootstrap;
 #[cfg(unix)]
 mod crash;
-mod retirement;
 mod protocol_epoch;
+mod retirement;
 
 struct Prepared {
     _source_dir: tempfile::TempDir,
@@ -42,7 +42,11 @@ impl Running {
         Self::start_prefilled(config, now, None).await
     }
 
-    async fn start_prefilled(config: crate::NodeConfig, now: u64, prefill: Option<&StateBlock>) -> Self {
+    async fn start_prefilled(
+        config: crate::NodeConfig,
+        now: u64,
+        prefill: Option<&StateBlock>,
+    ) -> Self {
         let data_dir = config.data_dir.clone();
         let client = NodeClient::new(format!("http://127.0.0.1:{}", config.rpc_port)).unwrap();
         let mut node = crate::BurstNode::new(config).await.unwrap();
@@ -50,8 +54,13 @@ impl Running {
         node.verification_fixture_clock = Some(Arc::new(|| None));
         if let Some(block) = prefill {
             let queue = node.block_queue();
-            for _ in 0..4096 { assert!(queue.push(block.clone()).await); }
-            assert!(!queue.push(block.clone()).await, "real ingress capacity must reject overflow");
+            for _ in 0..4096 {
+                assert!(queue.push(block.clone()).await);
+            }
+            assert!(
+                !queue.push(block.clone()).await,
+                "real ingress capacity must reject overflow"
+            );
             assert_eq!(queue.len().await, 4096);
         }
         let stop = node.shutdown.clone();
@@ -349,39 +358,89 @@ fn prepare_with_fixture() -> (Prepared, Fixture) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn compact_import_uses_committed_parent_without_installing_the_new_decision() {
     let (prepared, fixture) = prepare_with_fixture();
-    let source = Arc::new(LmdbStore::open(prepared.source_config.data_dir.as_path(), 32, 32 << 20).unwrap());
-    let local = Arc::new(LmdbStore::open(prepared.target_config.data_dir.as_path(), 32, 32 << 20).unwrap());
+    let source =
+        Arc::new(LmdbStore::open(prepared.source_config.data_dir.as_path(), 32, 32 << 20).unwrap());
+    let local =
+        Arc::new(LmdbStore::open(prepared.target_config.data_dir.as_path(), 32, 32 << 20).unwrap());
     let prefix = format!("checkpoint_chain/v1/dev/{}", fixture.blocks[0].hash);
     let mut batch = local.tx_begin_write().unwrap();
     batch.delete_meta(&format!("{prefix}/3")).unwrap();
-    batch.put_meta(&format!("{prefix}/head"), &2u64.to_be_bytes()).unwrap();
+    batch
+        .put_meta(&format!("{prefix}/head"), &2u64.to_be_bytes())
+        .unwrap();
     batch.commit().unwrap();
-    let service = crate::confirmed_replay::tests::snapshot_history::installed_recovery::Service::start(
-        source.clone(), local.clone(), 0,
-    ).await;
+    let service =
+        crate::confirmed_replay::tests::snapshot_history::installed_recovery::Service::start(
+            source.clone(),
+            local.clone(),
+            0,
+        )
+        .await;
     let candidate = installed::recover_metadata_from_peers(
-        local.clone(), NetworkId::Dev, fixture.params.clone(), service.registry.clone(),
-    ).await.unwrap().unwrap().prepare_next_from_peers(local.clone(), service.registry.clone())
-        .await.unwrap().unwrap();
+        local.clone(),
+        NetworkId::Dev,
+        fixture.params.clone(),
+        service.registry.clone(),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .prepare_next_from_peers(local.clone(), service.registry.clone())
+    .await
+    .unwrap()
+    .unwrap();
     let (_, recovery, handoff) = candidate.commit_with_recovery(&local).unwrap();
     let parent = recovery.recovered.continuation.anchor().hash();
     let shared = service.registry.read().await.recovery_projection.clone();
     handoff.publish(&shared, &local).unwrap();
     assert_eq!(shared.replay_handoffs(), 0);
     let transfer = crate::checkpoint_store::CertifiedCheckpoint::export_transfer(
-        &source, NetworkId::Dev, &fixture.params, 3,
-    ).unwrap().unwrap();
+        &source,
+        NetworkId::Dev,
+        &fixture.params,
+        3,
+    )
+    .unwrap()
+    .unwrap();
     let mut imports = crate::checkpoint_store::historical::snapshot_transfer::Session::default();
-    assert_eq!(imports.import(local.clone(), NetworkId::Dev, fixture.params.clone(), 3,
-        transfer, service.registry.clone()).await.unwrap(), Some(parent));
-    assert_eq!(shared.replay_handoffs(), 1, "import must consume the committed parent handoff");
+    assert_eq!(
+        imports
+            .import(
+                local.clone(),
+                NetworkId::Dev,
+                fixture.params.clone(),
+                3,
+                transfer,
+                service.registry.clone()
+            )
+            .await
+            .unwrap(),
+        Some(parent)
+    );
+    assert_eq!(
+        shared.replay_handoffs(),
+        1,
+        "import must consume the committed parent handoff"
+    );
     assert_eq!(imports.recovery_anchor(), Some(parent));
-    assert_eq!(local.meta_store().payment_epoch().unwrap(), parent,
-        "accepting a transferred decision must not install it");
+    assert_eq!(
+        local.meta_store().payment_epoch().unwrap(),
+        parent,
+        "accepting a transferred decision must not install it"
+    );
     let next = installed::recover_metadata_from_peers(
-        local.clone(), NetworkId::Dev, fixture.params.clone(), service.registry.clone(),
-    ).await.unwrap().unwrap().prepare_next_from_peers(local.clone(), service.registry.clone())
-        .await.unwrap().unwrap();
+        local.clone(),
+        NetworkId::Dev,
+        fixture.params.clone(),
+        service.registry.clone(),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .prepare_next_from_peers(local.clone(), service.registry.clone())
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(next.anchor().hash(), prepared.epoch);
     next.commit(&local).unwrap();
     assert_eq!(local.meta_store().payment_epoch().unwrap(), prepared.epoch);

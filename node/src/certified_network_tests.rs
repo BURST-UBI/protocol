@@ -60,20 +60,31 @@ async fn signed_block(
     if std::env::var("NATIVE_SDK_OFFLINE_IDENTITY").as_deref() == Ok("1") {
         assert!(burst_verification::checkpoint_selection_enabled(NetworkId::Dev),
             "offline panel qualification requires the testnet feature; default artifacts keep selection gated");
-        use burst_wallet_core::offline::{OfflineAction, OfflineActionContext, load_action_with_content};
+        use burst_wallet_core::offline::{
+            load_action_with_content, OfflineAction, OfflineActionContext,
+        };
         let action = match &tx {
-            Transaction::Challenge(challenge) if challenge.appeal_of.is_none() => Some(OfflineAction::Challenge {
-                target: challenge.target.clone(), stake: challenge.stake_amount, reason: challenge.reason,
-            }),
+            Transaction::Challenge(challenge) if challenge.appeal_of.is_none() => {
+                Some(OfflineAction::Challenge {
+                    target: challenge.target.clone(),
+                    stake: challenge.stake_amount,
+                    reason: challenge.reason,
+                })
+            }
             Transaction::VerificationVote(vote) => Some(OfflineAction::VerificationVote {
-                target: vote.target_wallet.clone(), context: vote.selection_context,
-                vote: vote.vote, stake: vote.stake_amount,
+                target: vote.target_wallet.clone(),
+                context: vote.selection_context,
+                vote: vote.vote,
+                stake: vote.stake_amount,
             }),
             _ => None,
         };
         if let Some(action) = action {
             let before = client.inspect_signing_state(&address).await.unwrap().head;
-            let prepared = client.prepare_offline_action(&address, action).await.unwrap();
+            let prepared = client
+                .prepare_offline_action(&address, action)
+                .await
+                .unwrap();
             let encoded = serde_json::to_string(&prepared).unwrap();
             let restored: OfflineActionContext = serde_json::from_str(&encoded).unwrap();
             let signed = restored.sign(key, tx.timestamp()).unwrap();
@@ -82,9 +93,18 @@ async fn signed_block(
             signed.save(&path).unwrap();
             let (loaded, content) = load_action_with_content(&path).unwrap();
             assert!(content.is_none());
-            assert_eq!(serde_json::to_string(&loaded).unwrap(), serde_json::to_string(signed.block()).unwrap());
-            assert_eq!(client.inspect_signing_state(&address).await.unwrap().head, before);
-            eprintln!("PASS SDK offline identity prepared/signed/journaled {:?}", loaded.block_type);
+            assert_eq!(
+                serde_json::to_string(&loaded).unwrap(),
+                serde_json::to_string(signed.block()).unwrap()
+            );
+            assert_eq!(
+                client.inspect_signing_state(&address).await.unwrap().head,
+                before
+            );
+            eprintln!(
+                "PASS SDK offline identity prepared/signed/journaled {:?}",
+                loaded.block_type
+            );
             return loaded;
         }
     }

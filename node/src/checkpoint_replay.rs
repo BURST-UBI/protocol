@@ -168,7 +168,9 @@ impl ReplayedCheckpoint {
             anchor,
             target,
             &mut replay,
-            ancestors.iter().map(|old| Ok(std::borrow::Cow::Borrowed(*old))),
+            ancestors
+                .iter()
+                .map(|old| Ok(std::borrow::Cow::Borrowed(*old))),
         )
     }
 
@@ -201,10 +203,12 @@ impl ReplayedCheckpoint {
             ancestors.read_all().map(|certificate| {
                 let certificate = certificate.map_err(invalid)?;
                 Ok(match certificate {
-                    std::borrow::Cow::Borrowed(certificate) =>
-                        std::borrow::Cow::Borrowed(certificate.replayed()),
-                    std::borrow::Cow::Owned(certificate) =>
-                        std::borrow::Cow::Owned(certificate.replayed().clone()),
+                    std::borrow::Cow::Borrowed(certificate) => {
+                        std::borrow::Cow::Borrowed(certificate.replayed())
+                    }
+                    std::borrow::Cow::Owned(certificate) => {
+                        std::borrow::Cow::Owned(certificate.replayed().clone())
+                    }
                 })
             }),
         )
@@ -215,7 +219,9 @@ impl ReplayedCheckpoint {
         anchor: &CheckpointAnchor,
         target: &WalletAddress,
         replay: &mut ConfirmedReplay,
-        ancestors: impl IntoIterator<Item = Result<std::borrow::Cow<'a, ReplayedCheckpoint>, StoreError>>,
+        ancestors: impl IntoIterator<
+            Item = Result<std::borrow::Cow<'a, ReplayedCheckpoint>, StoreError>,
+        >,
     ) -> Result<Self, StoreError> {
         if replay.payment_epoch() != anchor.hash() {
             return Err(invalid(

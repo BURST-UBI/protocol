@@ -12,13 +12,13 @@ pub use action::{OfflineAction, OfflineActionContext, SignedOfflineAction};
 #[cfg(not(target_arch = "wasm32"))]
 mod storage;
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) use storage::record_submission;
-#[cfg(not(target_arch = "wasm32"))]
 pub use storage::load_action_with_content;
 #[cfg(not(target_arch = "wasm32"))]
-pub use storage::{archive_payment, load_payment, payment_was_submitted, save_payment};
-#[cfg(not(target_arch = "wasm32"))]
 pub use storage::migrate_account_named_journal;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use storage::record_submission;
+#[cfg(not(target_arch = "wasm32"))]
+pub use storage::{archive_payment, load_payment, payment_was_submitted, save_payment};
 #[cfg(not(target_arch = "wasm32"))]
 pub use storage::{load_payment_with_ancestry, save_payment_with_ancestry, save_signed_action};
 
@@ -76,7 +76,11 @@ pub struct OfflineReceiveContext {
 
 impl OfflineReceiveContext {
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn save_payment(&self, path: &std::path::Path, block: &StateBlock) -> Result<(), WalletError> {
+    pub fn save_payment(
+        &self,
+        path: &std::path::Path,
+        block: &StateBlock,
+    ) -> Result<(), WalletError> {
         self.signing.save_payment(path, block)
     }
     pub fn sign(
@@ -117,9 +121,15 @@ fn payment_kind(kind: &BlockType) -> bool {
 
 impl OfflinePaymentContext {
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn save_payment(&self, path: &std::path::Path, block: &StateBlock) -> Result<(), WalletError> {
+    pub fn save_payment(
+        &self,
+        path: &std::path::Path,
+        block: &StateBlock,
+    ) -> Result<(), WalletError> {
         if block.account != self.account || block.previous != self.state.head {
-            return Err(WalletError::Signing("saved payment differs from its prepared account position".into()));
+            return Err(WalletError::Signing(
+                "saved payment differs from its prepared account position".into(),
+            ));
         }
         storage::save_payment_with_ancestry(path, block, &self.ancestry)
     }
@@ -180,9 +190,15 @@ pub(crate) fn validate_signed_payment(block: &StateBlock) -> Result<(), WalletEr
 }
 
 pub(crate) fn validate_signed_action(block: &StateBlock) -> Result<(), WalletError> {
-    if matches!(block.block_type, BlockType::Epoch | BlockType::GovernanceActivation)
-        || block.payment_epoch.is_zero() || block.params_hash.is_zero() {
-        return Err(WalletError::Signing("invalid wallet action recovery context".into()));
+    if matches!(
+        block.block_type,
+        BlockType::Epoch | BlockType::GovernanceActivation
+    ) || block.payment_epoch.is_zero()
+        || block.params_hash.is_zero()
+    {
+        return Err(WalletError::Signing(
+            "invalid wallet action recovery context".into(),
+        ));
     }
     validate_signed_block(block)
 }
@@ -207,16 +223,26 @@ pub(crate) fn validate_signed_block(block: &StateBlock) -> Result<(), WalletErro
 }
 
 pub(crate) fn validate_ancestry(
-    account: &WalletAddress, mut previous: BlockHash, ancestry: &[StateBlock],
+    account: &WalletAddress,
+    mut previous: BlockHash,
+    ancestry: &[StateBlock],
 ) -> Result<(), WalletError> {
     if ancestry.len() > MAX_ANCESTRY_BLOCKS
-        || serde_json::to_vec(ancestry).map_err(|e| WalletError::Other(e.to_string()))?.len() > MAX_ANCESTRY_BYTES {
-        return Err(WalletError::Signing("offline recovery ancestry exceeds its size limit".into()));
+        || serde_json::to_vec(ancestry)
+            .map_err(|e| WalletError::Other(e.to_string()))?
+            .len()
+            > MAX_ANCESTRY_BYTES
+    {
+        return Err(WalletError::Signing(
+            "offline recovery ancestry exceeds its size limit".into(),
+        ));
     }
     for ancestor in ancestry {
         validate_signed_block(ancestor)?;
         if previous.is_zero() || ancestor.hash != previous || &ancestor.account != account {
-            return Err(WalletError::Signing("offline recovery ancestry does not match the saved account chain".into()));
+            return Err(WalletError::Signing(
+                "offline recovery ancestry does not match the saved account chain".into(),
+            ));
         }
         previous = ancestor.previous;
     }
@@ -234,7 +260,8 @@ mod tests {
         OfflinePaymentContext {
             ancestry: Vec::new(),
             account: account.clone(),
-            state: AccountState { signing_grant: burst_types::BlockHash::ZERO,
+            state: AccountState {
+                signing_grant: burst_types::BlockHash::ZERO,
                 payment_epoch: BlockHash::new([8; 32]),
                 release_sources: vec![],
                 head,

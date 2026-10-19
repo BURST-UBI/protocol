@@ -1,8 +1,8 @@
+use super::compact_authority::{recover_authority, Authority};
 use super::*;
 use crate::confirmed_replay::snapshot::installed::RecoveredSnapshot;
-use burst_consensus::checkpoint::CheckpointAnchor;
-use super::compact_authority::{Authority, recover_authority};
 use crate::confirmed_replay::snapshot::installed::ReplayCache;
+use burst_consensus::checkpoint::CheckpointAnchor;
 
 struct Worker {
     anchor: CheckpointAnchor,
@@ -121,7 +121,11 @@ impl CompactRuntime {
         if same_epoch && archive_base == self.archive_base {
             return Ok(());
         }
-        let cached = self.worker.authority.replay_copy(&self.settings.store).await?;
+        let cached = self
+            .worker
+            .authority
+            .replay_copy(&self.settings.store)
+            .await?;
         let authority = recover_authority(
             &self.settings,
             self.registry.clone(),
@@ -135,9 +139,11 @@ impl CompactRuntime {
                 "snapshot source handoff changed the installed epoch",
             ));
         }
-        let previous = decision_relay(authority.base.clone()).await?.ok_or_else(|| {
-            invalid("rotated compact authority has no replayed decision to relay")
-        })?;
+        let previous = decision_relay(authority.base.clone())
+            .await?
+            .ok_or_else(|| {
+                invalid("rotated compact authority has no replayed decision to relay")
+            })?;
         self.worker.stop().await?;
         self.archive_base = authority.base.uses_snapshot_archive();
         self.worker = Worker::start(

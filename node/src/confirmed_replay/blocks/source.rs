@@ -56,7 +56,9 @@ impl<'a> Source<'a> {
         })
     }
 
-    pub(in crate::confirmed_replay) fn hashes(&self) -> Box<dyn Iterator<Item = Result<BlockHash, StoreError>> + '_> {
+    pub(in crate::confirmed_replay) fn hashes(
+        &self,
+    ) -> Box<dyn Iterator<Item = Result<BlockHash, StoreError>> + '_> {
         match self {
             Self::Memory { blocks, .. } => Box::new(blocks.iter().map(|block| Ok(block.hash))),
             Self::File { blocks } => Box::new(blocks.hashes()),

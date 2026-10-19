@@ -124,7 +124,14 @@ impl CertifiedCheckpoint {
         height: u64,
         record_only: bool,
     ) -> Result<Option<Vec<u8>>, StoreError> {
-        Self::export_transfer_with_recovery(store, network, params, height, record_only, &mut ExportRecovery::default())
+        Self::export_transfer_with_recovery(
+            store,
+            network,
+            params,
+            height,
+            record_only,
+            &mut ExportRecovery::default(),
+        )
     }
 
     pub(crate) fn export_transfer_with_recovery(
@@ -135,7 +142,9 @@ impl CertifiedCheckpoint {
         record_only: bool,
         recovery: &mut ExportRecovery,
     ) -> Result<Option<Vec<u8>>, StoreError> {
-        let Some(bytes) = Self::export_record_with_recovery(store, network, params, height, recovery)? else {
+        let Some(bytes) =
+            Self::export_record_with_recovery(store, network, params, height, recovery)?
+        else {
             return Ok(None);
         };
         if record_only {

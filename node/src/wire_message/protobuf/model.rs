@@ -348,7 +348,10 @@ pub mod bootstrap {
 
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct CheckpointSync {
-    #[prost(oneof = "checkpoint_sync::Body", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11")]
+    #[prost(
+        oneof = "checkpoint_sync::Body",
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11"
+    )]
     pub body: Option<checkpoint_sync::Body>,
 }
 pub mod checkpoint_sync {

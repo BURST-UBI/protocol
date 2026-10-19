@@ -80,22 +80,36 @@ struct NodeBlockProcessor {
 
 impl BlockProcessorCallback for NodeBlockProcessor {
     fn checkpoint_sync_status(&self) -> Result<serde_json::Value, String> {
-        let epoch = self.recovery_store.meta_store().payment_epoch().map_err(|e| e.to_string())?;
+        let epoch = self
+            .recovery_store
+            .meta_store()
+            .payment_epoch()
+            .map_err(|e| e.to_string())?;
         Ok(self.checkpoint_sync_status.read(epoch))
     }
     fn historical_account_page(
-        &self, account: burst_types::WalletAddress, first: u64, count: u32,
+        &self,
+        account: burst_types::WalletAddress,
+        first: u64,
+        count: u32,
     ) -> burst_rpc::server::HistoricalAccountPageFuture<'_> {
         Box::pin(self.historical_lookup.account_page(account, first, count))
     }
     fn historical_block(
         &self,
         hash: burst_types::BlockHash,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<burst_ledger::StateBlock>, String>> + Send + '_>> {
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Option<burst_ledger::StateBlock>, String>>
+                + Send
+                + '_,
+        >,
+    > {
         Box::pin(self.historical_lookup.read(hash))
     }
     fn confirmed_account_slot(
-        &self, query: burst_types::payment_recovery::SlotQuery,
+        &self,
+        query: burst_types::payment_recovery::SlotQuery,
     ) -> Result<burst_types::payment_recovery::SlotReview, String> {
         crate::payment_exclusion::slot(&self.recovery_store, query)
     }
@@ -339,8 +353,13 @@ impl BurstNode {
         let peer_manager = Arc::new(RwLock::new(peer_manager));
 
         // Block priority queue (replaces FIFO channel — higher PoW = higher priority)
-        let retention = crate::block_retention::BlockRetention::new(crate::block_retention::MAX_RETAINED_BLOCKS);
-        let block_queue = Arc::new(BlockPriorityQueue::with_retention(BLOCK_CHANNEL_CAPACITY, retention.clone()));
+        let retention = crate::block_retention::BlockRetention::new(
+            crate::block_retention::MAX_RETAINED_BLOCKS,
+        );
+        let block_queue = Arc::new(BlockPriorityQueue::with_retention(
+            BLOCK_CHANNEL_CAPACITY,
+            retention.clone(),
+        ));
 
         // Outbound message channel
         let (outbound_tx, outbound_rx) =
@@ -1040,7 +1059,8 @@ impl BurstNode {
                         tracing::debug!(hash = %block.hash, account = %block.account, %reason,
                             "block admission rejected");
                         if certified_selection_bp && reason.contains("backdating rejected") {
-                            if let Err(error) = crate::checkpoint_recovery::request(&store, &block) {
+                            if let Err(error) = crate::checkpoint_recovery::request(&store, &block)
+                            {
                                 tracing::error!(%error, "cannot retain checkpoint recovery demand");
                             }
                             if let Ok(Some(authority)) =
@@ -3097,21 +3117,22 @@ impl BurstNode {
             .outbound_rx
             .take()
             .ok_or_else(|| NodeError::Other("node has already been started".into()))?;
-        let (sync_recovery, beacon_recovery, agreement_recovery) = if let Some(recovery) = self.recovered_checkpoint.take() {
-            let directory = self.store.env().path().to_path_buf();
-            let (recovery, sync, beacon, agreement) = tokio::task::spawn_blocking(move || {
-                let sync = recovery.fork(&directory)?;
-                let beacon = recovery.fork(&directory)?;
-                let agreement = recovery.fork(&directory)?;
-                Ok::<_, burst_store::StoreError>((recovery, sync, beacon, agreement))
-            })
-            .await
-            .map_err(|error| NodeError::Other(error.to_string()))??;
-            self.recovered_checkpoint = Some(recovery);
-            (Some(sync), Some(beacon), Some(agreement))
-        } else {
-            (None, None, None)
-        };
+        let (sync_recovery, beacon_recovery, agreement_recovery) =
+            if let Some(recovery) = self.recovered_checkpoint.take() {
+                let directory = self.store.env().path().to_path_buf();
+                let (recovery, sync, beacon, agreement) = tokio::task::spawn_blocking(move || {
+                    let sync = recovery.fork(&directory)?;
+                    let beacon = recovery.fork(&directory)?;
+                    let agreement = recovery.fork(&directory)?;
+                    Ok::<_, burst_store::StoreError>((recovery, sync, beacon, agreement))
+                })
+                .await
+                .map_err(|error| NodeError::Other(error.to_string()))??;
+                self.recovered_checkpoint = Some(recovery);
+                (Some(sync), Some(beacon), Some(agreement))
+            } else {
+                (None, None, None)
+            };
         self.connection_registry.write().await.finish_recovery();
         self.spawn_initial_tasks(outbound_rx).await?;
 
@@ -4021,7 +4042,12 @@ impl BurstNode {
                 work_generator: Arc::new(WorkGenerator),
                 params: Arc::new(self.config.params.clone()),
                 block_processor: Arc::new(NodeBlockProcessor {
-                    checkpoint_sync_status: self.connection_registry.read().await.checkpoint_sync_status.clone(),
+                    checkpoint_sync_status: self
+                        .connection_registry
+                        .read()
+                        .await
+                        .checkpoint_sync_status
+                        .clone(),
                     historical_lookup: crate::historical_lookup::Reader {
                         store: self.store.clone(),
                         registry: self.connection_registry.clone(),
@@ -4310,7 +4336,8 @@ impl BurstNode {
             let state = brn.wallets.get(account).ok_or_else(|| {
                 NodeError::Other("account has no BRN accrual state (not verified)".into())
             })?;
-            let available = brn.compute_balance_checked(state, now)
+            let available = brn
+                .compute_balance_checked(state, now)
                 .map_err(|error| NodeError::Other(error.to_string()))?;
             if amount > available {
                 return Err(NodeError::Other(format!(
@@ -4329,7 +4356,8 @@ impl BurstNode {
                     check_brn_spend(&brn, &sender, burn.amount)?;
                 }
                 // Ascending odometer: spending BRN increases the field.
-                let new_brn = brn_balance.checked_add(burn.amount)
+                let new_brn = brn_balance
+                    .checked_add(burn.amount)
                     .ok_or_else(|| NodeError::Other("BRN spend overflow".into()))?;
                 (
                     if is_open {
@@ -4382,7 +4410,8 @@ impl BurstNode {
                 }
                 (
                     BlockType::Endorse,
-                    brn_balance.checked_add(endorse.burn_amount)
+                    brn_balance
+                        .checked_add(endorse.burn_amount)
                         .ok_or_else(|| NodeError::Other("BRN spend overflow".into()))?,
                     trst_balance,
                     address_link(&endorse.target)?,
@@ -4395,7 +4424,8 @@ impl BurstNode {
                 }
                 (
                     BlockType::Challenge,
-                    brn_balance.checked_add(challenge.stake_amount)
+                    brn_balance
+                        .checked_add(challenge.stake_amount)
                         .ok_or_else(|| NodeError::Other("BRN spend overflow".into()))?,
                     trst_balance,
                     address_link(&challenge.target)?,
@@ -4408,7 +4438,8 @@ impl BurstNode {
                 }
                 (
                     BlockType::VerificationVote,
-                    brn_balance.checked_add(vote.stake_amount)
+                    brn_balance
+                        .checked_add(vote.stake_amount)
                         .ok_or_else(|| NodeError::Other("BRN spend overflow".into()))?,
                     trst_balance,
                     address_link(&vote.target_wallet)?,

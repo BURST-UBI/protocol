@@ -45,39 +45,75 @@ fn stale_action_recovery_requires_certified_cut_and_survives_snapshot_replay() {
     let epoch = first.manifest().checkpoint.hash();
     accept(&store, &fixture.params, &first, &[0]);
     PreparedInstallation::next(&store, NetworkId::Dev, &fixture.params)
-        .unwrap().unwrap().commit(&store).unwrap();
-    assert!(PreparedRoster::prepare_next(&store, NetworkId::Dev, &fixture.params, 200)
-        .unwrap().is_none(), "idle time alone must not request a recovery cut");
+        .unwrap()
+        .unwrap()
+        .commit(&store)
+        .unwrap();
+    assert!(
+        PreparedRoster::prepare_next(&store, NetworkId::Dev, &fixture.params, 200)
+            .unwrap()
+            .is_none(),
+        "idle time alone must not request a recovery cut"
+    );
     fixture.push(0, BlockType::ChangeRepresentative, 111, |block| {
         block.payment_epoch = epoch;
         block.representative = address(0);
     });
     let pending = fixture.blocks.pop().unwrap();
     let query = burst_types::payment_recovery::ExclusionQuery {
-        account: pending.account.to_string(), previous: pending.previous.to_string(),
+        account: pending.account.to_string(),
+        previous: pending.previous.to_string(),
         payment_epoch: epoch.to_string(),
     };
-    assert!(!crate::payment_exclusion::read(&store, query.clone()).unwrap().excluded);
+    assert!(
+        !crate::payment_exclusion::read(&store, query.clone())
+            .unwrap()
+            .excluded
+    );
     crate::checkpoint_recovery::request(&store, &pending).unwrap();
-    assert!(!crate::payment_exclusion::read(&store, query.clone()).unwrap().excluded,
-        "a local recovery request must not exclude an action");
+    assert!(
+        !crate::payment_exclusion::read(&store, query.clone())
+            .unwrap()
+            .excluded,
+        "a local recovery request must not exclude an action"
+    );
     let recovery = candidate(&store, &fixture.params, 200);
     let electorate = recovery.parent().roster().clone();
-    assert_eq!(recovery.manifest().checkpoint.selection_root,
-        crate::checkpoint_recovery::commitment());
+    assert_eq!(
+        recovery.manifest().checkpoint.selection_root,
+        crate::checkpoint_recovery::commitment()
+    );
     let mut wrong_domain = recovery.manifest().clone();
     wrong_domain.checkpoint.selection_root = crate::checkpoint_roster::commitment();
     assert!(PreparedRoster::replay_manifest(&store, &fixture.params, &wrong_domain).is_err());
-    assert!(PreparedRoster::replay_manifest(&store, &fixture.params, recovery.manifest())
-        .unwrap().certify(certified_votes::certify(&recovery.manifest().checkpoint, &[0])).is_err(),
-        "one of two humans cannot close the epoch alone");
+    assert!(
+        PreparedRoster::replay_manifest(&store, &fixture.params, recovery.manifest())
+            .unwrap()
+            .certify(certified_votes::certify(
+                &recovery.manifest().checkpoint,
+                &[0]
+            ))
+            .is_err(),
+        "one of two humans cannot close the epoch alone"
+    );
     accept(&store, &fixture.params, &recovery, &[0, 1]);
     let installed = PreparedInstallation::next(&store, NetworkId::Dev, &fixture.params)
-        .unwrap().unwrap().commit(&store).unwrap();
+        .unwrap()
+        .unwrap()
+        .commit(&store)
+        .unwrap();
     assert_eq!(installed.anchor.roster(), &electorate);
-    assert!(crate::payment_exclusion::read(&store, query).unwrap().excluded);
-    assert!(PreparedRoster::prepare_next(&store, NetworkId::Dev, &fixture.params, 300)
-        .unwrap().is_none(), "a demand from the closed epoch must not repeat");
+    assert!(
+        crate::payment_exclusion::read(&store, query)
+            .unwrap()
+            .excluded
+    );
+    assert!(
+        PreparedRoster::prepare_next(&store, NetworkId::Dev, &fixture.params, 300)
+            .unwrap()
+            .is_none(),
+        "a demand from the closed epoch must not repeat"
+    );
     crate::confirmed_replay::tests::snapshot_history::boundaries::assert_chain(&fixture, &store);
 }
 

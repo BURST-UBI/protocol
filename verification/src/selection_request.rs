@@ -5,9 +5,9 @@
 use burst_consensus::checkpoint::{Checkpoint, CheckpointAnchor, CheckpointCertificate};
 use burst_crypto::{blake2b_256, blake2b_256_multi, decode_address};
 use burst_types::{BlockHash, WalletAddress};
-use burst_vrf::{drand::DRAND_MAINNET_CHAIN, DrandPolicy, RandomOutput};
 #[cfg(test)]
 use burst_vrf::DrandClient;
+use burst_vrf::{drand::DRAND_MAINNET_CHAIN, DrandPolicy, RandomOutput};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 

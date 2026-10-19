@@ -118,7 +118,8 @@ impl NodeClient {
             ));
         }
         let operation = build_delegated_ballot(keys, current, proposal, vote)?;
-        self.submit_delegation_key_operation_signed(keys, &operation).await
+        self.submit_delegation_key_operation_signed(keys, &operation)
+            .await
     }
 }
 
@@ -129,40 +130,42 @@ pub(crate) fn build_scoped_operation(
     expected_generation: &str,
     page: &view::Page,
 ) -> Result<DelegationOperation, WalletError> {
-        require_review(page, expected_generation)?;
-        if page.entries.first().is_some_and(|entry|
-            entry.owner != burst_crypto::derive_address(&keys.public).as_str()
-                || entry.scope != *scope) {
-            return Err(WalletError::TransactionBuild("delegation owner or scope mismatch".into()));
-        }
-        let generation = expected_generation
-            .parse::<u64>()
-            .ok()
-            .and_then(|n| n.checked_add(1))
-            .ok_or_else(|| WalletError::TransactionBuild("invalid delegation generation".into()))?;
-        let scope = scope.resolve().map_err(WalletError::TransactionBuild)?;
-        let genesis = parse_hash(&page.genesis)?;
-        let operation = if let Some(delegate) = delegate {
-            let public = burst_crypto::decode_address(delegate.as_str())
-                .ok_or_else(|| WalletError::TransactionBuild("invalid delegate address".into()))?;
-            DelegationOperation::Grant(
-                Grant::create(
-                    keys,
-                    burst_types::PublicKey(public),
-                    scope,
-                    generation,
-                    page.network,
-                    genesis,
-                )
+    require_review(page, expected_generation)?;
+    if page.entries.first().is_some_and(|entry| {
+        entry.owner != burst_crypto::derive_address(&keys.public).as_str() || entry.scope != *scope
+    }) {
+        return Err(WalletError::TransactionBuild(
+            "delegation owner or scope mismatch".into(),
+        ));
+    }
+    let generation = expected_generation
+        .parse::<u64>()
+        .ok()
+        .and_then(|n| n.checked_add(1))
+        .ok_or_else(|| WalletError::TransactionBuild("invalid delegation generation".into()))?;
+    let scope = scope.resolve().map_err(WalletError::TransactionBuild)?;
+    let genesis = parse_hash(&page.genesis)?;
+    let operation = if let Some(delegate) = delegate {
+        let public = burst_crypto::decode_address(delegate.as_str())
+            .ok_or_else(|| WalletError::TransactionBuild("invalid delegate address".into()))?;
+        DelegationOperation::Grant(
+            Grant::create(
+                keys,
+                burst_types::PublicKey(public),
+                scope,
+                generation,
+                page.network,
+                genesis,
+            )
+            .map_err(WalletError::TransactionBuild)?,
+        )
+    } else {
+        DelegationOperation::Revoke(
+            Revocation::create(keys, scope, generation, page.network, genesis)
                 .map_err(WalletError::TransactionBuild)?,
-            )
-        } else {
-            DelegationOperation::Revoke(
-                Revocation::create(keys, scope, generation, page.network, genesis)
-                    .map_err(WalletError::TransactionBuild)?,
-            )
-        };
-        Ok(operation)
+        )
+    };
+    Ok(operation)
 }
 
 pub(crate) fn build_delegated_ballot(
@@ -171,28 +174,30 @@ pub(crate) fn build_delegated_ballot(
     proposal: burst_types::TxHash,
     vote: burst_transactions::governance::GovernanceVote,
 ) -> Result<DelegationOperation, WalletError> {
-        if !current.confirmed {
-            return Err(WalletError::TransactionBuild("delegation is not confirmed".into()));
-        }
-        let grant = current
-            .grant
-            .as_ref()
-            .ok_or_else(|| WalletError::TransactionBuild("delegation was revoked".into()))?;
-        let secondary = grant
-            .decrypt(&keys.private)
-            .map_err(WalletError::TransactionBuild)?;
-        let ballot = DelegatedBallot::sign(grant, &secondary, proposal, vote)
-            .map_err(WalletError::TransactionBuild)?;
-        let grant_block = parse_hash(
-            current
-                .grant_block
-                .as_deref()
-                .ok_or_else(|| WalletError::Node("missing grant block".into()))?,
-        )?;
-        Ok(DelegationOperation::Ballot {
-                ballot,
-                grant_block,
-            })
+    if !current.confirmed {
+        return Err(WalletError::TransactionBuild(
+            "delegation is not confirmed".into(),
+        ));
+    }
+    let grant = current
+        .grant
+        .as_ref()
+        .ok_or_else(|| WalletError::TransactionBuild("delegation was revoked".into()))?;
+    let secondary = grant
+        .decrypt(&keys.private)
+        .map_err(WalletError::TransactionBuild)?;
+    let ballot = DelegatedBallot::sign(grant, &secondary, proposal, vote)
+        .map_err(WalletError::TransactionBuild)?;
+    let grant_block = parse_hash(
+        current
+            .grant_block
+            .as_deref()
+            .ok_or_else(|| WalletError::Node("missing grant block".into()))?,
+    )?;
+    Ok(DelegationOperation::Ballot {
+        ballot,
+        grant_block,
+    })
 }
 
 pub(crate) fn require_review(page: &view::Page, expected: &str) -> Result<(), WalletError> {

@@ -312,8 +312,11 @@ async fn compact_deadline_peer_replay_rejects_forged_effects_and_changed_authori
             .unwrap();
         let local = Arc::new(local);
         let service = Service::start(
-            source.clone(), local.clone(), if change == 7 { 0 } else { change },
-        ).await;
+            source.clone(),
+            local.clone(),
+            if change == 7 { 0 } else { change },
+        )
+        .await;
         let mut manifest = expected.clone();
         if change == 7 {
             manifest.checkpoint.selection_root = BlockHash::new([99; 32]);
@@ -578,11 +581,15 @@ fn compact_checkpoint_rejects_skips_wrong_cuts_and_stale_witnesses() {
                     .read_tail(&suffix, cutoff, event.heads(), vec![stale])
                     .is_err());
             } else {
-                assert!(base
-                    .read_tail(&suffix, cutoff, event.heads(), vec![])
-                    .is_err(), "repeated checkpoints still require historical witnesses");
+                assert!(
+                    base.read_tail(&suffix, cutoff, event.heads(), vec![])
+                        .is_err(),
+                    "repeated checkpoints still require historical witnesses"
+                );
                 let current = authenticate(
-                    &store, &fixture.params, event.certificate().checkpoint.hash(),
+                    &store,
+                    &fixture.params,
+                    event.certificate().checkpoint.hash(),
                 );
                 let witnesses = retained(&current, &fixture, &store, &[]);
                 let tail = base

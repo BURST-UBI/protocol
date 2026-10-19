@@ -90,7 +90,10 @@ impl GroupClient {
     /// group does not trust it and fetching the directory discloses no wallet ID.
     pub async fn fetch_directory(&self, url: &str) -> Result<GroupRegistry, GroupError> {
         let body = self
-            .get_bounded(endpoint_url_checked(url)?, crate::registry::MAX_DIRECTORY_BYTES)
+            .get_bounded(
+                endpoint_url_checked(url)?,
+                crate::registry::MAX_DIRECTORY_BYTES,
+            )
             .await?;
         GroupRegistry::from_directory(&body)
     }

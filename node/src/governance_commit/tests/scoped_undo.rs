@@ -84,7 +84,8 @@ fn scoped_undo_case(kind: BlockType) {
     }
     let mut proposals = Vec::new();
     for (seed, open) in openings.iter().enumerate() {
-        let account = AccountState { signing_grant: burst_types::BlockHash::ZERO,
+        let account = AccountState {
+            signing_grant: burst_types::BlockHash::ZERO,
             payment_epoch: open.payment_epoch,
             release_sources: Vec::new(),
             head: open.hash,

@@ -195,14 +195,22 @@ mod tests {
         }
         let store = LmdbStore::open(dir.path(), 32, 16 * 1024 * 1024).unwrap();
         let mut scan = BacklogScan::default();
-        let mut recovered: Vec<_> = scan.next(&store, 10).unwrap()
-            .into_iter().map(|block| block.hash).collect();
+        let mut recovered: Vec<_> = scan
+            .next(&store, 10)
+            .unwrap()
+            .into_iter()
+            .map(|block| block.hash)
+            .collect();
         expected.sort_by_key(|hash| hash.to_string());
         recovered.sort_by_key(|hash| hash.to_string());
         assert_eq!(recovered, expected);
         // Neither scanning nor loss of the cache advances confirmation.
-        let mut again: Vec<_> = scan.next(&store, 10).unwrap()
-            .into_iter().map(|block| block.hash).collect();
+        let mut again: Vec<_> = scan
+            .next(&store, 10)
+            .unwrap()
+            .into_iter()
+            .map(|block| block.hash)
+            .collect();
         again.sort_by_key(|hash| hash.to_string());
         assert_eq!(again, expected);
     }

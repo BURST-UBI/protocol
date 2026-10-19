@@ -152,18 +152,20 @@ mod tests {
     #[test]
     fn address_decode_matches_canonical_reencoding_for_every_ascii_mutation() {
         fn reference(address: &str) -> Option<[u8; 32]> {
-            if !address.is_ascii() || !address.starts_with(PREFIX)
+            if !address.is_ascii()
+                || !address.starts_with(PREFIX)
                 || address.len() != PREFIX.len() + ENCODED_LEN
             {
                 return None;
             }
-            let key = decode_base32_fixed::<32>(
-                &address[PREFIX.len()..PREFIX.len() + PUBKEY_CHARS],
-            )?;
+            let key =
+                decode_base32_fixed::<32>(&address[PREFIX.len()..PREFIX.len() + PUBKEY_CHARS])?;
             (derive_address(&PublicKey(key)).as_str() == address).then_some(key)
         }
         for seed in 0u8..16 {
-            let key = PublicKey(std::array::from_fn(|i| seed.wrapping_mul(17).wrapping_add(i as u8)));
+            let key = PublicKey(std::array::from_fn(|i| {
+                seed.wrapping_mul(17).wrapping_add(i as u8)
+            }));
             let address = derive_address(&key);
             assert_eq!(decode_address(address.as_str()), Some(key.0));
             for position in 0..address.as_str().len() {
@@ -171,8 +173,11 @@ mod tests {
                     let mut bytes = address.as_str().as_bytes().to_vec();
                     bytes[position] = byte;
                     let mutated = String::from_utf8(bytes).unwrap();
-                    assert_eq!(decode_address(&mutated), reference(&mutated),
-                        "seed={seed} position={position} byte={byte}");
+                    assert_eq!(
+                        decode_address(&mutated),
+                        reference(&mutated),
+                        "seed={seed} position={position} byte={byte}"
+                    );
                 }
                 let mut unicode = address.as_str().to_owned();
                 unicode.replace_range(position..position + 1, "é");

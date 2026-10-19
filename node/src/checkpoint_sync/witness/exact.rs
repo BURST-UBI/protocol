@@ -271,7 +271,10 @@ mod tests {
                 digest: None,
             },
         };
-        assert!(server.handle(&store, request(starts[3]), now).unwrap().is_some());
+        assert!(server
+            .handle(&store, request(starts[3]), now)
+            .unwrap()
+            .is_some());
         assert_eq!(server.loaded, 4);
         assert!(server
             .handle(&store, request(starts[4]), now + RETRY / 2)
@@ -281,8 +284,10 @@ mod tests {
             .handle(&store, request(starts[4]), now + RETRY)
             .unwrap()
             .expect("deferred valid request must succeed in the next load window");
-        assert!(matches!(reply.message, Message::WitnessChunk { start, offset: 0, .. }
-            if start == identity(&[starts[4]])));
+        assert!(
+            matches!(reply.message, Message::WitnessChunk { start, offset: 0, .. }
+            if start == identity(&[starts[4]]))
+        );
         assert_eq!(server.loaded, 1);
     }
 }

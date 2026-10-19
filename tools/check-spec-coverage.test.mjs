@@ -17,6 +17,8 @@ test("release builds wait for readiness without disabling development CI", () =>
   }
   assert.match(jobs.get("release-readiness"), /node tools\/check-spec-coverage\.mjs --release/);
   assert.match(jobs.get("release"), /^      - release-readiness$/m);
+  assert.doesNotMatch(release, /^  push:/m, "publication requires explicit dispatch");
+  assert.match(release, /^  workflow_dispatch:/m);
   const ci = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
   assert.match(ci, /^  push:\n    branches: \[main, develop\]$/m);
   assert.doesNotMatch(ci, /needs: release-readiness/);

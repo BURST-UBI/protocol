@@ -343,7 +343,11 @@ fn staged_panels_preserve_vote_and_verified_spending_dependencies() {
         reads: std::cell::Cell::new(0),
     };
     let empty = selections::Selections::new(&reloaded, &[]).unwrap();
-    assert_eq!(reloaded.reads.get(), 1, "panel insertion must reuse the streamed certificate");
+    assert_eq!(
+        reloaded.reads.get(),
+        1,
+        "panel insertion must reuse the streamed certificate"
+    );
     drop(empty);
     let loaded = selections::Selections::for_certified_epoch(&reloaded, &source).unwrap();
     for block in fixture.blocks.iter().filter(|block| {
@@ -367,11 +371,17 @@ fn staged_panels_preserve_vote_and_verified_spending_dependencies() {
         .unwrap();
     let reads = reloaded.reads.get();
     reloaded.unreadable.set(true);
-    assert_eq!(loaded
-        .dependencies(fixture.blocks.last().unwrap(), usize::MAX)
-        .unwrap(), expected);
-    assert_eq!(reloaded.reads.get(), reads,
-        "authenticated dependencies should reuse the replay-scoped certificate");
+    assert_eq!(
+        loaded
+            .dependencies(fixture.blocks.last().unwrap(), usize::MAX)
+            .unwrap(),
+        expected
+    );
+    assert_eq!(
+        reloaded.reads.get(),
+        reads,
+        "authenticated dependencies should reuse the replay-scoped certificate"
+    );
     drop(loaded);
     assert!(selections::Selections::for_certified_epoch(&reloaded, &source).is_err());
 }

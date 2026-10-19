@@ -188,7 +188,8 @@ fn proposal(owner: u8, at: u64, large: bool) -> (StateBlock, EncodedContent) {
             new_value: 5,
         }
     };
-    let state = burst_wallet_core::transaction_builder::AccountState { signing_grant: burst_types::BlockHash::ZERO,
+    let state = burst_wallet_core::transaction_builder::AccountState {
+        signing_grant: burst_types::BlockHash::ZERO,
         head: BlockHash::new([1; 32]),
         payment_epoch: BlockHash::new([2; 32]),
         block_count: 1,

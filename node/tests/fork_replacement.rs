@@ -812,7 +812,11 @@ async fn elected_burn_replaces_received_branch_and_restart_can_receive_the_winne
     let native_report = drafts.path().join("native-fork.json");
     let native_enabled = std::env::var("BURST_NATIVE_FORK").as_deref() == Ok("1");
     let mut native_child = None;
-    let rpc_port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let rpc_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
     let mut config = NodeConfig {
         network: NetworkId::Dev,
         data_dir: dir.path().to_path_buf(),
@@ -844,239 +848,294 @@ async fn elected_burn_replaces_received_branch_and_restart_can_receive_the_winne
     let receiver = burst_crypto::derive_address(&burst_crypto::keypair_from_seed(&[1; 32]).public);
     let destination =
         burst_crypto::derive_address(&burst_crypto::keypair_from_seed(&[2; 32]).public);
-    let result = tokio::time::timeout(Duration::from_secs(if native_enabled { 180 } else { 60 }), async {
-        until(|| {
-            let batch = store.tx_begin_write().unwrap();
-            batch.ledger_counts().unwrap().0 == 1
-                && batch
-                    .get_meta(burst_trst::TrstEngine::meta_key())
+    let result = tokio::time::timeout(
+        Duration::from_secs(if native_enabled { 180 } else { 60 }),
+        async {
+            until(|| {
+                let batch = store.tx_begin_write().unwrap();
+                batch.ledger_counts().unwrap().0 == 1
+                    && batch
+                        .get_meta(burst_trst::TrstEngine::meta_key())
+                        .unwrap()
+                        .is_some()
+            })
+            .await;
+            let mut base = store.account_store().get_account(&creator).unwrap().head;
+            let mut grant = BlockHash::ZERO;
+            if native_enabled {
+                let runner = std::env::var_os("BURST_NATIVE_RUNNER")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| {
+                        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                            .join("../../wallet/tests/native-session.mjs")
+                    });
+                native_child = Some(
+                    tokio::process::Command::new("node")
+                        .arg(runner)
+                        .arg("--embedded")
+                        .arg("--offline-fork-fixture")
+                        .env("NATIVE_FIXTURE_RPC_URL", client.node_url())
+                        .env("NATIVE_RESULT_PATH", &native_report)
+                        .kill_on_drop(true)
+                        .spawn()
+                        .unwrap(),
+                );
+                // Enroll before creating the losing branch. Confirming enrollment
+                // afterward would also cement its predecessor and defeat this test.
+                tokio::time::timeout(Duration::from_secs(90), async {
+                    while store.account_store().get_account(&creator).unwrap().head == base {
+                        assert!(
+                            native_child.as_mut().unwrap().try_wait().unwrap().is_none(),
+                            "native enrollment exited early"
+                        );
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                })
+                .await
+                .expect("native enrollment was not submitted");
+                let handoff: StateBlock = bincode::deserialize(
+                    &store
+                        .block_store()
+                        .get_block(&store.account_store().get_account(&creator).unwrap().head)
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(handoff.block_type, BlockType::ChangeSigner);
+                assert_eq!(handoff.previous, base);
+                elect(&elections, &creator, &handoff, None).await;
+                until(|| {
+                    store
+                        .account_store()
+                        .get_account(&creator)
+                        .unwrap()
+                        .confirmation_height
+                        == 2
+                })
+                .await;
+                let enrolled = native_report.with_file_name("native-fork.json.enrolled");
+                until(|| enrolled.exists()).await;
+                grant = handoff.hash;
+                base = handoff.hash;
+                client = client.clone().with_signing_grant(grant);
+            }
+            let creator_block = |mut value: StateBlock| {
+                value.signing_grant = grant;
+                value.hash = value.compute_hash();
+                value.signature = burst_crypto::sign_message(
+                    value.hash.as_bytes(),
+                    &burst_crypto::keypair_from_seed(&[0; 32]).private,
+                );
+                value
+            };
+            let first = creator_block(block(
+                0,
+                BlockType::Burn,
+                base,
+                BlockHash::new(burst_crypto::decode_address(receiver.as_str()).unwrap()),
+                40,
+                0,
+                &config.params,
+                store.meta_store().payment_epoch().unwrap(),
+            ));
+            elections.write().await.set_online_weight(1);
+            assert!(queue.try_push(first.clone()));
+            until(|| store.block_store().exists(&first.hash).unwrap()).await;
+            let context = client.prepare_offline_payment(&creator).await.unwrap();
+            let keys = burst_crypto::keypair_from_seed(&[0; 32]);
+            let tx = burst_transactions::Transaction::Burn(
+                burst_wallet_core::transaction_builder::build_burn_tx(
+                    &creator,
+                    &destination,
+                    1,
+                    Timestamp::now(),
+                )
+                .unwrap(),
+            );
+            let draft = context.sign(&keys, &tx, TxHash::ZERO).unwrap();
+            context.save_payment(&draft_path, &draft).unwrap();
+            let (_, ancestry) = load_payment_with_ancestry(&draft_path).unwrap();
+            assert_eq!(ancestry.len(), 1);
+            assert_eq!(ancestry[0].hash, first.hash);
+            if native_enabled {
+                assert_eq!(
+                    store
+                        .account_store()
+                        .get_account(&creator)
+                        .unwrap()
+                        .confirmation_height,
+                    2
+                );
+                std::fs::write(
+                    native_report.with_file_name("native-fork.json.branch-ready"),
+                    b"true",
+                )
+                .unwrap();
+                let prepared = native_report.with_file_name("native-fork.json.prepared");
+                tokio::time::timeout(Duration::from_secs(90), async {
+                    while !prepared.exists() {
+                        assert!(
+                            native_child.as_mut().unwrap().try_wait().unwrap().is_none(),
+                            "native fork preparation exited before saving"
+                        );
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                })
+                .await
+                .expect("native fork preparation timed out");
+            }
+            let receive = block(
+                1,
+                BlockType::Open,
+                BlockHash::ZERO,
+                first.hash,
+                0,
+                40,
+                &config.params,
+                store.meta_store().payment_epoch().unwrap(),
+            );
+            assert!(queue.try_push(receive.clone()));
+            until(|| store.block_store().exists(&receive.hash).unwrap()).await;
+            assert_eq!(
+                trst.lock().await.transferable_balance_snapshot(&receiver),
+                Some(40)
+            );
+
+            let mut invalid_signature = creator_block(block(
+                0,
+                BlockType::Burn,
+                base,
+                BlockHash::new(burst_crypto::decode_address(destination.as_str()).unwrap()),
+                69,
+                0,
+                &config.params,
+                store.meta_store().payment_epoch().unwrap(),
+            ));
+            invalid_signature.signature = Signature([0; 64]);
+            assert!(queue.try_push(invalid_signature.clone()));
+            let mut invalid_balance = creator_block(block(
+                0,
+                BlockType::Burn,
+                base,
+                BlockHash::new(burst_crypto::decode_address(destination.as_str()).unwrap()),
+                68,
+                1,
+                &config.params,
+                store.meta_store().payment_epoch().unwrap(),
+            ));
+            invalid_balance.hash = invalid_balance.compute_hash();
+            invalid_balance.signature = burst_crypto::sign_message(
+                invalid_balance.hash.as_bytes(),
+                &burst_crypto::keypair_from_seed(&[0; 32]).private,
+            );
+            assert!(queue.try_push(invalid_balance.clone()));
+            let mut winner = creator_block(block(
+                0,
+                BlockType::Burn,
+                base,
+                BlockHash::new(burst_crypto::decode_address(destination.as_str()).unwrap()),
+                70,
+                0,
+                &config.params,
+                store.meta_store().payment_epoch().unwrap(),
+            ));
+            // The worker uses PoW priority, not FIFO. Make the valid candidate a
+            // barrier after both invalid submissions, without weakening admission.
+            let priority = burst_node::priority_queue::work_difficulty;
+            while priority(&winner.work_root(), winner.work)
+                >= priority(&invalid_signature.work_root(), invalid_signature.work)
+                    .min(priority(&invalid_balance.work_root(), invalid_balance.work))
+            {
+                winner.work += 1;
+            }
+            assert!(queue.try_push(winner.clone()));
+            until(|| {
+                store
+                    .meta_store()
+                    .fork_candidate(&winner.hash)
                     .unwrap()
                     .is_some()
-        })
-        .await;
-        let mut base = store.account_store().get_account(&creator).unwrap().head;
-        let mut grant = BlockHash::ZERO;
-        if native_enabled {
-            let runner = std::env::var_os("BURST_NATIVE_RUNNER").map(std::path::PathBuf::from)
-                .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../wallet/tests/native-session.mjs"));
-            native_child = Some(tokio::process::Command::new("node")
-                .arg(runner).arg("--embedded").arg("--offline-fork-fixture")
-                .env("NATIVE_FIXTURE_RPC_URL",client.node_url())
-                .env("NATIVE_RESULT_PATH",&native_report)
-                .kill_on_drop(true).spawn().unwrap());
-            // Enroll before creating the losing branch. Confirming enrollment
-            // afterward would also cement its predecessor and defeat this test.
-            tokio::time::timeout(Duration::from_secs(90), async {
-                while store.account_store().get_account(&creator).unwrap().head == base {
-                    assert!(native_child.as_mut().unwrap().try_wait().unwrap().is_none(), "native enrollment exited early");
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-            }).await.expect("native enrollment was not submitted");
-            let handoff: StateBlock = bincode::deserialize(&store.block_store().get_block(
-                &store.account_store().get_account(&creator).unwrap().head,
-            ).unwrap()).unwrap();
-            assert_eq!(handoff.block_type, BlockType::ChangeSigner);
-            assert_eq!(handoff.previous, base);
-            elect(&elections, &creator, &handoff, None).await;
-            until(|| store.account_store().get_account(&creator).unwrap().confirmation_height == 2).await;
-            let enrolled = native_report.with_file_name("native-fork.json.enrolled");
-            until(|| enrolled.exists()).await;
-            grant = handoff.hash;
-            base = handoff.hash;
-            client = client.clone().with_signing_grant(grant);
-        }
-        let creator_block = |mut value: StateBlock| {
-            value.signing_grant = grant;
-            value.hash = value.compute_hash();
-            value.signature = burst_crypto::sign_message(value.hash.as_bytes(), &burst_crypto::keypair_from_seed(&[0;32]).private);
-            value
-        };
-        let first = creator_block(block(
-            0,
-            BlockType::Burn,
-            base,
-            BlockHash::new(burst_crypto::decode_address(receiver.as_str()).unwrap()),
-            40,
-            0,
-            &config.params,
-            store.meta_store().payment_epoch().unwrap(),
-        ));
-        elections.write().await.set_online_weight(1);
-        assert!(queue.try_push(first.clone()));
-        until(|| store.block_store().exists(&first.hash).unwrap()).await;
-        let context = client.prepare_offline_payment(&creator).await.unwrap();
-        let keys = burst_crypto::keypair_from_seed(&[0;32]);
-        let tx = burst_transactions::Transaction::Burn(
-            burst_wallet_core::transaction_builder::build_burn_tx(&creator, &destination, 1, Timestamp::now()).unwrap()
-        );
-        let draft = context.sign(&keys, &tx, TxHash::ZERO).unwrap();
-        context.save_payment(&draft_path, &draft).unwrap();
-        let (_, ancestry) = load_payment_with_ancestry(&draft_path).unwrap();
-        assert_eq!(ancestry.len(),1);
-        assert_eq!(ancestry[0].hash,first.hash);
-        if native_enabled {
-            assert_eq!(store.account_store().get_account(&creator).unwrap().confirmation_height, 2);
-            std::fs::write(native_report.with_file_name("native-fork.json.branch-ready"), b"true").unwrap();
-            let prepared = native_report.with_file_name("native-fork.json.prepared");
-            tokio::time::timeout(Duration::from_secs(90), async {
-                while !prepared.exists() {
-                    assert!(native_child.as_mut().unwrap().try_wait().unwrap().is_none(), "native fork preparation exited before saving");
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-            }).await.expect("native fork preparation timed out");
-        }
-        let receive = block(
-            1,
-            BlockType::Open,
-            BlockHash::ZERO,
-            first.hash,
-            0,
-            40,
-            &config.params,
-            store.meta_store().payment_epoch().unwrap(),
-        );
-        assert!(queue.try_push(receive.clone()));
-        until(|| store.block_store().exists(&receive.hash).unwrap()).await;
-        assert_eq!(
-            trst.lock().await.transferable_balance_snapshot(&receiver),
-            Some(40)
-        );
-
-        let mut invalid_signature = creator_block(block(
-            0,
-            BlockType::Burn,
-            base,
-            BlockHash::new(burst_crypto::decode_address(destination.as_str()).unwrap()),
-            69,
-            0,
-            &config.params,
-            store.meta_store().payment_epoch().unwrap(),
-        ));
-        invalid_signature.signature = Signature([0; 64]);
-        assert!(queue.try_push(invalid_signature.clone()));
-        let mut invalid_balance = creator_block(block(
-            0,
-            BlockType::Burn,
-            base,
-            BlockHash::new(burst_crypto::decode_address(destination.as_str()).unwrap()),
-            68,
-            1,
-            &config.params,
-            store.meta_store().payment_epoch().unwrap(),
-        ));
-        invalid_balance.hash = invalid_balance.compute_hash();
-        invalid_balance.signature = burst_crypto::sign_message(
-            invalid_balance.hash.as_bytes(),
-            &burst_crypto::keypair_from_seed(&[0; 32]).private,
-        );
-        assert!(queue.try_push(invalid_balance.clone()));
-        let mut winner = creator_block(block(
-            0,
-            BlockType::Burn,
-            base,
-            BlockHash::new(burst_crypto::decode_address(destination.as_str()).unwrap()),
-            70,
-            0,
-            &config.params,
-            store.meta_store().payment_epoch().unwrap(),
-        ));
-        // The worker uses PoW priority, not FIFO. Make the valid candidate a
-        // barrier after both invalid submissions, without weakening admission.
-        let priority = burst_node::priority_queue::work_difficulty;
-        while priority(&winner.work_root(), winner.work)
-            >= priority(&invalid_signature.work_root(), invalid_signature.work)
-                .min(priority(&invalid_balance.work_root(), invalid_balance.work))
-        {
-            winner.work += 1;
-        }
-        assert!(queue.try_push(winner.clone()));
-        until(|| {
-            store
-                .meta_store()
-                .fork_candidate(&winner.hash)
-                .unwrap()
-                .is_some()
-        })
-        .await;
-        for invalid in [invalid_signature, invalid_balance] {
-            assert!(store
-                .meta_store()
-                .fork_candidate(&invalid.hash)
-                .unwrap()
-                .is_none());
-            assert!(!store.block_store().exists(&invalid.hash).unwrap());
-        }
-        assert!(
-            !store.block_store().exists(&winner.hash).unwrap(),
-            "admission must not install a fork"
-        );
-        assert_eq!(
-            brn.lock().await.get_wallet(&creator).unwrap().total_burned,
-            40
-        );
-        assert_eq!(
-            trst.lock().await.transferable_balance_snapshot(&receiver),
-            Some(40)
-        );
-
-        // Quorum creation is explicit in this worker-integration fixture.
-        let root = burst_node::ledger_updater::election_root(&winner);
-        {
-            let mut active = elections.write().await;
-            active.remove_root(&root);
-            active.set_online_weight(1);
-            active
-                .register_candidate(root, first.hash, Timestamp::now())
-                .unwrap();
-            active
-                .register_candidate(root, winner.hash, Timestamp::now())
-                .unwrap();
-            assert!(active
-                .process_vote(&root, &creator, winner.hash, 1, true, Timestamp::now())
-                .unwrap()
-                .is_some());
-        }
-        until(|| {
-            store.account_store().get_account(&creator).unwrap().head == winner.hash
-                && store
-                    .account_store()
-                    .get_account(&creator)
+            })
+            .await;
+            for invalid in [invalid_signature, invalid_balance] {
+                assert!(store
+                    .meta_store()
+                    .fork_candidate(&invalid.hash)
                     .unwrap()
-                    .confirmation_height
-                    == if native_enabled { 3 } else { 2 }
-        })
-        .await;
-        assert!(!store.block_store().exists(&first.hash).unwrap());
-        assert!(!store.block_store().exists(&receive.hash).unwrap());
-        assert!(!store.account_store().exists(&receiver).unwrap());
-        assert!(trst.lock().await.get_portfolio(&receiver).is_none());
-        assert_eq!(
-            brn.lock().await.get_wallet(&creator).unwrap().total_burned,
-            70
-        );
-        assert_eq!(frontier.read().await.get_head(&creator), Some(&winner.hash));
-        assert!(frontier.read().await.get_head(&receiver).is_none());
-        assert_eq!(weights.read().await.total_weight(), 10_000);
-        assert_eq!(
-            (
-                counts.block_count(),
-                counts.account_count(),
-                counts.pending_count()
-            ),
-            (if native_enabled { 3 } else { 2 }, 1, 1)
-        );
-        let pending = store
-            .pending_store()
-            .get_pending(&destination, &winner.hash.into_tx_hash())
-            .unwrap();
-        assert_eq!(pending.amount, 70);
-        assert_eq!(pending.provenance[0].origin, winner.hash.into_tx_hash());
-        assert!(store
-            .pending_store()
-            .get_pending(&receiver, &first.hash.into_tx_hash())
-            .is_err());
-        winner
-    })
+                    .is_none());
+                assert!(!store.block_store().exists(&invalid.hash).unwrap());
+            }
+            assert!(
+                !store.block_store().exists(&winner.hash).unwrap(),
+                "admission must not install a fork"
+            );
+            assert_eq!(
+                brn.lock().await.get_wallet(&creator).unwrap().total_burned,
+                40
+            );
+            assert_eq!(
+                trst.lock().await.transferable_balance_snapshot(&receiver),
+                Some(40)
+            );
+
+            // Quorum creation is explicit in this worker-integration fixture.
+            let root = burst_node::ledger_updater::election_root(&winner);
+            {
+                let mut active = elections.write().await;
+                active.remove_root(&root);
+                active.set_online_weight(1);
+                active
+                    .register_candidate(root, first.hash, Timestamp::now())
+                    .unwrap();
+                active
+                    .register_candidate(root, winner.hash, Timestamp::now())
+                    .unwrap();
+                assert!(active
+                    .process_vote(&root, &creator, winner.hash, 1, true, Timestamp::now())
+                    .unwrap()
+                    .is_some());
+            }
+            until(|| {
+                store.account_store().get_account(&creator).unwrap().head == winner.hash
+                    && store
+                        .account_store()
+                        .get_account(&creator)
+                        .unwrap()
+                        .confirmation_height
+                        == if native_enabled { 3 } else { 2 }
+            })
+            .await;
+            assert!(!store.block_store().exists(&first.hash).unwrap());
+            assert!(!store.block_store().exists(&receive.hash).unwrap());
+            assert!(!store.account_store().exists(&receiver).unwrap());
+            assert!(trst.lock().await.get_portfolio(&receiver).is_none());
+            assert_eq!(
+                brn.lock().await.get_wallet(&creator).unwrap().total_burned,
+                70
+            );
+            assert_eq!(frontier.read().await.get_head(&creator), Some(&winner.hash));
+            assert!(frontier.read().await.get_head(&receiver).is_none());
+            assert_eq!(weights.read().await.total_weight(), 10_000);
+            assert_eq!(
+                (
+                    counts.block_count(),
+                    counts.account_count(),
+                    counts.pending_count()
+                ),
+                (if native_enabled { 3 } else { 2 }, 1, 1)
+            );
+            let pending = store
+                .pending_store()
+                .get_pending(&destination, &winner.hash.into_tx_hash())
+                .unwrap();
+            assert_eq!(pending.amount, 70);
+            assert_eq!(pending.provenance[0].origin, winner.hash.into_tx_hash());
+            assert!(store
+                .pending_store()
+                .get_pending(&receiver, &first.hash.into_tx_hash())
+                .is_err());
+            winner
+        },
+    )
     .await;
     shutdown.shutdown();
     tokio::time::timeout(Duration::from_secs(20), task)
@@ -1105,7 +1164,10 @@ async fn elected_burn_replaces_received_branch_and_restart_can_receive_the_winne
     );
     late_conflict.signing_grant = winner.signing_grant;
     late_conflict.hash = late_conflict.compute_hash();
-    late_conflict.signature = burst_crypto::sign_message(late_conflict.hash.as_bytes(), &burst_crypto::keypair_from_seed(&[0;32]).private);
+    late_conflict.signature = burst_crypto::sign_message(
+        late_conflict.hash.as_bytes(),
+        &burst_crypto::keypair_from_seed(&[0; 32]).private,
+    );
     assert!(queue.push(late_conflict.clone()).await);
     let mut receive = block(
         2,
@@ -1123,44 +1185,65 @@ async fn elected_burn_replaces_received_branch_and_restart_can_receive_the_winne
         receive.work += 1;
     }
     assert!(queue.try_push(receive.clone()));
-    let result = tokio::time::timeout(Duration::from_secs(if native_enabled { 90 } else { 30 }), async {
-        until(|| store.block_store().exists(&receive.hash).unwrap()).await;
-        assert!(store
-            .meta_store()
-            .fork_candidate(&late_conflict.hash)
-            .unwrap()
-            .is_none());
-        assert!(!store.block_store().exists(&late_conflict.hash).unwrap());
-        assert_eq!(
-            store.account_store().get_account(&creator).unwrap().head,
-            winner.hash
-        );
-        assert_eq!(
-            restored
-                .lock()
-                .await
-                .transferable_balance_snapshot(&destination),
-            Some(70)
-        );
-        assert!(restored.lock().await.get_portfolio(&receiver).is_none());
-        let bytes = std::fs::read(&draft_path).unwrap();
-        let (draft, ancestry) = load_payment_with_ancestry(&draft_path).unwrap();
-        assert!(!store.block_store().exists(&draft.previous).unwrap());
-        assert!(client.confirmed_offline_successor(&draft).await.is_err());
-        assert_eq!(client.confirmed_offline_resolution(&draft, &ancestry).await.unwrap(), Some(winner.hash));
-        assert_eq!(std::fs::read(&draft_path).unwrap(), bytes);
-        assert!(!store.block_store().exists(&draft.hash).unwrap());
-        if let Some(child) = native_child.as_mut() {
-            let staged = native_report.with_file_name("native-fork.json.ready.tmp");
-            std::fs::write(&staged,
-                serde_json::to_vec(&serde_json::json!({"winner":winner.hash.to_string()})).unwrap()).unwrap();
-            std::fs::rename(staged,native_report.with_file_name("native-fork.json.ready")).unwrap();
-            assert!(child.wait().await.unwrap().success(), "native fork recovery failed");
-            let report: serde_json::Value = serde_json::from_slice(&std::fs::read(&native_report).unwrap()).unwrap();
-            assert_eq!(report["resolved"],true);
-            assert_eq!(report["winner"],winner.hash.to_string());
-        }
-    })
+    let result = tokio::time::timeout(
+        Duration::from_secs(if native_enabled { 90 } else { 30 }),
+        async {
+            until(|| store.block_store().exists(&receive.hash).unwrap()).await;
+            assert!(store
+                .meta_store()
+                .fork_candidate(&late_conflict.hash)
+                .unwrap()
+                .is_none());
+            assert!(!store.block_store().exists(&late_conflict.hash).unwrap());
+            assert_eq!(
+                store.account_store().get_account(&creator).unwrap().head,
+                winner.hash
+            );
+            assert_eq!(
+                restored
+                    .lock()
+                    .await
+                    .transferable_balance_snapshot(&destination),
+                Some(70)
+            );
+            assert!(restored.lock().await.get_portfolio(&receiver).is_none());
+            let bytes = std::fs::read(&draft_path).unwrap();
+            let (draft, ancestry) = load_payment_with_ancestry(&draft_path).unwrap();
+            assert!(!store.block_store().exists(&draft.previous).unwrap());
+            assert!(client.confirmed_offline_successor(&draft).await.is_err());
+            assert_eq!(
+                client
+                    .confirmed_offline_resolution(&draft, &ancestry)
+                    .await
+                    .unwrap(),
+                Some(winner.hash)
+            );
+            assert_eq!(std::fs::read(&draft_path).unwrap(), bytes);
+            assert!(!store.block_store().exists(&draft.hash).unwrap());
+            if let Some(child) = native_child.as_mut() {
+                let staged = native_report.with_file_name("native-fork.json.ready.tmp");
+                std::fs::write(
+                    &staged,
+                    serde_json::to_vec(&serde_json::json!({"winner":winner.hash.to_string()}))
+                        .unwrap(),
+                )
+                .unwrap();
+                std::fs::rename(
+                    staged,
+                    native_report.with_file_name("native-fork.json.ready"),
+                )
+                .unwrap();
+                assert!(
+                    child.wait().await.unwrap().success(),
+                    "native fork recovery failed"
+                );
+                let report: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&native_report).unwrap()).unwrap();
+                assert_eq!(report["resolved"], true);
+                assert_eq!(report["winner"], winner.hash.to_string());
+            }
+        },
+    )
     .await;
     shutdown.shutdown();
     tokio::time::timeout(Duration::from_secs(20), task)

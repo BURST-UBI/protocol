@@ -112,24 +112,57 @@ fn old_pending_has_no_receive_timeout_and_remains_claimable_after_restart() {
         let mut batch = f.store.tx_begin_write().unwrap();
         persist(&mut batch, &f.orchestrator).unwrap();
         batch.commit().unwrap();
-        let destination = BlockHash::new(burst_crypto::decode_address(address(5).as_str()).unwrap());
-        let burn = f.payment(0, BlockType::Burn, 100, (destination, TxHash::ZERO), 200).unwrap();
+        let destination =
+            BlockHash::new(burst_crypto::decode_address(address(5).as_str()).unwrap());
+        let burn = f
+            .payment(0, BlockType::Burn, 100, (destination, TxHash::ZERO), 200)
+            .unwrap();
         let source = burn.into_tx_hash();
-        let original = f.store.pending_store().get_pending(&address(5), &source).unwrap();
-        let recipient_head = f.store.account_store().get_account(&address(5)).unwrap().head;
+        let original = f
+            .store
+            .pending_store()
+            .get_pending(&address(5), &source)
+            .unwrap();
+        let recipient_head = f
+            .store
+            .account_store()
+            .get_account(&address(5))
+            .unwrap()
+            .head;
         for elapsed in [31 * 24 * 60 * 60, year] {
             assert_eq!(elapsed % tick_seconds, 0);
             let now = test_time(200 + elapsed / tick_seconds);
             assert_eq!(now.as_secs() - test_time(200).as_secs(), elapsed);
             crate::expiry_commit::apply(&f.store, &mut f.trst, now).unwrap();
             f = f.reopen();
-            let pending = f.store.pending_store().get_pending(&address(5), &source).unwrap();
-            assert_eq!(bincode::serialize(&pending).unwrap(), bincode::serialize(&original).unwrap());
+            let pending = f
+                .store
+                .pending_store()
+                .get_pending(&address(5), &source)
+                .unwrap();
+            assert_eq!(
+                bincode::serialize(&pending).unwrap(),
+                bincode::serialize(&original).unwrap()
+            );
             assert!(!pending.return_credit);
             assert_eq!(f.store.pending_store().pending_count().unwrap(), 1);
-            assert_eq!(f.store.account_store().get_account(&address(5)).unwrap().head, recipient_head);
+            assert_eq!(
+                f.store
+                    .account_store()
+                    .get_account(&address(5))
+                    .unwrap()
+                    .head,
+                recipient_head
+            );
         }
-        f.payment(5, BlockType::Receive, 100, (burn, source), 201 + year / tick_seconds).unwrap();
+        f.payment(
+            5,
+            BlockType::Receive,
+            100,
+            (burn, source),
+            201 + year / tick_seconds,
+        )
+        .unwrap();
         f = f.reopen();
         assert_eq!(f.store.pending_store().pending_count().unwrap(), 0);
         let portfolio = f.trst.get_portfolio(&address(5)).unwrap();
@@ -138,7 +171,11 @@ fn old_pending_has_no_receive_timeout_and_remains_claimable_after_restart() {
         assert_eq!(portfolio.tokens[0].origin, source);
         assert_eq!(portfolio.tokens[0].origin_timestamp, test_time(200));
         assert_eq!(portfolio.tokens[0].state, TrstState::Active);
-        assert_eq!(f.trst.transferable_balance(&address(5), test_time(202 + year / tick_seconds)), Some(100));
+        assert_eq!(
+            f.trst
+                .transferable_balance(&address(5), test_time(202 + year / tick_seconds)),
+            Some(100)
+        );
     }
 }
 
@@ -148,34 +185,84 @@ fn revoked_holder_keeps_clean_trst_and_spends_it_after_reverification_and_restar
     let mut batch = f.store.tx_begin_write().unwrap();
     persist(&mut batch, &f.orchestrator).unwrap();
     batch.commit().unwrap();
-    let destination = |seed| BlockHash::new(burst_crypto::decode_address(address(seed).as_str()).unwrap());
-    let burn = f.payment(0, BlockType::Burn, 100, (destination(5), TxHash::ZERO), 200).unwrap();
+    let destination =
+        |seed| BlockHash::new(burst_crypto::decode_address(address(seed).as_str()).unwrap());
+    let burn = f
+        .payment(0, BlockType::Burn, 100, (destination(5), TxHash::ZERO), 200)
+        .unwrap();
     let origin = burn.into_tx_hash();
-    f.payment(5, BlockType::Receive, 100, (burn, origin), 201).unwrap();
+    f.payment(5, BlockType::Receive, 100, (burn, origin), 201)
+        .unwrap();
     let before = f.trst.get_portfolio(&address(5)).unwrap().tokens.clone();
-    let head = f.store.account_store().get_account(&address(5)).unwrap().head;
-    assert_eq!(revoke(&mut f, 5), 0, "holder revocation must not revoke another originator's TRST");
+    let head = f
+        .store
+        .account_store()
+        .get_account(&address(5))
+        .unwrap()
+        .head;
+    assert_eq!(
+        revoke(&mut f, 5),
+        0,
+        "holder revocation must not revoke another originator's TRST"
+    );
     f = f.reopen();
     assert_eq!(f.trst.get_portfolio(&address(5)).unwrap().tokens, before);
-    assert_eq!(f.store.account_store().get_account(&address(5)).unwrap().state, WalletState::Revoked);
-    assert!(f.payment(5, BlockType::Send, 30, (destination(6), origin), 202)
-        .unwrap_err().contains("spending requires a verified wallet"));
-    assert_eq!(f.store.account_store().get_account(&address(5)).unwrap().head, head);
+    assert_eq!(
+        f.store
+            .account_store()
+            .get_account(&address(5))
+            .unwrap()
+            .state,
+        WalletState::Revoked
+    );
+    assert!(f
+        .payment(5, BlockType::Send, 30, (destination(6), origin), 202)
+        .unwrap_err()
+        .contains("spending requires a verified wallet"));
+    assert_eq!(
+        f.store
+            .account_store()
+            .get_account(&address(5))
+            .unwrap()
+            .head,
+        head
+    );
     assert_eq!(f.trst.get_portfolio(&address(5)).unwrap().tokens, before);
     restore(&mut f, 5, 203);
     f = f.reopen();
-    assert_eq!(f.store.account_store().get_account(&address(5)).unwrap().state, WalletState::Verified);
+    assert_eq!(
+        f.store
+            .account_store()
+            .get_account(&address(5))
+            .unwrap()
+            .state,
+        WalletState::Verified
+    );
     assert_eq!(f.trst.get_portfolio(&address(5)).unwrap().tokens, before);
-    let send = f.payment(5, BlockType::Send, 30, (destination(6), origin), 204).unwrap();
-    f.payment(6, BlockType::Receive, 30, (send, origin), 205).unwrap();
+    let send = f
+        .payment(5, BlockType::Send, 30, (destination(6), origin), 204)
+        .unwrap();
+    f.payment(6, BlockType::Receive, 30, (send, origin), 205)
+        .unwrap();
     f = f.reopen();
     for (holder, amount) in [(5, 70), (6, 30)] {
         let portfolio = f.trst.get_portfolio(&address(holder)).unwrap();
-        assert_eq!(portfolio.tokens.iter().map(|token| token.amount).sum::<u128>(), amount);
-        assert!(portfolio.tokens.iter().all(|token|
-            token.origin == before[0].origin && token.origin_timestamp == before[0].origin_timestamp
+        assert_eq!(
+            portfolio
+                .tokens
+                .iter()
+                .map(|token| token.amount)
+                .sum::<u128>(),
+            amount
+        );
+        assert!(portfolio
+            .tokens
+            .iter()
+            .all(|token| token.origin == before[0].origin
+                && token.origin_timestamp == before[0].origin_timestamp
                 && token.effective_origin_timestamp == before[0].effective_origin_timestamp
-                && token.origin_wallet == before[0].origin_wallet && token.state == TrstState::Active));
+                && token.origin_wallet == before[0].origin_wallet
+                && token.state == TrstState::Active));
     }
 }
 

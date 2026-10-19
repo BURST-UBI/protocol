@@ -7,11 +7,11 @@ use crate::{
 };
 use burst_store::{block::BlockStore, meta::MetaStore};
 
+mod dependencies;
 mod economics;
 mod guards;
 mod projection;
 mod record_retirement;
-mod dependencies;
 pub(in crate::confirmed_replay::tests) mod rollover;
 
 fn local_genesis(fixture: &Fixture) -> (tempfile::TempDir, LmdbStore) {

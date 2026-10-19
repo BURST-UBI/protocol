@@ -11,17 +11,20 @@ pub struct DrandPolicy {
 impl DrandPolicy {
     pub fn mainnet() -> Result<&'static Self, VrfError> {
         static MAINNET: OnceLock<Result<DrandPolicy, String>> = OnceLock::new();
-        MAINNET.get_or_init(|| {
-            let verifier = DrandVerifier::mainnet().map_err(|error| error.to_string())?;
-            let info = ChainInfo {
-                public_key: verifier.pub_key_bytes.clone(),
-                period: 30,
-                genesis_time: 1595431050,
-                chain_hash: DRAND_MAINNET_CHAIN.into(),
-                scheme: DrandScheme::Chained,
-            };
-            Ok(Self { verifier, info })
-        }).as_ref().map_err(|error| VrfError::InvalidPublicKey(error.clone()))
+        MAINNET
+            .get_or_init(|| {
+                let verifier = DrandVerifier::mainnet().map_err(|error| error.to_string())?;
+                let info = ChainInfo {
+                    public_key: verifier.pub_key_bytes.clone(),
+                    period: 30,
+                    genesis_time: 1595431050,
+                    chain_hash: DRAND_MAINNET_CHAIN.into(),
+                    scheme: DrandScheme::Chained,
+                };
+                Ok(Self { verifier, info })
+            })
+            .as_ref()
+            .map_err(|error| VrfError::InvalidPublicKey(error.clone()))
     }
 
     pub fn chain_info(&self) -> &ChainInfo {

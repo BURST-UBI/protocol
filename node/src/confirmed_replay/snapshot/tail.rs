@@ -339,8 +339,10 @@ impl SnapshotTailPlan {
                     .map_err(invalid)?;
                 block.validate_format().map_err(invalid)?;
                 let key = crate::block_processor::signing_key(
-                    &block, &crate::genesis_key::genesis_address(context.network),
-                ).map_err(invalid)?;
+                    &block,
+                    &crate::genesis_key::genesis_address(context.network),
+                )
+                .map_err(invalid)?;
                 if block.hash != hash
                     || block.compute_hash() != hash
                     || block.account != head.account
@@ -445,7 +447,9 @@ impl SnapshotTailPlan {
         }
         let supplied: HashSet<_> = retained.hashes().collect();
         if self.required.iter().any(|hash| !supplied.contains(hash)) {
-            return Err(invalid("planned tail is missing a required historical witness"));
+            return Err(invalid(
+                "planned tail is missing a required historical witness",
+            ));
         }
         let mut witnesses = HashSet::new();
         for witness in retained.iter() {
@@ -504,17 +508,28 @@ mod staged_witness_tests {
         let plan = SnapshotTailPlan {
             directory: directory.path().to_path_buf(),
             context: super::super::history::HistoryContext {
-                network: NetworkId::Dev, genesis: BlockHash::new([1; 32]),
-                epoch: BlockHash::new([2; 32]), state_hash: BlockHash::new([3; 32]),
+                network: NetworkId::Dev,
+                genesis: BlockHash::new([1; 32]),
+                epoch: BlockHash::new([2; 32]),
+                state_hash: BlockHash::new([3; 32]),
             },
-            cutoff: 1, heads: Vec::new(),
+            cutoff: 1,
+            heads: Vec::new(),
             blocks: StagedBlocks::new(directory.path()).unwrap(),
-            contents: Vec::new(), commitment: BlockHash::ZERO,
-            applied: HashSet::new(), required: vec![BlockHash::new([4; 32])], used: 0,
+            contents: Vec::new(),
+            commitment: BlockHash::ZERO,
+            applied: HashSet::new(),
+            required: vec![BlockHash::new([4; 32])],
+            used: 0,
         };
         let witnesses = Arc::new(HistoricalBlocks::stage(directory.path(), Vec::new()).unwrap());
-        let error = plan.finish_staged(witnesses).err().expect("missing witness must fail");
-        assert!(error.to_string().contains("missing a required historical witness"));
+        let error = plan
+            .finish_staged(witnesses)
+            .err()
+            .expect("missing witness must fail");
+        assert!(error
+            .to_string()
+            .contains("missing a required historical witness"));
     }
 }
 

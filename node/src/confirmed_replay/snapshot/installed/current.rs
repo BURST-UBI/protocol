@@ -75,11 +75,17 @@ async fn authenticate_view(
     cached: Option<ReplayCache>,
 ) -> Result<ReplayCache, StoreError> {
     let commitment = loaded.as_ref().map(|(_, commitment)| *commitment);
-    let cached_height = cached.as_ref().map(|cache| cache.recovered.continuation.anchor().height());
-    let base_matches = cached.as_ref().is_some_and(|cache| cache.base == commitment);
+    let cached_height = cached
+        .as_ref()
+        .map(|cache| cache.recovered.continuation.anchor().height());
+    let base_matches = cached
+        .as_ref()
+        .is_some_and(|cache| cache.base == commitment);
     let resumed = match cached.filter(|cache| cache.base == commitment) {
-        Some(cache) => match cache.recovered
-            .advance_target_from_peers(store.clone(), registry.clone(), None).await
+        Some(cache) => match cache
+            .recovered
+            .advance_target_from_peers(store.clone(), registry.clone(), None)
+            .await
         {
             Ok(recovered) => Some(recovered),
             Err(error @ StoreError::StaleRead(_)) => {
@@ -90,14 +96,19 @@ async fn authenticate_view(
         },
         None => None,
     };
-    tracing::debug!(?cached_height, base_matches, reused = resumed.is_some(),
-        "tip recovery selected replay path");
+    tracing::debug!(
+        ?cached_height,
+        base_matches,
+        reused = resumed.is_some(),
+        "tip recovery selected replay path"
+    );
     let recovered = match (resumed, loaded) {
         (Some(recovered), _) => recovered,
-        (None, Some((base, _))) =>
+        (None, Some((base, _))) => {
             base.recover_stored_successors_from_peers(store.clone(), registry)
-                .await?,
-        (None, None) =>
+                .await?
+        }
+        (None, None) => {
             RecoveredSnapshot::recover_genesis_from_peers(
                 store.clone(),
                 network,
@@ -105,7 +116,8 @@ async fn authenticate_view(
                 registry,
                 None,
             )
-            .await?,
+            .await?
+        }
     };
     tokio::task::spawn_blocking(move || {
         let transaction = store.tx_begin_write()?;
@@ -123,7 +135,10 @@ async fn authenticate_view(
             ));
         }
         drop(transaction);
-        Ok(ReplayCache { base: commitment, recovered })
+        Ok(ReplayCache {
+            base: commitment,
+            recovered,
+        })
     })
     .await
     .map_err(invalid)?

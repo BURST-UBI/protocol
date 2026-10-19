@@ -4,14 +4,15 @@ use burst_ledger::StateBlock;
 use std::io::{Read, Write};
 use std::path::Path;
 
-mod retention;
 mod migration;
+mod retention;
 pub use migration::migrate_account_named_journal;
 pub const COMPLETED_RECEIPTS_PER_ACCOUNT: usize = 100;
 
 // JSON byte arrays need more room than the wire encoding. Include the largest
 // legal merge and returned-stake proofs, not just ordinary payment blocks.
-const MAX_DRAFT_BYTES: u64 = 128 + super::MAX_ANCESTRY_BYTES as u64
+const MAX_DRAFT_BYTES: u64 = 128
+    + super::MAX_ANCESTRY_BYTES as u64
     + 8 * (burst_ledger::state_block::MAX_MERGE_BLOCK_BYTES
         + 32 * burst_ledger::state_block::MAX_RELEASE_SOURCES as u64)
     + 4 * burst_governance::content::MAX_CONTENT_BYTES as u64;
@@ -37,13 +38,22 @@ pub fn save_payment(path: &Path, block: &StateBlock) -> Result<(), WalletError> 
     save_payment_with_ancestry(path, block, &[])
 }
 
-pub fn save_payment_with_ancestry(path: &Path, block: &StateBlock, ancestry: &[StateBlock]) -> Result<(), WalletError> {
+pub fn save_payment_with_ancestry(
+    path: &Path,
+    block: &StateBlock,
+    ancestry: &[StateBlock],
+) -> Result<(), WalletError> {
     validate_signed_payment(block)?;
     save_draft(path, block, ancestry, None, 3)
 }
 
 /// Journal an already-reviewed online action, including its signed content commitment.
-pub fn save_signed_action(path: &Path, block: &StateBlock, ancestry: &[StateBlock], content: Option<&[u8]>) -> Result<(), WalletError> {
+pub fn save_signed_action(
+    path: &Path,
+    block: &StateBlock,
+    ancestry: &[StateBlock],
+    content: Option<&[u8]>,
+) -> Result<(), WalletError> {
     validate_action_content(block, content)?;
     save_draft(path, block, ancestry, content, 4)
 }
@@ -51,20 +61,38 @@ pub fn save_signed_action(path: &Path, block: &StateBlock, ancestry: &[StateBloc
 fn validate_action_content(block: &StateBlock, content: Option<&[u8]>) -> Result<(), WalletError> {
     super::validate_signed_action(block)?;
     let manifest = if block.block_type == burst_ledger::BlockType::GovernanceProposal {
-        burst_governance::content::ContentManifest::from_block_fields(block.link, block.origin, block.transaction)
-            .map_err(|error| WalletError::Signing(error.to_string()))?
-    } else { None };
+        burst_governance::content::ContentManifest::from_block_fields(
+            block.link,
+            block.origin,
+            block.transaction,
+        )
+        .map_err(|error| WalletError::Signing(error.to_string()))?
+    } else {
+        None
+    };
     match (manifest, content) {
         (Some(manifest), Some(bytes)) => {
-            manifest.decode_verified(bytes).map_err(|error| WalletError::Signing(error.to_string()))?;
+            manifest
+                .decode_verified(bytes)
+                .map_err(|error| WalletError::Signing(error.to_string()))?;
         }
         (None, None) => {}
-        _ => return Err(WalletError::Signing("saved action content does not match its signed commitment".into())),
+        _ => {
+            return Err(WalletError::Signing(
+                "saved action content does not match its signed commitment".into(),
+            ))
+        }
     }
     Ok(())
 }
 
-fn save_draft(path: &Path, block: &StateBlock, ancestry: &[StateBlock], content: Option<&[u8]>, version: u8) -> Result<(), WalletError> {
+fn save_draft(
+    path: &Path,
+    block: &StateBlock,
+    ancestry: &[StateBlock],
+    content: Option<&[u8]>,
+    version: u8,
+) -> Result<(), WalletError> {
     super::validate_ancestry(&block.account, block.previous, ancestry)?;
     let bytes = serde_json::to_vec(&Draft {
         version,
@@ -106,7 +134,11 @@ fn attempt_path(path: &Path, hash: &burst_types::BlockHash) -> std::path::PathBu
 
 /// Publish the complete recovery receipt before releasing the account slot.
 pub fn archive_payment(path: &Path, prefix: &str) -> Result<(), WalletError> {
-    if prefix.is_empty() || !prefix.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-') {
+    if prefix.is_empty()
+        || !prefix
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
         return Err(WalletError::Other("invalid payment receipt prefix".into()));
     }
     let io = |error: std::io::Error| WalletError::Other(error.to_string());
@@ -122,7 +154,13 @@ pub fn archive_payment(path: &Path, prefix: &str) -> Result<(), WalletError> {
     let archive = directory.join(format!("{prefix}-{}.json", block.hash));
     match std::fs::symlink_metadata(&archive) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            save_draft(&archive, block, &draft.ancestry, draft.proposal_content.as_deref(), draft.version)?;
+            save_draft(
+                &archive,
+                block,
+                &draft.ancestry,
+                draft.proposal_content.as_deref(),
+                draft.version,
+            )?;
         }
         Err(error) => return Err(io(error)),
         Ok(_) => {
@@ -131,8 +169,12 @@ pub fn archive_payment(path: &Path, prefix: &str) -> Result<(), WalletError> {
     }
     std::fs::remove_file(path).map_err(io)?;
     #[cfg(unix)]
-    std::fs::File::open(path.parent().ok_or_else(|| WalletError::Other("Missing payment directory".into()))?)
-        .and_then(|directory| directory.sync_all()).map_err(io)?;
+    std::fs::File::open(
+        path.parent()
+            .ok_or_else(|| WalletError::Other("Missing payment directory".into()))?,
+    )
+    .and_then(|directory| directory.sync_all())
+    .map_err(io)?;
     // Resolution is already durable. Maintenance failure must not report the
     // confirmed transaction as failed or encourage signing a replacement.
     if let Err(error) = retention::maintain(path, &archive, &block.account, block.hash) {
@@ -144,8 +186,11 @@ pub fn archive_payment(path: &Path, prefix: &str) -> Result<(), WalletError> {
 fn ensure_same_receipt(path: &Path, draft: &Draft) -> Result<(), WalletError> {
     let existing = read_draft(path)?;
     if serde_json::to_vec(&existing).map_err(|error| WalletError::Other(error.to_string()))?
-        != serde_json::to_vec(draft).map_err(|error| WalletError::Other(error.to_string()))? {
-        return Err(WalletError::Other("Conflicting saved payment receipt".into()));
+        != serde_json::to_vec(draft).map_err(|error| WalletError::Other(error.to_string()))?
+    {
+        return Err(WalletError::Other(
+            "Conflicting saved payment receipt".into(),
+        ));
     }
     Ok(())
 }
@@ -205,7 +250,9 @@ pub fn load_payment(path: &Path) -> Result<StateBlock, WalletError> {
     Ok(read_draft(path)?.block)
 }
 
-pub fn load_payment_with_ancestry(path: &Path) -> Result<(StateBlock, Vec<StateBlock>), WalletError> {
+pub fn load_payment_with_ancestry(
+    path: &Path,
+) -> Result<(StateBlock, Vec<StateBlock>), WalletError> {
     let draft = read_draft(path)?;
     Ok((draft.block, draft.ancestry))
 }
@@ -253,7 +300,9 @@ fn read_draft(path: &Path) -> Result<Draft, WalletError> {
     if draft.version < 4 {
         validate_signed_payment(&draft.block)?;
         if draft.proposal_content.is_some() {
-            return Err(WalletError::Signing("legacy draft cannot contain proposal content".into()));
+            return Err(WalletError::Signing(
+                "legacy draft cannot contain proposal content".into(),
+            ));
         }
     } else {
         validate_action_content(&draft.block, draft.proposal_content.as_deref())?;
@@ -269,17 +318,33 @@ mod tests {
     fn payment(seed: u8, amount: u128) -> StateBlock {
         let keys = burst_crypto::keypair_from_seed(&[seed; 32]);
         let account = burst_crypto::derive_address(&keys.public);
-        let state = crate::transaction_builder::AccountState { signing_grant: burst_types::BlockHash::ZERO,
-            head: burst_types::BlockHash::new([1; 32]), block_count: 1,
+        let state = crate::transaction_builder::AccountState {
+            signing_grant: burst_types::BlockHash::ZERO,
+            head: burst_types::BlockHash::new([1; 32]),
+            block_count: 1,
             payment_epoch: burst_types::BlockHash::new([2; 32]),
-            representative: account.clone(), brn_balance: 1000, trst_balance: 0, release_sources: vec![],
+            representative: account.clone(),
+            brn_balance: 1000,
+            trst_balance: 0,
+            release_sources: vec![],
         };
-        let tx = burst_transactions::Transaction::Burn(crate::transaction_builder::build_burn_tx(
-            &account, &account, amount, burst_types::Timestamp::new(42),
-        ).unwrap());
+        let tx = burst_transactions::Transaction::Burn(
+            crate::transaction_builder::build_burn_tx(
+                &account,
+                &account,
+                amount,
+                burst_types::Timestamp::new(42),
+            )
+            .unwrap(),
+        );
         crate::transaction_builder::build_and_sign_state_block(
-            &state, &tx, &keys.private, burst_types::TxHash::ZERO, burst_types::BlockHash::new([3; 32]),
-        ).unwrap()
+            &state,
+            &tx,
+            &keys.private,
+            burst_types::TxHash::ZERO,
+            burst_types::BlockHash::new([3; 32]),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -313,12 +378,20 @@ mod tests {
         save_payment(&unknown, &active).unwrap();
         for amount in 1..=105 {
             let block = payment(92, amount);
-            let path = directory.path().join(format!("confirmed-{}.json", block.hash));
+            let path = directory
+                .path()
+                .join(format!("confirmed-{}.json", block.hash));
             save_payment(&path, &block).unwrap();
-            std::fs::File::open(&path).unwrap().set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(amount as u64)).unwrap();
+            std::fs::File::open(&path)
+                .unwrap()
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(amount as u64))
+                .unwrap();
             record_submission(&path, &block.hash).unwrap();
         }
-        assert_eq!(migrate_account_named_journal(directory.path()).unwrap(), 105);
+        assert_eq!(
+            migrate_account_named_journal(directory.path()).unwrap(),
+            105
+        );
         assert_eq!(migrate_account_named_journal(directory.path()).unwrap(), 0);
         assert_eq!(std::fs::read(&active_path).unwrap(), original);
         assert!(payment_was_submitted(&active_path, &active.hash).unwrap());
@@ -337,10 +410,14 @@ mod tests {
     fn legacy_migration_retries_publication_and_refuses_conflicting_receipts() {
         let directory = tempfile::tempdir().unwrap();
         let block = payment(93, 1);
-        let path = directory.path().join(format!("confirmed-{}.json", block.hash));
+        let path = directory
+            .path()
+            .join(format!("confirmed-{}.json", block.hash));
         save_payment(&path, &block).unwrap();
         let bytes = std::fs::read(&path).unwrap();
-        let target = retention::directory(&path, &block.account).unwrap().join(path.file_name().unwrap());
+        let target = retention::directory(&path, &block.account)
+            .unwrap()
+            .join(path.file_name().unwrap());
         std::fs::hard_link(&path, &target).unwrap();
         assert_eq!(migrate_account_named_journal(directory.path()).unwrap(), 1);
         assert_eq!(std::fs::read(&target).unwrap(), bytes);
@@ -373,11 +450,23 @@ mod tests {
             record_submission(&pending, &block.hash).unwrap();
             archive_payment(&pending, "confirmed").unwrap();
             assert!(!attempt_path(&pending, &block.hash).exists());
-            let receipt = retention::directory(&pending, &block.account).unwrap().join(format!("confirmed-{}.json", block.hash));
+            let receipt = retention::directory(&pending, &block.account)
+                .unwrap()
+                .join(format!("confirmed-{}.json", block.hash));
             assert_eq!(load_payment(&receipt).unwrap().hash, block.hash);
         }
-        assert_eq!(std::fs::read_dir(retention::directory(&pending, &unresolved.account).unwrap()).unwrap().count(), COMPLETED_RECEIPTS_PER_ACCOUNT);
-        assert_eq!(std::fs::read_dir(retention::directory(&pending, &other.account).unwrap()).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::read_dir(retention::directory(&pending, &unresolved.account).unwrap())
+                .unwrap()
+                .count(),
+            COMPLETED_RECEIPTS_PER_ACCOUNT
+        );
+        assert_eq!(
+            std::fs::read_dir(retention::directory(&pending, &other.account).unwrap())
+                .unwrap()
+                .count(),
+            1
+        );
         assert_eq!(std::fs::read(&protected).unwrap(), original);
         assert!(payment_was_submitted(&protected, &unresolved.hash).unwrap());
     }
@@ -437,8 +526,13 @@ mod tests {
         archive_payment(&pending, "confirmed").unwrap();
         assert!(!pending.exists());
         assert!(attempt_path(&pending, &block.hash).exists());
-        assert_eq!(std::fs::read(&unknown).unwrap(), b"unreadable legacy record");
-        let archive = retention::directory(&pending, &block.account).unwrap().join(format!("confirmed-{}.json", block.hash));
+        assert_eq!(
+            std::fs::read(&unknown).unwrap(),
+            b"unreadable legacy record"
+        );
+        let archive = retention::directory(&pending, &block.account)
+            .unwrap()
+            .join(format!("confirmed-{}.json", block.hash));
         assert_eq!(load_payment(&archive).unwrap().hash, block.hash);
     }
 
@@ -459,22 +553,35 @@ mod tests {
     #[test]
     fn action_journal_requires_exact_content_and_archives_the_complete_record() {
         let keys = burst_crypto::keypair_from_seed(&[83; 32]);
-        let state = crate::transaction_builder::AccountState { signing_grant: burst_types::BlockHash::ZERO,
-            head: burst_types::BlockHash::new([1; 32]), block_count: 1,
+        let state = crate::transaction_builder::AccountState {
+            signing_grant: burst_types::BlockHash::ZERO,
+            head: burst_types::BlockHash::new([1; 32]),
+            block_count: 1,
             payment_epoch: burst_types::BlockHash::new([2; 32]),
             representative: burst_crypto::derive_address(&keys.public),
-            brn_balance: u64::MAX as u128 + 1, trst_balance: 0, release_sources: vec![],
+            brn_balance: u64::MAX as u128 + 1,
+            trst_balance: 0,
+            release_sources: vec![],
         };
         let content = burst_governance::ProposalContent::ParameterChange {
-            param: burst_governance::GovernableParam::BrnRate, new_value: 1,
+            param: burst_governance::GovernableParam::BrnRate,
+            new_value: 1,
         };
         let (block, _) = crate::governance_content::build_signed_proposal(
-            &state, &keys, &content, burst_types::BlockHash::new([3; 32]), burst_types::Timestamp::new(42),
-        ).unwrap();
+            &state,
+            &keys,
+            &content,
+            burst_types::BlockHash::new([3; 32]),
+            burst_types::Timestamp::new(42),
+        )
+        .unwrap();
         let bytes = content.encode_content().unwrap();
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("pending.json");
-        assert!(save_payment(&path, &block).is_err(), "offline payment context must stay restricted");
+        assert!(
+            save_payment(&path, &block).is_err(),
+            "offline payment context must stay restricted"
+        );
         assert!(save_signed_action(&path, &block, &[], None).is_err());
         assert!(save_signed_action(&path, &block, &[], Some(b"wrong content")).is_err());
         assert!(!path.exists());
@@ -485,8 +592,13 @@ mod tests {
         assert_eq!(recovered.version, 4);
         assert_eq!(recovered.block.hash, block.hash);
         assert_eq!(recovered.block.brn_balance, state.brn_balance);
-        assert_eq!(recovered.proposal_content.as_deref(), Some(bytes.as_slice()));
-        let archive = retention::directory(&path, &block.account).unwrap().join(format!("confirmed-{}.json", block.hash));
+        assert_eq!(
+            recovered.proposal_content.as_deref(),
+            Some(bytes.as_slice())
+        );
+        let archive = retention::directory(&path, &block.account)
+            .unwrap()
+            .join(format!("confirmed-{}.json", block.hash));
         save_signed_action(&archive, &block, &[], Some(&bytes)).unwrap();
         archive_payment(&path, "confirmed").unwrap();
         assert!(!path.exists());

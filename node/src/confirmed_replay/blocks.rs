@@ -13,7 +13,9 @@ pub(super) enum AppliedHistory<'a> {
 impl<'a> AppliedHistory<'a> {
     pub(super) fn new(directory: Option<&std::path::Path>) -> Result<Self, StoreError> {
         match directory {
-            Some(directory) => staged::StagedBlocks::new(directory).map(Box::new).map(Self::Disk),
+            Some(directory) => staged::StagedBlocks::new(directory)
+                .map(Box::new)
+                .map(Self::Disk),
             None => Ok(Self::Memory(HashMap::new())),
         }
     }

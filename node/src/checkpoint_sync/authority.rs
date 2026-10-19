@@ -53,8 +53,14 @@ pub(crate) async fn authenticate_with_cache(
     registry: Arc<RwLock<ConnectionRegistry>>,
     cached: Option<installed::ReplayCache>,
 ) -> Result<Checked, StoreError> {
-    let recovery = installed::recover_current_tip_with_cache(store.clone(), network, params.clone(), registry, cached)
-        .await?;
+    let recovery = installed::recover_current_tip_with_cache(
+        store.clone(),
+        network,
+        params.clone(),
+        registry,
+        cached,
+    )
+    .await?;
     Ok(Checked {
         store,
         network,

@@ -142,8 +142,14 @@ mod tests {
             u128::MAX / 2
         );
         assert_eq!(token.effective_value(Timestamp::new(200), 100), 0);
-        assert_eq!(token.current_value_bps(Timestamp::new(u64::MAX), u64::MAX), 10_000);
-        assert_eq!(token.effective_value(Timestamp::new(u64::MAX), u64::MAX), u128::MAX);
+        assert_eq!(
+            token.current_value_bps(Timestamp::new(u64::MAX), u64::MAX),
+            10_000
+        );
+        assert_eq!(
+            token.effective_value(Timestamp::new(u64::MAX), u64::MAX),
+            u128::MAX
+        );
         assert_eq!(token.current_value_bps(Timestamp::new(99), 100), 10_000);
         assert_eq!(token.current_value_bps(Timestamp::new(150), 100), 5_000);
         assert_eq!(token.current_value_bps(Timestamp::new(150), 0), 0);

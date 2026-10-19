@@ -35,7 +35,9 @@ impl ExportRecovery {
 
     #[cfg(test)]
     pub(crate) fn height(&self) -> Option<u64> {
-        self.cached.as_ref().map(|cached| cached.continuation.anchor().height())
+        self.cached
+            .as_ref()
+            .map(|cached| cached.continuation.anchor().height())
     }
 
     pub(super) fn clear(&mut self) {

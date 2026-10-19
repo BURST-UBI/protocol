@@ -16,56 +16,94 @@ fn panel_reads_reuse_authenticated_certificate_only_inside_one_replay() {
 
 #[test]
 fn recovery_reads_selection_history_once_and_keeps_beacon_and_trailing_guards() {
-    use std::{borrow::Cow, cell::Cell};
     use crate::confirmed_replay::ReplayError;
+    use std::{borrow::Cow, cell::Cell};
     struct Counted<'a> {
         rows: Vec<&'a CertifiedCheckpoint>,
         reads: Cell<usize>,
         trailing_error: bool,
     }
     impl SelectionSource for Counted<'_> {
-        fn len(&self) -> usize { self.rows.len() }
-        fn read_selection(&self, position: usize) -> Result<Cow<'_, CertifiedCheckpoint>, ReplayError> {
+        fn len(&self) -> usize {
+            self.rows.len()
+        }
+        fn read_selection(
+            &self,
+            position: usize,
+        ) -> Result<Cow<'_, CertifiedCheckpoint>, ReplayError> {
             self.reads.set(self.reads.get() + 1);
             self.rows.read_selection(position)
         }
-        fn read_all(&self) -> impl Iterator<Item = Result<Cow<'_, CertifiedCheckpoint>, ReplayError>> {
-            (0..self.len()).map(|position| self.read_selection(position)).chain(
-                self.trailing_error.then(|| Err(crate::confirmed_replay::invalid("trailing authority failure"))),
-            )
+        fn read_all(
+            &self,
+        ) -> impl Iterator<Item = Result<Cow<'_, CertifiedCheckpoint>, ReplayError>> {
+            (0..self.len())
+                .map(|position| self.read_selection(position))
+                .chain(self.trailing_error.then(|| {
+                    Err(crate::confirmed_replay::invalid(
+                        "trailing authority failure",
+                    ))
+                }))
         }
     }
     let (fixture, _dir, source, _, _) = selection::setup();
     let events = chain::load(&source, NetworkId::Dev, &fixture.params).unwrap();
     let mut anchors = vec![events[0].parent().clone()];
     for event in &events {
-        anchors.push(event.parent().advance(event.certificate(), event.next_roster().clone()).unwrap());
+        anchors.push(
+            event
+                .parent()
+                .advance(event.certificate(), event.next_roster().clone())
+                .unwrap(),
+        );
     }
     let mut selections = Counted {
-        rows: events.iter().filter_map(|event| event.selection()).collect(),
+        rows: events
+            .iter()
+            .filter_map(|event| event.selection())
+            .collect(),
         reads: Cell::new(0),
         trailing_error: false,
     };
     assert!(!selections.rows.is_empty());
     let records = crate::checkpoint_store::compact::read_after(
-        &source, anchors.iter().cloned().map(Ok), &selections,
-    ).unwrap();
+        &source,
+        anchors.iter().cloned().map(Ok),
+        &selections,
+    )
+    .unwrap();
     assert_eq!(selections.reads.get(), selections.len());
     assert_eq!(records.successors.len(), 0);
-    records.observations.verify(&source.tx_begin_write().unwrap()).unwrap();
+    records
+        .observations
+        .verify(&source.tx_begin_write().unwrap())
+        .unwrap();
     let beacon_key = crate::checkpoint_store::archive_selection::beacon_key(
         selections.rows[0].certificate().checkpoint.hash(),
     );
-    source.meta_store().put_meta(&beacon_key, b"damaged beacon").unwrap();
-    assert!(records.observations.verify(&source.tx_begin_write().unwrap()).is_err());
+    source
+        .meta_store()
+        .put_meta(&beacon_key, b"damaged beacon")
+        .unwrap();
+    assert!(records
+        .observations
+        .verify(&source.tx_begin_write().unwrap())
+        .is_err());
     assert!(crate::checkpoint_store::compact::read_after(
-        &source, anchors.iter().cloned().map(Ok), &selections,
-    ).is_err());
+        &source,
+        anchors.iter().cloned().map(Ok),
+        &selections,
+    )
+    .is_err());
     source.meta_store().delete_meta(&beacon_key).unwrap();
     selections.trailing_error = true;
     let error = crate::checkpoint_store::compact::read_after(
-        &source, anchors.into_iter().map(Ok), &selections,
-    ).err().unwrap();
+        &source,
+        anchors.into_iter().map(Ok),
+        &selections,
+    )
+    .err()
+    .unwrap();
     assert!(error.to_string().contains("trailing authority failure"));
 }
 
@@ -420,10 +458,22 @@ fn stored_snapshot_reauthenticates_retained_beacons_without_prefix_blocks() {
         assert_eq!(result.is_ok(), case == 0);
         if let Ok(recovered) = result {
             assert_eq!(
-                recovered.selections.read_selection(0).unwrap().beacon().unwrap().value,
+                recovered
+                    .selections
+                    .read_selection(0)
+                    .unwrap()
+                    .beacon()
+                    .unwrap()
+                    .value,
                 valid_beacon.value
             );
-            assert!(recovered.selections.read_selection(0).unwrap().replayed().history_hashes().is_err());
+            assert!(recovered
+                .selections
+                .read_selection(0)
+                .unwrap()
+                .replayed()
+                .history_hashes()
+                .is_err());
         }
         assert_eq!(
             local
@@ -541,7 +591,13 @@ async fn stored_snapshot_recovers_from_peer_plans_without_local_prefix_bodies() 
         certificate.checkpoint.hash()
     );
     assert_eq!(recovered.selections.len(), 1);
-    assert!(recovered.selections.read_selection(0).unwrap().replayed().history_hashes().is_err());
+    assert!(recovered
+        .selections
+        .read_selection(0)
+        .unwrap()
+        .replayed()
+        .history_hashes()
+        .is_err());
     assert_eq!(local.block_store().block_count().unwrap(), 0);
     assert_eq!(
         local

@@ -142,6 +142,8 @@ async fn payments_and_bootstrap_replay_identically_after_wire_delivery_and_fresh
         config.params.endorsement_threshold = 1;
         config.params.endorsement_burn_amount = 2;
         config.params.num_verifiers = 1;
+        // Creator plus recipient end bootstrap before normal verifier selection.
+        config.params.bootstrap_exit_threshold = 2;
         configs.push(config);
     }
     let params = configs[0].params.clone();

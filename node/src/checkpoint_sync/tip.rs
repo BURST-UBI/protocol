@@ -13,7 +13,8 @@ impl ReplyLimit {
     const CAPACITY: usize = 256;
 
     pub(super) fn allow(&mut self, peer: &str, now: Instant) -> bool {
-        self.0.retain(|_, served| now.duration_since(*served) < super::RETRY);
+        self.0
+            .retain(|_, served| now.duration_since(*served) < super::RETRY);
         if self.0.contains_key(peer) || self.0.len() >= Self::CAPACITY {
             return false;
         }
@@ -28,7 +29,10 @@ pub(crate) struct Published(std::sync::Mutex<Option<(Instant, serde_json::Value)
 impl Published {
     pub(super) fn update(&self, expires: Instant, value: serde_json::Value) {
         if let Ok(mut current) = self.0.lock() {
-            if current.as_ref().is_none_or(|(_, previous)| previous != &value) {
+            if current
+                .as_ref()
+                .is_none_or(|(_, previous)| previous != &value)
+            {
                 tracing::debug!(status = %value, "checkpoint signing observation changed");
             }
             *current = Some((expires, value));
@@ -71,16 +75,26 @@ pub(super) struct Discovery {
 
 impl Discovery {
     pub(super) fn new(now: Instant) -> Self {
-        Self { request: None, observation: None, nonce: 0, cursor: 0, next: now }
+        Self {
+            request: None,
+            observation: None,
+            nonce: 0,
+            cursor: 0,
+            next: now,
+        }
     }
 
     pub(super) fn poll(&mut self, peers: &[String], now: Instant) -> Option<Incoming> {
-        if self.observation.as_ref().is_some_and(|o|
-            now.duration_since(o.received) >= FRESHNESS || !peers.contains(&o.peer)) {
+        if self.observation.as_ref().is_some_and(|o| {
+            now.duration_since(o.received) >= FRESHNESS || !peers.contains(&o.peer)
+        }) {
             self.observation = None;
         }
-        if self.request.as_ref().is_some_and(|r|
-            now.duration_since(r.sent) >= PEER_TIMEOUT || !peers.contains(&r.peer)) {
+        if self
+            .request
+            .as_ref()
+            .is_some_and(|r| now.duration_since(r.sent) >= PEER_TIMEOUT || !peers.contains(&r.peer))
+        {
             self.request = None;
         }
         if peers.is_empty() || self.request.is_some() || now < self.next {
@@ -93,32 +107,69 @@ impl Discovery {
         // Exhaustion stops discovery instead of accepting a reused challenge.
         self.nonce = self.nonce.checked_add(1)?;
         self.next = now + PEER_TIMEOUT;
-        self.request = Some(Request { peer: peer.clone(), nonce: self.nonce, sent: now });
-        Some(Incoming { peer, message: Message::TipRequest { nonce: self.nonce } })
+        self.request = Some(Request {
+            peer: peer.clone(),
+            nonce: self.nonce,
+            sent: now,
+        });
+        Some(Incoming {
+            peer,
+            message: Message::TipRequest { nonce: self.nonce },
+        })
     }
 
-    pub(super) fn receive(&mut self, peer: &str, nonce: u64, height: u64, epoch: BlockHash, now: Instant) {
+    pub(super) fn receive(
+        &mut self,
+        peer: &str,
+        nonce: u64,
+        height: u64,
+        epoch: BlockHash,
+        now: Instant,
+    ) {
         let Some(request) = &self.request else { return };
-        if request.peer != peer || request.nonce != nonce || epoch.is_zero()
-            || now.duration_since(request.sent) >= PEER_TIMEOUT {
+        if request.peer != peer
+            || request.nonce != nonce
+            || epoch.is_zero()
+            || now.duration_since(request.sent) >= PEER_TIMEOUT
+        {
             return;
         }
         self.request = None;
         // Replace, do not accumulate a peer-controlled high-water mark.
-        self.observation = Some(Observation { peer: peer.into(), epoch, height, received: now });
+        self.observation = Some(Observation {
+            peer: peer.into(),
+            epoch,
+            height,
+            received: now,
+        });
     }
 
     pub(super) fn expires(&self, now: Instant) -> Instant {
-        self.observation.as_ref().map_or(now + FRESHNESS, |o| o.received + FRESHNESS)
+        self.observation
+            .as_ref()
+            .map_or(now + FRESHNESS, |o| o.received + FRESHNESS)
     }
 
-    pub(super) fn view(&self, now: Instant, installed: BlockHash, height: u64, installing: bool) -> serde_json::Value {
-        let observation = self.observation.as_ref()
+    pub(super) fn view(
+        &self,
+        now: Instant,
+        installed: BlockHash,
+        height: u64,
+        installing: bool,
+    ) -> serde_json::Value {
+        let observation = self
+            .observation
+            .as_ref()
             .filter(|o| now.duration_since(o.received) < FRESHNESS);
-        let phase = if installing { "catching_up" }
-            else if observation.is_some_and(|o| o.epoch == installed && o.height == height) { "peer_matches" }
-            else if observation.is_some() { "peer_differs" }
-            else { "unknown" };
+        let phase = if installing {
+            "catching_up"
+        } else if observation.is_some_and(|o| o.epoch == installed && o.height == height) {
+            "peer_matches"
+        } else if observation.is_some() {
+            "peer_differs"
+        } else {
+            "unknown"
+        };
         serde_json::json!({
             "phase": phase, "payment_epoch": installed.to_string(),
             "observed_epoch": observation.map(|o| o.epoch.to_string()),
@@ -163,16 +214,34 @@ mod tests {
     #[test]
     fn wire_roundtrip_and_bounds() {
         use crate::wire_message::WireMessage;
-        for message in [Message::TipRequest { nonce: 7 }, Message::TipObservation {
-            nonce: 7, height: u64::MAX, epoch: BlockHash::new([2; 32]),
-        }] {
-            let encoded = WireMessage::CheckpointSync(message.clone()).encode().unwrap();
+        for message in [
+            Message::TipRequest { nonce: 7 },
+            Message::TipObservation {
+                nonce: 7,
+                height: u64::MAX,
+                epoch: BlockHash::new([2; 32]),
+            },
+        ] {
+            let encoded = WireMessage::CheckpointSync(message.clone())
+                .encode()
+                .unwrap();
             assert!(encoded.len() < 128);
-            let WireMessage::CheckpointSync(decoded) = WireMessage::decode(&encoded).unwrap() else { panic!("wrong envelope") };
-            assert_eq!(serde_json::to_value(decoded).unwrap(), serde_json::to_value(message).unwrap());
+            let WireMessage::CheckpointSync(decoded) = WireMessage::decode(&encoded).unwrap()
+            else {
+                panic!("wrong envelope")
+            };
+            assert_eq!(
+                serde_json::to_value(decoded).unwrap(),
+                serde_json::to_value(message).unwrap()
+            );
         }
         assert!(!Message::TipRequest { nonce: 0 }.is_bounded());
-        assert!(!Message::TipObservation { nonce: 1, height: 0, epoch: BlockHash::ZERO }.is_bounded());
+        assert!(!Message::TipObservation {
+            nonce: 1,
+            height: 0,
+            epoch: BlockHash::ZERO
+        }
+        .is_bounded());
     }
 
     #[test]
@@ -186,11 +255,23 @@ mod tests {
         discovery.receive("a", 2, 4, epoch, now);
         assert_eq!(discovery.view(now, epoch, 4, false)["phase"], "unknown");
         discovery.receive("a", 1, 4, epoch, now);
-        assert_eq!(discovery.view(now, epoch, 4, false)["phase"], "peer_matches");
-        assert_eq!(discovery.view(now, epoch, 5, false)["phase"], "peer_differs");
+        assert_eq!(
+            discovery.view(now, epoch, 4, false)["phase"],
+            "peer_matches"
+        );
+        assert_eq!(
+            discovery.view(now, epoch, 5, false)["phase"],
+            "peer_differs"
+        );
         assert_eq!(discovery.view(now, epoch, 4, true)["phase"], "catching_up");
-        assert_eq!(discovery.view(now, BlockHash::new([2; 32]), 4, false)["phase"], "peer_differs");
-        assert_eq!(discovery.view(now + FRESHNESS, epoch, 4, false)["phase"], "unknown");
+        assert_eq!(
+            discovery.view(now, BlockHash::new([2; 32]), 4, false)["phase"],
+            "peer_differs"
+        );
+        assert_eq!(
+            discovery.view(now + FRESHNESS, epoch, 4, false)["phase"],
+            "unknown"
+        );
     }
 
     #[test]
@@ -206,10 +287,19 @@ mod tests {
         assert_eq!(discovery.view(later, epoch, 4, false)["phase"], "unknown");
         discovery.receive("b", 2, u64::MAX, BlockHash::new([2; 32]), later);
         discovery.poll(&["a".into()], later + PEER_TIMEOUT).unwrap();
-        assert_eq!(discovery.view(later + PEER_TIMEOUT, epoch, 4, false)["phase"], "unknown");
+        assert_eq!(
+            discovery.view(later + PEER_TIMEOUT, epoch, 4, false)["phase"],
+            "unknown"
+        );
         discovery.receive("a", 3, 4, epoch, later + PEER_TIMEOUT);
-        assert_eq!(discovery.view(later + PEER_TIMEOUT, epoch, 4, false)["phase"], "peer_matches");
+        assert_eq!(
+            discovery.view(later + PEER_TIMEOUT, epoch, 4, false)["phase"],
+            "peer_matches"
+        );
         discovery.poll(&[], later + PEER_TIMEOUT);
-        assert_eq!(discovery.view(later + PEER_TIMEOUT, epoch, 4, false)["phase"], "unknown");
+        assert_eq!(
+            discovery.view(later + PEER_TIMEOUT, epoch, 4, false)["phase"],
+            "unknown"
+        );
     }
 }
