@@ -21,6 +21,7 @@ appendFileSync(process.env.MOCK_CARGO_LOG, JSON.stringify({
     ? readFileSync("/proc/self/status", "utf8").match(/^Cpus_allowed_list:\s*(.+)$/m)[1] : null,
 }) + "\n");
 if (process.env.MOCK_CARGO_FAIL === "1") process.exit(1);
+if (!options.includes("--list") && selected.includes(process.env.MOCK_CARGO_FAIL_TEST)) process.exit(1);
 if (options.includes("--list")) {
   for (const name of selected) console.log(`${name}: test`);
   console.log(`\n${selected.length} tests, 0 benchmarks`);

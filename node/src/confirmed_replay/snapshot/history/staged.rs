@@ -53,11 +53,6 @@ impl HistoricalBlocks {
         self.positions.len()
     }
 
-    #[cfg(test)]
-    pub(crate) fn is_empty(&self) -> bool {
-        self.positions.is_empty()
-    }
-
     pub(crate) fn hashes(&self) -> impl Iterator<Item = BlockHash> + '_ {
         self.positions.iter().map(|position| position.hash)
     }

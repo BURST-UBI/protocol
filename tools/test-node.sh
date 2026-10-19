@@ -154,12 +154,19 @@ if [[ "$mode" == network || "$mode" == all ]]; then
     done < <(LC_ALL=C sort <<< "$inventory")
     (( position > 0 )) || { echo 'No network tests were discovered' >&2; exit 1; }
     echo "Network shard $shard_index/$shard_count: ${#selected[@]} of $position tests" >&2
+    failures=()
     for name in "${selected[@]}"; do
       if (( ${#listing[@]} )); then
         printf '%s: test\n' "$name"
       else
-        "${runner[@]}" "${node_tests[@]}" "$name" --exact --test-threads=1
+        if ! "${runner[@]}" "${node_tests[@]}" "$name" --exact --test-threads=1; then
+          failures+=("$name")
+        fi
       fi
     done
+    if (( ${#failures[@]} )); then
+      printf 'Failed network test: %s\n' "${failures[@]}" >&2
+      exit 1
+    fi
   fi
 fi

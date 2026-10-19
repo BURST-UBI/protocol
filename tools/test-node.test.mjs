@@ -158,6 +158,18 @@ test("network shards cover the same catalog exactly once with exact names", () =
   assert.equal(empty.calls.length, 1);
 });
 
+test("a failed network case does not hide the rest of its shard", () => {
+  const env = {BURST_TEST_NETWORK_SHARDS:"2", BURST_TEST_NETWORK_SHARD:"0"};
+  const baseline = run(["network"], env);
+  const failing = baseline.calls[1].selected[0];
+  for (const prebuilt of [false, true]) {
+    const result = run(["network"], {...env, MOCK_CARGO_FAIL_TEST:failing}, undefined, prebuilt);
+    assert.equal(result.status, 1);
+    assert.deepEqual(result.calls.map(call => call.selected), baseline.calls.map(call => call.selected));
+    assert(result.stderr.includes(`Failed network test: ${failing}`));
+  }
+});
+
 test("all stops immediately when a group fails", () => {
   const result = run(["all"], { MOCK_CARGO_FAIL: "1" });
   assert.equal(result.status, 1);
