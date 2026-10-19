@@ -436,7 +436,10 @@ async fn payment_replay_journey(certified_catchup: bool) {
                 .unwrap();
             assert_eq!(status["status"], "endorsing");
             assert_eq!(status["endorser_count"], 1);
-            assert_eq!(status["selection_available"], false);
+            assert_eq!(
+                status["selection_available"],
+                cfg!(feature = "experimental-testnet")
+            );
             assert!(status["selection_context"].is_null());
         }
 
