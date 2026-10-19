@@ -121,7 +121,11 @@ fn replay_cut(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn payments_and_bootstrap_replay_identically_after_wire_delivery_and_fresh_catchup() {
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                "burst_node::checkpoint_sync=debug,burst_node::checkpoint_service=debug".into()
+            }),
+        )
         .with_test_writer()
         .try_init();
     let directory = tempfile::tempdir().unwrap();
@@ -529,6 +533,7 @@ async fn payments_and_bootstrap_replay_identically_after_wire_delivery_and_fresh
             applicant.clone(),
         )
         .unwrap();
+        eprintln!("source accepted selection certificate; waiting for connected observers");
         // No direct import on observers: the running peer service transfers,
         // authenticates and replays the record using their own confirmed blocks.
         for node in &nodes[1..] {
@@ -538,6 +543,7 @@ async fn payments_and_bootstrap_replay_identically_after_wire_delivery_and_fresh
                 {
                     assert_eq!(imported.certificate(), &certificate);
                     assert_eq!(imported.replayed().request(), replay.request());
+                    eprintln!("connected observer imported selection certificate");
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -548,6 +554,7 @@ async fn payments_and_bootstrap_replay_identically_after_wire_delivery_and_fresh
         fresh.port = port();
         fresh.rpc_port = port();
         nodes.push(launch(fresh).await);
+        eprintln!("fresh checkpoint observer launched");
         loop {
             let node = nodes.last().unwrap();
             if let Some(imported) =

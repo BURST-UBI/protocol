@@ -11,8 +11,12 @@ on:
       suite:
         type: choice
         default: all
-        options: [all, windows]
-        description: Full validation or isolated Windows service diagnosis
+        options: [all, windows, integration]
+        description: Full validation or isolated failure diagnosis
+      integration_target:
+        type: string
+        default: '*'
+        description: Cargo integration target; used only by manual integration runs
 
 concurrency:
   group: ${{ github.workflow }}-validation-${{ github.ref }}
@@ -34,6 +38,7 @@ jobs:
     outputs:
       runtime: ${{ steps.scope.outputs.runtime }}
       windows: ${{ steps.scope.outputs.windows }}
+      integration: ${{ steps.scope.outputs.integration }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -318,7 +323,7 @@ jobs:
 
   integration-test:
     needs: scope
-    if: needs.scope.outputs.runtime == 'true'
+    if: needs.scope.outputs.integration == 'true'
     name: Integration Tests
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -332,4 +337,6 @@ jobs:
           shared-key: burst-nightly
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run integration tests
-        run: cargo test -p burst-node --locked --test '*' -- --test-threads=1
+        env:
+          INTEGRATION_TARGET: ${{ github.event_name == 'workflow_dispatch' && inputs.suite == 'integration' && inputs.integration_target || '*' }}
+        run: cargo test -p burst-node --locked --test "$INTEGRATION_TARGET" -- --test-threads=1

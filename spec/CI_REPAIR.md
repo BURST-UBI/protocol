@@ -92,3 +92,28 @@ external NTS/drand reachability, NAT hardware, large-state resource bounds or
 the owner's production VPS. The release workflow also cannot sign off the 335
 open specification entries. These are explicit coverage limits, not optional
 requirements silently dropped from release readiness.
+
+## Diagnostic handoff
+
+Keep run 39313057623's remaining workers alive. Do not push workflow-only work
+to main while that would cancel their useful results. The `ci-repair-validation`
+branch allows explicit Windows/integration diagnosis without repeating unrelated
+jobs. Manual filtered runs are not full-suite passes.
+
+Windows run 39314401208 proves startup stack overflow in both SCM and a foreground
+probe (exit 0xC00000FD). Service command quoting and config resolution succeed.
+The next change boxes node construction/start futures and adds a supervisor-size
+regression. Do not increase thread stack limits. Reuse the warmed Windows cache;
+the same service lifecycle must pass, including clean restart and bad config.
+
+Both governance ballot tests in run 39313057623 advance through their live
+journey, then fail in the old genesis-only post-run replay helper. The helper now
+supplies the certified prefix preceding the exact counting cut. The later
+revocation remains excluded, and reversed block order must retain the same ballot
+commitment. The fresh-observer result is not signed off until the whole case passes.
+
+The payment replay integration test passes its former bootstrap-exit failure but
+times out later. Its manual certificate transfer stage needs diagnosis. The next
+attempt adds checkpoint-service logs and stage markers only; no timeout, guard,
+quorum or assertion is relaxed. Run just `confirmed_replay_network`, not the
+entire network group, to identify the blocked stage before another behavior edit.

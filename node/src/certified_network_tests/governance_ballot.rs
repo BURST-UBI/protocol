@@ -304,6 +304,13 @@ fn assert_counting_cut(config: &NodeConfig, hash: &str, cutoff: u64) {
     use crate::confirmed_history::ConfirmedHistory;
     use crate::confirmed_replay::ConfirmedReplay;
     let store = burst_store_lmdb::LmdbStore::open(&config.data_dir, 32, 256 << 20).unwrap();
+    let mut events =
+        crate::checkpoint_store::chain::load(&store, NetworkId::Dev, &config.params).unwrap();
+    events.retain(|event| event.certificate().checkpoint.cutoff < cutoff);
+    let parent_heads = events.last().map_or(
+        &[][..],
+        crate::checkpoint_store::chain::CertifiedEvent::heads,
+    );
     let heads = ConfirmedHistory::heads_at(&store, cutoff).unwrap();
     let history = ConfirmedHistory::read(
         &store,
@@ -311,15 +318,24 @@ fn assert_counting_cut(config: &NodeConfig, hash: &str, cutoff: u64) {
         crate::genesis_state::block(NetworkId::Dev, &config.params).hash,
         cutoff,
         &heads,
-        &[],
+        parent_heads,
     )
     .unwrap();
     let id = burst_wallet_core::signed_client::parse_hash(hash)
         .unwrap()
         .into_tx_hash();
-    let prepared =
-        ConfirmedReplay::prepare_governance_ballot(&history, NetworkId::Dev, &config.params, id)
-            .unwrap();
+    let prepare = |history: &ConfirmedHistory| {
+        ConfirmedReplay::replay_governance_candidate(
+            history,
+            NetworkId::Dev,
+            &config.params,
+            &events,
+        )
+        .unwrap()
+        .ballot_at(history, id)
+        .unwrap()
+    };
+    let prepared = prepare(&history);
     let proposal = prepared.next_proposal();
     assert_eq!(proposal.phase, burst_governance::GovernancePhase::Cooldown);
     assert_eq!(
@@ -338,16 +354,13 @@ fn assert_counting_cut(config: &NodeConfig, hash: &str, cutoff: u64) {
         history.genesis(),
         cutoff,
         &heads,
-        &[],
+        parent_heads,
         blocks,
         history.proposal_witnesses().to_vec(),
     )
     .unwrap();
     assert_eq!(
-        ConfirmedReplay::prepare_governance_ballot(&detached, NetworkId::Dev, &config.params, id)
-            .unwrap()
-            .commitment()
-            .unwrap(),
+        prepare(&detached).commitment().unwrap(),
         prepared.commitment().unwrap()
     );
     assert!(

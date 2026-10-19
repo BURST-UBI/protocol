@@ -13,8 +13,9 @@ test('code, build inputs, workflows and unknown paths run runtime validation', (
 });
 
 test('explicit Windows diagnosis does not repeat unrelated Rust journeys', () => {
-  assert.deepEqual(selectChecks(true, 'windows'), {runtime:false, windows:true});
-  assert.deepEqual(selectChecks(true), {runtime:true, windows:true});
-  assert.deepEqual(selectChecks(false), {runtime:false, windows:false});
+  assert.deepEqual(selectChecks(true, 'windows'), {runtime:false, windows:true, integration:false});
+  assert.deepEqual(selectChecks(true, 'integration'), {runtime:false, windows:false, integration:true});
+  assert.deepEqual(selectChecks(true), {runtime:true, windows:true, integration:true});
+  assert.deepEqual(selectChecks(false), {runtime:false, windows:false, integration:false});
   assert.throws(() => selectChecks(true, 'typo'));
 });

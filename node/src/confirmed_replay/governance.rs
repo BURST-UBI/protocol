@@ -136,7 +136,7 @@ impl ConfirmedReplay {
         replay.ballot_at(history, proposal)
     }
 
-    fn ballot_at(
+    pub(crate) fn ballot_at(
         &self,
         history: &impl LifecycleHistory,
         proposal: TxHash,

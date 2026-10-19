@@ -281,14 +281,14 @@ async fn run(
                     }
                     NetworkId::Live => {}
                 }
-                let mut node = burst_node::BurstNode::new(config).await?;
+                // Keep startup state off the supervisor/Windows service stack.
+                let mut node = Box::pin(burst_node::BurstNode::new(config)).await?;
                 if let Some(ready) = ready {
                     let _ = ready.send(());
                 }
                 let started = if let Some(mut stop) = stop {
                     let shutdown = node.shutdown.clone();
-                    let start = node.start();
-                    tokio::pin!(start);
+                    let mut start = Box::pin(node.start());
                     tokio::select! {
                         result = &mut start => result,
                         _ = wait_for_stop(&mut stop) => {
@@ -297,7 +297,7 @@ async fn run(
                         }
                     }
                 } else {
-                    node.start().await
+                    Box::pin(node.start()).await
                 };
 
                 tracing::info!("Node run ended; stopping subsystems");
@@ -316,6 +316,13 @@ async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn node_supervisor_future_does_not_embed_startup_state() {
+        let cli = Cli::try_parse_from(["burst-daemon", "node", "run"]).unwrap();
+        let future = run(cli, None, None);
+        assert!(std::mem::size_of_val(&future) < 64 * 1024);
+    }
 
     #[tokio::test]
     async fn stop_signal_is_latched_and_sender_loss_also_stops() {
