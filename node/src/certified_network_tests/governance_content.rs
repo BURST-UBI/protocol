@@ -243,6 +243,12 @@ async fn signed_constitution_diff_activates_over_tcp_and_survives_reopen_and_fre
     for config in &configs {
         let store = burst_store_lmdb::LmdbStore::open(&config.data_dir, 32, 256 << 20).unwrap();
         let cutoff = Timestamp::now().as_secs();
+        let events =
+            crate::checkpoint_store::chain::load(&store, NetworkId::Dev, &config.params).unwrap();
+        let parent_heads = events.last().map_or(
+            &[][..],
+            crate::checkpoint_store::chain::CertifiedEvent::heads,
+        );
         let heads = crate::confirmed_history::ConfirmedHistory::heads_at(&store, cutoff).unwrap();
         let history = crate::confirmed_history::ConfirmedHistory::read(
             &store,
@@ -250,7 +256,7 @@ async fn signed_constitution_diff_activates_over_tcp_and_survives_reopen_and_fre
             crate::genesis_state::block(NetworkId::Dev, &config.params).hash,
             cutoff,
             &heads,
-            &[],
+            parent_heads,
         )
         .unwrap();
         let proposal = burst_wallet_core::signed_client::parse_hash(&hash).unwrap();
@@ -266,15 +272,21 @@ async fn signed_constitution_diff_activates_over_tcp_and_survives_reopen_and_fre
             history.genesis(),
             cutoff,
             &heads,
-            &[],
+            parent_heads,
             history.replay_blocks().to_vec(),
             history.proposal_witnesses().to_vec(),
         )
         .unwrap();
         assert_eq!(detached.commitment(), history.commitment());
         assert_eq!(detached.proposal_content(&proposal), Some(bytes));
-        let replayed =
-            crate::governance_commit::ledger::replay::genesis_transcript(&detached, &config.params);
+        let state = crate::confirmed_replay::ConfirmedReplay::replay_with_events(
+            &detached,
+            NetworkId::Dev,
+            &config.params,
+            &events,
+        )
+        .unwrap();
+        let replayed = state.governance_state().unwrap();
         let governance = replayed
             .governance
             .get_proposal(&proposal.into_tx_hash())

@@ -20,6 +20,28 @@ async fn transact(clients: &[NodeClient], signer: &KeyPair, tx: Transaction) -> 
     submitted.hash
 }
 
+async fn wait_roster_epoch(clients: &[NodeClient], previous: &str) {
+    let mut observed = Vec::new();
+    let result = tokio::time::timeout(Duration::from_secs(25), async {
+        loop {
+            observed.clear();
+            for client in clients {
+                let params = client.rpc_call("params_hash", json!({})).await.unwrap();
+                observed.push(params["payment_epoch"].as_str().unwrap().to_owned());
+            }
+            if observed[0] != previous && observed.iter().all(|epoch| epoch == &observed[0]) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+    assert!(
+        result.is_ok(),
+        "verified human did not enter a shared installed roster: {observed:?}"
+    );
+}
+
 async fn check(clients: &[NodeClient], hash: &str) {
     wait_phase(clients, hash, "Activated").await;
     for client in clients {
@@ -64,7 +86,7 @@ async fn signed_multi_human_ballot_replays_at_its_cut_without_later_revocation()
 
 async fn governance_journey(check_catchup: bool) {
     let _ = tracing_subscriber::fmt()
-        .with_env_filter("burst_node::node=debug,burst_node::bootstrap=debug")
+        .with_env_filter("burst_node::node=debug,burst_node::bootstrap=debug,burst_node::checkpoint_service=debug,burst_node::checkpoint_sync=debug")
         .with_test_writer()
         .try_init();
     let _permit = crate::verification_test_support::NETWORK_FIXTURE
@@ -147,6 +169,7 @@ async fn governance_journey(check_catchup: bool) {
             .map(|key| burst_crypto::derive_address(&key.public))
             .collect();
         for index in 1..3 {
+            let previous = initial[0].rpc_call("params_hash", json!({})).await.unwrap();
             transact(
                 &initial,
                 &keys[0],
@@ -156,6 +179,9 @@ async fn governance_journey(check_catchup: bool) {
                 ),
             )
             .await;
+            // The new human changes certified voting authority. Fund that
+            // account only after all participants have installed the new epoch.
+            wait_roster_epoch(&initial, previous["payment_epoch"].as_str().unwrap()).await;
             let source = transact(
                 &initial,
                 &keys[0],

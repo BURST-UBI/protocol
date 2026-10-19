@@ -1001,6 +1001,13 @@ impl ConfirmedReplay {
         &self.params
     }
 
+    #[cfg(test)]
+    pub(crate) fn governance_state(
+        &self,
+    ) -> Option<&crate::governance_commit::CandidateGovernance> {
+        self.governance.as_ref()
+    }
+
     pub fn brn_balance(&self, address: &WalletAddress) -> Result<u128, ReplayError> {
         self.brn.get_wallet(address).map_or(Ok(0), |wallet| {
             self.brn
@@ -2831,6 +2838,12 @@ mod tests {
                 });
                 if runtime {
                     drop(drivers[index].take());
+                    crate::checkpoint_sync::witness::start(
+                        stores[index].as_ref().unwrap().clone(),
+                        registries[index].clone(),
+                        stops[index].clone(),
+                    )
+                    .await;
                     workers.push(tokio::spawn(checkpoint_service::run_node(
                         checkpoint_service::Settings {
                             store: stores[index].as_ref().unwrap().clone(),

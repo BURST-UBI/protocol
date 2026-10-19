@@ -49,5 +49,3 @@ impl Ledger for LmdbWriteTransaction<'_> {
 }
 
 pub(crate) mod derived;
-#[cfg(test)]
-pub(crate) mod replay;

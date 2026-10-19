@@ -139,9 +139,10 @@ layout fix gives the signing-device message a flexible basis so its action can
 stay alongside it; no warning, text size or hit target was removed. Emil's layout
 guidance informed that change. Full wallet CI is run 39317237388.
 
-Filtered browser diagnosis must select the relevant file: filtering across every
-file left a no-matching-test browser process alive until the job timeout in
-39314468567. The focused dashboard run completes in seconds. Full runs still
+Filtered browser diagnosis selects the relevant file: the all-file filtered run
+39314468567 hung before producing a test result, with a browser process still
+alive at the job timeout. Its exact hook-level cause is not established. The
+focused dashboard run completes in seconds. Full runs still
 select every browser test. Network shards now finish their remaining isolated
 cases after a failure and return failure with the exact names; runner contracts
 verify this in both Cargo and prebuilt modes.
