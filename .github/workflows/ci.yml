@@ -165,7 +165,15 @@ jobs:
           cache-on-failure: true
       - name: Compile and collect the exact test executable
         run: |
-          cargo test -p burst-node --lib --locked --profile validation --no-run --message-format=json > "$RUNNER_TEMP/node-build.jsonl"
+          if ! cargo test -p burst-node --lib --locked --profile validation --no-run --message-format=json > "$RUNNER_TEMP/node-build.jsonl"; then
+            node --input-type=module -e '
+              import {readFileSync} from "node:fs";
+              for (const line of readFileSync(process.env.RUNNER_TEMP + "/node-build.jsonl", "utf8").trim().split("\n")) {
+                const item = JSON.parse(line);
+                if (item.reason === "compiler-message" && item.message.rendered) process.stderr.write(item.message.rendered);
+              }'
+            exit 1
+          fi
           node --input-type=module -e '
             import {readFileSync, mkdirSync, copyFileSync} from "node:fs";
             const artifacts = readFileSync(process.env.RUNNER_TEMP + "/node-build.jsonl", "utf8")
