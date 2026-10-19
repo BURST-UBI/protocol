@@ -496,10 +496,15 @@ async fn payment_replay_journey(certified_catchup: bool) {
         // This is a replay/import fixture, not a live agreement test. Construct
         // its certificate with an isolated durable signer; the running source's
         // round manager may already have advanced while payments were delivered.
-        let signer =
-            LmdbStore::open(&directory.path().join("certificate-signer"), 32, 32 << 20).unwrap();
+        let signer_node = BurstNode::new(NodeConfig {
+            data_dir: directory.path().join("certificate-signer"),
+            ..configs[0].clone()
+        })
+        .await
+        .unwrap();
+        let signer = &signer_node.store;
         let proposed = checkpoint_agreement::apply(
-            &signer,
+            signer,
             &anchor,
             &creator_keys.private,
             Command::Propose(replay.checkpoint().clone()),
@@ -511,7 +516,7 @@ async fn payment_replay_journey(certified_catchup: bool) {
             panic!("expected checkpoint proposal")
         };
         let votes = checkpoint_agreement::apply(
-            &signer,
+            signer,
             &anchor,
             &creator_keys.private,
             Command::Proposal(proposal),
@@ -527,7 +532,7 @@ async fn payment_replay_journey(certified_catchup: bool) {
             signatures: vec![prevote.signer.clone()],
         };
         let commits = checkpoint_agreement::apply(
-            &signer,
+            signer,
             &anchor,
             &creator_keys.private,
             Command::Prepared(proposal, &proof),
@@ -544,7 +549,7 @@ async fn payment_replay_journey(certified_catchup: bool) {
             signatures: vec![precommit.signer.clone()],
         };
         checkpoint_agreement::apply(
-            &signer,
+            signer,
             &anchor,
             &creator_keys.private,
             Command::Decide(certificate.clone()),
