@@ -36,7 +36,7 @@ jobs:
 
   build-linux-amd64:
     name: Build (linux-amd64)
-    needs: release-readiness
+    needs: [release-readiness, validation]
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -70,7 +70,7 @@ jobs:
 
   build-linux-arm64:
     name: Build (linux-arm64)
-    needs: release-readiness
+    needs: [release-readiness, validation]
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -101,7 +101,7 @@ jobs:
 
   build-macos-arm64:
     name: Build (darwin-arm64)
-    needs: release-readiness
+    needs: [release-readiness, validation]
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
@@ -133,7 +133,7 @@ jobs:
 
   build-macos-amd64:
     name: Build (darwin-amd64)
-    needs: release-readiness
+    needs: [release-readiness, validation]
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
@@ -162,7 +162,7 @@ jobs:
 
   build-windows-amd64:
     name: Build (windows-amd64)
-    needs: release-readiness
+    needs: [release-readiness, validation]
     runs-on: windows-latest
     timeout-minutes: 45
     steps:

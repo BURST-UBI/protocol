@@ -106,23 +106,6 @@ jobs:
       - run: node --test --test-concurrency=1 tools/*.test.mjs
       - run: node tools/check-spec-coverage.mjs
 
-  check:
-    needs: scope
-    if: needs.scope.outputs.runtime == 'true'
-    name: Check
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly-2026-10-11
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: burst-nightly
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo check --workspace --locked
-
   wasm:
     needs: scope
     if: needs.scope.outputs.runtime == 'true'

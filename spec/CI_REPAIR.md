@@ -95,16 +95,15 @@ requirements silently dropped from release readiness.
 
 ## Diagnostic handoff
 
-Keep run 39313057623's remaining workers alive. Do not push workflow-only work
-to main while that would cancel their useful results. The `ci-repair-validation`
-branch allows explicit Windows/integration diagnosis without repeating unrelated
-jobs. Manual filtered runs are not full-suite passes.
+Run 39313057623 is terminal. The `ci-repair-validation` branch allows explicit
+Windows/integration/node diagnosis without repeating unrelated jobs. Manual
+filtered runs are not full-suite passes.
 
 Windows run 39314401208 proves startup stack overflow in both SCM and a foreground
 probe (exit 0xC00000FD). Service command quoting and config resolution succeed.
-The next change boxes node construction/start futures and adds a supervisor-size
-regression. Do not increase thread stack limits. Reuse the warmed Windows cache;
-the same service lifecycle must pass, including clean restart and bad config.
+Boxing node construction/start futures fixes the failure: run 39315332589 passes
+daemon tests and the complete Windows service lifecycle, including clean restart
+and bad config. Stack limits are unchanged. The supervisor-size regression passes.
 
 Both governance ballot tests in run 39313057623 advance through their live
 journey, then fail in the old genesis-only post-run replay helper. The helper now
@@ -112,8 +111,37 @@ supplies the certified prefix preceding the exact counting cut. The later
 revocation remains excluded, and reversed block order must retain the same ballot
 commitment. The fresh-observer result is not signed off until the whole case passes.
 
-The payment replay integration test passes its former bootstrap-exit failure but
-times out later. Its manual certificate transfer stage needs diagnosis. The next
-attempt adds checkpoint-service logs and stage markers only; no timeout, guard,
-quorum or assertion is relaxed. Run just `confirmed_replay_network`, not the
-entire network group, to identify the blocked stage before another behavior edit.
+The payment replay integration test passes in 31.69 seconds in run 39315812086.
+That run changes diagnostics, not protocol behavior, from the earlier 300-second
+timeout. The timeout remains an unexplained intermittent failure; a single
+targeted pass does not establish its cause or erase it. Stage markers remain for
+the next integration boundary. No wait budget, guard or quorum was relaxed.
+
+The full component run found eight failures: five stale snapshot proof fixtures,
+two assertions naming `constitution` rather than the actual corrupted
+`consti_engine` key, and a wire golden still encoding version 33 instead of 36.
+Snapshot tests now supply required authenticated proofs on positive paths and
+check rejection at the earlier planning boundary on missing-proof paths. Invalid
+suffix tests also supply valid proofs so unrelated missing witnesses cannot mask
+their intended rejection. Runtime proof requirements are unchanged.
+
+Run 39316338539 targets those eight cases, both governance ballots, constitution
+catch-up, the stalled checkpoint runtime and the compact outcome stack overflow.
+The latter two remain diagnostic work, not completed fixes. The shared binary
+and exact-name runner are used; no node compiler runs on the desktop.
+
+## Which checks are necessary
+
+- Keep native tests, WASM, Clippy, formatting, tool contracts, network/recovery
+  journeys and platform lifecycle checks. Their assertions differ.
+- Remove standalone workspace `cargo check`: Clippy checks the same default
+  workspace targets with the same locked dependencies and warnings policy.
+- Compile the node test executable once, not independently in six workers.
+- Documentation-only changes run inventory/tool contracts. Unknown inputs still
+  trigger runtime checks. Release validation always runs the full suite.
+- Release builds wait for conformance **and** validation. Publication remains
+  manual and still depends on all five platform builds.
+
+The GitHub API reports main is not branch-protected. CI reports failures but does
+not itself prevent a direct push. Changing repository governance is separate from
+repairing the workflow; no protection policy has been silently imposed.

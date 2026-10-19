@@ -11,8 +11,9 @@ test("release builds wait for readiness without disabling development CI", () =>
     .map(([, name, body]) => [name, body]));
   const builds = [...jobs.keys()].filter(name => name.startsWith("build-"));
   assert.equal(builds.length, 5);
-  for (const name of ["validation", ...builds]) {
-    assert.match(jobs.get(name) ?? "", /^    needs: release-readiness$/m, name);
+  assert.match(jobs.get("validation"), /^    needs: release-readiness$/m);
+  for (const name of builds) {
+    assert.match(jobs.get(name) ?? "", /^    needs: \[release-readiness, validation\]$/m, name);
     assert.doesNotMatch(jobs.get(name), /^    if:/m, "do not bypass dependency failure");
   }
   assert.match(jobs.get("release-readiness"), /node tools\/check-spec-coverage\.mjs --release/);
