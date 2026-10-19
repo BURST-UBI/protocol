@@ -125,10 +125,26 @@ check rejection at the earlier planning boundary on missing-proof paths. Invalid
 suffix tests also supply valid proofs so unrelated missing witnesses cannot mask
 their intended rejection. Runtime proof requirements are unchanged.
 
-Run 39316338539 targets those eight cases, both governance ballots, constitution
+Run 39317355166 targets those eight cases, both governance ballots, constitution
 catch-up, the stalled checkpoint runtime and the compact outcome stack overflow.
-The latter two remain diagnostic work, not completed fixes. The shared binary
-and exact-name runner are used; no node compiler runs on the desktop.
+The preceding attempt caught an obsolete test-only accessor after its last use
+was removed; it did not execute tests. Compiler failures now render from the JSON
+build record. The shared executable builds and transfers successfully. The last
+two network cases remain diagnostic work, not completed fixes. No node compiler
+runs on the desktop.
+
+Wallet f721634 passes the targeted reduced-motion and compact-window checks in
+run 39317046171. The motion test now selects the actual origin disclosure. The
+layout fix gives the signing-device message a flexible basis so its action can
+stay alongside it; no warning, text size or hit target was removed. Emil's layout
+guidance informed that change. Full wallet CI is run 39317237388.
+
+Filtered browser diagnosis must select the relevant file: filtering across every
+file left a no-matching-test browser process alive until the job timeout in
+39314468567. The focused dashboard run completes in seconds. Full runs still
+select every browser test. Network shards now finish their remaining isolated
+cases after a failure and return failure with the exact names; runner contracts
+verify this in both Cargo and prebuilt modes.
 
 ## Which checks are necessary
 

@@ -6,8 +6,8 @@ export function needsRuntime(paths) {
   // Only known documentation paths can skip runtime checks. Unknown inputs
   // (including workflows, toolchains, fixtures and scripts) run the full suite.
   return paths.some(path => !(
-    path.startsWith('docs/') || path.startsWith('spec/') ||
-    (!path.includes('/') && path.endsWith('.md'))
+    path === 'spec/coverage.json' ||
+    (path.endsWith('.md') && (path.startsWith('docs/') || path.startsWith('spec/') || !path.includes('/')))
   ));
 }
 
