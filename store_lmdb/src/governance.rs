@@ -4,11 +4,11 @@
 //! `get_votes` performs a prefix range-scan on the 32-byte proposal prefix.
 //! No length-prefixed blobs or dual writes.
 
+use crate::shared_env::SharedEnv;
 use std::ops::Bound;
-use std::sync::Arc;
 
 use heed::types::Bytes;
-use heed::{Database, Env};
+use heed::Database;
 
 use burst_store::governance::GovernanceStore;
 use burst_store::StoreError;
@@ -18,7 +18,7 @@ use crate::block::increment_prefix;
 use crate::LmdbError;
 
 pub struct LmdbGovernanceStore {
-    pub(crate) env: Arc<Env>,
+    pub(crate) env: SharedEnv,
     pub(crate) proposals_db: Database<Bytes, Bytes>,
     pub(crate) votes_db: Database<Bytes, Bytes>,
     pub(crate) delegations_db: Database<Bytes, Bytes>,

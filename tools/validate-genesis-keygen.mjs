@@ -1,0 +1,27 @@
+// Run against a built genesis_keygen example; never uses an existing network key.
+import assert from 'node:assert/strict';
+import {spawnSync} from 'node:child_process';
+import {mkdtempSync, readFileSync, statSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+const binary = process.argv[2];
+assert(binary, 'Provide the genesis_keygen executable path');
+const directory = mkdtempSync(join(tmpdir(), 'burst-keygen-check-'));
+const seedFile = join(directory, 'disposable.seed');
+const run = args => spawnSync(binary, args, {encoding:'utf8', timeout:10000});
+const created = run(['test','--seed-file',seedFile]);
+assert.equal(created.status, 0);
+const seed = readFileSync(seedFile, 'utf8').trim();
+assert(/^[0-9a-f]{64}$/.test(seed));
+assert.equal(statSync(seedFile).mode & 0o777, 0o600);
+assert(!(created.stdout + created.stderr).includes(seed), 'File-mode output disclosed seed');
+assert(created.stdout.includes('Genesis address:'));
+assert(created.stdout.includes('Genesis signature:'));
+assert(created.stdout.includes('BURST_TEST_GENESIS_PUBLIC_KEY'));
+const duplicate = run(['test','--seed-file',seedFile]);
+assert.notEqual(duplicate.status, 0);
+assert(readFileSync(seedFile, 'utf8').trim() === seed, 'Existing seed changed');
+assert(!(duplicate.stdout + duplicate.stderr).includes(seed));
+assert.notEqual(run(['test']).status, 0);
+assert.notEqual(run(['typo','--seed-file',join(directory,'unused')]).status, 0);
+console.log('PASS file-mode CLI: private seed, public output, no secret disclosure, no overwrite, explicit network/output');

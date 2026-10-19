@@ -9,8 +9,9 @@ use serde::{Deserialize, Serialize};
 /// IMPLEMENTATION_DECISIONS 6.17(b), merged tokens do NOT carry flattened
 /// ancestry — their `origin` is the merge transaction hash, and constituent
 /// origins are discovered by following the merger graph.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrstToken {
+    pub basis: burst_types::TrstBasis,
     /// Unique identifier for this token instance (hash of the creating tx).
     pub id: TxHash,
 
@@ -92,8 +93,8 @@ impl TrstToken {
         if expiry_secs == 0 || self.state == TrstState::Revoked {
             return 0;
         }
-        if self.state == TrstState::Expired {
-            return 0;
+        if expiry_secs == u64::MAX {
+            return 10_000;
         }
         let age_secs = now
             .as_secs()
@@ -110,6 +111,47 @@ impl TrstToken {
     /// an effective value of 500 TRST.
     pub fn effective_value(&self, now: Timestamp, expiry_secs: u64) -> u128 {
         let bps = self.current_value_bps(now, expiry_secs) as u128;
-        self.amount.saturating_mul(bps) / 10_000
+        // Divide first while retaining the remainder. Multiplying a valid u128
+        // raw amount by basis points can overflow even though the result fits.
+        (self.amount / 10_000) * bps + ((self.amount % 10_000) * bps) / 10_000
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linear_reference_preserves_large_raw_amounts() {
+        let token = TrstToken {
+            basis: Default::default(),
+            id: TxHash::ZERO,
+            amount: u128::MAX,
+            origin: TxHash::ZERO,
+            link: TxHash::ZERO,
+            holder: WalletAddress::new(format!("brst_{:0>75}", "test")),
+            origin_timestamp: Timestamp::new(100),
+            effective_origin_timestamp: Timestamp::new(100),
+            state: TrstState::Active,
+            origin_wallet: WalletAddress::new(format!("brst_{:0>75}", "origin")),
+            revoked_origin: None,
+        };
+        assert_eq!(token.effective_value(Timestamp::new(100), 100), u128::MAX);
+        assert_eq!(
+            token.effective_value(Timestamp::new(150), 100),
+            u128::MAX / 2
+        );
+        assert_eq!(token.effective_value(Timestamp::new(200), 100), 0);
+        assert_eq!(token.current_value_bps(Timestamp::new(u64::MAX), u64::MAX), 10_000);
+        assert_eq!(token.effective_value(Timestamp::new(u64::MAX), u64::MAX), u128::MAX);
+        assert_eq!(token.current_value_bps(Timestamp::new(99), 100), 10_000);
+        assert_eq!(token.current_value_bps(Timestamp::new(150), 100), 5_000);
+        assert_eq!(token.current_value_bps(Timestamp::new(150), 0), 0);
+        let mut expired = token.clone();
+        expired.state = TrstState::Expired;
+        assert_eq!(expired.current_value_bps(Timestamp::new(200), 100), 0);
+        assert_eq!(expired.current_value_bps(Timestamp::new(200), 200), 5_000);
+        expired.state = TrstState::Revoked;
+        assert_eq!(expired.current_value_bps(Timestamp::new(200), u64::MAX), 0);
     }
 }

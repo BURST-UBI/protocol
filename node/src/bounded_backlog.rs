@@ -8,7 +8,7 @@ use burst_types::{BlockHash, WalletAddress};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Maximum unconfirmed blocks before proactive rollback.
-const DEFAULT_MAX_BACKLOG: usize = 100_000;
+const DEFAULT_MAX_BACKLOG: usize = 65_536;
 
 /// Maximum unconfirmed blocks per account (prevents single-account spam).
 const MAX_BACKLOG_PER_ACCOUNT: usize = 128;
@@ -36,6 +36,12 @@ struct BacklogEntry {
 }
 
 impl BoundedBacklog {
+    pub(crate) fn clear(&mut self) {
+        self.entries.clear();
+        self.by_priority.clear();
+        self.per_account.clear();
+        self.protected.clear();
+    }
     pub fn new(max_size: usize) -> Self {
         Self {
             entries: HashMap::new(),

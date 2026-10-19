@@ -24,6 +24,7 @@ members = [
     "rpc",
     "websocket",
     "wallet_core",
+    "browser",
     "groups",
     "nullables",
 ]
@@ -74,6 +75,10 @@ tower-http = { version = "0.6", features = ["cors"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
+wasm-bindgen = "=0.2.126"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = "0.3"
 prost = "0.13"
 
 # Metrics
@@ -113,5 +118,37 @@ burst-node = { path = "node" }
 burst-rpc = { path = "rpc" }
 burst-websocket = { path = "websocket" }
 burst-wallet-core = { path = "wallet_core" }
+burst-browser = { path = "browser" }
 burst-groups = { path = "groups" }
 burst-nullables = { path = "nullables" }
+
+# Native development journeys request real work from the daemon. Keep hashing
+# optimized without lowering network difficulty or disabling debug assertions.
+[profile.dev.package.burst-work]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
+
+# Checkpoint replay verifies the same signed prefixes many times. Optimize the
+# curve arithmetic while retaining debug assertions in the protocol under test.
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+
+[profile.dev.package.ed25519-dalek]
+opt-level = 3
+
+[profile.test.package.curve25519-dalek]
+opt-level = 3
+
+[profile.test.package.ed25519-dalek]
+opt-level = 3
+
+[profile.test.package.blake2]
+opt-level = 3
+
+# Functional validation keeps test assertions without full debug-symbol output.
+# Release performance and packaged-candidate checks still use the release profile.
+[profile.validation]
+inherits = "test"
+debug = 0

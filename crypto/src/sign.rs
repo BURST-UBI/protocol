@@ -1,7 +1,7 @@
 //! Ed25519 message signing and verification.
 
 use burst_types::{PrivateKey, PublicKey, Signature};
-use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 
 /// Sign a message with a private key, returning the signature.
 pub fn sign_message(message: &[u8], private_key: &PrivateKey) -> Signature {
@@ -19,7 +19,7 @@ pub fn verify_signature(message: &[u8], signature: &Signature, public_key: &Publ
         return false;
     };
     let dalek_sig = ed25519_dalek::Signature::from_bytes(&signature.0);
-    verifying_key.verify(message, &dalek_sig).is_ok()
+    verifying_key.verify_strict(message, &dalek_sig).is_ok()
 }
 
 #[cfg(test)]
@@ -74,5 +74,20 @@ mod tests {
         let sig = sign_message(b"test", &kp.private);
         let bad_key = PublicKey([0xFF; 32]);
         assert!(!verify_signature(b"test", &sig, &bad_key));
+    }
+
+    #[test]
+    fn weak_identity_key_cannot_forge_votes_for_any_message() {
+        let mut identity = [0; 32];
+        identity[0] = 1;
+        let mut forged = [0; 64];
+        forged[..32].copy_from_slice(&identity);
+        for message in [b"checkpoint A".as_slice(), b"checkpoint B"] {
+            assert!(!verify_signature(
+                message,
+                &Signature(forged),
+                &PublicKey(identity)
+            ));
+        }
     }
 }

@@ -5,10 +5,14 @@ edition.workspace = true
 license.workspace = true
 description = "Unique Humanity Verification — endorsers, verifiers, challenges, modular verification"
 
+[features]
+experimental-testnet = []
+
 [dependencies]
 burst-types = { workspace = true }
 burst-brn = { workspace = true }
 burst-crypto = { workspace = true }
+burst-consensus = { workspace = true }
 burst-vrf = { workspace = true }
 burst-transactions = { workspace = true }
 serde = { workspace = true }

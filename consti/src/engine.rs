@@ -10,16 +10,26 @@ use burst_governance::proposal::GovernancePhase;
 use burst_types::{TxHash, WalletAddress};
 use std::collections::HashMap;
 
+mod snapshot_undo;
+
 /// A vote on a constitutional amendment.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ConstiVote {
     Yea,
     Nay,
     Abstain,
 }
 
+/// An approved patch cannot be applied to the constitution at activation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum AmendmentConflict {
+    ArticleNotFound(u64),
+    ArticleAlreadyRepealed(u64),
+}
+
 /// The constitutional engine manages amendments through their lifecycle,
 /// tracking votes and applying diff-based changes to the constitution.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ConstiEngine {
     /// All submitted amendments indexed by their transaction hash.
     amendments: HashMap<TxHash, Amendment>,
@@ -27,6 +37,7 @@ pub struct ConstiEngine {
     votes: HashMap<TxHash, HashMap<WalletAddress, ConstiVote>>,
     /// The current constitution document (canonical state).
     document: ConstiDocument,
+    conflicts: HashMap<TxHash, AmendmentConflict>,
 }
 
 impl ConstiEngine {
@@ -36,6 +47,7 @@ impl ConstiEngine {
             amendments: HashMap::new(),
             votes: HashMap::new(),
             document: ConstiDocument::genesis(),
+            conflicts: HashMap::new(),
         }
     }
 
@@ -47,6 +59,7 @@ impl ConstiEngine {
             amendments: HashMap::new(),
             votes: HashMap::new(),
             document: ConstiDocument::bootstrap(),
+            conflicts: HashMap::new(),
         }
     }
 
@@ -60,39 +73,7 @@ impl ConstiEngine {
         amendment: Amendment,
         document: &ConstiDocument,
     ) -> Result<TxHash, ConstiError> {
-        // Validate operations against current document state
-        for op in &amendment.operations {
-            match op {
-                AmendmentOp::AddArticle { title, text } => {
-                    if title.is_empty() || text.is_empty() {
-                        return Err(ConstiError::Other(
-                            "article title and text must not be empty".to_string(),
-                        ));
-                    }
-                }
-                AmendmentOp::ModifyArticle {
-                    article_number,
-                    new_text,
-                } => {
-                    if new_text.is_empty() {
-                        return Err(ConstiError::Other(
-                            "new article text must not be empty".to_string(),
-                        ));
-                    }
-                    if !document.has_active_article(*article_number) {
-                        return Err(ConstiError::ArticleNotFound(*article_number));
-                    }
-                }
-                AmendmentOp::RepealArticle { article_number } => {
-                    let article = document
-                        .get_article_including_repealed(*article_number)
-                        .ok_or(ConstiError::ArticleNotFound(*article_number))?;
-                    if article.repealed {
-                        return Err(ConstiError::ArticleAlreadyRepealed(*article_number));
-                    }
-                }
-            }
-        }
+        Self::apply_amendment(&amendment, &mut document.clone())?;
 
         let hash = amendment.hash;
         self.amendments.insert(hash, amendment);
@@ -147,7 +128,44 @@ impl ConstiEngine {
         &mut self,
         amendment: &Amendment,
     ) -> Result<(), ConstiError> {
-        Self::apply_amendment(amendment, &mut self.document)
+        if self.amendments.get(&amendment.hash).is_some_and(|saved| {
+            matches!(
+                saved.phase,
+                GovernancePhase::Activated | GovernancePhase::Conflicted
+            )
+        }) {
+            return Err(ConstiError::WrongPhase);
+        }
+        Self::apply_amendment(amendment, &mut self.document)?;
+        let mut activated = amendment.clone();
+        activated.phase = GovernancePhase::Activated;
+        self.amendments.insert(amendment.hash, activated);
+        Ok(())
+    }
+
+    /// Resolve an approved patch atomically. Target conflicts are terminal;
+    /// invalid content, corrupt state and arithmetic failures remain errors.
+    pub fn resolve_approved_amendment(
+        &mut self,
+        amendment: &Amendment,
+    ) -> Result<Option<AmendmentConflict>, ConstiError> {
+        let conflict = match self.activate_amendment_internal(amendment) {
+            Ok(()) => return Ok(None),
+            Err(ConstiError::ArticleNotFound(number)) => AmendmentConflict::ArticleNotFound(number),
+            Err(ConstiError::ArticleAlreadyRepealed(number)) => {
+                AmendmentConflict::ArticleAlreadyRepealed(number)
+            }
+            Err(error) => return Err(error),
+        };
+        let mut saved = amendment.clone();
+        saved.phase = GovernancePhase::Conflicted;
+        self.amendments.insert(saved.hash, saved);
+        self.conflicts.insert(amendment.hash, conflict);
+        Ok(Some(conflict))
+    }
+
+    pub fn activation_conflict(&self, hash: &TxHash) -> Option<AmendmentConflict> {
+        self.conflicts.get(hash).copied()
     }
 
     /// Apply an amendment to the given constitution document.
@@ -163,7 +181,34 @@ impl ConstiEngine {
         amendment: &Amendment,
         document: &mut ConstiDocument,
     ) -> Result<(), ConstiError> {
-        let new_version = document.version + 1;
+        let content = if amendment.operations.is_empty() {
+            burst_governance::ProposalContent::ConstitutionalAmendment {
+                title: amendment.title.clone(),
+                text: amendment.text.clone(),
+            }
+        } else {
+            burst_governance::ProposalContent::ConstitutionalDiff {
+                title: amendment.title.clone(),
+                operations: amendment.operations.clone(),
+            }
+        };
+        content
+            .validate_content()
+            .map_err(|error| ConstiError::Other(error.to_string()))?;
+        let mut candidate = document.clone();
+        Self::apply_operations(amendment, &mut candidate)?;
+        *document = candidate;
+        Ok(())
+    }
+
+    fn apply_operations(
+        amendment: &Amendment,
+        document: &mut ConstiDocument,
+    ) -> Result<(), ConstiError> {
+        let new_version = document
+            .version
+            .checked_add(1)
+            .ok_or_else(|| ConstiError::Other("constitution version overflow".into()))?;
 
         if amendment.operations.is_empty() {
             // Legacy behavior: add a single article from title/text
@@ -331,6 +376,185 @@ mod tests {
     }
 
     // ── Legacy activate (backward compatibility) ────────────────────
+
+    #[test]
+    fn approved_conflicts_are_atomic_terminal_and_preserve_votes() {
+        for repeat_repeal in [false, true] {
+            let mut engine = ConstiEngine::bootstrap();
+            let mut repeal = create_diff_amendment(
+                "Repeal".into(),
+                vec![AmendmentOp::RepealArticle { article_number: 1 }],
+            );
+            repeal.hash = unique_hash(1);
+            let mut later = create_diff_amendment(
+                "Independent patch".into(),
+                vec![
+                    AmendmentOp::AddArticle {
+                        title: "Must not leak".into(),
+                        text: "new".into(),
+                    },
+                    if repeat_repeal {
+                        AmendmentOp::RepealArticle { article_number: 1 }
+                    } else {
+                        AmendmentOp::ModifyArticle {
+                            article_number: 1,
+                            new_text: "updated".into(),
+                        }
+                    },
+                ],
+            );
+            later.hash = unique_hash(2);
+            later.votes_yea = 9;
+            later.votes_nay = 1;
+            // Both patches are valid before either activates.
+            engine
+                .submit_amendment(repeal.clone(), &engine.get_constitution().clone())
+                .unwrap();
+            engine
+                .submit_amendment(later.clone(), &engine.get_constitution().clone())
+                .unwrap();
+            assert_eq!(engine.resolve_approved_amendment(&repeal).unwrap(), None);
+            let before = serde_json::to_value(engine.get_constitution()).unwrap();
+            let conflict = if repeat_repeal {
+                AmendmentConflict::ArticleAlreadyRepealed(1)
+            } else {
+                AmendmentConflict::ArticleNotFound(1)
+            };
+            assert_eq!(
+                engine.resolve_approved_amendment(&later).unwrap(),
+                Some(conflict)
+            );
+            assert_eq!(
+                serde_json::to_value(engine.get_constitution()).unwrap(),
+                before
+            );
+            let saved = engine.get_amendment(&later.hash).unwrap();
+            assert_eq!(saved.phase, GovernancePhase::Conflicted);
+            assert_eq!((saved.votes_yea, saved.votes_nay), (9, 1));
+            assert_eq!(engine.activation_conflict(&later.hash), Some(conflict));
+            assert!(matches!(
+                engine.resolve_approved_amendment(&later),
+                Err(ConstiError::WrongPhase)
+            ));
+            assert!(matches!(
+                engine.activate_amendment_internal(&later),
+                Err(ConstiError::WrongPhase)
+            ));
+            let mut independent = create_diff_amendment(
+                "Unaffected".into(),
+                vec![AmendmentOp::ModifyArticle {
+                    article_number: 2,
+                    new_text: "still works".into(),
+                }],
+            );
+            independent.hash = unique_hash(3);
+            assert_eq!(
+                engine.resolve_approved_amendment(&independent).unwrap(),
+                None
+            );
+            assert_eq!(engine.get_constitution().version, 2);
+        }
+    }
+
+    #[test]
+    fn overlapping_modifications_apply_in_activation_order() {
+        let mut engine = ConstiEngine::bootstrap();
+        for (seed, text) in [(1, "First approved text"), (2, "Later approved text")] {
+            let mut amendment = create_diff_amendment(
+                "Modify".into(),
+                vec![AmendmentOp::ModifyArticle {
+                    article_number: 1,
+                    new_text: text.into(),
+                }],
+            );
+            amendment.hash = unique_hash(seed);
+            assert_eq!(engine.resolve_approved_amendment(&amendment).unwrap(), None);
+            assert_eq!(engine.get_constitution().get_article(1).unwrap().text, text);
+        }
+        assert_eq!(engine.get_constitution().version, 2);
+    }
+
+    #[test]
+    fn activation_errors_other_than_target_conflicts_remain_errors() {
+        let mut engine = ConstiEngine::bootstrap();
+        let mut amendment = create_diff_amendment(
+            "Update".into(),
+            vec![AmendmentOp::ModifyArticle {
+                article_number: 1,
+                new_text: "updated".into(),
+            }],
+        );
+        engine.document.version = u64::MAX;
+        assert!(matches!(
+            engine.resolve_approved_amendment(&amendment),
+            Err(ConstiError::Other(_))
+        ));
+        engine.document.version = 0;
+        amendment.title.clear();
+        assert!(engine.resolve_approved_amendment(&amendment).is_err());
+        assert!(engine.activation_conflict(&amendment.hash).is_none());
+        assert!(engine.get_amendment(&amendment.hash).is_none());
+        assert_eq!(engine.get_constitution().version, 0);
+    }
+
+    #[test]
+    fn failed_diff_is_atomic_and_sequential_edits_use_the_candidate_state() {
+        let mut engine = ConstiEngine::bootstrap();
+        let before = serde_json::to_value(engine.get_constitution()).unwrap();
+        let invalid = create_diff_amendment(
+            "Invalid".into(),
+            vec![
+                AmendmentOp::ModifyArticle {
+                    article_number: 1,
+                    new_text: "changed".into(),
+                },
+                AmendmentOp::RepealArticle { article_number: 2 },
+                AmendmentOp::AddArticle {
+                    title: "Added".into(),
+                    text: "new".into(),
+                },
+                AmendmentOp::ModifyArticle {
+                    article_number: 999,
+                    new_text: "missing".into(),
+                },
+            ],
+        );
+        assert!(engine.activate_amendment_internal(&invalid).is_err());
+        assert_eq!(
+            serde_json::to_value(engine.get_constitution()).unwrap(),
+            before
+        );
+        let valid = create_diff_amendment(
+            "Sequential".into(),
+            vec![
+                AmendmentOp::AddArticle {
+                    title: "Added".into(),
+                    text: "new".into(),
+                },
+                AmendmentOp::ModifyArticle {
+                    article_number: 4,
+                    new_text: "modified".into(),
+                },
+                AmendmentOp::RepealArticle { article_number: 2 },
+            ],
+        );
+        engine
+            .submit_amendment(valid.clone(), &engine.get_constitution().clone())
+            .unwrap();
+        engine.activate_amendment_internal(&valid).unwrap();
+        assert_eq!(engine.get_constitution().version, 1);
+        assert_eq!(
+            engine.get_constitution().get_article(4).unwrap().text,
+            "modified"
+        );
+        assert!(engine.get_constitution().get_article(2).is_none());
+        let before = serde_json::to_value(engine.get_constitution()).unwrap();
+        assert!(engine.activate_amendment_internal(&valid).is_err());
+        assert_eq!(
+            serde_json::to_value(engine.get_constitution()).unwrap(),
+            before
+        );
+    }
 
     #[test]
     fn test_activate_amendment_adds_article() {

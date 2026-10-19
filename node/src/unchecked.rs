@@ -7,7 +7,12 @@
 
 use burst_ledger::StateBlock;
 use burst_types::BlockHash;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use crate::block_retention::{BlockRetention, RetainedBlock, Slot};
+use std::sync::Arc;
+
+/// Implementation decision 26.2: retain missing-dependency blocks for 15 minutes.
+pub(crate) const MAX_AGE_SECS: u64 = 15 * 60;
 
 /// Reason a block is in the unchecked map.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -25,6 +30,7 @@ pub struct UncheckedEntry {
     pub block: StateBlock,
     /// Unix timestamp (seconds) when this entry was received.
     pub received_at: u64,
+    slot: Option<Slot>,
 }
 
 /// Extended unchecked map that tracks both gap-previous and gap-source.
@@ -36,33 +42,66 @@ pub struct UncheckedMap {
     entries: HashMap<BlockHash, Vec<UncheckedEntry>>,
     /// Maps source_hash → blocks waiting for the linked send block (gap-source).
     source_dependents: HashMap<BlockHash, Vec<UncheckedEntry>>,
+    queued: HashSet<BlockHash>,
     /// Total number of individual entries across all dependency keys.
     count: usize,
     /// Maximum total entries allowed (prevents memory exhaustion from spam).
     max_size: usize,
+    retention: Option<Arc<BlockRetention>>,
+    pub(crate) admission_slot: Option<Slot>,
 }
 
 impl UncheckedMap {
+    pub(crate) fn clear(&mut self) {
+        self.entries.clear();
+        self.source_dependents.clear();
+        self.queued.clear();
+        self.count = 0;
+    }
     /// Create a new unchecked map with the given capacity limit.
     pub fn new(max_size: usize) -> Self {
         Self {
             entries: HashMap::new(),
             source_dependents: HashMap::new(),
+            queued: HashSet::new(),
             count: 0,
             max_size,
+            retention: None,
+            admission_slot: None,
+        }
+    }
+
+    pub(crate) fn with_retention(max_size: usize, retention: Arc<BlockRetention>) -> Self {
+        let mut map = Self::new(max_size);
+        map.retention = Some(retention);
+        map
+    }
+
+    fn slot(&self) -> Option<Option<Slot>> {
+        if let Some(slot) = &self.admission_slot { return Some(Some(slot.clone())); }
+        match &self.retention {
+            Some(budget) => budget.acquire().map(Some),
+            None => Some(None),
         }
     }
 
     /// Insert a block that depends on `dependency` (the hash of its missing previous block).
     ///
-    /// Returns `true` if the entry was inserted, `false` if the map is full.
+    /// Duplicate arrivals are retained once and do not extend the expiry time.
+    /// Returns `false` only if a new entry cannot fit.
     pub fn insert(&mut self, dependency: BlockHash, block: StateBlock, now: u64) -> bool {
+        if self.queued.contains(&block.hash) {
+            return true;
+        }
         if self.count >= self.max_size {
             return false;
         }
+        let Some(slot) = self.slot() else { return false; };
+        self.queued.insert(block.hash);
         let entry = UncheckedEntry {
             block,
             received_at: now,
+            slot,
         };
         self.entries.entry(dependency).or_default().push(entry);
         self.count += 1;
@@ -71,14 +110,21 @@ impl UncheckedMap {
 
     /// Insert a block waiting for its source (linked send) block to arrive.
     ///
-    /// Returns `true` if the entry was inserted, `false` if the map is full.
+    /// Duplicate arrivals, including those waiting on a predecessor, do not
+    /// allocate another entry. Returns `false` if a new entry cannot fit.
     pub fn insert_source(&mut self, source_hash: BlockHash, block: StateBlock, now: u64) -> bool {
+        if self.queued.contains(&block.hash) {
+            return true;
+        }
         if self.count >= self.max_size {
             return false;
         }
+        let Some(slot) = self.slot() else { return false; };
+        self.queued.insert(block.hash);
         let entry = UncheckedEntry {
             block,
             received_at: now,
+            slot,
         };
         self.source_dependents
             .entry(source_hash)
@@ -92,13 +138,7 @@ impl UncheckedMap {
     ///
     /// Returns the blocks that can now be re-processed.
     pub fn get_dependents(&mut self, hash: &BlockHash) -> Vec<StateBlock> {
-        match self.entries.remove(hash) {
-            Some(entries) => {
-                self.count -= entries.len();
-                entries.into_iter().map(|e| e.block).collect()
-            }
-            None => Vec::new(),
-        }
+        self.take_entries(hash, GapType::Previous, None)
     }
 
     /// Drain all entries that were waiting for `source_hash` as their linked send
@@ -106,13 +146,44 @@ impl UncheckedMap {
     ///
     /// Returns the blocks that can now be re-processed.
     pub fn get_source_dependents(&mut self, source_hash: &BlockHash) -> Vec<StateBlock> {
-        match self.source_dependents.remove(source_hash) {
-            Some(entries) => {
-                self.count -= entries.len();
-                entries.into_iter().map(|e| e.block).collect()
-            }
-            None => Vec::new(),
+        self.take_entries(source_hash, GapType::Source, None)
+    }
+
+    /// Drain one dependency bucket, returning only entries still within the
+    /// selected timeout even when the periodic cleanup has not run yet.
+    pub fn take_ready(&mut self, hash: &BlockHash, gap: GapType, now: u64) -> Vec<StateBlock> {
+        self.take_entries(hash, gap, Some(now))
+    }
+
+    fn take_entries(
+        &mut self,
+        hash: &BlockHash,
+        gap: GapType,
+        now: Option<u64>,
+    ) -> Vec<StateBlock> {
+        self.take_retained(hash, gap, now).into_iter().map(|entry| entry.block).collect()
+    }
+
+    pub(crate) fn take_retained(
+        &mut self,
+        hash: &BlockHash,
+        gap: GapType,
+        now: Option<u64>,
+    ) -> Vec<RetainedBlock> {
+        let entries = match gap {
+            GapType::Previous => self.entries.remove(hash),
+            GapType::Source => self.source_dependents.remove(hash),
         }
+        .unwrap_or_default();
+        self.count -= entries.len();
+        entries
+            .into_iter()
+            .filter_map(|entry| {
+                self.queued.remove(&entry.block.hash);
+                now.is_none_or(|now| now.saturating_sub(entry.received_at) < MAX_AGE_SECS)
+                    .then_some(RetainedBlock { block: entry.block, slot: entry.slot })
+            })
+            .collect()
     }
 
     /// Total number of unchecked entries (both gap-previous and gap-source).
@@ -130,12 +201,16 @@ impl UncheckedMap {
     /// Returns the number of entries removed.
     pub fn clear_expired(&mut self, max_age_secs: u64, now: u64) -> usize {
         let mut removed = 0;
+        let queued = &mut self.queued;
 
         // Clear expired gap-previous entries
         self.entries.retain(|_dep, entries| {
             let before = entries.len();
             entries.retain(|e| {
                 let age = now.saturating_sub(e.received_at);
+                if age >= max_age_secs {
+                    queued.remove(&e.block.hash);
+                }
                 age < max_age_secs
             });
             let after = entries.len();
@@ -148,6 +223,9 @@ impl UncheckedMap {
             let before = entries.len();
             entries.retain(|e| {
                 let age = now.saturating_sub(e.received_at);
+                if age >= max_age_secs {
+                    queued.remove(&e.block.hash);
+                }
                 age < max_age_secs
             });
             let after = entries.len();
@@ -180,7 +258,10 @@ mod tests {
 
     fn make_block(previous: BlockHash) -> StateBlock {
         let mut block = StateBlock {
+            signing_grant: burst_types::BlockHash::ZERO,
+            delegation_payload: Vec::new(),
             version: CURRENT_BLOCK_VERSION,
+            payment_epoch: burst_types::BlockHash::new([1; 32]),
             block_type: BlockType::Send,
             account: test_account(),
             previous,
@@ -192,7 +273,9 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1000),
             params_hash: BlockHash::ZERO,
+            target_head: burst_types::BlockHash::ZERO,
             merge_sources: Vec::new(),
+            release_sources: Vec::new(),
             work: 0,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,
@@ -222,7 +305,9 @@ mod tests {
         let dep = BlockHash::new([0xBB; 32]);
 
         let b1 = make_block(dep);
-        let b2 = make_block(dep);
+        let mut b2 = make_block(dep);
+        b2.timestamp = Timestamp::new(1001);
+        b2.hash = b2.compute_hash();
 
         assert!(map.insert(dep, b1, 1000));
         assert!(map.insert(dep, b2, 1001));
@@ -245,9 +330,12 @@ mod tests {
         let mut map = UncheckedMap::new(2);
         let dep = BlockHash::new([0xDD; 32]);
 
-        assert!(map.insert(dep, make_block(dep), 1000));
-        assert!(map.insert(dep, make_block(dep), 1001));
-        assert!(!map.insert(dep, make_block(dep), 1002));
+        for time in 1000..=1002 {
+            let mut block = make_block(dep);
+            block.timestamp = Timestamp::new(time);
+            block.hash = block.compute_hash();
+            assert_eq!(map.insert(dep, block, time), time < 1002);
+        }
         assert_eq!(map.len(), 2);
     }
 
@@ -292,11 +380,55 @@ mod tests {
         assert!(!map.is_empty());
     }
 
+    #[test]
+    fn selected_timeout_preserves_fresh_dependencies_and_expires_duplicates_at_fifteen_minutes() {
+        assert_eq!(MAX_AGE_SECS, 900);
+        let previous = BlockHash::new([21; 32]);
+        let source = BlockHash::new([22; 32]);
+        for source_gap in [false, true] {
+            let mut map = UncheckedMap::new(2);
+            let block = make_receive_block(previous, source);
+            let dependency = if source_gap { source } else { previous };
+            let insert = |map: &mut UncheckedMap, now| {
+                if source_gap {
+                    map.insert_source(dependency, block.clone(), now)
+                } else {
+                    map.insert(dependency, block.clone(), now)
+                }
+            };
+            assert!(insert(&mut map, 1000));
+            assert!(insert(&mut map, 1899));
+            assert_eq!(map.len(), 1);
+            assert_eq!(map.clear_expired(MAX_AGE_SECS, 1899), 0);
+            let gap = if source_gap {
+                GapType::Source
+            } else {
+                GapType::Previous
+            };
+            let ready = map.take_ready(&dependency, gap.clone(), 1899);
+            assert_eq!(ready.len(), 1);
+            assert_eq!(ready[0].hash, block.hash);
+            assert!(insert(&mut map, 2000));
+            assert!(insert(&mut map, 2899));
+            assert_eq!(map.clear_expired(MAX_AGE_SECS, 2900), 1);
+            assert!(map.is_empty());
+            assert!(map.get_dependents(&dependency).is_empty());
+            assert!(map.get_source_dependents(&dependency).is_empty());
+            assert!(insert(&mut map, 2901));
+            assert!(map.take_ready(&dependency, gap, 3801).is_empty());
+            assert!(map.is_empty());
+            assert!(insert(&mut map, 3802));
+        }
+    }
+
     // ── Gap-source tests ──────────────────────────────────────────────────
 
     fn make_receive_block(previous: BlockHash, source: BlockHash) -> StateBlock {
         let mut block = StateBlock {
+            signing_grant: burst_types::BlockHash::ZERO,
+            delegation_payload: Vec::new(),
             version: CURRENT_BLOCK_VERSION,
+            payment_epoch: burst_types::BlockHash::new([1; 32]),
             block_type: BlockType::Receive,
             account: test_account(),
             previous,
@@ -308,7 +440,9 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(2000),
             params_hash: BlockHash::ZERO,
+            target_head: burst_types::BlockHash::ZERO,
             merge_sources: Vec::new(),
+            release_sources: Vec::new(),
             work: 0,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,
@@ -365,11 +499,17 @@ mod tests {
         let dep = BlockHash::new([0xDD; 32]);
         let source = BlockHash::new([0xEE; 32]);
 
-        assert!(map.insert(dep, make_block(dep), 1000));
-        assert!(map.insert_source(source, make_block(dep), 1001));
-        assert!(map.insert(dep, make_block(dep), 1002));
-        // Map is now full (3 entries)
-        assert!(!map.insert_source(source, make_block(dep), 1003));
+        for time in 1000..=1003 {
+            let mut block = make_block(dep);
+            block.timestamp = Timestamp::new(time);
+            block.hash = block.compute_hash();
+            let retained = if time % 2 == 0 {
+                map.insert(dep, block, time)
+            } else {
+                map.insert_source(source, block, time)
+            };
+            assert_eq!(retained, time < 1003);
+        }
         assert_eq!(map.len(), 3);
     }
 
@@ -398,5 +538,28 @@ mod tests {
         assert_eq!(GapType::Previous, GapType::Previous);
         assert_eq!(GapType::Source, GapType::Source);
         assert_ne!(GapType::Previous, GapType::Source);
+    }
+
+    #[test]
+    fn duplicate_gap_arrivals_cannot_fill_the_queue_or_refresh_their_expiry() {
+        let mut map = UncheckedMap::new(2);
+        let dependency = BlockHash::new([1; 32]);
+        let source = BlockHash::new([2; 32]);
+        let block = make_receive_block(dependency, source);
+        assert!(map.insert(dependency, block.clone(), 100));
+        for now in 101..200 {
+            assert!(map.insert(dependency, block.clone(), now));
+            assert!(map.insert_source(source, block.clone(), now));
+        }
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.clear_expired(100, 200), 1);
+        assert!(map.is_empty());
+        assert!(map.queued.is_empty());
+        assert!(map.insert_source(source, block.clone(), 201));
+        assert_eq!(map.get_source_dependents(&source).len(), 1);
+        assert!(map.queued.is_empty());
+        assert!(map.insert(dependency, block, 202));
+        assert_eq!(map.get_dependents(&dependency).len(), 1);
+        assert!(map.queued.is_empty());
     }
 }

@@ -524,6 +524,14 @@ BURST targets a **feeless DAG (Directed Acyclic Graph)** architecture, modeled a
 - **Sub-second confirmation.** Consensus via representative voting (similar to Nano's Open Representative Voting).
 - **Minimal resource requirements.** Designed to run on low-power hardware.
 
+Representative consensus is weighted by **verified people**, not tokens. Each
+verified person contributes one equal unit to their chosen representative for
+transaction confirmation and double-spend resolution. BRN, transferable TRST,
+and expired-TRST virtue points do not increase that unit. The creator has no
+extra consensus weight. This relies on the human-verification system and its
+limitations described under Sybil Tolerance; it does not assume perfect Sybil
+prevention.
+
 Why DAG over blockchain:
 
 - No miners, no staking for block production — decentralization is not compromised by economies of scale
@@ -541,19 +549,23 @@ In a feeless system, transaction spam is a real threat. BURST uses the same appr
 
 ## VRF for Verifier Selection
 
-BURST needs a way to randomly and verifiably select verifiers for humanity verification. This requires a **Verifiable Random Function (VRF)** — a cryptographic primitive that produces a random output anyone can verify was correctly generated.
+BURST needs shared, unpredictable and publicly verifiable randomness to select humanity verifiers. A **Verifiable Random Function (VRF)** is one way to produce verifiable pseudorandom output; a distributed randomness beacon can also supply the randomness BURST needs.
 
-The core challenge: VRF typically needs a shared seed that all participants agree on. In a linear blockchain, this is the previous block hash. In a DAG, there is no single "previous state."
+The selection protocol must agree on the verification request, eligible verifier pool and randomness round before that randomness becomes known. A VRF or beacon does not establish this agreement. A linear chain supplies an ordering of requests and state, though a block hash alone is not automatically safe randomness. A DAG needs an explicit agreement mechanism for the selection inputs.
+
+An expired proposal that has not reached agreement must not strand the network. In a later consensus round, a proposer without a known prepare certificate may offer a newly replayed ledger cut and its next future beacon round. Honest representatives sign fresh selection inputs only before that beacon can be known. Signed timeout participation advances consensus rounds; elapsed time alone cannot erase votes or locks. A proposer with a valid prepare certificate reproposes its exact checkpoint and original beacon round. Late prepare evidence remains admissible after restart. A finalized selection never changes its pool or beacon because a relay is unavailable.
+
+This recovery rule preserves the consensus locking rules but does not claim unconditional resistance to selection bias. Before network delays become bounded, an adversary may affect which proposals reach a quorum. Release requires adversarial scheduling review as well as deadline and restart tests. Under timely communication, progress still requires the configured human quorum and a usable pre-beacon signing window.
 
 **This is solvable.** BURST's use case (infrequent verifier selection, not continuous block production) makes it significantly more tractable than general-purpose VRF in a DAG.
 
 ### Phased Approach
 
-**Phase 1 — Bootstrap (MVP):** Use **drand**, an operational decentralized randomness beacon run by the League of Entropy (18+ organizations including Cloudflare and Protocol Labs). It emits publicly verifiable random values every 30 seconds. Integration requires minimal code. This lets BURST launch while the harder solutions are developed.
+**Phase 1 — Bootstrap (MVP):** Use **drand**, a distributed randomness beacon operated by the League of Entropy. The mainnet chain approved in implementation decision 19.1 emits a beacon every 30 seconds. Nodes pin the chain identity and public key and verify its threshold BLS signatures. Each verification must use an agreed future round and a fixed eligible pool; unavailable randomness queues the request rather than triggering a local fallback. Drand supplies the randomness, not BURST's agreement on those inputs. This phase depends on drand's threshold-security and availability assumptions.
 
-**Phase 2 — Self-Sovereign Randomness:** Implement **commit-reveal with representatives**. When verification is needed, representatives commit hashed random values, then reveal them. Combined outputs produce the seed. Slashing penalties for non-reveal mitigate the last-revealer problem. No external dependency.
+**Phase 2 — Self-Sovereign Randomness:** Develop **commit-reveal with representatives**. Representatives commit hashed random values, then reveal them. Membership and commitments must be fixed before reveals begin. Producing an output from only the revealed contributions gives the last revealer a choice that can bias selection. Slashing makes withholding costly but does not eliminate that choice. Waiting for all reveals prevents selective omission but allows one participant to stall the round. This phase requires an agreed recovery protocol and security review before replacing drand; removing the external dependency is not by itself a security improvement.
 
-**Phase 3 — Gold Standard:** Implement **threshold VRF (DVRF)** — a multiparty protocol where a committee collectively produces randomness. No single participant can predict or bias the output. Strongest possible guarantees, justified when the network is mature enough for the complexity.
+**Phase 3 — Threshold Randomness:** Implement **threshold VRF (DVRF)** or a BURST-operated threshold beacon. A committee collectively produces randomness under explicit corruption-threshold assumptions. This requires distributed key generation, secure committee rotation and recovery when too few members are available. It is a possible self-sovereign successor, not an unconditional security upgrade. Drand already uses threshold cryptography; operating that mechanism within BURST transfers responsibility for its security and availability to BURST.
 
 ## Democratic Governance
 

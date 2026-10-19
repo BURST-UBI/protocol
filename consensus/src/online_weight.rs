@@ -19,15 +19,14 @@
 //! (~60M NANO, ≈45% of its ~133M premined supply). That works because Nano
 //! premines the ENTIRE supply into the genesis account, so from block one the
 //! genesis representative holds weight far above the floor and confirmation is
-//! immediate. BURST has NO premine, and its consensus weight is EXPIRED
-//! (non-transferable) TRST — which accrues only as minted TRST passes its
-//! expiry, starting at zero — so a fixed absolute floor would be unreachable at
-//! launch and would block ALL confirmation. Instead we scale the floor to the
+//! immediate. BURST weights verified people rather than any token supply.
+//! A fixed token-denominated floor would be unreachable at launch. The existing
+//! implementation instead scales the floor to the
 //! TOTAL voting weight currently in existence ([`MIN_ONLINE_WEIGHT_FRACTION_BPS`]):
-//! a small launch network (the genesis bootstrap weight holding ~all weight) can
-//! cement from block one, while the same safety property — "a substantial
-//! fraction of all weight must back a confirmation" — holds at every network
-//! size, as real expired-TRST weight accrues and decentralises consensus.
+//! a small launch network can confirm with its actual verified electorate,
+//! without a genesis voting bonus. This floor limits a small online minority;
+//! it is not a proof of safety against all partitions, and its policy still
+//! needs reconciliation with implementation decision 12.16.
 
 use std::collections::HashMap;
 
@@ -87,7 +86,7 @@ impl OnlineWeightSampler {
     /// Calculate the total delegated weight of online representatives.
     ///
     /// `weights` maps each representative to the total weight delegated to it
-    /// (sum of balances of accounts that selected it as their representative).
+    /// (equal units from verified people who selected that representative).
     pub fn online_weight(&self, now: u64, weights: &HashMap<WalletAddress, u128>) -> u128 {
         let cutoff = now.saturating_sub(self.window_secs);
         self.recent_voters
@@ -301,6 +300,52 @@ mod tests {
         let sampler = OnlineWeightSampler::new(300);
         let weights: HashMap<WalletAddress, u128> = HashMap::new();
         assert_eq!(sampler.effective_weight(1000, &weights), 0);
+    }
+
+    #[test]
+    fn restart_does_not_invent_online_weight_from_offline_people() {
+        use crate::election::Election;
+        use crate::rep_weights::WEIGHT_PER_HUMAN;
+        use burst_types::{BlockHash, Timestamp};
+
+        // Seven people, four delegated to an online rep and three self-repping
+        // offline. A restart has no observed online history yet. Artificially
+        // seeding the trend at seven people would prevent four from confirming.
+        let weights = HashMap::from([
+            (rep("online"), 4 * WEIGHT_PER_HUMAN),
+            (rep("offline_a"), WEIGHT_PER_HUMAN),
+            (rep("offline_b"), WEIGHT_PER_HUMAN),
+            (rep("offline_c"), WEIGHT_PER_HUMAN),
+        ]);
+        let mut sampler = OnlineWeightSampler::new(300);
+        assert_eq!(sampler.trended_weight(), 0);
+        let initial = sampler.effective_weight(1000, &weights);
+        assert_eq!(initial, 7 * WEIGHT_PER_HUMAN / 2);
+        let mut election = Election::new(BlockHash::new([1; 32]), initial, Timestamp::new(1000));
+        election.vote(
+            &rep("online"),
+            BlockHash::new([2; 32]),
+            4 * WEIGHT_PER_HUMAN,
+            true,
+            Timestamp::new(1001),
+        );
+        assert!(election.try_confirm(Timestamp::new(1001)).is_some());
+        sampler.record_vote(&rep("online"), 1001);
+        assert_eq!(
+            sampler.effective_weight(1001, &weights),
+            4 * WEIGHT_PER_HUMAN
+        );
+
+        // The existing floor still excludes an isolated one-person minority.
+        let mut minority = Election::new(BlockHash::new([3; 32]), initial, Timestamp::new(1000));
+        minority.vote(
+            &rep("offline_a"),
+            BlockHash::new([4; 32]),
+            WEIGHT_PER_HUMAN,
+            true,
+            Timestamp::new(1001),
+        );
+        assert!(minority.try_confirm(Timestamp::new(1001)).is_none());
     }
 
     #[test]

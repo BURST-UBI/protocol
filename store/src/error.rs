@@ -16,4 +16,7 @@ pub enum StoreError {
 
     #[error("database is corrupted: {0}")]
     Corruption(String),
+
+    #[error("storage changed during preparation: {0}")]
+    StaleRead(String),
 }

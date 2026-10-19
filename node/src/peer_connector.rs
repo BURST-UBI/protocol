@@ -7,7 +7,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Mutex, RwLock};
 
 use burst_consensus::{ActiveElections, OnlineWeightSampler, RepWeightCache};
@@ -19,12 +18,12 @@ use burst_types::{BlockHash, NetworkId};
 use crate::connection_registry::{spawn_peer_read_loop, ConnectionRegistry, Direction};
 use crate::metrics::NodeMetrics;
 use crate::priority_queue::BlockPriorityQueue;
-use crate::wire_message::{HandshakeMsg, WireMessage};
+use crate::wire_message::HandshakeMsg;
 
 /// Timeout for the initial TCP connection attempt.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Timeout for reading the cookie challenge from the remote peer.
+/// Handshake allowance in the total connection-attempt deadline.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Shared dependencies needed by `connect_to_peer`. All `Arc` fields are
@@ -37,6 +36,7 @@ pub struct PeerConnectorContext {
     pub metrics: Arc<NodeMetrics>,
     pub active_elections: Arc<RwLock<ActiveElections>>,
     pub rep_weights: Arc<RwLock<RepWeightCache>>,
+    pub vote_generator: Arc<Mutex<burst_consensus::VoteGenerator>>,
     pub message_dedup: Arc<Mutex<MessageDedup>>,
     pub online_weight_sampler: Arc<Mutex<OnlineWeightSampler>>,
     pub store: Arc<LmdbStore>,
@@ -47,8 +47,8 @@ pub struct PeerConnectorContext {
     /// `network_id` or we drop the connection — hard isolation between
     /// Dev/Test/Live independent of `params_hash`.
     pub network: NetworkId,
-    /// Our listening/peering port, sent in the handshake so the peer keys us by
-    /// our dialable address instead of the ephemeral source port.
+    /// Our local listening port. It is not necessarily our NAT's external port
+    /// and must never be used as the connection identity.
     pub peering_port: u16,
     /// Channel for the read loop to report ascending-bootstrap ack results to
     /// the bootstrap task.
@@ -75,13 +75,22 @@ pub async fn connect_to_peer(
     {
         let mut reg = ctx.connection_registry.write().await;
         if !reg.begin_dial(addr_str) {
-            return Err("already dialing or connected to this address".into());
+            return Err("address connected, dialing, or waiting for retry".into());
         }
     }
-    let result = connect_to_peer_inner(addr_str, ctx).await;
+    let result = tokio::time::timeout(
+        CONNECT_TIMEOUT + HANDSHAKE_TIMEOUT,
+        connect_to_peer_inner(addr_str, ctx),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        Err(format!(
+            "connection attempt deadline exceeded for {addr_str}"
+        ))
+    });
     {
         let mut reg = ctx.connection_registry.write().await;
-        reg.end_dial(addr_str);
+        reg.end_dial(addr_str, result.is_ok());
     }
     result
 }
@@ -94,6 +103,8 @@ async fn connect_to_peer_inner(
         .await
         .map_err(|_| format!("connection timed out to {addr_str}"))?
         .map_err(|e| format!("TCP connect to {addr_str} failed: {e}"))?;
+    burst_network::connection::configure_peer_stream(&stream)
+        .map_err(|e| format!("TCP setup for {addr_str} failed: {e}"))?;
 
     let parts: Vec<&str> = addr_str.rsplitn(2, ':').collect();
     let (port, ip) = if parts.len() == 2 {
@@ -108,135 +119,59 @@ async fn connect_to_peer_inner(
         ip: ip.clone(),
         port,
     };
-    let peer_id = format!("{ip}:{port}");
 
     let (read_half, mut write_half) = stream.into_split();
 
-    // Read the cookie challenge from the peer
-    let mut reader = tokio::io::BufReader::new(read_half);
-    let mut remote_node_id: Option<burst_types::WalletAddress> = None;
-    let mut remote_network: Option<NetworkId> = None;
-    let cookie_opt = {
-        let mut len_buf = [0u8; 4];
-        match tokio::time::timeout(HANDSHAKE_TIMEOUT, reader.read_exact(&mut len_buf)).await {
-            Ok(Ok(_)) => {
-                let body_len = u32::from_be_bytes(len_buf) as usize;
-                if body_len > 0 && body_len < 65536 {
-                    let mut body = vec![0u8; body_len];
-                    if reader.read_exact(&mut body).await.is_ok() {
-                        if let Ok(WireMessage::Handshake(hs)) =
-                            bincode::deserialize::<WireMessage>(&body)
-                        {
-                            remote_node_id = Some(hs.node_id.clone());
-                            remote_network = Some(hs.network_id);
-                            hs.cookie
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
-    };
-
-    // Reject peers on a different network (Dev/Test/Live) before doing any
-    // further work. Default params make `params_hash` identical across
-    // networks, so `network_id` is the authoritative isolation check.
-    if let Some(net) = remote_network {
-        if net != ctx.network {
-            tracing::debug!(
-                peer = %peer_id,
-                ours = ?ctx.network,
-                theirs = ?net,
-                "dropping peer on different network"
-            );
-            return Err("network mismatch".into());
-        }
-    }
-
-    // Never peer with ourselves: if the handshake reveals our own node_id, the
-    // address we dialed is really us (learned via gossip or our own advertised
-    // address). Abort before registering — this is what produced phantom
-    // "self" entries that inflated peer_count.
-    if remote_node_id.as_ref() == Some(&ctx.node_address) {
-        tracing::debug!(peer = %peer_id, "dropping self-connection (own node_id)");
-        return Err("self-connection".into());
-    }
-
-    // Sign and send cookie response
-    if let Some(cookie) = cookie_opt {
-        let sig = burst_crypto::sign_message(&cookie, &ctx.node_private_key);
-        let response = WireMessage::Handshake(HandshakeMsg {
+    let mut read_half = read_half;
+    let remote = crate::peer_handshake::outbound(
+        &mut read_half,
+        &mut write_half,
+        HandshakeMsg {
+            block_version: burst_ledger::CURRENT_BLOCK_VERSION,
+            wire_version: burst_types::PROTOCOL_VERSION,
             node_id: ctx.node_address.clone(),
             cookie: None,
-            cookie_signature: Some(sig),
+            cookie_signature: None,
             params_hash: ctx.params_hash,
             network_id: ctx.network,
             peering_port: ctx.peering_port,
-        });
-        if let Ok(bytes) = bincode::serialize(&response) {
-            let len_bytes = (bytes.len() as u32).to_be_bytes();
-            let _ = write_half.write_all(&len_bytes).await;
-            let _ = write_half.write_all(&bytes).await;
-            let _ = write_half.flush().await;
-            tracing::debug!(peer = %peer_id, "sent cookie response");
-        }
-    } else {
-        tracing::warn!(peer = %peer_id, "no cookie challenge received");
-    }
-
-    let read_half = reader.into_inner();
+        },
+        &ctx.node_private_key,
+    )
+    .await?;
     let now = unix_now_secs();
-
-    // The peer's verified node_id (from the handshake) is the dedup key.
-    // Without it we can't dedup deterministically, so require it.
-    let peer_node_id = match remote_node_id {
-        Some(id) => id.as_str().to_string(),
-        None => {
-            tracing::warn!(peer = %peer_id, "outbound handshake had no node_id — dropping");
-            return Err("no peer node_id".into());
-        }
-    };
+    let peer_node_id = remote.node_id.as_str().to_owned();
     let our_node_id = ctx.node_address.as_str().to_string();
+    let peer_id = peer_node_id.clone();
 
     // Register with deterministic dedup keyed by node_id: if the peer already
     // dialed us (opposite direction), keep exactly one — the connection from
     // the lower node_id — so simultaneous connects don't churn. `None` means
     // this outbound lost the tie-break; close it.
     let conn_id = {
+        let mut pm = ctx.peer_manager.write().await;
         let mut registry = ctx.connection_registry.write().await;
-        match registry.register_dedup(
-            peer_id.clone(),
-            peer_node_id,
-            Direction::Outbound,
-            write_half,
-            &our_node_id,
-        ) {
+        match registry.register_dedup(peer_node_id, Direction::Outbound, write_half, &our_node_id) {
             Some(id) => {
+                if !pm.register_connection(peer_id.clone(), peer_addr.clone(), true, now) {
+                    registry.remove_if(&peer_id, id);
+                    ctx.metrics.peer_count.set(registry.len() as i64);
+                    return Err("peer banned or connection capacity reached".into());
+                }
                 ctx.metrics.peer_count.set(registry.len() as i64);
                 id
             }
             None => {
+                pm.record_dialed_address(&peer_id, peer_addr.clone());
                 tracing::debug!(peer = %peer_id, "outbound superseded by peer's inbound (tie-break)");
                 return Err("connection deduplicated".into());
             }
         }
     };
 
-    // Register the peer address (address book, for gossip/dialing).
-    {
-        let mut pm = ctx.peer_manager.write().await;
-        pm.add_peer(peer_addr.clone());
-        pm.mark_connected(&peer_id, now);
-    }
-
     // Spawn a read loop (no SYN cookie for outbound — already validated)
-    spawn_peer_read_loop(
+    let mut registry = ctx.connection_registry.write().await;
+    let reader_task = spawn_peer_read_loop(
         peer_id.clone(),
         conn_id,
         read_half,
@@ -248,12 +183,12 @@ async fn connect_to_peer_inner(
         Arc::clone(&ctx.rep_weights),
         Arc::clone(&ctx.message_dedup),
         Arc::clone(&ctx.online_weight_sampler),
-        None,
-        ip.clone(),
         Arc::clone(&ctx.store),
         ctx.params_hash,
         ctx.bootstrap_feedback.clone(),
+        Arc::clone(&ctx.vote_generator),
     );
+    registry.track_task(reader_task);
 
     Ok(ConnectedPeer { peer_id, peer_addr })
 }

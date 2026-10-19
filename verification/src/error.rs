@@ -35,6 +35,9 @@ pub enum VerificationError {
     #[error("insufficient stake: needed {needed}, provided {provided}")]
     InsufficientStake { needed: u128, provided: u128 },
 
+    #[error("insufficient endorsement burn: needed {needed}, provided {provided}")]
+    InsufficientEndorsementBurn { needed: u128, provided: u128 },
+
     #[error("bootstrap phase has ended — normal verification rules apply")]
     BootstrapPhaseEnded,
 

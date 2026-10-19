@@ -1,8 +1,6 @@
-//! Core governance engine — manages proposals through the 5-phase lifecycle.
-//!
-//! Tezos-inspired flow: Proposal → Exploration → Cooldown → Promotion → Activation
-//! Emergency flow: Exploration → Promotion → Activation (skip Proposal and Cooldown)
-//! With adaptive quorum biasing (EMA-based).
+//! BURST governance: Proposal → Voting → Cooldown → Activation.
+//! `Exploration` is the stored name of the single voting phase. Promotion is
+//! retained for decoding old snapshots but is not a valid transition.
 
 use crate::delegation::DelegationEngine;
 use crate::error::GovernanceError;
@@ -12,22 +10,18 @@ use burst_types::{ProtocolParams, Timestamp, TxHash, WalletAddress};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Duration of each voting phase for emergency proposals (24 hours).
-const EMERGENCY_PHASE_DURATION_SECS: u64 = 86400;
+mod snapshot_undo;
 
-/// Supermajority threshold for emergency proposals (95%).
-const EMERGENCY_SUPERMAJORITY_BPS: u32 = 9500;
-
-/// Delay between promotion passing and activation applying.
+/// Delay between cooldown ending and activation applying.
 /// Ensures all nodes activate the change at the same deterministic timestamp.
 /// Uses the governance_propagation_buffer_secs parameter (default 3600s / 1 hour).
 fn activation_delay_secs(params: &ProtocolParams) -> u64 {
     params.governance_propagation_buffer_secs
 }
 
-/// The governance engine manages proposals through the 5-phase lifecycle,
+/// The governance engine manages proposals through the four-phase lifecycle,
 /// tracking endorsements, votes, and phase transitions.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GovernanceEngine {
     /// All submitted proposals indexed by their transaction hash.
     proposals: HashMap<TxHash, Proposal>,
@@ -45,6 +39,8 @@ pub struct GovernanceEngine {
     /// `(target, evict)` where `evict = true` evicts and `false` reinstates.
     #[serde(default)]
     pending_evictions: Vec<(WalletAddress, bool)>,
+    timings: HashMap<TxHash, crate::GovernanceTiming>,
+    key_ballots: HashMap<(TxHash, WalletAddress, burst_types::BlockHash), GovernanceVote>,
 }
 
 impl GovernanceEngine {
@@ -58,24 +54,29 @@ impl GovernanceEngine {
             pending_changes: Vec::new(),
             pending_amendments: Vec::new(),
             pending_evictions: Vec::new(),
+            timings: HashMap::new(),
+            key_ballots: HashMap::new(),
         }
     }
 
-    /// Submit a new proposal (enters Proposal phase).
+    /// Submit a verified human's proposal. Emergencies enter voting immediately.
     ///
-    /// The caller must verify the proposer is verified. The proposer's BRN balance
-    /// is checked against `governance_proposal_cost`; the caller is responsible for
-    /// actually deducting the cost after this returns `Ok`.
+    /// Any verified wallet can submit. The anti-spam cost is paid by endorsers
+    /// (whitepaper Governance Process and implementation decision 20.1).
     pub fn submit_proposal(
         &mut self,
         mut proposal: Proposal,
-        proposer_brn_balance: u128,
+        _proposer_brn_balance: u128,
         proposer_verified: bool,
         params: &ProtocolParams,
     ) -> Result<TxHash, GovernanceError> {
         if !proposer_verified {
             return Err(GovernanceError::ProposerNotVerified);
         }
+        proposal
+            .content
+            .validate_content()
+            .map_err(|error| GovernanceError::Other(error.to_string()))?;
 
         if proposal.proposer.as_str().is_empty() {
             return Err(GovernanceError::Other(
@@ -83,44 +84,106 @@ impl GovernanceEngine {
             ));
         }
 
-        // Validate proposer can afford the governance proposal cost
-        if proposer_brn_balance < params.governance_proposal_cost {
-            return Err(GovernanceError::InsufficientBrn {
-                have: proposer_brn_balance,
-                need: params.governance_proposal_cost,
-            });
+        if self.proposals.contains_key(&proposal.hash) {
+            return Err(GovernanceError::Other("proposal already exists".into()));
         }
 
+        if matches!(proposal.content, ProposalContent::Emergency { .. }) {
+            let at = proposal.created_at;
+            self.submit_emergency_proposal(&mut proposal, at, params)?;
+            return Ok(proposal.hash);
+        }
         proposal.phase = GovernancePhase::Proposal;
 
-        if proposal.created_at == Timestamp::EPOCH && proposal.hash != TxHash::ZERO {
-            // If created_at was not explicitly set, this is an issue, but we allow
-            // the caller to have already set it on the Proposal struct.
-        }
-
         let hash = proposal.hash;
+        let timing = crate::GovernanceTiming::new(params, &proposal.content);
+        timing.counting_at(timing.proposal_end(proposal.created_at)?)?;
+        self.timings.insert(hash, timing);
         self.proposals.insert(hash, proposal);
         Ok(hash)
     }
 
     /// Submit an emergency proposal — enters Exploration phase immediately.
     ///
-    /// Emergency proposals skip the Proposal and Cooldown phases, use 24-hour
-    /// voting periods, and require a 95% supermajority. Can only be submitted
-    /// by the genesis account or a quorum of representatives.
-    pub fn submit_emergency_proposal(
+    /// Called after common proposer validation. No genesis or representative
+    /// override is granted; governed human participation and approval still apply.
+    fn submit_emergency_proposal(
         &mut self,
         proposal: &mut Proposal,
         now: Timestamp,
+        params: &ProtocolParams,
     ) -> Result<(), GovernanceError> {
         if !matches!(proposal.content, ProposalContent::Emergency { .. }) {
             return Err(GovernanceError::WrongPhase);
         }
+        proposal
+            .content
+            .validate_content()
+            .map_err(|error| GovernanceError::Other(error.to_string()))?;
+        let hash = proposal.hash;
+        if self.proposals.contains_key(&hash) {
+            return Err(GovernanceError::Other("proposal already exists".into()));
+        }
+        let timing = crate::GovernanceTiming::new(params, &proposal.content);
+        timing.counting_at(now)?;
         proposal.phase = GovernancePhase::Exploration;
         proposal.exploration_started_at = Some(now);
-
-        let hash = proposal.hash;
+        self.timings.insert(hash, timing);
         self.proposals.insert(hash, proposal.clone());
+        Ok(())
+    }
+
+    pub fn timing(
+        &self,
+        proposal: &Proposal,
+        params: &ProtocolParams,
+    ) -> Result<crate::GovernanceTiming, GovernanceError> {
+        match self.timings.get(&proposal.hash) {
+            Some(timing) => Ok(*timing),
+            None if !self.proposals.contains_key(&proposal.hash) => {
+                Ok(crate::GovernanceTiming::new(params, &proposal.content))
+            }
+            None => Err(GovernanceError::Other(
+                "stored proposal timing is missing".into(),
+            )),
+        }
+    }
+
+    pub fn counting_time(
+        &self,
+        proposal: &Proposal,
+        params: &ProtocolParams,
+    ) -> Result<Timestamp, GovernanceError> {
+        let timing = self.timing(proposal, params)?;
+        let start = match proposal.exploration_started_at {
+            Some(start) => start,
+            None => timing.proposal_end(proposal.created_at)?,
+        };
+        timing.counting_at(start)
+    }
+
+    /// Resolve proposal windows before an activation changes qualification
+    /// thresholds. Later rules cannot reopen a phase that already ended.
+    pub fn close_proposal_windows(
+        &mut self,
+        now: Timestamp,
+        params: &ProtocolParams,
+    ) -> Result<(), GovernanceError> {
+        let proposals: Vec<_> = self
+            .proposals
+            .values()
+            .filter(|proposal| proposal.phase == GovernancePhase::Proposal)
+            .cloned()
+            .collect();
+        for mut proposal in proposals {
+            match self.try_advance_proposal(&mut proposal, now, params) {
+                Ok(_) | Err(GovernanceError::InsufficientEndorsements { .. }) => {
+                    self.proposals.insert(proposal.hash, proposal);
+                }
+                Err(GovernanceError::PhaseNotExpired) => (),
+                Err(error) => return Err(error),
+            }
+        }
         Ok(())
     }
 
@@ -149,8 +212,8 @@ impl GovernanceEngine {
     /// Endorse a proposal (burn BRN to advance past spam filter).
     ///
     /// Each call increments the endorsement count and tracks total BRN burned.
-    /// When the endorsement count reaches `governance_proposal_endorsements`,
-    /// the proposal auto-advances to the Exploration phase.
+    /// The node validates the signer, deadline, unique endorsement and actual
+    /// BRN burn in the same transaction. Voting starts at the proposal deadline.
     pub fn endorse_proposal(
         &mut self,
         proposal_hash: &TxHash,
@@ -169,8 +232,15 @@ impl GovernanceEngine {
             .endorsement_counts
             .entry(*proposal_hash)
             .or_insert((0, 0));
-        entry.0 += 1;
-        entry.1 += brn_burned;
+        let count = entry
+            .0
+            .checked_add(1)
+            .ok_or_else(|| GovernanceError::Other("endorsement count overflow".into()))?;
+        let burned = entry
+            .1
+            .checked_add(brn_burned)
+            .ok_or_else(|| GovernanceError::Other("endorsement burn overflow".into()))?;
+        *entry = (count, burned);
 
         proposal.endorsement_count = entry.0;
 
@@ -181,12 +251,62 @@ impl GovernanceEngine {
     ///
     /// Validates the proposal is in the Exploration phase, that voting hasn't
     /// closed, and that the voter hasn't already voted. Records the vote and
-    /// updates the proposal's aggregate vote counts using adaptive quorum biasing.
+    /// updates the proposal's aggregate vote counts.
     pub fn cast_exploration_vote(
         &mut self,
         proposal_hash: &TxHash,
         voter: &WalletAddress,
         vote: GovernanceVote,
+        now: Timestamp,
+        params: &ProtocolParams,
+    ) -> Result<(), GovernanceError> {
+        self.require_voting_window(proposal_hash, now, params)?;
+        let votes = self.exploration_votes.entry(*proposal_hash).or_default();
+        if votes.contains_key(voter) {
+            return Err(GovernanceError::AlreadyVoted(voter.to_string()));
+        }
+        votes.insert(voter.clone(), vote);
+        if let Some(proposal) = self.proposals.get_mut(proposal_hash) {
+            match vote {
+                GovernanceVote::Yea => proposal.exploration_votes_yea += 1,
+                GovernanceVote::Nay => proposal.exploration_votes_nay += 1,
+                GovernanceVote::Abstain => proposal.exploration_votes_abstain += 1,
+            }
+        }
+        Ok(())
+    }
+
+    /// The caller authenticates the secondary signature and its ledger grant.
+    /// Eligibility and current scope authority are resolved again at counting.
+    pub fn record_key_ballot(
+        &mut self,
+        ballot: &crate::key_delegation::DelegatedBallot,
+        now: Timestamp,
+        params: &ProtocolParams,
+    ) -> Result<(), GovernanceError> {
+        self.require_voting_window(&ballot.proposal, now, params)?;
+        let key = (ballot.proposal, ballot.owner.clone(), ballot.grant);
+        if self.key_ballots.contains_key(&key) {
+            return Err(GovernanceError::AlreadyVoted(ballot.owner.to_string()));
+        }
+        self.key_ballots.insert(key, ballot.vote);
+        Ok(())
+    }
+
+    pub fn key_ballot(
+        &self,
+        proposal: TxHash,
+        owner: &WalletAddress,
+        grant: burst_types::BlockHash,
+    ) -> Option<GovernanceVote> {
+        self.key_ballots
+            .get(&(proposal, owner.clone(), grant))
+            .copied()
+    }
+
+    fn require_voting_window(
+        &self,
+        proposal_hash: &TxHash,
         now: Timestamp,
         params: &ProtocolParams,
     ) -> Result<(), GovernanceError> {
@@ -200,89 +320,29 @@ impl GovernanceEngine {
         }
 
         if let Some(started) = proposal.exploration_started_at {
-            let is_emergency = matches!(proposal.content, ProposalContent::Emergency { .. });
-            let duration = if is_emergency {
-                EMERGENCY_PHASE_DURATION_SECS
-            } else {
-                params.governance_exploration_duration_secs
-            };
-            if started.has_expired(duration, now) {
-                return Err(GovernanceError::VotingClosed);
+            if now < started {
+                return Err(GovernanceError::Other(
+                    "vote predates the voting window".into(),
+                ));
             }
-        }
-
-        let votes = self.exploration_votes.entry(*proposal_hash).or_default();
-
-        if votes.contains_key(voter) {
-            return Err(GovernanceError::AlreadyVoted(voter.to_string()));
-        }
-
-        votes.insert(voter.clone(), vote);
-
-        // Update aggregate counts on the proposal
-        if let Some(proposal) = self.proposals.get_mut(proposal_hash) {
-            match vote {
-                GovernanceVote::Yea => proposal.exploration_votes_yea += 1,
-                GovernanceVote::Nay => proposal.exploration_votes_nay += 1,
-                GovernanceVote::Abstain => proposal.exploration_votes_abstain += 1,
+            if now >= self.timing(proposal, params)?.voting_end(started)? {
+                return Err(GovernanceError::VotingClosed);
             }
         }
 
         Ok(())
     }
 
-    /// Cast a vote during the Promotion phase.
-    ///
-    /// Validates the proposal is in the Promotion phase, that voting hasn't
-    /// closed, and that the voter hasn't already voted. Records the vote and
-    /// updates the proposal's aggregate vote counts.
+    /// Old snapshots may contain Promotion, but BURST has no second vote.
     pub fn cast_promotion_vote(
         &mut self,
-        proposal_hash: &TxHash,
-        voter: &WalletAddress,
-        vote: GovernanceVote,
-        now: Timestamp,
-        params: &ProtocolParams,
+        _proposal_hash: &TxHash,
+        _voter: &WalletAddress,
+        _vote: GovernanceVote,
+        _now: Timestamp,
+        _params: &ProtocolParams,
     ) -> Result<(), GovernanceError> {
-        let proposal = self
-            .proposals
-            .get(proposal_hash)
-            .ok_or_else(|| GovernanceError::ProposalNotFound(proposal_hash.to_string()))?;
-
-        if proposal.phase != GovernancePhase::Promotion {
-            return Err(GovernanceError::WrongPhase);
-        }
-
-        if let Some(started) = proposal.promotion_started_at {
-            let is_emergency = matches!(proposal.content, ProposalContent::Emergency { .. });
-            let duration = if is_emergency {
-                EMERGENCY_PHASE_DURATION_SECS
-            } else {
-                params.governance_promotion_duration_secs
-            };
-            if started.has_expired(duration, now) {
-                return Err(GovernanceError::VotingClosed);
-            }
-        }
-
-        let votes = self.promotion_votes.entry(*proposal_hash).or_default();
-
-        if votes.contains_key(voter) {
-            return Err(GovernanceError::AlreadyVoted(voter.to_string()));
-        }
-
-        votes.insert(voter.clone(), vote);
-
-        // Update aggregate counts on the proposal
-        if let Some(proposal) = self.proposals.get_mut(proposal_hash) {
-            match vote {
-                GovernanceVote::Yea => proposal.promotion_votes_yea += 1,
-                GovernanceVote::Nay => proposal.promotion_votes_nay += 1,
-                GovernanceVote::Abstain => proposal.promotion_votes_abstain += 1,
-            }
-        }
-
-        Ok(())
+        Err(GovernanceError::WrongPhase)
     }
 
     /// Get a reference to a stored proposal by hash.
@@ -328,12 +388,12 @@ impl GovernanceEngine {
         now: Timestamp,
         params: &mut ProtocolParams,
         delegation: &DelegationEngine,
-        verified_count: u32,
+        verified_wallets: &[WalletAddress],
     ) -> Vec<TxHash> {
         let mut activated = Vec::new();
 
         // Pass 1: activate proposals whose deferred activation timestamp has arrived
-        let pending_activation: Vec<TxHash> = self
+        let mut pending_activation: Vec<TxHash> = self
             .proposals
             .iter()
             .filter(|(_, p)| {
@@ -345,6 +405,15 @@ impl GovernanceEngine {
             .map(|(h, _)| *h)
             .collect();
 
+        pending_activation.sort_by_key(|hash| {
+            (
+                self.proposals[hash]
+                    .activation_at
+                    .map(|at| at.as_secs())
+                    .unwrap_or(u64::MAX),
+                *hash.as_bytes(),
+            )
+        });
         for hash in pending_activation {
             if let Some(proposal) = self.proposals.get(&hash) {
                 let p = proposal.clone();
@@ -354,20 +423,13 @@ impl GovernanceEngine {
             }
         }
 
-        // Pass 2: proposal competition — when the proposal window has elapsed,
-        // select the winner and reject/reset all other Proposal-phase proposals.
-        self.resolve_proposal_competition(now, params);
-
-        // Pass 3: advance proposals in active (advanceable) phases
+        // Proposals advance independently; support for one does not reject another.
         let hashes = self.active_proposal_hashes();
         for hash in hashes {
             if let Some(proposal) = self.proposals.get_mut(&hash) {
                 let mut p = proposal.clone();
-                match self.try_advance(&mut p, now, params, Some((delegation, verified_count))) {
+                match self.try_advance(&mut p, now, params, Some((delegation, verified_wallets))) {
                     Ok(GovernancePhase::Activation) => {
-                        p.activation_at = Some(Timestamp::new(
-                            now.as_secs() + activation_delay_secs(params),
-                        ));
                         tracing::debug!(
                             proposal = ?hash,
                             phase = ?GovernancePhase::Activation,
@@ -395,6 +457,26 @@ impl GovernanceEngine {
             }
         }
         activated
+    }
+
+    /// Advance scheduling without applying a parameter change off-ledger.
+    /// The node must submit and validate an activation block before those effects
+    /// become live. Existing queued effects are preserved for their owner.
+    pub fn schedule_activations(
+        &mut self,
+        now: Timestamp,
+        params: &ProtocolParams,
+        delegation: &DelegationEngine,
+        verified_wallets: &[WalletAddress],
+    ) -> Vec<TxHash> {
+        let changes = std::mem::take(&mut self.pending_changes);
+        let amendments = std::mem::take(&mut self.pending_amendments);
+        let evictions = std::mem::take(&mut self.pending_evictions);
+        let ready = self.tick(now, &mut params.clone(), delegation, verified_wallets);
+        self.pending_changes = changes;
+        self.pending_amendments = amendments;
+        self.pending_evictions = evictions;
+        ready
     }
 
     /// Get the endorsement count and total BRN burned for a proposal.
@@ -426,26 +508,29 @@ impl GovernanceEngine {
     /// - Changing `ConstiSupermajorityBps` requires the CURRENT consti threshold.
     ///   This is the self-referential property: "The Consti threshold is changed
     ///   by hitting that same Consti threshold (not the parameter threshold)."
-    /// - Changing `GovernanceSupermajorityBps` requires the *current* governance
-    ///   threshold OR 85%, whichever is higher. This prevents a majority from
-    ///   first lowering the threshold and then pushing through destructive changes.
+    /// - Changing `GovernanceSupermajorityBps` uses the current threshold,
+    ///   with no hardcoded floor (implementation decision 20.10).
     /// - Constitutional amendments require the consti threshold.
     /// - All other parameter changes use the normal governance threshold.
     fn get_required_supermajority(proposal: &Proposal, params: &ProtocolParams) -> u32 {
         match &proposal.content {
-            ProposalContent::ParameterChange { param, .. }
-            | ProposalContent::Emergency { param, .. } => match param {
+            ProposalContent::Emergency { param, .. } => match param {
+                crate::params::GovernableParam::ConstiSupermajorityBps => params
+                    .emergency_supermajority_bps
+                    .max(params.consti_supermajority_bps),
+                _ => params.emergency_supermajority_bps,
+            },
+            ProposalContent::ParameterChange { param, .. } => match param {
                 crate::params::GovernableParam::ConstiSupermajorityBps => {
                     params.consti_supermajority_bps
                 }
                 crate::params::GovernableParam::GovernanceSupermajorityBps => {
-                    // Meta-threshold: changing the threshold requires at least
-                    // the current threshold or 85%, whichever is higher.
-                    params.governance_supermajority_bps.max(8500)
+                    params.governance_supermajority_bps
                 }
                 _ => params.governance_supermajority_bps,
             },
-            ProposalContent::ConstitutionalAmendment { .. } => params.consti_supermajority_bps,
+            ProposalContent::ConstitutionalAmendment { .. }
+            | ProposalContent::ConstitutionalDiff { .. } => params.consti_supermajority_bps,
             // Evicting/reinstating a rep is a serious but ordinary governance
             // action → the normal governance supermajority (a values choice, not
             // a consti-level change).
@@ -458,18 +543,25 @@ impl GovernanceEngine {
     /// Mirrors [`get_required_supermajority`](Self::get_required_supermajority):
     /// constitutional amendments (and changes to the consti thresholds
     /// themselves) require the separately-governable consti quorum
-    /// (`consti_quorum_bps`); everything else uses the normal governance quorum.
+    /// (`consti_quorum_bps`). Emergencies also require the emergency quorum.
     /// The whitepaper (§Governance Process) requires BOTH a supermajority AND a
     /// quorum — previously the consti quorum was never enforced.
     fn get_required_quorum(proposal: &Proposal, params: &ProtocolParams) -> u32 {
         match &proposal.content {
-            ProposalContent::ParameterChange { param, .. }
-            | ProposalContent::Emergency { param, .. } => match param {
+            ProposalContent::Emergency { param, .. } => match param {
+                crate::params::GovernableParam::ConstiSupermajorityBps
+                | crate::params::GovernableParam::ConstiQuorumBps => {
+                    params.emergency_quorum_bps.max(params.consti_quorum_bps)
+                }
+                _ => params.emergency_quorum_bps,
+            },
+            ProposalContent::ParameterChange { param, .. } => match param {
                 crate::params::GovernableParam::ConstiSupermajorityBps
                 | crate::params::GovernableParam::ConstiQuorumBps => params.consti_quorum_bps,
                 _ => params.governance_quorum_bps,
             },
-            ProposalContent::ConstitutionalAmendment { .. } => params.consti_quorum_bps,
+            ProposalContent::ConstitutionalAmendment { .. }
+            | ProposalContent::ConstitutionalDiff { .. } => params.consti_quorum_bps,
             ProposalContent::RepresentativeEviction { .. } => params.governance_quorum_bps,
         }
     }
@@ -497,7 +589,7 @@ impl GovernanceEngine {
         proposal: &mut Proposal,
         now: Timestamp,
         params: &ProtocolParams,
-        delegation_ctx: Option<(&DelegationEngine, u32)>,
+        delegation_ctx: Option<(&DelegationEngine, &[WalletAddress])>,
     ) -> Result<GovernancePhase, GovernanceError> {
         match proposal.phase {
             GovernancePhase::Proposal => self.try_advance_proposal(proposal, now, params),
@@ -505,9 +597,6 @@ impl GovernanceEngine {
                 self.try_advance_exploration(proposal, now, params, delegation_ctx)
             }
             GovernancePhase::Cooldown => self.try_advance_cooldown(proposal, now, params),
-            GovernancePhase::Promotion => {
-                self.try_advance_promotion(proposal, now, params, delegation_ctx)
-            }
             _ => Err(GovernanceError::WrongPhase),
         }
     }
@@ -522,16 +611,32 @@ impl GovernanceEngine {
         &self,
         proposal: &Proposal,
         phase: GovernancePhase,
-        delegation_ctx: Option<(&DelegationEngine, u32)>,
+        delegation_ctx: Option<(&DelegationEngine, &[WalletAddress])>,
     ) -> (u32, u32, u32, u32) {
         match delegation_ctx {
-            Some((delegation, verified_count)) => {
+            Some((delegation, verified_wallets)) => {
                 let (yea, nay, abstain) = if phase == GovernancePhase::Promotion {
-                    self.count_effective_promotion_votes(&proposal.hash, delegation, &[])
+                    self.count_effective_promotion_votes(
+                        &proposal.hash,
+                        delegation,
+                        verified_wallets,
+                    )
                 } else {
-                    self.count_effective_exploration_votes(&proposal.hash, delegation, &[])
+                    self.count_effective_exploration_votes(
+                        &proposal.hash,
+                        delegation,
+                        verified_wallets,
+                    )
                 };
-                (yea, nay, abstain, verified_count)
+                (
+                    yea,
+                    nay,
+                    abstain,
+                    verified_wallets
+                        .iter()
+                        .collect::<std::collections::HashSet<_>>()
+                        .len() as u32,
+                )
             }
             None if phase == GovernancePhase::Promotion => (
                 proposal.promotion_votes_yea,
@@ -555,29 +660,36 @@ impl GovernanceEngine {
         now: Timestamp,
         params: &ProtocolParams,
     ) -> Result<GovernancePhase, GovernanceError> {
-        let duration_elapsed = proposal
-            .created_at
-            .has_expired(params.governance_proposal_duration_secs, now);
+        let end = self
+            .timing(proposal, params)?
+            .proposal_end(proposal.created_at)?;
+        let duration_elapsed = now >= end;
         let endorsements_met =
             proposal.endorsement_count >= params.governance_proposal_endorsements;
 
-        if duration_elapsed && endorsements_met {
+        if !duration_elapsed {
+            return Err(GovernanceError::PhaseNotExpired);
+        }
+        if endorsements_met {
             proposal.phase = GovernancePhase::Exploration;
-            proposal.exploration_started_at = Some(now);
+            proposal.exploration_started_at = Some(end);
             Ok(GovernancePhase::Exploration)
         } else {
-            Err(GovernanceError::PhaseNotExpired)
+            proposal.phase = GovernancePhase::Rejected;
+            Err(GovernanceError::InsufficientEndorsements {
+                have: proposal.endorsement_count,
+                need: params.governance_proposal_endorsements,
+            })
         }
     }
 
-    /// Exploration → Cooldown (normal) or Exploration → Promotion (emergency):
-    /// duration elapsed + propagation buffer + adaptive quorum + supermajority.
+    /// Voting → Cooldown (normal) or Activation (emergency).
     fn try_advance_exploration(
         &self,
         proposal: &mut Proposal,
         now: Timestamp,
         params: &ProtocolParams,
-        delegation_ctx: Option<(&DelegationEngine, u32)>,
+        delegation_ctx: Option<(&DelegationEngine, &[WalletAddress])>,
     ) -> Result<GovernancePhase, GovernanceError> {
         let is_emergency = matches!(proposal.content, ProposalContent::Emergency { .. });
 
@@ -585,39 +697,29 @@ impl GovernanceEngine {
             .exploration_started_at
             .ok_or_else(|| GovernanceError::Other("exploration_started_at not set".to_string()))?;
 
-        let duration_secs = if is_emergency {
-            EMERGENCY_PHASE_DURATION_SECS
-        } else {
-            params.governance_exploration_duration_secs
-        };
-
-        let voting_ended = exploration_started.has_expired(duration_secs, now);
+        let timing = self.timing(proposal, params)?;
+        let voting_ended = now >= timing.voting_end(exploration_started)?;
 
         if !voting_ended {
             return Err(GovernanceError::PhaseNotExpired);
         }
 
-        let counting_time = exploration_started
-            .as_secs()
-            .saturating_add(duration_secs)
-            .saturating_add(params.governance_propagation_buffer_secs);
+        let counting_time = timing.counting_at(exploration_started)?.as_secs();
         if now.as_secs() < counting_time {
             return Err(GovernanceError::PropagationBuffer);
         }
 
-        let effective_quorum = self.adaptive_quorum(
-            Self::get_required_quorum(proposal, params),
-            params.governance_ema_participation_bps,
-        );
+        let effective_quorum = Self::get_required_quorum(proposal, params);
 
-        let supermajority_bps = if is_emergency {
-            EMERGENCY_SUPERMAJORITY_BPS
-        } else {
-            Self::get_required_supermajority(proposal, params)
-        };
+        let supermajority_bps = Self::get_required_supermajority(proposal, params);
 
         let (yea, nay, abstain, eligible) =
             self.tally_inputs(proposal, GovernancePhase::Exploration, delegation_ctx);
+        // Closed proposals retain the effective result, not just direct votes.
+        proposal.exploration_votes_yea = yea;
+        proposal.exploration_votes_nay = nay;
+        proposal.exploration_votes_abstain = abstain;
+        proposal.total_eligible_voters = eligible;
         self.check_vote_result(
             yea,
             nay,
@@ -631,23 +733,34 @@ impl GovernanceEngine {
         )?;
 
         if is_emergency {
-            proposal.phase = GovernancePhase::Promotion;
-            proposal.promotion_started_at = Some(now);
-            Ok(GovernancePhase::Promotion)
+            proposal.phase = GovernancePhase::Activation;
+            proposal.activation_at = Some(Timestamp::new(
+                counting_time.saturating_add(activation_delay_secs(params)),
+            ));
+            Ok(GovernancePhase::Activation)
         } else {
             proposal.phase = GovernancePhase::Cooldown;
-            proposal.cooldown_started_at = Some(now);
+            proposal.cooldown_started_at = Some(Timestamp::new(counting_time));
             Ok(GovernancePhase::Cooldown)
         }
     }
 
-    /// Cooldown → Promotion: duration elapsed.
+    /// Cooldown → Activation: no second vote.
     fn try_advance_cooldown(
         &self,
         proposal: &mut Proposal,
         now: Timestamp,
         params: &ProtocolParams,
     ) -> Result<GovernancePhase, GovernanceError> {
+        // Certified ballots freeze their complete activation schedule. Later
+        // parameter changes cannot move this proposal's agreed timestamp.
+        if let Some(activation_at) = proposal.activation_at {
+            if now < activation_at {
+                return Err(GovernanceError::PhaseNotExpired);
+            }
+            proposal.phase = GovernancePhase::Activation;
+            return Ok(GovernancePhase::Activation);
+        }
         let cooldown_started = proposal
             .cooldown_started_at
             .ok_or_else(|| GovernanceError::Other("cooldown_started_at not set".to_string()))?;
@@ -656,81 +769,21 @@ impl GovernanceEngine {
             cooldown_started.has_expired(params.governance_cooldown_duration_secs, now);
 
         if duration_elapsed {
-            proposal.phase = GovernancePhase::Promotion;
-            proposal.promotion_started_at = Some(now);
-            Ok(GovernancePhase::Promotion)
+            proposal.phase = GovernancePhase::Activation;
+            proposal.activation_at = Some(Timestamp::new(
+                cooldown_started
+                    .as_secs()
+                    .saturating_add(params.governance_cooldown_duration_secs)
+                    .saturating_add(activation_delay_secs(params)),
+            ));
+            Ok(GovernancePhase::Activation)
         } else {
             Err(GovernanceError::PhaseNotExpired)
         }
     }
 
-    /// Promotion → Activation: duration elapsed + propagation buffer + adaptive quorum + supermajority.
-    fn try_advance_promotion(
-        &self,
-        proposal: &mut Proposal,
-        now: Timestamp,
-        params: &ProtocolParams,
-        delegation_ctx: Option<(&DelegationEngine, u32)>,
-    ) -> Result<GovernancePhase, GovernanceError> {
-        let is_emergency = matches!(proposal.content, ProposalContent::Emergency { .. });
-
-        let promotion_started = proposal
-            .promotion_started_at
-            .ok_or_else(|| GovernanceError::Other("promotion_started_at not set".to_string()))?;
-
-        let duration_secs = if is_emergency {
-            EMERGENCY_PHASE_DURATION_SECS
-        } else {
-            params.governance_promotion_duration_secs
-        };
-
-        let voting_ended = promotion_started.has_expired(duration_secs, now);
-
-        if !voting_ended {
-            return Err(GovernanceError::PhaseNotExpired);
-        }
-
-        let counting_time = promotion_started
-            .as_secs()
-            .saturating_add(duration_secs)
-            .saturating_add(params.governance_propagation_buffer_secs);
-        if now.as_secs() < counting_time {
-            return Err(GovernanceError::PropagationBuffer);
-        }
-
-        let effective_quorum = self.adaptive_quorum(
-            Self::get_required_quorum(proposal, params),
-            params.governance_ema_participation_bps,
-        );
-
-        let supermajority_bps = if is_emergency {
-            EMERGENCY_SUPERMAJORITY_BPS
-        } else {
-            Self::get_required_supermajority(proposal, params)
-        };
-
-        let (yea, nay, abstain, eligible) =
-            self.tally_inputs(proposal, GovernancePhase::Promotion, delegation_ctx);
-        self.check_vote_result(
-            yea,
-            nay,
-            abstain,
-            eligible,
-            effective_quorum,
-            supermajority_bps,
-            proposal,
-            now,
-            params,
-        )?;
-
-        proposal.phase = GovernancePhase::Activation;
-        proposal.activation_at = Some(now);
-        Ok(GovernancePhase::Activation)
-    }
-
     /// Check quorum and supermajority for a vote phase.
-    /// On failure, resets the proposal to Proposal phase with an incremented round
-    /// counter (if rounds remain), or terminally rejects it.
+    /// Failure rejects the proposal without erasing its vote record.
     #[allow(clippy::too_many_arguments)]
     fn check_vote_result(
         &self,
@@ -744,10 +797,11 @@ impl GovernanceEngine {
         now: Timestamp,
         params: &ProtocolParams,
     ) -> Result<(), GovernanceError> {
-        let total_votes = votes_yea + votes_nay + votes_abstain;
+        let total_votes = u64::from(votes_yea) + u64::from(votes_nay) + u64::from(votes_abstain);
         let participation_bps = (total_votes * 10000)
-            .checked_div(total_eligible_voters)
-            .unwrap_or(0);
+            .checked_div(u64::from(total_eligible_voters))
+            .unwrap_or(0)
+            .min(u64::from(u32::MAX)) as u32;
 
         if participation_bps < quorum_bps {
             self.fail_proposal(proposal, now, params);
@@ -757,8 +811,10 @@ impl GovernanceEngine {
             });
         }
 
-        let total_yea_nay = votes_yea + votes_nay;
-        let supermajority_actual_bps = (votes_yea * 10000).checked_div(total_yea_nay).unwrap_or(0);
+        let total_yea_nay = u64::from(votes_yea) + u64::from(votes_nay);
+        let supermajority_actual_bps = (u64::from(votes_yea) * 10000)
+            .checked_div(total_yea_nay)
+            .unwrap_or(0) as u32;
 
         if supermajority_actual_bps < supermajority_bps {
             self.fail_proposal(proposal, now, params);
@@ -771,35 +827,9 @@ impl GovernanceEngine {
         Ok(())
     }
 
-    /// Handle a proposal failure: reset to Proposal phase if rounds remain,
-    /// otherwise reject terminally. Clears vote state for the new round.
-    fn fail_proposal(&self, proposal: &mut Proposal, now: Timestamp, params: &ProtocolParams) {
-        if proposal.round < params.governance_max_rounds {
-            proposal.round += 1;
-            proposal.phase = GovernancePhase::Proposal;
-            proposal.created_at = now;
-            proposal.endorsement_count = 0;
-            proposal.exploration_started_at = None;
-            proposal.exploration_votes_yea = 0;
-            proposal.exploration_votes_nay = 0;
-            proposal.exploration_votes_abstain = 0;
-            proposal.cooldown_started_at = None;
-            proposal.promotion_started_at = None;
-            proposal.promotion_votes_yea = 0;
-            proposal.promotion_votes_nay = 0;
-            proposal.promotion_votes_abstain = 0;
-            tracing::info!(
-                proposal = ?proposal.hash,
-                round = proposal.round,
-                "proposal failed, reset to Proposal phase"
-            );
-        } else {
-            proposal.phase = GovernancePhase::Rejected;
-            tracing::info!(
-                proposal = ?proposal.hash,
-                "proposal rejected after max rounds"
-            );
-        }
+    /// A failed vote is final. Resubmission needs a new proposal and endorsements.
+    fn fail_proposal(&self, proposal: &mut Proposal, _now: Timestamp, _params: &ProtocolParams) {
+        proposal.phase = GovernancePhase::Rejected;
     }
 
     /// Safely convert u128 to u32, saturating at u32::MAX to prevent truncation.
@@ -920,6 +950,30 @@ impl GovernanceEngine {
             crate::params::GovernableParam::MinWorkDifficulty => {
                 params.min_work_difficulty = Self::saturating_u64(new_value);
             }
+            crate::params::GovernableParam::MinVerificationAgeSecs => {
+                params.min_verification_age_secs = Self::saturating_u64(new_value);
+            }
+            crate::params::GovernableParam::NeitherPenaltyCooldownSecs => {
+                params.neither_penalty_cooldown_secs = Self::saturating_u64(new_value);
+            }
+            crate::params::GovernableParam::NeitherPenaltyThresholdBps => {
+                params.neither_penalty_threshold_bps = Self::saturating_u32(new_value);
+            }
+            crate::params::GovernableParam::NeitherWindowAssignments => {
+                params.neither_window_assignments = Self::saturating_u32(new_value);
+            }
+            crate::params::GovernableParam::MinVerifierBrnBalance => {
+                params.min_verifier_brn_balance = new_value;
+            }
+            crate::params::GovernableParam::EmergencyVotingDurationSecs => {
+                params.emergency_voting_duration_secs = Self::saturating_u64(new_value);
+            }
+            crate::params::GovernableParam::EmergencyQuorumBps => {
+                params.emergency_quorum_bps = Self::saturating_u32(new_value);
+            }
+            crate::params::GovernableParam::EmergencySupermajorityBps => {
+                params.emergency_supermajority_bps = Self::saturating_u32(new_value);
+            }
         }
     }
 
@@ -938,7 +992,8 @@ impl GovernanceEngine {
                 self.pending_changes.push((param.clone(), *new_value));
                 Ok(())
             }
-            ProposalContent::ConstitutionalAmendment { .. } => {
+            ProposalContent::ConstitutionalAmendment { .. }
+            | ProposalContent::ConstitutionalDiff { .. } => {
                 self.pending_amendments.push(proposal.content.clone());
                 Ok(())
             }
@@ -956,6 +1011,40 @@ impl GovernanceEngine {
                 Ok(())
             }
         }
+    }
+
+    /// Calculate an activation hash without applying or queuing any effects.
+    /// Authoring a candidate is not an on-chain activation.
+    pub fn preview_activation(
+        &self,
+        proposal: &Proposal,
+        params: &ProtocolParams,
+    ) -> Result<ProtocolParams, GovernanceError> {
+        let mut staged = self.clone();
+        let mut next = params.clone();
+        staged.activate(proposal, &mut next)?;
+        Ok(next)
+    }
+
+    /// Queue effects only if the activation's committed parameter hash matches.
+    /// Failed validation must not leak effects to the periodic propagation task.
+    pub fn activate_checked(
+        &mut self,
+        proposal: &Proposal,
+        params: &mut ProtocolParams,
+        expected: &burst_types::BlockHash,
+    ) -> Result<(), GovernanceError> {
+        let mut staged = self.clone();
+        let mut next = params.clone();
+        staged.activate(proposal, &mut next)?;
+        if next.params_hash() != *expected {
+            return Err(GovernanceError::Other(
+                "activation parameter hash mismatch".into(),
+            ));
+        }
+        *self = staged;
+        *params = next;
+        Ok(())
     }
 
     /// Get pending parameter changes that have been activated but not yet propagated.
@@ -991,12 +1080,18 @@ impl GovernanceEngine {
         delegation_engine: &DelegationEngine,
         all_verified_wallets: &[WalletAddress],
     ) -> (u32, u32, u32) {
-        let direct_votes = match self.exploration_votes.get(proposal_hash) {
-            Some(votes) => votes,
-            None => return (0, 0, 0),
-        };
+        let empty = HashMap::new();
+        let direct_votes = self.exploration_votes.get(proposal_hash).unwrap_or(&empty);
 
-        Self::count_votes_with_delegation(direct_votes, delegation_engine, all_verified_wallets)
+        let Some(proposal) = self.get_proposal(proposal_hash) else {
+            return (0, 0, 0);
+        };
+        Self::count_votes_with_delegation(
+            direct_votes,
+            delegation_engine,
+            all_verified_wallets,
+            Some(proposal),
+        )
     }
 
     /// Count effective promotion votes for a proposal, including transitively delegated votes.
@@ -1013,71 +1108,64 @@ impl GovernanceEngine {
             None => return (0, 0, 0),
         };
 
-        Self::count_votes_with_delegation(direct_votes, delegation_engine, all_verified_wallets)
+        let Some(proposal) = self.get_proposal(proposal_hash) else {
+            return (0, 0, 0);
+        };
+        Self::count_votes_with_delegation(
+            direct_votes,
+            delegation_engine,
+            all_verified_wallets,
+            Some(proposal),
+        )
     }
 
-    /// Shared implementation for transitive delegation vote counting.
-    ///
-    /// Instead of iterating all verified wallets O(w×d), we:
-    /// 1. Count direct votes: O(v) where v = voters
-    /// 2. For each direct voter, walk reverse-delegation tree to count
-    ///    non-voting delegators whose chain resolves to this voter: O(δ×d)
-    ///    where δ = delegators and d = max delegation depth
-    ///
-    /// Total: O(v × (δ/v) × d) ≈ O(δ×d), much less than O(w×d)
+    /// Only the supplied verified electorate contributes votes. Stored votes or
+    /// delegation pointers do not grant a person eligibility by themselves.
     fn count_votes_with_delegation(
         direct_votes: &HashMap<WalletAddress, GovernanceVote>,
         delegation_engine: &DelegationEngine,
-        _all_verified_wallets: &[WalletAddress],
+        all_verified_wallets: &[WalletAddress],
+        proposal: Option<&Proposal>,
     ) -> (u32, u32, u32) {
-        let mut yea = 0u32;
-        let mut nay = 0u32;
-        let mut abstain = 0u32;
-
-        // Step 1: Count direct votes
-        for vote in direct_votes.values() {
+        let eligible: std::collections::HashSet<_> = all_verified_wallets.iter().collect();
+        let parameter = proposal.and_then(|p| match &p.content {
+            ProposalContent::ParameterChange { param, .. }
+            | ProposalContent::Emergency { param, .. } => Some(param),
+            _ => None,
+        });
+        let category = parameter.map(|p| p.category()).or_else(|| {
+            proposal.map(|p| match &p.content {
+                ProposalContent::ConstitutionalAmendment { .. }
+                | ProposalContent::ConstitutionalDiff { .. } => "constitution",
+                ProposalContent::RepresentativeEviction { .. } => "consensus",
+                _ => unreachable!("parameter content handled above"),
+            })
+        });
+        let (mut yea, mut nay, mut abstain) = (0, 0, 0);
+        for wallet in &eligible {
+            let vote = direct_votes.get(*wallet).copied().or_else(|| {
+                if let Some(vote) = delegation_engine.key_ballot(wallet) {
+                    return vote;
+                }
+                let delegate = delegation_engine.resolve_for_ballot(
+                    wallet,
+                    proposal.map(|p| &p.hash),
+                    parameter,
+                    category,
+                    |person| eligible.contains(person),
+                )?;
+                if !eligible.contains(&delegate) {
+                    return None;
+                }
+                direct_votes.get(&delegate).copied()
+            });
             match vote {
-                GovernanceVote::Yea => yea += 1,
-                GovernanceVote::Nay => nay += 1,
-                GovernanceVote::Abstain => abstain += 1,
+                Some(GovernanceVote::Yea) => yea += 1,
+                Some(GovernanceVote::Nay) => nay += 1,
+                Some(GovernanceVote::Abstain) => abstain += 1,
+                None => {}
             }
         }
-
-        // Step 2: For each voter, find delegators whose chain resolves to them.
-        // BFS through reverse-delegation index, only counting wallets that
-        // didn't vote directly and whose chain terminates at this voter.
-        for (voter, vote) in direct_votes {
-            let delegators = delegation_engine.get_delegators(voter);
-            let mut queue = std::collections::VecDeque::new();
-            for d in delegators {
-                if !direct_votes.contains_key(d) {
-                    queue.push_back(d.clone());
-                }
-            }
-            let mut visited = std::collections::HashSet::new();
-            while let Some(current) = queue.pop_front() {
-                if !visited.insert(current.clone()) {
-                    continue;
-                }
-                // Verify this delegator's chain actually resolves to `voter`
-                if let Some(resolved) = delegation_engine.resolve(&current) {
-                    if &resolved == voter {
-                        match vote {
-                            GovernanceVote::Yea => yea += 1,
-                            GovernanceVote::Nay => nay += 1,
-                            GovernanceVote::Abstain => abstain += 1,
-                        }
-                    }
-                }
-                // Continue BFS to find deeper delegators
-                for deeper in delegation_engine.get_delegators(&current) {
-                    if !direct_votes.contains_key(deeper) && !visited.contains(deeper) {
-                        queue.push_back(deeper.clone());
-                    }
-                }
-            }
-        }
-
         (yea, nay, abstain)
     }
 
@@ -1108,79 +1196,6 @@ impl GovernanceEngine {
         let current = participation_bps as u64;
         let new_ema = (8 * old + 2 * current) / 10;
         params.governance_ema_participation_bps = new_ema as u32;
-    }
-
-    /// Select the winning proposal from all proposals in the Proposal phase
-    /// that meet the endorsement threshold. Returns `None` if no proposal
-    /// qualifies or if there's a tie for the top spot.
-    fn select_winning_proposal(&self, params: &ProtocolParams) -> Option<TxHash> {
-        let mut qualified: Vec<_> = self
-            .proposals
-            .iter()
-            .filter(|(_, p)| p.phase == GovernancePhase::Proposal)
-            .filter(|(_, p)| p.endorsement_count >= params.governance_proposal_endorsements)
-            .collect();
-
-        if qualified.is_empty() {
-            return None;
-        }
-
-        qualified.sort_by_key(|b| std::cmp::Reverse(b.1.endorsement_count));
-
-        if qualified.len() > 1
-            && qualified[0].1.endorsement_count == qualified[1].1.endorsement_count
-        {
-            return None;
-        }
-
-        Some(*qualified[0].0)
-    }
-
-    /// When the proposal window has elapsed for any Proposal-phase proposals,
-    /// select the single winner (most endorsements, no ties) and reject/reset losers.
-    fn resolve_proposal_competition(&mut self, now: Timestamp, params: &ProtocolParams) {
-        let window_expired: Vec<TxHash> = self
-            .proposals
-            .iter()
-            .filter(|(_, p)| p.phase == GovernancePhase::Proposal)
-            .filter(|(_, p)| {
-                p.created_at
-                    .has_expired(params.governance_proposal_window_secs, now)
-            })
-            .map(|(h, _)| *h)
-            .collect();
-
-        if window_expired.is_empty() {
-            return;
-        }
-
-        let winner = self.select_winning_proposal(params);
-
-        for hash in &window_expired {
-            if Some(*hash) == winner {
-                continue;
-            }
-            if let Some(proposal) = self.proposals.get_mut(hash) {
-                if proposal.round < params.governance_max_rounds {
-                    proposal.round += 1;
-                    proposal.phase = GovernancePhase::Proposal;
-                    proposal.created_at = now;
-                    proposal.endorsement_count = 0;
-                    self.endorsement_counts.remove(hash);
-                    tracing::info!(
-                        proposal = ?hash,
-                        round = proposal.round,
-                        "proposal lost competition, reset to Proposal phase"
-                    );
-                } else {
-                    proposal.phase = GovernancePhase::Rejected;
-                    tracing::info!(
-                        proposal = ?hash,
-                        "proposal rejected after max rounds (lost competition)"
-                    );
-                }
-            }
-        }
     }
 
     /// Get all proposals currently in the Proposal or Exploration phase,
@@ -1225,6 +1240,7 @@ impl Default for GovernanceEngine {
 
 #[cfg(test)]
 mod tests {
+    mod snapshot_undo;
     use super::*;
     use crate::proposal::ProposalContent;
     use burst_types::{ProtocolParams, WalletAddress};
@@ -1274,6 +1290,108 @@ mod tests {
             created_at: Timestamp::new(created_at),
             activation_at: None,
         }
+    }
+
+    #[test]
+    fn constitutional_diffs_use_constitution_thresholds_and_queue_exact_operations() {
+        let mut engine = GovernanceEngine::new();
+        let mut proposal = make_proposal(1, 10);
+        proposal.content = ProposalContent::ConstitutionalDiff {
+            title: "Update rights".into(),
+            operations: vec![crate::proposal::AmendmentOp::ModifyArticle {
+                article_number: 1,
+                new_text: "Equal votes".into(),
+            }],
+        };
+        let mut params = default_params();
+        params.consti_supermajority_bps = 9100;
+        params.consti_quorum_bps = 3100;
+        assert_eq!(
+            GovernanceEngine::get_required_supermajority(&proposal, &params),
+            9100
+        );
+        assert_eq!(
+            GovernanceEngine::get_required_quorum(&proposal, &params),
+            3100
+        );
+        let hash = params.params_hash();
+        engine
+            .activate_checked(&proposal, &mut params, &hash)
+            .unwrap();
+        assert_eq!(params.params_hash(), hash);
+        assert_eq!(engine.drain_activated_amendments(), vec![proposal.content]);
+        assert!(engine.drain_pending_changes().is_empty());
+    }
+
+    #[test]
+    fn proposal_content_limits_reject_before_mutating_governance() {
+        let mut engine = GovernanceEngine::new();
+        let mut proposal = make_proposal(1, 0);
+        proposal.content = ProposalContent::ConstitutionalAmendment {
+            title: "憲法".into(),
+            text: "🌍".repeat(crate::content::MAX_AMENDMENT_CHARS + 1),
+        };
+        assert!(engine
+            .submit_proposal(proposal.clone(), 0, true, &default_params())
+            .is_err());
+        assert!(engine.get_proposal(&proposal.hash).is_none());
+        if let ProposalContent::ConstitutionalAmendment { text, .. } = &mut proposal.content {
+            text.pop();
+        }
+        engine
+            .submit_proposal(proposal.clone(), 0, true, &default_params())
+            .unwrap();
+        assert_eq!(
+            engine.get_proposal(&proposal.hash).unwrap().content,
+            proposal.content
+        );
+
+        let mut emergency = make_emergency_proposal(2);
+        emergency.hash = TxHash::new([7; 32]);
+        if let ProposalContent::Emergency { description, .. } = &mut emergency.content {
+            *description = "x".repeat(crate::content::MAX_CONTENT_BYTES);
+        }
+        assert!(engine
+            .submit_emergency_proposal(&mut emergency, Timestamp::new(2), &default_params())
+            .is_err());
+        assert_eq!(emergency.phase, GovernancePhase::Proposal);
+        assert!(engine.get_proposal(&emergency.hash).is_none());
+    }
+
+    #[test]
+    fn preview_and_invalid_activation_hash_never_queue_effects() {
+        let mut engine = GovernanceEngine::new();
+        let mut params = default_params();
+        let original_hash = params.params_hash();
+        let proposal = make_proposal(1, 10);
+        let preview = engine.preview_activation(&proposal, &params).unwrap();
+        assert_eq!(preview.brn_rate, 1000);
+        assert_eq!(params.params_hash(), original_hash);
+        assert!(engine.drain_pending_changes().is_empty());
+        assert!(engine
+            .activate_checked(&proposal, &mut params, &burst_types::BlockHash::ZERO)
+            .is_err());
+        assert_eq!(params.params_hash(), original_hash);
+        assert!(engine.drain_pending_changes().is_empty());
+        engine
+            .activate_checked(&proposal, &mut params, &preview.params_hash())
+            .unwrap();
+        assert_eq!(params.brn_rate, 1000);
+        assert_eq!(engine.drain_pending_changes().len(), 1);
+    }
+
+    #[test]
+    fn preview_does_not_queue_constitution_or_eviction_effects() {
+        let mut engine = GovernanceEngine::new();
+        let params = default_params();
+        let mut proposal = make_proposal(1, 10);
+        proposal.content = ProposalContent::ConstitutionalAmendment {
+            title: "test".into(),
+            text: "test".into(),
+        };
+        engine.preview_activation(&proposal, &params).unwrap();
+        assert!(engine.drain_activated_amendments().is_empty());
+        assert!(engine.drain_pending_evictions().is_empty());
     }
 
     /// Helper to create an emergency proposal.
@@ -1473,8 +1591,11 @@ mod tests {
         // With delegation, A carries B and C's votes too → 3 effective Yea, and
         // the denominator is the live verified-wallet count. No double counting:
         // B and C did not vote directly.
-        let (yea, nay, abstain, eligible) =
-            engine.tally_inputs(proposal, GovernancePhase::Exploration, Some((&del, 10)));
+        let (yea, nay, abstain, eligible) = engine.tally_inputs(
+            proposal,
+            GovernancePhase::Exploration,
+            Some((&del, &(1..=10).map(voter_wallet).collect::<Vec<_>>())),
+        );
         assert_eq!((yea, nay, abstain), (3, 0, 0));
         assert_eq!(eligible, 10);
     }
@@ -1584,60 +1705,47 @@ mod tests {
     }
 
     #[test]
-    fn test_cast_promotion_vote() {
+    fn test_legacy_promotion_cannot_accept_votes() {
         let mut engine = GovernanceEngine::new();
         let params = default_params();
-        let proposal = make_proposal(1000, 0);
-        let hash = submit(&mut engine, proposal);
+        let hash = submit(&mut engine, make_proposal(1000, 0));
         engine.get_proposal_mut(&hash).unwrap().phase = GovernancePhase::Promotion;
-        engine.get_proposal_mut(&hash).unwrap().promotion_started_at = Some(Timestamp::new(1000));
-
-        let voter = voter_wallet(1);
-        assert!(engine
-            .cast_promotion_vote(
+        assert!(matches!(
+            engine.cast_promotion_vote(
                 &hash,
-                &voter,
+                &voter_wallet(1),
                 GovernanceVote::Yea,
                 Timestamp::new(1000),
                 &params
-            )
-            .is_ok());
-
-        let stored = engine.get_proposal(&hash).unwrap();
-        assert_eq!(stored.promotion_votes_yea, 1);
+            ),
+            Err(GovernanceError::WrongPhase)
+        ));
+        assert!(engine.get_promotion_votes(&hash).is_none());
     }
 
     #[test]
-    fn test_cast_promotion_vote_duplicate_rejected() {
+    fn test_voting_refuses_cooldown_and_activation() {
         let mut engine = GovernanceEngine::new();
         let params = default_params();
-        let proposal = make_proposal(1000, 0);
-        let hash = submit(&mut engine, proposal);
-        engine.get_proposal_mut(&hash).unwrap().phase = GovernancePhase::Promotion;
-
-        let voter = voter_wallet(1);
-        engine
-            .cast_promotion_vote(
-                &hash,
-                &voter,
-                GovernanceVote::Yea,
-                Timestamp::new(1000),
-                &params,
-            )
-            .unwrap();
-
-        let result = engine.cast_promotion_vote(
-            &hash,
-            &voter,
-            GovernanceVote::Nay,
-            Timestamp::new(1001),
-            &params,
-        );
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            GovernanceError::AlreadyVoted(_)
-        ));
+        let hash = submit(&mut engine, make_proposal(1000, 0));
+        for phase in [
+            GovernancePhase::Cooldown,
+            GovernancePhase::Activation,
+            GovernancePhase::Rejected,
+        ] {
+            engine.get_proposal_mut(&hash).unwrap().phase = phase;
+            assert!(matches!(
+                engine.cast_exploration_vote(
+                    &hash,
+                    &voter_wallet(1),
+                    GovernanceVote::Yea,
+                    Timestamp::new(1000),
+                    &params
+                ),
+                Err(GovernanceError::WrongPhase)
+            ));
+        }
+        assert!(engine.get_exploration_votes(&hash).is_none());
     }
 
     // ── Proposal → Exploration ────────────────────────────────────────
@@ -1714,7 +1822,7 @@ mod tests {
     }
 
     #[test]
-    fn test_try_advance_exploration_retry_on_quorum_failure() {
+    fn test_try_advance_exploration_rejects_on_quorum_failure() {
         let engine = GovernanceEngine::new();
         let params = default_params();
         let exploration_started = Timestamp::new(1000);
@@ -1732,14 +1840,14 @@ mod tests {
         );
         let result = engine.try_advance(&mut proposal, now, &params, None);
         assert!(result.is_err());
-        // With retry: resets to Proposal phase, round incremented
-        assert_eq!(proposal.phase, GovernancePhase::Proposal);
-        assert_eq!(proposal.round, 1);
-        assert_eq!(proposal.exploration_votes_yea, 0);
+        // Rejection is final; the vote record is retained.
+        assert_eq!(proposal.phase, GovernancePhase::Rejected);
+        assert_eq!(proposal.round, 0);
+        assert_eq!(proposal.exploration_votes_yea, 20);
     }
 
     #[test]
-    fn test_try_advance_exploration_retry_on_supermajority_failure() {
+    fn test_try_advance_exploration_rejects_on_supermajority_failure() {
         let engine = GovernanceEngine::new();
         let params = default_params();
         let exploration_started = Timestamp::new(1000);
@@ -1757,15 +1865,15 @@ mod tests {
         );
         let result = engine.try_advance(&mut proposal, now, &params, None);
         assert!(result.is_err());
-        // With retry: resets to Proposal phase, round incremented
-        assert_eq!(proposal.phase, GovernancePhase::Proposal);
-        assert_eq!(proposal.round, 1);
+        // Rejection is final; the vote record is retained.
+        assert_eq!(proposal.phase, GovernancePhase::Rejected);
+        assert_eq!(proposal.round, 0);
     }
 
     // ── Cooldown → Promotion ──────────────────────────────────────────
 
     #[test]
-    fn test_try_advance_cooldown_to_promotion() {
+    fn test_try_advance_cooldown_to_activation() {
         let engine = GovernanceEngine::new();
         let params = default_params();
         let cooldown_started = Timestamp::new(1000);
@@ -1784,84 +1892,68 @@ mod tests {
             .try_advance(&mut proposal, now, &params, None)
             .is_err());
 
-        // After duration elapsed — should advance to Promotion
+        // After duration elapsed — should advance to Activation
         let now =
             Timestamp::new(cooldown_started.as_secs() + params.governance_cooldown_duration_secs);
         let result = engine.try_advance(&mut proposal, now, &params, None);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), GovernancePhase::Promotion);
-        assert_eq!(proposal.phase, GovernancePhase::Promotion);
-        assert!(proposal.promotion_started_at.is_some());
+        assert_eq!(result.unwrap(), GovernancePhase::Activation);
+        assert_eq!(proposal.phase, GovernancePhase::Activation);
+        assert!(proposal.promotion_started_at.is_none());
+        assert_eq!(
+            proposal.activation_at,
+            Some(Timestamp::new(
+                cooldown_started.as_secs()
+                    + params.governance_cooldown_duration_secs
+                    + params.governance_propagation_buffer_secs,
+            ))
+        );
     }
 
     // ── Promotion → Activation ────────────────────────────────────────
 
     #[test]
-    fn test_try_advance_promotion_to_activation() {
+    fn test_legacy_promotion_cannot_activate() {
         let engine = GovernanceEngine::new();
         let params = default_params();
-        let promotion_started = Timestamp::new(1000);
-        let mut proposal = make_proposal(0, 10);
+        let mut proposal = make_proposal(1000, 10);
         proposal.phase = GovernancePhase::Promotion;
-        proposal.exploration_started_at = Some(Timestamp::new(0));
-        proposal.exploration_votes_yea = 85;
-        proposal.exploration_votes_nay = 15;
-        proposal.cooldown_started_at = Some(Timestamp::new(0));
-        proposal.promotion_started_at = Some(promotion_started);
-        proposal.promotion_votes_yea = 85;
-        proposal.promotion_votes_nay = 15;
-        proposal.promotion_votes_abstain = 0;
-
-        // Before duration elapsed — should fail
-        let now = Timestamp::new(
-            promotion_started.as_secs() + params.governance_promotion_duration_secs - 1,
-        );
-        assert!(engine
-            .try_advance(&mut proposal, now, &params, None)
-            .is_err());
-
-        // After duration + propagation buffer — should advance to Activation
-        let now = Timestamp::new(
-            promotion_started.as_secs()
-                + params.governance_promotion_duration_secs
-                + params.governance_propagation_buffer_secs,
-        );
-        let result = engine.try_advance(&mut proposal, now, &params, None);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), GovernancePhase::Activation);
-        assert_eq!(proposal.phase, GovernancePhase::Activation);
-        assert!(proposal.activation_at.is_some());
+        proposal.promotion_started_at = Some(Timestamp::new(1000));
+        proposal.promotion_votes_yea = 100;
+        assert!(matches!(
+            engine.try_advance(&mut proposal, Timestamp::new(u64::MAX), &params, None,),
+            Err(GovernanceError::WrongPhase)
+        ));
+        assert!(proposal.activation_at.is_none());
     }
 
     #[test]
-    fn test_try_advance_promotion_retry_after_failure() {
+    fn test_governance_threshold_has_no_hardcoded_floor() {
         let engine = GovernanceEngine::new();
-        let params = default_params();
-        let promotion_started = Timestamp::new(1000);
+        let mut params = default_params();
+        params.governance_supermajority_bps = 8000;
+        params.governance_ema_participation_bps = 10000;
         let mut proposal = make_proposal(0, 10);
-        proposal.phase = GovernancePhase::Promotion;
-        proposal.exploration_started_at = Some(Timestamp::new(0));
-        proposal.exploration_votes_yea = 85;
-        proposal.exploration_votes_nay = 15;
-        proposal.cooldown_started_at = Some(Timestamp::new(0));
-        proposal.promotion_started_at = Some(promotion_started);
-        // Promotion fails: 50/50 split doesn't meet 80% supermajority
-        proposal.promotion_votes_yea = 50;
-        proposal.promotion_votes_nay = 50;
-        proposal.promotion_votes_abstain = 0;
-
+        proposal.content = ProposalContent::ParameterChange {
+            param: crate::params::GovernableParam::GovernanceSupermajorityBps,
+            new_value: 7500,
+        };
+        proposal.phase = GovernancePhase::Exploration;
+        proposal.exploration_started_at = Some(Timestamp::new(1000));
+        proposal.exploration_votes_yea = 24;
+        proposal.exploration_votes_nay = 6;
+        proposal.total_eligible_voters = 100;
         let now = Timestamp::new(
-            promotion_started.as_secs()
-                + params.governance_promotion_duration_secs
+            1000 + params.governance_exploration_duration_secs
                 + params.governance_propagation_buffer_secs,
         );
-        let result = engine.try_advance(&mut proposal, now, &params, None);
-        assert!(result.is_err());
-        // With retry: resets to Proposal phase, round incremented, votes cleared
-        assert_eq!(proposal.phase, GovernancePhase::Proposal);
-        assert_eq!(proposal.round, 1);
-        assert_eq!(proposal.promotion_votes_yea, 0);
-        assert_eq!(proposal.exploration_votes_yea, 0);
+        // Exactly 30% quorum and 80% yes passes, regardless of historical EMA.
+        assert_eq!(
+            engine
+                .try_advance(&mut proposal, now, &params, None)
+                .unwrap(),
+            GovernancePhase::Cooldown
+        );
     }
 
     // ── Adaptive Quorum ───────────────────────────────────────────────
@@ -1902,7 +1994,7 @@ mod tests {
     // ── Full 5-Phase Lifecycle (Happy Path) ───────────────────────────
 
     #[test]
-    fn test_full_5_phase_lifecycle() {
+    fn test_full_four_phase_lifecycle() {
         let engine = GovernanceEngine::new();
         let params = default_params();
         let mut proposal = make_proposal(1000, params.governance_proposal_endorsements);
@@ -1929,29 +2021,102 @@ mod tests {
         let result = engine.try_advance(&mut proposal, now, &params, None);
         assert_eq!(result.unwrap(), GovernancePhase::Cooldown);
 
-        // Phase 3 → 4: Cooldown → Promotion
+        // Cooldown is followed by activation, not another ballot.
         let cooldown_started = proposal.cooldown_started_at.unwrap();
         let now =
             Timestamp::new(cooldown_started.as_secs() + params.governance_cooldown_duration_secs);
-        let result = engine.try_advance(&mut proposal, now, &params, None);
-        assert_eq!(result.unwrap(), GovernancePhase::Promotion);
-
-        // Simulate promotion votes (85 yea, 10 nay, 5 abstain, 89.5% supermajority)
-        proposal.promotion_votes_yea = 85;
-        proposal.promotion_votes_nay = 10;
-        proposal.promotion_votes_abstain = 5;
-
-        // Phase 4 → 5: Promotion → Activation (with propagation buffer)
-        let promotion_started = proposal.promotion_started_at.unwrap();
-        let now = Timestamp::new(
-            promotion_started.as_secs()
-                + params.governance_promotion_duration_secs
-                + params.governance_propagation_buffer_secs,
+        assert_eq!(
+            engine
+                .try_advance(&mut proposal, now, &params, None)
+                .unwrap(),
+            GovernancePhase::Activation
         );
-        let result = engine.try_advance(&mut proposal, now, &params, None);
-        assert_eq!(result.unwrap(), GovernancePhase::Activation);
+        assert!(proposal.promotion_started_at.is_none());
         assert_eq!(proposal.phase, GovernancePhase::Activation);
         assert!(proposal.activation_at.is_some());
+    }
+
+    #[test]
+    fn phase_deadlines_do_not_depend_on_scheduler_delay() {
+        let engine = GovernanceEngine::new();
+        let params = default_params();
+        let original = make_proposal(1000, params.governance_proposal_endorsements);
+        let voting = 1000 + params.governance_proposal_duration_secs;
+        let cooldown = voting
+            + params.governance_exploration_duration_secs
+            + params.governance_propagation_buffer_secs;
+        let activation = cooldown + params.governance_cooldown_duration_secs;
+        for delay in [0, 3, 300, 86400] {
+            let mut proposal = original.clone();
+            engine
+                .try_advance(&mut proposal, Timestamp::new(voting + delay), &params, None)
+                .unwrap();
+            assert_eq!(
+                proposal.exploration_started_at,
+                Some(Timestamp::new(voting))
+            );
+            proposal.exploration_votes_yea = 80;
+            proposal.exploration_votes_nay = 20;
+            engine
+                .try_advance(
+                    &mut proposal,
+                    Timestamp::new(cooldown + delay),
+                    &params,
+                    None,
+                )
+                .unwrap();
+            assert_eq!(proposal.cooldown_started_at, Some(Timestamp::new(cooldown)));
+            engine
+                .try_advance(
+                    &mut proposal,
+                    Timestamp::new(activation + delay),
+                    &params,
+                    None,
+                )
+                .unwrap();
+            assert_eq!(
+                proposal.activation_at,
+                Some(Timestamp::new(
+                    activation + params.governance_propagation_buffer_secs
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn tally_handles_billions_of_people_without_overflow() {
+        let engine = GovernanceEngine::new();
+        let params = default_params();
+        let mut proposal = make_proposal(0, 10);
+        proposal.phase = GovernancePhase::Exploration;
+        proposal.exploration_started_at = Some(Timestamp::new(1000));
+        proposal.total_eligible_voters = u32::MAX;
+        proposal.exploration_votes_yea = 3_600_000_000;
+        proposal.exploration_votes_nay = 400_000_000;
+        proposal.exploration_votes_abstain = 294_967_295;
+        let now = Timestamp::new(
+            1000 + params.governance_exploration_duration_secs
+                + params.governance_propagation_buffer_secs,
+        );
+        assert_eq!(
+            engine
+                .try_advance(&mut proposal, now, &params, None)
+                .unwrap(),
+            GovernancePhase::Cooldown
+        );
+    }
+
+    #[test]
+    fn insufficient_endorsements_fail_at_the_proposal_deadline() {
+        let engine = GovernanceEngine::new();
+        let params = default_params();
+        let mut proposal = make_proposal(1000, params.governance_proposal_endorsements - 1);
+        let now = Timestamp::new(1000 + params.governance_proposal_duration_secs);
+        assert!(matches!(
+            engine.try_advance(&mut proposal, now, &params, None),
+            Err(GovernanceError::InsufficientEndorsements { .. })
+        ));
+        assert_eq!(proposal.phase, GovernancePhase::Rejected);
     }
 
     // ── Full lifecycle using engine methods ───────────────────────────
@@ -2214,7 +2379,7 @@ mod tests {
         let now = Timestamp::new(1000);
         let mut proposal = make_emergency_proposal(1000);
 
-        let result = engine.submit_emergency_proposal(&mut proposal, now);
+        let result = engine.submit_emergency_proposal(&mut proposal, now, &default_params());
         assert!(result.is_ok());
         assert_eq!(proposal.phase, GovernancePhase::Exploration);
         assert_eq!(proposal.exploration_started_at, Some(now));
@@ -2226,7 +2391,7 @@ mod tests {
         let now = Timestamp::new(1000);
         let mut proposal = make_proposal(1000, 0);
 
-        let result = engine.submit_emergency_proposal(&mut proposal, now);
+        let result = engine.submit_emergency_proposal(&mut proposal, now, &default_params());
         assert!(result.is_err());
     }
 
@@ -2239,7 +2404,7 @@ mod tests {
 
         // Submit as emergency → starts in Exploration
         engine
-            .submit_emergency_proposal(&mut proposal, now)
+            .submit_emergency_proposal(&mut proposal, now, &params)
             .unwrap();
         assert_eq!(proposal.phase, GovernancePhase::Exploration);
 
@@ -2248,32 +2413,23 @@ mod tests {
         proposal.exploration_votes_nay = 4;
         proposal.exploration_votes_abstain = 0;
 
-        // Advance after 24h + propagation buffer → should go to Promotion (not Cooldown!)
-        let now = Timestamp::new(
-            1000 + EMERGENCY_PHASE_DURATION_SECS + params.governance_propagation_buffer_secs,
+        let deadline = 1000
+            + params.emergency_voting_duration_secs
+            + params.governance_propagation_buffer_secs;
+        assert_eq!(
+            engine
+                .try_advance(&mut proposal, Timestamp::new(deadline), &params, None)
+                .unwrap(),
+            GovernancePhase::Activation
         );
-        let result = engine.try_advance(&mut proposal, now, &params, None);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), GovernancePhase::Promotion);
-        assert_eq!(proposal.phase, GovernancePhase::Promotion);
         assert!(proposal.cooldown_started_at.is_none());
-
-        // Set promotion votes
-        proposal.promotion_votes_yea = 96;
-        proposal.promotion_votes_nay = 4;
-        proposal.promotion_votes_abstain = 0;
-
-        // Advance after another 24h + propagation buffer → Activation
-        let promotion_started = proposal.promotion_started_at.unwrap();
-        let now = Timestamp::new(
-            promotion_started.as_secs()
-                + EMERGENCY_PHASE_DURATION_SECS
-                + params.governance_propagation_buffer_secs,
+        assert!(proposal.promotion_started_at.is_none());
+        assert_eq!(
+            proposal.activation_at,
+            Some(Timestamp::new(
+                deadline + params.governance_propagation_buffer_secs
+            ))
         );
-        let result = engine.try_advance(&mut proposal, now, &params, None);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), GovernancePhase::Activation);
-        assert_eq!(proposal.phase, GovernancePhase::Activation);
     }
 
     #[test]
@@ -2283,7 +2439,7 @@ mod tests {
         let now = Timestamp::new(1000);
         let mut proposal = make_emergency_proposal(1000);
         engine
-            .submit_emergency_proposal(&mut proposal, now)
+            .submit_emergency_proposal(&mut proposal, now, &params)
             .unwrap();
 
         proposal.exploration_votes_yea = 96;
@@ -2291,13 +2447,13 @@ mod tests {
         proposal.exploration_votes_abstain = 0;
 
         // Before 24h → should fail (PhaseNotExpired)
-        let now = Timestamp::new(1000 + EMERGENCY_PHASE_DURATION_SECS - 1);
+        let now = Timestamp::new(1000 + params.emergency_voting_duration_secs - 1);
         assert!(engine
             .try_advance(&mut proposal, now, &params, None)
             .is_err());
 
         // At exactly 24h but before propagation buffer → should fail (PropagationBuffer)
-        let now = Timestamp::new(1000 + EMERGENCY_PHASE_DURATION_SECS);
+        let now = Timestamp::new(1000 + params.emergency_voting_duration_secs);
         assert!(matches!(
             engine
                 .try_advance(&mut proposal, now, &params, None)
@@ -2307,7 +2463,8 @@ mod tests {
 
         // At 24h + propagation buffer → should pass
         let now = Timestamp::new(
-            1000 + EMERGENCY_PHASE_DURATION_SECS + params.governance_propagation_buffer_secs,
+            1000 + params.emergency_voting_duration_secs
+                + params.governance_propagation_buffer_secs,
         );
         assert!(engine
             .try_advance(&mut proposal, now, &params, None)
@@ -2321,7 +2478,7 @@ mod tests {
         let now = Timestamp::new(1000);
         let mut proposal = make_emergency_proposal(1000);
         engine
-            .submit_emergency_proposal(&mut proposal, now)
+            .submit_emergency_proposal(&mut proposal, now, &params)
             .unwrap();
 
         // 94% yea → should fail (need 95%)
@@ -2330,13 +2487,14 @@ mod tests {
         proposal.exploration_votes_abstain = 0;
 
         let now = Timestamp::new(
-            1000 + EMERGENCY_PHASE_DURATION_SECS + params.governance_propagation_buffer_secs,
+            1000 + params.emergency_voting_duration_secs
+                + params.governance_propagation_buffer_secs,
         );
         let result = engine.try_advance(&mut proposal, now, &params, None);
         assert!(result.is_err());
-        // With retry: resets to Proposal phase, round incremented
-        assert_eq!(proposal.phase, GovernancePhase::Proposal);
-        assert_eq!(proposal.round, 1);
+        // Rejection is final; the vote record is retained.
+        assert_eq!(proposal.phase, GovernancePhase::Rejected);
+        assert_eq!(proposal.round, 0);
     }
 
     #[test]
@@ -2346,20 +2504,135 @@ mod tests {
         let now = Timestamp::new(1000);
         let mut proposal = make_emergency_proposal(1000);
         engine
-            .submit_emergency_proposal(&mut proposal, now)
+            .submit_emergency_proposal(&mut proposal, now, &params)
             .unwrap();
 
-        // 96% yea → (96*10000)/100 = 9600 bps ≥ 9500 bps → should pass
-        proposal.exploration_votes_yea = 96;
-        proposal.exploration_votes_nay = 4;
+        // Exactly 95% passes.
+        proposal.exploration_votes_yea = 95;
+        proposal.exploration_votes_nay = 5;
         proposal.exploration_votes_abstain = 0;
 
         let now = Timestamp::new(
-            1000 + EMERGENCY_PHASE_DURATION_SECS + params.governance_propagation_buffer_secs,
+            1000 + params.emergency_voting_duration_secs
+                + params.governance_propagation_buffer_secs,
         );
         let result = engine.try_advance(&mut proposal, now, &params, None);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), GovernancePhase::Promotion);
+        assert_eq!(result.unwrap(), GovernancePhase::Activation);
+    }
+
+    #[test]
+    fn emergency_submission_uses_verified_entrypoint_and_cannot_replace_an_existing_ballot() {
+        let mut engine = GovernanceEngine::new();
+        let params = default_params();
+        let proposal = make_emergency_proposal(1000);
+        assert!(matches!(
+            engine.submit_proposal(proposal.clone(), 0, false, &params),
+            Err(GovernanceError::ProposerNotVerified)
+        ));
+        assert!(engine.get_proposal(&proposal.hash).is_none());
+        engine
+            .submit_proposal(proposal.clone(), 0, true, &params)
+            .unwrap();
+        let stored = engine.get_proposal(&proposal.hash).unwrap().clone();
+        assert_eq!(stored.phase, GovernancePhase::Exploration);
+        assert_eq!(stored.exploration_started_at, Some(proposal.created_at));
+        assert_eq!(
+            engine.counting_time(&stored, &params).unwrap().as_secs(),
+            1000 + params.emergency_voting_duration_secs
+                + params.governance_propagation_buffer_secs
+        );
+        assert!(engine
+            .submit_proposal(proposal.clone(), 0, true, &params)
+            .is_err());
+        assert_eq!(
+            bincode::serialize(engine.get_proposal(&proposal.hash).unwrap()).unwrap(),
+            bincode::serialize(&stored).unwrap()
+        );
+    }
+
+    #[test]
+    fn emergency_quorum_is_participation_not_approval() {
+        let params = default_params();
+        for (yea, nay, abstain, passes) in [
+            (30, 0, 0, false),
+            (94, 0, 0, false),
+            (90, 5, 0, false),
+            (95, 0, 0, true),
+            (90, 0, 5, true),
+        ] {
+            let mut engine = GovernanceEngine::new();
+            let mut proposal = make_emergency_proposal(1000);
+            engine
+                .submit_emergency_proposal(&mut proposal, Timestamp::new(1000), &params)
+                .unwrap();
+            proposal.exploration_votes_yea = yea;
+            proposal.exploration_votes_nay = nay;
+            proposal.exploration_votes_abstain = abstain;
+            let at = engine.counting_time(&proposal, &params).unwrap();
+            let result = engine.try_advance(&mut proposal, at, &params, None);
+            assert_eq!(result.is_ok(), passes, "votes: {yea}/{nay}/{abstain}");
+            if yea + nay + abstain < 95 {
+                assert!(matches!(result, Err(GovernanceError::QuorumNotMet { .. })));
+            }
+        }
+    }
+
+    #[test]
+    fn emergency_timing_is_frozen_but_counting_uses_governed_thresholds_after_restore() {
+        let mut engine = GovernanceEngine::new();
+        let mut params = default_params();
+        params.emergency_voting_duration_secs = 17;
+        params.governance_proposal_duration_secs = u64::MAX;
+        params.governance_propagation_buffer_secs = 3;
+        let mut proposal = make_emergency_proposal(1000);
+        engine
+            .submit_emergency_proposal(&mut proposal, Timestamp::new(1000), &params)
+            .unwrap();
+        let bytes = bincode::serialize(&engine).unwrap();
+        let restored: GovernanceEngine = bincode::deserialize(&bytes).unwrap();
+        params.emergency_voting_duration_secs = 1;
+        params.emergency_quorum_bps = 8000;
+        params.emergency_supermajority_bps = 7500;
+        assert_eq!(
+            restored.counting_time(&proposal, &params).unwrap(),
+            Timestamp::new(1020)
+        );
+        proposal.exploration_votes_yea = 60;
+        proposal.exploration_votes_nay = 20;
+        assert!(matches!(
+            restored.try_advance(&mut proposal, Timestamp::new(1019), &params, None),
+            Err(GovernanceError::PropagationBuffer)
+        ));
+        assert_eq!(
+            restored
+                .try_advance(&mut proposal, Timestamp::new(1020), &params, None)
+                .unwrap(),
+            GovernancePhase::Activation
+        );
+    }
+
+    #[test]
+    fn emergency_does_not_bypass_constitution_thresholds() {
+        let params = ProtocolParams {
+            consti_supermajority_bps: 9900,
+            consti_quorum_bps: 9800,
+            ..default_params()
+        };
+        let mut proposal = make_emergency_proposal(1000);
+        proposal.content = ProposalContent::Emergency {
+            description: "Threshold change".into(),
+            param: crate::params::GovernableParam::ConstiSupermajorityBps,
+            new_value: 1,
+        };
+        assert_eq!(
+            GovernanceEngine::get_required_supermajority(&proposal, &params),
+            9900
+        );
+        assert_eq!(
+            GovernanceEngine::get_required_quorum(&proposal, &params),
+            9800
+        );
     }
 
     #[test]
@@ -2371,33 +2644,21 @@ mod tests {
 
         // Submit
         engine
-            .submit_emergency_proposal(&mut proposal, now)
+            .submit_emergency_proposal(&mut proposal, now, &params)
             .unwrap();
 
-        // Exploration → Promotion
+        // Voting → Activation
         proposal.exploration_votes_yea = 96;
         proposal.exploration_votes_nay = 4;
         proposal.exploration_votes_abstain = 0;
         let now = Timestamp::new(
-            1000 + EMERGENCY_PHASE_DURATION_SECS + params.governance_propagation_buffer_secs,
-        );
-        engine
-            .try_advance(&mut proposal, now, &params, None)
-            .unwrap();
-
-        // Promotion → Activation
-        proposal.promotion_votes_yea = 96;
-        proposal.promotion_votes_nay = 4;
-        proposal.promotion_votes_abstain = 0;
-        let promotion_started = proposal.promotion_started_at.unwrap();
-        let now = Timestamp::new(
-            promotion_started.as_secs()
-                + EMERGENCY_PHASE_DURATION_SECS
+            1000 + params.emergency_voting_duration_secs
                 + params.governance_propagation_buffer_secs,
         );
         engine
             .try_advance(&mut proposal, now, &params, None)
             .unwrap();
+
         assert_eq!(proposal.phase, GovernancePhase::Activation);
 
         // Activate — apply the parameter change
@@ -2447,9 +2708,9 @@ mod tests {
         // 85% yea (8500 bps) should FAIL because consti requires 90% (9000 bps)
         let result = engine.try_advance(&mut proposal, now, &params, None);
         assert!(result.is_err());
-        // With retry: resets to Proposal phase, round incremented
-        assert_eq!(proposal.phase, GovernancePhase::Proposal);
-        assert_eq!(proposal.round, 1);
+        // Rejection is final; the vote record is retained.
+        assert_eq!(proposal.phase, GovernancePhase::Rejected);
+        assert_eq!(proposal.round, 0);
     }
 
     #[test]
@@ -2536,18 +2797,14 @@ mod tests {
     // ── Fix 5: Governance Proposal BRN Cost ───────────────────────────
 
     #[test]
-    fn test_submit_proposal_insufficient_brn() {
+    fn test_submit_proposal_does_not_charge_submission() {
         let mut engine = GovernanceEngine::new();
         let params = default_params();
         let proposal = make_proposal(1000, 0);
 
-        // Try with 0 BRN — should fail
+        // Proposal submission is open to every verified wallet.
         let result = engine.submit_proposal(proposal, 0, true, &params);
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            GovernanceError::InsufficientBrn { .. }
-        ));
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -2563,18 +2820,14 @@ mod tests {
     }
 
     #[test]
-    fn test_submit_proposal_just_below_brn_cost() {
+    fn test_submit_proposal_does_not_require_endorsement_balance() {
         let mut engine = GovernanceEngine::new();
         let params = default_params();
         let proposal = make_proposal(1000, 0);
 
         let result =
             engine.submit_proposal(proposal, params.governance_proposal_cost - 1, true, &params);
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            GovernanceError::InsufficientBrn { .. }
-        ));
+        assert!(result.is_ok());
     }
 
     // ── Fix 5B: New GovernableParam variants applied correctly ────────
@@ -2641,6 +2894,98 @@ mod tests {
 
         engine.activate(&proposal, &mut params).unwrap();
         assert_eq!(params.new_wallet_rate_limit_duration_secs, 86400);
+    }
+
+    #[test]
+    fn activate_verifier_eligibility_and_cooldown_parameters() {
+        use crate::params::GovernableParam;
+        let mut engine = GovernanceEngine::new();
+        let mut params = default_params();
+        for param in [
+            GovernableParam::MinVerificationAgeSecs,
+            GovernableParam::NeitherPenaltyCooldownSecs,
+        ] {
+            for value in [0, 7, u64::MAX as u128, u128::MAX] {
+                let mut proposal = make_proposal(0, 10);
+                proposal.phase = GovernancePhase::Activation;
+                proposal.content = ProposalContent::ParameterChange {
+                    param: param.clone(),
+                    new_value: value,
+                };
+                engine.activate(&proposal, &mut params).unwrap();
+                assert_eq!(
+                    param.value_view(&params).current,
+                    value.min(u64::MAX as u128).to_string()
+                );
+                let encoded = proposal.content.encode_compact().unwrap();
+                assert_eq!(
+                    ProposalContent::decode_compact(&encoded).unwrap(),
+                    proposal.content
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn activate_verifier_balance_and_emergency_rules_losslessly() {
+        use crate::params::GovernableParam::*;
+        let mut engine = GovernanceEngine::new();
+        let mut params = default_params();
+        for (param, maximum) in [
+            (MinVerifierBrnBalance, u128::MAX),
+            (EmergencyVotingDurationSecs, u64::MAX as u128),
+            (EmergencyQuorumBps, u32::MAX as u128),
+            (EmergencySupermajorityBps, u32::MAX as u128),
+        ] {
+            for value in [0, 1, 9501, maximum, u128::MAX] {
+                let mut proposal = make_proposal(0, 10);
+                proposal.phase = GovernancePhase::Activation;
+                proposal.content = ProposalContent::ParameterChange {
+                    param: param.clone(),
+                    new_value: value,
+                };
+                engine.activate(&proposal, &mut params).unwrap();
+                assert_eq!(
+                    param.value_view(&params).current,
+                    value.min(maximum).to_string()
+                );
+                let encoded = proposal.content.encode_compact().unwrap();
+                assert_eq!(
+                    ProposalContent::decode_compact(&encoded).unwrap(),
+                    proposal.content
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn activate_rolling_neither_rules() {
+        use crate::params::GovernableParam;
+        let mut engine = GovernanceEngine::new();
+        let mut params = default_params();
+        for param in [
+            GovernableParam::NeitherPenaltyThresholdBps,
+            GovernableParam::NeitherWindowAssignments,
+        ] {
+            for value in [0, 4, 7500, u32::MAX as u128, u128::MAX] {
+                let mut proposal = make_proposal(0, 10);
+                proposal.phase = GovernancePhase::Activation;
+                proposal.content = ProposalContent::ParameterChange {
+                    param: param.clone(),
+                    new_value: value,
+                };
+                engine.activate(&proposal, &mut params).unwrap();
+                assert_eq!(
+                    param.value_view(&params).current,
+                    value.min(u32::MAX as u128).to_string()
+                );
+                let encoded = proposal.content.encode_compact().unwrap();
+                assert_eq!(
+                    ProposalContent::decode_compact(&encoded).unwrap(),
+                    proposal.content
+                );
+            }
+        }
     }
 
     // ── EMA Update ───────────────────────────────────────────────────
@@ -2803,66 +3148,7 @@ mod tests {
     // ── Proposal Competition ────────────────────────────────────────
 
     #[test]
-    fn test_select_winning_proposal_single() {
-        let mut engine = GovernanceEngine::new();
-        let params = default_params();
-        let mut p = make_proposal(1000, params.governance_proposal_endorsements);
-        p.hash = unique_hash(1);
-        submit(&mut engine, p);
-
-        let winner = engine.select_winning_proposal(&params);
-        assert_eq!(winner, Some(unique_hash(1)));
-    }
-
-    #[test]
-    fn test_select_winning_proposal_highest_wins() {
-        let mut engine = GovernanceEngine::new();
-        let params = default_params();
-
-        let mut p1 = make_proposal(1000, params.governance_proposal_endorsements);
-        p1.hash = unique_hash(1);
-        submit(&mut engine, p1);
-
-        let mut p2 = make_proposal(1000, params.governance_proposal_endorsements + 5);
-        p2.hash = unique_hash(2);
-        submit(&mut engine, p2);
-
-        let winner = engine.select_winning_proposal(&params);
-        assert_eq!(winner, Some(unique_hash(2)));
-    }
-
-    #[test]
-    fn test_select_winning_proposal_tie_returns_none() {
-        let mut engine = GovernanceEngine::new();
-        let params = default_params();
-
-        let mut p1 = make_proposal(1000, params.governance_proposal_endorsements);
-        p1.hash = unique_hash(1);
-        submit(&mut engine, p1);
-
-        let mut p2 = make_proposal(1000, params.governance_proposal_endorsements);
-        p2.hash = unique_hash(2);
-        submit(&mut engine, p2);
-
-        let winner = engine.select_winning_proposal(&params);
-        assert_eq!(winner, None);
-    }
-
-    #[test]
-    fn test_select_winning_proposal_below_threshold() {
-        let mut engine = GovernanceEngine::new();
-        let params = default_params();
-
-        let mut p = make_proposal(1000, params.governance_proposal_endorsements - 1);
-        p.hash = unique_hash(1);
-        submit(&mut engine, p);
-
-        let winner = engine.select_winning_proposal(&params);
-        assert_eq!(winner, None);
-    }
-
-    #[test]
-    fn test_proposal_competition_winner_advances_losers_reset() {
+    fn test_qualified_proposals_advance_independently() {
         let mut engine = GovernanceEngine::new();
         let mut params = default_params();
 
@@ -2875,7 +3161,7 @@ mod tests {
         p2.hash = unique_hash(2);
         submit(&mut engine, p2);
 
-        // Endorse p1 past threshold, p2 below
+        // Both proposals meet the endorsement threshold.
         for _ in 0..params.governance_proposal_endorsements + 3 {
             engine.endorse_proposal(&unique_hash(1), 100).unwrap();
         }
@@ -2883,20 +3169,20 @@ mod tests {
             engine.endorse_proposal(&unique_hash(2), 100).unwrap();
         }
 
-        // Tick after proposal window elapses — winner (p1) advances, loser (p2) resets.
-        // The proposal window (7d) equals proposal_duration (7d), so p1 also meets
-        // try_advance_proposal conditions and advances to Exploration in the same tick.
         let now = Timestamp::new(created_at + params.governance_proposal_window_secs);
         let delegation = crate::delegation::DelegationEngine::new(10);
-        engine.tick(now, &mut params, &delegation, 0);
+        engine.tick(now, &mut params, &delegation, &[]);
 
         let p1_stored = engine.get_proposal(&unique_hash(1)).unwrap();
         assert_eq!(p1_stored.phase, GovernancePhase::Exploration);
 
         let p2_stored = engine.get_proposal(&unique_hash(2)).unwrap();
-        assert_eq!(p2_stored.phase, GovernancePhase::Proposal);
-        assert_eq!(p2_stored.round, 1);
-        assert_eq!(p2_stored.endorsement_count, 0);
+        assert_eq!(p2_stored.phase, GovernancePhase::Exploration);
+        assert_eq!(p2_stored.round, 0);
+        assert_eq!(
+            p2_stored.endorsement_count,
+            params.governance_proposal_endorsements
+        );
     }
 
     // ── Failure Retry ───────────────────────────────────────────────
@@ -2923,7 +3209,7 @@ mod tests {
     }
 
     #[test]
-    fn test_retry_clears_vote_state() {
+    fn test_rejection_preserves_vote_record() {
         let engine = GovernanceEngine::new();
         let params = default_params();
         let exploration_started = Timestamp::new(1000);
@@ -2941,53 +3227,148 @@ mod tests {
         );
         let _ = engine.try_advance(&mut proposal, now, &params, None);
 
-        assert_eq!(proposal.phase, GovernancePhase::Proposal);
-        assert_eq!(proposal.round, 1);
-        assert_eq!(proposal.exploration_votes_yea, 0);
-        assert_eq!(proposal.exploration_votes_nay, 0);
-        assert_eq!(proposal.exploration_votes_abstain, 0);
-        assert_eq!(proposal.endorsement_count, 0);
-        assert!(proposal.exploration_started_at.is_none());
+        assert_eq!(proposal.phase, GovernancePhase::Rejected);
+        assert_eq!(proposal.round, 0);
+        assert_eq!(proposal.exploration_votes_yea, 20);
+        assert_eq!(proposal.exploration_votes_nay, 30);
+        assert_eq!(proposal.exploration_votes_abstain, 5);
+        assert_eq!(proposal.endorsement_count, 10);
+        assert!(proposal.exploration_started_at.is_some());
     }
 
     #[test]
-    fn test_multiple_rounds_then_rejection() {
+    fn test_rejection_cannot_retry_without_new_proposal() {
         let engine = GovernanceEngine::new();
         let params = default_params();
         let mut proposal = make_proposal(0, 10);
-
-        for round in 0..params.governance_max_rounds {
-            proposal.phase = GovernancePhase::Exploration;
-            proposal.exploration_started_at = Some(Timestamp::new(round as u64 * 10000));
-            proposal.exploration_votes_yea = 20;
-            proposal.total_eligible_voters = 100;
-
-            let now = Timestamp::new(
-                proposal.exploration_started_at.unwrap().as_secs()
-                    + params.governance_exploration_duration_secs
-                    + params.governance_propagation_buffer_secs,
-            );
-            let _ = engine.try_advance(&mut proposal, now, &params, None);
-            assert_eq!(proposal.phase, GovernancePhase::Proposal);
-            assert_eq!(proposal.round, round + 1);
-        }
-
-        // One more failure at max_rounds should reject terminally
         proposal.phase = GovernancePhase::Exploration;
-        proposal.exploration_started_at = Some(Timestamp::new(99000));
+        proposal.exploration_started_at = Some(Timestamp::new(1000));
         proposal.exploration_votes_yea = 20;
-        proposal.total_eligible_voters = 100;
-
         let now = Timestamp::new(
-            99000
-                + params.governance_exploration_duration_secs
+            1000 + params.governance_exploration_duration_secs
                 + params.governance_propagation_buffer_secs,
         );
-        let _ = engine.try_advance(&mut proposal, now, &params, None);
+        assert!(matches!(
+            engine.try_advance(&mut proposal, now, &params, None),
+            Err(GovernanceError::QuorumNotMet { .. })
+        ));
+        for _ in 0..10 {
+            assert!(matches!(
+                engine.try_advance(&mut proposal, now, &params, None),
+                Err(GovernanceError::WrongPhase)
+            ));
+        }
         assert_eq!(proposal.phase, GovernancePhase::Rejected);
+        assert_eq!(proposal.round, 0);
     }
 
     // ── Delegation Tally ────────────────────────────────────────────
+
+    #[test]
+    fn key_only_ballots_count_and_explicit_absence_blocks_legacy_fallback() {
+        let mut engine = GovernanceEngine::new();
+        let hash = submit(&mut engine, make_proposal(1000, 0));
+        let people: Vec<_> = (1..=3).map(voter_wallet).collect();
+        let mut delegation = DelegationEngine::new(10);
+        delegation.project_key_ballot(people[0].clone(), Some(GovernanceVote::Yea));
+        delegation.project_key_ballot(people[1].clone(), Some(GovernanceVote::Nay));
+        assert_eq!(
+            engine.count_effective_exploration_votes(&hash, &delegation, &people),
+            (1, 1, 0)
+        );
+        delegation.delegate(&people[0], &people[2]).unwrap();
+        delegation.project_key_ballot(people[0].clone(), None);
+        engine.exploration_votes.insert(
+            hash,
+            HashMap::from([(people[2].clone(), GovernanceVote::Yea)]),
+        );
+        assert_eq!(
+            engine.count_effective_exploration_votes(&hash, &delegation, &people),
+            (1, 1, 0)
+        );
+        engine
+            .exploration_votes
+            .get_mut(&hash)
+            .unwrap()
+            .insert(people[1].clone(), GovernanceVote::Abstain);
+        assert_eq!(
+            engine.count_effective_exploration_votes(&hash, &delegation, &people),
+            (1, 0, 1)
+        );
+        // A cut-local projection must not become durable authority for a later proposal.
+        assert!(DelegationEngine::load_state(&delegation.save_state())
+            .unwrap()
+            .key_ballot(&people[1])
+            .is_none());
+    }
+
+    #[test]
+    fn tally_uses_proposal_parameter_category_and_direct_vote_precedence() {
+        use crate::{DelegationScope, GovernableParam};
+        let proposal = make_proposal(1000, 0);
+        let people: Vec<_> = (1..=5).map(voter_wallet).collect();
+        let owner = &people[0];
+        let mut delegation = DelegationEngine::new(10);
+        let mut votes = HashMap::from([
+            (people[1].clone(), GovernanceVote::Yea),
+            (people[2].clone(), GovernanceVote::Nay),
+            (people[3].clone(), GovernanceVote::Abstain),
+            (people[4].clone(), GovernanceVote::Yea),
+        ]);
+        let count = |del: &DelegationEngine, direct: &HashMap<_, _>| {
+            GovernanceEngine::count_votes_with_delegation(direct, del, &people, Some(&proposal))
+        };
+        delegation.delegate(owner, &people[1]).unwrap();
+        assert_eq!(count(&delegation, &votes), (3, 1, 1));
+        delegation
+            .delegate_scoped(
+                owner,
+                &people[2],
+                DelegationScope::Category("economic".into()),
+            )
+            .unwrap();
+        assert_eq!(count(&delegation, &votes), (2, 2, 1));
+        delegation
+            .delegate_scoped(
+                owner,
+                &people[3],
+                DelegationScope::Parameter(GovernableParam::BrnRate),
+            )
+            .unwrap();
+        assert_eq!(count(&delegation, &votes), (2, 1, 2));
+        delegation
+            .delegate_scoped(owner, &people[4], DelegationScope::Proposal(proposal.hash))
+            .unwrap();
+        assert_eq!(count(&delegation, &votes), (3, 1, 1));
+        votes.insert(owner.clone(), GovernanceVote::Nay);
+        assert_eq!(count(&delegation, &votes), (2, 2, 1));
+        let restored = DelegationEngine::load_state(&delegation.save_state()).unwrap();
+        assert_eq!(count(&restored, &votes), (2, 2, 1));
+    }
+
+    #[test]
+    fn revoked_intermediate_cannot_redirect_another_humans_vote() {
+        let a = voter_wallet(1);
+        let b = voter_wallet(2);
+        let c = voter_wallet(3);
+        let mut delegation = DelegationEngine::new(10);
+        delegation.delegate(&a, &b).unwrap();
+        delegation.delegate(&b, &c).unwrap();
+        let votes = HashMap::from([(c.clone(), GovernanceVote::Yea)]);
+        assert_eq!(
+            GovernanceEngine::count_votes_with_delegation(
+                &votes,
+                &delegation,
+                &[a.clone(), c.clone()],
+                None
+            ),
+            (1, 0, 0)
+        );
+        assert_eq!(
+            GovernanceEngine::count_votes_with_delegation(&votes, &delegation, &[a, b, c], None),
+            (3, 0, 0)
+        );
+    }
 
     #[test]
     fn test_effective_votes_with_delegation() {
@@ -3082,6 +3463,38 @@ mod tests {
         assert_eq!(yea, 1); // only delegate
         assert_eq!(nay, 1); // only delegator (voted directly)
         assert_eq!(abstain, 0);
+    }
+
+    #[test]
+    fn unverified_delegators_and_ineligible_old_votes_cannot_add_weight() {
+        let representative = voter_wallet(1);
+        let person = voter_wallet(2);
+        let unverified = voter_wallet(3);
+        let mut delegation = DelegationEngine::new(10);
+        delegation.delegate(&person, &representative).unwrap();
+        for id in 3..100 {
+            delegation
+                .delegate(&voter_wallet(id), &representative)
+                .unwrap();
+        }
+        let direct = HashMap::from([
+            (representative.clone(), GovernanceVote::Yea),
+            (unverified, GovernanceVote::Nay),
+        ]);
+        let eligible = vec![representative.clone(), person.clone(), person.clone()];
+        assert_eq!(
+            GovernanceEngine::count_votes_with_delegation(&direct, &delegation, &eligible, None),
+            (2, 0, 0)
+        );
+        // A stored ballot from a now-ineligible representative is not authority.
+        assert_eq!(
+            GovernanceEngine::count_votes_with_delegation(&direct, &delegation, &[person], None),
+            (0, 0, 0)
+        );
+        assert_eq!(
+            GovernanceEngine::count_votes_with_delegation(&direct, &delegation, &[], None),
+            (0, 0, 0)
+        );
     }
 
     #[test]

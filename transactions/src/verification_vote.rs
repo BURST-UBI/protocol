@@ -1,6 +1,6 @@
 //! Verification vote transaction: verifier casts a vote on a wallet's humanity.
 
-use burst_types::{Signature, Timestamp, TxHash, WalletAddress};
+use burst_types::{BlockHash, Signature, Timestamp, TxHash, WalletAddress};
 use serde::{Deserialize, Serialize};
 
 /// A verification vote transaction.
@@ -15,6 +15,8 @@ pub struct VerificationVoteTx {
     pub voter: WalletAddress,
     /// The wallet being verified.
     pub target_wallet: WalletAddress,
+    /// Certified checkpoint and selection request this vote answers.
+    pub selection_context: BlockHash,
     /// Vote: 1 = Legitimate, 2 = Illegitimate, 3 = Neither.
     pub vote: u8,
     /// Amount of BRN staked on this vote.

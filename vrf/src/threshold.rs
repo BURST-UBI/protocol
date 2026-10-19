@@ -1,7 +1,8 @@
-//! Phase 3: Threshold VRF (DVRF) — gold standard.
+//! Phase 3: BURST-operated threshold randomness (not implemented).
 //!
 //! A multiparty protocol where a committee collectively produces randomness.
-//! No single participant can predict or bias the output.
+//! Security depends on the committee, corruption threshold and key-management
+//! protocol. This placeholder does not provide those guarantees.
 //!
 //! Also provides beacon-based verifier selection for Phase 1 (drand) integration,
 //! and eligibility checking for verifier candidates.
@@ -10,7 +11,7 @@ use crate::{RandomOutput, VrfError, VrfProvider};
 use burst_types::{Timestamp, WalletAddress};
 use sha2::{Digest, Sha256};
 
-/// Threshold VRF provider — strongest guarantees.
+/// Placeholder provider; both generation and verification return Unavailable.
 pub struct ThresholdVrf {
     /// Minimum number of participants needed to produce a valid output.
     pub threshold: usize,

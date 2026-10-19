@@ -3,15 +3,17 @@
 //! Supports:
 //! - **Transitive delegation** (A→B→C means A's vote goes to C)
 //! - **Cycle detection** and max-depth limits
-//! - **Scoped delegation** (per-proposal, per-category, and global)
+//! - **Scoped delegation** (per-proposal, per-parameter, per-category, and global)
 //!
 //! This is governance delegation (one-person-one-vote), distinct from
-//! consensus delegation (balance-weighted for ORV).
+//! consensus delegation (also weighted by verified people, never balances).
 
 use crate::error::GovernanceError;
 use burst_types::{TxHash, WalletAddress};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+
+mod snapshot_undo;
 
 /// Scope for a delegation — determines which proposals it applies to.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -22,6 +24,8 @@ pub enum DelegationScope {
     Proposal(TxHash),
     /// Applies to a category of parameters (e.g., "economic", "verification").
     Category(String),
+    /// Applies to one named protocol parameter.
+    Parameter(crate::GovernableParam),
 }
 
 /// A scoped delegation record.
@@ -33,15 +37,35 @@ pub struct ScopedDelegation {
 }
 
 /// Manages vote delegation for governance, including transitive and scoped delegation.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DelegationEngine {
     /// Global delegations: delegator → delegate.
     delegations: HashMap<WalletAddress, WalletAddress>,
     /// Reverse index: delegate → set of direct delegators (global only).
+    #[serde(serialize_with = "ordered_reverse")]
     reverse_delegations: HashMap<WalletAddress, HashSet<WalletAddress>>,
     /// Scoped delegations: (delegator, scope) → delegate.
     scoped_delegations: HashMap<(WalletAddress, DelegationScope), WalletAddress>,
     /// Maximum transitive chain depth (to prevent abuse).
     max_depth: usize,
+    /// Cut-local key-ballot projection. None blocks legacy fallback for an
+    /// explicit scoped revocation or a grant with no currently effective vote.
+    key_ballots: HashMap<WalletAddress, Option<burst_transactions::governance::GovernanceVote>>,
+}
+
+fn ordered_reverse<S: serde::Serializer>(
+    reverse: &HashMap<WalletAddress, HashSet<WalletAddress>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let ordered: HashMap<_, _> = reverse
+        .iter()
+        .map(|(wallet, sources)| {
+            let mut sources: Vec<_> = sources.iter().collect();
+            sources.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+            (wallet, sources)
+        })
+        .collect();
+    ordered.serialize(serializer)
 }
 
 impl DelegationEngine {
@@ -51,7 +75,27 @@ impl DelegationEngine {
             reverse_delegations: HashMap::new(),
             scoped_delegations: HashMap::new(),
             max_depth,
+            key_ballots: HashMap::new(),
         }
+    }
+
+    pub fn max_depth(&self) -> usize {
+        self.max_depth
+    }
+
+    pub fn project_key_ballot(
+        &mut self,
+        owner: WalletAddress,
+        vote: Option<burst_transactions::governance::GovernanceVote>,
+    ) {
+        self.key_ballots.insert(owner, vote);
+    }
+
+    pub fn key_ballot(
+        &self,
+        owner: &WalletAddress,
+    ) -> Option<Option<burst_transactions::governance::GovernanceVote>> {
+        self.key_ballots.get(owner).copied()
     }
 
     /// Set or update a global delegation.
@@ -91,13 +135,16 @@ impl DelegationEngine {
         }
     }
 
-    /// Set or update a scoped delegation (per-proposal or per-category).
+    /// Set or update a scoped delegation.
     pub fn delegate_scoped(
         &mut self,
         from: &WalletAddress,
         to: &WalletAddress,
         scope: DelegationScope,
     ) -> Result<(), GovernanceError> {
+        if scope == DelegationScope::Global {
+            return self.delegate(from, to);
+        }
         if from == to {
             return Err(GovernanceError::SelfDelegation);
         }
@@ -108,6 +155,10 @@ impl DelegationEngine {
 
     /// Remove a scoped delegation.
     pub fn undelegate_scoped(&mut self, from: &WalletAddress, scope: DelegationScope) {
+        if scope == DelegationScope::Global {
+            self.undelegate(from);
+            return;
+        }
         self.scoped_delegations.remove(&(from.clone(), scope));
     }
 
@@ -118,7 +169,7 @@ impl DelegationEngine {
         let mut visited = HashSet::new();
         for _ in 0..self.max_depth {
             if !visited.insert(current.clone()) {
-                return None; // Cycle detected
+                return None;
             }
             match self.delegations.get(&current) {
                 Some(next) => current = next.clone(),
@@ -142,16 +193,36 @@ impl DelegationEngine {
         proposal_hash: Option<&TxHash>,
         category: Option<&str>,
     ) -> Option<WalletAddress> {
+        self.resolve_for_ballot(from, proposal_hash, None, category, |_| true)
+    }
+
+    /// Resolve with proposal > parameter > category > global precedence at
+    /// every hop. A revoked or otherwise ineligible intermediate cannot pass
+    /// another person's voting authority onward.
+    pub fn resolve_for_ballot(
+        &self,
+        from: &WalletAddress,
+        proposal_hash: Option<&TxHash>,
+        parameter: Option<&crate::GovernableParam>,
+        category: Option<&str>,
+        is_eligible: impl Fn(&WalletAddress) -> bool,
+    ) -> Option<WalletAddress> {
         let mut current = from.clone();
         let mut visited = HashSet::new();
         for _ in 0..self.max_depth {
-            if !visited.insert(current.clone()) {
+            if !is_eligible(&current) || !visited.insert(current.clone()) {
                 return None; // Cycle detected
             }
             let next = proposal_hash
                 .and_then(|h| {
                     self.scoped_delegations
                         .get(&(current.clone(), DelegationScope::Proposal(*h)))
+                })
+                .or_else(|| {
+                    parameter.and_then(|p| {
+                        self.scoped_delegations
+                            .get(&(current.clone(), DelegationScope::Parameter(p.clone())))
+                    })
                 })
                 .or_else(|| {
                     category.and_then(|c| {
@@ -200,48 +271,30 @@ impl DelegationEngine {
 
     /// Get the total voting power for an address in a scoped context.
     ///
-    /// Uses BFS from reverse-delegation index (like `voting_power`) instead of
-    /// iterating all delegations. For each candidate, resolves with scoped
-    /// context to verify it terminates at `address`.
+    /// Structural graph count only, not a consensus tally. Include scoped-only
+    /// ancestors as well as global pointers; eligibility is checked separately
+    /// by GovernanceEngine when counting actual ballots.
     pub fn voting_power_for_context(
         &self,
         address: &WalletAddress,
         proposal_hash: Option<&TxHash>,
         category: Option<&str>,
     ) -> u32 {
-        let mut power = 1u32; // Own vote
-                              // BFS through reverse-delegation index to find candidates
-        let mut candidates = HashSet::new();
-        let mut queue = std::collections::VecDeque::new();
-        queue.push_back(address.clone());
-        while let Some(current) = queue.pop_front() {
-            if let Some(delegators) = self.reverse_delegations.get(&current) {
-                for d in delegators {
-                    if candidates.insert(d.clone()) {
-                        queue.push_back(d.clone());
-                    }
-                }
-            }
-        }
-        // Also check scoped delegations that point to address or any candidate
-        // (scoped delegations can override global, so we need to check them too)
-        let mut scoped_candidates = HashSet::new();
-        for ((delegator, _scope), delegate) in &self.scoped_delegations {
-            if delegate == address || candidates.contains(delegator) {
-                scoped_candidates.insert(delegator.clone());
-            }
-        }
-        candidates.extend(scoped_candidates);
-
-        // Verify each candidate resolves to address in the given context
-        for candidate in &candidates {
-            if let Some(resolved) = self.resolve_for_context(candidate, proposal_hash, category) {
-                if &resolved == address {
-                    power += 1;
-                }
-            }
-        }
-        power
+        let candidates: HashSet<_> = self
+            .delegations
+            .keys()
+            .chain(self.scoped_delegations.keys().map(|(owner, _)| owner))
+            .collect();
+        1 + candidates
+            .into_iter()
+            .filter(|owner| {
+                *owner != address
+                    && self
+                        .resolve_for_context(owner, proposal_hash, category)
+                        .as_ref()
+                        == Some(address)
+            })
+            .count() as u32
     }
 
     /// Get the direct delegate for a wallet (None if not delegated).
@@ -270,7 +323,7 @@ impl DelegationEngine {
 const DELEGATION_ENGINE_META_KEY: &str = "delegation_engine_state";
 
 /// Serializable snapshot of the delegation engine's in-memory graph.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DelegationSnapshot {
     pub delegations: HashMap<WalletAddress, WalletAddress>,
     pub scoped_delegations: HashMap<(WalletAddress, DelegationScope), WalletAddress>,
@@ -289,22 +342,24 @@ impl DelegationEngine {
     }
 
     /// Restore the delegation graph from serialized bytes.
-    pub fn load_state(data: &[u8]) -> Self {
-        match bincode::deserialize::<DelegationSnapshot>(data) {
-            Ok(snapshot) => {
-                let mut reverse = HashMap::<WalletAddress, HashSet<WalletAddress>>::new();
-                for (from, to) in &snapshot.delegations {
-                    reverse.entry(to.clone()).or_default().insert(from.clone());
-                }
-                Self {
-                    delegations: snapshot.delegations,
-                    reverse_delegations: reverse,
-                    scoped_delegations: snapshot.scoped_delegations,
-                    max_depth: snapshot.max_depth,
-                }
-            }
-            Err(_) => Self::default(),
+    pub fn load_state(data: &[u8]) -> Result<Self, bincode::Error> {
+        use bincode::Options;
+        let snapshot: DelegationSnapshot = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .with_limit(data.len() as u64)
+            .reject_trailing_bytes()
+            .deserialize(data)?;
+        let mut reverse = HashMap::<WalletAddress, HashSet<WalletAddress>>::new();
+        for (from, to) in &snapshot.delegations {
+            reverse.entry(to.clone()).or_default().insert(from.clone());
         }
+        Ok(Self {
+            delegations: snapshot.delegations,
+            reverse_delegations: reverse,
+            scoped_delegations: snapshot.scoped_delegations,
+            max_depth: snapshot.max_depth,
+            key_ballots: HashMap::new(),
+        })
     }
 
     /// The meta-store key used for delegation engine persistence.
@@ -322,6 +377,19 @@ impl Default for DelegationEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persisted_delegation_roundtrip_and_corruption() {
+        let mut engine = DelegationEngine::new(10);
+        let from = wallet("from");
+        let to = wallet("to");
+        engine.delegate(&from, &to).unwrap();
+        let restored = DelegationEngine::load_state(&engine.save_state()).unwrap();
+        assert_eq!(restored.get_delegate(&from), Some(&to));
+        assert_eq!(restored.get_delegators(&to), vec![&from]);
+        assert!(DelegationEngine::load_state(b"corrupt snapshot").is_err());
+        assert!(DelegationEngine::load_state(&[]).is_err());
+    }
 
     fn wallet(name: &str) -> WalletAddress {
         WalletAddress::new(format!("brst_{:0>75}", name))
@@ -448,6 +516,38 @@ mod tests {
     }
 
     // ── Scoped Delegation (6.2) ──────────────────────────────────────────
+
+    #[test]
+    fn scoped_only_transitive_ancestors_are_counted_once() {
+        let mut engine = DelegationEngine::new(10);
+        let a = wallet("a");
+        let b = wallet("b");
+        let c = wallet("c");
+        let proposal = tx_hash(1);
+        engine
+            .delegate_scoped(&a, &b, DelegationScope::Proposal(proposal))
+            .unwrap();
+        engine
+            .delegate_scoped(&b, &c, DelegationScope::Proposal(proposal))
+            .unwrap();
+        assert_eq!(
+            engine.voting_power_for_context(&c, Some(&proposal), None),
+            3
+        );
+        assert_eq!(
+            engine.voting_power_for_context(&c, Some(&tx_hash(2)), None),
+            1
+        );
+        engine
+            .delegate_scoped(&a, &c, DelegationScope::Global)
+            .unwrap();
+        assert_eq!(
+            engine.voting_power_for_context(&c, Some(&proposal), None),
+            3
+        );
+        engine.undelegate_scoped(&a, DelegationScope::Global);
+        assert!(engine.get_delegate(&a).is_none());
+    }
 
     #[test]
     fn test_proposal_scoped_overrides_global() {

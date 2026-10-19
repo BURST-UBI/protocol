@@ -17,9 +17,63 @@
 //! check for revoked origins. With it, revocation is a one-time O(k) forward
 //! traversal at catch time, and every subsequent transaction is O(1).
 
-use burst_types::TxHash;
+use crate::shared::Shared;
+use bincode::Options;
+use burst_types::{TrstBasis, TxHash};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
+
+const SNAPSHOT_MAGIC: &[u8; 8] = b"BRSTMG03";
+
+mod records;
+mod snapshot_validation;
+pub use records::{GraphRecord, GraphRecordReader};
+
+/// One change, shared by every later merge using this revision. A source edge
+/// stores a pointer, not a copied list of all excluded burn origins.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RevocationRevision {
+    merge_tx: TxHash,
+    previous: TxHash,
+    origin: TxHash,
+    revoked: bool,
+    remaining: u128,
+}
+
+impl RevocationRevision {
+    fn hash(&self) -> TxHash {
+        TxHash::new(burst_crypto::blake2b_256_multi(&[
+            b"BURST/merge-revocation-revision/v1\0",
+            self.merge_tx.as_bytes(),
+            self.previous.as_bytes(),
+            self.origin.as_bytes(),
+            &[u8::from(self.revoked)],
+            &self.remaining.to_be_bytes(),
+        ]))
+    }
+}
+
+// Local snapshots must survive decode/encode without randomized map order
+// appearing as an unrelated economic change to an undo journal.
+fn sorted_map<V: Serialize, S: serde::Serializer>(
+    map: &HashMap<TxHash, V>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    map.iter()
+        .map(|(hash, value)| (hash.as_bytes(), value))
+        .collect::<std::collections::BTreeMap<_, _>>()
+        .serialize(serializer)
+}
+
+fn sorted_set<S: serde::Serializer>(
+    set: &HashSet<TxHash>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    set.iter()
+        .map(TxHash::as_bytes)
+        .collect::<std::collections::BTreeSet<_>>()
+        .serialize(serializer)
+}
 
 /// A node in the merger graph representing a merge operation.
 ///
@@ -27,7 +81,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 /// tokens descended from this merge are tracked by the engine's origin-holders
 /// index, not here — a holder recorded at merge time would go stale on the first
 /// transfer.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MergeNode {
     /// Hash of the merge transaction.
     pub merge_tx: TxHash,
@@ -40,7 +94,7 @@ pub struct MergeNode {
     /// Kept so sequential revocations of different origins split against the
     /// correct remaining (unrevoked) denominator, and so un-revocation (6.15b)
     /// can restore exactly what was taken.
-    #[serde(default)]
+    #[serde(default, serialize_with = "sorted_map")]
     pub revoked_contribs: HashMap<TxHash, u128>,
 }
 
@@ -54,38 +108,78 @@ impl MergeNode {
 }
 
 /// One source in a merge operation.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MergeSource {
     pub origin: TxHash,
     pub amount: u128,
 }
 
 /// The merger graph — maps origins forward to all merges that consumed them.
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct MergerGraph {
     /// Maps an input origin (burn tx or merge tx) to all merges that consumed it.
-    origin_to_merges: HashMap<TxHash, Vec<TxHash>>,
+    #[serde(serialize_with = "sorted_map")]
+    origin_to_merges: Shared<HashMap<TxHash, Vec<TxHash>>>,
 
     /// Maps a merge TxHash to its full merge node data.
-    merge_nodes: HashMap<TxHash, MergeNode>,
+    #[serde(serialize_with = "sorted_map")]
+    merge_nodes: Shared<HashMap<TxHash, MergeNode>>,
 
     /// Maps a merge TxHash to downstream merges that consumed it.
-    merge_to_downstream: HashMap<TxHash, Vec<TxHash>>,
+    #[serde(serialize_with = "sorted_map")]
+    merge_to_downstream: Shared<HashMap<TxHash, Vec<TxHash>>>,
 
     /// Set of burn origins that are currently revoked.
-    revoked_origins: HashSet<TxHash>,
+    #[serde(serialize_with = "sorted_set")]
+    revoked_origins: Shared<HashSet<TxHash>>,
+
+    #[serde(serialize_with = "sorted_map")]
+    revisions: Shared<HashMap<TxHash, RevocationRevision>>,
+    #[serde(serialize_with = "sorted_map")]
+    current_revisions: Shared<HashMap<TxHash, TxHash>>,
+    /// Child merge -> immediate source/revision pairs, only for changed sources.
+    #[serde(serialize_with = "sorted_map")]
+    source_revisions: Shared<HashMap<TxHash, Vec<(usize, TrstBasis)>>>,
 }
 
-/// Multiply-then-ceil-divide with saturation: `ceil(amount * num / den)`.
+/// Exact ceil-divide, capped at `amount`: `ceil(amount * num / den)`.
 /// The "harsh" rounding of IMPLEMENTATION_DECISIONS 6.18(b) — the holder
 /// loses the fractional raw.
 pub(crate) fn ceil_proportion(amount: u128, num: u128, den: u128) -> u128 {
     if den == 0 || num == 0 || amount == 0 {
         return 0;
     }
-    let prod = amount.saturating_mul(num);
-    let out = prod / den + u128::from(!prod.is_multiple_of(den));
-    out.min(amount)
+    if num >= den {
+        return amount;
+    }
+    if let Some(product) = amount.checked_mul(num) {
+        return product / den + u128::from(product % den != 0);
+    }
+    // Binary long division of the conceptual 256-bit product. Keep a
+    // remainder below den; subtraction comparisons avoid overflowing 2*r.
+    // Saturating the product would severely under-revoke ordinary 18-decimal
+    // amounts, not merely unrealistic u128-limit balances.
+    let mut quotient = 0u128;
+    let mut remainder = 0u128;
+    for bit in (0..128).rev() {
+        let mut carry = 0u128;
+        if remainder >= den - remainder {
+            remainder -= den - remainder;
+            carry = 1;
+        } else {
+            remainder += remainder;
+        }
+        if (amount >> bit) & 1 == 1 {
+            if remainder >= den - num {
+                remainder -= den - num;
+                carry += 1;
+            } else {
+                remainder += num;
+            }
+        }
+        quotient = quotient * 2 + carry;
+    }
+    quotient + u128::from(remainder != 0)
 }
 
 /// A taint computed for one merge node when a burn origin is revoked.
@@ -111,6 +205,30 @@ pub struct UnTaintEvent {
 }
 
 impl MergerGraph {
+    /// True only when both snapshots still share every unchanged index.
+    /// False does not imply different contents (for example, after decoding).
+    pub fn shares_storage_with(&self, other: &Self) -> bool {
+        self.origin_to_merges
+            .shares_storage_with(&other.origin_to_merges)
+            && self.merge_nodes.shares_storage_with(&other.merge_nodes)
+            && self
+                .merge_to_downstream
+                .shares_storage_with(&other.merge_to_downstream)
+            && self
+                .revoked_origins
+                .shares_storage_with(&other.revoked_origins)
+            && self.revisions.shares_storage_with(&other.revisions)
+            && self
+                .current_revisions
+                .shares_storage_with(&other.current_revisions)
+            && self
+                .source_revisions
+                .shares_storage_with(&other.source_revisions)
+    }
+
+    pub fn iter_merges(&self) -> impl Iterator<Item = &MergeNode> {
+        self.merge_nodes.values()
+    }
     pub fn new() -> Self {
         Self::default()
     }
@@ -121,7 +239,31 @@ impl MergerGraph {
     /// merge (multi-level merges). Because sources are the immediate inputs,
     /// this fires whenever a merged token is consumed by a subsequent merge.
     pub fn record_merge(&mut self, node: MergeNode) {
+        let bases = node
+            .source_origins
+            .iter()
+            .map(|source| {
+                self.current_revisions
+                    .get(&source.origin)
+                    .map_or(TrstBasis::Entire, |revision| {
+                        TrstBasis::Remainder(*revision)
+                    })
+            })
+            .collect();
+        self.record_merge_with_bases(node, bases);
+    }
+
+    pub(crate) fn record_merge_with_bases(&mut self, node: MergeNode, bases: Vec<TrstBasis>) {
         let merge_tx = node.merge_tx;
+        assert_eq!(node.source_origins.len(), bases.len());
+        let revisions: Vec<_> = bases
+            .into_iter()
+            .enumerate()
+            .filter(|(_, basis)| *basis != TrstBasis::Entire)
+            .collect();
+        if !revisions.is_empty() {
+            self.source_revisions.insert(merge_tx, revisions);
+        }
         for source in &node.source_origins {
             self.origin_to_merges
                 .entry(source.origin)
@@ -234,13 +376,36 @@ impl MergerGraph {
                 None => continue,
             };
             let mut t: u128 = 0;
-            for s in &node.source_origins {
-                if s.origin == *origin {
+            for (index, s) in node.source_origins.iter().enumerate() {
+                let basis = self
+                    .source_revisions
+                    .get(&m)
+                    .and_then(|sources| {
+                        sources
+                            .iter()
+                            .find(|(source, _)| *source == index)
+                            .map(|(_, basis)| *basis)
+                    })
+                    .unwrap_or_default();
+                if let TrstBasis::Single(single) = basis {
+                    if single == *origin {
+                        t = t.saturating_add(s.amount);
+                    }
+                } else if s.origin == *origin {
                     t = t.saturating_add(s.amount);
                 } else if let (Some(&pt), Some(parent)) =
                     (taint.get(&s.origin), self.merge_nodes.get(&s.origin))
                 {
-                    t = t.saturating_add(ceil_proportion(s.amount, pt, parent.total_amount));
+                    let denominator = match basis {
+                        TrstBasis::Remainder(revision) => {
+                            if self.revoked_at(revision, origin) {
+                                continue;
+                            }
+                            self.revisions[&revision].remaining
+                        }
+                        _ => parent.total_amount,
+                    };
+                    t = t.saturating_add(ceil_proportion(s.amount, pt, denominator));
                 }
             }
             let t = t.min(node.total_amount);
@@ -250,6 +415,117 @@ impl MergerGraph {
             }
         }
         out
+    }
+
+    fn revoked_at(&self, mut revision: TxHash, origin: &TxHash) -> bool {
+        while revision != TxHash::ZERO {
+            let state = &self.revisions[&revision];
+            if state.origin == *origin {
+                return state.revoked;
+            }
+            revision = state.previous;
+        }
+        false
+    }
+
+    fn record_revision(&mut self, merge_tx: TxHash, origin: TxHash, revoked: bool) {
+        let node = &self.merge_nodes[&merge_tx];
+        let revision = RevocationRevision {
+            merge_tx,
+            origin,
+            revoked,
+            previous: self
+                .current_revisions
+                .get(&merge_tx)
+                .copied()
+                .unwrap_or(TxHash::ZERO),
+            remaining: node.total_amount.saturating_sub(node.revoked_total()),
+        };
+        let hash = revision.hash();
+        self.revisions.insert(hash, revision);
+        self.current_revisions.insert(merge_tx, hash);
+    }
+
+    pub fn valid_basis(&self, origin: &TxHash, basis: TrstBasis) -> bool {
+        match basis {
+            TrstBasis::Entire => true,
+            TrstBasis::Single(single) => {
+                single != TxHash::ZERO && (single == *origin || self.contains_merge(origin))
+            }
+            TrstBasis::Remainder(revision) => self
+                .revisions
+                .get(&revision)
+                .is_some_and(|state| state.merge_tx == *origin && state.remaining > 0),
+        }
+    }
+
+    pub(crate) fn current_basis(&self, origin: &TxHash) -> TrstBasis {
+        self.current_revisions
+            .get(origin)
+            .map_or(TrstBasis::Entire, |hash| TrstBasis::Remainder(*hash))
+    }
+
+    pub(crate) fn basis_excludes(&self, basis: TrstBasis, origin: &TxHash) -> bool {
+        match basis {
+            TrstBasis::Entire => false,
+            TrstBasis::Single(single) => single != *origin,
+            TrstBasis::Remainder(revision) => self.revoked_at(revision, origin),
+        }
+    }
+
+    pub(crate) fn basis_cut(
+        &self,
+        origin: &TxHash,
+        basis: TrstBasis,
+        amount: u128,
+        revoked: &TxHash,
+        tainted: u128,
+    ) -> u128 {
+        match basis {
+            TrstBasis::Single(single) => {
+                if single == *revoked {
+                    amount
+                } else {
+                    0
+                }
+            }
+            TrstBasis::Remainder(revision) => {
+                if self.revoked_at(revision, revoked) {
+                    return 0;
+                }
+                ceil_proportion(amount, tainted, self.revisions[&revision].remaining)
+            }
+            TrstBasis::Entire => self
+                .merge_nodes
+                .get(origin)
+                .map_or(if origin == revoked { amount } else { 0 }, |node| {
+                    ceil_proportion(amount, tainted, node.total_amount)
+                }),
+        }
+    }
+
+    pub(crate) fn reduced_basis(
+        &mut self,
+        origin: &TxHash,
+        basis: TrstBasis,
+        revoked: TxHash,
+        tainted: u128,
+    ) -> TrstBasis {
+        let (previous, capacity) = match basis {
+            TrstBasis::Entire => (TxHash::ZERO, self.merge_nodes[origin].total_amount),
+            TrstBasis::Remainder(revision) => (revision, self.revisions[&revision].remaining),
+            TrstBasis::Single(_) => return basis,
+        };
+        let revision = RevocationRevision {
+            merge_tx: *origin,
+            previous,
+            origin: revoked,
+            revoked: true,
+            remaining: capacity.saturating_sub(tainted),
+        };
+        let hash = revision.hash();
+        self.revisions.entry(hash).or_insert(revision);
+        TrstBasis::Remainder(hash)
     }
 
     /// Mark a burn origin as revoked and propagate the taint forward through
@@ -279,6 +555,7 @@ impl MergerGraph {
                     prior_revoked: prior,
                     total_amount: node.total_amount,
                 });
+                self.record_revision(merge_tx, origin, true);
             }
         }
         events
@@ -299,6 +576,7 @@ impl MergerGraph {
                         merge_tx: m,
                         restored_amount: restored,
                     });
+                    self.record_revision(m, *origin, false);
                 }
             }
         }
@@ -325,18 +603,190 @@ impl MergerGraph {
 
     /// Serialize the entire graph to bytes for LMDB persistence.
     pub fn to_bytes(&self) -> Vec<u8> {
-        bincode::serialize(self).expect("merger graph serialization should not fail")
+        let mut bytes = Vec::new();
+        self.write_snapshot(&mut bytes)
+            .expect("merger graph serialization should not fail");
+        bytes
+    }
+
+    /// Write the existing snapshot format directly to a bounded caller's sink.
+    pub fn write_snapshot(&self, mut writer: impl std::io::Write) -> Result<(), bincode::Error> {
+        writer.write_all(SNAPSHOT_MAGIC)?;
+        bincode::serialize_into(writer, self)
+    }
+
+    /// Restore only entries changed by a local journal. Independent consumers
+    /// of a shared origin survive. Changes to the same merge or revision still
+    /// conflict. Finality and dependency checks belong to the caller.
+    pub fn rewind_snapshot(before: &[u8], after: &[u8], current: &[u8]) -> Result<Vec<u8>, String> {
+        const MAX_BYTES: usize = 64 * 1024 * 1024;
+        if [before, after, current]
+            .iter()
+            .any(|bytes| bytes.len() > MAX_BYTES)
+        {
+            return Err("merger graph undo exceeds size limit".into());
+        }
+        let before = Self::from_bytes(before)?;
+        let after = Self::from_bytes(after)?;
+        let current = Self::from_bytes(current)?;
+        let bytes = current.rewind_changes(&before, &after)?.to_bytes();
+        if bytes.len() > MAX_BYTES {
+            return Err("merger graph undo exceeds size limit".into());
+        }
+        Ok(bytes)
+    }
+
+    /// Reconcile a local transition against current state without constructing
+    /// aggregate snapshots. The returned candidate is unpublished on failure.
+    pub fn rewind_changes(&self, before: &Self, after: &Self) -> Result<Self, String> {
+        before.validate_persisted()?;
+        after.validate_persisted()?;
+        self.validate_persisted()?;
+        let mut current = self.clone();
+        use crate::snapshot_undo::{rewind_appended_edges, rewind_map, rewind_set};
+        rewind_appended_edges(
+            &before.origin_to_merges,
+            &after.origin_to_merges,
+            &mut current.origin_to_merges,
+        )?;
+        rewind_map(
+            &before.merge_nodes,
+            &after.merge_nodes,
+            &mut current.merge_nodes,
+        )?;
+        rewind_appended_edges(
+            &before.merge_to_downstream,
+            &after.merge_to_downstream,
+            &mut current.merge_to_downstream,
+        )?;
+        rewind_set(
+            &before.revoked_origins,
+            &after.revoked_origins,
+            &mut current.revoked_origins,
+        )?;
+        rewind_map(&before.revisions, &after.revisions, &mut current.revisions)?;
+        rewind_map(
+            &before.current_revisions,
+            &after.current_revisions,
+            &mut current.current_revisions,
+        )?;
+        rewind_map(
+            &before.source_revisions,
+            &after.source_revisions,
+            &mut current.source_revisions,
+        )?;
+        let removed: HashSet<_> = after
+            .merge_nodes
+            .keys()
+            .filter(|hash| !before.merge_nodes.contains_key(hash))
+            .collect();
+        if current.merge_nodes.values().any(|node| {
+            node.source_origins
+                .iter()
+                .any(|source| removed.contains(&source.origin))
+        }) {
+            return Err("snapshot undo would orphan a downstream merge".into());
+        }
+        current.validate_persisted()?;
+        Ok(current)
     }
 
     /// Deserialize a graph from bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
-        bincode::deserialize(bytes).map_err(|e| e.to_string())
+        if bytes.len() > 64 * 1024 * 1024 {
+            return Err("merger graph snapshot exceeds size limit".into());
+        }
+        let body = bytes
+            .strip_prefix(SNAPSHOT_MAGIC)
+            .ok_or("merger graph requires explicit ledger replay to upgrade")?;
+        let graph: Self = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .reject_trailing_bytes()
+            .with_limit(body.len() as u64)
+            .deserialize(body)
+            .map_err(|e| e.to_string())?;
+        graph.validate_persisted()?;
+        if !crate::snapshot_encoding::matches(bytes, |writer| graph.write_snapshot(writer))
+            .map_err(|error| error.to_string())?
+        {
+            return Err("noncanonical merger graph snapshot".into());
+        }
+        Ok(graph)
+    }
+
+    fn validate_persisted(&self) -> Result<(), String> {
+        let graph = self;
+        graph.validate_structure()?;
+        for (hash, revision) in &graph.revisions {
+            if *hash != revision.hash()
+                || revision.origin == TxHash::ZERO
+                || !graph
+                    .merge_nodes
+                    .get(&revision.merge_tx)
+                    .is_some_and(|node| revision.remaining <= node.total_amount)
+                || (revision.previous != TxHash::ZERO
+                    && !graph
+                        .revisions
+                        .get(&revision.previous)
+                        .is_some_and(|parent| parent.merge_tx == revision.merge_tx))
+            {
+                return Err("invalid merger graph revision".into());
+            }
+        }
+        for (merge_tx, revision) in &graph.current_revisions {
+            if !graph
+                .revisions
+                .get(revision)
+                .is_some_and(|revision| revision.merge_tx == *merge_tx)
+            {
+                return Err("invalid current merger graph revision".into());
+            }
+        }
+        for (merge_tx, sources) in &graph.source_revisions {
+            let node = graph
+                .merge_nodes
+                .get(merge_tx)
+                .ok_or("missing revised merge")?;
+            if sources.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
+                return Err("noncanonical merge source revisions".into());
+            }
+            for (index, basis) in sources {
+                if *basis == TrstBasis::Entire
+                    || !node
+                        .source_origins
+                        .get(*index)
+                        .is_some_and(|source| graph.valid_basis(&source.origin, *basis))
+                {
+                    return Err("invalid merge source revision".into());
+                }
+            }
+        }
+        Ok(())
     }
 }
 
 #[cfg(test)]
+mod shared_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proportional_revocation_is_exact_above_u128_product_range() {
+        let thousand = 1_000 * 10u128.pow(18);
+        assert_eq!(
+            ceil_proportion(thousand, thousand / 2, thousand),
+            thousand / 2
+        );
+        assert_eq!(
+            ceil_proportion(u128::MAX, u128::MAX - 1, u128::MAX),
+            u128::MAX - 1
+        );
+        assert_eq!(ceil_proportion(u128::MAX, 1, 2), (u128::MAX / 2) + 1);
+        assert_eq!(ceil_proportion(3, 1, 2), 2);
+        assert_eq!(ceil_proportion(3, 5, 2), 3);
+    }
 
     fn tx(id: u8) -> TxHash {
         TxHash::new([id; 32])
@@ -354,6 +804,97 @@ mod tests {
                 .collect(),
             total_amount: total,
             revoked_contribs: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn graph_snapshot_bytes_survive_rehashed_roundtrips() {
+        let mut graph = MergerGraph::new();
+        for id in 10..30 {
+            let mut merge = node(tx(id), &[(tx(id - 1), 60), (tx(1), 40)], 100);
+            merge.revoked_contribs.insert(tx(1), 10);
+            merge.revoked_contribs.insert(tx(2), 5);
+            graph.record_merge(merge);
+        }
+        graph.revoked_origins.extend([tx(1), tx(2), tx(3)]);
+        let bytes = graph.to_bytes();
+        for _ in 0..16 {
+            graph = MergerGraph::from_bytes(&bytes).unwrap();
+            assert_eq!(graph.to_bytes(), bytes);
+        }
+    }
+
+    #[test]
+    fn remerges_share_revision_history_instead_of_copying_excluded_origins() {
+        let mut graph = MergerGraph::new();
+        graph.record_merge(node(tx(20), &[(tx(1), 40), (tx(2), 60)], 100));
+        graph.apply_revocation(tx(1));
+        let revision = graph.current_revisions[&tx(20)];
+        for id in 50..150 {
+            graph.record_merge(node(tx(id), &[(tx(20), 60), (tx(3), 40)], 100));
+            assert_eq!(
+                graph.source_revisions[&tx(id)],
+                vec![(0, TrstBasis::Remainder(revision))]
+            );
+        }
+        assert_eq!(graph.revisions.len(), 1);
+        graph.apply_unrevocation(&tx(1));
+        assert_eq!(graph.revisions.len(), 2);
+        let first = graph.apply_revocation(tx(1));
+        assert_eq!(
+            first.len(),
+            1,
+            "clean remerges never consumed this restored origin"
+        );
+        assert_eq!(graph.revisions.len(), 3);
+        let second = graph.apply_revocation(tx(2));
+        assert_eq!(second.len(), 101);
+        assert!(second.iter().all(|cut| cut.tainted_amount == 60));
+        let bytes = graph.to_bytes();
+        for _ in 0..4 {
+            graph = MergerGraph::from_bytes(&bytes).unwrap();
+            assert_eq!(graph.to_bytes(), bytes);
+        }
+    }
+
+    #[test]
+    fn revision_snapshots_reject_legacy_trailing_and_dangling_history() {
+        let mut graph = MergerGraph::new();
+        graph.record_merge(node(tx(20), &[(tx(1), 40), (tx(2), 60)], 100));
+        graph.apply_revocation(tx(1));
+        graph.record_merge(node(tx(30), &[(tx(20), 60), (tx(3), 40)], 100));
+        assert!(MergerGraph::from_bytes(&bincode::serialize(&graph).unwrap()).is_err());
+        let mut trailing = graph.to_bytes();
+        trailing.push(0);
+        assert!(MergerGraph::from_bytes(&trailing).is_err());
+        let revision = graph.current_revisions[&tx(20)];
+        for mutation in 0..4 {
+            let mut corrupted = graph.clone();
+            match mutation {
+                0 => {
+                    corrupted.revisions.get_mut(&revision).unwrap().remaining += 1;
+                }
+                1 => {
+                    corrupted.current_revisions.insert(tx(20), tx(99));
+                }
+                2 => {
+                    corrupted.source_revisions.get_mut(&tx(30)).unwrap()[0].1 =
+                        TrstBasis::Remainder(tx(99));
+                }
+                _ => {
+                    let mut missing = corrupted.revisions.remove(&revision).unwrap();
+                    missing.previous = tx(99);
+                    let replacement = missing.hash();
+                    corrupted.revisions.insert(replacement, missing);
+                    corrupted.current_revisions.insert(tx(20), replacement);
+                    corrupted.source_revisions.get_mut(&tx(30)).unwrap()[0].1 =
+                        TrstBasis::Remainder(replacement);
+                }
+            }
+            assert!(
+                MergerGraph::from_bytes(&corrupted.to_bytes()).is_err(),
+                "mutation {mutation}"
+            );
         }
     }
 

@@ -9,6 +9,10 @@ description = "BURST daemon — entry point, CLI, starts node + RPC + WebSocket 
 name = "burst-daemon"
 path = "src/main.rs"
 
+[features]
+experimental-testnet = ["burst-node/experimental-testnet"]
+private-testnet = ["experimental-testnet", "burst-node/private-testnet"]
+
 [dependencies]
 burst-node = { workspace = true }
 burst-rpc = { workspace = true }
@@ -20,6 +24,11 @@ clap = { workspace = true }
 tracing = { workspace = true }
 toml = { workspace = true }
 anyhow = { workspace = true }
+tempfile = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.8.1"
 
 [dev-dependencies]
 burst-crypto = { workspace = true }

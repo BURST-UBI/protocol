@@ -14,5 +14,5 @@ pub mod error;
 
 pub use amendment::Amendment;
 pub use document::ConstiDocument;
-pub use engine::ConstiEngine;
+pub use engine::{AmendmentConflict, ConstiEngine};
 pub use error::ConstiError;

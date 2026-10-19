@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// The Consti document — the current constitution state.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConstiDocument {
     /// Ordered list of adopted articles.
     pub articles: Vec<Article>,
@@ -28,7 +28,7 @@ fn default_next_number() -> u64 {
 }
 
 /// A record of a version change to the constitution.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VersionEntry {
     /// The version number after this change.
     pub version: u64,
@@ -37,7 +37,7 @@ pub struct VersionEntry {
 }
 
 /// A single article in the constitution.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Article {
     /// Article number.
     pub number: u64,

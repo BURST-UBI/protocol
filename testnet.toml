@@ -41,7 +41,9 @@ work_threads = 1
 # Expose Prometheus metrics at /metrics on the RPC port.
 enable_metrics = true
 
-# Enable the testnet faucet endpoint (test network only).
+# Enable test-only RPC helpers. Faucet endorses during genesis bootstrap and
+# sends 1 TRST via a real burn; the recipient must explicitly receive it.
+# No local balance/verification rewrites; these endpoints are denied on Live.
 enable_faucet = true
 
 # UPnP port mapping for NAT traversal.

@@ -9,13 +9,15 @@ use std::collections::BinaryHeap;
 
 use tokio::sync::{Mutex, Notify};
 
-use burst_crypto::blake2b_256;
 use burst_ledger::StateBlock;
 use burst_types::BlockHash;
+use crate::block_retention::{BlockRetention, RetainedBlock, Slot};
+use std::sync::Arc;
 
 /// A block wrapped with its PoW difficulty score for priority ordering.
 struct PrioritizedBlock {
     block: StateBlock,
+    slot: Option<Slot>,
     difficulty: u64,
     /// Insertion order counter for FIFO tiebreaking among equal difficulties.
     sequence: u64,
@@ -47,17 +49,10 @@ impl PartialOrd for PrioritizedBlock {
 
 /// Compute the PoW difficulty score for a block.
 ///
-/// `Blake2b(block_hash || nonce_le_bytes)` interpreted as u64 LE.
+/// `Blake2b-64(nonce_le_bytes || work_root)` interpreted as u64 LE.
 /// Higher value = more work was done.
 pub fn work_difficulty(block_hash: &BlockHash, nonce: u64) -> u64 {
-    let mut input = [0u8; 40];
-    input[0..32].copy_from_slice(block_hash.as_bytes());
-    input[32..40].copy_from_slice(&nonce.to_le_bytes());
-
-    let hash = blake2b_256(&input);
-    u64::from_le_bytes([
-        hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7],
-    ])
+    burst_work::work_value(block_hash, nonce)
 }
 
 /// Thread-safe priority queue for blocks, ordered by PoW difficulty.
@@ -69,6 +64,7 @@ pub struct BlockPriorityQueue {
     heap: Mutex<(BinaryHeap<PrioritizedBlock>, u64)>,
     capacity: usize,
     notify: Notify,
+    retention: Option<Arc<BlockRetention>>,
 }
 
 impl BlockPriorityQueue {
@@ -78,24 +74,45 @@ impl BlockPriorityQueue {
             heap: Mutex::new((BinaryHeap::with_capacity(capacity), 0)),
             capacity,
             notify: Notify::new(),
+            retention: None,
         }
+    }
+
+    pub(crate) fn with_retention(capacity: usize, retention: Arc<BlockRetention>) -> Self {
+        let mut queue = Self::new(capacity);
+        queue.retention = Some(retention);
+        queue
     }
 
     /// Push a block into the queue, computing its difficulty from its work nonce.
     ///
     /// If the queue is at capacity the block is dropped and `false` is returned.
     pub async fn push(&self, block: StateBlock) -> bool {
-        let difficulty = work_difficulty(&block.hash, block.work);
+        self.push_retained(RetainedBlock { block, slot: None }).await
+    }
+
+    pub(crate) async fn push_retained(&self, mut retained: RetainedBlock) -> bool {
+        let block = retained.block;
+        let difficulty = work_difficulty(&block.work_root(), block.work);
 
         let mut guard = self.heap.lock().await;
         let (heap, seq) = &mut *guard;
-        if heap.len() >= self.capacity {
+        // A recovery transfer already owns a global slot. The smaller ingress
+        // cap must not discard dependencies merely because they became ready.
+        if heap.len() >= self.capacity && retained.slot.is_none() {
             return false;
+        }
+        if retained.slot.is_none() {
+            if let Some(budget) = &self.retention {
+                let Some(slot) = budget.acquire() else { return false; };
+                retained.slot = Some(slot);
+            }
         }
         *seq += 1;
         let sequence = *seq;
         heap.push(PrioritizedBlock {
             block,
+            slot: retained.slot,
             difficulty,
             sequence,
         });
@@ -108,20 +125,32 @@ impl BlockPriorityQueue {
     /// Non-async push using `try_lock`. Returns `false` if the lock is
     /// contended or the queue is at capacity.
     pub fn try_push(&self, block: StateBlock) -> bool {
-        let difficulty = work_difficulty(&block.hash, block.work);
+        self.try_push_retained(RetainedBlock { block, slot: None })
+    }
+
+    pub(crate) fn try_push_retained(&self, mut retained: RetainedBlock) -> bool {
+        let block = retained.block;
+        let difficulty = work_difficulty(&block.work_root(), block.work);
 
         let mut guard = match self.heap.try_lock() {
             Ok(g) => g,
             Err(_) => return false,
         };
         let (heap, seq) = &mut *guard;
-        if heap.len() >= self.capacity {
+        if heap.len() >= self.capacity && retained.slot.is_none() {
             return false;
+        }
+        if retained.slot.is_none() {
+            if let Some(budget) = &self.retention {
+                let Some(slot) = budget.acquire() else { return false; };
+                retained.slot = Some(slot);
+            }
         }
         *seq += 1;
         let sequence = *seq;
         heap.push(PrioritizedBlock {
             block,
+            slot: retained.slot,
             difficulty,
             sequence,
         });
@@ -133,11 +162,15 @@ impl BlockPriorityQueue {
 
     /// Pop the highest-priority block. Waits asynchronously if the queue is empty.
     pub async fn pop(&self) -> StateBlock {
+        self.pop_retained().await.block
+    }
+
+    pub(crate) async fn pop_retained(&self) -> RetainedBlock {
         loop {
             {
                 let mut guard = self.heap.lock().await;
                 if let Some(entry) = guard.0.pop() {
-                    return entry.block;
+                    return RetainedBlock { block: entry.block, slot: entry.slot };
                 }
             }
             // Queue is empty — wait for a producer to notify us.
@@ -147,8 +180,12 @@ impl BlockPriorityQueue {
 
     /// Try to pop without waiting. Returns `None` if the queue is empty.
     pub async fn try_pop(&self) -> Option<StateBlock> {
+        self.try_pop_retained().await.map(|entry| entry.block)
+    }
+
+    pub(crate) async fn try_pop_retained(&self) -> Option<RetainedBlock> {
         let mut guard = self.heap.lock().await;
-        guard.0.pop().map(|entry| entry.block)
+        guard.0.pop().map(|entry| RetainedBlock { block: entry.block, slot: entry.slot })
     }
 
     /// Current number of blocks in the queue.
@@ -183,7 +220,10 @@ mod tests {
 
     fn make_block_with_work(nonce: u64) -> StateBlock {
         let mut block = StateBlock {
+            signing_grant: burst_types::BlockHash::ZERO,
+            delegation_payload: Vec::new(),
             version: CURRENT_BLOCK_VERSION,
+            payment_epoch: burst_types::BlockHash::new([1; 32]),
             block_type: BlockType::Open,
             account: test_account(),
             previous: BlockHash::ZERO,
@@ -195,7 +235,9 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_000),
             params_hash: BlockHash::ZERO,
+            target_head: burst_types::BlockHash::ZERO,
             merge_sources: Vec::new(),
+            release_sources: Vec::new(),
             work: nonce,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,
@@ -206,7 +248,10 @@ mod tests {
 
     fn make_block_with_generated_work(difficulty: u64) -> StateBlock {
         let mut block = StateBlock {
+            signing_grant: burst_types::BlockHash::ZERO,
+            delegation_payload: Vec::new(),
             version: CURRENT_BLOCK_VERSION,
+            payment_epoch: burst_types::BlockHash::new([1; 32]),
             block_type: BlockType::Open,
             account: test_account(),
             previous: BlockHash::ZERO,
@@ -218,7 +263,9 @@ mod tests {
             transaction: TxHash::new([difficulty as u8; 32]),
             timestamp: Timestamp::new(1_000_000),
             params_hash: BlockHash::ZERO,
+            target_head: burst_types::BlockHash::ZERO,
             merge_sources: Vec::new(),
+            release_sources: Vec::new(),
             work: 0,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,
@@ -227,7 +274,7 @@ mod tests {
 
         if difficulty > 0 {
             let generator = WorkGenerator;
-            let nonce = generator.generate(&block.hash, difficulty).unwrap();
+            let nonce = generator.generate(&block.work_root(), difficulty).unwrap();
             block.work = nonce.0;
         }
 
@@ -266,6 +313,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recovery_transfer_keeps_reserved_blocks_when_ingress_is_full() {
+        let budget = BlockRetention::new(3);
+        let queue = BlockPriorityQueue::with_retention(1, budget.clone());
+        let recovered = RetainedBlock {
+            block: make_block_with_work(1), slot: Some(budget.acquire().unwrap()),
+        };
+        assert!(queue.push(make_block_with_work(2)).await);
+        assert!(!queue.push(make_block_with_work(3)).await);
+        assert!(queue.push_retained(recovered).await);
+        let recovered = RetainedBlock {
+            block: make_block_with_work(4), slot: Some(budget.acquire().unwrap()),
+        };
+        assert!(queue.try_push_retained(recovered));
+        assert!(budget.acquire().is_none());
+        assert_eq!(queue.len().await, 3);
+        for _ in 0..3 { drop(queue.try_pop_retained().await.unwrap()); }
+        assert!(queue.push(make_block_with_work(5)).await);
+        assert_eq!(queue.len().await, 1);
+    }
+
+    #[tokio::test]
     async fn test_priority_ordering() {
         let queue = BlockPriorityQueue::new(16);
 
@@ -273,8 +341,8 @@ mod tests {
         let low = make_block_with_generated_work(100);
         let high = make_block_with_generated_work(50_000);
 
-        let low_diff = work_difficulty(&low.hash, low.work);
-        let high_diff = work_difficulty(&high.hash, high.work);
+        let low_diff = work_difficulty(&low.work_root(), low.work);
+        let high_diff = work_difficulty(&high.work_root(), high.work);
 
         let low_hash = low.hash;
         let high_hash = high.hash;
@@ -369,8 +437,8 @@ mod tests {
             b
         };
 
-        let d1 = work_difficulty(&b1.hash, b1.work);
-        let d2 = work_difficulty(&b2.hash, b2.work);
+        let d1 = work_difficulty(&b1.work_root(), b1.work);
+        let d2 = work_difficulty(&b2.work_root(), b2.work);
 
         let h1 = b1.hash;
         let h2 = b2.hash;

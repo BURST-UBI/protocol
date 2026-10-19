@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A Unix timestamp in seconds since epoch (UTC).
@@ -21,10 +22,13 @@ impl Timestamp {
 
     /// Get the current system time as a `Timestamp`.
     pub fn now() -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
         let secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system clock before Unix epoch")
             .as_secs();
+        #[cfg(target_arch = "wasm32")]
+        let secs = (js_sys::Date::now() / 1000.0).floor() as u64;
         Self(secs)
     }
 

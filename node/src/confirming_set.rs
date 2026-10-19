@@ -198,7 +198,7 @@ mod tests {
         // Drain enough to get below 60%
         let target = MAX_CONFIRMING * 60 / 100;
         let drain_count = threshold - target + 1;
-        for _ in 0..((drain_count + CEMENT_BATCH_SIZE - 1) / CEMENT_BATCH_SIZE) {
+        for _ in 0..drain_count.div_ceil(CEMENT_BATCH_SIZE) {
             cs.next_batch();
         }
         assert!(!cs.is_near_full());

@@ -14,7 +14,7 @@
 //! - Failed challenger: stake forfeited
 //! - Expired challenge: half the stake returned, half forfeited
 
-use burst_types::WalletAddress;
+use burst_types::{BlockHash, WalletAddress};
 
 /// Outcome of a completed verification round.
 #[derive(Clone, Debug)]
@@ -53,6 +53,8 @@ pub struct EndorserOutcome {
 /// Outcome for a single verifier in a verification round.
 #[derive(Clone, Debug)]
 pub struct VerifierOutcome {
+    /// Certified selection that locked this stake; absent for legacy state.
+    pub selection_context: Option<BlockHash>,
     /// The verifier's wallet address.
     pub address: WalletAddress,
     /// Amount of BRN staked for this verification.
@@ -77,79 +79,70 @@ pub fn compute_verification_outcomes(
     result: VerificationResult,
     endorsers: &[(WalletAddress, u128)],
     verifiers: &[(WalletAddress, u128, bool)],
-) -> VerificationOutcomeEvent {
-    let total_dissenter_stakes: u128 = verifiers
-        .iter()
-        .filter(|(_, _, correct)| !correct)
-        .map(|(_, staked, _)| staked)
-        .sum();
-
-    // Only verifiers who staked (stake > 0) are eligible for reward distribution.
-    // Neither voters contribute 0 stake and must not receive shares.
-    let staked_correct_count = verifiers
-        .iter()
-        .filter(|(_, staked, correct)| *correct && *staked > 0)
-        .count() as u128;
-    let reward_per_correct = total_dissenter_stakes
-        .checked_div(staked_correct_count)
-        .unwrap_or(0);
-
-    let endorser_outcomes: Vec<EndorserOutcome> = endorsers
-        .iter()
-        .map(|(addr, burned)| EndorserOutcome {
-            address: addr.clone(),
-            brn_burned: *burned,
-        })
-        .collect();
-
-    let verifier_outcomes: Vec<VerifierOutcome> = verifiers
-        .iter()
-        .map(|(addr, staked, correct)| {
-            if *correct && *staked > 0 {
-                VerifierOutcome {
-                    address: addr.clone(),
-                    staked: *staked,
-                    voted_correctly: true,
-                    trst_reward: reward_per_correct,
-                    penalty: 0,
-                }
-            } else if *correct {
-                // Correct but zero stake (Neither voters) — no reward
-                VerifierOutcome {
-                    address: addr.clone(),
-                    staked: 0,
-                    voted_correctly: true,
-                    trst_reward: 0,
-                    penalty: 0,
-                }
-            } else {
-                VerifierOutcome {
-                    address: addr.clone(),
-                    staked: *staked,
-                    voted_correctly: false,
-                    trst_reward: 0,
-                    penalty: *staked,
-                }
-            }
-        })
-        .collect();
-
-    VerificationOutcomeEvent {
+) -> Result<VerificationOutcomeEvent, crate::VerificationError> {
+    Ok(VerificationOutcomeEvent {
         wallet: wallet.clone(),
         result,
-        endorsers: endorser_outcomes,
-        verifiers: verifier_outcomes,
+        endorsers: endorsers
+            .iter()
+            .map(|(address, burned)| EndorserOutcome {
+                address: address.clone(),
+                brn_burned: *burned,
+            })
+            .collect(),
+        verifiers: verifier_outcomes(verifiers)?,
+    })
+}
+
+fn verifier_outcomes(
+    verifiers: &[(WalletAddress, u128, bool)],
+) -> Result<Vec<VerifierOutcome>, crate::VerificationError> {
+    let mut seen = std::collections::HashSet::new();
+    let mut total = 0u128;
+    for (address, stake, correct) in verifiers {
+        if !seen.insert(address) {
+            return Err(crate::VerificationError::Other(
+                "duplicate verifier settlement".into(),
+            ));
+        }
+        if !correct {
+            total = total.checked_add(*stake).ok_or_else(|| {
+                crate::VerificationError::Other("verifier reward pool overflow".into())
+            })?;
+        }
     }
+    let count = verifiers
+        .iter()
+        .filter(|(_, stake, correct)| *correct && *stake > 0)
+        .count() as u128;
+    let share = total.checked_div(count).unwrap_or(0);
+    Ok(verifiers
+        .iter()
+        .map(|(address, stake, correct)| VerifierOutcome {
+            selection_context: None,
+            address: address.clone(),
+            staked: *stake,
+            voted_correctly: *correct,
+            trst_reward: if *correct && *stake > 0 { share } else { 0 },
+            penalty: if *correct { 0 } else { *stake },
+        })
+        .collect())
 }
 
 /// Outcome of a completed challenge.
 #[derive(Clone, Debug)]
 pub struct ChallengeOutcomeEvent {
+    /// Present only when this panel reviewed an earlier challenge judgment.
+    pub appeal: Option<crate::challenge::AppealContext>,
+    /// Signed challenge block that locked the challenger's stake.
+    pub challenge_context: Option<BlockHash>,
     /// The wallet that was challenged.
     pub challenged_wallet: WalletAddress,
     /// The wallet that submitted the challenge.
     pub challenger: WalletAddress,
-    /// Whether fraud was confirmed or the challenge was rejected.
+    /// The panel's judgment of the target. For an appeal, compare it with
+    /// `appeal.previously_legitimate`; this field alone does not say whether
+    /// the appeal succeeded or authorize ordinary challenge settlement.
     pub outcome: ChallengeResult,
     /// The BRN stake the challenger put up.
     pub challenger_stake: u128,
@@ -183,80 +176,48 @@ pub fn compute_challenge_outcome(
     outcome: ChallengeResult,
     stake: u128,
     verifiers: &[(WalletAddress, u128, bool)],
-) -> ChallengeOutcomeEvent {
-    let total_dissenter_stakes: u128 = verifiers
-        .iter()
-        .filter(|(_, _, correct)| !correct)
-        .map(|(_, staked, _)| staked)
-        .sum();
-
-    let staked_correct_count = verifiers
-        .iter()
-        .filter(|(_, staked, correct)| *correct && *staked > 0)
-        .count() as u128;
-    let reward_per_correct = total_dissenter_stakes
-        .checked_div(staked_correct_count)
-        .unwrap_or(0);
-
-    let verifier_outcomes: Vec<VerifierOutcome> = verifiers
-        .iter()
-        .map(|(addr, staked, correct)| {
-            if *correct && *staked > 0 {
-                VerifierOutcome {
-                    address: addr.clone(),
-                    staked: *staked,
-                    voted_correctly: true,
-                    trst_reward: reward_per_correct,
-                    penalty: 0,
-                }
-            } else if *correct {
-                VerifierOutcome {
-                    address: addr.clone(),
-                    staked: 0,
-                    voted_correctly: true,
-                    trst_reward: 0,
-                    penalty: 0,
-                }
-            } else {
-                VerifierOutcome {
-                    address: addr.clone(),
-                    staked: *staked,
-                    voted_correctly: false,
-                    trst_reward: 0,
-                    penalty: *staked,
-                }
-            }
-        })
-        .collect();
-
-    match outcome {
-        ChallengeResult::FraudConfirmed => ChallengeOutcomeEvent {
-            challenged_wallet: challenged.clone(),
-            challenger: challenger.clone(),
-            outcome: ChallengeResult::FraudConfirmed,
-            challenger_stake: stake,
-            verifier_outcomes,
-        },
-        ChallengeResult::ChallengeRejected => ChallengeOutcomeEvent {
-            challenged_wallet: challenged.clone(),
-            challenger: challenger.clone(),
-            outcome: ChallengeResult::ChallengeRejected,
-            challenger_stake: stake,
-            verifier_outcomes,
-        },
-        ChallengeResult::Expired => ChallengeOutcomeEvent {
-            challenged_wallet: challenged.clone(),
-            challenger: challenger.clone(),
-            outcome: ChallengeResult::Expired,
-            challenger_stake: stake,
-            verifier_outcomes,
-        },
-    }
+) -> Result<ChallengeOutcomeEvent, crate::VerificationError> {
+    Ok(ChallengeOutcomeEvent {
+        appeal: None,
+        challenge_context: None,
+        challenged_wallet: challenged.clone(),
+        challenger: challenger.clone(),
+        outcome,
+        challenger_stake: stake,
+        verifier_outcomes: verifier_outcomes(verifiers)?,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overflowing_or_duplicate_stakes_cannot_create_a_reward_pool() {
+        for voters in [
+            vec![
+                (test_address(1), u128::MAX, false),
+                (test_address(2), 1, false),
+            ],
+            vec![(test_address(1), 1, true), (test_address(1), 1, false)],
+        ] {
+            assert!(compute_verification_outcomes(
+                &test_address(9),
+                VerificationResult::Verified,
+                &[],
+                &voters
+            )
+            .is_err());
+            assert!(compute_challenge_outcome(
+                &test_address(9),
+                &test_address(8),
+                ChallengeResult::FraudConfirmed,
+                100,
+                &voters
+            )
+            .is_err());
+        }
+    }
 
     fn test_address(n: u8) -> WalletAddress {
         WalletAddress::new(format!("brst_{:0>60}", n))
@@ -265,7 +226,7 @@ mod tests {
     // ── Verification outcome tests ──────────────────────────────────────
 
     #[test]
-    fn verified_endorsers_get_10_percent_trst_reward() {
+    fn verified_endorsers_receive_no_protocol_reward() {
         let wallet = test_address(1);
         let endorsers = vec![(test_address(10), 1000u128), (test_address(11), 2000u128)];
         let verifiers = vec![
@@ -278,7 +239,8 @@ mod tests {
             VerificationResult::Verified,
             &endorsers,
             &verifiers,
-        );
+        )
+        .unwrap();
 
         assert_eq!(outcome.result, VerificationResult::Verified);
         assert_eq!(outcome.endorsers.len(), 2);
@@ -299,7 +261,8 @@ mod tests {
             VerificationResult::Failed,
             &endorsers,
             &verifiers,
-        );
+        )
+        .unwrap();
 
         assert_eq!(outcome.result, VerificationResult::Failed);
         assert_eq!(outcome.endorsers[0].brn_burned, 1000);
@@ -321,7 +284,8 @@ mod tests {
             VerificationResult::Verified,
             &endorsers,
             &verifiers,
-        );
+        )
+        .unwrap();
 
         // Total dissenter stakes: 600 + 400 = 1000 (BRN, burned)
         // 2 correct verifiers: each gets a 500 TRST share — burn-backed
@@ -358,7 +322,8 @@ mod tests {
             VerificationResult::Verified,
             &endorsers,
             &verifiers,
-        );
+        )
+        .unwrap();
 
         // No dissenters — nothing forfeited, so no TRST reward (stake is
         // simply unlocked by the node).
@@ -380,7 +345,8 @@ mod tests {
             VerificationResult::Failed,
             &endorsers,
             &verifiers,
-        );
+        )
+        .unwrap();
 
         // No correct verifiers — all stakes forfeited
         assert_eq!(outcome.verifiers[0].trst_reward, 0);
@@ -405,7 +371,8 @@ mod tests {
             VerificationResult::Verified,
             &endorsers,
             &verifiers,
-        );
+        )
+        .unwrap();
 
         // Total dissenter: 300 + 400 + 300 = 1000
         // 1 correct verifier gets the whole 1000 as burn-backed TRST
@@ -417,7 +384,7 @@ mod tests {
     fn empty_verifiers_and_endorsers() {
         let wallet = test_address(1);
         let outcome =
-            compute_verification_outcomes(&wallet, VerificationResult::Verified, &[], &[]);
+            compute_verification_outcomes(&wallet, VerificationResult::Verified, &[], &[]).unwrap();
 
         assert_eq!(outcome.wallet, wallet);
         assert_eq!(outcome.result, VerificationResult::Verified);
@@ -428,14 +395,15 @@ mod tests {
     #[test]
     fn verification_outcome_preserves_wallet() {
         let wallet = test_address(42);
-        let outcome = compute_verification_outcomes(&wallet, VerificationResult::Failed, &[], &[]);
+        let outcome =
+            compute_verification_outcomes(&wallet, VerificationResult::Failed, &[], &[]).unwrap();
         assert_eq!(outcome.wallet, wallet);
     }
 
     // ── Challenge outcome tests ─────────────────────────────────────────
 
     #[test]
-    fn fraud_confirmed_gives_double_stake_reward() {
+    fn fraud_confirmed_returns_stake_and_rewards_correct_verifiers() {
         let challenged = test_address(1);
         let challenger = test_address(2);
         let stake = 1000u128;
@@ -450,7 +418,8 @@ mod tests {
             ChallengeResult::FraudConfirmed,
             stake,
             &verifiers,
-        );
+        )
+        .unwrap();
 
         assert_eq!(outcome.outcome, ChallengeResult::FraudConfirmed);
         assert_eq!(outcome.challenger_stake, 1000);
@@ -476,7 +445,8 @@ mod tests {
             ChallengeResult::ChallengeRejected,
             stake,
             &[],
-        );
+        )
+        .unwrap();
 
         assert_eq!(outcome.outcome, ChallengeResult::ChallengeRejected);
         assert_eq!(outcome.challenger_stake, 1000);
@@ -494,7 +464,8 @@ mod tests {
             ChallengeResult::FraudConfirmed,
             0,
             &[],
-        );
+        )
+        .unwrap();
 
         assert_eq!(outcome.challenger_stake, 0);
         assert!(outcome.verifier_outcomes.is_empty());
@@ -511,7 +482,8 @@ mod tests {
             ChallengeResult::FraudConfirmed,
             500,
             &[],
-        );
+        )
+        .unwrap();
 
         assert_eq!(outcome.challenged_wallet, challenged);
         assert_eq!(outcome.challenger, challenger);

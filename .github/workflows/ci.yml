@@ -5,10 +5,14 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main]
+  workflow_call:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-validation-${{ github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -16,18 +20,81 @@ env:
   SEGMENT_DOWNLOAD_TIMEOUT_MINS: 2
 
 jobs:
+  windows-installer:
+    name: Windows installer contracts
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./tools/install-checksum.tests.ps1
+        shell: pwsh
+      - run: ./tools/windows-validation-run.tests.ps1
+        shell: pwsh
+      - name: Windows PowerShell 5.1 contracts
+        shell: powershell
+        run: |
+          ./tools/windows-validation-run.tests.ps1
+          ./tools/install-checksum.tests.ps1
+
+  windows-service:
+    name: Windows service lifecycle
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-11
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: burst-windows-tests
+      - run: cargo test -p burst-daemon --locked
+      - run: cargo build -p burst-daemon --locked
+      - run: ./tools/windows-service-smoke.ps1 -Daemon ./target/debug/burst-daemon.exe
+        shell: pwsh
+
+  spec-inventory:
+    name: Specification inventory
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --test tools/check-spec-coverage.test.mjs tools/test-node.test.mjs tools/install-download.test.mjs tools/update-node.test.mjs tools/validation-reuse.test.mjs
+      - run: node tools/check-spec-coverage.mjs
+
   check:
     name: Check
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-11
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: burst-nightly
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo check --workspace
+      - run: cargo check --workspace --locked
+
+  wasm:
+    name: Browser wallet core
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-11
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: burst-wasm
+      - run: cargo check -p burst-wallet-core -p burst-crypto --locked --target wasm32-unknown-unknown
+      - run: cargo clippy -p burst-wallet-core -p burst-groups -p burst-browser --locked --target wasm32-unknown-unknown -- -D warnings
 
   test:
     name: Test
@@ -35,12 +102,66 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-11
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: burst-nightly
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo test --workspace
+      - run: cargo test --workspace --exclude burst-node --locked
+      - name: Check Protobuf schema against the running node codec
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+          cargo test -p burst-node --test protobuf_schema --locked -- --ignored
+
+  node-components:
+    name: Node components (${{ matrix.group }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [fast, slow]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-11
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: burst-nightly
+      - run: bash tools/test-node.sh "${{ matrix.group }}"
+      - if: matrix.group == 'fast'
+        run: cargo test -p burst-node --doc --locked
+      - name: Exercise snapshot operator commands
+        if: matrix.group == 'fast'
+        run: |
+          cargo build -p burst-daemon --locked
+          BURST_SNAPSHOT_DAEMON="$PWD/target/debug/burst-daemon" cargo test -p burst-node --lib --locked confirmed_replay::tests::snapshot_export::daemon_snapshot_attest_export_verify_journey -- --exact --ignored --test-threads=1
+
+  node-network:
+    name: Node network (shard ${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-11
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: burst-nightly
+      - run: bash tools/test-node.sh network
+        env:
+          BURST_TEST_NETWORK_SHARDS: '4'
+          BURST_TEST_NETWORK_SHARD: ${{ matrix.shard }}
 
   clippy:
     name: Clippy
@@ -48,14 +169,15 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-10-11
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: burst-nightly
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo clippy --workspace -- -D warnings
+      - run: cargo clippy --workspace --locked -- -D warnings
 
   fmt:
     name: Format
@@ -63,8 +185,9 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-10-11
           components: rustfmt
       - run: cargo fmt --all -- --check
 
@@ -74,43 +197,20 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-11
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: burst-nightly
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build daemon
-        run: cargo build --release -p burst-daemon
-      - name: Verify daemon starts
-        run: |
-          # Create minimal config
-          mkdir -p /tmp/burst-test
-          cat > /tmp/burst-config.toml <<EOF
-          network = "Test"
-          data_dir = "/tmp/burst-test"
-          port = 17076
-          enable_rpc = true
-          rpc_port = 7077
-          bootstrap_peers = []
-          log_level = "info"
-          EOF
-
-          # Start daemon in background
-          timeout 10 ./target/release/burst-daemon --config /tmp/burst-config.toml node run &
-          DAEMON_PID=$!
-
-          # Wait for startup
-          sleep 3
-
-          # Check if process is still running
-          if kill -0 $DAEMON_PID 2>/dev/null; then
-            echo "✓ Daemon started successfully"
-            kill $DAEMON_PID 2>/dev/null || true
-            exit 0
-          else
-            echo "✗ Daemon failed to start"
-            exit 1
-          fi
+        run: cargo build --locked --release -p burst-daemon
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Verify RPC, graceful shutdown and ledger reopen
+        run: node tools/daemon-smoke.mjs ./target/release/burst-daemon
 
   integration-test:
     name: Integration Tests
@@ -118,10 +218,12 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-11
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: burst-nightly
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run integration tests
-        run: cargo test --workspace --test '*' -- --test-threads=1
+        run: cargo test -p burst-node --locked --test '*' -- --test-threads=1

@@ -95,11 +95,12 @@ mod tests {
     }
 
     fn test_params() -> ProtocolParams {
-        let mut params = ProtocolParams::default();
-        params.new_wallet_spending_limit = 5000;
-        params.new_wallet_tx_limit_per_day = 10;
-        params.new_wallet_rate_limit_duration_secs = 30 * 24 * 3600; // 30 days
-        params
+        ProtocolParams {
+            new_wallet_spending_limit: 5000,
+            new_wallet_tx_limit_per_day: 10,
+            new_wallet_rate_limit_duration_secs: 30 * 24 * 3600,
+            ..ProtocolParams::default()
+        }
     }
 
     #[test]

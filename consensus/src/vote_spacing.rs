@@ -101,7 +101,7 @@ mod tests {
         let root = make_root("alice");
         let hash = make_hash(1);
 
-        spacing.record(root.clone(), hash);
+        spacing.record(root, hash);
         // Same candidate, reconfirmation — always OK regardless of timing
         assert!(spacing.votable(&root, &hash));
     }
@@ -111,7 +111,7 @@ mod tests {
         let mut spacing = VoteSpacing::new();
         let root = make_root("alice");
 
-        spacing.record(root.clone(), make_hash(1));
+        spacing.record(root, make_hash(1));
         // Different candidate immediately — should be blocked
         assert!(!spacing.votable(&root, &make_hash(2)));
     }
@@ -121,7 +121,7 @@ mod tests {
         let mut spacing = VoteSpacing::new();
         let root = make_root("alice");
 
-        spacing.record(root.clone(), make_hash(1));
+        spacing.record(root, make_hash(1));
         // Sleep longer than MIN_VOTE_SPACING (1500ms)
         thread::sleep(Duration::from_millis(1600));
         assert!(spacing.votable(&root, &make_hash(2)));
@@ -133,7 +133,7 @@ mod tests {
         let root_a = make_root("alice");
         let root_b = make_root("bob");
 
-        spacing.record(root_a.clone(), make_hash(1));
+        spacing.record(root_a, make_hash(1));
         // root_b has no record, so first-vote logic applies
         assert!(spacing.votable(&root_b, &make_hash(2)));
         // root_a switching to different candidate immediately — blocked
@@ -145,8 +145,8 @@ mod tests {
         let mut spacing = VoteSpacing::new();
         let root = make_root("alice");
 
-        spacing.record(root.clone(), make_hash(1));
-        spacing.record(root.clone(), make_hash(2));
+        spacing.record(root, make_hash(1));
+        spacing.record(root, make_hash(2));
 
         // After re-recording, hash(2) is now the last candidate
         assert!(spacing.votable(&root, &make_hash(2)));

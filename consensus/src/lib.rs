@@ -1,10 +1,10 @@
 //! Consensus — double-spend resolution via representative voting.
 //!
 //! Inspired by Nano's Open Representative Voting (ORV):
-//! - Each account delegates its weight to a representative.
+//! - Each verified human delegates one unit to a representative.
 //! - Representatives vote on conflicting blocks.
-//! - A block is confirmed when it receives ≥ 67% of online voting weight.
-//! - Finality is typically sub-second.
+//! - Elections freeze their confirmed-human denominator; online attendance
+//!   cannot lower it. Agreement on roster epochs is still being integrated.
 //!
 //! ## Module overview
 //!
@@ -19,6 +19,9 @@
 
 pub mod active_elections;
 pub mod backlog_scanner;
+pub mod checkpoint;
+pub mod checkpoint_evidence;
+pub mod checkpoint_round;
 pub mod conflict;
 pub mod election;
 pub mod equivocation;
@@ -30,6 +33,7 @@ pub mod rep_weights;
 pub mod representative;
 pub mod request_aggregator;
 pub mod scheduler;
+pub mod snapshot;
 pub mod vote_by_hash;
 pub mod vote_cache;
 pub mod vote_generator;

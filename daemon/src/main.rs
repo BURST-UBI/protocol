@@ -1,30 +1,49 @@
 //! BURST daemon — entry point for running a BURST node.
 
+use anyhow::Context;
 use burst_node::NodeConfig;
 use burst_types::NetworkId;
 use clap::Parser;
 use std::path::PathBuf;
 
+mod snapshot;
+
+#[cfg(windows)]
+mod service;
+
 #[derive(Parser)]
 #[command(name = "burst-daemon", about = "BURST protocol node daemon")]
 struct Cli {
+    /// Run under the Windows Service Control Manager (used by the installer).
+    #[cfg(windows)]
+    #[arg(long)]
+    windows_service: bool,
+
     /// Network to connect to: "live", "test", or "dev".
     /// When a config file is provided, defaults to the file's network value.
-    #[arg(long, env = "BURST_NETWORK")]
-    network: Option<String>,
+    #[arg(long, env = "BURST_NETWORK", value_parser = parse_network)]
+    network: Option<NetworkId>,
 
     /// Data directory for ledger storage (defaults to "./burst_data", or the
     /// config-file value).
     #[arg(long, env = "BURST_DATA_DIR")]
     data_dir: Option<PathBuf>,
 
+    /// File containing the representative's private seed (64 hex characters, mode 600).
+    #[arg(long, env = "BURST_REPRESENTATIVE_KEY_FILE")]
+    representative_key_file: Option<PathBuf>,
+
+    /// Follow the ledger without signing consensus votes.
+    #[arg(long)]
+    no_representative: bool,
+
     /// Port for P2P connections (defaults to network default).
     #[arg(long, env = "BURST_P2P_PORT")]
     port: Option<u16>,
 
     /// Enable RPC server.
-    #[arg(long, default_value_t = true, env = "BURST_ENABLE_RPC")]
-    rpc: bool,
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", env = "BURST_ENABLE_RPC")]
+    rpc: Option<bool>,
 
     /// RPC server port (defaults to 7077, or the config-file value).
     #[arg(long, env = "BURST_RPC_PORT")]
@@ -37,12 +56,16 @@ struct Cli {
     rpc_bind: Option<String>,
 
     /// Enable WebSocket server.
-    #[arg(long, env = "BURST_ENABLE_WEBSOCKET")]
-    websocket: bool,
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", env = "BURST_ENABLE_WEBSOCKET")]
+    websocket: Option<bool>,
 
     /// WebSocket server port (defaults to 7078, or the config-file value).
     #[arg(long, env = "BURST_WS_PORT")]
     websocket_port: Option<u16>,
+
+    /// Event subscription bind address (defaults to localhost or the config value).
+    #[arg(long, env = "BURST_WS_BIND")]
+    websocket_bind: Option<String>,
 
     /// Bootstrap peer addresses (comma-separated: "1.2.3.4:17076,5.6.7.8:17076").
     #[arg(long, env = "BURST_BOOTSTRAP_PEERS", value_delimiter = ',')]
@@ -80,6 +103,11 @@ struct Cli {
 
 #[derive(clap::Subcommand)]
 enum Command {
+    /// Attest, export or verify an authenticated economic snapshot.
+    Snapshot {
+        #[command(subcommand)]
+        action: snapshot::Action,
+    },
     /// Start the node.
     #[command(name = "node")]
     Node {
@@ -94,42 +122,24 @@ enum NodeAction {
     Run,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    burst_utils::init_tracing();
-
-    let cli = Cli::parse();
-
-    fn parse_network(s: &str) -> NetworkId {
-        match s.to_lowercase().as_str() {
-            "live" => NetworkId::Live,
-            "test" => NetworkId::Test,
-            _ => NetworkId::Dev,
-        }
+fn parse_network(value: &str) -> Result<NetworkId, String> {
+    match value.to_ascii_lowercase().as_str() {
+        "live" => Ok(NetworkId::Live),
+        "test" => Ok(NetworkId::Test),
+        "dev" => Ok(NetworkId::Dev),
+        _ => Err("network must be live, test or dev".into()),
     }
+}
 
-    let cli_network = cli.network.as_deref().map(parse_network);
+fn resolve_config(cli: Cli) -> anyhow::Result<(NodeConfig, Command)> {
+    let cli_network = cli.network;
 
     let file_config: Option<NodeConfig> = if let Some(ref config_path) = cli.config {
-        match std::fs::read_to_string(config_path) {
-            Ok(contents) => match toml::from_str::<NodeConfig>(&contents) {
-                Ok(cfg) => {
-                    tracing::info!("Loaded config from {}", config_path.display());
-                    Some(cfg)
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to parse config file: {e}, using CLI defaults");
-                    None
-                }
-            },
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to read config file {}: {e}, using CLI defaults",
-                    config_path.display()
-                );
-                None
-            }
-        }
+        let contents = std::fs::read_to_string(config_path)
+            .with_context(|| format!("cannot read node config {}", config_path.display()))?;
+        let config = toml::from_str::<NodeConfig>(&contents)
+            .with_context(|| format!("cannot parse node config {}", config_path.display()))?;
+        Some(config)
     } else {
         None
     };
@@ -141,12 +151,17 @@ async fn main() -> anyhow::Result<()> {
         NodeConfig {
             network,
             data_dir: cli.data_dir.unwrap_or(file_cfg.data_dir),
+            representative_key_file: cli
+                .representative_key_file
+                .or(file_cfg.representative_key_file),
+            enable_representative: file_cfg.enable_representative && !cli.no_representative,
             port: cli.port.unwrap_or(file_cfg.port),
-            enable_rpc: cli.rpc,
+            enable_rpc: cli.rpc.unwrap_or(file_cfg.enable_rpc),
             rpc_port: cli.rpc_port.unwrap_or(file_cfg.rpc_port),
             rpc_bind: cli.rpc_bind.unwrap_or(file_cfg.rpc_bind),
-            enable_websocket: cli.websocket,
+            enable_websocket: cli.websocket.unwrap_or(file_cfg.enable_websocket),
             websocket_port: cli.websocket_port.unwrap_or(file_cfg.websocket_port),
+            websocket_bind: cli.websocket_bind.unwrap_or(file_cfg.websocket_bind),
             bootstrap_peers: if cli.bootstrap_peers.is_empty() {
                 file_cfg.bootstrap_peers
             } else {
@@ -166,12 +181,15 @@ async fn main() -> anyhow::Result<()> {
             data_dir: cli
                 .data_dir
                 .unwrap_or_else(|| PathBuf::from("./burst_data")),
+            representative_key_file: cli.representative_key_file,
+            enable_representative: !cli.no_representative,
             port: cli.port.unwrap_or(network.default_port()),
-            enable_rpc: cli.rpc,
+            enable_rpc: cli.rpc.unwrap_or(true),
             rpc_port: cli.rpc_port.unwrap_or(7077),
             rpc_bind: cli.rpc_bind.unwrap_or_else(|| "127.0.0.1".to_string()),
-            enable_websocket: cli.websocket,
+            enable_websocket: cli.websocket.unwrap_or(false),
             websocket_port: cli.websocket_port.unwrap_or(7078),
+            websocket_bind: cli.websocket_bind.unwrap_or_else(|| "127.0.0.1".into()),
             bootstrap_peers: cli.bootstrap_peers,
             max_peers: cli.max_peers.unwrap_or(50),
             enable_metrics: cli.metrics,
@@ -182,11 +200,16 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // The faucet mints verified wallets and unbacked TRST — a testnet-only
-    // convenience. It must never run on the live network (it would violate the
-    // "TRST only from burned BRN" invariant), so force it off there regardless
-    // of flags or config file.
+    // The faucet supplies test funding, never verification or vote delegation.
+    // Force it off on Live regardless of
+    // flags or config file; the RPC handlers independently enforce this too.
     let mut config = config;
+    // Offline snapshot authentication and node startup need the same genesis rules.
+    match config.network {
+        NetworkId::Test => config.params = burst_types::ProtocolParams::testnet_defaults(),
+        NetworkId::Dev => config.params = burst_types::ProtocolParams::devnet_defaults(),
+        NetworkId::Live => {}
+    }
     if config.network == NetworkId::Live && config.enable_faucet {
         tracing::warn!("faucet requested on the live network — refusing (faucet is testnet-only)");
         config.enable_faucet = false;
@@ -197,7 +220,37 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    match cli.command {
+    Ok((config, cli.command))
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    burst_utils::init_tracing();
+    let cli = Cli::parse();
+    #[cfg(windows)]
+    if cli.windows_service {
+        return service::dispatch();
+    }
+    run(cli, None, None).await
+}
+
+async fn wait_for_stop(receiver: &mut tokio::sync::watch::Receiver<bool>) {
+    while !*receiver.borrow_and_update() {
+        if receiver.changed().await.is_err() {
+            break;
+        }
+    }
+}
+
+async fn run(
+    cli: Cli,
+    stop: Option<tokio::sync::watch::Receiver<bool>>,
+    ready: Option<tokio::sync::oneshot::Sender<()>>,
+) -> anyhow::Result<()> {
+    let (config, command) = resolve_config(cli)?;
+
+    match command {
+        Command::Snapshot { action } => snapshot::run(&config, action)?,
         Command::Node { action } => match action {
             NodeAction::Run => {
                 tracing::info!(
@@ -219,16 +272,38 @@ async fn main() -> anyhow::Result<()> {
                     tracing::info!("Bootstrap peers: {}", config.bootstrap_peers.join(", "));
                 }
 
-                let mut config = config;
-                if config.network == NetworkId::Test {
-                    config.params = burst_types::ProtocolParams::testnet_defaults();
-                    tracing::info!("using fast governance timelines for testnet");
+                match config.network {
+                    NetworkId::Test => {
+                        tracing::info!("using fast governance timelines for testnet");
+                    }
+                    NetworkId::Dev => {
+                        tracing::info!("using development proof-of-work difficulty");
+                    }
+                    NetworkId::Live => {}
                 }
                 let mut node = burst_node::BurstNode::new(config).await?;
-                node.start().await?;
+                if let Some(ready) = ready {
+                    let _ = ready.send(());
+                }
+                let started = if let Some(mut stop) = stop {
+                    let shutdown = node.shutdown.clone();
+                    let start = node.start();
+                    tokio::pin!(start);
+                    tokio::select! {
+                        result = &mut start => result,
+                        _ = wait_for_stop(&mut stop) => {
+                            shutdown.shutdown();
+                            start.await
+                        }
+                    }
+                } else {
+                    node.start().await
+                };
 
-                tracing::info!("Shutdown signal received — stopping node");
-                node.stop().await?;
+                tracing::info!("Node run ended; stopping subsystems");
+                let stopped = node.stop().await;
+                started?;
+                stopped?;
 
                 tracing::info!("BURST daemon exited cleanly");
             }
@@ -236,4 +311,186 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stop_signal_is_latched_and_sender_loss_also_stops() {
+        let (sender, mut receiver) = tokio::sync::watch::channel(false);
+        sender.send(true).unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            wait_for_stop(&mut receiver),
+        )
+        .await
+        .unwrap();
+        let (sender, mut receiver) = tokio::sync::watch::channel(false);
+        drop(sender);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            wait_for_stop(&mut receiver),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn supervised_stop_drains_the_node_and_allows_the_same_ledger_to_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("node.toml");
+        let config = NodeConfig {
+            network: NetworkId::Dev,
+            data_dir: directory.path().join("ledger"),
+            port: 0,
+            enable_rpc: false,
+            enable_websocket: false,
+            enable_upnp: false,
+            enable_representative: false,
+            bootstrap_peers: Vec::new(),
+            ..NodeConfig::default()
+        };
+        std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
+        for _ in 0..2 {
+            let (stop, receiver) = tokio::sync::watch::channel(false);
+            let (ready, started) = tokio::sync::oneshot::channel();
+            let command = cli(&["--config", config_path.to_str().unwrap()]);
+            let worker = tokio::spawn(run(command, Some(receiver), Some(ready)));
+            tokio::time::timeout(std::time::Duration::from_secs(15), started)
+                .await
+                .unwrap()
+                .unwrap();
+            stop.send(true).unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(15), worker)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        }
+    }
+
+    fn cli(args: &[&str]) -> Cli {
+        let mut full = vec!["burst-daemon"];
+        full.extend_from_slice(args);
+        full.extend(["node", "run"]);
+        Cli::try_parse_from(full).unwrap()
+    }
+
+    fn configured(text: &str, overrides: &[&str]) -> anyhow::Result<NodeConfig> {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("node.toml");
+        std::fs::write(&path, text).unwrap();
+        let mut args = vec!["--config", path.to_str().unwrap()];
+        args.extend_from_slice(overrides);
+        resolve_config(cli(&args)).map(|(config, _)| config)
+    }
+
+    #[test]
+    fn unknown_network_never_becomes_devnet() {
+        for value in ["", "main", "production", "lve", "test "] {
+            assert!(
+                Cli::try_parse_from(["burst-daemon", "--network", value, "node", "run"]).is_err()
+            );
+        }
+        for (value, network) in [
+            ("LIVE", NetworkId::Live),
+            ("Test", NetworkId::Test),
+            ("dev", NetworkId::Dev),
+        ] {
+            assert_eq!(
+                resolve_config(cli(&["--network", value]))
+                    .unwrap()
+                    .0
+                    .network,
+                network
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_and_node_commands_use_the_same_network_genesis_rules() {
+        for (network, expected) in [
+            ("test", burst_types::ProtocolParams::testnet_defaults()),
+            ("dev", burst_types::ProtocolParams::devnet_defaults()),
+            ("live", burst_types::ProtocolParams::default()),
+        ] {
+            let node = resolve_config(cli(&["--network", network])).unwrap().0;
+            let snapshot = Cli::try_parse_from([
+                "burst-daemon",
+                "--network",
+                network,
+                "snapshot",
+                "verify",
+                "--input",
+                "unused.snapshot",
+            ])
+            .unwrap();
+            let snapshot = resolve_config(snapshot).unwrap().0;
+            assert_eq!(node.params.params_hash(), expected.params_hash());
+            assert_eq!(snapshot.params.params_hash(), expected.params_hash());
+            let file = configured(&format!("network = '{:?}'", node.network), &[]).unwrap();
+            assert_eq!(file.params.params_hash(), expected.params_hash());
+        }
+    }
+
+    #[test]
+    fn explicit_missing_or_invalid_config_never_falls_back() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("missing.toml");
+        assert!(resolve_config(cli(&["--config", path.to_str().unwrap()])).is_err());
+        for text in ["network = 'Lvie'", "port = 'wrong'", "not a TOML file"] {
+            assert!(configured(text, &[]).is_err());
+        }
+    }
+
+    #[test]
+    fn absent_flags_preserve_file_network_and_server_settings() {
+        let config = configured("network = 'Test'\nport = 17100\nenable_rpc = false\nenable_websocket = true\nrpc_bind = '127.0.0.2'", &[]).unwrap();
+        assert_eq!(config.network, NetworkId::Test);
+        assert_eq!(config.port, 17100);
+        assert!(!config.enable_rpc);
+        assert!(config.enable_websocket);
+        assert_eq!(config.rpc_bind, "127.0.0.2");
+    }
+
+    #[test]
+    fn explicit_server_flags_override_config_in_both_directions() {
+        let text = "network = 'Test'\nenable_rpc = false\nenable_websocket = true";
+        let enabled = configured(text, &["--rpc", "--websocket"]).unwrap();
+        assert!(enabled.enable_rpc && enabled.enable_websocket);
+        let disabled = configured(text, &["--rpc=false", "--websocket=false"]).unwrap();
+        assert!(!disabled.enable_rpc && !disabled.enable_websocket);
+    }
+
+    #[test]
+    fn event_bind_is_local_unless_explicitly_configured() {
+        assert_eq!(
+            resolve_config(cli(&[])).unwrap().0.websocket_bind,
+            "127.0.0.1"
+        );
+        assert_eq!(
+            configured("websocket_bind = '127.0.0.2'", &[])
+                .unwrap()
+                .websocket_bind,
+            "127.0.0.2"
+        );
+        assert_eq!(
+            configured("websocket_bind = '127.0.0.2'", &["--websocket-bind", "::1"])
+                .unwrap()
+                .websocket_bind,
+            "::1"
+        );
+    }
+
+    #[test]
+    fn live_never_enables_test_funding_from_flags_or_config() {
+        let config = configured("network = 'Live'\nenable_faucet = true", &["--faucet"]).unwrap();
+        assert!(!config.enable_faucet);
+        let config = resolve_config(cli(&["--network", "live", "--faucet"]))
+            .unwrap()
+            .0;
+        assert!(!config.enable_faucet);
+    }
 }

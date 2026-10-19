@@ -10,6 +10,7 @@ use aes_gcm::{Aes256Gcm, Nonce};
 use argon2::{Algorithm, Argon2, Params, Version};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
 use crate::error::WalletError;
@@ -146,15 +147,31 @@ pub fn decrypt_keystore(keystore: &KeystoreFile, password: &str) -> Result<[u8; 
 }
 
 /// Save a keystore to a JSON file.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn save_keystore(keystore: &KeystoreFile, path: &Path) -> Result<(), WalletError> {
+    use std::io::Write;
     let json = serde_json::to_string_pretty(keystore)
         .map_err(|e| WalletError::Other(format!("JSON serialization failed: {}", e)))?;
-    std::fs::write(path, json)
-        .map_err(|e| WalletError::Other(format!("failed to write keystore file: {}", e)))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).map_err(|e| {
+        WalletError::Other(format!(
+            "cannot create keystore; choose a new file path: {e}"
+        ))
+    })?;
+    file.write_all(json.as_bytes())
+        .and_then(|_| file.sync_all())
+        .map_err(|e| WalletError::Other(format!("failed to write keystore file: {e}")))?;
     Ok(())
 }
 
 /// Load a keystore from a JSON file.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_keystore(path: &Path) -> Result<KeystoreFile, WalletError> {
     let json = std::fs::read_to_string(path)
         .map_err(|e| WalletError::Other(format!("failed to read keystore file: {}", e)))?;
@@ -188,7 +205,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
-    if !s.len().is_multiple_of(2) {
+    if !s.is_ascii() || !s.len().is_multiple_of(2) {
         return Err("odd-length hex string".to_string());
     }
     (0..s.len())
@@ -260,6 +277,10 @@ mod tests {
         let path = dir.join("test-keystore.json");
 
         save_keystore(&keystore, &path).unwrap();
+        assert!(
+            save_keystore(&keystore, &path).is_err(),
+            "must not overwrite an existing backup"
+        );
         let loaded = load_keystore(&path).unwrap();
         let decrypted = decrypt_keystore(&loaded, password).unwrap();
 

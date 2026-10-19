@@ -26,6 +26,9 @@ pub enum WalletError {
     #[error("node RPC error: {0}")]
     Node(String),
 
+    #[error("account preparation incomplete; requested action was not submitted: {0}")]
+    Preparation(#[source] Box<WalletError>),
+
     #[error("no node connection configured")]
     NoNodeConnection,
 

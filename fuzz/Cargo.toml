@@ -13,6 +13,7 @@ burst-types = { path = "../types" }
 burst-crypto = { path = "../crypto" }
 burst-protocol = { path = "../protocol" }
 burst-messages = { path = "../messages" }
+burst-node = { path = "../node" }
 burst-work = { path = "../work" }
 burst-brn = { path = "../brn" }
 burst-transactions = { path = "../transactions" }

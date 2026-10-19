@@ -36,7 +36,10 @@ pub fn create_genesis_block(config: &GenesisConfig) -> StateBlock {
     let timestamp = genesis_timestamp(&config.network);
 
     let mut block = StateBlock {
+        signing_grant: burst_types::BlockHash::ZERO,
+        delegation_payload: Vec::new(),
         version: CURRENT_BLOCK_VERSION,
+        payment_epoch: BlockHash::ZERO,
         block_type: BlockType::Open,
         account: config.creator.clone(),
         previous: BlockHash::ZERO,
@@ -48,7 +51,9 @@ pub fn create_genesis_block(config: &GenesisConfig) -> StateBlock {
         transaction: TxHash::ZERO,
         timestamp,
         params_hash: BlockHash::ZERO,
+        target_head: burst_types::BlockHash::ZERO,
         merge_sources: Vec::new(),
+        release_sources: Vec::new(),
         work: 0,
         signature: Signature([0u8; 64]),
         hash: BlockHash::ZERO,

@@ -11,8 +11,10 @@
 
 pub mod engine;
 pub mod error;
+pub mod releases;
 pub mod stake;
 pub mod state;
+pub mod wallet_states;
 
 pub use engine::BrnEngine;
 pub use error::BrnError;

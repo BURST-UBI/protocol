@@ -12,7 +12,7 @@
 #
 # Environment variables (set before running):
 #   BURST_NETWORK     — "test" (default) or "live"
-#   BURST_SEED        — bootstrap peer address (default: testnet seed)
+#   BURST_SEED        — bootstrap peer address (default: none)
 #   BURST_DATA_DIR    — data directory (default: platform-specific)
 
 set -eu
@@ -20,8 +20,8 @@ set -eu
 REPO="BURST-UBI/protocol"
 RELEASE_URL="https://github.com/${REPO}/releases/latest/download"
 BURST_NETWORK="${BURST_NETWORK:-test}"
-BURST_SEED="${BURST_SEED:-167.172.83.88:17076}"
-# Set BURST_IS_SEED=1 when installing on the seed node itself (no bootstrap, faucet enabled).
+BURST_SEED="${BURST_SEED:-}"
+# Set BURST_IS_SEED=1 when installing a seed node (no bootstrap; no faucet).
 BURST_IS_SEED="${BURST_IS_SEED:-0}"
 # BURST_ADVERTISE_ADDRESS — optional override for keepalive self-advertisement.
 # Node auto-detects public IP on cloud VPSes; set this only if auto-detect fails.
@@ -37,6 +37,54 @@ NC='\033[0m'
 info()  { printf "${GREEN}[+]${NC} %s\n" "$1"; }
 warn()  { printf "${YELLOW}[!]${NC} %s\n" "$1"; }
 error() { printf "${RED}[x]${NC} %s\n" "$1"; exit 1; }
+
+download_verified_binary() (
+    set -eu
+    destination=$1
+    asset=$2
+    stage=$(mktemp -d "${destination}.download.XXXXXX") || exit 1
+    trap 'rm -f "$stage/binary" "$stage/SHA256SUMS"; rmdir "$stage"' EXIT
+    trap 'exit 1' HUP INT TERM
+    curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+        --connect-timeout 10 --max-time 180 --retry 2 \
+        -o "$stage/SHA256SUMS" "${RELEASE_URL}/SHA256SUMS" || exit 1
+    expected=$(awk -v asset="$asset" '
+        $2 == asset {
+            count++
+            if (NF != 2 || length($1) != 64 || $1 ~ /[^[:xdigit:]]/) invalid = 1
+            hash = tolower($1)
+        }
+        END { if (count != 1 || invalid) exit 1; print hash }
+    ' "$stage/SHA256SUMS") || { echo 'Missing, duplicate or invalid release checksum' >&2; exit 1; }
+    curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+        --connect-timeout 10 --max-time 180 --retry 2 \
+        -o "$stage/binary" "${RELEASE_URL}/${asset}" || exit 1
+    if command -v sha256sum >/dev/null 2>&1; then
+        actual=$(sha256sum "$stage/binary" | awk '{ print $1 }')
+    else
+        actual=$(shasum -a 256 "$stage/binary" | awk '{ print $1 }')
+    fi
+    [ "$actual" = "$expected" ] || { echo 'Release checksum mismatch; installed binary was not changed' >&2; exit 1; }
+    chmod 755 "$stage/binary" || exit 1
+    mv -f "$stage/binary" "$destination"
+)
+
+
+xml_text() {
+    printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g' -e "s/'/\&apos;/g"
+}
+
+systemd_arg() {
+    printf '"'
+    printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/%/%%/g'
+    printf '"'
+}
+
+toml_string() {
+    printf '"'
+    printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+    printf '"'
+}
 
 # ── Detect platform ─────────────────────────────────────────────────
 
@@ -80,6 +128,12 @@ else
     UPDATE_PLIST="com.burst.update"
 fi
 
+# Reject control characters before embedding paths or endpoint values in config.
+for value in "$DATA_DIR" "$BIN_PATH" "$CONFIG_PATH" "$BURST_SEED" "$BURST_ADVERTISE_ADDRESS"; do
+    clean=$(printf '%s' "$value" | LC_ALL=C tr -d '[:cntrl:]')
+    [ "$clean" = "$value" ] || error "Paths and endpoint settings cannot contain control characters"
+done
+
 # ── Uninstall ────────────────────────────────────────────────────────
 
 uninstall_linux() {
@@ -96,7 +150,7 @@ uninstall_linux() {
     systemctl daemon-reload
 
     info "Removing binary and config..."
-    rm -f "${BIN_PATH}"
+    rm -f "${BIN_PATH}" "${BIN_PATH}.updater"
     rm -rf "${CONFIG_DIR}"
 
     printf "${YELLOW}[!]${NC} Data directory %s was NOT removed.\n" "${DATA_DIR}"
@@ -115,7 +169,7 @@ uninstall_macos() {
     rm -f "${PLIST_DIR}/${UPDATE_PLIST}.plist"
 
     info "Removing binary..."
-    rm -f "${BIN_PATH}"
+    rm -f "${BIN_PATH}" "${BIN_PATH}.updater"
     rmdir "${BIN_DIR}" 2>/dev/null || true
 
     printf "${YELLOW}[!]${NC} Data and config at %s were NOT removed.\n" "${BURST_APP_DIR}"
@@ -162,7 +216,8 @@ command -v curl >/dev/null 2>&1 || {
 case "${BURST_NETWORK}" in
     live|Live|LIVE) NET_NAME="Live"; NET_PORT=7076 ;;
     dev|Dev|DEV)    NET_NAME="Dev";  NET_PORT=27076 ;;
-    *)              NET_NAME="Test"; NET_PORT=17076 ;;
+    test|Test|TEST) NET_NAME="Test"; NET_PORT=17076 ;;
+    *) error "BURST_NETWORK must be live, test or dev" ;;
 esac
 
 info "Platform: ${PLATFORM}/${ARCH_LABEL}"
@@ -177,15 +232,15 @@ if [ "${PLATFORM}" = "darwin" ]; then
     mkdir -p "${BIN_DIR}"
 fi
 
-TMP_BIN="${BIN_PATH}.tmp"
-
-if curl -fSL --progress-bar -o "${TMP_BIN}" "${BINARY_URL}"; then
-    mv "${TMP_BIN}" "${BIN_PATH}"
-    chmod +x "${BIN_PATH}"
+if download_verified_binary "${BIN_PATH}" "burst-daemon-${PLATFORM}-${ARCH_LABEL}"; then
     info "Installed ${BIN_PATH}"
 else
-    rm -f "${TMP_BIN}"
-    error "Download failed. Is there a release at ${BINARY_URL} ?"
+    error "Release download or checksum validation failed for ${BINARY_URL}"
+fi
+
+UPDATER_PATH="${BIN_PATH}.updater"
+if ! download_verified_binary "${UPDATER_PATH}" "burst-update.sh"; then
+    error "Could not install the verified updater"
 fi
 
 # ── Write config (skip if exists) ────────────────────────────────────
@@ -198,23 +253,16 @@ if [ ! -f "${CONFIG_PATH}" ]; then
         BOOTSTRAP_LINE="bootstrap_peers = []"
         info "Installing as SEED node (no bootstrap peers)"
     else
-        BOOTSTRAP_LINE="bootstrap_peers = [\"${BURST_SEED}\"]"
+        BOOTSTRAP_LINE="bootstrap_peers = [$(toml_string "${BURST_SEED}")]"
         info "Installing as NON-SEED node (bootstrap from ${BURST_SEED})"
     fi
 
-    # Faucet is testnet-only (mints unbacked TRST). Never on live — the daemon
-    # force-disables it there anyway; keep the config honest.
-    if [ "${NET_NAME}" = "Live" ]; then
-        FAUCET_LINE="enable_faucet = false"
-    elif [ "${BURST_IS_SEED}" = "1" ] || [ -z "${BURST_SEED}" ]; then
-        FAUCET_LINE="enable_faucet = true"
-    else
-        FAUCET_LINE="enable_faucet = false"
-    fi
+    # Installing a node or omitting a seed never grants test-funding authority.
+    FAUCET_LINE="enable_faucet = false"
 
     cat > "${CONFIG_PATH}" <<TOML
 network = "${NET_NAME}"
-data_dir = "${DATA_DIR}"
+data_dir = $(toml_string "${DATA_DIR}")
 port = ${NET_PORT}
 max_peers = 50
 enable_rpc = true
@@ -224,6 +272,7 @@ rpc_port = 7077
 rpc_bind = "127.0.0.1"
 enable_websocket = true
 websocket_port = 7078
+websocket_bind = "127.0.0.1"
 ${BOOTSTRAP_LINE}
 log_format = "human"
 log_level = "info"
@@ -235,7 +284,7 @@ enable_verification = false
 enable_representative = true
 TOML
     if [ -n "${BURST_ADVERTISE_ADDRESS}" ]; then
-        echo "advertise_address = \"${BURST_ADVERTISE_ADDRESS}\"" >> "${CONFIG_PATH}"
+        printf 'advertise_address = %s\n' "$(toml_string "${BURST_ADVERTISE_ADDRESS}")" >> "${CONFIG_PATH}"
         info "Set advertise_address override (auto-detect disabled)"
     fi
     info "Config written to ${CONFIG_PATH}"
@@ -263,8 +312,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=${BURST_USER}
-ExecStart=${BIN_PATH} --config ${CONFIG_PATH} --data-dir ${DATA_DIR} node run
-WorkingDirectory=${DATA_DIR}
+ExecStart=:$(systemd_arg "${BIN_PATH}") --config $(systemd_arg "${CONFIG_PATH}") node run
+WorkingDirectory=$(systemd_arg "${DATA_DIR}")
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
@@ -281,23 +330,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c '\
-    ARCH=\$(uname -m); \
-    case "\$ARCH" in x86_64) A=amd64;; aarch64) A=arm64;; *) exit 0;; esac; \
-    URL="https://github.com/${REPO}/releases/latest/download/burst-daemon-linux-\$A"; \
-    NEW=\$(curl -fsSL "https://github.com/${REPO}/releases/latest/download/SHA256SUMS" 2>/dev/null | grep "linux-\$A" | cut -d" " -f1); \
-    OLD=\$(sha256sum ${BIN_PATH} 2>/dev/null | cut -d" " -f1); \
-    if [ -n "\$NEW" ] && [ "\$NEW" != "\$OLD" ]; then \
-        curl -fsSL -o ${BIN_PATH}.tmp "\$URL" && \
-        VERIFY=\$(sha256sum ${BIN_PATH}.tmp | cut -d" " -f1) && \
-        if [ "\$VERIFY" = "\$NEW" ]; then \
-            mv ${BIN_PATH}.tmp ${BIN_PATH} && \
-            chmod +x ${BIN_PATH} && \
-            systemctl restart ${SERVICE_NAME}; \
-        else \
-            rm -f ${BIN_PATH}.tmp; \
-        fi; \
-    fi'
+ExecStart=:/bin/sh $(systemd_arg "${UPDATER_PATH}") $(systemd_arg "${BIN_PATH}") ${PLATFORM}-${ARCH_LABEL} ${SERVICE_NAME}
 EOF
 
     cat > "/etc/systemd/system/${UPDATE_SERVICE}.timer" <<EOF
@@ -359,11 +392,9 @@ install_macos() {
     <string>${NODE_PLIST}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>${BIN_PATH}</string>
+        <string>$(xml_text "${BIN_PATH}")</string>
         <string>--config</string>
-        <string>${CONFIG_PATH}</string>
-        <string>--data-dir</string>
-        <string>${DATA_DIR}</string>
+        <string>$(xml_text "${CONFIG_PATH}")</string>
         <string>node</string>
         <string>run</string>
     </array>
@@ -372,9 +403,9 @@ install_macos() {
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>${BURST_APP_DIR}/burst-node.log</string>
+    <string>$(xml_text "${BURST_APP_DIR}/burst-node.log")</string>
     <key>StandardErrorPath</key>
-    <string>${BURST_APP_DIR}/burst-node.log</string>
+    <string>$(xml_text "${BURST_APP_DIR}/burst-node.log")</string>
 </dict>
 </plist>
 EOF
@@ -389,32 +420,17 @@ EOF
     <key>ProgramArguments</key>
     <array>
         <string>/bin/sh</string>
-        <string>-c</string>
-        <string>
-ARCH=\$(uname -m);
-case "\$ARCH" in x86_64) A=amd64;; arm64) A=arm64;; *) exit 0;; esac;
-URL="https://github.com/${REPO}/releases/latest/download/burst-daemon-darwin-\$A";
-NEW=\$(curl -fsSL "https://github.com/${REPO}/releases/latest/download/SHA256SUMS" 2>/dev/null | grep "darwin-\$A" | cut -d" " -f1);
-OLD=\$(shasum -a 256 "${BIN_PATH}" 2>/dev/null | cut -d" " -f1);
-if [ -n "\$NEW" ] &amp;&amp; [ "\$NEW" != "\$OLD" ]; then
-    curl -fsSL -o "${BIN_PATH}.tmp" "\$URL" &amp;&amp;
-    VERIFY=\$(shasum -a 256 "${BIN_PATH}.tmp" | cut -d" " -f1) &amp;&amp;
-    if [ "\$VERIFY" = "\$NEW" ]; then
-        mv "${BIN_PATH}.tmp" "${BIN_PATH}" &amp;&amp;
-        chmod +x "${BIN_PATH}" &amp;&amp;
-        launchctl kickstart -k "gui/\$(id -u)/${NODE_PLIST}";
-    else
-        rm -f "${BIN_PATH}.tmp";
-    fi;
-fi
-        </string>
+        <string>$(xml_text "${UPDATER_PATH}")</string>
+        <string>$(xml_text "${BIN_PATH}")</string>
+        <string>${PLATFORM}-${ARCH_LABEL}</string>
+        <string>${NODE_PLIST}</string>
     </array>
     <key>StartInterval</key>
     <integer>300</integer>
     <key>StandardOutPath</key>
-    <string>${BURST_APP_DIR}/burst-update.log</string>
+    <string>$(xml_text "${BURST_APP_DIR}/burst-update.log")</string>
     <key>StandardErrorPath</key>
-    <string>${BURST_APP_DIR}/burst-update.log</string>
+    <string>$(xml_text "${BURST_APP_DIR}/burst-update.log")</string>
 </dict>
 </plist>
 EOF

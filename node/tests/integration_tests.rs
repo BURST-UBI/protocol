@@ -6,6 +6,8 @@
 //! in isolation.
 
 use burst_brn::BrnEngine;
+#[path = "support/lifecycle_simulation.rs"]
+mod lifecycle_simulation;
 use burst_consensus::RepWeightCache;
 use burst_crypto::{derive_address, keypair_from_seed, sign_message};
 use burst_ledger::{BlockType, DagFrontier, StateBlock, CURRENT_BLOCK_VERSION};
@@ -35,6 +37,10 @@ fn pubkey_bytes(addr: &WalletAddress) -> [u8; 32] {
     burst_crypto::decode_address(addr.as_str()).expect("valid address")
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "fixture exposes the signed block fields under test"
+)]
 fn make_block(
     block_type: BlockType,
     account: &WalletAddress,
@@ -49,7 +55,10 @@ fn make_block(
     let mut dummy_sig = [0u8; 64];
     dummy_sig[0] = 0xFF;
     let mut block = StateBlock {
+        signing_grant: burst_types::BlockHash::ZERO,
+        delegation_payload: Vec::new(),
         version: CURRENT_BLOCK_VERSION,
+        payment_epoch: burst_types::BlockHash::new([1; 32]),
         block_type,
         account: account.clone(),
         previous,
@@ -61,7 +70,9 @@ fn make_block(
         transaction: TxHash::ZERO,
         timestamp: Timestamp::new(ts),
         params_hash: BlockHash::ZERO,
+        target_head: burst_types::BlockHash::ZERO,
         merge_sources: Vec::new(),
+        release_sources: Vec::new(),
         work: 0,
         signature: Signature(dummy_sig),
         hash: BlockHash::ZERO,
@@ -259,7 +270,7 @@ fn ledger_updater_rep_change_updates_representative() {
 
     // A rebuilt cache attributes this verified human's one vote to rep2, not rep1.
     let mut rw = RepWeightCache::new();
-    rw.rebuild_from_accounts(std::iter::once((true, info2.representative.clone(), 0)));
+    rw.rebuild_from_accounts(std::iter::once((true, info2.representative.clone())));
     assert_eq!(rw.weight(&rep1), 0);
     assert_eq!(
         rw.weight(&rep2),
@@ -685,7 +696,7 @@ fn block_processor_accepts_open_block() {
     let account = make_address(111);
     let rep = make_address(112);
 
-    let mut proc = BlockProcessor::new(0);
+    let mut proc = BlockProcessor::new(0, burst_types::BlockHash::new([1; 32]));
     proc.set_verify_signatures(false);
     proc.set_validate_timestamps(false);
     let mut frontier = DagFrontier::new();
@@ -714,7 +725,7 @@ fn block_processor_detects_gap() {
     let account = make_address(121);
     let rep = make_address(122);
 
-    let mut proc = BlockProcessor::new(0);
+    let mut proc = BlockProcessor::new(0, burst_types::BlockHash::new([1; 32]));
     proc.set_verify_signatures(false);
     proc.set_validate_timestamps(false);
     let mut frontier = DagFrontier::new();
@@ -742,7 +753,7 @@ fn block_processor_detects_fork() {
     let account = make_address(131);
     let rep = make_address(132);
 
-    let mut proc = BlockProcessor::new(0);
+    let mut proc = BlockProcessor::new(0, burst_types::BlockHash::new([1; 32]));
     proc.set_verify_signatures(false);
     proc.set_validate_timestamps(false);
     let mut frontier = DagFrontier::new();
@@ -797,7 +808,7 @@ fn block_processor_detects_duplicate() {
     let account = make_address(141);
     let rep = make_address(142);
 
-    let mut proc = BlockProcessor::new(0);
+    let mut proc = BlockProcessor::new(0, burst_types::BlockHash::new([1; 32]));
     proc.set_verify_signatures(false);
     proc.set_validate_timestamps(false);
     let mut frontier = DagFrontier::new();
@@ -1034,7 +1045,7 @@ fn e2e_real_signatures_burn_send_receive() {
     let carol_kp = keypair_from_seed(&[0xC3; 32]);
     let carol = derive_address(&carol_kp.public);
 
-    let mut proc = BlockProcessor::new(0);
+    let mut proc = BlockProcessor::new(0, burst_types::BlockHash::new([1; 32]));
     proc.set_validate_timestamps(false);
     let mut frontier = DagFrontier::new();
 
@@ -1428,13 +1439,14 @@ fn governance_proposal_and_vote_economics() {
             ..
         } => {
             assert_eq!(p, proposer);
-            assert_eq!(proposal_hash, TxHash::new([0xAA; 32]));
+            assert_eq!(proposal_hash, proposal_block.hash.into_tx_hash());
+            assert_ne!(proposal_hash, proposal_block.transaction);
         }
         other => panic!("expected GovernanceProposal, got {:?}", other),
     }
 
     // GovernanceVote block (link = proposal hash, transaction[0] = vote value)
-    let proposal_hash = TxHash::new([0xAA; 32]);
+    let proposal_hash = proposal_block.hash.into_tx_hash();
     let mut vote_block = make_block(
         BlockType::GovernanceVote,
         &voter,
@@ -1498,10 +1510,13 @@ fn create_received_token_single_provenance() {
     );
 
     let pending = burst_store::pending::PendingInfo {
+        return_credit: false,
         source: sender.clone(),
         amount: 500,
         timestamp: Timestamp::new(4000),
         provenance: vec![burst_store::pending::PendingProvenance {
+            basis: Default::default(),
+            revoked_amounts: Default::default(),
             amount: 500,
             origin: TxHash::new([0x01; 32]),
             origin_wallet: origin_wallet.clone(),
@@ -1540,10 +1555,13 @@ fn create_received_token_single_provenance_preserves_origin() {
 
     let origin_hash = TxHash::new([0x02; 32]);
     let pending = burst_store::pending::PendingInfo {
+        return_credit: false,
         source: sender.clone(),
         amount: 400,
         timestamp: Timestamp::new(7000),
         provenance: vec![burst_store::pending::PendingProvenance {
+            basis: Default::default(),
+            revoked_amounts: Default::default(),
             amount: 400,
             origin: origin_hash,
             origin_wallet: origin_wallet.clone(),
@@ -1587,6 +1605,7 @@ fn create_received_token_no_provenance_uses_pending_timestamp() {
     );
 
     let pending = burst_store::pending::PendingInfo {
+        return_credit: false,
         source: sender.clone(),
         amount: 100,
         timestamp: Timestamp::new(8000),
@@ -2022,10 +2041,11 @@ fn verifier_rewards_are_burn_backed_pending_entries() {
             (correct.clone(), 500, true),
             (dissenter.clone(), 500, false),
         ],
-    );
+    )
+    .unwrap();
 
     let ts = Timestamp::new(9000);
-    burst_node::ledger_bridge::resolve_verifier_outcomes(
+    lifecycle_simulation::resolve_verifier_outcomes(
         &mut brn,
         &pending_store,
         &outcome.verifiers,
@@ -2058,8 +2078,8 @@ fn verifier_rewards_are_burn_backed_pending_entries() {
 // ---------------------------------------------------------------------------
 // 20. FULL PROTOCOL LIFECYCLE SIMULATION
 //
-// One connected story exercising every principle through the same functions
-// the node calls, in the same order, with conservation asserted throughout:
+// Component-level accounting story, not the node's admission/settlement path.
+// Atomic production lifecycle tests live in verification_commit.rs:
 // verification → BRN accrual (computed) → two-phase burn/mint → receive →
 // per-origin send → merge (immediate-input graph) → challenge → vote →
 // fraud → proportional revocation (incl. in-flight sends) → burn-backed
@@ -2073,6 +2093,7 @@ fn full_protocol_lifecycle_simulation() {
 
     let params = ProtocolParams {
         endorsement_threshold: 3,
+        endorsement_burn_amount: 1000,
         num_verifiers: 3,
         verification_threshold_bps: 6000,
         verifier_stake_amount: 100,
@@ -2152,10 +2173,13 @@ fn full_protocol_lifecycle_simulation() {
             &bob,
             &burn_hash,
             &PendingInfo {
+                return_credit: false,
                 source: alice.clone(),
                 amount: minted.amount,
                 timestamp: t2000,
                 provenance: vec![PendingProvenance {
+                    basis: Default::default(),
+                    revoked_amounts: Default::default(),
                     amount: minted.amount,
                     origin: minted.origin,
                     origin_wallet: minted.origin_wallet.clone(),
@@ -2197,6 +2221,7 @@ fn full_protocol_lifecycle_simulation() {
     let prov = trst.debit_wallet_with_provenance(&bob, &origin_a, 200);
     assert_eq!(prov[0].amount, 200);
     let carol_recv = burst_trst::TrstToken {
+        basis: Default::default(),
         id: test_hash_sim(1),
         amount: 200,
         origin: prov[0].origin,
@@ -2353,7 +2378,7 @@ fn full_protocol_lifecycle_simulation() {
         Some(250)
     );
 
-    // Settle the challenge like the node does.
+    // Apply the component simulation's accounting model.
     if let burst_verification::VerificationEvent::ChallengeResolved { outcome, .. } = &resolved {
         assert_eq!(
             outcome.outcome,
@@ -2363,7 +2388,7 @@ fn full_protocol_lifecycle_simulation() {
         let ws = brn.get_wallet_mut(&carol).unwrap();
         ws.total_staked = ws.total_staked.saturating_sub(outcome.challenger_stake);
         // Panel: unanimous → no dissenters → stakes unlocked, no TRST minted.
-        burst_node::ledger_bridge::resolve_verifier_outcomes(
+        lifecycle_simulation::resolve_verifier_outcomes(
             &mut brn,
             &pending_store,
             &outcome.verifier_outcomes,
@@ -2381,7 +2406,7 @@ fn full_protocol_lifecycle_simulation() {
             params.challenge_reward_cap,
         );
         assert_eq!(reward, 2); // 1% of 250, integer math
-        let reward_hash = burst_node::ledger_bridge::create_reward_pending(
+        let reward_hash = lifecycle_simulation::create_reward_pending(
             &pending_store,
             &carol,
             &sybil,
@@ -2413,6 +2438,7 @@ fn full_protocol_lifecycle_simulation() {
     // The in-flight 300 of M arrives at Carol — revocation caught at receive:
     // ceil(300·400/800) = 150 revoked, 150 stays live.
     let inflight = burst_trst::TrstToken {
+        basis: Default::default(),
         id: test_hash_sim(3),
         amount: 300,
         origin: merge_tx,

@@ -95,12 +95,82 @@ pub enum ProcessResult {
     Queued,
 }
 
+pub type HistoricalAccountPage = Vec<(u64, burst_ledger::StateBlock)>;
+pub type HistoricalAccountPageFuture<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<HistoricalAccountPage, String>> + Send + 'a>,
+>;
+
 /// Callback trait for processing a block through the node's pipeline.
 ///
 /// The node provides a concrete implementation that calls its `BlockProcessor`.
 /// This indirection breaks the `rpc → node → rpc` circular dependency.
 pub trait BlockProcessorCallback: Send + Sync {
+    /// Advisory synchronization observations, not authority to sign or confirm.
+    fn checkpoint_sync_status(&self) -> Result<serde_json::Value, String> {
+        Err("checkpoint synchronization status is unavailable on this node".into())
+    }
+    /// Authenticated account-prefix entries, keyed by their original heights.
+    /// Missing entries are unavailable, not proof that the account has no history.
+    fn historical_account_page(
+        &self, _account: burst_types::WalletAddress, _first: u64, _count: u32,
+    ) -> HistoricalAccountPageFuture<'_> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+    /// Read-only membership proof. This must never admit or execute the block.
+    fn historical_block(
+        &self,
+        _hash: burst_types::BlockHash,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<burst_ledger::StateBlock>, String>> + Send + '_>> {
+        Box::pin(async { Ok(None) })
+    }
+    fn confirmed_account_slot(
+        &self, _query: burst_types::payment_recovery::SlotQuery,
+    ) -> Result<burst_types::payment_recovery::SlotReview, String> {
+        Err("confirmed account slot recovery is unavailable on this node".into())
+    }
+    fn payment_exclusion(
+        &self,
+        _query: burst_types::payment_recovery::ExclusionQuery,
+    ) -> Result<burst_types::payment_recovery::ExclusionReview, String> {
+        Err("payment exclusion recovery is unavailable on this node".into())
+    }
     fn process_block(&self, block_bytes: &[u8]) -> Result<ProcessResult, String>;
+    fn supports_full_governance_content(&self) -> bool {
+        false
+    }
+    fn supports_delegation_key_journal(&self) -> bool {
+        false
+    }
+    fn appeal_review(
+        &self,
+        _account: &WalletAddress,
+    ) -> Result<burst_types::appeal::AppealReview, String> {
+        Err("appeal review is unavailable on this node".into())
+    }
+    fn delegation_keys(
+        &self,
+        _query: burst_governance::key_delegation::view::Query,
+    ) -> Result<burst_governance::key_delegation::view::Page, String> {
+        Err("scoped delegation discovery is unavailable".into())
+    }
+
+    fn process_block_with_content(
+        &self,
+        _block_bytes: &[u8],
+        _content: &[u8],
+    ) -> Result<ProcessResult, String> {
+        Err("full governance content submission is unavailable".into())
+    }
+
+    /// Optional bounded wait for admission/persistence, not consensus finality.
+    /// Missing or timed-out results remain queued, never become a rejection.
+    fn wait_for_result<'a>(
+        &'a self,
+        _block_bytes: &'a [u8],
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<ProcessResult>> + Send + 'a>>
+    {
+        Box::pin(async { None })
+    }
 }
 
 /// Top-level RPC server handle.
@@ -117,6 +187,13 @@ pub struct RpcServer {
 /// circular dependency. The node constructs an `RpcState` and passes it in
 /// when starting the RPC server.
 pub struct RpcState {
+    /// Node clock for read-only time projections, not signing authority.
+    pub display_now: Arc<dyn Fn() -> burst_types::Timestamp + Send + Sync>,
+    pub meta_store: Arc<dyn burst_store::meta::MetaStore + Send + Sync>,
+    /// Actual node network, independent of convenience-tool configuration.
+    pub network: burst_types::NetworkId,
+    /// Serialize genesis-chain transactions authored by these RPC helpers.
+    pub genesis_authoring: tokio::sync::Mutex<()>,
     /// Unix timestamp (seconds) when the node started.
     pub started_at: u64,
     /// Prometheus metric registry (optional; when present the `/metrics`
@@ -138,6 +215,12 @@ pub struct RpcState {
     pub governance_engine: Option<Arc<tokio::sync::Mutex<burst_governance::GovernanceEngine>>>,
     /// BRN computation engine (shared with the node).
     pub brn_engine: Arc<tokio::sync::Mutex<BrnEngine>>,
+    pub brn_store: Arc<dyn burst_store::brn::BrnStore + Send + Sync>,
+    pub clock_sync: Arc<tokio::sync::Mutex<burst_network::ClockSync>>,
+    pub verification_engine: Arc<tokio::sync::Mutex<burst_verification::VerificationOrchestrator>>,
+    pub delegation_engine: Arc<tokio::sync::Mutex<burst_governance::DelegationEngine>>,
+    pub trst_engine: Arc<tokio::sync::Mutex<burst_trst::TrstEngine>>,
+    pub consti_engine: Arc<tokio::sync::Mutex<burst_consti::ConstiEngine>>,
     /// Cached representative weights (shared with the node).
     pub rep_weight_cache: Arc<tokio::sync::RwLock<RepWeightCache>>,
     /// Proof-of-work generator.
@@ -219,8 +302,11 @@ impl RpcServer {
         Self { port, bind, state }
     }
 
-    /// Start listening. Blocks until the server is shut down.
-    pub async fn start(&self) -> Result<(), RpcError> {
+    /// Stop accepting connections and drain existing HTTP sessions on shutdown.
+    pub async fn start(
+        &self,
+        shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> Result<(), RpcError> {
         let app = Router::new()
             .route("/health", get(|| async { "ok" }))
             .route("/metrics", get(metrics_handler))
@@ -242,27 +328,22 @@ impl RpcServer {
             .await
             .map_err(|e| RpcError::Server(e.to_string()))?;
 
-        // Periodically evict stale rate-limiter buckets so the per-client-IP
-        // map can't grow unbounded over the node's lifetime.
-        {
-            let rate_limiter = Arc::clone(&self.state.rate_limiter);
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-                loop {
-                    interval.tick().await;
-                    rate_limiter.cleanup();
-                }
-            });
-        }
-
-        axum::serve(
+        let cleanup = async {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                self.state.rate_limiter.cleanup();
+            }
+        };
+        let server = axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
-        .await
-        .map_err(|e| RpcError::Server(e.to_string()))?;
-
-        Ok(())
+        .with_graceful_shutdown(shutdown);
+        tokio::select! {
+            result = server => result.map_err(|error| RpcError::Server(error.to_string())),
+            () = cleanup => Ok(()),
+        }
     }
 }
 
@@ -357,14 +438,24 @@ async fn dispatch_action(
         "account_info" => handlers::handle_account_info(params, state).await,
         "account_history" => handlers::handle_account_history(params, state).await,
         "account_balance" => handlers::handle_account_balance(params, state).await,
+        "brn_components" => handlers::handle_brn_components(params, state).await,
+        "trst_portfolio" => handlers::handle_trst_portfolio(params, state).await,
         "account_pending" => handlers::handle_account_pending(params, state).await,
         "account_representative" => handlers::handle_account_representative(params, state).await,
         "process" => handlers::handle_process(params, state).await,
         "block_info" => handlers::handle_block_info(params, state).await,
+        "params_hash" => handlers::handle_params_hash(params, state).await,
+        "protocol_params" => handlers::handle_protocol_params(params, state).await,
         "blocks_info" => handlers::handle_blocks_info(params, state).await,
         "pending" => handlers::handle_pending(params, state).await,
         "work_generate" => handlers::handle_work_generate(params, state).await,
         "governance_proposals" => handlers::handle_governance_proposals(params, state).await,
+        "verification_activity" => handlers::handle_verification_activity(params, state).await,
+        "consti" => handlers::handle_consti(params, state).await,
+        "merger_graph_stats" => handlers::handle_merger_graph_stats(params, state).await,
+        "trace_origin" => handlers::handle_trace_origin(params, state).await,
+        "trst_origins" => handlers::provenance::handle_trst_origins(params, state).await,
+        "peers_detailed" => handlers::handle_peers_detailed(params, state).await,
         "governance_vote" => handlers::handle_governance_vote(params, state).await,
         "governance_proposal_info" => {
             handlers::handle_governance_proposal_info(params, state).await
@@ -372,6 +463,42 @@ async fn dispatch_action(
         "telemetry" => handlers::handle_telemetry(params, state).await,
         "peers" => handlers::handle_peers(params, state).await,
         "verification_status" => handlers::handle_verification_status(params, state).await,
+        "verifier_assignments" => handlers::handle_verifier_assignments(params, state).await,
+        "appeal_review" => {
+            let request: handlers::VerificationStatusRequest = serde_json::from_value(params)
+                .map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
+            let account = WalletAddress::new(request.account);
+            burst_crypto::decode_address(account.as_str())
+                .ok_or_else(|| RpcError::InvalidRequest("invalid wallet address".into()))?;
+            let review = state
+                .block_processor
+                .appeal_review(&account)
+                .map_err(RpcError::Server)?;
+            serde_json::to_value(review).map_err(|e| RpcError::Server(e.to_string()))
+        }
+        "confirmed_account_slot" => {
+            let query = serde_json::from_value(params)
+                .map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
+            let review = state.block_processor.confirmed_account_slot(query).map_err(RpcError::Server)?;
+            serde_json::to_value(review).map_err(|e| RpcError::Server(e.to_string()))
+        }
+        "checkpoint_sync_status" => state.block_processor.checkpoint_sync_status().map_err(RpcError::Server),
+        "payment_exclusion" => {
+            let query = serde_json::from_value(params)
+                .map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
+            let review = state.block_processor.payment_exclusion(query).map_err(RpcError::Server)?;
+            serde_json::to_value(review).map_err(|e| RpcError::Server(e.to_string()))
+        }
+        "delegation_info" => handlers::handle_delegation_info(params, state).await,
+        "delegation_keys" => {
+            let query = serde_json::from_value(params)
+                .map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
+            let page = state
+                .block_processor
+                .delegation_keys(query)
+                .map_err(RpcError::Server)?;
+            serde_json::to_value(page).map_err(|e| RpcError::Server(e.to_string()))
+        }
         "representatives" => handlers::handle_representatives(params, state).await,
         "representatives_online" => handlers::handle_representatives_online(params, state).await,
         "send" => handlers::handle_send(params, state).await,

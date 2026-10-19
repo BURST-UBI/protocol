@@ -14,6 +14,11 @@ pub struct LedgerCache {
 }
 
 impl LedgerCache {
+    pub(crate) fn reset(&self, counts: (u64, u64, u64)) {
+        self.block_count.store(counts.0, Ordering::Relaxed);
+        self.account_count.store(counts.1, Ordering::Relaxed);
+        self.pending_count.store(counts.2, Ordering::Relaxed);
+    }
     /// Create a new cache seeded with the given initial values.
     pub fn new(block_count: u64, account_count: u64, pending_count: u64) -> Self {
         Self {

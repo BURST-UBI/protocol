@@ -1,13 +1,21 @@
 //! Challenge engine — any verified wallet can contest another's legitimacy.
 
 pub use burst_types::ChallengeReason;
-use burst_types::{Timestamp, WalletAddress};
+use burst_types::{BlockHash, Timestamp, WalletAddress};
 use serde::{Deserialize, Serialize};
 
-/// Maximum time (in seconds) a challenge can remain open before auto-expiring.
-/// 7 days. If verifiers fail to vote in time, the challenge resolves in favor
-/// of the challenged wallet.
+/// Legacy admission-based timeout. Certified challenge panels instead use
+/// `challenge_duration_secs` from their agreed activation and default missing
+/// votes to Neither; this constant cannot authorize live settlement.
 pub const CHALLENGE_TIMEOUT_SECS: u64 = 7 * 24 * 3600;
+
+/// The earlier judgment being reviewed, supplied by receipt-validated replay.
+/// This is not proof that the receipt or its settlement was certified.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppealContext {
+    pub reviewed_outcome: BlockHash,
+    pub previously_legitimate: bool,
+}
 
 /// An active challenge against a wallet.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -19,6 +27,7 @@ pub struct Challenge {
     pub reason: ChallengeReason,
 }
 
+#[derive(Clone)]
 pub struct ChallengeEngine;
 
 impl ChallengeEngine {
@@ -42,7 +51,7 @@ impl ChallengeEngine {
         }
     }
 
-    /// Whether a challenge has timed out (auto-resolves in favor of target).
+    /// Legacy admission-only predicate, not authority to settle a challenge.
     pub fn is_timed_out(&self, challenge: &Challenge, now: Timestamp) -> bool {
         let elapsed = now
             .as_secs()
@@ -56,7 +65,7 @@ mod tests {
     use super::*;
 
     fn addr(s: &str) -> WalletAddress {
-        WalletAddress::new(&format!("brst_{s}"))
+        WalletAddress::new(format!("brst_{s}"))
     }
 
     #[test]

@@ -1,138 +1,179 @@
-//! Encryption helpers for delegation key sharing.
-//!
-//! Uses X25519 Diffie-Hellman for key agreement, then ChaCha20-Poly1305
-//! AEAD for authenticated encryption of the delegation private key.
+//! Versioned delegation-key envelopes. Authorization belongs to the primary-key
+//! signed grant; encryption alone does not authenticate the granting wallet.
 
+use burst_types::PrivateKey;
 use chacha20poly1305::{
-    aead::{Aead, KeyInit},
-    ChaCha20Poly1305, Nonce,
+    aead::{Aead, KeyInit, Payload},
+    XChaCha20Poly1305, XNonce,
 };
+use rand::{rngs::OsRng, RngCore};
 use x25519_dalek::{PublicKey as X25519Public, StaticSecret};
+use zeroize::Zeroizing;
 
-/// Encrypt a delegation private key for secure transmission.
-///
-/// Uses X25519 Diffie-Hellman key agreement + ChaCha20-Poly1305 AEAD.
-/// The nonce is derived deterministically from the sender's public key
-/// (first 12 bytes), which is unique per sender and known to both parties.
-///
-/// Returns the 48-byte ciphertext (32 bytes plaintext + 16 bytes auth tag).
+const MAGIC: &[u8; 4] = b"BDK\x01";
+pub const DELEGATION_ENVELOPE_LEN: usize = 4 + 32 + 24 + 48;
+const MAX_CONTEXT: usize = 4096;
+
+pub fn validate_delegation_envelope(envelope: &[u8]) -> Result<(), &'static str> {
+    if envelope.len() != DELEGATION_ENVELOPE_LEN || &envelope[..4] != MAGIC {
+        return Err("invalid delegation envelope version or length");
+    }
+    Ok(())
+}
+
+fn cipher(
+    shared: &x25519_dalek::SharedSecret,
+    ephemeral: &[u8; 32],
+    recipient: &[u8; 32],
+    context: &[u8],
+) -> Result<XChaCha20Poly1305, &'static str> {
+    if context.is_empty() || context.len() > MAX_CONTEXT {
+        return Err("delegation context is empty or oversized");
+    }
+    if !shared.was_contributory() {
+        return Err("non-contributory delegation key exchange");
+    }
+    let key = Zeroizing::new(crate::blake2b_256_multi(&[
+        b"BURST/delegation-key/v1\0",
+        shared.as_bytes(),
+        ephemeral,
+        recipient,
+        &(context.len() as u64).to_be_bytes(),
+        context,
+    ]));
+    Ok(XChaCha20Poly1305::new((&*key).into()))
+}
+
+/// Encrypt a secondary seed with a fresh ephemeral X25519 key and random nonce.
+/// Context must encode the grant's network, owner, delegate, scope, generation
+/// and secondary public key. Decryption must use the authenticated grant's
+/// context, not an independent context supplied by a peer.
 pub fn encrypt_delegation_key(
     delegation_private_key: &[u8; 32],
     recipient_x25519_public: &[u8; 32],
-    sender_x25519_secret: &[u8; 32],
-) -> Vec<u8> {
-    let secret = StaticSecret::from(*sender_x25519_secret);
-    let recipient_pub = X25519Public::from(*recipient_x25519_public);
-    let shared = secret.diffie_hellman(&recipient_pub);
-
-    let sym_key = crate::hash::blake2b_256_multi(&[shared.as_bytes(), b"burst-delegation"]);
-    let cipher = ChaCha20Poly1305::new_from_slice(&sym_key).expect("valid key length");
-
-    let sender_pub = X25519Public::from(&secret);
-    let mut nonce_bytes = [0u8; 12];
-    nonce_bytes.copy_from_slice(&sender_pub.as_bytes()[..12]);
-    let nonce = Nonce::from(nonce_bytes);
-
-    cipher
-        .encrypt(&nonce, delegation_private_key.as_ref())
-        .expect("encryption should not fail")
+    context: &[u8],
+) -> Result<Vec<u8>, &'static str> {
+    let mut seed = Zeroizing::new([0; 32]);
+    OsRng
+        .try_fill_bytes(&mut *seed)
+        .map_err(|_| "delegation entropy unavailable")?;
+    let secret = StaticSecret::from(*seed);
+    let ephemeral = X25519Public::from(&secret);
+    let recipient = X25519Public::from(*recipient_x25519_public);
+    let shared = secret.diffie_hellman(&recipient);
+    let cipher = cipher(&shared, ephemeral.as_bytes(), recipient.as_bytes(), context)?;
+    let mut nonce = [0; 24];
+    OsRng
+        .try_fill_bytes(&mut nonce)
+        .map_err(|_| "delegation entropy unavailable")?;
+    let ciphertext = cipher
+        .encrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: delegation_private_key,
+                aad: context,
+            },
+        )
+        .map_err(|_| "delegation encryption failed")?;
+    let mut envelope = Vec::with_capacity(DELEGATION_ENVELOPE_LEN);
+    envelope.extend_from_slice(MAGIC);
+    envelope.extend_from_slice(ephemeral.as_bytes());
+    envelope.extend_from_slice(&nonce);
+    envelope.extend_from_slice(&ciphertext);
+    Ok(envelope)
 }
 
-/// Decrypt a delegation private key.
-///
-/// The sender's X25519 public key is needed both for DH shared secret
-/// derivation and for reconstructing the deterministic nonce.
+/// Reject legacy deterministic-nonce ciphertexts and noncanonical lengths.
+/// The returned secret is zeroized on drop and cannot be formatted with Debug.
 pub fn decrypt_delegation_key(
-    encrypted: &[u8],
-    sender_x25519_public: &[u8; 32],
+    envelope: &[u8],
     recipient_x25519_secret: &[u8; 32],
-) -> Result<[u8; 32], &'static str> {
+    context: &[u8],
+) -> Result<PrivateKey, &'static str> {
+    validate_delegation_envelope(envelope)?;
+    let ephemeral = X25519Public::from(<[u8; 32]>::try_from(&envelope[4..36]).unwrap());
     let secret = StaticSecret::from(*recipient_x25519_secret);
-    let sender_pub = X25519Public::from(*sender_x25519_public);
-    let shared = secret.diffie_hellman(&sender_pub);
-
-    let sym_key = crate::hash::blake2b_256_multi(&[shared.as_bytes(), b"burst-delegation"]);
-    let cipher = ChaCha20Poly1305::new_from_slice(&sym_key).expect("valid key length");
-
-    let mut nonce_bytes = [0u8; 12];
-    nonce_bytes.copy_from_slice(&sender_pub.as_bytes()[..12]);
-    let nonce = Nonce::from(nonce_bytes);
-
-    let decrypted = cipher
-        .decrypt(&nonce, encrypted)
-        .map_err(|_| "decryption failed: authentication check failed")?;
-
-    if decrypted.len() != 32 {
-        return Err("invalid key length after decryption");
-    }
-    let mut key = [0u8; 32];
-    key.copy_from_slice(&decrypted);
-    Ok(key)
+    let recipient = X25519Public::from(&secret);
+    let shared = secret.diffie_hellman(&ephemeral);
+    let cipher = cipher(&shared, ephemeral.as_bytes(), recipient.as_bytes(), context)?;
+    let plaintext = Zeroizing::new(
+        cipher
+            .decrypt(
+                XNonce::from_slice(&envelope[36..60]),
+                Payload {
+                    msg: &envelope[60..],
+                    aad: context,
+                },
+            )
+            .map_err(|_| "delegation authentication failed")?,
+    );
+    let seed = plaintext
+        .as_slice()
+        .try_into()
+        .map_err(|_| "invalid delegation seed length")?;
+    Ok(PrivateKey(seed))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn encrypt_decrypt_roundtrip() {
-        let sender_secret = [1u8; 32];
-        let delegate_secret = [2u8; 32];
-
-        let sender_pub = X25519Public::from(&StaticSecret::from(sender_secret));
-        let delegate_pub = X25519Public::from(&StaticSecret::from(delegate_secret));
-
-        let delegation_key = [42u8; 32];
-        let encrypted =
-            encrypt_delegation_key(&delegation_key, delegate_pub.as_bytes(), &sender_secret);
-
-        // 32 bytes plaintext + 16 bytes Poly1305 auth tag
-        assert_eq!(encrypted.len(), 48);
-        assert_ne!(&encrypted[..32], delegation_key.as_slice());
-
-        let decrypted =
-            decrypt_delegation_key(&encrypted, sender_pub.as_bytes(), &delegate_secret).unwrap();
-
-        assert_eq!(decrypted, delegation_key);
+    const CONTEXT: &[u8] = b"test-network/owner/delegate/proposal/generation/key";
+    fn recipient() -> ([u8; 32], [u8; 32]) {
+        let secret = [7; 32];
+        let public = X25519Public::from(&StaticSecret::from(secret)).to_bytes();
+        (secret, public)
     }
 
     #[test]
-    fn wrong_key_fails_authentication() {
-        let sender_secret = [1u8; 32];
-        let delegate_secret = [2u8; 32];
-        let wrong_secret = [3u8; 32];
-
-        let delegate_pub = X25519Public::from(&StaticSecret::from(delegate_secret));
-        let sender_pub = X25519Public::from(&StaticSecret::from(sender_secret));
-
-        let delegation_key = [42u8; 32];
-        let encrypted =
-            encrypt_delegation_key(&delegation_key, delegate_pub.as_bytes(), &sender_secret);
-
-        let result = decrypt_delegation_key(&encrypted, sender_pub.as_bytes(), &wrong_secret);
-
-        assert!(
-            result.is_err(),
-            "AEAD should reject decryption with wrong key"
+    fn roundtrip_uses_fresh_ephemeral_key_and_nonce() {
+        let (secret, public) = recipient();
+        let a = encrypt_delegation_key(&[42; 32], &public, CONTEXT).unwrap();
+        let b = encrypt_delegation_key(&[42; 32], &public, CONTEXT).unwrap();
+        assert_eq!(a.len(), DELEGATION_ENVELOPE_LEN);
+        assert_ne!(&a[4..36], &b[4..36]);
+        assert_ne!(&a[36..60], &b[36..60]);
+        assert_eq!(
+            decrypt_delegation_key(&a, &secret, CONTEXT).unwrap().0,
+            [42; 32]
+        );
+        assert_eq!(
+            decrypt_delegation_key(&b, &secret, CONTEXT).unwrap().0,
+            [42; 32]
         );
     }
 
     #[test]
-    fn tampered_ciphertext_fails_authentication() {
-        let sender_secret = [1u8; 32];
-        let delegate_secret = [2u8; 32];
+    fn changing_any_envelope_byte_context_or_recipient_fails() {
+        let (secret, public) = recipient();
+        let envelope = encrypt_delegation_key(&[42; 32], &public, CONTEXT).unwrap();
+        for i in 0..envelope.len() {
+            let mut changed = envelope.clone();
+            changed[i] ^= 1;
+            assert!(
+                decrypt_delegation_key(&changed, &secret, CONTEXT).is_err(),
+                "byte {i}"
+            );
+        }
+        assert!(decrypt_delegation_key(&envelope, &[8; 32], CONTEXT).is_err());
+        assert!(decrypt_delegation_key(&envelope, &secret, b"another grant").is_err());
+        assert!(decrypt_delegation_key(&envelope[..envelope.len() - 1], &secret, CONTEXT).is_err());
+        let mut extended = envelope.clone();
+        extended.push(0);
+        assert!(decrypt_delegation_key(&extended, &secret, CONTEXT).is_err());
+    }
 
-        let delegate_pub = X25519Public::from(&StaticSecret::from(delegate_secret));
-        let sender_pub = X25519Public::from(&StaticSecret::from(sender_secret));
-
-        let delegation_key = [42u8; 32];
-        let mut encrypted =
-            encrypt_delegation_key(&delegation_key, delegate_pub.as_bytes(), &sender_secret);
-
-        encrypted[0] ^= 0xFF;
-
-        let result = decrypt_delegation_key(&encrypted, sender_pub.as_bytes(), &delegate_secret);
-
-        assert!(result.is_err(), "AEAD should detect tampered ciphertext");
+    #[test]
+    fn rejects_low_order_keys_legacy_format_and_empty_context() {
+        let (secret, public) = recipient();
+        for public in [[0; 32], {
+            let mut one = [0; 32];
+            one[0] = 1;
+            one
+        }] {
+            assert!(encrypt_delegation_key(&[42; 32], &public, CONTEXT).is_err());
+        }
+        assert!(decrypt_delegation_key(&[0; 48], &secret, CONTEXT).is_err());
+        assert!(encrypt_delegation_key(&[42; 32], &public, b"").is_err());
+        assert!(encrypt_delegation_key(&[42; 32], &public, &[1; 4097]).is_err());
     }
 }

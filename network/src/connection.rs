@@ -15,7 +15,13 @@ use crate::NetworkError;
 pub const DEFAULT_MAX_CONNECTIONS: usize = 64;
 
 /// Maximum message body size accepted on a connection (same as protocol codec limit).
-const MAX_BODY_SIZE: usize = 16 * 1024 * 1024; // 16 MiB
+const MAX_BODY_SIZE: usize = burst_types::MAX_P2P_MESSAGE_BYTES;
+
+/// Peer RPCs write a length prefix followed by a body. Do not hold the body
+/// behind an unacknowledged small prefix while the receiver waits for the frame.
+pub fn configure_peer_stream(stream: &TcpStream) -> std::io::Result<()> {
+    stream.set_nodelay(true)
+}
 
 /// A live TCP connection to a peer.
 pub struct PeerConnection {
@@ -205,6 +211,75 @@ impl ConnectionPool {
 mod tests {
     use super::*;
     use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn peer_socket_configuration_survives_split_and_preserves_framing() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        for stream in [&client, &server] {
+            stream.set_nodelay(false).unwrap();
+            configure_peer_stream(stream).unwrap();
+            assert!(stream.nodelay().unwrap());
+        }
+        let (mut client_read, mut client_write) = client.into_split();
+        let (mut server_read, mut server_write) = server.into_split();
+        assert!(client_write.as_ref().nodelay().unwrap());
+        assert!(server_write.as_ref().nodelay().unwrap());
+        let server = tokio::spawn(async move {
+            for expected in [vec![7], vec![8; 4096], vec![9; 64]] {
+                let length = server_read.read_u32().await.unwrap();
+                assert_eq!(length as usize, expected.len());
+                let mut body = vec![0; length as usize];
+                server_read.read_exact(&mut body).await.unwrap();
+                assert_eq!(body, expected);
+                server_write.write_u32(length).await.unwrap();
+                server_write.write_all(&body).await.unwrap();
+            }
+        });
+        for body in [vec![7], vec![8; 4096], vec![9; 64]] {
+            client_write.write_u32(body.len() as u32).await.unwrap();
+            client_write.write_all(&body).await.unwrap();
+            assert_eq!(client_read.read_u32().await.unwrap() as usize, body.len());
+            let mut echoed = vec![0; body.len()];
+            client_read.read_exact(&mut echoed).await.unwrap();
+            assert_eq!(echoed, body);
+        }
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn message_limit_is_enforced_in_both_directions() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = PeerConnection::connect(&addr.to_string()).await.unwrap();
+        let (stream, peer) = listener.accept().await.unwrap();
+        let mut server = PeerConnection::from_stream(stream, peer.to_string());
+        let mut client = client;
+        assert!(client.send(&vec![0; MAX_BODY_SIZE + 1]).await.is_err());
+        let payload = vec![42; MAX_BODY_SIZE];
+        let (sent, received) = tokio::join!(client.send(&payload), server.recv());
+        sent.unwrap();
+        assert_eq!(received.unwrap(), payload);
+    }
+
+    #[tokio::test]
+    async fn oversized_prefix_is_rejected_without_reading_a_body() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (stream, peer) = listener.accept().await.unwrap();
+        let mut server = PeerConnection::from_stream(stream, peer.to_string());
+        client
+            .write_all(&((MAX_BODY_SIZE + 1) as u32).to_be_bytes())
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), server.recv())
+            .await
+            .expect("must reject the prefix without waiting for a body");
+        assert!(result.is_err());
+    }
 
     #[test]
     fn test_pool_max_connections() {

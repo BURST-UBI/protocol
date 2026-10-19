@@ -1,15 +1,26 @@
 //! Phase 1: drand — external randomness beacon from the League of Entropy.
 //!
-//! drand emits publicly verifiable random values every 30 seconds.
+//! The chain approved in implementation decision 19.1 emits every 30 seconds.
 //! This module provides an HTTP client to fetch and verify drand beacons,
 //! including full BLS12-381 signature verification against the network's
 //! distributed public key.
 
 use crate::{RandomOutput, VrfError, VrfProvider};
+use bincode::Options;
+use futures_util::{stream::FuturesUnordered, StreamExt};
 use sha2::{Digest, Sha256};
 
+mod verified_signatures;
+mod policy;
+pub use policy::DrandPolicy;
+
 /// Default drand mainnet relay URL.
-const DRAND_MAINNET_URL: &str = "https://api.drand.sh";
+pub const DRAND_MAINNET_URL: &str = "https://api.drand.sh";
+pub const MAX_DRAND_RELAYS: usize = 4;
+pub const DRAND_MAINNET_CHAIN: &str =
+    "8990e7a9aaed2ffed73dbd7092123d6f289930540d7651336225dc172e51b2ce";
+const DRAND_MAINNET_PUBKEY: &str = "868f005eb8e6e4ca0a47c8a77ceaa5309a47978a7c71bc5cce96366b5d7a569937c529eeda66c7293784a9402801af31";
+const MAX_BEACON_BYTES: usize = 4096;
 
 /// Domain separation tag used by drand's quicknet (unchained) scheme.
 /// This is the DST for BLS signatures on G1 with SHA-256 hash-to-curve.
@@ -39,7 +50,7 @@ pub enum DrandScheme {
 }
 
 /// A drand beacon response containing the randomness for a given round.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DrandBeacon {
     /// The round number of this beacon.
     pub round: u64,
@@ -57,16 +68,26 @@ pub struct DrandBeacon {
 /// Performs full cryptographic verification:
 /// 1. Checks that `randomness == SHA-256(signature)` (drand's derivation rule)
 /// 2. Verifies the BLS signature against the network's distributed public key
+#[derive(Clone)]
 pub struct DrandVerifier {
     pub_key_bytes: Vec<u8>,
     scheme: DrandScheme,
 }
 
 impl DrandVerifier {
-    /// Create a verifier with a custom public key (hex-encoded compressed G2 point).
+    /// Create a verifier with a pinned public key in the selected scheme's group.
     pub fn new(pub_key_hex: &str, scheme: DrandScheme) -> Result<Self, VrfError> {
         let pub_key_bytes = hex::decode(pub_key_hex)
             .map_err(|e| VrfError::InvalidPublicKey(format!("hex decode: {e}")))?;
+        match scheme {
+            DrandScheme::Unchained => {
+                blst::min_sig::PublicKey::key_validate(&pub_key_bytes).map(|_| ())
+            }
+            DrandScheme::Chained => {
+                blst::min_pk::PublicKey::key_validate(&pub_key_bytes).map(|_| ())
+            }
+        }
+        .map_err(|e| VrfError::InvalidPublicKey(format!("invalid public key: {e:?}")))?;
         Ok(Self {
             pub_key_bytes,
             scheme,
@@ -78,11 +99,27 @@ impl DrandVerifier {
         Self::new(DRAND_QUICKNET_PUBKEY_HEX, DrandScheme::Unchained)
     }
 
+    pub fn mainnet() -> Result<Self, VrfError> {
+        Self::new(DRAND_MAINNET_PUBKEY, DrandScheme::Chained)
+    }
+
+    fn require_beacon(&self, beacon: &DrandBeacon) -> Result<(), VrfError> {
+        if !self.verify_beacon(beacon)? {
+            return Err(VrfError::BlsVerification(format!(
+                "beacon round {} failed BLS signature verification", beacon.round,
+            )));
+        }
+        Ok(())
+    }
+
     /// Verify a drand beacon using full BLS12-381 signature verification.
     ///
     /// Returns `Ok(true)` if both the randomness derivation and BLS signature
     /// are valid, `Ok(false)` if either check fails.
     pub fn verify_beacon(&self, beacon: &DrandBeacon) -> Result<bool, VrfError> {
+        if beacon.round == 0 {
+            return Err(VrfError::InvalidProof("drand rounds start at 1".into()));
+        }
         let sig_bytes = hex::decode(&beacon.signature)
             .map_err(|e| VrfError::InvalidSignature(format!("hex decode: {e}")))?;
         let randomness_bytes = hex::decode(&beacon.randomness)
@@ -105,6 +142,11 @@ impl DrandVerifier {
     fn beacon_message(&self, beacon: &DrandBeacon) -> Result<Vec<u8>, VrfError> {
         match self.scheme {
             DrandScheme::Unchained => {
+                if beacon.previous_signature.is_some() {
+                    return Err(VrfError::InvalidProof(
+                        "unchained beacon includes a previous signature".into(),
+                    ));
+                }
                 let hash = Sha256::digest(beacon.round.to_be_bytes());
                 Ok(hash.to_vec())
             }
@@ -124,11 +166,17 @@ impl DrandVerifier {
 
     /// Verify a BLS12-381 signature using the `blst` crate.
     ///
-    /// For unchained/quicknet: signature on G1, public key on G2 (min_pk scheme).
+    /// For unchained/quicknet: signature on G1, public key on G2 (min_sig).
     fn verify_bls(&self, sig_bytes: &[u8], message: &[u8]) -> Result<bool, VrfError> {
+        verified_signatures::verify(self.scheme, &self.pub_key_bytes, sig_bytes, message, || {
+            self.verify_bls_uncached(sig_bytes, message)
+        })
+    }
+
+    fn verify_bls_uncached(&self, sig_bytes: &[u8], message: &[u8]) -> Result<bool, VrfError> {
         match self.scheme {
             DrandScheme::Unchained => {
-                use blst::min_pk::{PublicKey, Signature};
+                use blst::min_sig::{PublicKey, Signature};
 
                 let pk = PublicKey::from_bytes(&self.pub_key_bytes).map_err(|e| {
                     VrfError::InvalidPublicKey(format!("G2 point deserialization: {e:?}"))
@@ -142,7 +190,7 @@ impl DrandVerifier {
                 Ok(result == blst::BLST_ERROR::BLST_SUCCESS)
             }
             DrandScheme::Chained => {
-                use blst::min_sig::{PublicKey, Signature};
+                use blst::min_pk::{PublicKey, Signature};
 
                 let pk = PublicKey::from_bytes(&self.pub_key_bytes).map_err(|e| {
                     VrfError::InvalidPublicKey(format!("G1 point deserialization: {e:?}"))
@@ -190,19 +238,40 @@ pub struct ChainInfo {
 }
 
 impl ChainInfo {
-    pub fn time_of_round(&self, round: u64) -> u64 {
-        self.genesis_time + (round.saturating_sub(1)) * self.period
+    pub fn time_of_round(&self, round: u64) -> Result<u64, VrfError> {
+        if self.period == 0 || round == 0 {
+            return Err(VrfError::InvalidProof("zero drand period or round".into()));
+        }
+        (round - 1)
+            .checked_mul(self.period)
+            .and_then(|offset| self.genesis_time.checked_add(offset))
+            .ok_or_else(|| VrfError::InvalidProof("drand round time overflow".into()))
     }
 
-    pub fn current_round(&self, now: u64) -> u64 {
-        if now < self.genesis_time {
-            return 0;
+    pub fn current_round(&self, now: u64) -> Result<u64, VrfError> {
+        if self.period == 0 {
+            return Err(VrfError::InvalidProof("zero drand period".into()));
         }
-        ((now - self.genesis_time) / self.period) + 1
+        if now < self.genesis_time {
+            return Ok(0);
+        }
+        ((now - self.genesis_time) / self.period)
+            .checked_add(1)
+            .ok_or_else(|| VrfError::InvalidProof("drand round overflow".into()))
+    }
+
+    /// First round strictly after an agreed request cutoff, not an observer's clock.
+    pub fn round_after(&self, cutoff: u64) -> Result<u64, VrfError> {
+        let round = self
+            .current_round(cutoff)?
+            .checked_add(1)
+            .ok_or_else(|| VrfError::InvalidProof("drand round overflow".into()))?;
+        self.time_of_round(round)?;
+        Ok(round)
     }
 
     pub fn is_round_available(&self, round: u64, now: u64) -> bool {
-        self.time_of_round(round) <= now
+        self.time_of_round(round).is_ok_and(|at| at <= now)
     }
 }
 
@@ -214,6 +283,8 @@ impl ChainInfo {
 pub struct DrandClient {
     /// Base URL of the drand HTTP relay.
     base_url: String,
+    /// Optional bounded mirror set, used only for exact-round requests.
+    relays: Vec<String>,
     /// Reusable HTTP client.
     client: reqwest::Client,
     /// The chain hash identifying which drand network to use (optional filter).
@@ -227,22 +298,27 @@ pub struct DrandClient {
 }
 
 impl DrandClient {
-    /// Create a new client pointing at the drand mainnet relay (no BLS verification).
+    /// Create a client for the chain approved in implementation decision 19.1.
     pub fn new() -> Self {
-        Self {
-            base_url: DRAND_MAINNET_URL.to_string(),
-            client: reqwest::Client::new(),
-            chain_hash: None,
-            verifier: None,
-            chain_info: None,
-            cached_beacon: None,
-        }
+        Self::mainnet().expect("the pinned mainnet public key is valid")
     }
 
-    /// Create a client pointing at a custom relay URL.
+    pub fn mainnet() -> Result<Self, VrfError> {
+        let policy = DrandPolicy::mainnet()?;
+        Ok(Self::with_chain(DRAND_MAINNET_URL, DRAND_MAINNET_CHAIN)
+            .with_verifier(policy.verifier.clone())
+            .with_chain_info(policy.chain_info().clone()))
+    }
+
+    pub fn chain_info(&self) -> Option<&ChainInfo> {
+        self.chain_info.as_ref()
+    }
+
+    /// Create a custom relay client. Attach a verifier before fetching beacons.
     pub fn with_url(base_url: &str) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
+            relays: Vec::new(),
             client: reqwest::Client::new(),
             chain_hash: None,
             verifier: None,
@@ -251,10 +327,11 @@ impl DrandClient {
         }
     }
 
-    /// Create a client with a specific chain hash for network selection.
+    /// Create a custom chain client. Attach that chain's verifier before fetching.
     pub fn with_chain(base_url: &str, chain_hash: &str) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
+            relays: Vec::new(),
             client: reqwest::Client::new(),
             chain_hash: Some(chain_hash.to_string()),
             verifier: None,
@@ -268,12 +345,20 @@ impl DrandClient {
         let verifier = DrandVerifier::quicknet()?;
         Ok(Self {
             base_url: DRAND_MAINNET_URL.to_string(),
+            relays: Vec::new(),
             client: reqwest::Client::new(),
             chain_hash: Some(
                 "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971".into(),
             ),
             verifier: Some(verifier),
-            chain_info: None,
+            chain_info: Some(ChainInfo {
+                public_key: hex::decode(DRAND_QUICKNET_PUBKEY_HEX).expect("pinned key hex"),
+                period: 3,
+                genesis_time: 1692803367,
+                chain_hash: "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971"
+                    .into(),
+                scheme: DrandScheme::Unchained,
+            }),
             cached_beacon: None,
         })
     }
@@ -288,6 +373,59 @@ impl DrandClient {
     pub fn with_chain_info(mut self, info: ChainInfo) -> Self {
         self.chain_info = Some(info);
         self
+    }
+
+    /// Mirrors affect availability only; the chain, verifier and requested round
+    /// remain pinned. HTTP is permitted only for loopback test/local relays.
+    pub fn with_relays(mut self, relays: &[String]) -> Result<Self, VrfError> {
+        self.relays = Self::validate_relays(relays)?;
+        if self.chain_hash.is_none() || self.verifier.is_none() {
+            return Err(VrfError::Unavailable(
+                "relay failover requires a pinned chain and verifier".into(),
+            ));
+        }
+        self.client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|error| VrfError::DrandFetch(error.to_string()))?;
+        Ok(self)
+    }
+
+    pub fn validate_relays(relays: &[String]) -> Result<Vec<String>, VrfError> {
+        if relays.is_empty() || relays.len() > MAX_DRAND_RELAYS {
+            return Err(VrfError::Unavailable(format!(
+                "configure 1 to {MAX_DRAND_RELAYS} drand relays"
+            )));
+        }
+        let mut urls = Vec::with_capacity(relays.len());
+        for relay in relays {
+            let url = reqwest::Url::parse(relay)
+                .map_err(|_| VrfError::Unavailable("invalid drand relay URL".into()))?;
+            let loopback = url
+                .host_str()
+                .and_then(|host| {
+                    host.trim_start_matches('[')
+                        .trim_end_matches(']')
+                        .parse::<std::net::IpAddr>()
+                        .ok()
+                })
+                .is_some_and(|ip| ip.is_loopback());
+            if !(url.scheme() == "https" || (url.scheme() == "http" && loopback))
+                || url.host().is_none()
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.query().is_some()
+                || url.fragment().is_some()
+            {
+                return Err(VrfError::Unavailable("drand relays require HTTPS (or loopback HTTP), without credentials, query or fragment".into()));
+            }
+            let normalized = url.as_str().trim_end_matches('/').to_string();
+            if urls.contains(&normalized) {
+                return Err(VrfError::Unavailable("duplicate drand relay URL".into()));
+            }
+            urls.push(normalized);
+        }
+        Ok(urls)
     }
 
     /// Build the API path prefix, incorporating chain_hash if set.
@@ -308,14 +446,73 @@ impl DrandClient {
 
     /// Fetch a specific round from drand.
     pub async fn fetch_round(&self, round: u64) -> Result<DrandBeacon, VrfError> {
+        if !self.relays.is_empty() {
+            return self.fetch_round_from_relays(round, &self.relays).await;
+        }
+        if round == 0 {
+            return Err(VrfError::InvalidProof("drand rounds start at 1".into()));
+        }
         let url = format!("{}/public/{}", self.api_prefix(), round);
         let beacon = self.fetch_beacon_from(&url).await?;
+        if round == 0 || beacon.round != round {
+            return Err(VrfError::InvalidProof(format!(
+                "requested round {round}, received {}",
+                beacon.round
+            )));
+        }
         self.maybe_verify(&beacon)?;
         Ok(beacon)
     }
 
+    /// Try mirrors for the same pinned chain and exact round. A failure never
+    /// substitutes latest randomness, another round, or an unverified response.
+    pub async fn fetch_round_from_relays(
+        &self,
+        round: u64,
+        relays: &[String],
+    ) -> Result<DrandBeacon, VrfError> {
+        if round == 0 {
+            return Err(VrfError::InvalidProof("drand rounds start at 1".into()));
+        }
+        let chain = self.chain_hash.as_ref().ok_or_else(|| {
+            VrfError::Unavailable("relay failover requires a pinned chain".into())
+        })?;
+        if self.verifier.is_none() {
+            return Err(VrfError::Unavailable(
+                "relay failover requires a pinned verifier".into(),
+            ));
+        }
+        let relays = Self::validate_relays(relays)?;
+        let mut last_error = VrfError::Unavailable("no drand relays configured".into());
+        // Poll a bounded set together. A stalled primary cannot prevent a
+        // healthy mirror from supplying the same authenticated round. Dropping
+        // this set cancels losing requests, including on worker shutdown.
+        let mut requests: FuturesUnordered<_> = relays
+            .into_iter()
+            .map(|relay| async move {
+                let url = format!("{}/{chain}/public/{round}", relay.trim_end_matches('/'));
+                let beacon = self.fetch_beacon_from(&url).await?;
+                if beacon.round != round {
+                    return Err(VrfError::InvalidProof(format!(
+                        "requested round {round}, received {}",
+                        beacon.round
+                    )));
+                }
+                self.maybe_verify(&beacon)?;
+                Ok(beacon)
+            })
+            .collect();
+        while let Some(result) = requests.next().await {
+            match result {
+                Ok(beacon) => return Ok(beacon),
+                Err(error) => last_error = error,
+            }
+        }
+        Err(last_error)
+    }
+
     async fn fetch_beacon_from(&self, url: &str) -> Result<DrandBeacon, VrfError> {
-        let resp = self
+        let mut resp = self
             .client
             .get(url)
             .timeout(std::time::Duration::from_secs(10))
@@ -331,22 +528,47 @@ impl DrandClient {
             )));
         }
 
-        resp.json()
+        if resp
+            .content_length()
+            .is_some_and(|length| length > MAX_BEACON_BYTES as u64)
+        {
+            return Err(VrfError::DrandFetch(
+                "beacon exceeds response size limit".into(),
+            ));
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = resp
+            .chunk()
             .await
-            .map_err(|e| VrfError::DrandFetch(e.to_string()))
+            .map_err(|e| VrfError::DrandFetch(e.to_string()))?
+        {
+            if chunk.len() > MAX_BEACON_BYTES.saturating_sub(body.len()) {
+                return Err(VrfError::DrandFetch(
+                    "beacon exceeds response size limit".into(),
+                ));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        serde_json::from_slice(&body).map_err(|e| VrfError::DrandFetch(e.to_string()))
     }
 
-    /// If a verifier is attached, perform full BLS verification.
+    /// Require full BLS verification; a signature hash alone is not authentication.
     fn maybe_verify(&self, beacon: &DrandBeacon) -> Result<(), VrfError> {
-        if let Some(ref verifier) = self.verifier {
-            if !verifier.verify_beacon(beacon)? {
-                return Err(VrfError::BlsVerification(format!(
-                    "beacon round {} failed BLS signature verification",
-                    beacon.round,
-                )));
+        let verifier = self.verifier.as_ref().ok_or_else(|| {
+            VrfError::Unavailable("custom drand clients require a pinned BLS verifier".into())
+        })?;
+        if let Some(info) = &self.chain_info {
+            if info.period == 0
+                || self.chain_hash.as_ref() != Some(&info.chain_hash)
+                || verifier.pub_key_bytes != info.public_key
+                || verifier.scheme != info.scheme
+            {
+                return Err(VrfError::InvalidProof(
+                    "drand chain metadata does not match pinned verification policy".into(),
+                ));
             }
         }
-        Ok(())
+        verifier.require_beacon(beacon)
     }
 
     /// Fetch the latest beacon with caching — returns the cached beacon if
@@ -357,7 +579,7 @@ impl DrandClient {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            let current_round = info.current_round(now);
+            let current_round = info.current_round(now)?;
             if let Some((cached_round, ref beacon)) = self.cached_beacon {
                 if cached_round == current_round {
                     return Ok(beacon.clone());
@@ -380,18 +602,16 @@ impl DrandClient {
             if !info.is_round_available(beacon.round, now) {
                 return Err(VrfError::FutureRound {
                     round: beacon.round,
-                    available_at: info.time_of_round(beacon.round),
+                    available_at: info.time_of_round(beacon.round)?,
                 });
             }
         }
         Ok(())
     }
 
-    /// Verify a drand beacon (simplified SHA-256 check only).
-    ///
-    /// **Deprecated**: Use [`DrandVerifier::verify_beacon`] for full BLS verification.
+    /// Verify against the approved mainnet key. Other chains need an explicit verifier.
     pub fn verify_beacon(beacon: &DrandBeacon) -> Result<bool, VrfError> {
-        verify_beacon_simple(beacon)
+        DrandPolicy::mainnet()?.verifier.verify_beacon(beacon)
     }
 
     /// Convert a drand beacon into a [`RandomOutput`] for use in verifier selection.
@@ -399,12 +619,14 @@ impl DrandClient {
         let randomness_bytes =
             hex::decode(&beacon.randomness).map_err(|e| VrfError::InvalidProof(e.to_string()))?;
 
-        let mut value = [0u8; 32];
-        let len = randomness_bytes.len().min(32);
-        value[..len].copy_from_slice(&randomness_bytes[..len]);
+        let value: [u8; 32] = randomness_bytes.try_into().map_err(|_| {
+            VrfError::InvalidProof("beacon randomness must contain exactly 32 bytes".into())
+        })?;
 
+        // Preserve the previous signature too; chained beacons cannot be
+        // authenticated from the current signature alone.
         let proof =
-            hex::decode(&beacon.signature).map_err(|e| VrfError::InvalidProof(e.to_string()))?;
+            bincode::serialize(beacon).map_err(|e| VrfError::InvalidProof(e.to_string()))?;
 
         Ok(RandomOutput {
             value,
@@ -429,21 +651,13 @@ impl VrfProvider for DrandClient {
 
     fn verify(&self, _context: &[u8], output: &RandomOutput) -> Result<bool, VrfError> {
         // If we have a verifier, reconstruct the beacon and do full BLS verification.
-        if let Some(ref verifier) = self.verifier {
-            let beacon = DrandBeacon {
-                round: output.round,
-                randomness: hex::encode(output.value),
-                signature: hex::encode(&output.proof),
-                previous_signature: None,
-            };
-            return verifier.verify_beacon(&beacon);
+        if self.verifier.is_some() {
+            return policy::verify_output(output, |beacon| self.maybe_verify(beacon));
         }
 
-        // Fallback: SHA-256 of the proof (signature) should yield the randomness value.
-        let hash = Sha256::digest(&output.proof);
-        let mut expected = [0u8; 32];
-        expected.copy_from_slice(&hash);
-        Ok(expected == output.value)
+        Err(VrfError::Unavailable(
+            "custom drand clients require a pinned BLS verifier".into(),
+        ))
     }
 
     fn name(&self) -> &str {
@@ -455,11 +669,377 @@ impl VrfProvider for DrandClient {
 mod tests {
     use super::*;
 
+    // https://api.drand.sh/8990e7a9aaed2ffed73dbd7092123d6f289930540d7651336225dc172e51b2ce/public/1
+    fn mainnet_round_one() -> DrandBeacon {
+        DrandBeacon {
+            round: 1,
+            randomness: "101297f1ca7dc44ef6088d94ad5fb7ba03455dc33d53ddb412bbc4564ed986ec".into(),
+            signature: "8d61d9100567de44682506aea1a7a6fa6e5491cd27a0a0ed349ef6910ac5ac20ff7bc3e09d7c046566c9f7f3c6f3b10104990e7cb424998203d8f7de586fb7fa5f60045417a432684f85093b06ca91c769f0e7ca19268375e659c2a2352b4655".into(),
+            previous_signature: Some("176f93498eac9ca337150b46d21dd58673ea4e3581185f869672e59fa4cb390a".into()),
+        }
+    }
+
+    #[test]
+    fn replay_policy_matches_client_without_transport_or_key_reconstruction() {
+        let policy = DrandPolicy::mainnet().unwrap();
+        assert!(std::ptr::eq(policy, DrandPolicy::mainnet().unwrap()));
+        assert_eq!(policy.chain_info().chain_hash, DRAND_MAINNET_CHAIN);
+        assert_eq!(policy.chain_info().period, 30);
+        assert_eq!(policy.chain_info().genesis_time, 1595431050);
+        assert_eq!(policy.chain_info().round_after(1595431050).unwrap(), 2);
+        let client = DrandClient::mainnet().unwrap();
+        let beacon = mainnet_round_one();
+        let valid = DrandClient::beacon_to_random_output(&beacon).unwrap();
+        assert!(policy.verify(&valid).unwrap());
+        assert!(client.verify(&[], &valid).unwrap());
+        for case in 0..6 {
+            let mut output = valid.clone();
+            match case {
+                0 => output.round += 1,
+                1 => output.value[0] ^= 1,
+                2 => output.proof.push(0),
+                3 => { output.proof.pop(); },
+                4 => {
+                    let mut changed = beacon.clone();
+                    changed.previous_signature = None;
+                    output = DrandClient::beacon_to_random_output(&changed).unwrap();
+                }
+                _ => output = DrandClient::beacon_to_random_output(&quicknet_round_one()).unwrap(),
+            }
+            let local = policy.verify(&output);
+            let network = client.verify(&[], &output);
+            assert!(!matches!(local, Ok(true)), "case {case}");
+            assert_eq!(local.is_err(), network.is_err(), "case {case}");
+            assert_eq!(local.ok(), network.ok(), "case {case}");
+        }
+    }
+
+    #[test]
+    fn approved_mainnet_chain_and_complete_proof_verify() {
+        let client = DrandClient::new();
+        assert_eq!(client.chain_hash.as_deref(), Some(DRAND_MAINNET_CHAIN));
+        let beacon = mainnet_round_one();
+        client.maybe_verify(&beacon).unwrap();
+        let mut output = DrandClient::beacon_to_random_output(&beacon).unwrap();
+        assert!(client.verify(&[], &output).unwrap());
+        output.round = 2;
+        assert!(!client.verify(&[], &output).unwrap());
+        output.round = 1;
+        output.proof.push(0);
+        assert!(client.verify(&[], &output).is_err());
+        let quicknet = DrandClient::quicknet().unwrap();
+        assert!(quicknet.maybe_verify(&beacon).is_err());
+    }
+
+    #[test]
+    fn proof_verification_enforces_the_same_pinned_metadata_as_fetching() {
+        let mut client = DrandClient::new();
+        let beacon = mainnet_round_one();
+        let output = DrandClient::beacon_to_random_output(&beacon).unwrap();
+        client.chain_info.as_mut().unwrap().chain_hash = "another-chain".into();
+        assert!(client.maybe_verify(&beacon).is_err());
+        assert!(client.verify(&[], &output).is_err());
+    }
+
+    #[test]
+    fn round_mapping_is_strictly_future_checked_and_independent_of_local_time() {
+        let info = DrandClient::new().chain_info().unwrap().clone();
+        let genesis = info.genesis_time;
+        assert_eq!(info.round_after(genesis - 1).unwrap(), 1);
+        assert_eq!(info.round_after(genesis).unwrap(), 2);
+        assert_eq!(info.round_after(genesis + 29).unwrap(), 2);
+        assert_eq!(info.round_after(genesis + 30).unwrap(), 3);
+        assert_eq!(info.time_of_round(2).unwrap(), genesis + 30);
+        assert!(!info.is_round_available(0, u64::MAX));
+        assert!(info.time_of_round(u64::MAX).is_err());
+        assert!(info.round_after(u64::MAX).is_err());
+        let invalid = ChainInfo { period: 0, ..info };
+        assert!(invalid.current_round(genesis).is_err());
+        assert!(invalid.round_after(genesis).is_err());
+    }
+
+    async fn relay(
+        status: u16,
+        body: String,
+        requested_round: u64,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            loop {
+                request.push(socket.read_u8().await.unwrap());
+                assert!(request.len() <= 8192);
+                if request.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let expected =
+                format!("GET /{DRAND_MAINNET_CHAIN}/public/{requested_round} HTTP/1.1\r\n");
+            assert!(request.starts_with(expected.as_bytes()));
+            let response = format!("HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            // An oversized response may be rejected before the body is consumed.
+            let _ = socket.write_all(response.as_bytes()).await;
+        });
+        (url, task)
+    }
+
+    #[tokio::test]
+    async fn relay_failure_wrong_round_and_forgery_do_not_change_the_request() {
+        let good = mainnet_round_one();
+        let mut wrong_round = good.clone();
+        wrong_round.round = 2;
+        let mut forged = good.clone();
+        forged.signature = "aa".repeat(96);
+        forged.randomness = hex::encode(Sha256::digest(hex::decode(&forged.signature).unwrap()));
+        let (down, down_task) = relay(503, "unavailable".into(), 1).await;
+        let (wrong, wrong_task) = relay(200, serde_json::to_string(&wrong_round).unwrap(), 1).await;
+        let (fake, fake_task) = relay(200, serde_json::to_string(&forged).unwrap(), 1).await;
+        let (valid, valid_task) = relay(200, serde_json::to_string(&good).unwrap(), 1).await;
+        let client = DrandClient::new();
+        let beacon = client
+            .fetch_round_from_relays(1, &[down, wrong, fake, valid])
+            .await
+            .unwrap();
+        assert_eq!(beacon.round, 1);
+        assert_eq!(beacon.randomness, good.randomness);
+        for task in [down_task, wrong_task, fake_task, valid_task] {
+            task.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn unavailable_oversized_and_unexpected_round_responses_fail_closed() {
+        let client = DrandClient::new();
+        for (status, body) in [
+            (404, "not yet available".into()),
+            (200, "x".repeat(MAX_BEACON_BYTES + 1)),
+            (200, serde_json::to_string(&mainnet_round_one()).unwrap()),
+        ] {
+            let (url, task) = relay(status, body, 2).await;
+            assert!(client.fetch_round_from_relays(2, &[url]).await.is_err());
+            task.await.unwrap();
+        }
+        assert!(client.fetch_round_from_relays(1, &[]).await.is_err());
+        assert!(client.fetch_round(0).await.is_err());
+    }
+
+    #[test]
+    fn relay_configuration_is_bounded_and_cannot_embed_credentials_or_downgrade_remote_http() {
+        let validate = |urls: &[&str]| {
+            DrandClient::validate_relays(
+                &urls.iter().map(|url| url.to_string()).collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(
+            validate(&["https://api.drand.sh/"]).unwrap(),
+            vec![DRAND_MAINNET_URL]
+        );
+        assert!(validate(&["http://127.0.0.1:9000", "http://[::1]:9001"]).is_ok());
+        for urls in [
+            vec![],
+            vec!["http://example.com"],
+            vec!["file:///tmp/beacon"],
+            vec!["https://user:secret@example.com"],
+            vec!["https://example.com?token=secret"],
+            vec!["https://example.com#fragment"],
+            vec!["https://api.drand.sh", "https://api.drand.sh/"],
+            vec!["https://example.com"; MAX_DRAND_RELAYS + 1],
+        ] {
+            assert!(
+                validate(&urls).is_err(),
+                "invalid relay configuration accepted"
+            );
+        }
+        assert!(
+            DrandClient::with_chain(DRAND_MAINNET_URL, DRAND_MAINNET_CHAIN)
+                .with_relays(&[DRAND_MAINNET_URL.into()])
+                .is_err()
+        );
+    }
+
+    async fn read_relay_request(socket: &mut tokio::net::TcpStream) {
+        use tokio::io::AsyncReadExt;
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+            request.push(socket.read_u8().await.unwrap());
+            assert!(request.len() <= 8192);
+        }
+        assert!(request
+            .starts_with(format!("GET /{DRAND_MAINNET_CHAIN}/public/1 HTTP/1.1\r\n").as_bytes()));
+    }
+
+    #[tokio::test]
+    async fn healthy_mirror_bypasses_stalled_body_and_cancels_the_losing_request() {
+        use std::time::Duration;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let stalled = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let healthy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relays = [
+            format!("http://{}", stalled.local_addr().unwrap()),
+            format!("http://{}", healthy.local_addr().unwrap()),
+        ];
+        let (started, seen) = tokio::sync::oneshot::channel();
+        let slow = tokio::spawn(async move {
+            let (mut socket, _) = stalled.accept().await.unwrap();
+            read_relay_request(&mut socket).await;
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n{")
+                .await
+                .unwrap();
+            started.send(()).unwrap();
+            let mut byte = [0];
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(3), socket.read(&mut byte))
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                0
+            );
+        });
+        let good = mainnet_round_one();
+        let expected = good.randomness.clone();
+        let fast = tokio::spawn(async move {
+            let (mut socket, _) = healthy.accept().await.unwrap();
+            read_relay_request(&mut socket).await;
+            seen.await.unwrap();
+            let body = serde_json::to_string(&good).unwrap();
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        let client = DrandClient::mainnet()
+            .unwrap()
+            .with_relays(&relays)
+            .unwrap();
+        let beacon = tokio::time::timeout(Duration::from_secs(2), client.fetch_round(1))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(beacon.randomness, expected);
+        slow.await.unwrap();
+        fast.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn configured_relays_do_not_follow_redirects() {
+        use std::time::Duration;
+        use tokio::io::AsyncWriteExt;
+        let destination = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirect = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", redirect.local_addr().unwrap());
+        let location = format!("http://{}/unexpected", destination.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = redirect.accept().await.unwrap();
+            read_relay_request(&mut socket).await;
+            socket.write_all(format!("HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+        });
+        let client = DrandClient::mainnet().unwrap().with_relays(&[url]).unwrap();
+        assert!(client.fetch_round(1).await.is_err());
+        server.await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), destination.accept())
+                .await
+                .is_err()
+        );
+    }
+
+    // Immutable public vector from the pinned quicknet chain's /public/1.
+    fn quicknet_round_one() -> DrandBeacon {
+        DrandBeacon {
+            round: 1,
+            randomness: "1466a6cd24e327188770752f6134001c64d6efcc590ccc26b721611ad96f165a".into(),
+            signature: "b55e7cb2d5c613ee0b2e28d6750aabbb78c39dcc96bd9d38c2c2e12198df95571de8e8e402a0cc48871c7089a2b3af4b".into(),
+            previous_signature: None,
+        }
+    }
+
+    #[test]
+    fn authentic_quicknet_beacon_passes_bls_and_changed_round_fails() {
+        let verifier = DrandVerifier::quicknet().unwrap();
+        let mut beacon = quicknet_round_one();
+        assert!(verifier.verify_beacon(&beacon).unwrap());
+        beacon.round = 2;
+        assert!(!verifier.verify_beacon(&beacon).unwrap());
+    }
+
+    #[test]
+    fn warmed_signature_cache_preserves_full_beacon_validation() {
+        let verifier = DrandVerifier::quicknet().unwrap();
+        let beacon = quicknet_round_one();
+        assert!(verifier.verify_beacon(&beacon).unwrap());
+        assert!(verifier.verify_beacon(&beacon).unwrap());
+        let mut changed = beacon.clone();
+        changed.randomness = "00".repeat(32);
+        assert!(!verifier.verify_beacon(&changed).unwrap());
+        changed = beacon.clone();
+        changed.previous_signature = Some("ab".repeat(48));
+        assert!(verifier.verify_beacon(&changed).is_err());
+        let other_key = blst::min_sig::SecretKey::key_gen(&[17; 32], &[]).unwrap();
+        let other = DrandVerifier::new(
+            &hex::encode(other_key.sk_to_pk().to_bytes()), DrandScheme::Unchained,
+        ).unwrap();
+        assert!(!other.verify_beacon(&beacon).unwrap());
+        changed = beacon.clone();
+        changed.signature = "00".repeat(48);
+        changed.randomness = hex::encode(Sha256::digest([0; 48]));
+        assert!(!matches!(verifier.verify_beacon(&changed), Ok(true)));
+        assert!(verifier.verify_beacon(&beacon).unwrap());
+    }
+
+    #[test]
+    fn chained_beacons_use_g1_public_keys_and_g2_signatures() {
+        let secret = blst::min_pk::SecretKey::key_gen(&[7; 32], &[]).unwrap();
+        let verifier = DrandVerifier::new(
+            &hex::encode(secret.sk_to_pk().to_bytes()),
+            DrandScheme::Chained,
+        )
+        .unwrap();
+        let mut beacon = DrandBeacon {
+            round: 5,
+            randomness: String::new(),
+            signature: String::new(),
+            previous_signature: Some("ab".repeat(96)),
+        };
+        let message = verifier.beacon_message(&beacon).unwrap();
+        let signature = secret
+            .sign(
+                &message,
+                b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_",
+                &[],
+            )
+            .to_bytes();
+        beacon.signature = hex::encode(signature);
+        beacon.randomness = hex::encode(Sha256::digest(signature));
+        assert!(verifier.verify_beacon(&beacon).unwrap());
+        beacon.previous_signature = Some("cd".repeat(96));
+        assert!(!verifier.verify_beacon(&beacon).unwrap());
+    }
+
+    #[test]
+    fn malformed_randomness_is_not_padded_or_truncated() {
+        let mut beacon = quicknet_round_one();
+        for length in [0, 1, 31, 33, 64] {
+            beacon.randomness = "ab".repeat(length);
+            assert!(DrandClient::beacon_to_random_output(&beacon).is_err());
+        }
+    }
+
     #[test]
     fn test_default_client_creation() {
         let client = DrandClient::new();
         assert_eq!(client.base_url, DRAND_MAINNET_URL);
-        assert!(client.chain_hash.is_none());
+        assert!(client.chain_hash.is_some());
+        assert!(client.verifier.is_some());
     }
 
     #[test]
@@ -513,7 +1093,7 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_beacon_deprecated_wrapper() {
+    fn convenience_verifier_does_not_accept_hash_only_proofs() {
         let sig_hex = "deadbeef".to_string();
         let sig_bytes = hex::decode(&sig_hex).unwrap();
         let hash = Sha256::digest(&sig_bytes);
@@ -526,7 +1106,7 @@ mod tests {
             previous_signature: None,
         };
 
-        assert!(DrandClient::verify_beacon(&beacon).unwrap());
+        assert!(!matches!(DrandClient::verify_beacon(&beacon), Ok(true)));
     }
 
     #[test]
@@ -550,7 +1130,7 @@ mod tests {
     }
 
     #[test]
-    fn test_vrf_provider_verify_fallback() {
+    fn self_consistent_signature_hash_is_not_a_valid_beacon() {
         let client = DrandClient::new();
 
         let proof = b"test_signature_data".to_vec();
@@ -564,7 +1144,10 @@ mod tests {
             round: 1,
         };
 
-        assert!(client.verify(&[], &output).unwrap());
+        assert!(!matches!(client.verify(&[], &output), Ok(true)));
+        let custom = DrandClient::with_url("http://127.0.0.1");
+        assert!(custom.verify(&[], &output).is_err());
+        assert!(custom.maybe_verify(&quicknet_round_one()).is_err());
     }
 
     #[test]
@@ -603,7 +1186,7 @@ mod tests {
 
     #[test]
     fn test_beacon_message_chained_requires_prev_sig() {
-        let verifier = DrandVerifier::new("aabb", DrandScheme::Chained).unwrap();
+        let verifier = DrandVerifier::mainnet().unwrap();
         let beacon = DrandBeacon {
             round: 1,
             randomness: String::new(),
@@ -615,7 +1198,7 @@ mod tests {
 
     #[test]
     fn test_beacon_message_chained() {
-        let verifier = DrandVerifier::new("aabb", DrandScheme::Chained).unwrap();
+        let verifier = DrandVerifier::mainnet().unwrap();
         let beacon = DrandBeacon {
             round: 5,
             randomness: String::new(),
@@ -650,9 +1233,9 @@ mod tests {
         // SHA-256 check passes, but BLS verification must fail
         assert!(verify_beacon_simple(&forged).unwrap());
         let result = verifier.verify_beacon(&forged);
-        match result {
-            Ok(valid) => assert!(!valid, "forged beacon must not pass BLS verification"),
-            Err(_) => {} // deserialization failure is also acceptable
+        // Deserialization failure also rejects the forged beacon.
+        if let Ok(valid) = result {
+            assert!(!valid, "forged beacon must not pass BLS verification");
         }
     }
 

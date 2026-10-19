@@ -12,7 +12,7 @@
 //! - Query the router for the external IP address
 //! - Clean up mappings on shutdown
 
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::time::Duration;
 
 use igd_next::PortMappingProtocol;
@@ -21,11 +21,21 @@ use tokio::sync::watch;
 /// Lease duration requested from the router (seconds).
 const LEASE_DURATION_SECS: u32 = 3600;
 
-/// How often to renew the mapping — half the lease duration.
-const RENEWAL_INTERVAL: Duration = Duration::from_secs(LEASE_DURATION_SECS as u64 / 2);
+/// Lease and retry policy. Short leases also make lifecycle tests deterministic.
+#[derive(Clone, Copy, Debug)]
+pub struct PortMapperConfig {
+    pub lease_duration_secs: u32,
+    pub retry_interval: Duration,
+}
 
-/// Maximum number of consecutive renewal failures before giving up.
-const MAX_FAILURES: u32 = 10;
+impl Default for PortMapperConfig {
+    fn default() -> Self {
+        Self {
+            lease_duration_secs: LEASE_DURATION_SECS,
+            retry_interval: Duration::from_secs(30),
+        }
+    }
+}
 
 /// Current state of the UPnP port mapping.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,7 +51,7 @@ pub enum UpnpState {
         external_ip: Ipv4Addr,
         external_port: u16,
     },
-    /// Mapping failed after retries.
+    /// Mapping/query failed; discovery will be retried with bounded backoff.
     Failed(String),
     /// UPnP is disabled by configuration.
     Disabled,
@@ -60,11 +70,24 @@ impl PortMapper {
     /// - `local_port`: the local TCP port the node is listening on.
     /// - `description`: human-readable label for the mapping (shown in router UI).
     pub fn start(local_port: u16, description: String) -> Self {
+        Self::start_with_config(local_port, description, PortMapperConfig::default())
+    }
+
+    /// Start with a custom finite lease. Renewals run at half its duration.
+    /// Permanent mappings are deliberately not requested: a crash must not
+    /// leave an unbounded router rule behind.
+    pub fn start_with_config(
+        local_port: u16,
+        description: String,
+        mut config: PortMapperConfig,
+    ) -> Self {
+        config.lease_duration_secs = config.lease_duration_secs.max(2);
+        config.retry_interval = config.retry_interval.max(Duration::from_secs(1));
         let (state_tx, state_rx) = watch::channel(UpnpState::Searching);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         let task = tokio::spawn(async move {
-            run_upnp_loop(local_port, description, state_tx, shutdown_rx).await;
+            run_upnp_loop(local_port, description, config, state_tx, shutdown_rx).await;
         });
 
         Self {
@@ -101,9 +124,40 @@ impl PortMapper {
             let _ = tx.send(true);
         }
         if let Some(task) = self.task.take() {
-            let _ = tokio::time::timeout(Duration::from_secs(10), task).await;
+            // Do not detach a task that may still create a mapping after stop.
+            let _ = task.await;
         }
     }
+}
+
+impl Drop for PortMapper {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(true);
+        }
+    }
+}
+
+async fn stopped_or_wait(shutdown: &mut watch::Receiver<bool>, delay: Duration) -> bool {
+    if *shutdown.borrow() {
+        return true;
+    }
+    tokio::select! {
+        _ = shutdown.changed() => true,
+        _ = tokio::time::sleep(delay) => false,
+    }
+}
+
+/// Select the interface the OS routes to the IGD. UDP connect selects a route
+/// without transmitting a datagram; 0.0.0.0 is a bind address, never a LAN host.
+fn gateway_local_address(gateway: SocketAddr, port: u16) -> std::io::Result<SocketAddr> {
+    let socket = UdpSocket::bind("0.0.0.0:0")?;
+    socket.connect(gateway)?;
+    let ip = socket.local_addr()?.ip();
+    if ip.is_unspecified() {
+        return Err(std::io::Error::other("no routed LAN address"));
+    }
+    Ok(SocketAddr::new(ip, port))
 }
 
 /// The main UPnP event loop. Runs entirely on a blocking thread pool because
@@ -111,8 +165,28 @@ impl PortMapper {
 async fn run_upnp_loop(
     local_port: u16,
     description: String,
+    config: PortMapperConfig,
     state: watch::Sender<UpnpState>,
     mut shutdown: watch::Receiver<bool>,
+) {
+    loop {
+        if *shutdown.borrow() {
+            break;
+        }
+        run_gateway_session(local_port, &description, config, &state, &mut shutdown).await;
+        if stopped_or_wait(&mut shutdown, config.retry_interval).await {
+            break;
+        }
+    }
+    state.send_replace(UpnpState::Disabled);
+}
+
+async fn run_gateway_session(
+    local_port: u16,
+    description: &str,
+    config: PortMapperConfig,
+    state: &watch::Sender<UpnpState>,
+    shutdown: &mut watch::Receiver<bool>,
 ) {
     // Step 1: Discover the gateway (blocking I/O)
     let gateway = match tokio::task::spawn_blocking(|| {
@@ -137,134 +211,133 @@ async fn run_upnp_loop(
 
     tracing::info!(gateway = %gateway.addr, "UPnP: gateway discovered");
 
-    // Step 2: Check if the external IP is publicly routable (blocking I/O)
-    let gw_for_ip = gateway.clone();
-    let external_ip = match tokio::task::spawn_blocking(move || gw_for_ip.get_external_ip()).await {
-        Ok(Ok(ip)) => ip,
-        Ok(Err(e)) => {
-            state.send_replace(UpnpState::Failed(format!("cannot get external IP: {e}")));
-            tracing::warn!("UPnP: failed to query external IP: {e}");
-            return;
-        }
+    let local_addr = match gateway_local_address(gateway.addr, local_port) {
+        Ok(addr) => addr,
         Err(e) => {
-            state.send_replace(UpnpState::Failed(format!("task panicked: {e}")));
+            state.send_replace(UpnpState::Failed(e.to_string()));
             return;
         }
     };
-
-    let ipv4 = match external_ip {
-        std::net::IpAddr::V4(ip) => ip,
-        std::net::IpAddr::V6(_) => {
-            state.send_replace(UpnpState::NonRoutable);
-            tracing::info!("UPnP: gateway returned IPv6, not supported for UPnP");
-            return;
-        }
-    };
-
-    if !is_public_ipv4(ipv4) {
-        state.send_replace(UpnpState::NonRoutable);
-        tracing::info!(
-            external_ip = %ipv4,
-            "UPnP: gateway external IP is not publicly routable (double NAT?)"
-        );
-        return;
-    }
-
-    tracing::info!(external_ip = %ipv4, "UPnP: external IP is publicly routable");
-
-    // Step 3: Add/renew the port mapping in a loop
-    let local_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, local_port));
-    let mut consecutive_failures: u32 = 0;
-
+    let mut mapped_port = None;
     loop {
+        if *shutdown.borrow() {
+            break;
+        }
+        // Revalidate on EVERY renewal. Never advertise an old public IP after
+        // the WAN changes to CGNAT, or after the gateway stops responding.
+        let gw = gateway.clone();
+        let ipv4 = match tokio::task::spawn_blocking(move || gw.get_external_ip()).await {
+            Ok(Ok(IpAddr::V4(ip))) if is_public_ipv4(ip) => ip,
+            Ok(Ok(_)) => {
+                state.send_replace(UpnpState::NonRoutable);
+                break;
+            }
+            result => {
+                state.send_replace(UpnpState::Failed(format!(
+                    "external IP query failed: {result:?}"
+                )));
+                break;
+            }
+        };
+        if *shutdown.borrow() {
+            break;
+        }
         // Add port mapping (blocking I/O)
         let gw = gateway.clone();
-        let desc = description.clone();
+        let desc = description.to_owned();
+        let requested_port = mapped_port.unwrap_or(local_port);
         let map_result = tokio::task::spawn_blocking(move || {
-            gw.add_port(
+            match gw.add_port(
                 PortMappingProtocol::TCP,
-                local_port,
+                requested_port,
                 local_addr,
-                LEASE_DURATION_SECS,
+                config.lease_duration_secs,
                 &desc,
-            )
+            ) {
+                Ok(()) => Ok(requested_port),
+                // Another LAN node may already own the default external port.
+                // Let the IGD choose a different port; publish that exact port.
+                Err(igd_next::AddPortError::PortInUse) if mapped_port.is_none() => gw
+                    .add_any_port(
+                        PortMappingProtocol::TCP,
+                        local_addr,
+                        config.lease_duration_secs,
+                        &desc,
+                    )
+                    .map_err(|e| (e.to_string(), false)),
+                // If ownership changed after a router restart, do not delete
+                // the new owner's mapping while cleaning up our expired lease.
+                Err(igd_next::AddPortError::PortInUse) => {
+                    Err(("mapping now belongs to another client".into(), true))
+                }
+                Err(e) => Err((e.to_string(), false)),
+            }
         })
         .await;
 
         match map_result {
-            Ok(Ok(())) => {
-                // Refresh external IP (might change)
-                let gw_ip = gateway.clone();
-                let current_ip = tokio::task::spawn_blocking(move || gw_ip.get_external_ip())
-                    .await
-                    .ok()
-                    .and_then(|r| r.ok())
-                    .and_then(|ip| match ip {
-                        std::net::IpAddr::V4(v4) => Some(v4),
-                        _ => None,
-                    })
-                    .unwrap_or(ipv4);
-
-                consecutive_failures = 0;
+            Ok(Ok(port)) => {
+                mapped_port = Some(port);
                 state.send_replace(UpnpState::Active {
-                    external_ip: current_ip,
-                    external_port: local_port,
+                    external_ip: ipv4,
+                    external_port: port,
                 });
                 tracing::info!(
-                    external = %format!("{}:{}", current_ip, local_port),
+                    external = %format!("{}:{}", ipv4, port),
                     "UPnP: TCP port mapped successfully"
                 );
             }
-            Ok(Err(e)) => {
-                consecutive_failures += 1;
-                tracing::warn!(
-                    attempt = consecutive_failures,
-                    max = MAX_FAILURES,
-                    "UPnP: mapping failed: {e}"
-                );
-                if consecutive_failures >= MAX_FAILURES {
-                    state.send_replace(UpnpState::Failed(e.to_string()));
-                    tracing::error!("UPnP: giving up after {MAX_FAILURES} consecutive failures");
-                    return;
+            Ok(Err((e, lost_ownership))) => {
+                if lost_ownership {
+                    mapped_port = None;
                 }
+                state.send_replace(UpnpState::Failed(e));
+                break;
             }
             Err(e) => {
                 state.send_replace(UpnpState::Failed(format!("task panicked: {e}")));
-                return;
+                break;
             }
         }
 
-        // Wait for renewal interval or shutdown
-        tokio::select! {
-            biased;
-            _ = shutdown.changed() => {
-                if *shutdown.borrow() {
-                    break;
-                }
-            }
-            _ = tokio::time::sleep(RENEWAL_INTERVAL) => {}
+        if stopped_or_wait(
+            shutdown,
+            Duration::from_secs(config.lease_duration_secs as u64 / 2),
+        )
+        .await
+        {
+            break;
         }
     }
 
-    // Cleanup: remove the mapping (blocking I/O)
-    let gw = gateway.clone();
-    let _ = tokio::task::spawn_blocking(move || {
-        match gw.remove_port(PortMappingProtocol::TCP, local_port) {
-            Ok(()) => tracing::info!(port = local_port, "UPnP: port mapping removed on shutdown"),
-            Err(e) => tracing::warn!(port = local_port, "UPnP: failed to remove mapping: {e}"),
-        }
-    })
-    .await;
+    // Only remove a mapping that we actually created, on all exit paths.
+    if let Some(port) = mapped_port {
+        let _ = tokio::task::spawn_blocking(move || {
+            match gateway.remove_port(PortMappingProtocol::TCP, port) {
+                Ok(()) => tracing::info!(port, "UPnP: port mapping removed"),
+                Err(e) => tracing::warn!(
+                    port,
+                    "UPnP: failed to remove mapping: {e}; finite lease will expire"
+                ),
+            }
+        })
+        .await;
+    }
 }
 
 /// Check if an IPv4 address is publicly routable.
-fn is_public_ipv4(ip: Ipv4Addr) -> bool {
+pub fn is_public_ipv4(ip: Ipv4Addr) -> bool {
     !ip.is_private()
         && !ip.is_loopback()
         && !ip.is_link_local()
         && !ip.is_broadcast()
         && !ip.is_unspecified()
         && !ip.is_documentation()
+        && !ip.is_multicast()
+        && ip.octets()[0] != 0
+        && ip.octets()[0] < 240
+        && !(ip.octets()[0] == 198 && (ip.octets()[1] == 18 || ip.octets()[1] == 19))
+        && !(ip.octets()[0] == 192 && ip.octets()[1] == 0 && ip.octets()[2] == 0)
         // 100.64.0.0/10 (Carrier-Grade NAT)
         && !(ip.octets()[0] == 100 && (ip.octets()[1] & 0xC0) == 64)
 }
@@ -293,6 +366,27 @@ mod tests {
         assert!(!is_public_ipv4(Ipv4Addr::new(192, 0, 2, 1)));
         assert!(!is_public_ipv4(Ipv4Addr::new(198, 51, 100, 1)));
         assert!(!is_public_ipv4(Ipv4Addr::new(203, 0, 113, 1)));
+    }
+
+    #[test]
+    fn special_use_ranges_are_not_advertised() {
+        for ip in [
+            "0.1.2.3",
+            "192.0.0.1",
+            "198.18.0.1",
+            "198.19.255.254",
+            "224.0.0.1",
+            "239.255.255.250",
+            "240.0.0.1",
+        ] {
+            assert!(!is_public_ipv4(ip.parse().unwrap()), "{ip}");
+        }
+    }
+
+    #[test]
+    fn selects_routed_interface_not_unspecified_bind_address() {
+        let addr = gateway_local_address("127.0.0.1:1901".parse().unwrap(), 7076).unwrap();
+        assert_eq!(addr, "127.0.0.1:7076".parse().unwrap());
     }
 
     #[test]

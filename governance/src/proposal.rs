@@ -1,4 +1,4 @@
-//! Governance proposals and their lifecycle (Tezos-inspired).
+//! Governance proposals and their four-phase BURST lifecycle.
 
 use burst_types::{Timestamp, TxHash, WalletAddress};
 use serde::{Deserialize, Serialize};
@@ -13,21 +13,21 @@ pub const ORV_EVICT_MARKER: [u8; 32] = *b"BURST_ORV_EVICT_MARKER__________";
 /// As [`ORV_EVICT_MARKER`], but for a *reinstatement* proposal.
 pub const ORV_REINSTATE_MARKER: [u8; 32] = *b"BURST_ORV_REINSTATE_MARKER______";
 
-/// The phases of a governance proposal (Tezos-inspired).
+/// The phases of a governance proposal.
 ///
-/// Normal flow: Proposal → Exploration (1st vote) → Cooldown → Promotion (2nd vote) → Activation
-/// Emergency flow: Exploration → Promotion → Activation (skip Proposal and Cooldown)
+/// Normal flow: Proposal → Exploration (Voting) → Cooldown → Activation.
+/// Emergency flow: Exploration (Voting) → Activation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GovernancePhase {
     /// Phase 1: Collecting endorsements (BRN burns) to advance past spam filter.
     Proposal,
-    /// Phase 2: First vote — "Should we explore this change?"
+    /// Phase 2: The single voting window. Stored as Exploration for compatibility.
     Exploration,
     /// Phase 3: No voting. Community discusses and prepares.
     Cooldown,
-    /// Phase 4: Second vote — "Should we actually activate this?"
+    /// Legacy snapshot value. New proposals cannot enter or vote in this phase.
     Promotion,
-    /// Phase 5: At a deterministic timestamp, all nodes apply the change.
+    /// Phase 4: At a deterministic timestamp, all nodes apply the change.
     Activation,
     /// The proposal was rejected (did not meet supermajority/quorum at any voting stage).
     Rejected,
@@ -35,10 +35,12 @@ pub enum GovernancePhase {
     Activated,
     /// The proposal was withdrawn by the proposer before leaving the Proposal phase.
     Withdrawn,
+    /// Approved, but an earlier activation removed an article this amendment needs.
+    Conflicted,
 }
 
 /// A governance proposal.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Proposal {
     /// Hash of the proposal transaction.
     pub hash: TxHash,
@@ -85,22 +87,22 @@ pub struct Proposal {
     // ── Timestamps ──────────────────────────────────────────────────────
     /// When the proposal was created.
     pub created_at: Timestamp,
-    /// When activation was scheduled (set after Promotion passes).
+    /// Deterministic activation timestamp derived from phase deadlines.
     pub activation_at: Option<Timestamp>,
 }
 
 /// What a governance proposal changes.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProposalContent {
     /// Change a numeric protocol parameter.
     ParameterChange {
         param: super::params::GovernableParam,
         new_value: u128,
     },
-    /// Constitutional amendment (handled by the consti crate).
+    /// Legacy single-article addition. Diff proposals use `ConstitutionalDiff`.
     ConstitutionalAmendment { title: String, text: String },
     /// Emergency parameter change — fast-tracked lifecycle with higher thresholds.
-    /// Skips Proposal and Cooldown phases, 24-hour voting periods, 95% supermajority.
+    /// Skips support and cooldown; governed defaults are 24 hours and 95% quorum/approval.
     Emergency {
         description: String,
         param: super::params::GovernableParam,
@@ -122,5 +124,27 @@ pub enum ProposalContent {
         evict: bool,
         /// Human-readable justification (audit trail).
         reason: String,
+    },
+    /// Ordered edits to the current constitution. Existing amendment history
+    /// is immutable; these operations change the materialized document.
+    ConstitutionalDiff {
+        title: String,
+        operations: Vec<AmendmentOp>,
+    },
+}
+
+/// Signed constitutional edits, shared with the constitution executor.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AmendmentOp {
+    AddArticle {
+        title: String,
+        text: String,
+    },
+    ModifyArticle {
+        article_number: u64,
+        new_text: String,
+    },
+    RepealArticle {
+        article_number: u64,
     },
 }

@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 
 /// A consensus representative.
 ///
-/// Unlike governance delegation (one-person-one-vote), consensus weight is
-/// proportional to delegated TRST balance (similar to Nano's ORV).
+/// Consensus weight is the number of verified people delegating here, in fixed
+/// units per person. Token balances and historical reputation confer no weight.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Representative {
     pub address: WalletAddress,

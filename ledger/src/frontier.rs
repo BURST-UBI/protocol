@@ -52,7 +52,7 @@ mod tests {
     use super::*;
 
     fn addr(s: &str) -> WalletAddress {
-        WalletAddress::new(&format!("brst_{s}"))
+        WalletAddress::new(format!("brst_{s}"))
     }
 
     fn hash(v: u8) -> BlockHash {

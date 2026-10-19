@@ -5,12 +5,14 @@
 
 pub mod address;
 pub mod amount;
+pub mod appeal;
 pub mod block;
 pub mod error;
 pub mod hash;
 pub mod keys;
 pub mod network;
 pub mod params;
+pub mod payment_recovery;
 pub mod state;
 pub mod time;
 
@@ -22,5 +24,14 @@ pub use hash::TxHash;
 pub use keys::{KeyPair, PrivateKey, PublicKey, Signature};
 pub use network::NetworkId;
 pub use params::ProtocolParams;
-pub use state::{ChallengeReason, TrstState, WalletState, INACTIVITY_CHALLENGE_MARKER};
+pub use state::{
+    ChallengeReason, TrstBasis, TrstRevocationChunk, TrstState, WalletState,
+    INACTIVITY_CHALLENGE_MARKER,
+};
 pub use time::Timestamp;
+
+/// Maximum P2P message body, excluding the four-byte framing prefix (decision 23.15).
+pub const MAX_P2P_MESSAGE_BYTES: usize = 64 * 1024;
+
+/// Signed blocks carry account-chain signing-device grants.
+pub const PROTOCOL_VERSION: u16 = 36;

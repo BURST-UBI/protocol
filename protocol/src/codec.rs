@@ -1,12 +1,14 @@
-//! Message codec — framing and serialization for the wire protocol.
+//! Bounded Bincode record codec retained for transaction/internal callers.
 //!
 //! Uses bincode for efficient binary serialization with 4-byte big-endian
-//! length-prefix framing.
+//! length-prefix framing. The running node's P2P transport instead uses
+//! `WireMessage::encode/decode` and the Protobuf schema in `wire.proto`.
 
 use crate::ProtocolError;
+use bincode::Options;
 
 /// Maximum message size in bytes.
-pub const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024; // 16 MiB
+pub const MAX_MESSAGE_SIZE: usize = burst_types::MAX_P2P_MESSAGE_BYTES;
 
 /// Encode a message for transmission (4-byte big-endian length prefix + bincode body).
 pub fn encode(message: &impl serde::Serialize) -> Result<Vec<u8>, ProtocolError> {
@@ -26,7 +28,18 @@ pub fn encode(message: &impl serde::Serialize) -> Result<Vec<u8>, ProtocolError>
 
 /// Decode a message from raw bincode bytes (no length prefix).
 pub fn decode<T: serde::de::DeserializeOwned>(data: &[u8]) -> Result<T, ProtocolError> {
-    bincode::deserialize(data).map_err(|e| ProtocolError::Malformed(e.to_string()))
+    if data.len() > MAX_MESSAGE_SIZE {
+        return Err(ProtocolError::MessageTooLarge {
+            size: data.len(),
+            max: MAX_MESSAGE_SIZE,
+        });
+    }
+    bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .allow_trailing_bytes()
+        .with_limit(MAX_MESSAGE_SIZE as u64)
+        .deserialize(data)
+        .map_err(|e| ProtocolError::Malformed(e.to_string()))
 }
 
 /// Decode a framed message (4-byte big-endian length prefix + bincode body).
@@ -66,6 +79,31 @@ mod tests {
     struct TestMessage {
         value: u32,
         text: String,
+    }
+
+    #[test]
+    fn exact_body_limit_roundtrips_but_one_more_byte_is_rejected() {
+        let payload = vec![7u8; MAX_MESSAGE_SIZE - 8];
+        let framed = encode(&payload).unwrap();
+        assert_eq!(framed.len(), MAX_MESSAGE_SIZE + 4);
+        assert_eq!(decode::<Vec<u8>>(&framed[4..]).unwrap(), payload);
+        assert_eq!(decode_framed::<Vec<u8>>(&framed).unwrap().0, payload);
+        assert!(matches!(
+            encode(&vec![0u8; MAX_MESSAGE_SIZE - 7]),
+            Err(ProtocolError::MessageTooLarge { .. })
+        ));
+        assert!(matches!(
+            decode::<Vec<u8>>(&vec![0u8; MAX_MESSAGE_SIZE + 1]),
+            Err(ProtocolError::MessageTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn dishonest_nested_lengths_are_rejected() {
+        assert!(decode::<Vec<u8>>(&u64::MAX.to_le_bytes()).is_err());
+        let mut body = 1u64.to_le_bytes().to_vec();
+        body.extend_from_slice(&u64::MAX.to_le_bytes());
+        assert!(decode::<Vec<Vec<u8>>>(&body).is_err());
     }
 
     #[test]

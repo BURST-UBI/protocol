@@ -29,6 +29,7 @@ pub enum VotingOutcome {
 }
 
 /// Engine for managing verification votes.
+#[derive(Clone)]
 pub struct VerificationVoting;
 
 impl VerificationVoting {
@@ -170,72 +171,185 @@ pub struct NeitherPenaltyAction {
 /// The whitepaper states: "Voting Neither excessively incurs penalties."
 /// Specifically, if a verifier votes Neither on more than 50% of their
 /// assigned verifications in a rolling window, they are penalized.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NeitherVoteTracker {
-    /// Per-verifier vote history: (total_assignments, neither_count)
+    pub(crate) history: std::collections::BTreeMap<String, VoteWindow>,
+    pub(crate) penalty_threshold_bps: u32,
+    pub(crate) window_assignments: u32,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub(crate) struct VoteWindow {
+    votes: std::collections::VecDeque<bool>,
+    neither: u32,
+}
+
+impl VoteWindow {
+    fn trim(&mut self, limit: usize) {
+        while self.votes.len() > limit {
+            self.neither -= u32::from(self.votes.pop_front().unwrap());
+        }
+    }
+}
+
+/// Old snapshots retained counts but not order. Nonempty history needs replay.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct LegacyNeitherVoteTracker {
     history: std::collections::HashMap<String, (u32, u32)>,
-    /// Penalty threshold in basis points (5000 = 50%)
     penalty_threshold_bps: u32,
 }
 
+impl LegacyNeitherVoteTracker {
+    pub(crate) fn into_rolling(self) -> Result<NeitherVoteTracker, bincode::Error> {
+        if self.history.values().any(|counts| *counts != (0, 0)) {
+            return Err(Box::new(bincode::ErrorKind::Custom(
+                "old Neither history has no vote order; replay is required".into(),
+            )));
+        }
+        Ok(NeitherVoteTracker::new(self.penalty_threshold_bps))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn empty() -> Self {
+        Self {
+            history: Default::default(),
+            penalty_threshold_bps: 5000,
+        }
+    }
+}
+
 impl NeitherVoteTracker {
-    /// Create a new tracker with the given penalty threshold.
+    pub(crate) fn same_rules(&self, other: &Self) -> bool {
+        self.penalty_threshold_bps == other.penalty_threshold_bps
+            && self.window_assignments == other.window_assignments
+    }
+
+    pub(crate) fn same_history(
+        &self,
+        other: &Self,
+        verifier: &WalletAddress,
+    ) -> Result<bool, String> {
+        crate::orchestrator::snapshot_undo::equivalent(
+            self.history.get(verifier.as_str()),
+            other.history.get(verifier.as_str()),
+        )
+    }
+
+    pub(crate) fn rewind(&mut self, before: &Self, after: &Self) -> Result<(), String> {
+        use crate::orchestrator::snapshot_undo::{equivalent, rewind_value};
+        rewind_value(
+            &before.penalty_threshold_bps,
+            &after.penalty_threshold_bps,
+            &mut self.penalty_threshold_bps,
+        )?;
+        rewind_value(
+            &before.window_assignments,
+            &after.window_assignments,
+            &mut self.window_assignments,
+        )?;
+        for key in before
+            .history
+            .keys()
+            .chain(after.history.keys())
+            .collect::<std::collections::BTreeSet<_>>()
+        {
+            if equivalent(before.history.get(key), after.history.get(key))? {
+                continue;
+            }
+            if !equivalent(self.history.get(key), after.history.get(key))? {
+                return Err("verification undo conflicts with a changed Neither window".into());
+            }
+            match before.history.get(key) {
+                Some(value) => {
+                    self.history.insert(key.clone(), value.clone());
+                }
+                None => {
+                    self.history.remove(key);
+                }
+            }
+        }
+        self.validate().map_err(|e| e.to_string())
+    }
+
     pub fn new(penalty_threshold_bps: u32) -> Self {
         Self {
-            history: std::collections::HashMap::new(),
+            history: Default::default(),
             penalty_threshold_bps,
+            window_assignments: burst_types::ProtocolParams::burst_defaults()
+                .neither_window_assignments,
         }
     }
 
-    /// Record a vote for a verifier.
+    /// Changes apply to future observations. A larger window fills prospectively;
+    /// discarded assignments are not fabricated and past penalties are not undone.
+    pub fn configure(&mut self, penalty_threshold_bps: u32, window_assignments: u32) {
+        self.penalty_threshold_bps = penalty_threshold_bps;
+        if window_assignments == self.window_assignments {
+            return;
+        }
+        self.window_assignments = window_assignments;
+        for history in self.history.values_mut() {
+            history.trim(window_assignments as usize);
+        }
+        self.history.retain(|_, history| !history.votes.is_empty());
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), bincode::Error> {
+        if self.history.values().any(|history| {
+            history.votes.is_empty()
+                || history.votes.len() > self.window_assignments as usize
+                || history.neither as usize != history.votes.iter().filter(|vote| **vote).count()
+        }) {
+            return Err(Box::new(bincode::ErrorKind::Custom(
+                "invalid rolling Neither history".into(),
+            )));
+        }
+        Ok(())
+    }
+
+    /// Record one signed vote or certified timeout assignment.
     pub fn record_vote(&mut self, verifier: &WalletAddress, vote: Vote) {
-        let entry = self.history.entry(verifier.to_string()).or_insert((0, 0));
-        entry.0 += 1;
-        if vote == Vote::Neither {
-            entry.1 += 1;
+        if self.window_assignments == 0 {
+            return;
         }
+        let history = self.history.entry(verifier.to_string()).or_default();
+        history.trim(self.window_assignments as usize - 1);
+        let neither = vote == Vote::Neither;
+        history.votes.push_back(neither);
+        history.neither += u32::from(neither);
     }
 
-    /// Check if a verifier has exceeded the Neither vote penalty threshold.
     pub fn is_penalized(&self, verifier: &WalletAddress) -> bool {
-        match self.history.get(verifier.as_str()) {
-            Some((total, neither)) if *total > 0 => {
-                let neither_bps = (*neither as u64 * 10_000) / (*total as u64);
-                neither_bps > self.penalty_threshold_bps as u64
-            }
-            _ => false,
-        }
+        self.history.get(verifier.as_str()).is_some_and(|history| {
+            u64::from(history.neither) * 10_000
+                > history.votes.len() as u64 * u64::from(self.penalty_threshold_bps)
+        })
     }
 
-    /// Get the Neither vote ratio for a verifier in basis points.
     pub fn neither_ratio_bps(&self, verifier: &WalletAddress) -> u32 {
-        match self.history.get(verifier.as_str()) {
-            Some((total, neither)) if *total > 0 => {
-                ((*neither as u64 * 10_000) / (*total as u64)) as u32
+        self.history.get(verifier.as_str()).map_or(0, |history| {
+            if history.votes.is_empty() {
+                0
+            } else {
+                (u64::from(history.neither) * 10_000 / history.votes.len() as u64) as u32
             }
-            _ => 0,
-        }
+        })
     }
 
-    /// Get the total number of assignments for a verifier.
+    /// Retained assignments, not a lifetime total.
     pub fn total_assignments(&self, verifier: &WalletAddress) -> u32 {
         self.history
             .get(verifier.as_str())
-            .map(|(t, _)| *t)
-            .unwrap_or(0)
+            .map_or(0, |history| history.votes.len() as u32)
     }
 
-    /// Get the total number of Neither votes for a verifier.
     pub fn neither_count(&self, verifier: &WalletAddress) -> u32 {
         self.history
             .get(verifier.as_str())
-            .map(|(_, n)| *n)
-            .unwrap_or(0)
+            .map_or(0, |history| history.neither)
     }
 
-    /// Apply a penalty for excessive Neither voting.
-    ///
-    /// Resets the vote history and returns a penalty action describing
-    /// the cooldown period and reward forfeiture.
+    /// A completed penalty starts a fresh window.
     pub fn apply_neither_penalty(
         &mut self,
         verifier: &WalletAddress,
@@ -245,17 +359,15 @@ impl NeitherVoteTracker {
         self.reset(verifier);
         NeitherPenaltyAction {
             verifier: verifier.clone(),
-            cooldown_until: current_time_secs + cooldown_secs,
+            cooldown_until: current_time_secs.saturating_add(cooldown_secs),
             forfeited_rewards: true,
         }
     }
 
-    /// Reset the rolling window for a verifier (e.g., after penalty is applied).
     pub fn reset(&mut self, verifier: &WalletAddress) {
         self.history.remove(verifier.as_str());
     }
 
-    /// Number of tracked verifiers.
     pub fn tracked_count(&self) -> usize {
         self.history.len()
     }
@@ -266,10 +378,90 @@ mod tests {
     use super::*;
 
     fn test_addr(s: &str) -> WalletAddress {
-        WalletAddress::new(format!(
-            "brst_{}",
-            s.repeat(60 / s.len() + 1)[..60].to_string()
-        ))
+        WalletAddress::new(format!("brst_{}", &s.repeat(60 / s.len() + 1)[..60]))
+    }
+
+    #[test]
+    fn rolling_history_cannot_bank_old_participation_to_hide_recent_neither_votes() {
+        let verifier = test_addr("v1");
+        let mut tracker = NeitherVoteTracker::new(5000);
+        tracker.configure(5000, 4);
+        for _ in 0..1000 {
+            tracker.record_vote(&verifier, Vote::Legitimate);
+        }
+        for _ in 0..2 {
+            tracker.record_vote(&verifier, Vote::Neither);
+        }
+        assert_eq!(tracker.total_assignments(&verifier), 4);
+        assert!(!tracker.is_penalized(&verifier));
+        tracker.record_vote(&verifier, Vote::Neither);
+        assert!(tracker.is_penalized(&verifier));
+        assert_eq!(tracker.neither_count(&verifier), 3);
+        let bytes = bincode::serialize(&tracker).unwrap();
+        let mut restored: NeitherVoteTracker = bincode::deserialize(&bytes).unwrap();
+        restored.validate().unwrap();
+        for _ in 0..4 {
+            restored.record_vote(&verifier, Vote::Illegitimate);
+        }
+        assert_eq!(restored.total_assignments(&verifier), 4);
+        assert_eq!(restored.neither_count(&verifier), 0);
+        assert!(!restored.is_penalized(&verifier));
+    }
+
+    #[test]
+    fn governed_window_shrink_growth_disable_and_exact_threshold() {
+        let verifier = test_addr("v1");
+        let mut tracker = NeitherVoteTracker::new(6666);
+        tracker.configure(6666, 3);
+        for vote in [Vote::Legitimate, Vote::Neither, Vote::Neither] {
+            tracker.record_vote(&verifier, vote);
+        }
+        assert!(
+            tracker.is_penalized(&verifier),
+            "2/3 is strictly above 6666 basis points"
+        );
+        tracker.configure(6667, 3);
+        assert!(!tracker.is_penalized(&verifier));
+        tracker.configure(5000, 1);
+        assert_eq!(tracker.total_assignments(&verifier), 1);
+        assert!(tracker.is_penalized(&verifier));
+        tracker.configure(5000, 100);
+        assert_eq!(
+            tracker.total_assignments(&verifier),
+            1,
+            "growth cannot invent old assignments"
+        );
+        tracker.configure(10000, 100);
+        assert!(!tracker.is_penalized(&verifier));
+        tracker.configure(0, 0);
+        tracker.record_vote(&verifier, Vote::Neither);
+        assert_eq!(tracker.tracked_count(), 0);
+        assert!(!tracker.is_penalized(&verifier));
+        tracker.configure(0, u32::MAX);
+        tracker.record_vote(&verifier, Vote::Neither);
+        assert!(tracker.is_penalized(&verifier));
+        let penalty = tracker.apply_neither_penalty(&verifier, 10, u64::MAX);
+        assert_eq!(penalty.cooldown_until, u64::MAX);
+        assert_eq!(tracker.tracked_count(), 0);
+    }
+
+    #[test]
+    fn malformed_history_and_unordered_legacy_counts_require_replay() {
+        let verifier = test_addr("v1");
+        let mut tracker = NeitherVoteTracker::new(5000);
+        tracker.record_vote(&verifier, Vote::Neither);
+        tracker.history.get_mut(verifier.as_str()).unwrap().neither = 0;
+        assert!(tracker.validate().is_err());
+        let mut legacy = LegacyNeitherVoteTracker::empty();
+        legacy.history.insert(verifier.to_string(), (3, 1));
+        assert!(legacy.into_rolling().is_err());
+        assert_eq!(
+            LegacyNeitherVoteTracker::empty()
+                .into_rolling()
+                .unwrap()
+                .tracked_count(),
+            0
+        );
     }
 
     #[test]

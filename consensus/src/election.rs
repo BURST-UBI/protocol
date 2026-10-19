@@ -78,7 +78,18 @@ impl Election {
     /// `online_weight` is the total voting weight of all online representatives.
     /// The confirmation threshold is set to 67% of that value.
     pub fn new(root: BlockHash, online_weight: u128, now: Timestamp) -> Self {
-        let confirmation_threshold = online_weight.saturating_mul(QUORUM_BPS) / BPS_DENOMINATOR;
+        Self::with_quorum(root, online_weight, now, QUORUM_BPS as u16)
+    }
+
+    pub(crate) fn with_quorum(
+        root: BlockHash,
+        weight: u128,
+        now: Timestamp,
+        quorum_bps: u16,
+    ) -> Self {
+        let quorum = u128::from(quorum_bps);
+        let confirmation_threshold = (weight / BPS_DENOMINATOR) * quorum
+            + ((weight % BPS_DENOMINATOR) * quorum).div_ceil(BPS_DENOMINATOR);
 
         Self {
             id: root,
@@ -107,6 +118,38 @@ impl Election {
         is_final: bool,
         now: Timestamp,
     ) -> VoteResult {
+        if !is_final
+            && self
+                .last_votes
+                .get(voter)
+                .is_some_and(|old| now <= old.timestamp)
+        {
+            return VoteResult::Ignored;
+        }
+        let sequence = self
+            .last_votes
+            .get(voter)
+            .map_or(1, |old| old.sequence.saturating_add(1));
+        self.vote_signed(
+            VoteInfo::new(voter.clone(), block, weight, is_final, now, sequence),
+            now,
+        )
+    }
+
+    /// Signature verification belongs to the caller. Order soft votes by the
+    /// signed sequence, not the receiving node's clock or arrival order.
+    pub fn vote_signed(&mut self, vote: VoteInfo, received_at: Timestamp) -> VoteResult {
+        let voter = &vote.voter;
+        let block = vote.block_hash;
+        let weight = vote.weight;
+        let is_final = vote.is_final;
+        let now = received_at;
+        if vote.sequence == 0 {
+            return VoteResult::Ignored;
+        }
+        if weight == 0 {
+            return VoteResult::Ignored;
+        }
         if self.state == ElectionState::Confirmed {
             return VoteResult::Ignored;
         }
@@ -124,8 +167,9 @@ impl Election {
                 return VoteResult::Error(format!("final vote already cast by {}", voter.as_str()));
             }
 
-            // Replay protection: reject votes with timestamps not strictly newer
-            if now.as_secs() <= existing.timestamp.as_secs() {
+            // A final vote supersedes any soft vote. A prior final vote is
+            // immutable, regardless of timestamp or sequence.
+            if !is_final && vote.sequence <= existing.sequence {
                 return VoteResult::Ignored;
             }
 
@@ -139,14 +183,11 @@ impl Election {
                 }
             }
 
-            let new_sequence = existing.sequence + 1;
-
             // Record the new vote. The old vote was necessarily non-final (a
             // final vote can't be re-cast — guarded above), so only the
             // combined `tally` needed the subtraction; `final_tally` gains the
             // new weight iff this vote is final.
-            let info = VoteInfo::new(voter.clone(), block, weight, is_final, now, new_sequence);
-            self.last_votes.insert(voter.clone(), info);
+            self.last_votes.insert(voter.clone(), vote);
             *self.tally.entry(block).or_insert(0) += weight;
             if is_final {
                 *self.final_tally.entry(block).or_insert(0) += weight;
@@ -161,8 +202,7 @@ impl Election {
             VoteResult::Updated
         } else {
             // First vote from this representative
-            let info = VoteInfo::new(voter.clone(), block, weight, is_final, now, 1);
-            self.last_votes.insert(voter.clone(), info);
+            self.last_votes.insert(voter.clone(), vote);
             *self.tally.entry(block).or_insert(0) += weight;
             if is_final {
                 *self.final_tally.entry(block).or_insert(0) += weight;
@@ -182,6 +222,11 @@ impl Election {
     /// If so, transitions the election to Confirmed and returns the status.
     /// Returns `None` if no block has reached quorum yet.
     pub fn try_confirm(&mut self, now: Timestamp) -> Option<ElectionStatus> {
+        // No eligible electorate is not a free quorum. In particular, removal
+        // of the genesis bonus must never let a zero-weight vote confirm.
+        if self.confirmation_threshold == 0 {
+            return None;
+        }
         if self.state == ElectionState::Confirmed {
             return None;
         }
@@ -231,6 +276,9 @@ impl Election {
     /// the node uses to decide it may begin emitting FINAL votes (rsnano's
     /// `has_quorum`). It does NOT by itself confirm the election.
     pub fn has_quorum(&self) -> bool {
+        if self.confirmation_threshold == 0 {
+            return false;
+        }
         let mut tallies: Vec<u128> = self.tally.values().copied().collect();
         tallies.sort_unstable_by(|a, b| b.cmp(a));
         let first = tallies.first().copied().unwrap_or(0);
@@ -298,6 +346,71 @@ impl Election {
 mod tests {
     use super::*;
 
+    #[test]
+    fn authenticated_sequence_orders_soft_votes_even_with_identical_or_reversed_clocks() {
+        let voter = WalletAddress::new("brst_rep");
+        let a = BlockHash::new([1; 32]);
+        let b = BlockHash::new([2; 32]);
+        let now = Timestamp::new(100);
+        let mut election = Election::new(a, 30_000, now);
+        let vote = |hash, sequence, time, final_vote| {
+            VoteInfo::new(
+                voter.clone(),
+                hash,
+                10_000,
+                final_vote,
+                Timestamp::new(time),
+                sequence,
+            )
+        };
+        assert_eq!(
+            election.vote_signed(vote(a, 10, 500, false), now),
+            VoteResult::Accepted
+        );
+        assert_eq!(
+            election.vote_signed(vote(b, 11, 400, false), now),
+            VoteResult::Updated
+        );
+        assert_eq!(
+            election.vote_signed(vote(a, 10, 500, false), Timestamp::new(101)),
+            VoteResult::Ignored
+        );
+        assert_eq!(
+            election.vote_signed(vote(a, 11, 600, false), Timestamp::new(102)),
+            VoteResult::Ignored
+        );
+        assert_eq!(election.last_votes[&voter].block_hash, b);
+        assert_eq!(election.last_votes[&voter].sequence, 11);
+        assert_eq!(election.tally.get(&a), None);
+        assert_eq!(election.tally.get(&b), Some(&10_000));
+        assert_eq!(
+            election.vote_signed(vote(b, 12, 400, true), now),
+            VoteResult::Updated
+        );
+        assert!(matches!(
+            election.vote_signed(vote(a, u64::MAX, 900, true), now),
+            VoteResult::Error(_)
+        ));
+        assert_eq!(election.final_tally.get(&b), Some(&10_000));
+    }
+
+    #[test]
+    fn final_vote_in_same_second_as_soft_vote_is_not_lost_or_double_counted() {
+        let voter = WalletAddress::new("brst_voter");
+        let root = BlockHash::new([1; 32]);
+        let block = BlockHash::new([2; 32]);
+        let time = Timestamp::new(100);
+        let mut election = Election::new(root, 10_000, time);
+        election.vote(&voter, block, 10_000, false, time);
+        assert!(election.try_confirm(time).is_none());
+        election.vote(&voter, block, 10_000, true, time);
+        assert_eq!(election.tally[&block], 10_000);
+        assert_eq!(election.final_tally[&block], 10_000);
+        assert!(election.try_confirm(time).is_some());
+        election.vote(&voter, block, 10_000, true, time);
+        assert_eq!(election.final_tally[&block], 10_000);
+    }
+
     fn make_hash(byte: u8) -> BlockHash {
         BlockHash::new([byte; 32])
     }
@@ -319,6 +432,19 @@ mod tests {
         assert!(e.tally.is_empty());
         // 67% of 1000 = 670
         assert_eq!(e.confirmation_threshold(), 670);
+    }
+
+    #[test]
+    fn quorum_rounds_up_without_overflow() {
+        for (weight, threshold) in [(0, 0), (1, 1), (2, 2), (3, 3), (100, 67), (101, 68)] {
+            assert_eq!(
+                Election::new(make_hash(1), weight, ts(100)).confirmation_threshold(),
+                threshold
+            );
+        }
+        let large = Election::new(make_hash(1), u128::MAX, ts(100)).confirmation_threshold();
+        assert!(large > u128::MAX / 2);
+        assert!(large < u128::MAX);
     }
 
     #[test]
@@ -351,7 +477,7 @@ mod tests {
 
         assert_eq!(result, VoteResult::Updated);
         // Block 2 should have been removed (tally dropped to 0)
-        assert!(e.tally.get(&make_hash(2)).is_none());
+        assert!(!e.tally.contains_key(&make_hash(2)));
         assert_eq!(e.tally.get(&make_hash(3)), Some(&300));
         // Sequence should have incremented
         assert_eq!(e.last_votes.get(&make_voter("alice")).unwrap().sequence, 2);
@@ -486,7 +612,7 @@ mod tests {
         assert_eq!(result, VoteResult::Updated);
 
         assert_eq!(e.tally.get(&make_hash(2)), Some(&700));
-        assert!(e.tally.get(&make_hash(3)).is_none());
+        assert!(!e.tally.contains_key(&make_hash(3)));
     }
 
     #[test]
@@ -502,11 +628,28 @@ mod tests {
     #[test]
     fn zero_online_weight_election() {
         let mut e = Election::new(make_hash(1), 0, ts(100));
-        // Threshold is 0, so any vote should confirm
+        // No eligible electorate must fail closed, even with an inconsistent
+        // positive-weight vote supplied by the caller.
         assert_eq!(e.confirmation_threshold(), 0);
         e.vote(&make_voter("alice"), make_hash(2), 1, true, ts(101));
-        let status = e.try_confirm(ts(102));
-        assert!(status.is_some());
+        assert!(!e.has_quorum());
+        assert!(e.try_confirm(ts(102)).is_none());
+    }
+
+    #[test]
+    fn weightless_votes_do_not_enter_tallies() {
+        for online in [0, 10_000] {
+            let mut e = Election::new(make_hash(1), online, ts(100));
+            assert_eq!(
+                e.vote(&make_voter("unverified"), make_hash(2), 0, true, ts(101)),
+                VoteResult::Ignored
+            );
+            assert!(e.last_votes.is_empty());
+            assert!(e.tally.is_empty());
+            assert!(e.final_tally.is_empty());
+            assert!(!e.has_quorum());
+            assert!(e.try_confirm(ts(102)).is_none());
+        }
     }
 
     #[test]

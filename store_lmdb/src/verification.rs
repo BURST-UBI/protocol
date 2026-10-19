@@ -4,8 +4,8 @@
 //! so each entry is its own LMDB key/value pair. Listing all entries for a
 //! target is a prefix range-scan.
 
+use crate::shared_env::SharedEnv;
 use std::ops::Bound;
-use std::sync::Arc;
 
 use heed::types::Bytes;
 use heed::{Database, Env};
@@ -18,7 +18,7 @@ use crate::block::increment_prefix;
 use crate::LmdbError;
 
 pub struct LmdbVerificationStore {
-    pub(crate) env: Arc<Env>,
+    pub(crate) env: SharedEnv,
     pub(crate) endorsements_db: Database<Bytes, Bytes>,
     pub(crate) verification_votes_db: Database<Bytes, Bytes>,
     pub(crate) challenges_db: Database<Bytes, Bytes>,

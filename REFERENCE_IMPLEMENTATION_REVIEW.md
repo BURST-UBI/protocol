@@ -1,0 +1,12083 @@
+# Reference implementation review
+
+This is an implementation log, not a claim that BURST has reached whitepaper
+parity. The whitepaper and the owner's later explicit decisions govern BURST.
+Reference projects provide engineering examples; they do not redefine its money,
+humanity verification, or voting rights.
+
+## Pinned checkouts
+
+Cloned on 2026-10-10 into the already-ignored `protocol/references/` directory.
+The commits below identify the code reviewed, independently of future upstream
+changes. These are shallow development checkouts, not audited release selections.
+
+| Checkout | Origin | Commit |
+| --- | --- | --- |
+| `references/nano-node` | https://github.com/nanocurrency/nano-node.git | `f32f120a326ac6eab41c442f81bd7b9b18c2b0da` |
+| `references/rsnano-node` | https://github.com/rsnano-node/rsnano-node.git | `414dd884c162f78f151b9d912a029bbc9a340866` |
+| `references/tezos` | https://gitlab.com/tezos/tezos.git | `6ef1d49dee6a29b103fca2e8e507231308b01109` |
+
+Nano and rsnano have full working trees. Tezos uses sparse checkout for `docs`,
+`src/lib_shell`, `src/lib_store`, `src/lib_validation`, `src/lib_context`,
+`src/proto_alpha/lib_protocol`, and `src/proto_alpha/lib_delegate`. Expand that
+checkout when the next question requires another subsystem. None was modified
+or built during this review.
+
+## First source comparisons
+
+| Reference source | What it establishes | BURST consequence |
+| --- | --- | --- |
+| Nano `nano/lib/blocks.cpp`, `block::qualified_root`; `nano/node/active_elections.cpp`, election insertion | Competing candidates share a qualified root; candidate hashes route to that election. | Ordinary blocks, forks, the scheduler and wire votes must agree on an account-position key. |
+| rsnano `ledger/src/ledger.rs`, `process_batch`; `ledger/src/ledger_sets/confirmed.rs` | Processing owns a write transaction; observers run after commit. Confirmed reads use confirmation heights, not merely block presence. | Primary economic writes already batch together. Post-block lifecycle effects and confirmed-only account state still need work. |
+| rsnano `ledger/src/block_cementer.rs`, `confirm` | Cementation walks unconfirmed dependencies and writes their heights before the dependent block. | A receive cannot become final while its send/burn source remains reversible. |
+| Tezos `src/lib_validation/block_validation.ml`, block application | Validation applies against predecessor context; resulting context has a checked hash and is committed explicitly. | A checkpoint commitment must come from deterministic replay of the proposed cut, not serialization of whichever mutable account view happens to exist locally. |
+| Tezos `src/proto_alpha/lib_delegate/state_transitions.ml`, locked-round handling; `baking_state.ml`, state persistence | A different payload requires evidence from a higher prequorum; persisted locking state cannot simply disappear at the same level. | BURST's permanent checkpoint vote reservations prevent a second local choice but do not implement proposal recovery. A timer-based unlock is not a substitute. |
+| Tezos `src/proto_alpha/lib_protocol/voting_period_repr.ml` | Its phases are Proposal, Exploration, Cooldown, Promotion, Adoption. | BURST's whitepaper specifies Proposal, Voting, Cooldown, Activation. Copying Tezos's five-phase lifecycle verbatim would change the product. Resolve the existing mismatch explicitly. |
+
+No upstream source code was copied into BURST in these iterations.
+
+## Iteration 1: election identity and vote routing
+
+The node previously started ordinary elections under the candidate hash, fork
+elections under `previous`, and dispatched wire votes under the candidate hash.
+Those were different elections for the same conflict.
+
+The node now derives a domain-separated account-position root from the account
+and predecessor. Open blocks for different accounts remain separate; competing
+opens for one account share a root. Local admission, fork registration, vote
+spacing and scheduling use that root. Wire votes resolve a registered candidate
+hash to the shared election. Unknown hashes cannot choose or create an election.
+Routes are bounded to 16 candidates per election and removed with the election.
+An existing election can accept another candidate even at container capacity.
+
+Quorum arithmetic now rounds up without overflowing. The ordinary payment path
+still uses its existing online-weight policy and provisional weight cache; this
+change does not migrate it to checkpoint roster quorum.
+
+The node does not announce an unavailable fork winner as confirmed. It retains
+the election until the winner can be installed. Full competing-branch economic
+validation, rollback and installation remain incomplete. Routing a vote to the
+correct conflict is necessary, but is not a complete double-spend recovery path.
+
+## Iteration 2: causal cementation
+
+The runtime's former confirmation processor walked only one account chain.
+`node/src/causal_cementation.rs` now follows predecessors and receive/open/reject
+source links. One LMDB write transaction owns the reads, index checks and
+confirmation-height updates. Missing or corrupt dependencies abort that batch,
+including heights already staged inside it. Confirmed ancestors remain intact.
+The walk does not finalize newer descendants merely because their ancestor won.
+
+The walker commits at most 4096 blocks per batch and requeues unfinished work.
+Traversal is capped at 131072 dependencies. A graph exceeding that cap fails
+closed; chunked traversal beyond that bound still needs implementation. This is
+not a complete confirmed economic snapshot or a checkpoint certificate. The
+durable confirmation queue was added in iteration 6. Synthetic reward sources need an explicit
+causal commitment before the currently gated challenge lifecycle is enabled.
+
+## Iteration 3: atomic lifecycle admission and returns
+
+Block processing now owns the LMDB transaction. Endorsement admission and its
+orchestrator snapshot share the block's commit. Genesis verification writes the
+target account, BRN accrual start and restoration of eligible holdings in that
+transaction, using the signed block timestamp. Duplicate verification cannot
+restart a person's accrual clock.
+
+Governance and delegation effects are computed on isolated engines and published
+only after commit. Invalid proposal encodings no longer invent a zero-rate
+proposal. Activation requires the approved phase, its timestamp and the expected
+parameter hash; an activated proposal cannot be applied twice. Scheduler ticks
+only nominate activation blocks. They do not apply economic changes off-ledger.
+The fake secondary-key registration has been removed. Pointer delegation still
+works, but it does not implement the whitepaper's encrypted secondary-key scheme.
+
+Pending-transfer expiry now commits returned provenance, account totals and
+pending deletion together. A recipient's signed rejection creates a claim for
+the original sender under the rejection block's hash. The sender must receive
+that claim; rejection does not fabricate an unsigned balance change. Receives
+recheck the exact pending amount inside the writer, so an expiry between initial
+admission and commit cannot also be received.
+
+Tests cover transaction abort, reopen, duplicate admission, expiry idempotence,
+declined transfers and the receive/expiry race. The expanded multi-node fixture
+passed at `/tmp/burst-validation.VpPfV665`, including hard restart and fresh-node
+catch-up. That run predates the governance changes below.
+
+## Iteration 4: BURST governance, not Tezos governance
+
+The whitepaper's Governance Process and decisions 20.5, 20.6 and 20.10 specify one
+ballot, final rejection, concurrent proposals and governable thresholds without
+a hardcoded meta-governance floor. The active engine now follows those rules.
+It no longer adds a Promotion ballot, retries rejected proposals, selects one
+winning proposal, raises quorum using participation EMA, or imposes an 85% floor.
+Constitutional changes still use the current constitutional threshold.
+
+Phase timestamps derive from the preceding deadline rather than the tick time.
+Rate changes use the scheduled activation timestamp. Tests compare nodes ticking
+at different times and check arithmetic with a full `u32` electorate. The stored
+name `Exploration` means the single Voting phase. Legacy Promotion snapshots
+cannot accept votes or advance. Old serialized parameter fields remain to avoid
+silently changing unrelated parameter encodings; they no longer select policy.
+The wallet labels the live phase "Voting" and does not offer a second ballot.
+
+Signed GovernanceEndorse and GovernanceWithdraw blocks complete the missing
+support/withdrawal admission path. The node checks the proposal window and
+signer. Each verified wallet can endorse once, burning the configured cost with
+the block, proposal count and durable duplicate marker in one transaction.
+Only the proposer can withdraw. Decision 20.1's 100 BRN is an endorsement cost,
+not a balance prerequisite or fee for proposal submission. The stored parameter
+name remains `governance_proposal_cost`; RPC exposes its meaning as
+`governance_endorsement_cost`. Wallet-core signs these operations locally.
+
+Proposal identity is now the signed proposal block's hash, not a caller-chosen
+transaction identifier. Votes, support, withdrawal and activation reference that
+block, wait for it during catch-up, and cement it as a causal dependency.
+Activation authoring preserves the genesis account's representative and BRN
+spending counter. It uses the scheduled timestamp and submits one activation
+per account head instead of competing activations under the same predecessor.
+
+The full governance network test exposed a separate genesis bug. Genesis was
+written through a raw account operation, bypassing the verified-person counter.
+It now uses the transactional account updater. The new counter migration also
+repairs existing databases instead of carrying that missing human forward.
+
+Governance tallying now requires the explicit verified electorate. Unverified
+delegators, duplicate electorate entries and stored votes from ineligible
+representatives cannot add weight. Delegation admission requires a verified
+wallet. This still reads provisional eligibility, not a certified ledger cut.
+
+Decisions 15.11 and 17.3 retain rights while a challenge is pending. Challenged
+wallets now keep governance eligibility and remain in the verified-person count;
+an accusation cannot remove them from the denominator or permit genesis to
+verify them again. A one-time LMDB migration rebuilds the count. Corrupt current
+counters produce an error instead of silently becoming zero.
+
+The new block types require upgraded nodes. No running app or remote node was
+upgraded. This does not solve confirmed-state tallying, global activation order,
+constitutional content transport, governance UI submission controls, or encrypted
+scoped delegation. Emergency policy still needs a complete agreed transaction
+format and authorization path; its existing engine helper is not proof of that.
+
+## Iteration 5: confirmed history input
+
+`node/src/confirmed_history.rs` reads a requested ledger cut from one LMDB read
+transaction. It checks both height indexes, account-chain continuity, hashes,
+every ancestor's cutoff timestamp, causal closure and extension of the supplied
+trusted parent. It rejects unconfirmed heads. The manifest has a canonical,
+network/genesis/cutoff-bound commitment and a deterministic dependency-first
+replay order. Reads are bounded to 131072 blocks and 64 MiB; larger histories
+require incremental replay, which is not implemented.
+
+Five tests cover reordered manifests, provisional account changes, missing
+dependencies, parent regression, backdated descendants, malformed prefixes,
+cutoff/network separation and reopen. The reader deliberately does not derive
+eligibility from mutable account status, balances or delegation. It checks
+structure, not signatures, economic execution, global completeness or quorum.
+It is not wired into checkpoint approval. Semantic replay remains required.
+
+## Iteration 6: durable confirmation and startup ordering
+
+Consensus now persists its cementation handoff before retiring an election.
+The bounded LMDB queue survives restart, deduplicates retries and applies
+backpressure without discarding earlier decisions. Cementation removes a target
+in the same transaction that finishes its confirmation heights. Incomplete
+batches and errors retain the target. The worker rotates through pending hashes
+so an unavailable dependency cannot monopolize the first batch.
+
+Confirmation events, counters and rebroadcast cleanup now follow committed
+cementation, including causal ancestors. Notifications remain best-effort; a
+crash after commit can lose a WebSocket event. The persisted heights, not the
+event stream, are authoritative. Queue entries record local consensus decisions,
+not certificates that another node can independently verify.
+
+The old confirmation-time fork handler could roll back a frontier and delete a
+block without reversing its economic state. That handler is removed. This does
+not install an alternative winning branch; full transactional branch reversal
+and installation remain unfinished.
+
+Background workers now start after persisted engines are restored, rather than
+in the constructor. A node restart test disables representative voting and has
+no peers: the persisted handoff alone resumes cementation after startup.
+Additional tests cover restart between 4096-block batches, missing-source
+rollback, transactional queue acknowledgment, capacity and corrupt queue records.
+
+The legacy secondary-key fallback accepted a key lookup assembled from signature
+bytes without verifying that key's signature or binding its authority to the
+account. It is removed, with a regression test for the forged input. Primary-key
+operations and pointer delegation remain. Scoped encrypted secondary keys still
+need the format and authorization required by whitepaper Delegation and decision
+20.8; legacy records cannot authorize signatures.
+
+BRN restoration now rejects malformed stake sequences, missing metadata on an
+existing snapshot and discontinuous rate histories. Storage read failures no
+longer silently select fresh governance rules or empty lifecycle engines.
+Initial BRN metadata is written atomically. Exhausting the stake-ID sequence
+returns an error without locking BRN.
+
+## Iteration 7: scoped delegation and encrypted key grants
+
+Whitepaper Delegation requires an encrypted secondary key, authenticated by the
+owner's primary key, with revocation. Decisions 20.7 and 20.8 retain transitive
+delegation and require per-proposal and per-parameter scopes. A global pointer
+alone does not implement those requirements.
+
+The existing governance tally followed only global pointers. It now resolves
+proposal, parameter, category and global pointers in that order at every hop.
+Each intermediate wallet must be in the eligible set. A revoked intermediate
+cannot redirect other people's votes. A person's own direct ballot still takes
+precedence, and duplicate eligible-list entries cannot add weight. The scoped
+graph count also includes ancestors that have no global pointer. Tests cover
+scope precedence, transitive eligibility and restoration.
+
+`governance/src/key_delegation.rs` adds an authenticated grant component. A
+primary-key signature binds the owner, recipient, secondary public key, scope,
+generation, network and genesis to the encrypted key. Revocation leaves a
+generation tombstone; replaying an old grant cannot reactivate it after restart.
+A proposal-specific revocation blocks fallback to a broader parameter grant.
+The secondary signature authorizes only the typed governance ballot. It does
+not authorize spending, account-chain blocks or new grants.
+
+`crypto/src/encryption.rs` replaces the old repeated-nonce construction. Each
+envelope uses a fresh ephemeral X25519 key and a random 24-byte XChaCha20 nonce.
+The grant context is bound to key derivation and authenticated encryption.
+Malformed or legacy envelopes, weak recipients and non-contributory exchanges
+are rejected. Decrypted seeds and derived secret buffers are zeroized on drop.
+The relevant library contracts are [XChaCha20Poly1305](https://docs.rs/chacha20poly1305/0.10.1/chacha20poly1305/)
+and [X25519 contributory checking](https://docs.rs/x25519-dalek/2.0.1/x25519_dalek/struct.SharedSecret.html).
+These tests are not an independent cryptographic audit.
+
+This component is **not connected to node authorization**. Grants and revocations
+still need ledger payloads, confirmed ordering, transport, wallet submission,
+atomic persistence and catch-up. Transitive encrypted delegation must integrate
+with the tally without giving a downstream delegate account-spending authority.
+The component's local snapshot is not a certificate from a peer. Its bounded
+in-memory registry also needs incremental storage before production scale.
+The existing primary-key-only block validation remains in place.
+
+Validation for iteration 7:
+
+- `cargo test --workspace --locked --offline --quiet` passed, including the
+  70.88-second signed governance activation/replay test. One documentation
+  example remains ignored. After adding two final regression tests, the targeted
+  crypto and governance runs passed with 41 and 108 tests respectively.
+- Crypto and governance library Clippy passed with `-D warnings`.
+- `bash ./run-validation.sh` passed. Evidence is retained in
+  `/tmp/burst-validation.bDLC3OMz`. It covers the existing signed network paths,
+  crash recovery and late-join replay, not encrypted grant transport.
+- Both Tauri backends passed offline checks. The wallet's untracked lockfile
+  needed regeneration for the added dependency; the subsequent locked check
+  passed. Existing app processes and data were not restarted or replaced.
+
+## Iteration 8: recorded block effects and rollback preflight
+
+The public node rollback method and the persistent block processor still had
+deletion-only rollback paths. They could remove a block while leaving its
+pending transfers and economic effects behind. Those paths now refuse persistent
+rollback without changing the frontier, dedup cache or database. In-memory
+simulation tests retain their frontier-only operation.
+
+Newly applied blocks record the primary writer transaction's before/after images
+in `store_lmdb/src/block_undo.rs`. The record commits with the block. All 14 tables
+written through `LmdbWriteTransaction` participate, including account and height
+indexes, pending transfers, BRN state, TRST indexes and the engine snapshots used
+by the primary transaction. Repeated writes retain the original before-image;
+unchanged values are omitted. Failed raw writes poison the batch. Cementation
+prunes undo records in the same transaction as advancing confirmation heights.
+
+`node/src/rollback_plan.rs` adds a read-only preflight over one writer snapshot.
+It follows explicit block dependencies across accounts and plans descendants
+before their sources. It checks both height indexes and each block hash, refuses
+cemented targets, and rejects missing or corrupt undo records. Among independent
+descendants, it follows matching after-images rather than assuming hash order is
+economic update order. An ancestor's later confirmation height is preserved.
+Unexpected changes outside the dependency closure abort the whole plan.
+
+The journal is local recovery data, not a network certificate. It is bounded at
+64 MiB and 65,536 changed keys per block. Preflight also has traversal and memory
+limits; exceeding them returns an error, never a partial success. Existing
+unconfirmed history without records needs reconstruction. It cannot be undone by
+guessing prior balances.
+
+At the end of iteration 8, branch installation was not implemented. The preflight does not write
+the plan or accept a competing winner. Whole-engine snapshots can conflict with
+independent activity; those conflicts currently stop the plan. The next stage
+needs per-entity economic changes or validated replay, atomic winner application,
+engine/cache publication, and explicit lifecycle dependencies. Post-commit gated
+verification outcomes are not made transactional by this journal. The existing
+checkpoint and secondary-key integration gaps remain.
+
+Validation for iteration 8:
+
+- The final full workspace run passed, including 41 LMDB tests and the
+  70.34-second governance activation/replay test. One documentation example is
+  still ignored. The final targeted run passed 290 node unit tests and both
+  recovery tests after adding the undo-pruning and public-API checks.
+- The first full run failed before proposal submission because its RPC request
+  could not connect after a fixed three-second sleep. The fixture now waits for
+  RPC and connected peers, checks for an exited node, and reports per-node status
+  on timeout. The separate governance rerun passed in 70.46 seconds before the
+  successful full run.
+- The disposable multi-node validation passed with evidence retained in
+  `/tmp/burst-validation.bkIbclBa`. It covers signed payments, rejection/return,
+  governance support and withdrawal, crash recovery, a post-restart payment and
+  fresh-node catch-up. It does not exercise winner replacement.
+- LMDB/node library Clippy passed with the two existing argument-count warnings
+  in `endorsement_commit::apply` and `ledger_updater::persist_block`. The strict
+  `-D warnings` run failed on those warnings; they were not suppressed.
+- Both app backends passed locked offline checks. `git diff --check` passed.
+  Existing app processes and data were not restarted, upgraded or deleted.
+
+## Iteration 9: transactional branch replacement
+
+`rollback_plan::replace_with` now removes a losing branch and applies its
+replacement in one LMDB writer transaction. It rebuilds the plan in that writer
+snapshot rather than accepting a stale preflight result. Descendants are removed
+before their sources. The application callback sees the restored predecessor
+state; it must validate and stage the replacement and return unpublished engines.
+The function returns those engines only after commit.
+
+Each rewind checks the current after-images, primary indexes, account head and
+confirmation height. It restores every recorded table and removes the consumed
+journal. The replacement needs a new journal matching its hash, account and
+height. Replacing it later returns to the common ancestor, without resurrecting
+the discarded branch. A failed rewind poisons the entire writer, including any
+earlier rewinds in that transaction.
+
+Durable confirmation handoffs now protect their ancestors before cementation
+advances the height. Undo records cannot include final-vote choices, vote
+sequence counters, checkpoint choices or confirmation queue records. Following
+a different branch does not erase a representative's earlier voting commitment.
+
+Enabled block types no longer rewrite their engine snapshots in a second,
+unjournaled post-block transaction. Their economics, endorsement and governance
+effects already share the primary commit. The legacy checkpoint remains for the
+admission-gated challenge and verification-vote outcome code; that code still
+needs atomic settlement before release.
+
+At the end of iteration 9, this was not automatic runtime fork resolution. The election worker still deferred
+winners absent from the ledger. Its integration needs validation against the
+restored engines, serialization with other workers, and post-commit publication
+of frontiers, parameters, caches and scheduler state. `replace_with` is not a
+consensus authorization API or a substitute for economic validation. The
+whole-engine snapshot conflicts and implicit lifecycle dependencies described
+in iteration 8 remain. Conflicts stop replacement instead of discarding unrelated
+accounts.
+
+Storage tests cover all 14 recorded tables, cross-account descendants, repeated
+replacement, reopened databases, preserved confirmation heights and voting
+commitments, failure after candidate writes, missing candidate journals, removed
+dependencies, and ignored map-full errors. The economic replacement test uses a
+BRN burn and receive to fund a transfer, then replaces that received transfer.
+It checks the restored portfolio, replacement pending amount, original burn
+origin and unchanged expiry timestamp after reopening. It does not run elections
+or network admission.
+
+The first version of that fixture tried to create a funded open without a source
+and correctly failed the pending-claim check. The fixture now uses a burn and
+receive; the production check was not weakened.
+
+Validation for iteration 9:
+
+- The final locked, offline workspace suite passed, including the governance
+  activation/replay network test in 70.56 seconds. One documentation example
+  remains ignored.
+- The targeted run passed 298 node unit tests, both recovery tests and 42 LMDB
+  tests. Thirteen node tests exercise rollback planning and replacement.
+- The disposable multi-node run passed. Logs are retained in
+  `/tmp/burst-validation.GINBMhp5`. Payments, merged provenance, declined returns,
+  governance support/withdrawal, rejection of uncertified verification actions,
+  hard restart, another payment after restart and fresh-node catch-up passed.
+  This run does not exercise network fork replacement.
+- LMDB/node library Clippy passed with the two existing argument-count warnings.
+  Both app backends passed locked offline checks. `git diff --check` passed.
+- Existing app processes and their data were left untouched. The test nodes used
+  temporary data directories and exited after validation. No Azure resources
+  were allocated or changed.
+
+## Iteration 10: live payment-fork installation
+
+The block worker now validates competing payment blocks against their restored
+predecessor state in an uncommitted LMDB writer. It checks signatures, PoW,
+timestamps, current parameters, balances and provenance before caching a
+candidate. Admission does not change live balances or install the block.
+Competing opens use this path too. RPC callers receive a fork result rather than
+waiting for a receipt that never arrives.
+
+When the election selects a cached candidate, the same worker repeats validation
+and commits the replacement with its durable confirmation handoff. It then
+publishes restored BRN/TRST engines, frontiers, equal-person weights and ledger
+counts under locks. Displaced blocks leave the dedup cache, scheduler, backlog
+and rebroadcaster; their descendant elections are removed. Cemented blocks,
+durable handoff ancestors and other already-winning elections remain protected.
+Ordinary handoffs now check block presence inside their writer transaction.
+
+The supported replacement types are Open, Burn, Send, Receive, RejectReceive
+and ChangeRepresentative. Every removed descendant must also belong to that
+set. Merge, governance and verification forks still need their own validated
+replay path. This restriction does not remove ordinary merge, governance or
+verification functionality. Existing admission gates remain closed.
+
+Fork payloads have a separate bounded durable cache. Local votes can reference
+those bytes without pretending the candidate is already applied. Restart
+requeues them for validation and election registration; it does not reconstruct
+a quorum from cached data. Vote reservations remain permanent across replacement.
+The cache holds at most 256 payloads of at most 128 KiB each. Safe cache cleanup
+is still missing; a full cache rejects new candidates rather than evicting
+evidence. This is a liveness limit, not a production-ready cache policy.
+
+Fresh genesis ledgers now persist an economic baseline before workers start.
+Existing histories with missing snapshots fail startup. Wallet and merger-graph
+snapshot maps serialize in a stable key order, so reloading unchanged state does
+not create a false undo conflict. This is local byte stability, not a consensus
+state commitment. Old journals with noncanonical after-images can still fail
+closed. The metrics reader also releases the frontier lock before taking the
+block-processor lock, avoiding the inverse of admission's lock order.
+
+The live worker test burns BRN, receives the losing payment, admits a competing
+burn without changing balances, then elects and installs it. It checks the
+removed recipient, replacement pending provenance, engine balances, frontiers,
+weights and counts. After restarting, the new recipient can claim the winner's
+payment. A later conflict with that cemented winner is rejected after restart.
+Invalid signatures and an invalid balance transition are rejected before
+caching. A second test restarts before election completion and checks
+that the cached candidate is registered without being installed.
+
+These tests inject the winning vote at the authenticated-election boundary.
+They do not prove wire-level fork convergence, independent-representative
+quorum safety or partition recovery. Payment elections still use provisional
+equal-person weights, not a certified roster. Whole-engine snapshot conflicts
+with independent activity still stop replacement. Historical catch-up beyond
+the timestamp window remains unresolved.
+
+Validation for iteration 10:
+
+- The final locked, offline workspace suite passed. One documentation example
+  remains ignored. The targeted run passed 300 node unit tests, two live fork
+  tests, 44 LMDB tests and 42 TRST tests. The fork tests passed again after
+  adding the post-restart cemented-winner check.
+- Both disposable multi-node runs passed payments, merged provenance, rejection
+  returns, delegation, governance support/withdrawal, gated-action rejection,
+  hard restart, a new payment after restart and fresh-node catch-up. The final
+  run's evidence is in `/tmp/burst-validation.lfBpdn79`; the preceding run is in
+  `/tmp/burst-validation.taVL7LBY`. These runs do not test competing wire forks.
+- The initial live fixture failed because it expected one raw voting-weight
+  unit rather than `WEIGHT_PER_HUMAN`'s 10,000. The assertion was corrected;
+  production weights were not changed. An initial serializer compile failed
+  because address/hash types lack `Ord`; sorting now uses their string/byte keys.
+- Both app backends passed locked offline checks. Existing app processes and
+  data were not restarted or deleted. No Azure resources were changed.
+- Node, LMDB, BRN and TRST library Clippy passed with the two existing
+  argument-count warnings in `endorsement_commit::apply` and
+  `ledger_updater::persist_block`. `git diff --check` passed.
+
+## Iteration 11: source inventory and explicit specification mismatches
+
+Both the whitepaper and all numbered implementation decisions were read in
+full. `spec/coverage.json` pins their working-tree hashes and indexes 388 source
+sections. This count includes narrative and grouped requirements, not 388
+independent features. `spec/README.md` maps all 37 decision chapters to code
+entry points and records known gaps and six source conflicts. Most sections
+remain unverified. This is a complete section inventory, not a completed
+implementation audit.
+
+The checker rejects missing/duplicate sections, source drift and unsupported
+completion claims without evidence records. CI runs the inventory check.
+The stricter local `--release` check returns exit code 2 with 386 unsigned
+sections. It is not wired into artifact publishing and does not execute tests
+or prove recorded claims. Only the narrow numeric PoW-default and uniform
+block-type difficulty decisions were signed off in this pass.
+
+Unambiguous implementation changes:
+
+- Block admission rejects unsupported versions before publication.
+- Work thresholds no longer apply unselected 8x receive/open and 64x epoch
+  multipliers. Every type uses the exact configured base without floating-point
+  conversion. Live defaults now use decision 14.2's `0xfffffff800000000`.
+- The live governance proposal cost now matches the explicit 336 BRN override
+  in decision 37.1. Testnet retains its existing overrides. The development
+  daemon explicitly keeps cheaper work while retaining live economic rules.
+- A shared 64 KiB body limit replaces the 16 MiB limits in the generic codec,
+  sockets and node registry. Inbound decoding also uses a bincode byte limit.
+  The four-byte framing prefix is separate. This does not implement Protobuf.
+- Bootstrap block replies return a contiguous prefix that fits the byte budget.
+  Frontier pages are capped at 512. Admission reserves bootstrap-envelope space
+  so a newly accepted block fits both publication and single-block catch-up.
+  Old oversized stored records are not migrated. The conflicting 1 KiB block
+  cap and 256-input merge decision remain unresolved.
+- Stale module comments no longer claim bare-block wire fallback or that the
+  runtime never invokes branch replacement.
+
+The source documents were not edited in this pass. No data was deleted; the
+existing RPC-7077 node and apps were not restarted. No Azure resources changed.
+The writing-skill pass keeps this log explicit about the difference between
+source coverage, component tests and integrated protocol completion.
+
+Validation:
+
+- Targeted library tests passed: 305 node, 99 network, 14 protocol and 24 work.
+  New cases cover unknown versions, oversized admission, exact message bounds,
+  malformed nested lengths, prefix-only rejection, largest-block transport,
+  contiguous large-block pagination and a full frontier page.
+- The locked offline workspace suite passed, including governance activation
+  and fresh-node replay. It passed again after correcting the live defaults.
+  One documentation test remains ignored. The subsequent development-only
+  default selection is covered by the final checks recorded below.
+- Both app backends passed locked offline checks after the live-default change.
+- Library Clippy completed with the two existing argument-count warnings in
+  `endorsement_commit::apply` and `ledger_updater::persist_block`. This is not a
+  warning-free CI claim; CI's `-D warnings` treats these as failures.
+- Five coverage-checker tests passed. `git diff --check` passed.
+- Disposable multi-node validation passed at `/tmp/burst-validation.wyMehxRx`
+  before the final live-default corrections. It covers payments, merged
+  provenance, rejection returns, delegation, governance support/withdrawal,
+  gated-action rejection, hard restart, another payment and fresh-node catch-up.
+  It uses a shared public development key, not independent Byzantine signers.
+
+Final checks after the explicit development-network work override also passed:
+
+- `cargo test --workspace --locked --offline --quiet`, including the signed
+  governance network test. One documentation test remains ignored.
+- `bash ./run-validation.sh`, with final evidence in
+  `/tmp/burst-validation.h7tr2QR4`. The preceding live-difficulty development run
+  also passed at `/tmp/burst-validation.h5B7rzdD`. The final daemon logs confirm
+  the development work override was selected on startup and restart.
+- Locked offline wallet-backend check and Clippy for daemon, node, protocol,
+  network, work and types. The same two Clippy warnings remain.
+- Coverage checker and all five checker tests. The stricter conformance check
+  still correctly exits 2 because the unsigned requirements remain.
+
+These results do not test normal certified verification, challenge settlement,
+independent Byzantine signers, old-history snapshots, full wallet trust policy
+or the unresolved source choices. Passing the current suite is not completion
+of those features.
+
+## Iteration 12: delegated conflict resolution and version-2 work
+
+The owner delegated the six specification choices. `spec/DECISION_RESOLUTIONS.md`
+records the interpretation without changing the whitepaper or questionnaire.
+Merge capacity is preserved. Work can be computed in advance. Voting authority
+must come from agreed confirmed humans. Endorsements remain public and do not
+earn protocol rewards. Explicit no-memo and immediate-finality answers override
+the inconsistent summary table. These decisions do not complete the unfinished
+checkpoint or verification protocols.
+
+Implementation in this pass:
+
+- Ordinary blocks are limited to 1024 encoded bytes; merges can use 9216 bytes
+  and at most 256 inline inputs. Other block types cannot carry merge inputs.
+  Admission and payment-fork authentication share these rules.
+- Block version 2 uses predecessor-root work and domain-separated account roots
+  for opening blocks. Signatures still authenticate the complete block hash.
+  Work generation, validation and queue priority share nonce-first Blake2b-64,
+  checked against the pinned rsnano difficulty vector.
+- Handshakes require the current block version. Stored version-1 genesis blocks
+  fail startup with a fresh-ledger instruction, without modifying their data.
+  Wallet submission checks the node's block version and current difficulty.
+- `dev-user.sh --data-dir PATH` allows a separate development ledger without
+  moving or deleting an older one. The default path is unchanged. Shell syntax,
+  help output and missing-argument rejection were checked without starting it.
+- The wallet API prepares work before constructing a transaction and accepts
+  prepared work only for the current root and difficulty. Stale work falls back
+  to generation. Automatic UI background precomputation and offline queuing
+  are not implemented by this API change.
+
+The full locked offline workspace suite passed after the hash-algorithm change.
+Disposable network validation passed at `/tmp/burst-validation.V3LixgJY`, covering
+cross-peer precomputation, payments, merge provenance, rejection returns,
+delegation, governance support/withdrawal, gated-action rejection, hard restart,
+another payment and fresh-node catch-up. The shared development key is not an
+independent-signer or Byzantine-partition test. Handshake compatibility was then
+factored into a shared predicate with explicit old/missing-version tests.
+
+The final targeted library run passed 307 node, 15 protocol, 73 wallet-core and
+25 work tests. A final locked offline workspace rerun also passed after the
+handshake predicate and regression tests, with one ignored documentation test.
+Both Tauri backends passed locked offline compilation. Library Clippy
+completed with the same two existing argument-count warnings in
+`endorsement_commit::apply` and `ledger_updater::persist_block`; this is not a
+warning-free `-D warnings` result.
+
+Two initial ledger tests failed because their fixture addresses lacked `brst_`;
+the fixtures were corrected, not the production validation. The source inventory
+and five checker tests pass with no unresolved design-choice entries. There are
+still 386 unsigned source sections; the release conformance check must stay red.
+Workspace-wide formatting also reports existing changes across many files;
+this pass does not claim a clean global formatting check.
+
+No existing node or app was restarted, no existing data was deleted and no Azure
+resource was changed. Running the new apps against an old node is unsupported;
+this development transition needs coordinated builds and a separate fresh ledger.
+
+## Iteration 13 in progress: confirmed authority and independent signers
+
+Authority fields now come from a separate durable projection. Cementation checks
+each account's before-image against that projection, applies the journaled
+authority transition and commits it with confirmation heights before pruning the
+undo record. It does not read a later provisional account image. Missing history
+or unmet authority prerequisites fail closed. A provisional branch replacement
+cannot change confirmed voting weights. Older development ledgers without this
+index require a separate fresh directory; no provisional-state migration exists.
+
+Payment elections freeze a map of representative weights when they start. Later
+delegation and caller-supplied weights cannot rewrite that map. Online sampling
+remains telemetry and cannot reduce the denominator. This does not solve agreed
+roster epochs: historical votes must still be bound to a certified context before
+claiming safety across different local cuts or membership transitions.
+
+The daemon accepts a representative key file, checks its encoding and Unix
+permissions, and has a non-voting observer option. The disposable network uses
+three distinct public fixture seeds, with one signer per seed. This replaces the
+shared-genesis-key validation setup; it does not make the fixture Byzantine.
+
+The independent-signer runs exposed lost-vote failures. A final vote arriving in
+the same second as its soft vote was discarded. Soft votes also used receipt time
+instead of their authenticated sequence. Both paths now preserve final-vote
+immutability and use signed sequence numbers for soft-vote ordering. Delayed
+packets cannot restore an older soft choice.
+
+Signed, durably reserved vote-by-hash replies and bounded retries now cover the
+tested star topology. Requests carry a three-hop forwarding budget, have a
+per-peer rate limit and share a 4096-entry, two-second relay window. Only locally
+known blocks are forwarded. A reply is final only for a locally cemented
+canonical block, never merely for a cached fork. Wire version 3 is required in
+the handshake; block version remains 2.
+
+A relay may carry a requested historical vote after that representative's
+delegation changes. This grants transport permission, not voting weight. Each
+receiving election still applies its frozen electorate. Gossip deduplication
+does not suppress local processing when a vote is retried after its candidate
+arrives. Tests cover these distinctions and the relay bounds.
+
+The three-independent-signer journey passed, including merges, signed delegation,
+governance admission, gated-operation rejection, hard-crash recovery, a new
+post-restart payment and a fresh non-voting fourth node's catch-up. A separate
+live-node test disables one of three signers: two cannot finalize, and finality
+resumes when the third returns. This is an offline-signer test, not Byzantine
+partition or membership-transition evidence.
+
+The workspace tests passed again after the machine reboot. New evidence is kept
+under `target/validation-evidence/`, because the reboot removed temporary logs.
+The repeated independent network journey passed at `burst-validation.r4ZE3ZAg`.
+Both app frontends built and their desktop backends passed locked offline checks.
+These builds are not visual or interaction QA. The release gate stays
+closed, and the coverage inventory still has 386 unsigned source sections.
+
+NAT fixtures now separate transport from consensus testing. One disposable dev
+representative signs; NAT clients are non-voting observers. Their repeatable
+journey exercises signed burns, receives, merges, transfers, rejected unverified
+spending and returned payments. It does not repeatedly endorse the fixed signer
+accounts or clone their private keys. Independent quorum testing remains in
+`run-validation.sh`. All seven NAT scenarios passed after these fixture changes;
+evidence is in `target/validation-evidence/burst-nat.SHa9i9tx` and `nat-suite.log`.
+This covers single and multiple clients, default and distinct ports, double NAT,
+firewall interruption/recovery, manual forwarding and UPnP lifecycle checks. It
+does not establish compatibility with every physical router or firewall.
+Builds are limited to one compiler job; the portable NAT build also has a 4 GiB
+container memory limit to avoid exhausting the workstation again.
+
+## Iteration 14: shared economic application and finalized-fork cleanup
+
+Live admission and payment-fork replacement now use `economic_candidate::apply`
+for BRN/TRST effects. Both check complete send provenance, read pending receives
+inside the writer transaction, and reject merge failures instead of advancing
+the account with an unchanged portfolio. Wallet-age limits use the bounded
+signed timestamp rather than a receiving node's wall clock. Candidate engines
+are published only after the ledger transaction commits.
+
+Explicit expired-only consolidation remains supported (decision 6.8b). Merges
+retain the earliest input expiry and their immediate-source graph. Overflow is
+rejected before recording a graph node. The bounded fork path now includes
+merges; this does not resolve independent snapshot conflicts or lifecycle forks.
+
+Regression tests cover invalid-input atomicity, restored holdings after merge
+replacement and LMDB reopen, expired consolidation, signed-time wallet age, and
+reading current account metadata inside the writer. A merge-amount overflow
+test verifies that failure cannot leave a partial graph.
+
+The authenticated-TCP fork test runs two nodes with one disposable development
+representative. A forged vote cannot replace the incumbent merge. A valid signed
+vote installs the competing block on both nodes, restores both original holdings,
+cements the winner, rejects resurrection of the losing merge, and allows a new
+payment. This tests the live fork path, not independent Byzantine quorum safety.
+Its first run exposed an RPC inconsistency: a known fork receipt was being hidden
+behind the original queued response. RPC now returns its existing conflict detail;
+missing responses still remain pending rather than becoming false rejections.
+
+Finalized fork payloads are pruned at startup and after cementation. Cleanup
+checks the durable canonical position in one writer transaction and never deletes
+final-vote reservations. Tests cover aborted cleanup, refusal to prune during
+provisional application, and persistence after reopening. Missing predecessor
+history is not proof of finality; orphaned candidates without that proof remain.
+The cache still has its 256-entry limit and applies backpressure when full.
+
+The final independent-signer network journey passed at
+`target/validation-evidence/burst-validation.nlw1vKr1`, including the new invalid
+merge check, hard restart, a subsequent payment and a fresh node's catch-up.
+The earlier shared-transition run is retained at `burst-validation.rhoqI4kI`.
+The final workspace suite passed, including 322 node library tests and the
+authenticated-TCP merge-fork test. One existing documentation example remains
+ignored. Strict workspace Clippy (`-D warnings`) passed without warnings. The
+two previous argument-count warnings were removed by grouping the paired
+economic engines, without lint suppressions.
+
+Reproduction commands are `cargo test --workspace --locked --offline --quiet`,
+`cargo clippy --workspace --locked --offline -- -D warnings`, and
+`bash ./run-validation.sh`, with `CARGO_BUILD_JOBS=1`. Final logs are
+`target/validation-evidence/verified-workspace.log`, `verified-clippy.log` and
+`verified-network.log`. The coverage inventory and five checker tests pass;
+the conformance gate still exits 2 with 386 unsigned sections. Source-document
+hashes are unchanged. All test nodes stopped after the runs. No user ledger was
+deleted or migrated, and no Azure resources were changed.
+
+This shared transition is a replay prerequisite, not full confirmed-state replay
+or an agreed checkpoint. The verification gate remains closed.
+
+## Iteration 15: transactional verification settlement
+
+The node no longer applies verification results through separate post-commit
+account, reward and engine writes. `verification_commit` stages challenge
+admission, vote recording, stake receipts, outcome effects and pending rewards
+in the block's writer transaction. It publishes candidate engines only after
+commit. Missing, corrupt, mismatched or already-settled stake receipts abort
+the candidate. Reward sums and account changes use checked arithmetic.
+
+Verifier rewards have the outcome block as their pending source. Their origins
+also bind that block and recipient, so a later attempt cannot overwrite an
+earlier reward. A test claims the reward through the shared payment transition.
+This supplies an existing source block; it does not yet certify all panel votes
+or establish their causal closure for cementation.
+
+Revote snapshots retain prior votes and stakes until final settlement. Snapshot
+format 3 reads older snapshots only when they have not lost an active revote's
+history. Old incomplete revotes require replay instead of silently dropping
+locked stakes. Signed timestamps drive voting and challenge initiation. The
+wall-clock convenience APIs remain for component callers.
+
+Challenge resolution rejects incomplete panels. Split votes below either
+supermajority, and all-Neither panels, require a new panel while revotes remain.
+Past panels remain excluded and their stakes settle with the final outcome.
+Fraud removes spendability in affected portfolios and stops the originator's
+accrual. It does not rewrite holders' signed chain balances. Expiry already
+uses this distinction; otherwise revocation breaks later signed balance deltas
+or debits tokens that returned as expired reputation without a Receive block.
+Inactivity stops accrual without revoking TRST. The fraud bounty uses the amount revoked
+from holders during this settlement, not the originator's own holdings.
+Challenge expiry commits its refund, penalty, receipts and snapshot together;
+its identity uses the challenge and deadline, not the local timer's firing time.
+
+Tests cover aborted final votes, corrupt receipts after earlier staged writes,
+LMDB close/reopen, claimable rewards, retained revote stakes, both challenge
+reasons, rejected challenges and idempotent expiry. A signed payment sequence
+checks that clean funds remain spendable after partial revocation and tainted
+funds do not. Component tests also cover
+reward overflow, duplicate recipients, signed-time penalties and incomplete
+challenge resolution. The old manually assembled lifecycle story remains a
+component simulation; its accounting helpers are now test-only. It is not
+evidence for the production settlement path.
+
+The release gate remains closed. Committees still need certified request and
+attempt binding, complete causal evidence and confirmed-cut replay. Timeout
+application also needs an agreed cutoff. The new transaction boundary does not
+provide those consensus guarantees. Nothing in this iteration changes the
+whitepaper, implementation decisions or the requirement that human authority
+come from agreed confirmed state.
+
+Final checks passed with `CARGO_BUILD_JOBS=1`:
+
+- `cargo test --workspace --locked --offline --quiet`, including 329 node
+  library tests and 79 verification tests. One existing doctest remains ignored.
+- `cargo clippy --workspace --locked --offline -- -D warnings`.
+- `bash ./run-validation.sh`, including three independent representative keys,
+  hard restart, a post-restart payment and a fresh fourth node's catch-up.
+- The coverage inventory, its five checker tests and `git diff --check`.
+
+Logs are in `target/validation-evidence/lifecycle-final-workspace.log`,
+`lifecycle-final-clippy.log` and `lifecycle-network.log`. The network artifacts
+are in `target/validation-evidence/burst-validation.LYnyz2rU`. The run also verifies
+that gated votes and challenges leave accounts, stakes and frontiers unchanged.
+It does not exercise certified distributed verification. All disposable test
+nodes stopped. No user ledger or Azure resource was changed.
+
+The release conformance command still exits 2 with 386 unsigned source sections
+and zero inventory errors. Four sections now link the scoped settlement tests;
+they remain partial, not signed off. The whitepaper and decision hashes are
+unchanged from iteration 14.
+
+## Iteration 16: checkpoint rounds and authenticated dependency admission
+
+Checkpoint certificates now authenticate a precommit round. The signature domain
+separates proposals, prevotes and precommits. A prevote quorum is preparation
+evidence, not a decision. The previous roster still supplies all human weights
+and the quorum denominator.
+
+The round machine follows the lock/valid transitions in
+[Tendermint Algorithm 1](https://arxiv.org/html/1807.04938v3).
+Tests cover split proposals, stale or forged proofs, nil votes, delayed prepare
+proofs, restart, and recovery with a newer prepare quorum. An enumerated test
+varies which honest signers receive a prepare proof while one signer
+equivocates. The tested schedules do not produce conflicting decisions.
+This is a scoped test, not a formal proof of the BURST network.
+
+The node's durable signing service persists each transition and forces disk
+synchronization before returning a signature. Competing tasks using one signer
+share the LMDB writer. The snapshot stores the proposal, both local vote choices,
+lock and recovery proofs, and the decision. It has bounded decoding and a
+checksum. Its key excludes parent, so a competing parent reaches the existing
+record instead of starting an independent signing history. Undo journals cannot
+write the round-state namespace. Corrupt records and old single-choice
+reservations require explicit recovery; they are not reset automatically.
+
+Four independent fixture signers prepare and decide a checkpoint through this
+service. The test encodes proposals with the bounded protocol codec, closes all
+four LMDB environments and checks decision retransmission after reopening.
+Other tests reject a replay-validation failure without writing a signing record,
+race conflicting proposals against one signer, and preserve a lock across a
+timeout and database restart. These use fixture ledger predicates. They do not
+run through BurstNode's live TCP dispatcher or verify a complete ledger cut.
+
+Live block admission now authenticates dependency gaps through the same pipeline
+as ordinary blocks. Previously its early gap path checked only hash and work.
+Receive-open and governance links use the same dependency definition as
+cementation and history replay. Different valid opening blocks compete at the
+zero predecessor; exact duplicates remain duplicates. Unchecked storage retains
+one copy of each block across both dependency queues. Duplicate arrivals cannot
+fill the queue or extend their expiry. Capacity tests now use distinct blocks,
+and the repeated-arrival behavior has its own regression test.
+
+The full confirmed replay predicate, live checkpoint transport, timer/gossip
+driver, certificate-chain catch-up and agreed roster handoff remain unfinished.
+Recovery for a selection request that misses its beacon deadline without a
+prepare quorum also remains unfinished. The release gate stays closed.
+No source requirement was changed or signed off by this iteration.
+
+The full workspace regression passed after the persistent-store fix:
+`target/validation-evidence/checkpoint-round-final-workspace.log`. This run
+includes the governance and merge-fork network integration tests. The checkpoint
+round suite has nine tests; the durable signing service has five. Broader
+all-target Clippy checking found existing warnings in test fixtures, benchmarks
+and an example. Their cleanup preserves the same assertions and inputs.
+
+The first workspace run failed both live fork-replacement tests after admission
+was consolidated. The node had never attached its persistent block store to the
+block processor. An ancestor outside the recent-hash cache therefore appeared
+missing. Startup now supplies that store, and a regression test covers a cold
+cache with stored receive sources and fork ancestors. The failed run remains in
+`target/validation-evidence/checkpoint-round-workspace.log`.
+
+## Iteration 17: persist origin ownership through pending payments and merges
+
+The prior TRST snapshot saved holdings but not the historical origin registry.
+Rebuilding that registry from current holdings loses a burn when all its TRST is
+pending or consumed by merges. Revocation and re-verification after restart could
+then miss it. The version-2 snapshot saves both holdings and origin ownership in
+canonical order. Holder-index rebuilding no longer erases that history or treats
+the merging wallet as the issuer of its constituent burns. Startup and payment
+replacement restore the registry. Verification rewards register their mint origin
+before creating the pending claim.
+
+This changes the local economic snapshot format. Old portfolio-only snapshots
+fail with an explicit replay-required error; no empty-registry fallback or
+automatic deletion is performed. Complete semantic replay and an audited
+migration tool remain unfinished. Existing user data was not changed by these
+tests. Use a separate disposable directory for the new test daemon.
+
+Pending fraud-bounty accounting measures newly revoked amounts using the same
+integer rounding as token delivery. It does not delete pending payments or
+rewrite signed balances. Receiving revoked TRST records the nominal signed
+amount while keeping it unspendable. Receiving and returning pending tokens now
+refresh both expired and revoked account counters in the same transaction.
+Re-verification still restores the specified origin rights; it was not removed
+as a workaround.
+
+Tests cover pending mints, fully sent balances, consumed merge origins,
+revocation before and after restart, re-verification before and after delivery,
+and merged pending rounding. A node test commits a real signed burn, reopens
+LMDB, applies a fixture-selected fraud outcome, reopens again, receives the
+revoked payment and checks that spending fails. Restoring verification then
+permits spending. Another test returns expired revoked pending TRST without
+inventing a signed balance. These tests do not bypass or open the live selection
+gate. Reward reversal through a meta-challenge, complete lifecycle replay and
+certified selection integration are still required.
+
+Validation so far:
+
+- The workspace regression passed with 1,403 tests and one existing ignored
+  documentation example (`target/validation-evidence/origin-registry-workspace.log`).
+- All four startup/recovery integration tests passed, including the two new
+  snapshot checks (`origin-registry-startup.log`).
+- Strict workspace Clippy passed for all targets, including tests, benchmarks
+  and examples (`origin-registry-clippy-all-targets.log`).
+- The conformance inventory and its five tests passed. The release check still
+  exits 2 because 386 source sections lack sign-off. That count includes narrative
+  sections and is not a count of missing features. Source hashes are unchanged.
+
+The rebuilt-daemon three-signer validation passed, including hard crash/restart,
+the subsequent payment and fresh observer catch-up. Evidence is in
+`target/validation-evidence/checkpoint-round-network.log` and
+`target/validation-evidence/burst-validation.pMRPi6Hx/`. This exercises the live
+payment/governance subset and checks that uncertified challenges and votes are
+rejected without mutations. It does not exercise live checkpoint selection.
+All seven isolated NAT/firewall scenarios passed after the origin-registry
+changes: outbound-only NAT, interruption/reconnect, same-IP clients using the
+same and distinct ports, double NAT/CGNAT, manual forwarding and UPnP lifecycle.
+Evidence is in `target/validation-evidence/origin-registry-nat.log` and
+`target/validation-evidence/burst-nat.nmICNjCB/`. The test container was removed.
+These are transport tests with one representative, not Byzantine quorum tests.
+
+Both application frontend builds and both offline Tauri backend checks passed.
+The wallet's 47 frontend/unit tests and dashboard's 18 browser contract tests
+passed in isolated Chromium sessions. They use synthetic RPC fixtures, not native
+transaction signing. The first browser-test command could not locate Playwright;
+the rerun used the existing installed module, without changing package files.
+These checks preserve the prior UI work and do not constitute a new visual design
+review. Logs use the `origin-registry-wallet-*` and `origin-registry-dashboard-*`
+prefixes in `target/validation-evidence/`.
+
+## Iteration 18: separate test funding from identity bootstrap
+
+The test-tool isolation run found that the faucet's automatic endorsement could
+strand a new one-signer network. Confirming the endorsement added a verified
+human whose default representative was their unopened, offline wallet. The
+following funding burn then lacked quorum. The failed run is retained in
+`target/validation-evidence/origin-registry-test-tools.log` and
+`/tmp/burst-test-tools-Mmd42u/`.
+
+The faucet now funds without changing verification. The recipient receives,
+signs its representative choice, and separately requests creator endorsement
+during bootstrap. This preserves receive-before-verification, user-signed
+delegation, and the fixed human denominator. It does not auto-delegate another
+person's vote or exclude offline humans to make a test pass. The test verifies
+that funding neither opens nor verifies the recipient, and then exercises the
+ordered signed workflow on Test and Dev.
+
+The test launcher also strips inherited `BURST_*` daemon settings from every
+fixture process. A real signer file, bootstrap peer or faucet setting must not
+leak into an isolation test. Bootstrap peers run without representative signing,
+so only the fixture seed node votes with the public genesis key. No user secrets
+are printed or saved.
+The rebuilt daemon passed 1,405 workspace tests and strict all-target Clippy.
+The live test-tool run passed funding, explicit receive, signed delegation,
+verification, concurrent grants and crash recovery. Fresh-node catch-up failed:
+balances matched, but the recipient's confirmation height stayed at zero.
+Failed runs remain in `target/validation-evidence/faucet-order-test-tools*.log`.
+That failure led to iteration 19; it is not counted as a passing live suite.
+
+## Iteration 19: signed endorsement dependencies
+
+The catch-up log showed the genesis chain confirming before the recipient's
+chain arrived. Its endorsement had no dependency on the recipient's earlier
+representative choice. The joining node therefore added a self-represented
+human before it could confirm that choice, leaving only one of two humans voting.
+Changing the threshold or copying a peer's confirmation height would hide the
+ordering error.
+
+Block version 3 adds `target_head` to the signed block hash. Creator endorsement
+and the signed wallet client set it to the target's observed account head.
+Admission waits for that block; endorsement validation checks its account,
+canonical index and timestamp, preserving decision 23.7's 60-second clock
+tolerance. Cementation and confirmed-history traversal
+include it alongside the account predecessor. Other operations must leave it zero.
+A zero value carries no head dependency and is not an absence proof. Endorsing
+an unopened wallet remains possible. Complete lifecycle dependencies and agreed
+roster epochs are still unfinished.
+
+Wire version 4 excludes peers with the older block layout. Startup checks the
+stored version before decoding and refuses older directories without modifying
+their data. No existing user ledger was migrated or deleted. Rebuild the node
+and native wallet together, and use a fresh development directory.
+
+Regression tests cover hash binding, allowed block types, deferred admission,
+wrong-target/future anchors, causal cementation and unchanged old-format data.
+The live suite now also checks that creator endorsement commits the recipient's
+signed representative choice. The final workspace run passed 1,410 tests with
+one existing ignored documentation example. Strict all-target Clippy passed.
+Both native app checks passed against the updated wallet library.
+
+The independent three-signer test passed payments, merge/rejection provenance,
+delegation, governance, gated-operation rejection, hard restart, a new payment
+after restart and fresh observer catch-up. Evidence is in
+`target/validation-evidence/endorsement-final-network.log` and
+`target/validation-evidence/burst-validation.zB5VrMG9/`.
+
+The final test-tool suite passed funding before verification, signed receive and
+delegation, the new endorsement dependency, repeated/concurrent grants, state
+agreement after SIGKILL/restart, fresh observer catch-up and cross-network
+isolation. Evidence is in `target/validation-evidence/endorsement-final-test-tools.log`
+and `/tmp/burst-test-tools-jz9Gaq/`. Only the seed signs in this fixture; observers
+do not clone its representative key. The original confirmation-height assertion
+remains unchanged.
+
+All seven NAT scenarios passed with the final wire format: inbound blocking,
+reconnect, multiple default-port clients, distinct-port clients, double
+NAT/CGNAT, manual forwarding and UPnP lifecycle/discovery. The daemon published
+its alternate mapped port for automatic discovery and removed the mapping on
+shutdown. Non-routable CGNAT was reported as such, not as successful inbound
+traversal. Evidence is in `target/validation-evidence/endorsement-final-nat.log`
+and `target/validation-evidence/burst-nat.A5m4lGZn/`. These are isolated Linux
+namespace/router-emulator tests, not physical-router or Azure trials. The
+fixture containers were removed; evidence remains on disk. No host firewall
+rules or Azure resources were changed.
+
+The conformance inventory still reports 386 unsigned sections and zero inventory
+errors. Its release check exits 2. This iteration does not complete the
+whitepaper or justify opening certified verifier selection.
+
+## Iteration 20: recompute confirmed payment effects
+
+`node/src/confirmed_replay.rs` adds a read-only payment audit over
+`ConfirmedHistory`. It starts from the configured network's genesis and initial
+parameters. It recalculates BRN burns, pending transfers, receive/open claims,
+rejection returns, sends, merges, representative changes and received-token
+expiry. Stored balances, verification flags, economic snapshots and undo
+journals cannot supply the result. The output exposes reconstructed account and
+provenance state, not a checkpoint root or roster certificate.
+
+Replay shares the economic transition, account update, pending-provenance and
+receive-amount rules with live processing. The node and audit also share the
+same genesis constructor. Historical signatures, proof of work and parameter
+hashes are checked. The cut's timestamp bound replaces today's admission window
+only inside the read-only audit; network admission is unchanged. The history
+reader now bounds bincode decoding, rejects trailing bytes and checks the current
+block format before replay.
+
+The eleven unit regressions include signed overspending, receive inflation,
+double claims, wrong origins, unheld merge inputs, forged identity/economic
+afterimages, changed genesis parameters, invalid signatures/work, provisional
+successors and reversed manifest order. A payment sequence also compares the
+reconstructed state with the LMDB payment transition. Expired received TRST
+remains in the nominal balance and reputation counters but is not spendable.
+
+The new `confirmed_replay_network` test passed. One representative and two
+non-voting observers, including a fresh joiner, derive matching cuts and
+payment state after signed RPC submissions and TCP catch-up. It checks a
+50-unit merge, a 15-unit receive and a 5-unit pending transfer against the running
+account store. No fixture grants the recipient verification. This test is not
+independent-representative agreement, roster handoff or Byzantine tolerance.
+Its focused log is `target/validation-evidence/payment-replay-network-final.log`.
+
+The release-build three-signer suite also passed, including governance support
+and withdrawal, gated-operation rejection, hard restart, a post-restart payment
+and a fresh fourth node's catch-up. Its log is
+`target/validation-evidence/payment-replay-release-network.log`; node artifacts
+are in `target/validation-evidence/burst-validation.m5ZpcQFq/`. Test daemons were
+stopped. That suite exercises the shared live helpers, not complete lifecycle
+replay or certified selection.
+
+The full workspace passed 1,422 tests with one existing ignored documentation
+example. Strict all-target Clippy passed. Evidence is in
+`target/validation-evidence/payment-replay-final-workspace.log` and
+`payment-replay-final-clippy.log`. These include the final typed replay errors.
+The coverage checker and its five tests also passed;
+386 source sections still lack sign-off. The source hashes remain unchanged.
+
+This remains a bounded payment-only audit. Any endorsement, verification,
+challenge, governance, verifier opt-in/out, voting delegation or epoch block
+fails before economic replay. In particular, it cannot replay the usual creator
+endorsement bootstrap yet. Expired pending transfers and claims at/after their
+expiry also fail because their local timer-driven return is not an agreed
+lifecycle event. Skipping those effects would produce a false state proof.
+`ReplayError` distinguishes unsupported blocks and pending-expiry ordering from
+invalid history. An unimplemented transition is not labelled database corruption.
+
+No checkpoint signing callback uses this partial audit. Certified selection
+remains closed. Full lifecycle replay, agreed timeout/activation ordering,
+roster epochs, checkpoint transport and certificate import are still required.
+No source specification, block/wire format, existing ledger or Azure resource
+was changed by this iteration.
+
+## Iteration 21: replay creator verification and verifier opt-in/out
+
+`ConfirmedReplay` now reconstructs creator bootstrap endorsements, including
+verification before a wallet opens its account chain. BRN accrues from the
+endorsement timestamp. Opening the account preserves that identity and accrual
+history. Live processing and replay share the account constructor, target-head
+validation, verification transition and eligibility checks.
+
+Bootstrap replay adds the creator endorsement as a prerequisite of the target's
+spending and opt-in blocks. This is valid only in the supported monotone subset,
+where a target has one creator verification and cannot later be challenged or
+reverified. The creator chain orders the bootstrap count. Duplicate/self
+verification, dependency cycles and wrong target heads are rejected. Noncreator
+endorsements and creator endorsements after the exit threshold remain unsupported;
+they cannot silently grant identity. This inferred dependency is not a substitute
+for signed attempt context in the normal lifecycle.
+
+The five added replay tests cover unopened wallets, both account-opening orders,
+verification-dependent spending under sixteen hash orderings, bootstrap limits,
+invalid signatures, unaffordable burns and unverified opt-in. Existing tests
+still supply false account afterimages and corrupt economic snapshots. A separate
+regression ensures lifecycle audit support does not enable lifecycle fork
+replacement.
+
+`NodeClient::set_verifier_opt_in_signed` signs the opt-in/out blocks on the client
+and waits for confirmation. Private keys are not sent to the node. Opting in does
+not itself establish panel eligibility or enable certified selection.
+
+The expanded three-node test compares reconstructed account bytes and BRN with
+the running stores before verification, after opt-in and after opt-out/fresh-node
+catch-up. It retains the payment, merge and pending-transfer checks. The recipient
+delegates to the sole signer before verification; this is not an independent-voter
+or roster-handoff test.
+
+Initial runs exposed an arrival-order stall on the fresh node. Its spending
+block could arrive before the creator endorsement, be rejected, and wait for
+bootstrap's full timeout. The bootstrap cursor now retries from a partially
+persisted prefix without skipping the remaining blocks. A unit regression also
+checks that no progress still waits for the bounded timeout. The failed trace is
+`target/validation-evidence/bootstrap-replay-network-trace-3.log`; the first two
+passing runs after the change are `bootstrap-replay-network-retry.log` and
+`bootstrap-replay-network-retry-2.log` in the same directory.
+
+The workspace suite passed 1,429 tests with one existing ignored documentation
+example. Strict all-target Clippy passed. Evidence is in
+`target/validation-evidence/bootstrap-replay-final-workspace.log` and
+`bootstrap-replay-final-clippy.log`. The inventory checker and its five tests
+passed; all 388 source sections remain indexed, with 386 not signed off. The
+release check still exits with status 2. Source hashes are unchanged.
+
+The rebuilt release daemon passed the independent three-signer suite, now
+including client-signed verifier opt-in/out and unverified opt-in rejection.
+The final opt-in timestamp survived a hard restart and fresh fourth-node
+catch-up with the rest of the account state. A new post-restart payment also
+confirmed on all three original nodes. The log is
+`target/validation-evidence/bootstrap-replay-release-network.log`; node artifacts
+are in `target/validation-evidence/burst-validation.lcYFkDF7/`. All disposable
+test nodes stopped and their ports are free. This run validates bootstrap
+behavior, not certified panels or agreed roster epochs.
+
+No checkpoint signing callback uses this partial audit. Normal verification and
+challenges remain gated. Neither the source specifications nor block/wire formats
+changed. Existing user ledgers and Azure resources were untouched.
+
+## Iteration 22: certified vote contexts and normal endorsement replay
+
+The orchestrator now freezes a `SelectionRequest` before committee installation.
+The caller supplies the trigger and complete eligible pool from the replayed cut;
+the orchestrator applies target, endorser, prior-panel and penalty exclusions at
+that cutoff. It rejects attempts to change a frozen request or replace it with
+local randomness. Certificate installation verifies the trusted parent quorum
+and pinned drand proof, then uses that exact frozen pool without a current-time
+eligibility query. Retrying installation does not clear votes.
+
+Verification votes now carry a signed context digest in `StateBlock.origin`.
+The digest includes the checkpoint hash and request commitment. Admission checks
+the context, request parameters, beacon release time, selected membership,
+duplicate votes and exact stake before economic mutation. The context-free
+component API cannot cast votes into a certified committee. Revotes and new
+challenges discard the previous active context. Snapshot format 4 persists frozen
+requests, certificates and proofs; loading an older snapshot never grants its
+committee certified status. The wallet builder requires a nonzero context, and
+`verification_status` returns the context when one exists.
+
+Lifecycle component tests now install committees with actual pinned-mainnet
+drand proofs and signed checkpoint certificates. Their logical clock spans beacon
+periods, so a challenge's next vote cannot precede its beacon. Tests still cover
+atomic stake settlement, restart, revotes, reward claims, pending-origin
+revocation, inactivity without revocation and restoration after re-verification.
+New regressions reject changed contexts, old-attempt votes, legacy committees,
+wrong parameters and pre-beacon votes without locking stakes. These tests do not
+exercise live distributed checkpoint agreement.
+
+Confirmed replay also accepts normal endorsements whose targets remain pending.
+Their burns are permanent, they produce no endorser reward, and meeting the
+threshold does not grant identity, BRN accrual or transaction rights. Repeated
+endorsements fail. Creator bootstrap admission and normal endorsement of the same
+target still fail closed because their relative order is not committed. The
+three-node replay test now includes a normal endorsement through signed wire
+delivery and fresh-node catch-up, with matching balances and pending state.
+
+Block version 3 and wire version 4 are unchanged. The vote field was unused on an
+operation that remains gated; old accepted payment data is not rewritten. Neither
+source specification was changed. No existing user ledger or Azure resource was
+modified.
+
+Still missing for runtime selection: complete semantic replay, trigger/pool
+derivation from agreed cuts, full panel dependencies, governance transitions
+during a request, proposal transport, durable scheduling, certificate-chain
+import, roster handoff and pre-beacon deadline recovery. The selection release
+gate remains closed. Snapshot and component tests do not finish these paths.
+
+The rebuilt daemon passed `CARGO_BUILD_JOBS=1 bash ./run-validation.sh` with
+three independent public fixture signers. It exercised payments, merges,
+delegation, governance endorsement/withdrawal, verifier opt-in/out, gated vote
+and challenge rejection, hard-crash recovery, a post-restart payment and a fresh
+fourth node's catch-up. Evidence is in
+`target/validation-evidence/certified-selection-release-network.log` and
+`target/validation-evidence/burst-validation.NSo9hTWr/`. All disposable daemons
+stopped. This run did not enable certified verifier selection.
+
+Final validation passed on this source revision:
+
+- `CARGO_BUILD_JOBS=1 cargo test --workspace --locked --offline --quiet`:
+  1,440 passed, zero failed, one existing ignored documentation example.
+  Log: `target/validation-evidence/certified-selection-workspace-final.log`.
+- `CARGO_BUILD_JOBS=1 cargo clippy --workspace --all-targets --locked --offline -- -D warnings`:
+  exit 0. Log: `target/validation-evidence/certified-selection-clippy-final.log`.
+- The inventory checker reports 388 indexed sections, 386 not signed off and
+  zero coverage errors. Its five regression tests pass. `--release` still exits
+  2 as required; the partial work is not release sign-off.
+- `git diff --check` passes. Both specification hashes match the pinned inputs.
+
+These checks did not re-audit the UI, NAT/router coverage or Azure deployments.
+
+## Iteration 23: replay-authorized checkpoints and durable certificate ancestry
+
+The public checkpoint signing entry point now takes a `ReplayedCheckpoint`.
+Only its private transition helper accepts a callback. The checked value derives
+the manifest root, endorsement trigger, complete eligible pool, parameters and
+next human roster from signed confirmed history. Tests deliberately corrupt the
+stored account and economic snapshots; none supplies authority to replay.
+
+Eligibility follows decision 15.5. It checks signed opt-in, verified status,
+verification age, 50 available BRN and a completed payment involving a distinct
+verified wallet. Received burns count as payments. Self-transfers, refunds,
+unclaimed sends and activity only with unverified wallets do not count.
+The separate vote stake remains an admission check at voting. Endorsers and the
+target are excluded from the resulting selection request. Threshold-crossing
+endorsements use timestamp/hash order within the named cut so traversal order
+cannot change the trigger.
+
+The signing path rejects changed roots, parameters, pools, rosters and quorum
+thresholds before persisting a signature choice. An absent clock bound or one
+that reaches the beacon release prohibits fresh signing. A valid prepare proof
+can finish its unchanged request after release. Initial authority is checked
+against the configured genesis, not a supplied peer roster.
+
+`checkpoint_store` persists certificates and canonical manifests before their
+beacons arrive. Import and restart authenticate the chain from configured genesis
+and replay each named cut. Exact-round BLS validation precedes beacon persistence.
+Retries preserve a stored beacon. The new metadata namespace is excluded from
+block rollback. Tests cover reopening, a separate observer store, wrong proofs,
+missing manifest entries, corrupted records and altered targets.
+
+Successive checkpoints can select different pending targets. They must retain
+the parent's complete manifest and earlier frozen endorsement sets. A previously
+certified attempt cannot be resampled. Tests advance from the creator's initial
+authority to nine independently keyed verified humans; the second certificate
+requires seven signatures. One creator signature or six human signatures fail.
+A fresh store cannot skip the parent. A late beacon for the first request does
+not populate the second request. The chain head and record commit atomically,
+and ordinary block rollback cannot modify either.
+
+The bounded reader supports 128 checkpoints, 16 MiB per record and 64 MiB total,
+with room reserved for delayed beacons. It fails rather than omitting history
+past those limits. This is not a live verification network. Cuts containing
+verification votes/outcomes, challenges or governance still fail closed.
+Wire scheduling, complete lifecycle replay, live roster handoff and payment
+epoch integration remain the next work.
+Normal verification remains gated. No whitepaper text, user ledger, UI or Azure
+resource was changed in this iteration.
+
+Validation before the following recovery extension: 1,445 workspace tests
+passed, zero failed and one documentation example remained ignored. Strict
+all-target Clippy passed. The release network run passed with three independent
+signers, hard restarts, a new post-restart payment and a fresh fourth node's
+catch-up. Logs are `target/validation-evidence/replayed-checkpoint-workspace-final-complete.log`,
+`replayed-checkpoint-clippy-final-complete.log` and
+`replayed-checkpoint-release-network.log`; the disposable network evidence is
+`target/validation-evidence/burst-validation.19dWmsxS/`.
+
+Pending signer snapshots now also retain the exact replay manifests for their
+proposal, votes, lock, prepared value and decision. Version 2 checksums cover
+both round state and manifests; version 1 is not silently upgraded. The same
+LMDB transaction stores both before any signature is released. Recovery reads
+those manifests and replays their certified ancestry and signed blocks, even
+when the accepted chain has since advanced. Missing history prevents recovery.
+The signer retains different locked/prepared choices across rounds and prunes
+only manifests no longer referenced by its state. Tests exercise recovery
+before any certificate exists, missing history, changed recovery input,
+checksum failure and retention of two competing round values. This removes the
+need to reconstruct a pending proposal's history from its root by guesswork.
+
+## Iteration 24: pending-manifest recovery and checkpoint-record transport
+
+The node now pins original genesis parameters independently of the active
+governed parameters. Existing ledgers require matching genesis inputs before
+this record can be added; mismatches or corrupt records fail without replacing
+history. The namespace is protected from block rollback.
+
+Wire version 5 adds bounded checkpoint-record requests and chunks. The running
+node installs a bounded inbox behind its authenticated peer reader. One sync
+worker requests missing certificates and refreshes older records for delayed
+beacons. Import authenticates the certificate chain and replays local signed
+history; it never trusts a transferred account snapshot. Missing history defers
+import until ledger bootstrap supplies it. The service has one bounded inbound
+transfer and one bounded export cache, fixed-size chunks, retry deadlines and
+global serving limits. It does not sign or propose checkpoints and leaves
+normal verification gated.
+
+The signer recovery extension described above now persists manifests for every
+retained round choice before emitting signatures. Targeted tests pass for
+pre-certificate recovery, competing locked/prepared choices, corrupt manifests,
+oversized or mixed wire chunks, forged digests and stalled-peer rotation.
+The expanded live-node regression passed: a replay-authorized durable signer
+produced a certificate, the other running nodes imported it over ordinary P2P
+connections, and a fourth node starting with an empty ledger caught up and
+imported the same request. That fixture uses the trusted creator for its first
+checkpoint; it does not demonstrate distributed proposal scheduling or BFT
+liveness. Log: `target/validation-evidence/checkpoint-sync-network.log`.
+
+That source passed 1,454 workspace tests with zero failures and one ignored
+documentation example (`target/validation-evidence/checkpoint-sync-workspace.log`).
+Subsequent changes enforce the governed normal-endorsement burn in the shared
+orchestrator before creating or mutating a request. Live admission and confirmed
+replay use that same check. Creator bootstrap remains separate, and the creator
+must meet the normal cost once bootstrap ends. Reduced amounts in tests are now
+explicit genesis parameters rather than silent exceptions to the default
+336-BRN rule. Overpaying still supplies only one endorsement. The updated source
+passed 1,456 workspace tests (zero failures, one ignored documentation example)
+and strict all-target workspace Clippy. The release-node fixture also passed,
+including crash recovery and payments after restart. Evidence:
+`target/validation-evidence/checkpoint-sync-workspace-final.log`,
+`target/validation-evidence/checkpoint-sync-clippy-final.log`, and
+`target/validation-evidence/checkpoint-sync-release-network.log`; disposable
+node logs are in `target/validation-evidence/burst-validation.Vz4m5Db4`.
+
+## Iteration 25: beacon recovery, clock observations and wallet capability
+
+Accepted checkpoints now have a running-node worker that
+reconstructs their pending beacon queue from the replay-validated certificate
+chain. It fetches the exact pinned mainnet round, verifies its BLS proof, and
+persists it through the existing checkpoint boundary. A missing or wrong-round
+response leaves the request unchanged. This does not install live committees or
+enable voting: proposal agreement and full lifecycle replay remain prerequisites.
+The local relay regression passed: a wrong-round response leaves the certificate
+unchanged, retry requests the same round, the valid proof is persisted, and a
+restarted worker does not fetch it again. Strict workspace Clippy also passes.
+The full workspace and release-node checks are being rerun with this worker.
+
+The SNTP client preserves fractional timestamps, matches the request and server
+endpoint, checks server synchronization and timing, and rejects clock jumps
+during the exchange. Rejected observations no longer change the offset or its
+freshness; extreme timestamps cannot overflow arithmetic. Fifteen clock tests
+and strict network Clippy pass, including a local UDP exchange and the 2036 NTP
+era boundary. These unauthenticated observations are **not** a trusted error
+bound for pre-beacon signing. No such signing authority has been added.
+
+The wallet adapter retains the node's `selection_available` field. Paused or
+unknown review capability is visible and prevents offering a challenge that
+cannot be processed. Endorsements remain available with a visible warning that
+they cannot complete verification yet. Challenged wallets retain the community
+actions allowed by decision 17.3. The wallet production build and all 37 browser
+fixture checks pass, including a capability change during confirmation, both
+themes and narrow screens. Browser IPC fixtures are not native ledger E2E.
+The native Tauri adapter deserialization regression also passes.
+
+## Iteration 26: replay-authorized agreement driver
+
+`checkpoint_evidence` collects one authenticated ballot per representative and
+phase for a fixed parent and round. It counts the parent's delegated human
+weights, not keys or online attendance. Duplicate deliveries do not add weight;
+conflicting signatures, other contexts and unauthorized signers do not replace
+the first choice. Prepare and precommit quorums remain separate. Four targeted
+tests pass.
+
+The node's `checkpoint_driver` connects those quorums to the durable signer and
+certificate store. It validates manifests through confirmed replay, preserves
+saved choices, and can finish an existing prepared value after beacon release
+without signing a fresh choice. A missed original proposal is handled with a
+durable nil prevote before the justified precommit. It also exposes the round
+machine's quorum-backed timeout and higher-round recovery paths.
+
+A nine-signer message-level regression passes: six humans cannot decide, seven
+can, duplicate messages terminate without rebroadcast loops, late signers reject
+fresh votes without a clock bound, and a late prepared choice survives closing
+and reopening LMDB. It uses independent keys and stores, but not live TCP
+proposal transport. The driver caches bounded, replay-validated immutable cuts;
+startup and certificate admission independently read history again. Strict
+all-target workspace Clippy passes for this driver. The consolidated workspace
+run passed 1,464 tests, including the higher-round recovery assertions, with no
+failures and one ignored documentation example. Release-mode multi-node
+validation also passed, including hard restart, a new signed payment after
+restart, and fresh observer catch-up. Evidence is in
+`target/validation-evidence/agreement-driver-release-network.log` and
+`target/validation-evidence/burst-validation.vCUnExXu/`.
+
+The preceding full run's component tests passed, but its documentation phase
+failed because exported modules were changed during that run. That run is not
+counted as a full pass. `agreement-driver-workspace.log` is the fresh consolidated
+run; source is held stable through release validation. Proposal transport, scheduling,
+trusted signing-clock integration and complete lifecycle replay remain open.
+
+The node dashboard's native verification adapter now serializes `state` and
+`endorsement_count`, the names its React screens consume, while accepting the
+RPC's `status` and `endorser_count` names. Browser fixtures previously hid this
+mismatch. It also retains selection availability and renders paused or unknown
+selection in account lookup and explorer details. All 18 browser checks and the
+production build pass. Native compilation, the adapter regression and real
+WebKit IPC checks also pass against a fresh local development node. All 12 read
+commands succeed; verification lookup and explorer details render the real
+state/count/capability, and closing the dialog restores keyboard focus. The
+first navigation run expected a peer table on an empty peer list; the corrected
+test accepts the explicit empty state. That failed run is retained separately.
+The native runner isolates app settings and uses an explicitly supplied
+disposable-node endpoint. Its app and node were stopped after testing; existing
+user data was untouched. Evidence: `node-verification-capability-webkit-final.log`.
+
+## Iteration 27: later-round evidence and agreement delivery
+
+The driver now collects authenticated later-round ballots itself. One latest
+ballot per authorized representative bounds memory; different rounds and
+duplicate keys cannot be combined into catch-up authority. The existing >f
+human-weight requirement still applies, and advancing preserves the saved
+prepared choice. Six evidence tests, the nine-signer driver regression and
+strict workspace Clippy pass.
+
+Agreement payloads have bounded pull-based delivery: 16 KiB chunks, at most
+16 MiB per message, a 32 MiB/16-message publication cache, 64 queued offers,
+four offers per peer, and one active download. Requests retry without trusting
+advertised allocation sizes. Mismatched peers, offsets, sizes, digests and
+contexts are rejected. A receiver acknowledges only after driver acceptance,
+so missing signed history can arrive through bootstrap before another attempt.
+Wire generation 6 identifies this new envelope; block version 3 is unchanged.
+Three transport tests pass, including a message larger than one wire frame.
+
+A clock observation now includes monotonic elapsed time spent replaying history
+or waiting for a database writer in its conservative uncertainty bound. It is
+not silently treated as a fresh observation after that work. All 18 targeted
+checkpoint tests and strict all-target workspace Clippy pass at this boundary.
+
+The single-height network worker joins transport, evidence validation, durable
+signing, retry and phase timers. The first nine-signer TCP test timed out after
+the seventh participant joined; that is a failure, not a passed integration
+check. The worker's scheduling cache now avoids repeatedly validating durable
+signatures while handling transport packets. Durable transitions retain their
+independent checks. The rerun passed in 61.68 seconds: six signers cannot decide,
+a seventh permits agreement, and the final two receive the same decision with
+no authority to sign fresh values. Its diagnostic state dump remains available
+on timeout. Evidence: `checkpoint-service-tcp-cached-tests.log`.
+The fixture uses preconnected TCP sockets and a historical test clock, not
+automatic daemon startup or a production trusted-clock service. Normal verifier
+selection remains gated.
+
+### Iteration 28 — authenticated signing clock and node agreement runtime
+
+The iteration-27 workspace run completed with **1,471 passed, zero failed and
+one ignored**. Strict workspace Clippy also passed. Evidence is in
+`checkpoint-service-workspace.log` and `checkpoint-service-clippy.log` under
+`target/validation-evidence/`.
+
+The signing clock is now separate from diagnostic SNTP offsets. Its NTS client
+uses exactly `ntp-proto = 1.9.0`, with its unstable internal API isolated behind
+a read-only measurement adapter. The ignored source reference is
+`references/ntpd-rs`, tag `v1.9.0`, commit
+`46ec9bb4d5b6cb24f814f5543d85b9138afb4cba`. The adapter does not steer the host
+clock. TLS certificate and hostname checks remain enabled, and NTS authenticates
+the UDP responses. There is no unauthenticated fallback.
+
+At least three fresh, separately configured operators are required. The interval
+calculation assumes at most one supplies an incorrect bound. It takes the hull
+of every consistent leave-one-source-out intersection, rather than choosing a
+convenient median or pair. Disjoint replies, stale observations, excessive root
+error, unsynchronized/leap-warning responses and detected host-clock jumps remove
+signing authority. The local clock assumptions and operational limits are in
+`CHECKPOINT_SELECTION.md`; NTS authentication alone does not prove UTC accuracy.
+
+Eleven clock tests passed, including real local TLS and authenticated UDP exchanges,
+tampered time headers, replayed responses, untrusted certificates and hostname
+mismatch. Network all-target Clippy passed. A public interoperability probe
+accepted Cloudflare, Netnod and SIDN measurements and returned a three-second UTC
+interval containing the host time. An initial PTB hostname failed DNS; the default
+was replaced with Canonical's documented NTS pool. This probe is not evidence
+that every public operator is always reachable. Logs: `nts-authenticated-tests-final.log`,
+`nts-clippy.log` and `nts-public-probe-all-sources.log`.
+
+Node startup now owns the cancellable NTS worker and keeps a shared representative
+key for payment and checkpoint voting. The new agreement runtime recovers saved
+manifests, builds local dependency-closed candidate cuts, validates received
+proposals from signed history, rotates certified heights and retains the previous
+decision for late peers. Observer admission is wired to the node; automatic
+signing remains behind `CHECKPOINT_SELECTION_ENABLED`. Full lifecycle replay and
+unbiased missed-deadline recovery are still required.
+
+`checkpoint_runtime_builds_candidates_and_advances_late_nodes_over_tcp` passed
+in 99.29 seconds. Unlike the previous single-height fixture, it starts runtime
+workers without supplying candidates. They derive the same second checkpoint
+from signed confirmed history. Six humans remain below quorum, the seventh
+permits a decision, and the last two receive the retained decision with no clock
+authority for fresh signatures. This still uses preconnected TCP sockets and a
+historical test clock; it does not open the release gate or establish a live
+end-to-end verification lifecycle. Evidence: `checkpoint-runtime-tcp-tests.log`.
+
+The dependency-closed automatic-cut regression also passed. The completed
+workspace run passed **1,484 tests, zero failed and one ignored**, including
+the nine-human TCP runtime fixture, network replay and governance activation /
+restart checks. Strict all-target workspace Clippy passed. Evidence:
+`checkpoint-automatic-cut-tests.log`, `checkpoint-runtime-workspace.log` and
+`checkpoint-runtime-clippy.log`. This run precedes the attempt-scoped receipt
+change below; it is not evidence for that subsequent change.
+
+### Iteration 29 — attempt-scoped stake settlement
+
+Verifier receipts now use the certified selection context in their storage key;
+challenger receipts use the signed challenge block hash. Outcomes carry those
+same identities, including prior revote panels and challenge expiry. Settled
+receipts cannot be overwritten by a later attempt. Snapshot version 5 retains
+the bindings across restart. Older snapshots retain their original state but do
+not receive fabricated bindings: their unscoped settlements require signed
+history replay and fail closed until that is available.
+
+This preserves the chosen stake/reward rules. It does not fix final-outcome
+ordering, agree an expiry cutoff, or complete lifecycle replay. Those remain
+release-gate requirements.
+
+All 87 verification-package tests and all 10 node settlement tests passed.
+The added regressions cover distinct revote contexts through serialization,
+version-4 snapshots without invented context, a stale outcome against a newer
+stake after restart, missing identities, and overwriting/repeating a consumed
+receipt. Existing challenge/revote atomicity tests remain passing. Evidence:
+`attempt-context-verification.log` and `attempt-context-node.log`.
+
+Checkpoint runtime initialization now derives its anchor and previous decision
+from the same loaded record. Signer recovery occurs in the retrying poll path;
+a catch-up race cannot permanently exit the worker during construction. Fresh
+candidate creation waits for successful recovery, and a driver cannot join a
+different height from the runtime that owns it. A recovery-failure regression
+passed without mutating the corrupt fixture's reservation before explicit test
+repair. Strict workspace/all-target Clippy passed. Evidence:
+`checkpoint-runtime-recovery.log` and `attempt-context-clippy.log`.
+
+The release-process validation passed with wire version 6: three independent
+representative keys, signed payments/merge/refund/delegation/governance checks,
+uncertified-operation rejection, hard-stop recovery, a new payment after restart,
+and a fresh fourth observer replaying the same ledger. Evidence:
+`attempt-context-release.log` and `burst-validation.o8ucXfb5/`. All processes and
+ledgers were disposable; the manual-test ledger and Azure were untouched. This
+run does not exercise enabled certified verification: its gate remains closed.
+
+### Iteration 30 — arrival-independent outcome identity
+
+A new regression first reproduced differing verification timestamps when the
+same three signed votes arrived in different orders (`outcome-order-before.log`).
+The candidate path now resolves every participant's attempt-scoped receipt back
+to its signed source. The greatest `(timestamp, hash)` source determines the
+outcome time and reward claim identity; packet arrival order is not an input.
+Missing, already settled, mismatched or context-free source receipts fail before
+economic settlement. Nonterminal votes do not fabricate an outcome context.
+
+All 13 node settlement tests passed (`outcome-order-node.log`), including all six
+vote orders, equal-timestamp tie handling, successful and rejected challenges,
+restart, revotes, atomic failures, and stale-attempt protection. Reward claims
+and their provenance serialize identically across the tested permutations.
+
+This is component-level determinism for a fixed admitted vote set. The claim's
+source block alone does not prove the complete panel. Causal cementation, signed
+history replay, expiry cutoffs and concurrent revocation/payment ordering still
+need the complete agreed lifecycle dependencies. The release gate remains
+closed; the previous release-process test predates this change.
+
+Strict all-target workspace Clippy passed, followed by **1,491 tests passed,
+zero failed and one ignored**. This includes all 395 node unit tests, independent
+checkpoint TCP runtimes, signed replay/catch-up and governance activation/restart.
+Evidence: `outcome-order-clippy.log` and `outcome-order-workspace.log`.
+The source-inventory checker also passed with 388 sections and zero inventory
+errors; 386 remain unsigned-off. Whitepaper and decision-document hashes remain
+unchanged. These counts do not establish protocol completion.
+
+### Iteration 31 — shared live/replay lifecycle transitions
+
+The lifecycle writer now takes a narrow candidate-ledger interface. The LMDB
+implementation writes into its caller's uncommitted transaction. The replay
+implementation sees only replay-derived account/pending/receipt maps and already
+applied signed blocks, plus the current block. It cannot read the live database's
+economic snapshots or account afterimages. Creator verification in confirmed
+replay now uses the same `verify_wallet` transition as live processing.
+
+A parity regression applies the same certified component-fixture votes to both
+backends and compares accounts, pending reward provenance, stake balances and
+receipt bytes after every vote. All **14 settlement tests** and **29 confirmed
+history/checkpoint tests** passed, followed by strict workspace/all-target Clippy.
+Evidence: `shared-lifecycle-backend-tests.log`,
+`shared-lifecycle-history-tests.log`, and `shared-lifecycle-clippy.log`.
+The parity fixture starts from explicit component state; it does not establish
+certified history admission. Normal-vote/challenge history is still gated while
+certificate-bound replay and full panel dependencies are connected.
+
+### Iteration 32: certified normal-vote history replay
+
+Checkpoint replay now carries validated ancestor records, including their exact
+beacon proofs, into the history interpreter. A normal vote must match its
+certificate's target and selected voter set. It depends on the full certified
+cut. Target spending and reward claims depend on the complete selected panel,
+not just the one vote named as the reward source.
+
+The interpreter installs the already frozen committee without filtering it
+against later account state or penalties. Freezing alone grants no voting
+authority; installation still verifies the certificate and exact beacon.
+The shared ledger adapter then applies the same vote checks, attempt receipts,
+stake settlement and reward provenance as the live candidate path.
+
+Five signed-history regressions passed. They cover verification and unlocked
+stakes, target spending, partial panels, malformed votes, minority-funded rewards
+and their claims, plus a successor checkpoint's new human roster after restart.
+The stores contain deliberately false account projections and invalid economic
+snapshots. Replay must derive its answer from signed history. Evidence is in
+`certified-vote-replay-tests.log`. An earlier reward assertion incorrectly
+expected expiry to rewrite the signed balance; the corrected test checks the
+expired counter and transferable portfolio separately. That failed expectation
+is retained in `certified-vote-replay-balance-expectation.log`.
+
+This path supports initial normal panels only after bootstrap has exited.
+Revotes, challenges, parameter changes and agreed timeout effects are not
+supported. A verifier's later BRN spend can depend on an implicit stake release;
+that dependency still needs an agreed signed lifecycle context. Adding every
+panel vote to every later spend would create cycles for valid interleaved
+payments. The fixed-panel timestamp rule is also not an agreed finalization
+cutoff. The release gate remains closed.
+
+The full workspace run passed **1,498 tests**, with zero failures and one ignored
+documentation example. Strict all-target workspace Clippy also passed. Evidence
+is in `certified-vote-replay-workspace.log` and
+`certified-vote-replay-clippy.log`. The first full run found an old assertion
+that still classified every verification vote as unsupported. Its failed log is
+retained in `certified-vote-replay-old-unsupported-assertion.log`; uncertified
+votes now have a separate rejection regression. This run predates iteration 33.
+
+### Iteration 33: irreversible bootstrap exit and bounded replay dependencies
+
+Decisions 27.1, 27.2 and 35.4 end the creator's special authority after bootstrap.
+Checking only today's verified count could restore that authority after
+revocation or an increase to the governed threshold. The node now records the
+phase with genesis and closes it in the same transaction as verification or
+parameter activation. Once closed, it stays closed. Its writes participate in
+the existing block undo journal; an aborted candidate cannot publish the exit.
+
+The genesis-authoring RPC checks that durable phase. It also reports the target's
+actual verification state after confirmation rather than assuming an endorsement
+must have verified it. Missing or corrupt phase history fails closed. Existing
+ledgers are not reset or silently granted fresh bootstrap privileges. The
+confirmed-history interpreter reconstructs the phase from genesis and signed
+admissions rather than trusting the stored marker.
+
+The targeted pass completed 22 node bootstrap-related tests, 90 verification
+tests and 17 RPC tests. These include abort/restart behavior, creator endorsement
+after a revoked wallet and raised threshold, and approved threshold activation.
+Evidence is in `bootstrap-phase-node-tests.log`,
+`bootstrap-phase-verification-tests.log` and `bootstrap-phase-rpc-tests.log`.
+The subsequent history/Clippy command was interrupted before its final result;
+it is not counted as a pass. The resumed full workspace run passed 1,505 tests,
+with zero failures and one ignored documentation example. This includes 405 node
+unit tests and the startup refusal regression. Strict all-target workspace Clippy
+also passed. Evidence is in `bootstrap-phase-workspace.log` and
+`bootstrap-phase-clippy.log`.
+
+The separate `bootstrap_exit_network` test passed. Two independent signing nodes
+reach a fixture threshold of two humans. Both close creator authority, reject
+the convenience RPC and treat a subsequent client-signed creator endorsement
+as normal pending verification. Both restart, and a fresh observer reconstructs
+the same closed phase and pending endorsement over the network. No database
+state is injected into this test. Evidence is in `bootstrap-phase-network.log`.
+The release-network run also passed on three independent fixture signers. It
+covers signed payments, provenance-preserving merges, declined transfers,
+delegation, governance submission/withdrawal, and rejection of uncertified
+verification operations. After a hard kill, every node recovered its recorded
+state and confirmed a new payment. A fourth node synced from a fresh ledger.
+Evidence is in `bootstrap-phase-release.log` and `burst-validation.hv9kYPY4/`.
+This does not open normal verification or prove agreed governance activation.
+The wire-version-6 NAT/firewall run passed all seven case groups with zero
+failures. These cover outbound-only NAT, firewall interruption/reconnect,
+same-public-IP clients with equal and distinct listening ports, double
+NAT/CGNAT, manual forwarding, and UPnP. UPnP checks include renewal failure,
+rediscovery, lease expiry after a crash, competing LAN clients, alternate ports,
+real daemon advertisement and shutdown cleanup. A CGNAT gateway is reported as
+non-routable; UPnP is not claimed to traverse it. Evidence is in
+`bootstrap-phase-nat.log` and `burst-nat.z9SK7FUz/`. The lab used an isolated
+container and changed no host firewall or Azure resource. These transport
+fixtures do not establish distributed-quorum safety or cover every real router.
+
+Certified replay now caps additional lifecycle dependency edges at 1,048,576 and
+checks the remaining budget before allocating a certificate's heads or panel
+votes. Selected-voter membership uses a set. A boundary test checks rejection
+below the required dependency budget. Larger histories require incremental
+replay; they must not consume unbounded memory or silently omit prerequisites.
+
+### Running-app revalidation
+
+The wallet and node dashboard both passed production frontend builds and native
+debug builds. Chromium checks passed 50 wallet tests and 18 node tests. The
+wallet now defers secondary screens, reducing its initial JavaScript from
+501.14 kB to 449.63 kB; loading and failed screen requests preserve navigation.
+
+Real Linux Tauri/WebKit checks then passed against a separate local Dev ledger.
+Wallet tests cover recovery, encrypted backup, onboarding, signed payments,
+sender restrictions, receiving, automatic merging, transfer and locking. The
+payment-form test checks review/cancellation without signing and compares the
+confirmed receipt to the exact one-raw-unit pending payment. No IPC is mocked.
+The node app passed RPC adapters and rendered navigation, verification lookup,
+provenance tracing and explorer-dialog focus restoration.
+
+Evidence is in `continuation-native-wallet.log`, `continuation-native-node.log`,
+`/tmp/burst-native-wallet-tSurEd/` and `/tmp/burst-native-dashboard-frTOIb/`.
+The reusable wallet runner is `../wallet/tests/native-session.mjs`. It uses a
+fresh node and separate desktop profile, and its write tests require loopback
+Dev RPC. These results do not enable the gated verification lifecycle or certify
+macOS/iOS, production packaging or adversarial economics.
+
+### Iteration 34: durable live committee handoff
+
+The beacon worker now has a gate-controlled connection to the live verification
+orchestrator. It freezes the accepted request before fetching randomness and
+installs the exact committee after the BLS proof is persisted. A candidate copy
+is published only after its snapshot commits; aborting a write leaves both the
+live state and saved snapshot unchanged. Restart can recover either a frozen
+request or its installed committee without resampling or replaying events.
+
+The handoff requires a persisted, replay-validated certificate, locally confirmed
+heads, matching parameter identity, completed bootstrap and an initial normal
+verification attempt. Live endorsement addresses, burns and timestamps must
+match the cut regardless of arrival order. Extra or changed endorsements,
+challenge/revote state and undrained lifecycle events fail closed. The worker
+does not overwrite those states or erase their signed burns.
+
+The HTTP fixture exercises observer mode and active installation separately:
+an authenticated beacon for the wrong round leaves the frozen request pending,
+then the exact round installs the committee. Restart preserves the context and
+does not refetch the stored proof. These historical fixtures do not prove
+pre-beacon agreement timing or a full independent-node voting lifecycle.
+The source release gate remains closed. Late endorsements outside the cut,
+parameter/lifecycle epochs and timeout finalization still need agreed ordering.
+
+The workspace suite passed 1,512 tests with no failures and one existing ignored
+documentation example; strict all-target Clippy passed. The final restored-panel
+check also passed in the six-test handoff run. Evidence is in
+`live-selection-workspace.log`, `live-selection-clippy.log`,
+`live-selection-tests.log` and `live-selection-worker-tests.log`. The source
+inventory still has 388 sections, 386 without sign-off and no coverage errors.
+
+### Iteration 35: certified normal revotes
+
+A completed inconclusive panel can now queue its next attempt in checkpoint
+replay. The request binds the new attempt, a deterministic prior-panel trigger,
+the unchanged endorsement history and a new frozen pool excluding earlier
+verifiers. It requires a new exact beacon. Missing prior attempts or votes,
+old-panel voters, stale contexts and pre-beacon votes fail replay. A missing
+vote does not count as an agreed timeout.
+
+Earlier stakes remain locked while the next panel is pending or partially voted.
+The final outcome settles both rounds through the shared live/replay adapter.
+Tests cover a tie followed by verification, rewards funded by the incorrect
+vote, claiming a prior verifier's reward, all-Neither rejection at the revote
+limit, certificate-chain restart and fresh-store import.
+
+The gated live handoff also supports these revotes. It compares a canonical
+target-history commitment, including prior vote choices, stakes, timestamps,
+contexts and exclusions. Completed older panels are recognized through their
+signed vote bindings instead of being reinstalled. Aborted writes preserve the
+waiting state; the worker persists the next committee and prior stakes together.
+Modified prior votes or exclusions fail without overwriting the snapshot.
+
+Focused evidence is in `certified-revote-tests.log`,
+`certified-revote-incomplete.log` and `certified-revote-live-regressions.log`.
+The new fixture is the pinned chain's authentic
+[historical round 103](https://api.drand.sh/8990e7a9aaed2ffed73dbd7092123d6f289930540d7651336225dc172e51b2ce/public/103),
+verified by the normal BLS path. These are replay/worker fixtures, not proof of
+live pre-beacon timing or independent-node lifecycle finalization. The release
+gate remains closed. Challenges, timeout cuts, late-endorsement ordering and
+implicit stake-release dependencies still need integration.
+
+The workspace regression passed with 1,518 tests, zero failures and one existing
+ignored documentation test (`certified-revote-workspace.log`). Strict all-target
+Clippy also passed (`certified-revote-clippy.log`). The inventory check remains
+388 entries, 386 without sign-off and zero inventory errors; this is not a
+completion percentage.
+
+The first combined run hung during TCP fixture setup. Debugger inspection found
+a failed socket connection after the process reached its 1,024-descriptor limit,
+while `join!` kept waiting for an accept that could never complete. The two
+nine-node meshes now share a fixture semaphore, and connection setup uses
+bounded `try_join!`. Consensus assertions and deadlines were not relaxed.
+Interrupted runs and debugger evidence remain in the validation-evidence
+directory and are not counted as passes.
+
+### Iteration 36: outcome and reward confirmation dependencies
+
+Validated vote settlement now journals the complete signed source set with its
+economic effects. The source set includes prior revote stakes. Cementation of
+the outcome-producing vote visits the other sources before promoting its
+authority changes. Reward claims require the complete set even when their
+canonical source vote was confirmed earlier. A source vote alone is not proof
+that the other panel votes are confirmed.
+
+These are local confirmation records, not new signatures or peer certificates.
+Remote semantic replay still derives its own dependencies from certified panels.
+The recorded triggering vote may differ with arrival order; the canonical reward
+source and its full dependency set do not. Missing or changed transition records
+are checked against the committed journal; malformed records fail closed.
+Records commit and abort with the settlement and survive restart.
+
+Focused checks passed: 18 settlement/backend tests, seven cementation tests and
+ten certified-vote/revote replay tests. Evidence is in
+`outcome-dependencies-settlement.log`, `outcome-dependencies-cementation.log` and
+`outcome-dependencies-replay.log`. The first missing-source fixture restored
+block bytes without restoring their deleted height indexes; it was corrected to
+restore both. Its failed log is retained separately. The complete workspace
+rerun passed with 1,522 tests, zero failures and one existing ignored documentation
+test (`outcome-dependencies-workspace.log`). Strict all-target Clippy passed
+(`outcome-dependencies-clippy.log`).
+
+The selection gate remains closed. This does not yet supply explicit prerequisites
+for every spend of released stakes, automatic new-identity spending closure,
+lifecycle fork replacement, agreed timeout cuts, or independent-node certified
+verification. Those remain required before enabling the path.
+
+### Iteration 37: outcome/reward rollback closure
+
+Rollback planning now uses the same journaled outcome/reward prerequisites as
+cementation, in addition to explicit block dependencies. The added edges count
+against the traversal byte budget and are retained for reverse scheduling.
+Replacement candidates cannot refer to an outcome removed with the losing branch.
+
+The regression delivers the canonical reward-source vote first, completes the
+outcome with another account's vote, then claims a reward. Before the change,
+planning a rollback of the outcome-producing vote failed because the reward
+claim lay outside its dependency closure. The planner now includes the claim
+before that vote. Aborting the rewind preserves the complete outcome; committing
+and reopening restores the two earlier votes and their locked stakes, with no
+reward or verified target left behind.
+
+That regression and all 13 existing rollback-planner tests passed. Evidence is
+`outcome-rollback-before.log`, `outcome-rollback-after.log` and
+`outcome-rollback-plan.log`. The first rewind attempt also exposed a missing
+frontier in the component fixture's initial accounts; the fixture now initializes
+it alongside each opening block. Its failed log is retained separately. The
+complete workspace rerun passed with 1,523 tests, zero failures and one existing
+ignored documentation test (`outcome-rollback-workspace.log`). Strict all-target
+Clippy also passed (`outcome-rollback-clippy.log`).
+
+The isolated release-daemon validation also passed (`outcome-rollback-release.log`,
+`burst-validation.3IF5FMWf/`). Three independent development signers agreed on
+payments, claims, declines, merges/provenance, delegation and governance records;
+uncertified lifecycle submissions remained rejected without economic changes.
+Hard-crash restart preserved the state, a new payment confirmed after restart,
+and a fresh fourth node reconstructed the ledger. The owned processes exited;
+the manual test ledger was not touched. This run does not exercise the gated
+certified-verification lifecycle.
+
+This is not authorization for a network fork or support for arbitrary lifecycle
+replacement. Shared-snapshot conflicts outside the dependency closure still fail
+closed. Released-stake spending, re-verification and outcome reversal across
+confirmed epochs remain unfinished. The release gate is unchanged.
+
+### Iteration 38: first-block identity confirmation dependencies
+
+Successful bootstrap and normal verification now journal their signed identity
+source. The first subsequent account block pins that source in its own journal;
+later blocks inherit the prerequisite through their predecessor. Normal outcomes
+resolve to the complete signed panel, not just the canonical source vote. This
+applies both to opening an already verified wallet and to an existing account's
+first block after verification. It does not create an account block at verification,
+delay BRN accrual, add a user claim action, or change the wire format.
+
+The regression first failed with an unconfirmed authority prerequisite. It now
+confirms the full outcome before the target's block. Additional tests cover
+bootstrap endorsement ordering, restart, abort/retry, one binding per identity
+transition, missing/changed binding records and rollback followed by reapplication.
+Both identity and outcome records are checked against the owning committed
+journal, including rejecting an injected record absent from that journal.
+
+Focused checks passed: 22 identity-related tests, 21 settlement tests, seven
+cementation tests and 13 rollback-planner tests. Evidence is retained in
+`identity-dependencies-before.log`, `identity-dependencies-after.log`,
+`identity-dependencies-focused.log`, `identity-dependencies-settlement.log`,
+`identity-dependencies-cementation-recheck.log` and
+`identity-dependencies-rollback.log`. The stricter journal check rejected an older
+synthetic cementation fixture that wrote its outcome record outside the vote
+transaction; that fixture now stages them together, as production settlement does.
+The failed fixture run is retained separately. The complete workspace rerun passed
+with 1,526 tests, zero failures and one existing ignored documentation test
+(`identity-dependencies-workspace.log`). Strict all-target Clippy passed
+(`identity-dependencies-clippy.log`). The five coverage-check tests and source
+inventory also passed; the 388 indexed sections still have 386 without sign-off.
+
+These records describe validated local history, not peer-supplied authority.
+Remote replay must continue deriving its own identity dependencies. This does
+not establish distributed identity activation, general re-verification ordering,
+released-stake spend closure or arbitrary lifecycle fork replacement. The
+certified-selection release gate remains closed.
+
+The isolated release-daemon run also passed (`identity-dependencies-release.log`,
+`burst-validation.sHkz3HjR/`), including three independent signers, hard restart,
+a post-restart payment and fresh fourth-node catch-up. Those happy-path results
+did not exercise the missing independent-quorum condition addressed next.
+
+### Iteration 39: local prerequisites cannot supply independent finality
+
+Review of the identity binding exposed an authorization gap in the earlier local
+dependency traversal. A wallet block's signature does not commit its local-only
+identity source. Likewise a reward link names one vote, not the other panel
+votes. Finalizing such a block cannot by itself authorize a choice among forks
+of those independent prerequisites.
+
+Cementation now requires every local-only prerequisite either to be cemented
+already or to have its own durable consensus handoff. Explicit signed dependencies
+retain their causal traversal behavior. Missing independent decisions return an
+incomplete result without committing staged heights, pruning journals or
+acknowledging the target; the durable worker retries it. Local handoffs remain
+local decisions, not portable quorum certificates.
+
+The bootstrap regression first reproduced premature finality
+(`implicit-dependency-quorum-before.log`). The test now requires the wallet block
+to remain pending without the endorsement's decision, then complete after that
+decision survives restart. Normal verification checks that a partial set of
+panel decisions cannot finalize the wallet. Reward claims similarly wait for
+the other panel decisions. These assertions strengthen the earlier happy-path
+tests; their final outcome assertions remain in place.
+
+The full workspace rerun passed with 1,526 tests, zero failures and one existing
+ignored documentation test (`implicit-dependency-quorum-workspace.log`). Strict
+all-target Clippy passed (`implicit-dependency-quorum-clippy.log`). The focused
+identity, cementation and rollback runs also passed (22, seven and 13 tests;
+`implicit-dependency-quorum-identity.log`, `implicit-dependency-quorum-cementation.log`
+and `implicit-dependency-quorum-rollback.log`). The coverage checks passed.
+The isolated release-daemon run passed as well
+(`implicit-dependency-quorum-release.log`, `burst-validation.83cFPSw5/`), including
+hard restart, a post-restart payment and a fresh fourth node. Its processes exited.
+This does not resolve agreed
+roster epochs, independent-signer Byzantine partition safety, or all lifecycle
+dependency and replay gaps. The selection gate remains closed.
+
+### Iteration 40: dependency finality before signing and durable handoff
+
+The pinned rsnano implementation checks confirmed dependencies before voting
+(`ledger/src/vote_verifier.rs` and
+`node/src/consensus/vote_generation/vote_generator.rs`). Reviewing BURST's earlier
+cementation fix exposed the corresponding upstream requirement: an unresolved
+local dependency must not gain irreversible protection just because a dependent
+block reached the handoff queue.
+
+BURST now checks explicit and local lifecycle prerequisites before reserving a
+final vote. Waiting returns a distinct pending-dependencies result, without
+consuming a sequence number or recording a final choice. Tentative soft voting
+is unchanged. Cached payment replacements also check the current identity source,
+because their signed payload has no committed journal yet. This is a local
+readiness check, not a new certificate or a peer-trusted snapshot.
+
+The normal consensus handoff and elected fork installation now require dependency
+cementation too. The normal path retains its election when not ready; the fork
+path aborts its candidate transaction. This prevents a pending dependent from
+pinning an independently unresolved prerequisite. Cementation retains iteration
+39's independent-decision guard as a second boundary.
+
+The new signing regression first reproduced premature final-vote reservation
+(`dependency-finality-vote-before.log`) and passed after the change
+(`dependency-finality-vote-after.log`). All six signing tests, eight cementation
+tests and 22 identity-related tests passed
+(`dependency-finality-signing-recheck.log`, `dependency-finality-cementation.log`,
+`dependency-finality-identity.log`). Three older signing fixtures used nonexistent
+predecessors; they now include a confirmed, indexed opening. Their existing
+equivocation and restart assertions remain. The failed fixture run is retained
+in `dependency-finality-signing.log`.
+
+The first network check exposed a genesis initialization assumption: the first
+child had previously cemented height one implicitly. Initialization now validates
+the exact configured genesis hash and both height indexes, then confirms only
+that anchor. Existing account heads, adjudications, burns and stakes are preserved.
+A regression covers corrupt/foreign anchors, atomic abort and unchanged descendants
+(`dependency-finality-genesis.log`). The recovery fixture now expects the trusted
+genesis at height one, while its pending child must still wait for startup
+restoration. Its former height-zero assertion is retained in the failed
+`dependency-finality-network-recheck.log` run.
+
+All nine focused network/recovery tests passed after this change
+(`dependency-finality-network-anchor.log`): independent offline-representative
+finality, crash recovery, payment-fork replacement and merge-fork replacement.
+The earlier failed first-payment run is retained in
+`dependency-finality-network.log`. The complete workspace rerun passed with
+1,529 tests, zero failures and one existing ignored documentation test
+(`dependency-finality-workspace.log`). Strict all-target Clippy passed
+(`dependency-finality-clippy.log`), as did the coverage tests and inventory.
+The two-payment pipeline check also passed: both payments remain pending without
+quorum, then confirm without resubmission when the independent signer returns
+(`dependency-finality-pipeline.log`). The subsequent release run passed the
+existing signed journeys, confirmed-state restart and fresh-observer checks, but
+failed the new pending-chain hard-restart check (`dependency-finality-release.log`,
+`burst-validation.wsovgjZV/`). It is not a passing release run.
+Agreed electorate epochs and general lifecycle fork/replay handling still need
+validation. This does not open the certified-selection gate.
+
+### Iteration 41: rediscover pending elections after restart
+
+Two restart cases exposed the same missing recovery path. The release probe
+staged two signed payments on an isolated minority representative, killed its
+process, then restarted all three signers. The separate network regression
+restarted all three nodes after each had already stored the pending chain.
+Neither case resumed confirmation. The latter failure is recorded in
+`pending-chain-restart-before.log`.
+
+The pinned rsnano backlog scanner continuously discovers unconfirmed accounts
+(`node/src/block_processing/backlog_scan.rs`). BURST now scans bounded pages of
+256 accounts using one LMDB read snapshot per page. It schedules only the first
+unconfirmed block of each account, checks its hash and both height indexes, and
+cycles the cursor. This also rediscovers elections dropped at capacity or
+expired during an outage. Reading the ledger does not restore votes, choose a
+fork, change economic state or authorize a confirmation handoff.
+
+An active election without this node's own vote can now obtain a canonical,
+durably reserved response through the existing vote path. Peers still have to
+supply their signatures. Final voting and handoff retain the dependency-finality
+checks from iteration 40. No offline human is removed from the denominator.
+
+Both independent-representative network tests passed after the fix
+(`pending-chain-restart-after.log`). The two bounded-scanning regressions passed
+(`pending-chain-scan.log`), as did the snapshot/cursor test
+(`pending-chain-snapshot.log`) and strict all-target Clippy
+(`pending-chain-clippy.log`). The full workspace passed with 1,534 tests, zero
+failures and one existing ignored documentation test
+(`pending-chain-workspace.log`). This includes the third network case, which
+expires elections and requires rediscovery without payment resubmission. The
+coverage tests and inventory passed too (`pending-chain-coverage.log`). The
+release rerun passed the existing journeys but still failed when only the
+crashed node had received the pending payloads (`pending-chain-release.log`,
+`burst-validation.141tl6Jp/`). Resuming vote requests was insufficient because
+the other nodes did not know those hashes. See iteration 43. The
+certified-selection gate remains closed.
+
+### Iteration 42: account history behind cross-account lifecycle writes
+
+A target may change its representative while a verification panel is pending.
+The outcome journal then updates a target account whose representative change
+is not necessarily confirmed. The former readiness check allowed a final vote
+and handoff for that outcome. Confirmed-authority promotion would later reject
+the conflicting prerequisite, but the earlier reservation was already too late
+to leave both branches freely reversible.
+
+The new regression reproduced that readiness error
+(`cross-account-prerequisite-before.log`). Dependency checks now include the
+signed heads behind the journal's cross-account writes. The heads come from
+the committed before-images, not later live state. They must match the account's
+height indexes. A lifecycle write cannot create or replace another account's
+chain. As with the other local-only dependencies, each prerequisite needs
+independent finality before final voting or handoff.
+
+The regression passes after the change
+(`cross-account-prerequisite-after.log`). It reopens the ledger, checks that
+handoff waits, rewinds the outcome before the representative change in an
+aborted transaction, then confirms the change and outcome in order. The final
+verified account keeps its chosen representative. All 22 settlement tests,
+eight cementation tests and 13 rollback tests passed
+(`cross-account-settlement.log`, `cross-account-cementation.log`,
+`cross-account-rollback.log`). The subsequent workspace run passed 1,537 tests
+with zero failures and one existing ignored example
+(`pending-payload-workspace.log`). This remains
+local causal accounting, not a signed cross-account witness, agreed lifecycle
+cut or permission to enable lifecycle fork replacement.
+
+### Iteration 43: recover pending payloads, not only their elections
+
+The release failure from iteration 41 isolated the missing step. The survivor
+restored an election and requested votes, but its peers had never received the
+two payment blocks. The existing rebroadcast worker had no entries after restart.
+Also, a seed node without configured bootstrap peers did not start its own
+catch-up worker, even when inbound peers had newer history.
+
+The bounded backlog scan now repopulates the existing rebroadcast queue with
+the next unconfirmed account blocks. Rediscovery preserves each entry's backoff
+and does not evict a full queue's pending work. Peers receive normal signed
+block messages and still run normal admission. The ten rebroadcast tests passed,
+including repeated rediscovery and queue-capacity behavior
+(`pending-payload-broadcast.log`).
+
+Catch-up now runs with or without configured seeds and uses connected peers.
+The logs also exposed an unknown-cursor response bug: a peer that did not know
+the requested predecessor returned the chain from its opening. The server now
+reads a consistent indexed snapshot and returns no successor for an unknown or
+foreign-account cursor. The request's chain check remains unchanged.
+All 24 bootstrap regressions and strict all-target Clippy passed
+(`pending-payload-bootstrap.log`, `pending-payload-clippy.log`). The workspace
+passed 1,537 tests with zero failures and one existing ignored example across
+61 suites (`pending-payload-workspace.log`).
+
+The release hard-crash run passed (`pending-payload-release.log`,
+`burst-validation.73ChN55m/`). Two original signed payments remained pending
+with only a minority online. After that node was killed and all three signers
+restarted, both hashes confirmed everywhere without resubmission. The run also
+passed the existing signed-wallet journeys, confirmed-state recovery, a new
+payment after restart and fresh-observer reconstruction. These disposable
+local nodes did not open the user's manual-test ledger or change Azure.
+
+### Iteration 44: running-node certified verification fixture
+
+A new unit-test-only fixture starts four real nodes with independent public
+development representative keys. It submits creator bootstrap endorsements,
+payments, receive-open blocks and verifier opt-ins through signed RPC blocks.
+After bootstrap closes, a normal endorsement triggers the checkpoint service.
+A local HTTP relay withholds the real, signed historical drand proof until a
+checkpoint is stored. All nodes then install the same three-person committee.
+
+The test rejects a signed vote with a wrong selection context without advancing
+the voter's chain. Two legitimate votes and one illegitimate vote meet the
+fixture's 60% threshold. All nodes verify the target, return the winners' stakes,
+burn the dissenter's 10 BRN and create two pending 5 TRST rewards. Confirmed
+history replay reconstructs the same verification and stake accounting.
+The initial network run passed (`certified-network.log`), as did the expanded
+settlement and replay run (`certified-network-settlement.log`).
+
+The clock and selection overrides exist only under `cfg(test)` and require a
+development network. There is no configuration, environment or CLI override in
+ordinary builds. The global selection gate and RPC availability flag remain
+false. Historic proofs and controlled time do not test honest real-time beacon
+secrecy, production NTS, missed-deadline recovery or Byzantine roster transitions.
+The expanded restart and fresh-observer test passed
+(`certified-network-recovery.log`). All four signers restarted. An empty fifth
+observer reconstructed the committee and signed voting history, with matching
+verified identity, frontiers, confirmations, stake accounting and pending
+rewards. Strict all-target Clippy passed (`certified-network-clippy.log`).
+The spending extension first failed because the HTTP client kept talking to a
+stopped node through an old keep-alive connection. That exposed the RPC shutdown
+bug in iteration 45. With that fix, reward receipt and the new person's BRN
+payment confirmed on all five nodes. Confirmed-history replay agrees on the
+resulting holdings and burn counter (`certified-spending-after.log`).
+
+### Iteration 45: close RPC sessions when their node stops
+
+The certified fixture retains its wallet clients across restart. A reward
+receive was reported as queued but never appeared in any ledger
+(`certified-network-spending.log`, `certified-spending-diagnosis.log`). Cancelling
+Axum's listener future left existing HTTP sessions alive. Those sessions retained
+the stopped node's RPC state and queued submissions for an abandoned processor.
+
+The node now signals Axum's graceful shutdown and awaits it. The rate-limit
+cleanup loop shares the server lifetime instead of running as a detached task.
+A focused regression reuses one wallet client across two node generations,
+rejects queries after each stop, and confirms a new payment after restart
+(`pooled-rpc-restart.log`). The same certified fixture then passed the reward
+receive and post-verification payment without replacing its clients.
+
+Node shutdown also aborts and joins unfinished owned tasks when its deadline
+expires. The old path dropped their handles, which detached them. Five shutdown
+tests pass, including cancellation and destruction of a stuck worker
+(`rpc-shutdown-workers.log`). Strict all-target Clippy passed
+(`rpc-shutdown-clippy.log`). The full workspace rerun is in progress.
+
+The WebSocket server had the same detached-session lifetime. Shutdown now
+signals upgraded sockets, aborts and joins subscription forwarders, closes
+their sockets with a bounded send, and waits for all sessions to leave. A real
+WebSocket client subscribes, receives an event, observes closure, and reconnects
+to a second server generation on the same port. All 14 WebSocket tests pass
+(`websocket-shutdown.log`). The added client dependency is test-only and was
+already in the workspace's resolved dependency set.
+
+The first combined workspace attempt overlapped the WebSocket API edit and
+failed compilation (`certified-workspace.log`); it is not counted as a test run.
+A subsequent combined run passed strict Clippy but exhausted the unit-test
+process's file-descriptor limit when the new full-node fixture overlapped the
+existing nine-node meshes (`session-shutdown-workspace.log`). Both mesh failures
+reported OS error 24, "Too many open files". The other 433 node tests passed,
+including the complete certified spending fixture. Large network fixtures now
+share the existing test-only semaphore. This changes fixture scheduling, not
+production concurrency, consensus thresholds or test assertions. The bounded
+rerun still failed one mesh with OS error 24 (`bounded-network-workspace.log`).
+Serializing those fixtures did not fix the underlying handle leak.
+
+### Iteration 46: release LMDB environments after their last owner
+
+The unit-test process retained hundreds of descriptors for deleted temporary
+`data.mdb` and `lock.mdb` files. Heed 0.20 keeps an internal environment reference
+until `prepare_for_closing` is called. Our stores only dropped their own Arcs.
+The same leak affected repeated node construction outside tests.
+
+All sub-stores now share an owned environment handle, including separate opens
+of the same canonical path. The last owner requests closure and releases its
+handle before another opener can acquire the path. Existing sub-stores retain
+access after the outer store drops. Failed database initialization also drops
+the owner. There is no forced close of a live transaction and no raised file
+descriptor limit.
+
+Two focused regressions failed before the fix (`lmdb-lifecycle-before.log`).
+All 50 storage tests now pass, including concurrent open/drop and failed
+initialization (`lmdb-lifecycle-after.log`). Strict workspace all-target Clippy
+passes (`lmdb-lifecycle-clippy.log`). The combined node suite completed with
+435 passing tests and only the separate returned-stake regression failing
+(`lmdb-lifecycle-workspace.log`). Both nine-node TCP meshes passed. A descriptor
+snapshot during the run contained only live LMDB files, with no deleted ledgers
+still open. This resource fix did not resolve the stake dependency itself.
+
+### Iteration 47: signed dependencies for returned verifier stake
+
+Block version 4 adds a canonical, bounded `release_sources` list. It commits
+the complete signed vote sets for stakes returned to the account, rather than
+an arrival-order-dependent local balance snapshot. These hashes participate in
+gap handling, rollback, confirmation and history replay. Wire generation 7
+rejects older peers. Older BRN snapshots cannot be decoded as empty release
+history; no existing ledger is migrated or deleted.
+
+Settlement records returned credit and its exact source set. A subsequent
+signed block can acknowledge a complete set once. Before that acknowledgement,
+spend validation excludes the credit, so its result does not depend on whether
+an unrelated outcome has arrived. Other unlocked BRN remains spendable, as
+required by decisions 5.5 and 5.9. The RPC exposes bounded source sets and the
+wallet attaches them automatically when signing.
+
+The previously failing finality regression passes after restart, and all 24
+lifecycle tests pass (`signed-release-independent-spending-after.log`). Ordinary
+unlocked spending can confirm before the unrelated outcome. Spending returned
+stake waits for the complete outcome, and rollback includes the dependent
+payment. Initial BRN, ledger and wallet component tests pass
+(`signed-release-components.log`). The five-node fixture rejects unproven
+returned-stake spending, confirms a payment consuming the full returned credit,
+and reconstructs its balances on all nodes (`signed-release-network.log`).
+An earlier complete workspace run passed 1553 tests, with no failures and one
+existing ignored example (`signed-release-workspace.log`). After the batching
+and independent-spending additions, all 438 node unit tests passed. That rerun
+then exposed a restart scheduler race in `confirmation_recovery`, described
+below (`stake-proof-final-workspace.log`). It did not reach release or NAT
+validation; that failed run is retained.
+
+Wallets with more proofs than one block can hold acknowledge complete batches
+before sending the requested operation. These account blocks preserve balances
+and the chosen representative. A 1200-source RPC-client test checks signatures,
+proof boundaries and exactly one payment (`signed-release-batching.log`). Strict
+workspace all-target Clippy passes (`signed-release-batching-clippy.log`). The
+node's local signing helpers now attach bounded proof sets too.
+Local challenge timers still lack agreed deadline evidence. Their returned
+credits remain unclaimable, including through an unrelated panel proof, and
+the production selection/challenge gate remains closed. This iteration does
+not establish deadline agreement or enable distributed verification.
+
+### Iteration 48: distinguish preparation from payment submission
+
+An interrupted automatic release batch previously exposed its hash as a pending
+payment, even though the requested payment had never been submitted. The wallet
+now wraps preparation failures in a distinct error. It retains the underlying
+hash for diagnostics without presenting it as the payment's receipt.
+
+The consumer form keeps the reviewed input, says the action was not submitted,
+and permits a deliberate retry. Actual ambiguous payment submissions retain
+their receipt and duplicate-payment warning. A dropped HTTP response regression
+failed before the change and passes afterward. All 76 wallet-core tests and 51
+wallet browser tests pass. The wallet production build passes. Evidence:
+`stake-preparation-wallet-before.log`, `stake-preparation-wallet-after.log`,
+`stake-preparation-ui-before.log`, `stake-preparation-ui-after.log`,
+`stake-preparation-ui-build.log` and `stake-preparation-wallet-ui.log`.
+The node interface also passed its unchanged build and 18 browser tests
+(`stake-proof-node-ui.log`). These browser tests use mocked desktop commands;
+they do not replace native or running-network tests.
+
+### Iteration 49: do not restart elections after confirmation handoff
+
+The broad run caught an election left active after restart cementation. A
+backlog scan could capture an unconfirmed block, then register it after the
+durable confirmation handoff or cementation had already occurred. Registration
+only checked the block bytes, not current finality.
+
+Registration now reads account height and the durable queue from one fresh
+snapshot while holding the election writer. Cementation retires election roots
+for all finalized blocks, including causal ancestors. The ordinary accepted-block
+path uses the same check before registering or tallying its local vote.
+
+The deterministic stale-scan regression failed before the fix
+(`backlog-handoff-before.log`) and passes afterward
+(`backlog-handoff-after.log`). Five queue-storage tests pass, including snapshot
+consistency and corrupt-record rejection (`backlog-handoff-storage.log`). The
+original six restart tests pass (`backlog-handoff-recovery.log`). An additional
+test seeds an unconfirmed election before recovery and requires it to be retired;
+all seven restart tests pass (`backlog-handoff-recovery-final.log`), and both
+cementation cases pass 15 consecutive repetitions (`backlog-handoff-repeat.log`).
+Strict workspace all-target Clippy passes on this source
+(`stake-proof-recovery-final-clippy.log`). The full workspace rerun passes 1,559
+tests across 61 test/doc-test results, with zero failures and one ignored
+documentation example (`stake-proof-recovery-final-workspace.log`). Release and
+NAT checks also pass on that source. The release run includes hard-crash recovery,
+a post-restart payment, fresh-node catch-up and minority-pending payments
+confirming after restart without resubmission. Logs are in
+`stake-proof-recovery-release.log` and `burst-validation.A3aHHL8F/`.
+All seven NAT groups pass, including interrupted connections, shared public IPs,
+double NAT, manual forwarding and the UPnP lifecycle/daemon integration.
+Evidence is in `stake-proof-recovery-nat.log` and `burst-nat.aMFE2vLc/`.
+Those are isolated Linux namespace tests, not tests of every physical router or
+proof of Byzantine consensus safety. The previous failed logs remain unchanged.
+
+### Iteration 50: return payments without first accepting them
+
+Whitepaper receiver rejection now has a reviewed wallet action. Previously an
+unopened recipient could not issue RejectReceive because it had no predecessor.
+The wallet core opens an empty account before rejecting, preserving its zero
+TRST balance and unverified status. Failed or ambiguous opening is reported as
+preparation, not as a submitted return. Existing accounts do not get an extra
+Open. Missing pending entries cannot trigger an Open at all.
+
+Four core regressions pass, including lost Open responses and existing-account
+balance preservation (`wallet-return-core.log`, 80 wallet-core tests at this
+iteration). Core all-target Clippy passes (`wallet-return-core-clippy.log`).
+The original native failure is retained in `wallet-return-native-unopened-red.log`.
+The complete native wallet run now passes (`wallet-return-native-stable.log`),
+including explicit cancel, an unopened recipient returning 17 raw units, no BRN
+refund, duplicate rejection, sender reclaim and identity/lock guards. The return
+does not change the block format, wire protocol, consensus or selection gate.
+The wallet build and all 54 browser tests pass. The node dashboard also passes
+native RPC and page-navigation checks (`return-node-native.log`).
+
+### Iteration 51: live off-chain group policy evaluation
+
+The group client had duplicate request paths, accepted invalid scores, read
+unbounded response bodies and spawned requests that outlived their caller.
+It now shares one parser, bounds declared and chunked bodies to 64 KiB, validates
+scores in [0, 1], limits concurrency to eight and cancels queued queries when
+the evaluation is dropped. Requests preserve group identity and order, encode
+the wallet as one path segment, do not follow redirects and query live each
+time. Client initialization returns an error instead of silently replacing the
+configured timeout client with a default client.
+
+The wallet policy evaluator is asynchronous and queries the supplied originator,
+not the payment sender. Any-group and all-groups rules distinguish negative
+membership from unavailable evidence. A valid response from another trusted
+group satisfies the any-group rule. Custom policies evaluate all applicable
+rules; an early warning cannot hide a later rejection. Verification age and
+unknown-origin proportions require explicit payment facts. Proportion checks
+use exact raw-unit arithmetic without u128 multiplication overflow.
+
+An empty required-group list now requires review rather than behaving like
+AcceptAll. Warnings are not automatic signing permission. This does not yet
+complete the consumer flow: directory discovery, wallet setup/preferences,
+complete merged-origin analysis and the explicit offline fallback still need
+integration. Transitive group vouching is also unfinished. No groups were added
+to node consensus, and group scores are not vote weights.
+
+The oversized-body and invalid-score tests failed against the old client
+(`group-boundary-before.log`). The empty required-group test failed against the
+old evaluator (`group-policy-before-compiled.log`). All 14 group tests and 89
+wallet-core tests pass (`group-policy-complete.log`), including real loopback
+HTTP, live membership changes, redirects, cancellation, timeout and exact-ratio
+boundaries. Strict all-target workspace Clippy passes
+(`group-policy-complete-clippy.log`). Emil's code cleanup guidance informed
+removal of silent fallback and duplicated HTTP handling. These component checks
+do not claim the app's automatic acceptance uses group policies yet.
+
+The subsequent full workspace run passes 1,582 tests across 61 test/doc-test
+results, with zero failures and one ignored documentation example
+(`return-group-workspace.log`). This includes both nine-node checkpoint TCP
+fixtures, signed committee settlement, pending-chain recovery, fresh-node
+replay and governance network tests. It predates the portfolio origin-kind
+metadata change below.
+
+### Iteration 52: distinguish burn origins from merge accounts in the wallet
+
+The portfolio labeled every batch "Created from BRN by" its stored origin
+account. For merged TRST that account is the merger, not necessarily any of the
+original creators. The RPC now reports burn, merge or unknown origin kind from
+the existing indexes. The native adapter preserves this field and each holding
+ID. Older responses stay unknown; the wallet does not infer a burn from a
+missing field. Separate holdings with the same origin no longer share a React
+key.
+
+The portfolio uses "Combined by" for merges and puts full identifiers, exact
+amounts and the effective age date in the disclosure. One divided list replaces
+nested row cards. Repeated status, a cosmetic progress percentage and unavailable
+chain-length placeholders were removed; the status badge and actual expiry
+remain visible. This is presentation metadata, not a change to merging,
+revocation, expiry or group trust rules.
+
+The original browser regression failed (`portfolio-origin-before.log`). All 55
+browser tests and the production build pass on the final layout
+(`portfolio-origin-row-ui.log`, `portfolio-origin-row-build.log`). Light and dark
+320px disclosures were visually inspected. One earlier full run timed out before
+opening a governance proposal; the unchanged test passed alone and in subsequent
+full runs. That failed log remains separate (`portfolio-origin-ui-all.log`).
+
+All 18 RPC tests pass, including split holdings from one merge and missing origin
+metadata (`portfolio-origin-rpc.log`). Strict workspace Clippy and the release
+daemon build pass. Both native adapter tests pass. The rebuilt wallet passes all
+five desktop test groups with the rebuilt daemon (`portfolio-origin-native.log`),
+including merged-origin metadata, stable holding IDs and returned burn origins
+retaining their timestamp. Its isolated fixture is
+`/tmp/burst-native-wallet-Vlqkip/`. The complete workspace run recorded above
+predates this read-only RPC metadata addition; it is not relabeled as a run on
+the later source.
+
+### Iteration 53: bounded original-creator inspection
+
+The read-only `trst_origins` RPC walks the existing merge index backward to
+distinct original burns. It validates root/leaf block hashes, checks merge input
+totals, detects cycles and bounds traversal to 8,192 scheduled steps. Missing,
+corrupt or over-limit history fails the request instead of returning a partial
+list as complete. It preserves each burn's creator, timestamp, confirmation and
+revocation flags. No group rules enter node validation or normal spending.
+
+The typed wallet reader rejects incomplete, wrong-root, malformed, unsorted or
+duplicate reports. The native wallet exposes this reader through a lazy,
+paginated disclosure for merged holdings. It explicitly identifies the result
+as node-reported, not independent proof or contribution weights. Changing nodes
+clears the disclosure; errors offer retry rather than an empty creator list.
+
+All 22 RPC tests and 93 wallet-core tests pass. Strict workspace Clippy and the
+release daemon build pass (`origin-inspection-*.log`). Both native adapter tests
+and all five real desktop test groups pass, including exact original burn IDs
+behind a merge and unchanged burn provenance after return/reclaim. The final
+native run also compares the Tauri reader's result with the real node's report:
+`origin-inspector-native.log`, fixture `/tmp/burst-native-wallet-HBUrv9/`.
+All 56 browser tests and the production build pass; the 320px inspector was
+visually reviewed. Earlier browser failures came from a fixture that assumed
+React StrictMode issued only one initial read; those logs remain separate.
+
+This does not finish group-based acceptance, contribution analysis, group
+directory/configuration, offline fallback or transitive group trust. It is an
+optional inspection path, not a new consensus rule, mandatory per-spend ancestry
+walk or independent light-client proof. The full workspace run in iteration 51
+predates these read-only additions.
+
+### Iteration 54: inspect incoming and returned payment origins
+
+Wallet-core can now resolve a burn, transfer or chain of returned payments to its
+original-creator report. It follows return links rather than interpreting a
+return block's zero origin as a new creator. The read is limited to 64 source
+blocks and 30 seconds overall; cycles, unsupported block kinds, missing fields,
+malformed hashes and inconsistent burn reports fail explicitly. Confirmation
+requires every visited source plus the reported root and original burns.
+
+The receive review has an optional creator disclosure. It is read-only and
+context-bound; inspecting does not receive, return, open an account or authorize
+automatic acceptance. The signing guards remain in place. A duplicate
+context-change alert introduced in this pass was caught by the existing return
+test and fixed. A new test initially used a nonexistent desktop navigation link;
+it now uses the visible Receive action. An earlier full run also timed out in a
+verification navigation test while the frontend was being edited; the subsequent
+unchanged full run passes all 57 browser tests. Failed evidence is retained in
+`payment-origins-ui.log` rather than counted as a pass.
+
+All 98 wallet-core tests and strict workspace Clippy pass
+(`payment-origins-core-verified.log`, `payment-origins-clippy-verified.log`).
+The wallet production build, native adapter tests and all five native flow groups
+pass (`payment-origins-native.log`, fixture `/tmp/burst-native-wallet-LP1s0N/`).
+Native coverage includes inspecting an unopened account's pending burn without
+changing its chain, original creators behind a merged transfer, and a returned
+payment retaining its original burn/creator/time. The narrow review was visually
+inspected. These results predate the subsequent group-directory additions.
+
+### Iteration 55: public group directories and payment-level group checks
+
+The group client can fetch a version-one public JSON listing over HTTP(S),
+including a web IPFS gateway. It bounds the body to 1 MiB, disallows redirects
+and embedded credentials, and does not query any listed endpoint or send a
+wallet identifier while loading the directory. Registry import validates the
+whole listing, rejects duplicate IDs and preserves an existing endpoint instead
+of silently replacing it. Group IDs may contain Unicode; display fields and URLs
+are length-bounded. A fetched listing does not itself grant trust.
+
+Payment-level group evaluation queries each distinct surviving original creator
+live, not the immediate sender or merger. Already-revoked contributions are not
+used to taint surviving honest value. Explicit protocol fallback applies only
+to connection/timeouts or HTTP server failures. Malformed responses, unknown
+configuration, incomplete/unconfirmed origin reports and explicit negative
+membership cannot silently become protocol fallback. A later negative origin
+overrides an earlier warning or fallback. Queries are bounded to 30 seconds,
+256 distinct creators and 32 selected groups; larger inspections stay for manual
+review without restricting protocol transfers.
+
+All 19 group tests and 103 wallet-core tests pass, with strict workspace Clippy
+(`payment-group-policy-tests.log`, `payment-group-policy-clippy.log`). Tests
+cover directory validation, no redirect/implicit endpoint query, live repeated
+origin checks, deduplication, revoked-history exclusion, offline-vs-malformed
+evidence and a negative result after fallback. These are component tests. The
+directory picker, consumer policy setup, automatic-acceptance integration,
+weighted custom rules and transitive group trust are not finished.
+
+The subsequent full workspace run passes all 1,606 tests across 61 test/doc-test
+results, with zero failures and one ignored documentation example
+(`origin-group-workspace.log`). This includes 439 node unit tests, the multi-human
+checkpoint TCP fixtures, pending-chain recovery, fresh-node replay and the
+governance network test. It validates source through iteration 55; the separate
+native automation-session changes are not part of this workspace run. The node
+dashboard's 18 browser tests and production build also pass against an isolated
+preview (`origin-group-node-ui-verified.log`, `origin-group-node-ui-build.log`).
+The initial dashboard attempt had no preview server listening; its connection
+failures remain recorded separately. The owned preview process was stopped.
+
+### Iteration 56: cancel stale automatic-receive passes
+
+Native maintenance now requires a current automation-session token. The wallet
+starts a session for each pass and cancels it when the wallet, connection or
+receive/merge settings change, on unmount and after completion. Cancelling an old
+session cannot invalidate a newer one. Missing, malformed and stale sessions
+fail before signing. A queued pass checks again after acquiring the signing lock;
+each new receive and merge checks the session before starting its signed action.
+
+Cancellation does not abandon an already-started receive halfway through a
+submission or pretend to undo a committed block. That receive may finish; the
+pass cannot start another one afterward. Settings explains this when automatic
+acceptance is turned off. A delayed session start is cancelled without launching
+maintenance, and late completion does not show an obsolete success toast.
+
+All 58 browser tests and the production build pass on the final source
+(`automation-session-ui-final.log`, `automation-session-ui-build-final.log`).
+An earlier browser run lost its context during navigation while test files were
+being edited; it remains recorded separately. Four native adapter/session tests
+and the native build pass. All six real desktop flow groups pass, including the
+new delayed-RPC fixture (`automation-session-native.log`, isolated data at
+`/tmp/burst-native-wallet-yZojzo/`). It verifies cancellation during the initial
+pending-list read creates no account or signed block, and cancellation during an
+already-started receive allows exactly that payment to finish while the second
+remains pending. Old/missing session rejection and scoped cancellation are also
+checked through real native IPC.
+
+This boundary prepares maintenance for longer group checks; it does not itself
+enable group-based acceptance. That integration must also recheck the session
+after the asynchronous group evaluation and before starting a receive.
+
+### Iteration 57: consumer group rules and cancellable live checks
+
+The wallet now loads a public group directory in onboarding and Settings. Loading
+does not select a group or contact membership endpoints. Selection and saving are
+separate actions. Saved rules pin group IDs to endpoints, support any/all selected
+groups per original creator, and expose the outage fallback. Unreadable saved
+rules pause automation instead of silently reverting to protocol-only acceptance.
+An unsaved onboarding choice prevents leaving setup until it is saved or undone.
+
+Native automatic acceptance now checks original creators behind burns, merged
+transfers and returns. Each payment queries membership live. Negative or malformed
+answers hold the payment; only an actual outage can use the selected protocol
+fallback. Manual acceptance remains available. Recent hold explanations are
+display-only, bounded to 512 entries, and cleared by context changes or rechecks.
+They are not cached membership decisions.
+
+Read-only pending/origin/group queries are cancellable. Locking, switching wallets
+or changing settings cancels those queries before another signed action starts.
+An already-started receive still finishes under the signing lock. All-held pages
+advance the bounded automatic scan; successful receives reset it. A new exact
+`account_pending` hash filter lets receive/return inspect their source without
+searching a truncated first page. The wallet rejects a paginated or unrelated
+result from a node that does not support that filter.
+
+All 61 wallet browser tests, production build, five native unit tests and seven
+desktop flow groups pass. The native run used a fresh local Dev ledger at
+`/tmp/burst-native-wallet-IJpdN8/`. It checks original creators behind merged
+payments, any/all rules, live membership changes, outage fallback, malformed
+answers, manual acceptance, lock cancellation and a ninth eligible payment behind
+eight held payments. Logs are `group-settings-browser-full-final.log`,
+`group-settings-ui-build-verified.log`, `group-settings-native-unit-final2.log`
+and `group-settings-native-session.log` under `target/validation-evidence`.
+The 104 wallet-core and 22 RPC tests and strict all-target workspace Clippy also
+pass (`group-integration-core-rpc.log`, `group-integration-clippy.log`). Earlier
+browser failures from an ambiguous selector and a test-clock setup are retained.
+
+This does not publish or endorse a default directory, implement transitive group
+trust or weighted origin rules, or turn a node-reported origin list into an
+independent proof. The whitepaper and decisions file are unchanged. Certified
+selection remains gated. No existing ledger, Azure deployment or running user
+app was upgraded.
+
+### Iteration 58: manual pending pages without hidden payments
+
+The native pending adapter now returns the node's cursor and at most 20 payments.
+Missing arrays, malformed entries, duplicates and repeated cursors are errors,
+not empty-wallet responses. Optional expected-account binding rejects a read
+after a wallet switch. The wallet shows bounded pages with Previous/Next controls;
+batch review names the current page when more payments exist. Dashboard counts
+use a plus sign when the page is incomplete. Receiving or refreshing returns to
+the first page so removals cannot strand the user on a later offset. Narrow sender
+labels truncate before the Review button; full addresses remain in review.
+
+All 62 browser tests, the production build and six native unit tests pass.
+All seven desktop flow groups pass at `/tmp/burst-native-wallet-Q888EN/`.
+The native fixture creates 21 real pending payments, checks both pages and the
+exact-source RPC's hash, account and amount-threshold isolation, then imports the
+recipient through the desktop UI. It checks the dashboard's `20+` count, navigates
+to page two, reviews and receives that payment, and sees the updated first page.
+Onboarding also exercises the unsaved/invalid group-rule navigation guard.
+Logs are `pending-pages-browser-final.log`, `pending-pages-ui-build-final.log`,
+`pending-pages-native-unit-rerun.log` and `pending-pages-native-ui-final.log`.
+The initial adapter compile failure used a crate that was not a direct dependency;
+the corrected adapter uses the wallet-core address parser. That failed log remains.
+
+Pagination is a live view, not a snapshot: other devices or automatic acceptance
+can change the pending list between pages. Refresh starts a new first-page read.
+The exact-source lookup and node validation remain authoritative when receiving.
+
+The subsequent full protocol workspace run passes 1,607 tests with zero failures
+and one ignored documentation example across 61 test/doc-test results. Strict
+all-target Clippy passes. Logs are `group-receive-final-workspace.log` and
+`group-receive-final-clippy.log`. This includes the 439 node tests, independent
+checkpoint TCP fixtures, fresh-node history replay, governance-network activation
+and merge-fork tests. The unchanged node dashboard also passes its 18 browser tests
+and production build in an isolated preview (`group-receive-node-ui.log`,
+`group-receive-node-ui-build.log`). That preview was stopped after testing.
+These results do not change the certified-selection release gate or sign off the
+remaining protocol requirements.
+
+### Iteration 59: manual actions take priority over group lookups
+
+Manual pay, transfer, receive, return and the shared governance/verification
+signing path now cancel an automatic pass before waiting for the signing lock.
+This interrupts read-only pending/origin/group queries. It does not interrupt an
+already-started signed action, which finishes under the lock before the manual
+action proceeds. The wallet suppresses the specific normal cancellation notice;
+node failures still show the automation warning.
+
+All 63 wallet browser tests and the production build pass. Six native unit tests,
+the native build and all seven desktop flow groups pass. The final disposable
+ledger is `/tmp/burst-native-wallet-7TudaY/`. The group fixture withholds its HTTP
+response and verifies that explicit Receive completes within five seconds, the
+old automatic pass reports cancellation and the payment is no longer pending.
+The separate lock case cancels without changing the ledger. Earlier tests still
+verify that cancellation cannot abandon an already-started receive or authorize
+the next payment. The page-two manual receive is also retested through desktop
+controls. Logs are `manual-priority-browser-final.log`,
+`manual-priority-ui-build.log`, `manual-priority-native-unit.log`,
+`manual-priority-native-build.log` and `manual-priority-native-session.log`.
+An earlier browser assertion searched for an error rendered in a title rather
+than visible text; the corrected test checks the notice itself and its title.
+
+The protocol source remains the version covered by the preceding full workspace
+run. No source requirement, release gate or existing user ledger was changed.
+
+### Iteration 60: distinguish challenge lifecycles during certified selection
+
+Normal verification and a later challenge can both have round zero and retain
+the same endorsements. The selection-history comparison previously omitted the
+active challenge. It now includes the signed challenge block hash and its
+challenger, target, stake, reason and initiation time. The first challenge
+request must name that hash as its trigger. A legacy challenge without its
+signed binding cannot acquire a certified selection. Historical committee
+installation now checks the same participant-history digest as live installation
+before freezing the request.
+The binding check also runs during committee installation and vote admission,
+including restored requests that were already frozen or certified. An unbound
+legacy challenge therefore cannot lock a new vote's stake before failing at
+settlement.
+
+Regression tests cover restart, a mismatched first trigger, successive
+challenges, changed challenge terms and missing legacy bindings. The node test
+changes endorsement amounts, timestamps and excluded verifiers while retaining
+the valid certificate; replay rejects each mismatch before installing anything.
+The complete focused replay run passes 47 tests, including certified normal
+panels, revotes, quorum recovery and TCP catch-up. Its log is
+`target/validation-evidence/challenge-selection-replay.log`.
+
+The first full-workspace run found eight challenge fixture failures. The shared
+component helper used a timestamp-derived trigger even for signed challenges;
+it now uses the actual challenge hash for the first panel. No validation rule
+was weakened. The rerun passes all 96 verification tests and all 24 transactional
+settlement tests, including proportional fraud revocation, benign inactivity,
+rejected challenges and arrival-order permutations. A real-certificate and
+drand-proof test preserves the challenge and voter receipt bindings through
+restart and keeps fraud revocation distinct from inactivity deactivation.
+The targeted logs are `challenge-selection-verification-final.log` and
+`challenge-selection-settlement.log` in `target/validation-evidence/`.
+
+The final `CARGO_BUILD_JOBS=1 cargo test --workspace` run passes 1,614 tests,
+with zero failures and one existing ignored test across 61 result summaries.
+`CARGO_BUILD_JOBS=1 cargo clippy --workspace --all-targets -- -D warnings` also
+passes. Final logs are `challenge-selection-workspace-final.log` and
+`challenge-selection-clippy-final.log`. They include independent-node certified
+vote settlement, fresh-history catch-up, governance and merge-fork integration
+tests. The coverage checker still reports 388 indexed sections, 386 not signed
+off and zero coverage errors. No requirement was marked complete from these
+component and regression results.
+
+This is a prerequisite for challenge replay, not its completion. Selection
+ancestry still assumes monotonically increasing rounds per target. Challenge
+outcomes still need an agreed order relative to payments and re-verification,
+and timeout settlement still needs an agreed cutoff. Simply allowing the round
+counter to reset is unsafe: replay currently uses the latest target panel as a
+spending dependency. With challenges, that would incorrectly make earlier
+payments depend on a later challenge's outcome. Those dependencies must identify
+the right lifecycle before challenge replay is enabled. The production release
+gate remains closed. The selection-history digest is derived during replay, so
+no block, wire, checkpoint record or snapshot encoding changed. The whitepaper
+and implementation-decisions source hashes are unchanged.
+
+### Iteration 61: replay pending challenges as separate lifecycles
+
+Replay now authenticates signed challenge admission, locks its stake and keeps
+the target verified. Selection ancestry is keyed by the signed admission and
+lifecycle type, not only the target and round number. A challenge can start at
+round zero after normal verification. Its pending committee is not added as a
+dependency of the target's earlier payments. Re-verification and challenge
+outcomes still fail closed until their non-monotone ordering is implemented.
+
+The original genesis wallet now gets orchestrator state during replay and node
+startup. Startup stages and commits a missing snapshot before publishing it.
+Existing adjudications are preserved; a missing lifecycle for an already-revoked
+genesis account is an error, not permission to recreate a verified identity.
+
+Pending challenge selection derives its trigger from the signed challenge and
+does not require old endorsements for genesis. Certificate persistence and
+beacon recovery distinguish that lifecycle from the completed normal panel.
+The beacon worker waits through the gap between challenge admission and its
+replacement certificate. It neither reinstalls the old panel nor stops the
+worker needed to install the new one. A later certified lifecycle proves that
+the old panel has completed; ordinary revotes still require their complete
+signed vote history.
+
+The verification-status RPC keeps a challenged wallet's account status while
+reporting its process in a separate `phase` field. `challenge_active` remains
+true while its committee votes. Previously it became false when the phase moved
+from `Challenged` to `Voting`. This preserves decision 17.3's transaction rights
+without hiding the challenge from the wallet's existing warning.
+
+Six focused replay tests cover pending burn/receive/send, the original genesis
+wallet, a new certificate after normal verification, changed signatures/stakes,
+duplicate admission, incomplete target verification, the deadline boundary,
+worker handoff and restart. The genesis storage test checks aborted and committed
+initialization plus preservation of revoked state. The independent-node fixture
+passes challenge admission, a second certificate, committee installation and
+continued spending through running services and TCP. Its four restarted nodes
+and fresh fifth observer agree on the certificate context and replayed account
+state. The network run passed in 73.05 seconds. Evidence is in
+`target/validation-evidence/pending-challenge-network-final.log`.
+
+The first network attempt exposed a missing test-only challenge admission
+override. The next exposed the beacon worker exiting between admission and the
+replacement certificate. Both failures are retained in the validation directory.
+The worker regression now explicitly holds that gap open before installing the
+new certificate and checks recovery after restart. Strict workspace Clippy
+passes after moving the constant release-gate assertion into a const block.
+
+No production gate, block version, wire generation or stored certificate format
+changed. An expired pending challenge requires agreed timeout replay, and a
+challenge outcome requires agreed ordering against payments. Neither acquires
+authority from these pending-admission changes.
+
+### Iteration 62: retain incomplete challenge votes during replay
+
+Confirmed replay now installs a pending challenge's certified committee and
+reconstructs an incomplete vote set. It checks the exact context, committee,
+signatures and stakes through the existing vote path. The target keeps its
+verified state and can transact. Neither votes require no stake; other votes
+lock the configured stake. No incomplete panel creates rewards or a stake-release
+proof. A complete challenge panel still fails closed before settlement, for both
+fraud and inactivity and for every vote choice.
+
+Ten focused challenge tests pass, including partial vote recovery, snapshot
+restore, duplicate/nonmember/wrong-context rejection and an attempted early
+stake refund. The six live-selection storage tests also pass. Logs are
+`challenge-vote-replay.log` and `challenge-vote-selection.log` in
+`target/validation-evidence/`. The independent-node fixture now also submits a
+challenge vote and compares its replayed stake and vote record across peers;
+that extended run passed in 63.41 seconds. It also checks decision 17.4 by
+selecting the original verifiers again from the eligible pool. Evidence is in
+`challenge-vote-network.log`. Strict all-target workspace Clippy passes in
+`challenge-vote-clippy.log`.
+
+Committee installation now checks for a superseding challenge while holding
+the same lock used to publish its snapshot. Previously, admission could occur
+after the worker's check but before installation acquired the lock. A queued
+installation test admits the challenge while holding that lock, then checks
+that the old panel is deferred without changing the new lifecycle. The direct
+transactional staging checks still reject mismatched lifecycles.
+
+The first full workspace run after iteration 61 found one stale unsupported-kind
+test. It still listed all challenge blocks as unsupported, even though signed
+admission now replays. The list now excludes admission; the dedicated challenge
+tests retain explicit rejection of unsupported outcomes and deadlines. That
+failed run is retained as `pending-challenge-workspace-final.log`; it is not a
+workspace pass. No source requirement or release gate changed.
+
+The corrected full run, `CARGO_BUILD_JOBS=1 cargo test --workspace`, passes
+1,625 tests with zero failures and one existing ignored documentation example
+across 61 result summaries. Evidence is in `challenge-vote-workspace-final.log`.
+It includes all 451 node tests, independent-node partial challenge voting,
+fresh-history catch-up, governance and merge-fork regressions. The source hashes
+remain unchanged. The coverage checker passes its five tests and reports 388
+indexed sections, 386 not signed off and zero inventory errors. Decisions 17.3,
+17.4, 17.7 and 17.8 now record scoped partial evidence rather than a sign-off.
+
+### Iteration 63: settle rejected challenges from certified votes
+
+Confirmed replay now accepts a complete challenge panel when its legitimate
+votes reach the configured threshold. The wallet stays verified. The challenger
+forfeits its locked BRN; correct staked voters receive their stake back, and
+minority stakes fund the existing TRST reward rule. The challenger forfeiture
+does not create an additional verifier reward. This follows decision 33.7's
+selected answer rather than its unselected example.
+
+Returned-stake proofs include the signed challenge admission and the complete
+panel. Omitting the admission is rejected. Reward claims name the canonical
+signed outcome source and require the complete panel through replay's existing
+dependencies. Rejection leaves transaction rights unchanged, so it does not
+introduce the cross-account revocation ordering needed by an upheld challenge.
+Complete panels that would revoke or deactivate the target still fail closed.
+Repeated challenge admissions also fail closed until their order is agreed.
+
+Certified vote validation now checks the challenge deadline before accepting a
+stake. Otherwise a final vote at the deadline could remove the active challenge
+and evade replay's unresolved-timeout check. The boundary test accepts a panel
+completed just before the deadline and rejects a final vote at the deadline.
+This check does not implement timeout settlement or make local timers authoritative.
+
+Four new replay tests cover both challenge reasons, stake forfeiture, voter
+refunds, minority-funded rewards and claims, incomplete refund proofs, deadline
+boundaries and repeated admissions. All 14 challenge replay tests pass in
+`target/validation-evidence/rejected-challenge-replay.log`. The five-node live
+fixture passes rejection, reward collection, spending returned stake and continued
+target payments in `rejected-challenge-network.log` in 76.93 seconds. The expanded
+restart stage matched on all five existing nodes. Its new sixth observer exposed
+the old-history admission failure addressed in iteration 64.
+
+The source release gate remains closed. No block, wire, certificate or snapshot
+format changed. Full upheld-challenge settlement, revocation ordering,
+re-verification and agreed timeout cuts remain required.
+
+### Iteration 64: authenticate old history before network admission
+
+The fresh sixth node initially stayed at genesis despite connected peers.
+Its clock was more than eight hours beyond the earliest signed blocks, so
+ordinary admission rejected them under the one-hour backdating limit. Restarted
+nodes already had those blocks and recovered the rejected-challenge settlement.
+The failed runs remain in `rejected-challenge-recovery.log` and
+`rejected-challenge-recovery-diagnostic.log`.
+
+Checkpoint transfer now includes the signed history named by its certificate.
+The receiver checks the certificate against its configured genesis and replayed
+ancestor roster before validating the supplied prefixes. It checks complete
+account chains, parent extension, causal closure, signatures, work and semantic
+replay. The reconstructed checkpoint must match the signed certificate. An
+attached beacon must match the committed round and pass BLS verification.
+
+Only then does the block processor grant an age-check exception for those exact
+hashes. Future timestamps, signatures, work, dependencies, forks and economic
+validation still apply. Bootstrap does not install peer account snapshots or
+disable timestamps globally. A new backdated block cannot borrow a historical
+block's authorization. Durable certificate import still waits for the locally
+cemented prefix. The in-memory authorization is bounded to one complete prefix;
+it must be reconstructed after restart if more old history is needed.
+
+Transfers remain peer-bound, digest-checked and chunked into 16 KiB messages.
+The complete transfer is capped at 64 MiB. Durable record and chain limits stay
+at 16 MiB and 64 MiB. Wire generation 8 distinguishes this envelope from the old
+record-only transfer; older peers fail the handshake. Block version 4 and the
+stored certificate and snapshot formats are unchanged.
+
+The full six-node scenario passed in 147.41 seconds in
+`target/validation-evidence/historical-transfer-network.log`. It includes
+normal verification, rejected-challenge settlement, reward claims and spending,
+restart of all five existing nodes, and fresh-node reconstruction of the same
+account heads, BRN counters, stake releases, TRST balances and verification
+state. Controlled fixture clocks and historical drand proofs are unchanged.
+The test's RPC polling now stays below the normal request-rate limit.
+
+The focused authentication regression passes in
+`historical-transfer-authentication-final.log`; all six prefix-reader tests pass
+in `historical-transfer-prefixes.log`. Tampered signed blocks, missing or extra
+blocks, altered heads, wrong network/height/target and absent quorum signatures
+do not authorize admission. Work, future-time and ordinary backdating checks
+remain active after a valid historical prefix is authorized. Strict workspace
+Clippy passes in `historical-transfer-clippy-final.log`.
+
+`CARGO_BUILD_JOBS=1 cargo test --workspace` passes 1,631 tests with zero
+failures and one existing ignored documentation example across 61 result
+summaries. The 457 node tests pass, including the six-node recovery scenario.
+Evidence is in `historical-transfer-workspace.log`. The stronger recovery test
+also requires confirmation of every recovered account head on all six nodes.
+It passes in 163.52 seconds in `historical-transfer-finality.log`. Strict
+workspace Clippy passes again with that assertion in
+`historical-transfer-clippy-latest.log`.
+
+The offline daemon build passes in `historical-transfer-daemon.log`. Offline
+native backend checks pass for the wallet and node GUI in
+`historical-transfer-wallet-native.log` and `historical-transfer-node-native.log`.
+These checks did not restart the user's running apps, migrate their ledgers,
+or change Azure resources. All test nodes used disposable local directories.
+
+The first tamper fixture accidentally selected genesis, whose configured
+signature was already zero. It now selects the signed candidate by hash before
+changing its signature. That failed fixture run is retained in
+`historical-transfer-authentication.log`; it is not counted as a pass.
+
+This is bounded, supported-history catch-up, not fast snapshot installation or
+full old-history support. History beyond the last certified cut still needs an
+authenticated finality context. Expiry races, upheld outcomes, governance,
+checkpoint compaction and pruning remain unfinished. The selection release
+gate remains closed. The whitepaper and decision document are unchanged.
+
+### Iteration 65: collect upheld verdicts and bind a settlement candidate to a cut
+
+The live vote path no longer applies an upheld challenge when its last packet
+arrives. It collects the complete verdict with stakes locked and transaction
+rights unchanged. Rejected challenges still settle, and inconclusive panels
+still queue revotes. A panel completed before its deadline remains pending when
+the node later crosses that deadline. A partial or late panel cannot use this
+exception to escape timeout handling.
+
+The six-node collected-verdict test passes in 162.20 seconds in
+`target/validation-evidence/collected-challenge-network.log`. The target burns BRN
+after the full negative panel. Five restarted nodes and a fresh sixth node
+recover the same account and verification state, including confirmation of every
+recovered account head. This proves collection and recovery, not live revocation.
+
+`checkpoint_outcome.rs` adds a read-only settlement candidate. It loads the
+authenticated selection ancestry, replays the named signed history, evaluates
+the upheld outcome at the cut, and derives the resulting human roster. A
+domain-separated outcome commitment distinguishes it from verifier selection.
+Certification checks the previous roster's quorum, including the challenged
+human's unit. The proposed reduced roster cannot approve itself.
+
+Candidate settlement includes payments made after voting but before the cut.
+BRN accrual stops at the cut, rather than retroactively at the last vote's time.
+Fraud revokes the tainted share at each holder of merged funds and counts pending
+revocation when backing the challenger reward. Inactivity does not revoke TRST.
+Refund and reward timestamps also use the cut.
+
+All 19 challenge replay tests pass in `challenge-outcome-replay-final.log`.
+Four new outcome tests cover fraud and inactivity, post-vote burns and merged
+payments, proportional splitting, reward backing, old-roster quorum, altered
+manifests, selection/outcome separation and reordered history. A certificate for
+an earlier cut cannot authorize an added payment tail. Incomplete, rejected and
+inconclusive panels cannot construct an upheld outcome candidate. Poisoned local
+account projections and invalid economic snapshots remain outside replay input.
+
+The candidate has no live installation API. The selection scheduler and durable
+chain do not yet carry outcome checkpoints. Post-outcome payments still need an
+epoch/context binding; the vote set alone does not authorize spending candidate
+refunds. Agreed timeout cuts, re-verification and repeated challenges remain open.
+The handoff must also protect already signed payment finality outside a proposed
+cut. Comparing local account heads and then swapping economic state would leave
+a race with old-epoch payment votes. The shared signing and installation rules
+must close that race before this candidate can change live balances.
+The production release gate stays closed. Block, wire and stored snapshot
+formats are unchanged, as are the whitepaper and decision document.
+
+`CARGO_BUILD_JOBS=1 cargo test --workspace` passes 1,637 tests with zero
+failures and one existing ignored documentation example across 61 result
+summaries. All 463 node unit tests pass in 473.35 seconds, including both six-node
+challenge scenarios and the independent checkpoint agreement tests. The separate
+integration tests also pass. Evidence is in `challenge-outcome-workspace.log`.
+Strict workspace Clippy passes in `challenge-outcome-clippy.log`. The source
+inventory check passes with 388 indexed sections, 386 unsigned and zero errors;
+those counts are not a completion percentage.
+
+The offline daemon build and offline native backend checks for the wallet and
+node GUI pass in `challenge-outcome-daemon.log`,
+`challenge-outcome-wallet-native.log` and `challenge-outcome-node-native.log`.
+No user app was restarted, no manual-test ledger was reset, and no Azure resource
+was changed by this work.
+
+The initial collector run failed an old assertion that every upheld history
+must reject replay. It now checks retained rights and locked stakes. That failure
+is preserved in `collected-challenge-replay-initial.log`. The first outcome-test
+compile used the wrong BRN field name; its compiler error remains in
+`challenge-outcome-boundary-initial.log`. Neither failed run counts as validation.
+
+### Iteration 66: share durable signing between selection and outcome candidates
+
+`checkpoint_agreement::apply_candidates` accepts replay-constructed selection and
+outcome values. Both use the existing signer key by network, genesis, human and
+height. There is no separate outcome reservation that could sign a second value
+beside a selection at the same height. The transition still commits and syncs
+its state before producing a signature.
+
+The signer journal now records a typed replay manifest in format 3. Recovery
+reconstructs each retained candidate from signed history and the authenticated
+parent chain. Missing retained choices fail recovery. The old selection-only
+recovery API rejects outcome records instead of silently dropping them. A
+successful transition converts a valid format-2 journal without discarding its
+precommit lock. Reading alone does not rewrite it. A bad legacy checksum fails
+without replacing the saved bytes. Older binaries cannot resume format-3 signer
+data; downgrading must not reset or replace those reservations.
+
+Fresh outcome proposals and prevotes require a trusted clock interval whose
+earliest possible time is at or after the cut. Unknown clocks, future cuts and
+uncertainty that crosses the cut produce no signature or journal update. A valid
+prepare quorum can complete the same value later without another clock reading.
+Selection candidates retain their separate pre-beacon deadline check.
+
+The new outcome-agreement tests pass in `outcome-signing-initial.log` in 30.82
+seconds. Seven independent signer stores replay the same ten-human cut and
+produce prevotes, precommits and the final certificate through durable round
+transitions. Six signatures cannot prepare that cut. Restart after prevoting
+reconstructs the outcome manifest; restart after deciding re-emits the identical
+certificate. A conflicting selection at the same height cannot replace the
+outcome's prevote. No post-outcome balances are installed by these tests.
+
+All eight checkpoint-journal tests pass in `mixed-checkpoint-journal-final.log`,
+including version-2 precommit recovery. Strict workspace Clippy passes in
+`outcome-signing-clippy.log`.
+
+The full workspace run passed 1,641 tests with no failures and one ignored
+documentation example in `outcome-signing-workspace.log`. The offline daemon
+build passed in `outcome-signing-daemon.log`; both native app checks passed in
+`outcome-signing-wallet-native.log` and `outcome-signing-node-native.log`.
+
+Outcome signing remains unavailable in ordinary builds while the source release
+gate is closed. The network driver, scheduler and certificate chain still need
+typed outcomes. Payment-finality sealing and epoch-bound continuation remain
+required before live installation. Block version 4, wire generation 8 and
+certificate-record version 1 are unchanged. The signer journal is the only
+persisted format changed here. No user app was restarted or ledger reset.
+
+### Iteration 67: carry outcome agreement through the worker and TCP transport
+
+The checkpoint driver now carries typed replay manifests in proposals, prepare
+proofs and decisions. It reconstructs either candidate from signed history and
+the certified parent chain before signing. Startup recovers every retained choice
+from the shared journal, including outcome choices. Selection admission keeps
+its existing certificate-chain behavior. An outcome decision stays in the signer
+journal and is independently replayed and certified before emission. It does not
+install balances, replace payment authority or advance the canonical chain.
+
+The ordinary driver and signer keep outcomes behind the source gate. The running
+node's height-rotation runtime explicitly rejects outcome scheduling and
+installation until mixed certificate-chain replay and payment epochs exist.
+The single-height worker can exercise outcome agreement in unit fixtures.
+
+Two new tests passed in `typed-outcome-transport-initial.log` in 86.89 seconds.
+Eight stores and independent signer keys use the existing worker, connection
+registry and bounded agreement transport over preconnected loopback TCP sockets.
+Six of ten human units cannot decide. A seventh completes agreement; an eighth
+joins with no clock authority and receives the decision. Reopening each store
+re-emits its exact decided certificate. Account snapshots and the canonical
+selection-chain tip remain unchanged. This fixture supplies historical clocks
+and signed history in advance; it does not test live settlement, peer discovery
+or network bootstrap of outcome history.
+
+The other test rejects a changed target, missing account head and outcome root
+relabeled as a selection before the follower creates any signer state. A valid
+proposal then succeeds. The existing selection-driver quorum/recovery test also
+passed in `typed-outcome-driver-initial.log` in 70.17 seconds. Strict workspace
+Clippy passed in `typed-outcome-clippy.log`.
+
+Review then closed the remembered-proposal fast path to changed manifests. The
+driver rejects a different target, account-head list or candidate kind even
+after accepting the original proposal. The regression now checks both first
+admission and repeats after signing. The broad run started before this small
+hardening change. Both final driver tests passed in 69.95 seconds in
+`typed-outcome-driver-final.log`, including changed-manifest rejection after
+signing, identical retry and the existing selection quorum/recovery scenario.
+The outcome worker TCP/restart test then passed again in 86.67 seconds in
+`typed-outcome-transport-final.log` against the hardened driver.
+
+The first broad run passed all 469 node tests, then failed the fresh-node
+confirmation deadline in `confirmed_replay_network`. Its failed log remains in
+`typed-outcome-workspace.log`. A diagnostic rerun passed in 94.37 seconds in
+`typed-outcome-replay-diagnostic.log`. That trace shows the fourth loopback node
+being refused cookie challenges until the existing per-IP handshake window
+reset, then connecting and catching up without intervention. All fixture peers
+share the same IP and its five-handshakes-per-minute limit. The test's 20-second
+fresh-join deadline could not cover that window plus frontier discovery.
+Fresh catch-up now allows 120 seconds, within a 300-second whole-fixture bound.
+Already connected payment checks retain their 20-second deadline. No handshake
+limit, quorum, balance assertion or admission rule was relaxed. The diagnostic
+rerun does not turn the earlier failed broad run into a pass.
+The final isolated replay/catch-up test passed in 93.56 seconds in
+`typed-outcome-replay-final.log` with every ledger-equality assertion intact.
+
+The final full workspace run passed 1,643 tests, failed none and ignored one
+documentation example across 61 test summaries. Its 469 node unit tests passed
+in 557.21 seconds; fresh-node replay passed in 93.27 seconds. Evidence is in
+`typed-outcome-workspace-final.log`. Strict all-target workspace Clippy passed
+in `typed-outcome-clippy-final.log`. The daemon build and both native app checks
+also passed in `typed-outcome-daemon.log`, `typed-outcome-wallet-native.log` and
+`typed-outcome-node-native.log`. This run predates the signer fence in iteration 68.
+
+Typed agreement manifests change the wire encoding, so the wire generation is
+now 9. Block version 4, signer-journal version 3 and certificate-record version 1
+are unchanged. Older peers cannot connect to this build. No existing app was
+restarted and no ledger was reset.
+
+Direct review of `Election::try_confirm` confirms that only `final_tally` can
+cement payments; soft votes alone cannot. The remaining handoff must bind final
+vote reservations and subsequent signed blocks to the agreed epoch. Freezing only
+an in-memory election or swapping current account balances cannot provide that
+boundary.
+
+### Iteration 68: fence ordinary signing with the outcome journal
+
+The gated outcome transition now checks every durable final-vote reservation
+against hashes derived from its replayed history. It writes a per-signer fence
+and the checkpoint journal in one LMDB transaction, then syncs before releasing
+a checkpoint signature. Ordinary soft and final vote reservations check the
+fence in their own writer transaction before changing the signing sequence.
+Concurrent writers therefore cannot commit both an outside-cut final reservation
+and the outcome fence. The fence records the certified parent and survives
+restart. Another cut at that parent can be considered, but cannot erase it.
+
+This deliberately stops ordinary v1 signing. There is no unseal operation.
+The implementation does not claim network-wide payment finality, epoch-bound
+signatures or liveness when outstanding final reservations disagree with the
+cut. A future certified epoch handoff must address those cases before the gate
+opens. An incomplete or merely pending challenge does not enter this path.
+The complete-panel replay and trusted-clock checks still apply. No balances,
+canonical certificates, block encoding or wire generation changed.
+
+Four storage tests passed in `outcome-fence-store.log`. They check concurrent
+outside-cut reservations, abort of the fence and journal together, missing final
+hashes, corrupt records, signer isolation, restart and unchanged vote sequences
+after rejection. The first node build failed because existing test helpers still
+used the old transition signature. That compile failure remains in
+`outcome-fence-node.log`; the helpers now supply an explicit test-only no-op fence.
+
+Both new node tests passed in `outcome-fence-node-retry.log` in 3.32 seconds.
+They use the ordinary durable vote generator, reject a stale outcome cut without
+leaving signer state, accept a cut containing the final payment, block subsequent
+ordinary signatures and retain the fence after reopening the store. A rejected
+clock leaves ordinary voting available. The three outcome agreement tests passed
+in 30.86 seconds in `outcome-fence-agreement.log`; all eight journal regressions
+passed in `outcome-fence-journal.log`. Strict workspace all-target Clippy passed
+in 5.74 seconds in `outcome-fence-clippy.log`.
+
+The two TCP driver tests also passed in 86.72 seconds in
+`outcome-fence-transport.log`. Each of the eight independent signer stores first
+reserves an ordinary final payment contained in the outcome cut. Agreement still
+requires seven of ten human units. Every signer, including the late joiner,
+refuses further ordinary signatures and retains that fence after restart.
+
+The unchanged frontends also passed both production builds, 11 wallet math/icon
+tests, 52 wallet Chromium UI tests and 18 node Chromium UI tests. Logs are
+`outcome-fence-wallet-unit.log`, `outcome-fence-wallet-web.log`,
+`outcome-fence-node-web.log`, `outcome-fence-wallet-browser.log` and
+`outcome-fence-node-browser.log`. These browser tests use IPC fixtures, not native
+transaction execution. The temporary node preview was stopped; the existing
+wallet development server was left running.
+
+The optional Playwright WebKit launch failed before app tests could run because
+the host lacks its `libicu74`, `libxml2` and `libflite1` compatibility libraries.
+`outcome-fence-node-webkit.log` retains that failure. No system libraries were
+replaced and that failed launch provides no WebKit, macOS or iOS sign-off.
+
+An isolated runtime then passed all 52 wallet and 18 node tests in Linux WebKit.
+Evidence is in `outcome-fence-wallet-webkit-isolated.log` and
+`outcome-fence-node-webkit-isolated.log`. The runtime lives under
+`/tmp/burst-webkit-compat.rMMmbc/browsers`. It is a copy of the cached WebKit 2272
+with three Ubuntu compatibility packages extracted into that copy's private
+library directories. Downloads matched the SHA256 values published for
+[ICU 74](https://packages.ubuntu.com/noble-updates/amd64/libicu74/download),
+[libxml2](https://packages.ubuntu.com/noble/amd64/libxml2/download) and
+[Flite](https://packages.ubuntu.com/noble/amd64/libflite1/download).
+No maintainer scripts ran and the system libraries and source browser were not
+changed. The temporary node preview was stopped again after testing.
+
+`tools/prepare-webkit-compat.sh` reproduces that setup with pinned checksums,
+HTTPS-only downloads and private-library path checks. Its final preparation
+passed in `outcome-fence-webkit-setup-final.log` and prints
+`/tmp/burst-webkit-compat.7rOwy9/browsers` in `outcome-fence-webkit-path-final.log`.
+These are fixture-based Linux browser tests, not native IPC or macOS/iOS sign-off.
+
+The helper's final runtime also launched, created a page and clicked a button in
+`outcome-fence-webkit-smoke.log`. Bash syntax validation passed, and a missing
+source argument exits with its usage error before creating files. ShellCheck is
+not installed on this host.
+
+The final full workspace run passed 1,649 tests with zero failures and one ignored
+documentation example across 61 summaries in `outcome-fence-workspace.log`.
+All 471 node unit tests passed in 565.91 seconds, and fresh-node replay passed in
+90.60 seconds. The daemon build and both native app checks passed in
+`outcome-fence-daemon.log`, `outcome-fence-wallet-native.log` and
+`outcome-fence-node-native.log`. Coverage validation and its five checker tests
+passed; the inventory remains 388 indexed sections, 386 without sign-off.
+Source-document hashes are unchanged. The release gate remains closed.
+
+### Iteration 69: persist and replay a mixed certificate chain
+
+Selection and upheld-outcome records now share the canonical height sequence.
+Each record is validated against its certified parent and the named signed
+history. Replay applies outcomes in certificate order and derives the next human
+roster from the settled candidate. The old selection-only reader rejects a mixed
+chain; it cannot silently remove an outcome and restore revoked authority.
+Selection records retain format 1. Outcome records use format 2 and remain gated
+in ordinary builds.
+
+Pending manifest recovery now uses its exact mixed parent prefix. Raw record
+import validates kind, manifest, quorum and any selection beacon before writing.
+An existing decision can be imported again without replacing its original proof.
+The new outcome persistence API writes only the certificate record and chain head
+in one transaction, followed by a forced sync. It does not install live economic
+state or remove the ordinary-vote fence.
+
+Mixed replay currently requires unchanged account heads after the first outcome.
+It can certify another pending selection from that cut under the updated human
+roster. It cannot accept new payment or verification blocks. Version-4 signatures
+do not bind a payment epoch, so replay rejects that tail rather than interpreting
+signed balances against changed economic state.
+
+The initial check passed. The first test compile found three old selection-view
+helpers using the previous reference type; `mixed-chain-tests.log` retains that
+failure. After updating those helpers, the three new tests passed in 34.13 seconds
+in `mixed-chain-tests-retry.log`. They cover restart, reduced signing authority,
+mixed record import, kind/domain rejection and the post-outcome legacy-block
+restriction. The expanded replay suite passed all 77 tests in 482.39 seconds in
+`mixed-chain-replay-regressions.log`. This includes exact reward and stake-release
+recovery, the proportional TRST split, outcome TCP agreement and the existing
+selection runtime/catch-up tests. Strict all-target workspace Clippy passed in
+7.22 seconds in `mixed-chain-clippy.log`.
+
+The full workspace passed 1,653 tests, with no failures and one ignored
+documentation example across 62 summaries in `mixed-chain-workspace.log`.
+Its 474 node unit tests took 524.44 seconds. The new ordinary-library integration
+test rejects outcome imports before mutation and rejects a copied outcome record
+on recovery. The offline daemon build and both native app checks passed in
+`mixed-chain-daemon.log`, `mixed-chain-wallet-native.log` and
+`mixed-chain-node-native.log`. Browser code did not change in this iteration.
+
+A fourth mixed-chain test was added after that workspace run compiled. It checks
+two successive fraud outcomes, separate settlement times and stake releases,
+and permanent bootstrap exit after revoking the original creator. Its first run
+failed because the fixture used the same cutoff for successive checkpoints.
+`mixed-chain-final.log` retains that failure. The fixture now advances the cutoff
+by one second, within the same authenticated beacon round. The protocol's strict
+cutoff check was not changed. The next run found that the shared test vote helper
+always addressed wallet 20. It now derives the target from the certificate.
+`mixed-chain-final-retry.log` retains that failure. No production rule changed
+for either fixture correction.
+
+The consecutive-outcome test then passed in 10.26 seconds in
+`mixed-chain-consecutive.log`. All four mixed-chain tests passed in 50.23 seconds
+in `mixed-chain-final-verified.log`, including historical re-import after the tip
+advances. Strict all-target workspace Clippy passed again in 1.73 seconds in
+`mixed-chain-clippy-final.log`. This fourth test is not included in the 1,653
+workspace count above. Coverage validation still reports 388 indexed sections,
+386 unsigned and no errors; its five checker tests pass. Both source-document
+hashes are unchanged.
+
+The single-height agreement worker still keeps outcome decisions in its journal.
+Runtime scheduling, historical transfer, live economic installation and signed
+payment epochs are not supplied by this record/replay change. The release gate
+remains closed.
+
+### Iteration 70: authenticate mixed history during checkpoint catch-up
+
+Historical transfer now uses the same semantic record validator as local mixed
+chain loading. The bounded envelope still contains signed blocks and one raw
+certificate record. It does not contain trusted account or economic snapshots.
+The receiver derives the exact parent prefix, verifies its quorum, reconstructs
+the supplied cut and checks the selection or outcome commitment before granting
+any block-age exception. Durable record import still requires locally stored,
+confirmed history.
+
+The sync worker now validates a mixed chain on startup. The selection-only raw
+import wrapper is test-only; production historical import uses the typed chain
+path. Redundant selection-only ancestry helpers were removed. Ordinary builds
+still reject outcome records at the source gate.
+
+Both historical-transfer tests passed in 20.75 seconds in
+`mixed-history-tests.log`. The new test rejects incomplete or duplicate blocks,
+forged signatures, record-kind reinterpretation, skipped ancestry and a wrong
+network before authorizing the hashes. Valid remote history can authorize an age
+exception without writing its blocks or finality. Once the signed cut is stored
+locally, import preserves the outcome's reduced roster and leaves the local
+account snapshots unchanged.
+
+The running sync worker passed a loopback TCP test in 37.53 seconds in
+`mixed-history-wire.log`. It transfers a multi-chunk outcome followed by a new
+selection, closes the receiver store, reopens it and serves the same chain to
+another receiver. Strict all-target workspace Clippy passed in 6.11 seconds in
+`mixed-history-clippy.log`. The initial check reported the now-unused selection
+import wrapper; it is retained only for its test callers.
+
+The full workspace then passed 1,656 tests, with no failures and one ignored
+documentation example across 62 summaries in `mixed-history-workspace.log`.
+All 477 node unit tests passed in 527.93 seconds. The ordinary-build release-gate
+test also passed. The offline daemon build and both native app checks passed in
+`mixed-history-daemon.log`, `mixed-history-wallet-native.log` and
+`mixed-history-node-native.log`. The source-document hashes are unchanged.
+Coverage validation and its five checker tests pass, with 386 sections still
+unsigned. No browser or native UI behavior was changed in this iteration.
+
+This fixture supplies the signed ledger history before starting sync. It is not
+full-node ledger bootstrap across a live outcome. Economic installation, payment
+epochs, ordinary-vote unsealing and outcome-aware beacon/runtime scheduling
+remain unfinished. The release gate is closed.
+
+### Iteration 71: run outcome discovery and decision recovery
+
+The checkpoint runtime now discovers complete upheld panels from confirmed,
+signed history. Incomplete and rejected panels do not become outcome candidates.
+Discovery uses a cutoff in the trusted past; signing still checks the clock
+again after replay. Selection and outcome choices recover through the same
+typed signer journal.
+
+The runtime copies a decided certificate into the canonical chain before
+rotating its service context. A restart between the journal commit and chain
+write recovers that exact decision without a clock. It can serve outcomes to
+observers and reopen a mixed chain. Any outcome in the ancestry stops fresh
+runtime signing until a live payment epoch is installed. A later selection
+record cannot hide that boundary. No balances are installed and no ordinary
+vote fence is cleared.
+
+The beacon queue now reads the typed chain and defers after an outcome. Committee
+installation checks the same boundary inside its LMDB writer, including when
+the worker started fetching a beacon before the outcome arrived. This is a
+pending-epoch guard, not a replacement for live economic installation.
+
+The new eight-store runtime TCP test passed in 107.44 seconds in
+`outcome-runtime-wire.log`. It starts without supplied candidates, requires seven
+of ten human units, persists the decision and serves a late observer without a
+key or trusted clock. Restart retains the reduced roster and produces no new
+epoch journal. Signed history is preloaded; this is not full-node bootstrap.
+Two discovery/recovery tests passed in 9.10 seconds in
+`outcome-runtime-recovery.log`. The initial compile check caught an incorrect
+enum import; it was fixed before these tests. The mixed-chain test with the
+committee guard and post-outcome selection passed in 14.45 seconds in
+`outcome-runtime-beacon.log`. Strict all-target workspace Clippy passed in
+`outcome-runtime-clippy.log`.
+
+The full workspace passed 1,659 tests, with zero failures and one ignored
+documentation example across 62 summaries in `outcome-runtime-workspace.log`.
+All 480 node unit tests passed in 703.69 seconds. The daemon build and both
+native app checks passed in `outcome-runtime-daemon.log`,
+`outcome-runtime-wallet-native.log` and `outcome-runtime-node-native.log`.
+The final strict lint run and ordinary-build outcome gate test passed in
+`outcome-runtime-clippy-final.log` and `outcome-runtime-release-final.log`.
+Ordinary observers also reject outcome proposals before replay or relay.
+
+Both source-document hashes remain unchanged. Coverage validation and its five
+checker tests pass, with 386 sections still unsigned. No UI source changed;
+native compile checks are not native GUI tests. Live outcome installation,
+signed payment epochs, safe vote unsealing and full-node bootstrap across that
+handoff remain unfinished. The release gate stays closed.
+
+### Iteration 72: bind signed payments to their installed context
+
+Block version 5 adds `payment_epoch` to the owner-signed hash. Every ordinary
+block initially names the configured genesis hash; genesis itself uses zero
+to avoid hashing its own identifier. Wire generation 10 marks the incompatible
+layout. The node rejects older ledgers before decoding them and does not migrate
+or delete their data.
+
+Genesis creation persists the initial epoch in the same transaction. Restart
+requires that record to match configured genesis. Missing, zero, malformed or
+different records stop initialization without repair. Admission, economic
+writes and durable vote reservation each check the installed context. Ordinary
+vote signatures bind it through the signed block hash. Rollback records cannot
+change either the epoch or the consensus vote fence. No epoch-advance or unseal
+operation was added.
+
+Account and parameter RPC responses supply the epoch. The wallet carries it
+through payment construction, account operations, stake-release batches and
+opening an empty account. Missing or changed context stops preparation before
+work generation or submission. Replay derives the initial context from genesis
+rather than trusting the metadata record. It rejects even correctly signed
+blocks naming another context. Post-outcome account-head extensions still fail
+closed because no certified economic handoff is installed.
+
+The new real-RPC tests passed in 1.38 seconds in `payment-epoch-network-2.log`.
+They reject wrong contexts without adding blocks, forks, elections or vote
+sequences, confirm ordinary wallet payments, and repeat after restart. They
+also check that initialization does not repair missing or corrupt metadata.
+The first test run expected an RPC error instead of the protocol's explicit
+`accepted: false` response; the assertion was corrected without changing RPC.
+
+All 74 node integration tests passed across 11 targets in
+`payment-epoch-node-integration.log`. The remaining workspace passed 1,111
+tests, with no failures and one ignored documentation example, in
+`payment-epoch-workspace-other.log`. The focused epoch tests passed 12 tests,
+including the outcome runtime TCP fixture. Ten network-identity tests passed.
+The initial node-unit run exposed one payment-replay fixture without epoch
+metadata; its setup was corrected, and the focused rerun passed. The clean full
+node-unit rerun then passed all 483 tests in 702.42 seconds in
+`payment-epoch-node-unit-final.log`. Together, the non-node workspace, node
+integration and clean node-unit runs passed 1,668 tests with no failures and
+one ignored documentation example.
+
+Strict all-target lint passed in `payment-epoch-clippy-final.log`. The daemon
+build and both native app checks passed in `payment-epoch-daemon.log`,
+`payment-epoch-wallet-native.log` and `payment-epoch-node-native.log`. Native
+compile checks are not GUI tests. No UI source, existing manual-test ledger,
+running app or Azure deployment was changed.
+
+This closes the missing signed-context field, not the payment-authority gap.
+Ordinary elections still use locally confirmed human weights. They must use
+the agreed installed roster before live outcome settlement can safely open
+the next epoch. Old final choices, account tails, atomic economic installation
+and fresh-node replay across that boundary remain the next coupled change.
+The release gate stays closed; neither source document was edited.
+
+The local reference review checked rsnano's `store_lmdb/src/final_vote_store.rs`,
+`node/src/consensus/vote_generation/vote_generator.rs` and experimental
+`node/src/ledger_snapshots/` path. Its final-vote store preserves one hash per
+qualified root. Its snapshot collector uses confirmed frontiers, while vote
+generation still has a TODO for including final-voted frontiers. That experiment
+is not a completed answer to BURST's handoff. Tezos's Tenderbake documentation
+binds endorsements to a level, round and payload; its consensus-key storage
+separates active keys from pending cycle updates. These are reference patterns,
+not permission to import token-weighted authority or a global transaction chain.
+
+### Iteration 73: replay signed tails across certified outcomes
+
+Mixed replay now extracts the exact signed prefix for each certificate, applies
+its settlement, then executes the next account-head extension. Blocks after an
+outcome must name its hash in `payment_epoch` and cannot predate the most recent
+certified cut. Later outcomes replace that context. A partially completed panel
+can resume after a cut without reinstalling its committee or releasing stakes
+twice. The candidate still derives its state from signed history, not local
+economic afterimages.
+
+The first clean-remainder test caught double revocation. A holder could send the
+clean portion of a merged token, but receipt applied the old graph cut again.
+Pending transfers now record their revoked chunks during settlement. Delivery,
+rejection and expiry return preserve those chunks; a clean post-settlement send
+starts with none. Bounty accounting counts newly revoked pending value in the
+same ordered proportional cuts as held tokens. Re-verification removes restored
+pending chunks with the economic candidate. The pending-record layout changed;
+older intermediate stores require explicit reconstruction, not silent decoding.
+
+Seven new signed-history tests pass in `post-outcome-epochs-6.log`. They cover
+fraud versus inactivity, spending the clean remainder, rejecting revoked
+spending, one-time reward and stake-release claims, stale and invalid signed
+contexts, backdating, pending delivery and rejection, restart/import, and a panel
+that finishes in the next epoch before a second outcome. The initial fixture
+failures and the reproduced double-revocation failure remain in the earlier
+`post-outcome-epochs-*` logs; they are not counted as passes.
+
+Validation passed 1,677 tests with no failures and one ignored documentation
+example. The full node run passed 490 tests in 724.02 seconds; the additional
+pending-restoration test passed separately. All 74 node integration tests and
+1,112 tests in the remaining workspace passed. Logs are
+`post-outcome-node-unit.log`, `post-outcome-restoration.log`,
+`post-outcome-node-integration.log`, `post-outcome-workspace-other.log` and
+`post-outcome-node-doc.log`. Strict all-target Clippy, the daemon build and both
+native checks passed in `post-outcome-{clippy,daemon,wallet-native,node-native}.log`.
+Native checks are not GUI tests. Coverage validation and its five tests passed;
+388 sections are indexed and 386 remain unsigned. Both source hashes match the
+previous iteration.
+
+Live epoch activation, the agreed payment electorate and safe vote unsealing
+remain unfinished. This change does
+not enable them. Re-merging clean remainders and later revocation/restoration
+also need explicit end-to-end coverage before the lifecycle gate can open.
+No source document, existing manual-test ledger, running app or Azure deployment
+was changed. The writing pass keeps the evidence scoped to what ran.
+
+### Iteration 74: preserve composition after revocation and restoration
+
+Two regressions exposed the remaining composition error. Merging a clean 60-unit
+remainder with 40 new units caused a later revocation to remove 36 units instead
+of 60. Restoring a revoked chunk after its clean remainder moved to another
+wallet also changed the proportions in both wallets. The failing cases are in
+`remerge-baseline.log` and `restored-composition-baseline.log`.
+
+Tokens now distinguish an original composition, a clean remainder and a split
+attributed to one burn. The reference is constant-size. The merger graph keeps
+shared immutable revocation revisions; immediate source edges point to those
+revisions rather than copying excluded-origin lists. Re-merging two portions
+with the same merge origin does not combine them if their compositions differ.
+This follows decisions 6.15b, 6.17b and 7.2c. Rounding still follows 6.18b.
+
+Pending settlement uses each portion's composition. Restoration marks a saved
+chunk restored instead of deleting it, superseding iteration 73's removal rule.
+Receive, resend and expiry return retain the distinct portions. Snapshot restore
+rejects missing composition references after attaching the graph. Holdings use
+`TRSTv003`, the graph uses `BRSTMG03`, and pending records have a new layout.
+No existing user ledger was migrated or deleted.
+
+The 30 existing pending-payment tests passed in `composition-pending-tests.log`.
+Three settlement tests pass in `composition-lifecycle-final.log`. They cover
+restoration before delivery, another origin's revocation, resend of multiple
+portions, repeat revocation, restart and expiry return. The signed-payment case
+also merges a received clean remainder and rejects a second receipt of the same
+payment. An initial fixture omitted its orchestrator snapshot; that setup error
+was corrected before the passing runs. These tests do not establish live
+certified re-verification or reward reversal.
+
+Validation passed 1,686 distinct Rust tests with no failures and one ignored
+documentation example. `composition-node-unit.log` records 493 tests in 689.03
+seconds. The later three-test lifecycle run adds one new test and repeats two
+from that full run. `composition-node-integration.log` records 74 tests across
+11 targets. `composition-workspace-other.log` records 1,118 tests, including all
+54 TRST tests; node documentation tests passed in `composition-node-doc.log`.
+Strict all-target workspace Clippy, the daemon build and both native checks
+passed in `composition-{clippy,daemon,wallet-native,node-native}.log`. Native
+checks are not GUI tests. The coverage checker and its five tests pass; both
+source-document hashes are unchanged. Live epoch installation remains gated.
+
+### Iteration 75: retain vote promises across a certified epoch handoff
+
+Ordinary final votes and fences now use `consensus_final/v2/{epoch}/...` and
+`consensus_fence/v2/{epoch}/...`. Sequence numbers remain monotonic across epochs.
+The new writer operation closes the old context and switches the installed
+context atomically with the caller's state writes. It retains old promises and
+fences, refuses a previously closed context, and cannot run inside a reversible
+block journal. Metadata reads and payment admission also reject a closed context.
+Legacy v1 records require explicit reconstruction rather than silent reassignment.
+
+An early version required every local final promise to appear in the new cut.
+That was too restrictive for an observer holding a minority vote. The handoff
+now returns excluded old-epoch choices for reconciliation. Only signing a
+checkpoint requires inclusion of that signer's own current-epoch final choices.
+After an authenticated handoff, the old epoch remains closed and its records
+remain available, while new-epoch voting can proceed at the certified frontier.
+This distinction is covered by the minority-vote and concurrent-writer tests.
+
+Outcome signing now supplies the payment epoch derived by history replay to the
+fence writer. After a storage handoff, resuming an old signer journal fails
+without sealing the new context. The node regression exercises this boundary;
+it does not install live economic state.
+
+Scoped validation passed 1,144 tests with no failures and one ignored example.
+`epoch-handoff-workspace.log` records 1,124 tests outside the node crate, including
+62 store tests. The node checks pass six durable-vote tests, two outcome-fence
+tests, three outcome-agreement tests, seven signed-tail replay tests and two
+payment-epoch network tests. Their logs are `epoch-handoff-{durable-final,
+fence-final,agreement-final,replay-epochs,network-final}.log`. Strict all-target
+workspace Clippy and the daemon build passed in `epoch-handoff-clippy-final.log`
+and `epoch-handoff-daemon.log`. The full-node suite from iteration 74 predates
+this change; this pass ran the affected node tests. Coverage validation and its
+five tests pass, and both source-document hashes are unchanged.
+
+No production code calls the storage handoff yet. The caller must authenticate
+the certificate under the old agreed roster, reconcile local tails without
+replacing cemented state, and install the replayed economy and next electorate
+in that same transaction. Selections also change authority and must become
+payment boundaries. The live installation path and source release gate remain
+unfinished. No existing user ledger or running app was changed.
+
+### Iteration 76: make every checkpoint a payment boundary
+
+Selections now close the previous replay context just as outcomes do. Each cut
+must extend the preceding certified heads, and every following signed block must
+name that checkpoint's hash and not predate its cutoff. Selection candidates
+retain their replay-derived context and history hashes. Both candidate kinds
+seal ordinary voting in the checkpoint journal's transaction before signing.
+
+Learning a quorum decision is different from signing one. A minority payment
+voter can accept and recover a certificate whose cut excludes its promise.
+Learning fences the still-installed old context without deleting the promise;
+the handoff reports it for reconciliation. A decided journal can relay its
+certificate after handoff without fencing the new context. Undecided recovery
+still cannot seal a different installed epoch. The store regression checks
+abort, commit, retained promises and poisoning of a stale writer.
+
+The runtime now waits after selections as well as outcomes until the installed
+context matches the certified parent. It rechecks that condition without needing
+another certificate and retries journal recovery when installation catches up.
+These tests supply storage contexts explicitly; they do not install a live
+economy or establish an agreed payment electorate.
+
+A new regression reproduced a separate boundary error: standalone replay had no
+frozen selection request until its first verifier vote. The failing assertion is
+in `all-boundaries-freeze-baseline.log`. Replay now reconstructs and compares the
+request at its exact certificate cut, then freezes it before waiting for a beacon.
+Late endorsements are rejected even without another checkpoint. Freezing alone
+does not install a committee. Tests also distinguish an older panel's vote
+context from the current payment epoch when a panel spans multiple checkpoints.
+
+Current scoped validation passed 174 distinct tests with no failures: 63 store
+tests, 96 confirmed-replay tests, eight checkpoint-journal tests, one runtime
+recovery test and six durable-payment-vote tests. Logs are
+`all-boundaries-store-final.log`, `all-boundaries-confirmed-replay-current.log`,
+`all-boundaries-checkpoint-agreement-final.log`, `all-boundaries-runtime-final.log`
+and `all-boundaries-durable-votes-final.log`. The replay run took 775.71 seconds
+and includes the selection and outcome TCP worker tests. Earlier failed runs
+remain in the evidence directory; their results are not counted as passes.
+The corrected fixtures sign tails in their actual checkpoint context and still
+assert rejection of changed frozen requests. Strict all-target workspace Clippy
+and the daemon build passed in `all-boundaries-clippy-final.log` and
+`all-boundaries-daemon-final.log`.
+
+Live state installation remains unfinished. The full running-node wallet journey
+predates these universal boundaries and must pass again with the installer; the
+worker tests above do not replace it. Next is an atomic certified economy,
+electorate, epoch and cutoff installation, with local-tail reconciliation that
+preserves cemented prefixes and durable confirmation work. Bootstrap and
+delegation also need an agreed roster update when no panel or outcome is pending.
+No production caller activates a new payment epoch yet. The release gate stays
+closed, and neither source document, the user's ledger nor a running app was
+changed. No Azure resources were touched.
+
+### Iteration 77: commit a replayed checkpoint projection atomically
+
+`PreparedInstallation` authenticates the stored chain from configured genesis,
+finds the immediate successor of the installed payment context, and replays that
+cut. The writer rechecks the context and exact certificate record. It commits
+accounts, BRN/TRST, pending transfers, lifecycle receipts and orchestrator state,
+bootstrap state, parameters, the confirmed authority projection, agreed human
+roster, quorum, cutoff and epoch together. The engines are returned only after
+commit and forced synchronization. This API remains source-gated and has no
+running-node caller.
+
+The storage replacement checks every cemented account position and durable
+confirmation handoff. It archives excluded unconfirmed block bytes under
+`checkpoint_orphan/v1/`, outside canonical block and height indexes. Old final
+promises remain in their closed epoch. Stale pending entries, BRN wallets, undo
+records and replay-owned lifecycle keys are removed from the new projection.
+Unrelated settings and agreement journals remain. Unsupported tail lifecycles or
+populated legacy transaction/governance tables abort the transaction. Errors
+poison the storage writer; errors after staging at node level drop the owned
+transaction. Live economic admission now rejects a block timestamp before its
+installed checkpoint cutoff.
+
+The new tests cover abort/commit, poisoned writers, retained minority evidence,
+reconstruction from deliberately false local snapshots, stale prepared inputs,
+cemented and queued-confirmation refusal, and failure after replacement has been
+staged. A sequence test installs two selections and a fraud outcome, checks the
+replayed accounts and pending entries, preserves signed nominal TRST balances,
+and reopens the store without settling twice. It explicitly injects confirmed
+prefixes. It does not exercise running payment elections or worker publication.
+
+Current scoped validation passed 86 Rust tests with no failures or ignored tests:
+66 store tests, eight installation-related tests, eight payment-transition tests,
+two payment-epoch network tests and two fork-replacement network tests. Logs are
+`installer-store-final.log`, `installer-installation-final.log`,
+`installer-payments-final.log`, `installer-epoch-network-final.log` and
+`installer-forks-final.log`. Strict all-target workspace Clippy and the daemon
+build pass in `installer-clippy-final.log` and `installer-daemon-final.log`.
+The initial tests caught an invalid empty-prefix LMDB scan; that was fixed before
+the passing runs. Earlier failure logs are retained, not counted as passes.
+Coverage validation and its five tests pass. The whitepaper and decisions hashes
+are unchanged.
+
+Live integration is still required. The block-processing task must serialize
+installation with admission and fork replacement, publish rebuilt engines and
+caches, retire old elections, and use the installed agreed electorate for all
+payment votes. Startup must validate a certified installed context instead of
+requiring genesis forever. Beacon readiness must follow installed state, not
+merely certificate presence. Roster-only updates and late catch-up also remain:
+this installer refuses a lagging cut that omits already-cemented later history.
+Do not work around that refusal by lowering confirmation heights. The full live
+verification/challenge journeys must be rerun after that coordination exists.
+The release gate stays closed. No user ledger, running app or Azure resource was
+changed.
+
+### Iteration 78: running installation and certified-history catch-up
+
+The gated block-processing task now installs the next authenticated certificate
+between admissions and fork replacements. It publishes rebuilt economic and
+verification engines, frontiers, counts and payment authority under the shared
+locks. It retires old elections and queued local work. If a failed commit has
+already changed the durable epoch, it shuts down rather than serving old engines
+over a new ledger. Startup authenticates the installed roster and cutoff from
+configured genesis and the stored certificate chain.
+
+Certified payment elections use the installed roster and quorum. Local account
+verification, attendance and token balances cannot change their weights. A new
+epoch retires old candidate routes. Repeating the same epoch with changed weights
+or quorum is rejected. Legacy source-gated nodes retain their existing path.
+
+The first live test failed on fresh-node catch-up. It asked an already-closed
+ordinary voting epoch to cement the certified history. Transfers now authenticate
+the prior roster's certificate and replay the signed cut before archiving block
+bytes under `checkpoint_history/v1/`. Import leaves live accounts unchanged.
+The installer reads that authenticated history without requiring old ordinary
+votes, then applies its existing finality checks. Archival history cannot be
+undone by block rollback. Local proposal signing still requires a cemented cut.
+
+The normal live verification/rejected-challenge journey passes with this handoff
+in `live-install-network-2.log` (79.78 seconds). The upheld-fraud journey passes
+in `live-install-upheld-2.log` (148.21 seconds). It checks delayed revocation at the
+certified boundary, a reduced electorate, rejected old-epoch spending, a payment
+in the new epoch, restart and a fresh sixth observer. Its first run found an RPC
+status bug: a process phase hid the account's revoked status. The handler now
+preserves that status. The agreement driver also reads mixed ancestry when
+starting a successor after an outcome.
+
+Both expanded journeys pass again in `live-install-node-final.log`, which records
+405 passing node tests with no failures or ignored tests. Recovery now compares
+portfolios, pending transfers, payment epochs and stopped accrual as well as heads
+and stake counters. The fraud journey rejects a revoked wallet even when it signs
+the current epoch. The replay run initially passed 99 of 103 tests; three worker
+fixtures needed real epoch installation, and the missing-history test needed to
+remove the authenticated archive as well as the ordinary block. Their five
+focused reruns pass in `live-install-fixtures-final.log`, including one previously
+passing beacon test. The original failures remain in `live-install-replay.log`.
+
+`live-install-components-final.log` records 244 consensus, 66 storage and 22 RPC
+tests passing. Strict workspace all-target Clippy and the daemon build pass in
+`live-install-clippy-final.log` and `live-install-daemon-final.log`. Coverage
+validation and its five tests pass; this does not sign off the indexed sections.
+
+`live-install-integration-final.log` also records both payment-epoch network tests
+and both fork-replacement tests passing.
+
+These fixtures use controlled clocks and historical drand proofs. They do not
+establish real-time beacon secrecy, production clock bounds or Byzantine
+liveness. Roster-only updates, agreed timeout/activation events,
+re-verification and adversarial handoff tests remain. The release gate is closed;
+no user ledger or Azure resource was changed.
+
+### Iteration 79: roster-only authority checkpoints
+
+`checkpoint_roster.rs` adds an authority update without a committee request or
+challenge outcome. It reconstructs the human roster from signed history and
+requires a change from the previous agreed roster. The previous roster certifies
+the update. Delegating both human units to one representative does not let that
+representative approve the change alone while the old roster still has two
+independent representatives. A separate event commitment binds the candidate kind.
+
+Roster records use format 3 and share the existing height sequence, durable signer
+journal, payment vote fences, authenticated history transfer and installer.
+They do not fetch a beacon. The runtime tries an outstanding outcome or selection
+first, then a roster update. Unchanged authority does not create a checkpoint.
+Production signing remains gated.
+
+The first live two-node test passes in `roster-tests-2.log`. It installs a human
+roster and a later delegation update without a committee, rejects an old-epoch
+payment, confirms a new-epoch payment, restarts both nodes and reconstructs the
+chain on a fresh observer. Three new component tests pass in that run. The
+additional final-payment-promise test passes in `roster-component-final.log`.
+Those logs precede the extension for updates before bootstrap exit.
+`roster-components-latest.log` now records all eight roster regressions passing,
+including admission after an early bootstrap epoch, a saved-decision crash point,
+competing creator/ordinary endorsements and refusal to erase a later cemented
+payment. `roster-all-live.log` records all three combined live journeys passing
+in 457.06 seconds before the early-bootstrap extension. The full roster-build
+node run passes all 517 tests with no failures or ignored tests in 1266.66 seconds
+(`roster-node-full.log`). It includes the early-bootstrap live journey, normal
+verification and upheld fraud settlement, plus the complete replay suite. This
+binary predates the following expiry-backend refactor, which is tested separately.
+
+Strict workspace all-target Clippy and the daemon build pass in
+`roster-clippy.log` and `roster-daemon.log`. `roster-integration.log` records both
+payment-epoch network tests and both fork-replacement tests passing. These later
+commands include the expiry-backend refactor. Both ordinary-build gate tests
+pass in `roster-release-gate.log`; recovery rejects roster and outcome records
+without altering the stored records.
+
+The bootstrap extension lets genesis dilution happen as humans are admitted,
+without waiting for the bootstrap exit threshold. Replay adds creator-admission
+dependencies to later-epoch spending and rejects competing bootstrap/ordinary
+endorsements. This does not implement re-verification, timeout settlement or
+governance. Those paths remain separate release requirements.
+
+Both frontend production builds pass (`roster-wallet-build.log` and
+`roster-node-ui-build.log`). The complete browser fixture suites pass 52 wallet
+tests and 18 node-dashboard tests (`roster-wallet-ui-full.log` and
+`roster-node-ui-full.log`). Verification screenshots were reviewed at desktop
+and mobile sizes. These tests substitute IPC responses; they do not test native
+signing or establish full app completion. The UI review required no source edits.
+
+### Iteration 80: shared expiry candidate, still gated
+
+`verification_commit::expire_candidate` separates the legacy expiry calculation
+from LMDB ownership. The caller supplies disposable ledger and engine state.
+The persistent wrapper commits all changes together and leaves live engines
+unchanged on failure. Settlement identifiers bind the signed challenge attempt
+to its deadline and are sorted independently of map iteration order. They are
+not certificates, and the returned BRN remains unavailable to signed spending.
+
+All 27 settlement tests pass in `expiry-candidate-tests.log`. The new parity
+test covers an unselected challenge and an incomplete panel, before, at and
+after the deadline. It compares the replay backend with reopened LMDB state,
+checks idempotence and rejects claiming the unproven refund. This validates the
+backend refactor, not the legacy timeout policy. Decision 15.16 requires absent
+selected verifiers to default to Neither; the old half-stake sweep is not that
+implementation. Activation certificates, deadline completion and revote ordering
+remain the next lifecycle work. No timeout path or release gate was enabled.
+
+The status notes in `spec/README.md` and `spec/coverage.json` now distinguish the
+tested roster/payment/outcome paths from those remaining requirements. Source
+pins are unchanged. Coverage validation and its five tests pass with 388 indexed
+sections, 386 unsigned and no inventory errors. No user ledger or Azure resource
+was changed.
+
+### Iteration 81: certified normal-committee activation
+
+Normal committees now acquire one agreed start and deadline through the mixed
+checkpoint chain. The old electorate certifies the transition. Its manifest
+binds the existing selection certificate and exact beacon proof, without a new
+draw. Replay installs the activation metadata with the payment epoch and the
+rest of the checkpoint projection. A fresh node can recover the proof even if
+it never received the original beacon relay.
+
+Fresh signatures require a trusted clock and reject a cutoff older than the
+shorter of 60 seconds and the configured voting duration. Prepared and decided
+agreements retain their original boundary during recovery. Activation preserves
+votes cast earlier by the same certified panel. A vote timestamp at or after the
+deadline fails before any stake write. Replay refuses to cross an incomplete panel's
+deadline until an agreed completion transition exists.
+
+The six activation component tests pass in 17.97 seconds in
+`activation-components-corrected.log`. A preceding run failed because the new
+clock test supplied a key other than the round's proposer. The corrected fixture
+uses the replay-derived proposer and checks the specific clock rejection.
+The normal-verification and roster journeys pass with the freshness guard.
+The upheld-challenge journey failed waiting for its later challenge-selection
+certificate. `activation-all-live.log` records two passes and one failure in
+442.22 seconds. The diagnostic rerun passes in 279.88 seconds in
+`activation-upheld-diagnostic.log`, including settled-state recovery. The earlier
+failure is not yet explained. Its timeout was not extended, and the diagnostic
+rerun is not counted as a fix. The repeated full live run passes all three tests
+in 546.85 seconds in `activation-repeat-live.log`. Its normal-path challenge
+certificates arrived in 13.16 to 21.74 seconds; the upheld-path certificates
+arrived in 11.85 to 17.77 seconds. Timing and durable-round diagnostics remain
+in the fixture. The original pipeline's chained checks did not run.
+
+An additional recovery change refreshes an expired activation
+candidate only in an eligible proposal step, with the same selection and beacon.
+Signed choices remain in the durable round journal. A prepared value cannot be
+replaced by a new clock reading. The first live run predates this retry change;
+the diagnostic rerun includes it. All 11 activation and retry tests pass in
+31.08 seconds in `activation-retry-final.log`. They include participation-bound
+round advancement, prepared-value recovery across restart, rejection of an
+advanced parent and a running worker that loses clock trust after replay. The
+worker rechecks the clock before signing and does not decide alone. Strict
+workspace all-target Clippy passes in 10.63 seconds in `activation-clippy.log`.
+The daemon build passes in 16.09 seconds in `activation-daemon.log`. Both ordinary
+release-gate tests pass in `activation-release-gate.log`, including rejection of
+activation records before recovery can alter the store.
+The full 529-test node library regression was interrupted after 269 passing
+tests to prioritize focused validation of the changed code. The run took about
+24 minutes and had no reported assertion failures before interruption.
+`activation-node-full.log` is incomplete evidence, not a passing regression.
+
+This does not complete decision 15.16. Challenge activation, absent-voter Neither
+defaults, deadline settlement and timeout-driven revotes remain open. The source
+release gate is unchanged. No user ledger, frontend or Azure resource was changed.
+
+### Iteration 82: certified normal deadline completion
+
+The new candidate applies decision 15.16 to normal committees. Missing members
+default to Neither at the activation's fixed deadline. Their defaults have no
+signed vote context, stake receipt or reward. Existing normal tallying chooses
+verification, another committee or final rejection. Cast stakes remain locked
+across a revote and settle only at the terminal result.
+
+The node now has a typed deadline checkpoint, record format 5, in the gated
+agreement chain. It derives every due panel from replay and binds the ordered
+completion batch. The previous human roster signs. Live balances and identity
+change only when the checkpoint projection and payment epoch install together.
+Ordinary replay still rejects an unresolved deadline; only this candidate's
+construction can cross it before applying the exact completion. Challenge
+expiry and pending-transfer expiry still fail closed.
+
+Completion records stay separate from signed vote history. Later revotes can
+use a certified completion as their trigger. Their final signed outcomes can
+include earlier recorded defaults without inventing signed receipts. Deadline
+refunds belong to the new payment epoch; unrelated unproven releases are not
+promoted.
+
+The six initial verification deadline tests pass in 0.03 seconds after a
+7.31-second compile in `deadline-verification.log`. The first node compile found
+an incorrect relative fixture path in the new live test; that path is corrected.
+The first focused node run passed four tests and failed one in 16.65 seconds.
+It exposed a real revote gap: the selection-history commitment assumed every
+prior vote had a signed context. `deadline-node-components.log` retains that
+failure.
+
+The corrected commitment keeps the existing signed-history domain unchanged.
+Histories containing defaults use a separate domain and require exact completion
+bindings derived from earlier certified boundaries. A default cannot be passed
+off as a signed vote. All five focused node tests now pass in 16.52 seconds in
+`deadline-node-components-fixed.log`. They cover forged boundaries, all-absent
+panels, partial success and rejection, prior-round settlement, simultaneous due
+panels, restart and historical transfer.
+
+The four-node journey passes in 103.65 seconds in `deadline-live.log`. Two
+selected members vote Legitimate; the third stays silent. All four nodes install
+the same completion, verify the target at the agreed cut and return cast stakes.
+The fixture spends the returned stake and the target's newly accrued BRN, then
+restarts and checks a fresh observer's recovered metadata and confirmed payments.
+It uses historical BLS proofs and a controlled clock, not production NTS or an
+unpredictable current beacon.
+
+All 103 verification tests pass in 0.09 seconds in
+`deadline-verification-full.log`. The added history-binding test rejects missing,
+changed and extra defaults and refuses to reinterpret signed Neither votes as
+defaults. Strict workspace all-target Clippy passes in 13.88 seconds in
+`deadline-clippy.log`. All 55 nearby settlement, activation, revote and live-selection
+tests pass in 30.32 seconds in `deadline-nearby-regression.log`. Both ordinary-build
+release-gate tests pass in `deadline-release-gate.log`, including rejection of
+format-5 records before recovery can mutate the store. The earlier 529-test regression was interrupted
+to prioritize changed-code checks. It used the iteration 81 binary, so its passing
+tests do not validate this path.
+
+All 535 tests in the iteration 82 node binary passed with four test threads in
+1155.96 seconds in `deadline-node-full.log`. That binary predates challenge
+deadline integration and the optimized crypto test profile. The development
+loop runs changed-code tests first; full sweeps are separate checkpoint checks.
+
+Challenge activation/completion, general missed-selection recovery and the
+other release-gate items remain open. The whitepaper and decision-document pins
+are unchanged. No user ledger, frontend or Azure resource was changed.
+
+### Iteration 83: challenge deadline candidate
+
+`VerificationOrchestrator::challenge_deadline_candidate` now completes missing
+challenge votes on an isolated copy. It shares the normal panel's certificate,
+parameter, activation-window and signed-vote checks. The challenge must also
+have its signed admission context. Missing members count as Neither at the
+activation deadline, with zero stake and no signed vote context.
+
+The candidate uses the existing challenge tally. An inconclusive panel requests
+a new panel and keeps the challenger stake unresolved. A decisive verdict or an
+exhausted revote limit uses the ordinary challenge outcome. Fraud revokes;
+inactivity deactivates without revocation. Neither defaults receive no rewards.
+This candidate does not use the legacy half-stake expiry rule.
+
+All 109 verification tests pass in 0.12 seconds in
+`target/validation-evidence/challenge-deadline-verification.log`. Six new tests
+cover silent-panel revotes and restart, partial success and rejection, exhausted
+fraud/inactivity panels, forged or early activation, late votes and already
+complete panels, and uncommitted events. They also check that a supplied
+activation window does not expire merely because challenge admission was old.
+The caller still has to authenticate that activation; this API does not do so.
+
+The five existing normal deadline node tests pass against the refactored code
+in 28.29 seconds in `challenge-deadline-normal-regression.log`. Strict workspace
+all-target Clippy passes in 12.73 seconds in `challenge-deadline-clippy.log`.
+The four-thread iteration 82 full node sweep passed all 535 tests separately.
+Its earlier binary cannot establish coverage of the new challenge candidate.
+The whitepaper and decision-document SHA-256 pins are unchanged. Coverage
+index validation reports zero errors; no additional section was signed off.
+
+This is a candidate calculation, not live challenge timeout support. Node
+activation still excludes challenges. The node's admission-time expiry guard,
+deadline settlement, prior-default history bindings and lifecycle-specific
+default indexes need to be updated together. Reusing a normal deadline record
+without those changes would leave later votes or revotes unable to replay.
+The release gate remains false. No user ledger, frontend or Azure resource changed.
+
+### Iteration 84: challenge activation and certified deadline settlement
+
+Challenge panels now use the same certified activation and completion events as
+normal panels. Each activation binds the selected committee, parameter epoch
+and beacon proof. Normal panels use `verification_timeout_secs`; challenges use
+the separately governable `challenge_duration_secs`. Both windows start at the
+agreed activation, not challenge admission or a receiving node's clock.
+
+The node no longer runs the local half-stake challenge expiry sweep. That node
+helper is test-only. Certified deadline replay defaults absent members to
+Neither, then stages the ordinary challenge verdict, stake accounting and
+provenance effects. All due panels share one boundary. The previous roster must
+certify the result before installation changes authority or payment rights.
+
+Prior defaults retain their challenge admission identity through revotes.
+An old default index from another lifecycle cannot supply the new panel's
+selection history. Completion can replace that index for a later independent
+lifecycle; it cannot reuse a verifier within the same attempt history.
+Reward claims retain dependencies on the actual signed stake sources. No
+signature or stake receipt is created for an absent verifier.
+
+The first integration fixture incorrectly treated signed-history storage as an
+installed epoch. The corrected fixture imports and installs the real certified
+prefix. A second run exposed two test errors: it tried to confirm a deliberately
+late vote before asserting rejection, and its jump to a later historical beacon
+crossed pending TRST expiry. The late vote now goes through candidate rejection;
+the revote fixture uses non-expiring TRST. Pending-expiry replay remains a
+separate open item, not a bypass in production code.
+
+Three node integration tests passed in 8.92 seconds in
+`target/validation-evidence/challenge-deadline-node-optimized.log`, covering
+partial and silent terminal panels, a timeout-driven revote, transfer and
+restart, later signed resolution, and rejection of late votes or uncertified
+deadline crossings. This run predates the final distinct-duration checks.
+The release gate is unchanged; these focused checks do not establish release readiness.
+
+The updated regression passed 114 tests in 163.96 seconds in
+`challenge-deadline-regression.log`. It includes four challenge deadline tests,
+normal deadlines, verification settlement, challenge outcomes, revotes and
+transport. The four focused challenge tests also cover zero/overflowing windows
+and differing normal/challenge durations. All 109 verification tests passed in
+0.05 seconds in `challenge-deadline-verification-final.log`. Strict workspace
+all-target Clippy passed in 18.61 seconds in
+`challenge-deadline-integrated-clippy.log`.
+
+The first live run failed after 175.73 seconds while waiting for challenge
+activation. `challenge-deadline-live.log` retains the failure. A diagnostic run
+also failed after 187.29 seconds. Its frozen clock left the proposed activation
+cut before an already confirmed vote. Waiting for activation before casting that
+vote passed the live journey in 239.69 seconds, recorded in
+`target/validation-evidence/challenge-deadline-live-activated.log`.
+The passing run covers certified default votes, fraud settlement, the reduced
+human roster, rejection of old-epoch and revoked-wallet payments, reward claiming,
+spending the challenger's entire available BRN, restart and fresh-node recovery.
+This ordering alone does not establish liveness when votes arrive before
+activation. Iteration 85 supplies a separate regression and live journey.
+
+Test builds now optimize `curve25519-dalek` and `ed25519-dalek`, while protocol
+code retains its debug assertions. The preceding unoptimized integration run
+took 131.77 seconds and failed two of its three tests. The optimized passing run
+also required a one-time 54.46-second rebuild. These timings include other
+validation running on the same machine; they are development-loop observations,
+not controlled benchmarks.
+
+### Iteration 85: include early votes in unsigned activation proposals
+
+A focused regression reproduced an activation delay. After candidate discovery,
+a verifier vote could become final beyond the candidate's cutoff. The ordinary
+final-vote fence correctly refused to sign a cut omitting that vote. The driver
+still considered the activation time fresh, so it would not prepare a later cut
+until the original signing window expired.
+
+An eligible unsigned activation now replays the latest cutoff in the trusted
+past before proposing. It retains the same certified committee, beacon and
+parent. Existing signed proposals and prepared values cannot take this path.
+The journal and ordinary final-vote fence still check the proposal atomically;
+moving the unsigned candidate does not install a payment epoch.
+
+`activation-early-vote-before.log` records the new regression failing before the
+fix with `checkpoint cut omits a durable final vote`. After the fix, all 17
+activation tests passed in 2.93 seconds in `activation-early-vote-regression.log`.
+They include deadline replay, uncertain clocks, early votes, signed proposal
+immutability and prepared-value recovery. Strict workspace/all-target Clippy
+passed in `activation-early-vote-clippy.log`; both ordinary-build release-gate
+tests passed in `activation-early-vote-release-gate.log`.
+
+A separate live journey confirms an early challenge vote at the beacon second,
+asserts that activation is still absent on every node, then advances to a valid
+past cut. Its settlement, reward claim, full refund spending, restart and fresh
+catch-up passed in 219.24 seconds in `activation-early-vote-live.log`. This is a
+controlled-clock journey, not evidence for partition recovery or real-time
+beacon secrecy. Evidence logs are under `target/validation-evidence/`.
+
+The 543-test node sweep is running in `challenge-deadline-node-full.log`. That
+binary predates iteration 86's reward-dependency fix. The last full passing
+baseline remains iteration 82's 535 tests until this new run finishes. The source
+release gate remains false, and the pinned whitepaper and implementation-decision
+hashes are unchanged.
+
+### Iteration 86: make upheld-challenge rewards claimable
+
+The installer regression now asks confirmation to resolve a signed reward
+claim's dependencies after certified fraud settlement. Before the fix it failed
+with `verification reward lacks complete outcome dependencies`, recorded in
+`target/validation-evidence/upheld-reward-dependencies-before.log`.
+The reward existed, but settlement had not retained the signed panel and
+challenge sources needed to confirm a later claim.
+
+Upheld settlement now writes those dependencies into its replay-derived
+candidate. Certificate installation publishes them with the economic state.
+This uses actual signed sources and the existing canonical reward source; it
+does not create a new reward, signature or time-based authorization.
+The extended installer test passes in 0.83 seconds in
+`upheld-reward-dependencies-after.log`. Strict workspace/all-target Clippy passed
+in `upheld-reward-clippy.log`.
+
+The expanded live upheld journey claims the challenger's bounty and both correct
+verifiers' rewards, then spends their entire available BRN after returned-stake
+dependencies are acknowledged. It checks both acknowledgements carried by a
+reward claim and an earlier ordinary payment. Restart and fresh-node recovery
+compare these new balances and heads too. The first run timed out before
+settlement after 185.40 seconds in `upheld-reward-live.log`; it did not reach the
+new claims. The broader outcome regression passed 57 tests in 176.78 seconds in
+`upheld-reward-regression.log`. Iteration 87 addresses the unsigned activation
+stall exposed by the live run and reruns the expanded journey.
+All logs are under `target/validation-evidence/`. No release gate, pinned protocol
+source, user ledger, frontend or Azure resource changed.
+
+### Iteration 87: retire an unsigned activation after a panel completes
+
+An early panel can finish while its unsigned activation candidate is waiting to
+include finalized votes. At the later cut, that committee no longer needs an
+activation. Previously the driver kept retrying the obsolete candidate, which
+prevented the completed challenge outcome from reaching agreement.
+
+`activation-completed-panel-before.log` reproduces this with confirmed history
+and a durable final-vote promise. It fails with `committee is not awaiting
+activation`. Activation replay now distinguishes a completed lifecycle from
+invalid history. Only an unsigned proposal step without a prepared value may
+replace that candidate with a replayed challenge outcome, revote selection or
+roster update. Signed choices, the old electorate and final-vote fences remain
+unchanged. Preparation does not install economic state.
+
+All 18 tests in `activation-completed-panel-after.log` passed in 3.67 seconds.
+The follow-up `activation-completed-panel-branches.log` passed two tests in
+1.00 second, covering the completed challenge and normal success/revote paths.
+The expanded live journey passed in 235.13 seconds in
+`upheld-reward-live-refreshed.log`, including all three reward claims, full
+returned-stake spending, restart and the fresh observer. The combined activation,
+outcome and settlement regression passed 76 tests in 148.85 seconds in
+`activation-completed-panel-regression.log`. Final strict workspace/all-target
+Clippy passed in 5.74 seconds in `upheld-reward-final-clippy.log`, and both release
+gate tests passed in `upheld-reward-final-release-gate.log`.
+The iteration 85 full sweep finished with 542 passes and one failure in
+1284.80 seconds. Its upheld-challenge journey timed out waiting for the outcome
+boundary. That binary predates both the reward-dependency fix and this
+transition. Logs are under `target/validation-evidence/`.
+
+### Test-runner concurrency
+
+Large node fixtures still default to one full mesh per process. An explicit
+`BURST_TEST_NETWORK_CONCURRENCY=2` permits two after the caller raises the test
+process's file limit to 4096. Values outside 1 or 2 fail; production behavior and
+protocol assertions are unchanged. The command is documented in the README.
+The parser and both TCP agreement fixtures passed together, four tests in
+77.28 seconds in `network-fixture-parallel.log`. The running process's soft
+descriptor limit was verified as 4096. This is not a controlled speed benchmark.
+
+A new 546-test full sweep uses that mode in
+`upheld-reward-node-full-parallel.log`. It includes iterations 86 and 87;
+`challenge-deadline-node-full.log` does not. The new run finished with 544 passes
+and two failures in 938.71 seconds. The upheld-challenge journey reached its
+outcome and recovered all five existing nodes, but timed out while the fresh
+observer caught up. Its last capture matched four accounts and verification;
+the genesis account still showed an earlier head, BRN counter and TRST balance.
+The runtime TCP test unwrapped a missing agreement journal after a fixed
+four-second startup sleep. That fixture now waits for the leader's prevote with
+a 60-second bound, then retains the assertion that six of nine humans cannot
+finalize. Both tests passed in the three-test iteration 88 rerun below. That
+targeted result does not make this full run a pass. This binary predates iteration 88.
+
+### Iteration 88: fresh verification after a settled challenge (in progress)
+
+Decisions 36.2 and 6.15 require new endorsements and verifier selection after a
+revocation, with previously revoked TRST restored when verification succeeds.
+The orchestrator now starts a new attempt only from a settled fraud or inactivity
+state. It clears the old endorsements, selection and attempt votes, but retains
+verifier penalties. Insufficient burns, backdated endorsements and active
+challenges cannot reset the attempt. All 111 verification tests passed in
+0.10 seconds in `reverification-start-verification-stable.log`.
+
+The signed-history regression then failed at checkpoint preparation because it
+compared fresh endorsements against the wallet's first frozen set. Evidence is
+in `reverification-lifecycle-before.log`, which failed in 33.97 seconds. Replay
+now retains completed endorsement commitments separately. Certified epoch replay
+can use a later verification lifecycle; bare selection replay still rejects it.
+The new test checks fraud and inactivity, unchanged identity rights before the
+fresh panel completes, restored merged holdings, and rejection of missing or
+reordered outcome certificates. `reverification-lifecycle-after.log` passed its
+fraud and inactivity cases in 91.57 seconds after a 9m 46s build. This is
+signed-history replay evidence, not live-node re-verification evidence.
+An expanded case also rejects spending after only one fresh vote and checks a
+new BRN payment after the full panel succeeds. It passed with the two previously
+failing network tests in `reverification-parallel-regression.log`: three passes
+in 212.90 seconds, using two network fixture permits and three test threads.
+Strict node/verification Clippy passed in `reverification-final-clippy.log`.
+The first run, `reverification-clippy.log`,
+reported one unnecessary `clone` of the copyable wallet-state enum in the new
+test. That call was removed. Another 117 surrounding replay, settlement and vote
+tests passed in 35.78 seconds in `reverification-surrounding-regression.log`.
+Both release-gate tests passed in `reverification-release-gate.log`.
+These results predate the stale-committee fix below. No second full sweep was started.
+
+The new live journey `revoked_wallet_reverifies_restores_pending_trst_and_recovers_on_fresh_nodes`
+extends the existing upheld-challenge fixture. It submits another paid
+endorsement, requires a new round-1102 committee and activation, checks that
+partial voting leaves the wallet revoked, then claims restored pending TRST and
+spends newly accrued BRN. The existing restart and fresh-observer comparison
+follows. Its first run failed after 211.37 seconds in `reverification-live.log`.
+After the new endorsement reset the lifecycle, the beacon worker tried to install
+the old committee and exited. The fresh selection was certified but never activated.
+Installation now defers a certificate whose cutoff precedes the signed start of
+the current lifecycle. This check holds the live publication lock; staging a new
+committee retains all existing validation. The live journey and both committee
+publication/worker regressions passed together in 321.65 seconds in
+`reverification-worker-regression.log`, after an 11.58-second incremental build.
+All five restarted nodes and the fresh observer matched the expected account,
+portfolio, pending-payment and verification state. This proves the tested fraud
+re-verification journey, not live inactivity recovery or appeal/reward reversal.
+Strict Clippy passed in 3.29 seconds in `reverification-worker-clippy.log`.
+Both release-gate tests passed again in `reverification-worker-release-gate.log`.
+The new journey's additional verification phase has a 300-second recovery-stage
+budget; the existing journeys retain 180 seconds.
+
+Recovery polling now waits for the expected signed heads and payment epoch before
+requesting full portfolio and balance captures. It still compares every captured
+field and checks confirmation of every head. The fresh-observer timeout remains
+180 seconds. The upheld-challenge recovery test passed in the three-test rerun.
+Another full sweep is still needed to check contention across the whole suite.
+The source inventory check still reports 388 entries, 386 without sign-off and
+zero coverage errors. All five inventory-checker tests pass. Decisions 6.15 and
+36.2 remain partial; decision 7.4's appeal/meta-challenge path is not implemented
+by this fresh-verification work. Neither source document nor the release gate
+was changed.
+
+### Iteration 89: preserve frozen BRN and test live inactivity
+
+Decision 36.1 selects frozen BRN for both revoked and unverified wallets.
+Re-verification must resume that history, not replace it. `verify_account`
+previously preserved deactivated BRN but reset revoked wallets. The new component
+test reproduced the loss in `reverification-frozen-brn-repro.log`: the original
+earning timestamp changed from 10 to 200. Re-verification now resumes both states
+while preserving burned counters, outstanding stakes, completed pause intervals
+and unacknowledged refund proofs. The focused test passes in the
+`reverification-frozen-brn-live-regression.log` batch.
+
+The new inactivity journey checks that a holder can receive and transfer TRST
+from a deactivated originator before that originator re-verifies. It then checks
+fresh endorsement, selection and voting, unchanged earned BRN across the paused
+period, resumed spending, restart and fresh-node recovery. Both re-verification
+journeys now assert the frozen-BRN rule, and recovery captures include BRN earning
+timestamps and pause intervals. The corrected inactivity journey passed in
+297.98 seconds in `inactivity-frozen-brn-live-final.log`, including all five
+restarted nodes and a fresh observer. Neither journey supplies Byzantine or
+partition-safety evidence.
+
+The first inactivity run failed in 171.96 seconds because the shared fraud
+fixture expected a bounty for the challenger. Inactivity has no revoked TRST
+backing that bounty. The fixture now asserts its absence and still spends the
+returned challenger stake using its release proof. A superseded second run was
+terminated before repeating that known fixture failure. The test signer was
+also corrected to supply the TRST origin for its new Send operation.
+The next run exposed one more fraud-only fixture assumption: without a bounty
+claim, the challenger's refund has not yet been acknowledged by a signed block.
+The test now checks that the difference between earned and immediately spendable
+BRN is exactly the returned stake, then spends it with its release proof. The
+passing inactivity rerun is in `inactivity-frozen-brn-live-final.log`; the fraud journey
+passed in `reverification-frozen-brn-live-regression.log`, including all restarted
+nodes and the fresh observer. That batch finished with two passes and the
+inactivity fixture failure in 311.56 seconds; it is not a green batch.
+
+The verification-status RPC now preserves `deactivated` during fresh endorsement
+and voting, as it already did for `revoked`. Its separate `phase` field carries
+the process state. The 22 RPC tests pass in `inactivity-rpc-regression.log`.
+All 118 surrounding replay/settlement tests passed in 30.62 seconds in
+`reverification-frozen-brn-surrounding.log`. Strict node, verification and RPC
+Clippy passed in 5.31 seconds in `reverification-frozen-brn-clippy.log`; both
+release-gate tests passed in `reverification-frozen-brn-release-gate.log`.
+The final inactivity fixture correction also passed strict Clippy in 3.12 seconds
+in `inactivity-final-clippy.log`.
+The new 550-test full node sweep is running in `reverification-node-full.log`,
+with two network fixture permits and four test threads. It has no final result yet.
+Neither source document nor the closed release gate changed.
+Pending-transfer expiry still fails closed in confirmed replay; these tests use
+infinite expiry and do not resolve that ordering gap. Appeal/meta-challenge and
+reward reversal also remain open.
+
+### Iteration 90: test execution overhead
+
+An eight-second `perf` sample of the iteration 89 full sweep attributed 22.01%
+of sampled CPU cycles to Blake2 compression. Test builds optimized Ed25519 curve
+arithmetic but not Blake2. The test profile now also compiles `blake2` at level 3.
+Protocol debug assertions remain enabled and no validation checks were removed.
+
+The existing 1 KiB hash benchmark, run with `cargo bench --profile test`, measured
+55.139-58.485 microseconds before and 3.7400-4.0526 microseconds after. Evidence is
+in `hash-profile-before.log` and `hash-profile-after.log`. This is a microbenchmark
+on a host running other tests, not a claim that the node suite is 14 times faster.
+All 41 crypto tests pass in `hash-profile-crypto-tests.log`.
+
+`tools/test-node.sh` separates fast tests from network fixtures. Its `all` mode
+runs fast tests first, then network tests with one or two workers matching the
+fixture permits. Previously, permit-waiting network tests could occupy the test
+workers while unrelated fast tests queued behind them. Both groups use the same
+filter list: the fast group excludes it and the network group selects it.
+The inventory comparison in `node-test-partition.log` finds 536 fast tests and
+14 network tests, with zero omissions or duplicates across all 550 tests.
+The optimized node test binary rebuilt in 48.27 seconds; subsequent inventory
+commands reused it. All 536 fast tests passed in 20.23 seconds, recorded in
+`node-fast-split.log`. The network group has not yet been timed with the new
+hashing profile; its end-to-end speedup is not established.
+
+The running iteration 89 full sweep is unchanged and predates the hashing
+optimization. Repeated checkpoint-history validation remains a runtime profiling
+target. No cache, certificate shortcut, deadline change or relaxed assertion was
+introduced in this iteration.
+
+### Iteration 91: agreed pending expiry
+
+Decision 6.16a returns expired unclaimed TRST to its sender. It does not mint
+spendable currency or move reputation to the intended recipient. Deadline
+checkpoints now replay old-epoch blocks first, settle due panels, and return
+remaining expired pending transfers in a canonical order. The return commitment
+binds the pending provenance and settled revocation chunks. A deadline may be
+the first checkpoint, with genesis authority signing it.
+
+Ordinary replay still rejects pending expiry without an agreed boundary. A
+receive at expiry remains invalid, and a later epoch cannot claim an already
+returned transfer. Certified nodes keep periodic held-token expiry, but local
+timers no longer return pending ownership. Installation uses the existing atomic
+checkpoint projection and replaces the live engines.
+
+The first focused run caught the deadline record decoder's old minimum height
+of two. That restriction is now one for deadline records. The initial corrected
+three-test batch passed in 0.04 seconds. The expanded fast group passed 540 tests
+in 40.12 seconds, including a transfer whose sender differs from its burn
+originator. This run predates the final held-only timer split, which has a
+separate focused check. Evidence is in `certified-pending-expiry-focused.log`,
+`certified-pending-expiry-focused-after.log`, and `certified-pending-expiry-fast.log`.
+
+The final held-only timer split passes 12 focused checks in 0.47 seconds in
+`certified-pending-expiry-components.log`. Strict node all-target Clippy passes
+in `certified-pending-expiry-clippy.log`.
+
+The first controlled-clock live run reached recovery but its observer poll
+incorrectly required the genesis account before startup had created it. The
+poll now waits only on account-not-found and still fails on other store errors.
+The corrected run passed in 9.56 seconds in `certified-pending-expiry-live-after.log`.
+It exercises a real signed pending payment, agreed return, a rejected late claim,
+restart, and fresh-node catch-up. It uses genesis checkpoint authority, not an
+independent human quorum. Combined expiry/challenge settlement and adversarial
+partitions still need evidence. The release gate remains closed.
+
+The combined normal-panel deadline and pending return test passes alongside the
+existing two-panel batch test: two tests in 3.01 seconds, recorded in
+`certified-pending-expiry-combined.log`. Its certificate requires seven of nine
+human signatures and installation applies both effects once. This is signed
+history evidence, not a live multi-human expiry journey.
+
+The additional fraud/inactivity plus expiry test passed in 133.56 seconds in
+`certified-pending-expiry-challenge.log`. The build took 6m 04s, including its wait
+for the Clippy build-directory lock. At the shared deadline, fraud returns one
+revoked chunk and one clean expired chunk to the sender; inactivity returns both
+as expired reputation. Neither changes the signed balance or grants spendable
+credit. The durable projection matches replay in both cases. This is a slow
+signed-history test, not a live challenge/expiry journey.
+The final strict node all-target Clippy run passed in 2m 01s in
+`certified-pending-expiry-final-clippy.log`.
+
+The iteration 89 baseline sweep finished with 548 passes and two failures in
+1244.29 seconds. `upheld_challenge_installs_agreed_settlement_across_restart_and_fresh_catchup`
+timed out waiting for outcome installation. The TCP outcome worker test timed
+out in stage 2, waiting for a late clockless participant to recover the decision.
+That binary predates iterations 90 and 91. The targeted optimized rerun in
+`outcome-network-focused-optimized.log` was cancelled after the user reported
+desktop lag. It used about 8.5 CPU cores. SIGTERM did not stop its test process;
+SIGKILL terminated that exact isolated process. Its output during cancellation
+is not a clean reproduction or a pass. The wallet and node-dashboard dev servers
+were left running. Heavy tests remain paused.
+
+### Iteration 92: agreement-worker input starvation
+
+Both agreement workers checked a biased 250 ms timer before their packet inbox.
+If processing took longer than that period, a ready timer could repeatedly beat
+queued packets. The shared `checkpoint_service/input.rs` selector now prioritizes
+shutdown, then packets or inbox closure, then the idle timer. Both workers still
+poll agreement progress after each packet. Rejected packets no longer skip that
+poll, so a stream of invalid packets cannot suppress periodic progress merely
+by keeping the inbox ready. Signature, quorum, replay and trusted-clock checks
+are unchanged.
+
+The first small regression did not register an overdue timer and passed with
+the old ordering. It was insufficient evidence. The corrected regression first
+registers the timer, resets it into the past, and yields to the timer driver.
+With the old ordering it fails packet delivery and closed-inbox termination;
+shutdown priority passes. With the corrected ordering all three checks pass in
+0.03 seconds. Evidence is in `agreement-input-overdue-before.log` and
+`agreement-input-overdue-after.log`.
+
+These checks compile the exact shared selector through the standalone wrapper
+`target/validation-evidence/agreement-input-regression.rs`, using the existing
+Tokio dependency. They do not run node networking. The first wrapper build
+selected an old incompatible Tokio artifact and did not execute any tests; the
+working artifact is `libtokio-36debfd6bf5f8fc8.rlib` for the current compiler.
+Node library compilation passes in 8.13 seconds in `agreement-input-check.log`.
+Both compilation and the small checks ran at nice level 15 on CPUs 0 and 1.
+
+The scheduling defect is reproduced and the shared selector is fixed. Whether
+it explains both earlier network failures still needs live verification. The
+release gate remains closed, and no heavy network rerun was started after the
+user's resource-use complaint.
+
+### Iteration 93: checkpoint-sync input fairness
+
+The checkpoint transfer worker had the same timer-first starvation problem.
+Unlike the agreement workers, it polls retries only on timer wakes. Packet-first
+priority alone would let continuous traffic suppress retries. Its new input
+scheduler alternates priority after each selected timer or packet. Shutdown
+always takes priority. When only one input is ready, the scheduler accepts it
+without waiting for the preferred input. Record authentication, replay, transfer
+limits and retry deadlines are unchanged.
+
+The standalone regression uses the production scheduler and the existing Tokio
+artifact, without building or running a node test binary. The old timer-first
+ordering passes two checks and fails two: queued packets and inbox closure lose
+to an overdue timer. With alternating priority, all four pass in 0.08 seconds.
+The checks cover sustained readiness of both inputs, either input alone,
+shutdown in both priority states, and closed-inbox termination. Evidence is in
+`target/validation-evidence/sync-input-before.log` and `sync-input-after.log`.
+The wrapper is `sync-input-regression.rs` in that directory.
+
+Node library compilation passes in 2.37 seconds in `sync-input-check.log`.
+Compilation and focused checks ran at nice level 15 on CPUs 0 and 1. Heavy tests
+remain paused. These results establish scheduling behavior, not end-to-end
+catch-up or resolution of the two earlier network failures. The release gate
+remains closed.
+
+### Iteration 94: sender-owned pending TRST in the wallet
+
+Decision 33.4(b) attributes pending TRST to its sender until receipt. The RPC and
+wallet previously showed only held tokens. `trst_portfolio` now reports
+`total_pending` and `pending_count` separately from active, expired and revoked
+holdings. Pending never enters the transferable amount or the held-token list.
+The RPC holds the live TRST lock while reading the sender's pending rows, so a
+coordinated ledger publication cannot appear half-applied in this response.
+
+The new LMDB sender index avoids a network-wide pending scan on wallet refresh.
+Direct pending writes, batched writes and block undo update it in the primary
+transaction. Checkpoint replacement removes the old indexed entries through the
+same write path. Existing databases build the index once on reopen, collecting
+at most 1024 index entries per migration batch. The marker and index commit
+together. A test migrates 2049 rows and checks a second reopen. Stored pending
+records and undo-journal formats do not change.
+
+The wallet carries this value through its native adapter and shows "Awaiting
+receipt" inside the existing TRST breakdown. The origins page shows the same
+outgoing amount. Older nodes produce an explicit unavailable state, not zero.
+The Emil design pass kept the existing balance layout and disclosure, without
+adding a card or motion. The writing pass keeps the component evidence separate
+from live lifecycle claims.
+
+Checks ran at nice level 15 on CPUs 0 and 1. Evidence files are under
+`target/validation-evidence/`:
+
+- `pending-sender-store.log`: all 70 LMDB library tests pass in 0.02 seconds.
+  This includes aborted writes, sender changes, deletion, malformed data,
+  migration/reopen, block rewind and checkpoint replacement.
+- `pending-sender-rpc.log`: both portfolio tests pass. The new test covers
+  attribution without spendable credit, held-token expiry, wrong ownership and
+  overflow. It is a response-construction test, not an HTTP/network journey.
+- `pending-sender-clippy.log`: strict Clippy passes for LMDB and RPC, all targets.
+- `pending-sender-node-check.log`: node library compilation passes.
+- `pending-sender-wallet-build.log` and `pending-sender-wallet-native.log`:
+  wallet frontend build and native compilation pass.
+- `pending-sender-ui.log`: one focused browser test passes in 3.63 seconds.
+  Mocked native responses cover positive, zero and unavailable pending amounts,
+  unchanged spendable balance, keyboard disclosure, and 320/1000 px layouts in
+  light and dark themes. `/tmp/burst-wallet-pending-sender.png` was inspected.
+
+The first store compilation failed on an inferred database codec type; adding
+the explicit byte codec fixed it. No test pass is claimed for that attempt.
+The real send/receive/expiry/restart journey has not been rerun with this index
+and wallet change. D-33.4 remains partial. Heavy network tests remain paused,
+existing app processes and the manual ledger were not restarted or upgraded,
+and the release gate remains closed.
+
+### Iteration 95: bounded test execution and live scheduling revalidation
+
+`tools/test-node.sh` now runs Cargo and its children at nice level 15. On Linux
+it selects at most two CPUs from the caller's allowed affinity set. One build
+job is the default; Tokio worker count follows the selected CPU count. Explicit
+worker settings remain available, but do not bypass the affinity cap.
+Non-Linux systems get worker limits and low priority, with an explicit notice
+that affinity is unavailable. Assertions and timeouts are unchanged.
+
+The expensive combined challenge/expiry replay test moved from `fast` to a
+separate `slow` group. `all` runs fast, slow and network groups sequentially and
+stops on failure. `focused` verifies an exact test name before running it, so a
+typo cannot produce a misleading zero-test success. README commands document
+the resource defaults and distinguish listing from execution.
+
+Six runner checks pass in `target/validation-evidence/test-runner-budget.log`.
+They use a fake Cargo executable to inspect arguments, inherited affinity,
+priority and environment; they do not execute protocol tests. The freshly
+compiled node binary's actual inventory is checked separately. It contains
+564 tests, split into 548 fast, one slow and 15 network tests, with no duplicate
+or missing names. Evidence is in `test-runner-groups.log`,
+`test-runner-all-tests.log` and `test-runner-inventory.log`.
+
+With that budget verified, focused live tests resumed. The previously failing
+`outcome_workers_agree_over_tcp_after_seven_humans_and_recover_without_installing`
+passes in 49.50 seconds, after a 34.16-second build. Its TCP journey checks that
+six humans cannot decide, seven can, and a late clockless participant learns the
+decision. It then reopens all stores and verifies recovery without installing
+the outcome. Evidence is in `clockless-budgeted-live.log`. This is one successful
+rerun, not a soak or partition-safety result.
+
+The other previously failing test,
+`upheld_challenge_installs_agreed_settlement_across_restart_and_fresh_catchup`,
+also passes individually in 237.75 seconds under the same budget. Evidence is in
+`upheld-budgeted-live.log`. Its existing checks cover the certified settlement,
+payment-epoch transition, denied old-epoch and revoked-wallet payments, restart
+and fresh-observer reconstruction. Both known baseline failures now have passing
+focused reruns. The full suite has not been restarted, and the release gate
+remains closed.
+
+The pending-expiry live journey now checks sender attribution through real
+`trst_portfolio` RPC before expiry, after the certified return, after restart
+and on a fresh observer. Pending is absent from the receiver's totals and never
+enters either wallet's active balance. The sender index clears with the return;
+the old-epoch receive still fails. This strengthened test passes in 8.50 seconds
+after an 18.26-second incremental build, recorded in
+`pending-sender-budgeted-live.log`. It uses genesis authority and a controlled
+clock. Native-wallet execution, successful receipt with the sender index, and
+live multi-human challenge/expiry combinations remain outside that result.
+
+Final node all-target Clippy passes with warnings denied in 13.41 seconds
+(`budgeted-live-final-clippy.log`). The six runner checks and five coverage
+checker tests pass together in `test-runner-and-coverage.log`; CI now includes
+both. Coverage still reports 388 source sections, 386 unsigned and zero index
+errors. No Rust build or test process remains running after these checks.
+
+### Iteration 96: successful receipt transfers pending ownership once
+
+The pending-ownership fixture now runs both successful receipt and certified
+expiry-return journeys. The new receipt case first observes the signed BRN
+payment as sender-owned pending on both nodes. The receiver then opens its
+account with a signed receive. Its active portfolio gains exactly that amount;
+the sender's pending amount and sender index clear, without crediting the
+sender's active balance. A fresh receive block attempting to claim the same
+source again is rejected on both nodes. Balances remain unchanged.
+
+Both nodes stop and reopen their databases, then a fresh observer joins. Real
+RPC responses, pending indexes and confirmed heads agree after recovery. The
+fixture uses genesis authority, independent sender/receiver keys, controlled
+clocks and non-expiring TRST. It does not establish multi-human quorum safety or
+exercise the native wallet UI.
+
+The receipt test passes in 6.54 seconds after an 18.68-second build in
+`target/validation-evidence/pending-receipt-live.log`. The original expiry branch
+passes after the shared-fixture change in 9.71 seconds in
+`pending-expiry-receipt-refactor.log`. Both use the low-priority two-CPU runner.
+The writing pass records these as scoped live evidence; D-33.4 remains partial
+and the release gate stays closed.
+
+The first fast node run passed 547 tests and failed the checkpoint-installation
+fixture. That fixture wrote malformed pending bytes through the ordinary
+writer, which the sender index now rejects. It now inserts a valid but stale
+pending record and verifies removal of both the record and its sender index.
+
+A separate raw-storage regression reproduced a real recovery failure. An
+authenticated checkpoint replacement tried to decode corrupt pending rows
+while removing their sender indexes. Full pending projection replacement now
+clears both databases in the same transaction, after the existing bounded scan.
+Normal pending writes still reject malformed records. The regression checks
+abort and commit behavior with corrupt primary bytes and an orphaned index.
+Its first rerun exposed a nested read-transaction error in the test; the test
+now closes that reader before using the metadata store's reader.
+
+Final results: all 71 LMDB tests pass in 0.02 seconds, all 548 fast node tests
+pass in 22.77 seconds, and node/LMDB all-target Clippy passes with warnings
+denied in 6.44 seconds. Logs are in `target/validation-evidence/`:
+`pending-projection-recovery-before.log`,
+`pending-projection-recovery-after.log`, `pending-ownership-fast.log`,
+`pending-ownership-fast-after.log` and `pending-ownership-final-clippy.log`.
+These runs do not include the slow or network test groups. The two focused
+live ownership journeys above are the network evidence for this change.
+
+### Iteration 97: bounded full governance content codec
+
+Decision 21.1 allows 50,000 characters, including UTF-8 and emoji under 21.5
+and 21.6. Decision 23.15 caps each peer message at 64 KiB. A single larger link
+field or message cannot satisfy both. `governance/src/content.rs` now encodes
+all existing proposal kinds without discarding constitutional text, emergency
+descriptions or eviction reasons. The transport envelope is bounded at 512 KiB
+and split into 32 KiB chunks. Its content hash commits to a versioned domain,
+length and every encoded byte.
+
+The receiver checks the expected manifest, offsets, exact chunk lengths,
+duplicate consistency, final hash and canonical content encoding. It accepts
+out-of-order chunks, emits content once and rejects malformed transfers.
+The chunk decoder bounds untrusted lengths and rejects trailing bytes.
+Amendment length counts Unicode scalar values, not UTF-8 bytes. Governance
+submission now checks the content bounds before mutating its engine.
+
+The existing wallet parameter-proposal builder, testnet convenience RPC and
+node compact decoder share the canonical compact codec. Nonzero padding is
+rejected. A zero-valued BRN-rate proposal is valid content, even though its
+entire compact link is zero; the previous decoder mistook it for no content.
+
+This is not a live full-content proposal implementation. The chunk receiver
+requires an externally authenticated manifest and does not manage peer quotas,
+timeouts or durable storage. Connect that manifest to signed proposal blocks,
+stage content with admission, and fetch missing content during catch-up before
+calling the feature complete. The old unsigned governance wire announcement
+still only logs a message; it must not authorize proposals. Certified governance
+replay, tallying, activation ordering, scoped delegation and constitutional
+diff application remain separate unfinished parts of the same goal.
+
+All 116 governance library tests pass in 0.03 seconds, including seven codec
+tests and the engine admission-bound test. Nine focused node governance tests
+pass in under 0.01 seconds. The maximal Unicode fixture carries 50,000 four-byte
+characters through seven encoded/decoded chunks, each below the peer-frame
+limit. Evidence is in `target/validation-evidence/governance-content-codec-final.log`
+and `governance-content-node-final.log`. These are component checks, not live
+node or native-wallet evidence. No block format, wire generation, existing
+ledger, running app or release gate was changed.
+
+All-target Clippy for governance, node, RPC and wallet core passes with warnings
+denied in 18.90 seconds (`governance-content-clippy-final.log`). The first check
+reported a manual divisibility check; the code now uses `is_multiple_of`.
+The low-priority two-CPU budget covered all builds and checks. The coverage
+index still has 388 sections, 386 unsigned and no index errors.
+
+### Iteration 98: signed full-content binding and atomic storage
+
+The wallet-core builder now constructs a full-content proposal block. Its
+signed link commits the content digest; a distinct origin marker selects the
+encoding, and the transaction field carries a canonical bounded length. The
+block remains small enough for an ordinary peer frame. The full text travels
+separately. Construction rejects missing account/signing context and mismatched
+keys. It does not submit the block or supply its proof of work.
+
+`node/src/governance_content.rs` checks the block format, hash, account signature
+and manifest before accepting its content bytes. The ordinary compact decoder
+does not reinterpret this marker, or an unknown origin domain, as compact data.
+Governance application resolves a full-content proposal only from matching,
+hash-checked content in the writer transaction. Missing or corrupt content
+rejects the candidate without mutating its governance engine.
+
+Content is stored under the proposal block's identity, inside its undo boundary.
+The new `put_block_meta` writer operation rejects an absent or mismatched block
+boundary and poisons the writer. This prevents attaching content in a later
+transaction after the block has already committed. Content and governance state
+abort with the block, survive database reopen together, and disappear together
+when an unconfirmed proposal is rewound.
+
+Tests use the wallet-core builder, real signatures, a 50,000-character Unicode
+amendment, LMDB and the node's governance application path. They reject changes
+to the content hash, length, origin, signer, payment epoch, parameters, previous
+block and timestamp. Invalid canonical lengths are rejected even when signed
+by the real owner. Missing content, incorrect bytes and a post-commit sidecar
+attempt are also covered.
+
+Final checks pass with low priority and two CPUs: 116 governance tests and 71
+store tests (`governance-binding-libraries.log`), one wallet-builder test
+(`governance-binding-wallet.log`), and 12 focused node governance tests in 0.06
+seconds (`governance-binding-node-final.log`). All-target Clippy for governance,
+store, node, RPC and wallet core passes with warnings denied in 12.71 seconds
+(`governance-binding-clippy.log`). Logs are in `target/validation-evidence/`.
+
+This remains component integration, not live transfer. RPC bundle admission,
+bounded peer fetch/retry, content availability during bootstrap, and the native
+wallet submission path are not connected yet. No wire version was advertised,
+no existing ledger or running app was changed, and the release gate stays
+closed. Complete those connections before testing full-content proposals over
+real nodes; then continue certified governance replay and agreed activation.
+
+### Iteration 99: live full-content submission, peer fetch and bootstrap
+
+Wallet core can now submit a full signed proposal bundle through `process`.
+The node advertises the capability through `params_hash`; a wallet refuses to
+submit to a node that has not enabled it. RPC bounds the body and requires a
+verified proposer and valid work before staging content. The block processor
+still performs its normal signature, account, epoch, balance and governance
+checks. Content joins the block's admission transaction through iteration 98's
+storage helper.
+
+Nodes missing content defer the proposal, fetch 32 KiB chunks from connected
+peers and verify them against the signed manifest. Completed content requeues
+the block; it does not bypass admission. The same path handles ordinary gossip
+and fresh-node bootstrap. Content serving reads the committed block and its
+sidecar and rechecks their binding before responding.
+
+Volatile staging is limited to 16 transfers, two per account, with a 60-second
+lifetime. Replies are correlated to the requested peer, proposal and offset.
+Requests retry after two seconds and rotate peers. Incorrect content resets
+the receiver for another attempt. Serving is capped at 16 requests per peer
+and 64 total per second, with a 64-message inbox. The ready-content queue
+retries admission if the ordinary block queue is full. These bounds do not
+replace the separate verified-human and PoW admission rules.
+
+The wire generation is now 11 for the added content request/reply messages.
+Block format and genesis are unchanged. Ordinary builds keep
+`FULL_CONTENT_ENABLED = false` and advertise the capability as unavailable.
+The checkpoint selection gate also remains closed. No existing app or node
+was rebuilt or restarted, and no user ledger was changed.
+
+The live test submits a 50,000-character emoji amendment through wallet-core
+signing and real RPC with faucet helpers disabled. Two nodes confirm and report
+the identical full text. A fresh third node fetches it during bootstrap, and
+the originating node retains it after reopening its database. The fixture uses
+genesis authority, not an independent multi-human electorate. It stops at the
+Proposal phase and does not test constitutional activation or the native UI.
+
+The first live run passes in 2.89 seconds after a 37.06-second build. The final
+run, including capability negotiation and proposer checks, passes in 2.86
+seconds (`target/validation-evidence/governance-full-content-live-final.log`).
+Three transfer tests pass in 0.02 seconds (`governance-transfer-budgets.log`),
+covering global/per-account limits, expiry, unchanged duplicate lifetimes,
+unsigned bundles, peer/offset correlation, timeout rotation and bad replies.
+All-target node/RPC/wallet-core Clippy passes with warnings denied in 18.85
+seconds (`governance-transfer-clippy-final.log`). Its first run identified an
+entry-API lint and a complex return type; both were fixed without suppressions.
+All builds and tests used the low-priority two-CPU budget.
+
+The final fast node regression group passes all 555 tests in 23.74 seconds
+(`governance-transfer-fast-regression.log`). The slow and network groups were
+not rerun wholesale; the focused live proposal journey is the network evidence.
+
+Full-content delivery now has live evidence. Certified governance replay,
+tallying and agreed activation ordering remain unfinished. Constitutional
+diff application, the native-wallet flow and broader adversarial handoff
+validation must also be completed before opening the gates.
+
+### Iteration 100: signed constitutional diffs and atomic application
+
+The live full-content path now carries typed add/modify/repeal operations. The
+proposal codec owns the shared operation type; the constitution crate re-exports
+it. `ConstitutionalDiff` is appended to the proposal enum so existing encoded
+proposal variants retain their discriminants. The old title/text variant still
+means a single article addition. New diffs cannot have an empty title or empty
+operation list. The 50,000-character limit applies to the combined added and
+replacement text, with the existing 512 KiB envelope bound.
+
+Governance applies the constitutional quorum and supermajority to diffs and
+passes the exact signed operations to activation. RPC returns typed
+`amendment_operations`; it does not flatten a repeal into prose or imply that
+the proposal is an append-only article. The constitution executor applies the
+ordered operations to a candidate document. An invalid later operation leaves
+the original articles, indexes and version history unchanged. Each successful
+diff advances the document version once. Earlier amendment records are not
+rewritten; operations address articles in the current document.
+
+The live test now submits 50,000 Unicode text characters across three operations,
+signs an endorsement and vote, and waits for activation on two running nodes.
+It modifies article 1, repeals article 2 and adds article 4. A fresh third node
+and a restarted original node recover the same signed operations and materialized
+constitution. Faucet helpers are disabled. The test uses development genesis
+authority and fixture-only phase durations. It is not evidence for certified
+multi-human governance or independent-signer conflict handling.
+
+The live test passed in 61.66 seconds after a 35.45-second build
+(`target/validation-evidence/constitution-diff-live.log`). Library checks pass
+23 constitution tests and 118 governance tests (`constitution-diff-libraries.log`).
+Three signed-content binding/storage/rollback tests pass in 0.07 seconds with
+typed diffs (`constitution-diff-binding.log`). All-target Clippy for governance,
+constitution, node, RPC and wallet-core passes with warnings denied in 16.34
+seconds (`constitution-diff-clippy.log`). Builds and tests use one build job,
+two CPUs and low priority. The whitepaper and decision text are unchanged.
+The final fast node regression passes 555 tests in 23.98 seconds, with the
+18 slow/network tests excluded (`constitution-diff-fast.log`). The live diff
+test above supplies the focused network evidence; this is not a full-suite run.
+
+Both source gates remain closed. Certified governance replay/tallying and
+agreed activation ordering still need implementation. Concurrent constitutional
+conflicts and native-wallet diff authoring/review are not covered by this test.
+The wallet currently disables voting when it cannot display the full amendment;
+the new typed response has not yet been integrated into that UI.
+
+### Iteration 101: proposal content in checkpoint history
+
+`ConfirmedHistory` now carries the complete body for every signed full-content
+proposal in its cut. Both the local cemented reader and the detached history
+constructor reject missing, duplicate, unrelated, corrupt or unsigned content.
+They authenticate the owner-signed manifest, exact length and content hash.
+Bodies count toward the existing 64 MiB history budget. The local reader checks
+the committed size before fetching the next body. Prefix extraction retains only
+the bodies needed by the selected ancestor cut and sorts them canonically.
+
+The history commitment still commits the account heads and their signed ancestry.
+Those block hashes already commit the proposal-body hashes; a second independent
+body root would not add authority. The constructor must nevertheless possess and
+authenticate every body before returning a usable history.
+
+Checkpoint archival now writes those bodies in the same transaction as its
+signed block archive. Reopening can recover a body from the archive when the
+live sidecar is absent. A corrupt live sidecar is an error, not a reason to hide
+it behind the archived copy. Archive writes reject changed bytes. The historical
+transfer envelope is version 2 and includes the body witnesses. Wire generation
+12 rejects peers using the earlier transfer shape. This does not change the
+signed block format or migrate the user's ledger.
+
+Content serving also reads archived blocks and bodies when the live copy is
+absent, using a single database read snapshot. The admission-side content loader
+can recover the same authenticated bytes. Neither path hides corrupt live data
+behind the archived copy. An archive-only test reconstructs all seven chunks,
+checks the writer-side load, and rejects invalid offsets and corrupt live data.
+
+Four focused archive/history tests cover local and detached equality, canonical
+ordering, per-proposal binding, prefix extraction, abort/reopen recovery and
+corruption. A separate test checks the body budget before storage access. The
+authenticated certificate-transfer regression also passes with rejection of
+unsolicited bodies and the old envelope version. Unsupported governance still
+returns `ReplayError::UnsupportedBlock` even when its full content is present.
+The archive tests do not manufacture a certificate or install governance state.
+
+The final fast node group passes 561 tests in 23.48 seconds, with 18 slow/network
+tests excluded (`target/validation-evidence/governance-history-fast-final.log`). The focused
+certificate-transfer test passes in 0.09 seconds (`governance-history-transfer.log`).
+Its first witness-test run passed three tests; the canonical-order and budget
+tests were added afterward and pass in the fast regression.
+
+This completes the content-carriage prerequisite, not certified governance.
+The live ordinary governance test now also extracts and reconstructs the
+authenticated proposal body from each node's cemented history after shutdown.
+The final run passes in 66.49 seconds (`governance-history-live-final.log`),
+including voting, activation, fresh-node catch-up and restart. Strict all-target
+node Clippy passes in 5.51 seconds (`governance-history-clippy-final.log`). Tallying,
+agreed activation order, installation and scoped secondary-key replay remain
+open. Both source gates remain closed.
+
+### Iteration 102: shared governance transitions and transcript reconstruction
+
+`CandidateGovernance::apply_to` now executes governance rules against a ledger
+interface. Live admission supplies the current LMDB writer. The existing `apply`
+wrapper persists the candidate engines and parameters alongside the authorizing
+block. Endorsement burns, uniqueness checks, verified eligibility, vote windows,
+delegation, constitutional diffs and bootstrap-exit rules remain in one executor.
+
+The live amendment test also reconstructs its governance state without database
+snapshots or scheduler ticks. A test-only in-memory adapter starts from configured
+genesis, reads the signed blocks and authenticated proposal bodies, applies the
+same economic and governance transitions, and compares the resulting vote,
+activation and constitution. The adapter explicitly accepts only this fixture's
+single-genesis-account ordering. It is not wired into certified replay and cannot
+grant checkpoint authority. Multi-human voting cuts and activation ordering still
+need their agreed boundaries before the production replay whitelist can change.
+
+The first stronger comparison failed: the live RPC reported activation while a
+cemented history reconstructed only the Proposal phase. The test previously
+waited for the proposal's confirmation, not the activation's. The revised test
+waits for confirmation of the activated account head before stopping nodes and
+comparing histories. The failed run remains in
+`target/validation-evidence/governance-shared-live-replay.log`.
+
+Five focused transaction tests pass after the refactor
+(`governance-shared-transition.log`). The strengthened live test passes in 65.89
+seconds (`governance-shared-live-confirmed.log`), including confirmation of the
+activated account head, snapshot-free transcript reconstruction on all three
+nodes, and restart. Strict all-target node Clippy passes in 7.70 seconds
+(`governance-shared-clippy.log`). The source release gates remain closed.
+The final fast node regression passes 561 tests in 22.78 seconds, excluding the
+18 slow/network tests (`governance-shared-fast.log`). No whitepaper or decision
+text changed. The failed first comparison is retained to distinguish an applied
+governance snapshot from a confirmed history.
+
+### Iteration 103: closed ballot results and exact counting cuts
+
+Closed governance proposals now retain the effective delegated tally and the
+eligible-human denominator used to decide their result. Previously, a decision
+could use delegated votes while its stored counters still showed only direct
+votes. Both accepted and rejected proposals retain the counted result. Later
+delegation changes do not rewrite a closed ballot.
+
+`GovernanceEngine::prepare_ballot_cut` prepares a result without mutating the
+engine. It requires the exact counting timestamp, including the propagation
+buffer, and rejects duplicate or invalid electorate addresses. Its commitment
+binds the proposal, history, parameters, canonical electorate and effective
+result. The caller must reconstruct those inputs from the same history. This
+commitment is not a quorum certificate and cannot authorize activation.
+
+The governance library passes 122 tests (`governance-ballot-cut-library.log`).
+The first run failed because the malformed-address fixture violated the address
+constructor's prefix assertion before reaching ballot validation. The corrected
+fixture retains the required prefix but has an invalid address payload.
+The live signed constitutional-diff test passes in 63.94 seconds
+(`governance-ballot-cut-live.log`). Its single-account transcript comparison now
+also prepares the exact-cut result and checks it against the activated tally.
+Strict all-target governance/node Clippy passes in 12.38 seconds
+(`governance-ballot-cut-clippy.log`). Logs are in `target/validation-evidence/`.
+
+The new live regression uses three independently signed verified wallets. Two
+delegate to the first wallet; one then casts its own Nay vote. With fixture-only
+60% approval and 100% participation thresholds, the three running nodes activate
+the amendment with two effective Yea votes and one Nay. Revoking the other
+delegation after activation preserves that closed result on all three nodes.
+
+The complete regression does **not** pass. A fourth node starting from an empty
+ledger fails to reach Activated within 60 seconds. The run ends after 148.72
+seconds (`governance-ballot-multi-representative.log`); restart checks after that
+point have not run. An earlier fixture lacked the new humans' online
+representatives and stopped on confirmation before governance
+(`governance-ballot-multi-human.log`). The corrected fixture runs all three
+representatives. These failures are retained, not treated as passing coverage.
+
+This exposes the recorded cross-account replay gap in a live journey. The current
+activation block identifies a proposal and parameter hash, but does not bind the
+ballot's electorate/delegation cut. Account-by-account catch-up and the local
+governance timer therefore lack the agreed ordering needed to reproduce a closed
+result. The preparation commitment above is not yet connected to that authority
+path. The failure log does not yet distinguish a missing catch-up dependency
+from a phase closed prematurely by the timer; both must be resolved through the
+agreed ballot history rather than trusted snapshots.
+
+Final strict all-target governance/node Clippy passes in 3.28 seconds
+(`governance-ballot-final-clippy.log`). The fast node regression passes 561 tests
+in 23.25 seconds, excluding 19 network/slow tests (`governance-ballot-fast.log`).
+That exclusion includes the failing multi-human journey above. Certified governance replay, agreed
+activation order and scoped secondary-key ledger actions remain open. Neither
+source release gate nor the replay whitelist changed. The whitepaper and
+implementation decisions are unchanged.
+
+### Iteration 104: timer projections and historical ballot reconstruction
+
+The diagnostic rerun identifies the timer failure. A fresh node first rejects
+activation with one of three participating votes. The scheduler then persists a
+Rejected proposal, so a later activation retry fails with WrongPhase. The late
+RPC view has one Yea and no Nay. The evidence is in
+`governance-ballot-catchup-diagnostic.log`.
+
+The node scheduler now projects phases on a copy of the governance engine. It
+does not persist that copy or queue economic effects. RPC uses the same
+projection and marks changed phases with `phase_projected`. Signed block
+transactions retain ownership of stored governance changes. A local timer or
+read request can no longer permanently reject an incompletely received ballot.
+
+That correction exposes the second failure. The late node now accepts the Nay
+vote, but counts only one Yea and one Nay because it has already received the
+post-vote delegation revocation. Activation retries report 66.66% participation
+against the fixture's 100% quorum (`governance-projection-live.log`). This remains
+a failing fresh-node journey, not a passing governance completion test.
+
+`ConfirmedReplay::prepare_governance_ballot` reconstructs a candidate from an
+exact counting cut. It reuses payment, bootstrap eligibility and governance
+transitions, authenticates every supported signed block and proposal body, and
+orders proposal support before its votes. It derives the electorate and
+delegation map from that history. The result has no certificate or installation
+API. Ordinary checkpoint replay still rejects governance. This first preparation
+path accepts genesis-epoch histories; prior certified lifecycle epochs and
+governance activations remain unsupported. Ambiguous support/withdrawal cuts
+fail rather than inventing an order.
+
+The live historical-cut test passes on all three running nodes' saved histories.
+Each reconstructs two Yea, one Nay and three eligible wallets at the counting cut,
+despite the subsequent revocation. Reordering the detached history preserves the
+ballot commitment. The test also checks that ordinary checkpoint replay still
+refuses the same governance history, that RPC distinguishes projected phases,
+and that restart preserves the activated result. This test and the existing
+single-signer constitutional-diff journey pass together in 97.38 seconds
+(`governance-cut-replay-live.log`).
+
+Final library checks pass 124 governance tests and 23 RPC tests
+(`governance-cut-final-library.log`). Strict all-target governance/node/RPC Clippy
+passes in 2.36 seconds (`governance-cut-final-clippy.log`). The fast node group
+passes 561 tests in 22.15 seconds, excluding 20 network/slow tests
+(`governance-cut-final-fast.log`). The full multi-human fresh-node regression
+remains failing and was not included in that passing focused batch. It still
+needs certified ballot history and installation, not a current-state recount.
+
+No source release gate was opened, and no whitepaper or implementation-decision
+text changed. Wallet/node consumers still need to use the projection flag when
+presenting an estimated phase.
+
+### Iteration 105: certified ballot storage and installation
+
+Governance now has a checkpoint manifest and version-6 chain record. It closes
+every proposal due at the same counting cut, in proposal-hash order. The root
+binds each replay-derived ballot receipt. Omitted or reordered proposals,
+altered roots and a cut before or after the counting time fail replay. The
+previous certified human roster authorizes this record, not the electorate it
+would install. Wire generation 13 carries the new manifest variant; block
+format v5 is unchanged.
+
+Mixed-event replay reconstructs governance and delegation from signed history.
+At a governance boundary it freezes the effective tally. Later delegation
+revocation does not change that result. Subsequent ordinary replay refuses to
+skip another due ballot without its governance certificate. This does not yet
+schedule certificates or govern activation order.
+
+Installation now writes governance, delegation and constitution snapshots in
+the same transaction as balances, verification, authority and payment epoch.
+It rebuilds governance endorsement markers and clears stale ones. The running
+installer acquires the governance publication locks before committing and
+replaces those engines before admission resumes. Certificates can also be
+recovered from the agreement journal without installing their state early.
+
+Three focused tests pass in 0.11 seconds
+(`governance-certificate-tests.log`). They cover two competing proposals,
+three-human delegated tallies, previous-roster authorization, corrupted local
+projections, journal recovery, installation, reopen, a subsequent roster epoch,
+and archival transfer into a fresh ledger. The first certificate deliberately
+has genesis-only authority; its next roster has three humans. The subsequent
+roster certificate requires the three independent representatives. These tests
+supply signed confirmed prefixes. They are not running-network governance
+evidence. An initial test compared serialized HashMap snapshots byte-for-byte;
+the corrected assertion compares proposal records, votes and endorsements.
+
+Strict all-target node/store/protocol Clippy passes in 18.16 seconds
+(`governance-certificate-clippy.log`). The fast node group passes 564 tests in
+30.50 seconds, with 20 network/slow tests excluded
+(`governance-certificate-fast.log`). Builds and tests used one build job, two
+CPU cores and nice +15. No source release gate was opened, and the whitepaper
+and implementation decisions are unchanged.
+
+Automatic counting-cut discovery, coordination with other due lifecycle events,
+the live payment handoff before a cut is passed, and deterministic activation
+remain open. The existing live fresh-node governance failure from iteration 104
+has not been rerun or claimed fixed. Scoped secondary-key delegation and the
+recorded UI gaps also remain open.
+
+### Iteration 106: frozen activation schedules and governed replay
+
+Ballot receipts now bind activation timestamps. A later cooldown or buffer
+change cannot move an approved schedule. A governance cut can count ballots,
+activate approved proposals, or do both when cooldown and buffer are zero.
+Counting uses the pre-activation rules. Simultaneous activations use ascending
+proposal hashes; the last applied change wins for a shared parameter. Wire
+generation 14 binds the revised receipt and cut commitments. Block format stays v5.
+
+The certified path uses the same staged effect executor as legacy signed
+activation. BRN rate segments and constitutional diffs apply at the approved
+timestamp. Constitution snapshots retain the adopted amendment and effective
+vote counts. Repeated adoption is refused. An invalid diff aborts preparation
+without changing the installed epoch or constitution.
+
+Mixed replay now uses the active rules after each governance boundary, and
+later certificates bind that parameter hash. Installation publishes the new
+rules to the block-processing task and updates its work thresholds before
+admission resumes. Certified-mode nodes no longer author or admit legacy
+genesis activation blocks. Ordinary source-gated development nodes retain
+their existing legacy path.
+
+The new signed-history tests cover competing BRN-rate changes, new-rule payments,
+rejection of stale-rule signatures, a later roster checkpoint, and fresh-ledger
+transfer. Another test carries an authenticated constitutional diff through
+ballot and activation certificates, checks the retained amendment, and recovers
+it in a fresh ledger. Its invalid-diff case checks that no durable activation
+occurred. These are storage/replay tests, not automatic live governance.
+
+The live legacy constitution regression exposed a shutdown leak. Inbound
+handshakes and peer readers were detached, so they could retain the ledger after
+the node reported that it had stopped. The connection registry now tracks and
+joins readers and writers, refuses late registrations after closure, and the
+listener owns its handshake tasks. Shutdown stops producers before saving final
+engine snapshots. The registry cancellation/reopen test passes. The legacy
+TCP activation, restart and fresh-node test passes in 33.96 seconds after this
+fix (`governance-activation-legacy-live.log`).
+
+Final strict node/governance/constitution Clippy passes in 8.60 seconds
+(`governance-shutdown-final-clippy.log`). The fast node group passes 568 tests in
+22.04 seconds, with 20 expensive/network tests excluded
+(`governance-shutdown-final-fast.log`). The governance and constitution libraries
+pass 125 and 23 tests respectively (`governance-activation-library.log`). These
+checks used one build job and two low-priority CPUs.
+
+The pre-cut payment fence and automatic candidate scheduling remain open. The
+existing fence seals an epoch after a checkpoint vote starts; it does not by
+itself stop final promises made after a scheduled governance cut but before
+that vote. Coordination with simultaneous verification deadlines and pending
+expiry is also unfinished. In-flight verification parameter changes and
+conflicting approved diffs still need end-to-end handling. The current rejection
+of invalid diff effects proves atomicity, not liveness of a contested amendment.
+No release gate was opened and no whitepaper or implementation-decision text changed.
+
+### Iteration 107: automatic governance candidates and live admission
+
+The checkpoint runtime now discovers counting and activation times from signed,
+confirmed history. It rebuilds the exact due cut before preparing the ballot,
+so a later delegation revocation does not enter an earlier count. Discovery
+does not authorize a signature. The existing durable-vote fence still refuses
+any candidate that omits a final promise. Earlier lifecycle candidates are
+capped below the due governance cut; coincident lifecycle effects still need
+a combined boundary.
+
+Ordinary certified replay now processes open proposals and delegation before
+the first governance certificate. It rejects a cutoff that crosses an unclosed
+counting or activation boundary. Governance discovery can inspect a due
+lifecycle state, but the actual governance candidate must pass normal exact-cut
+replay. That distinction avoids using an unfinished deadline projection as a
+signed ballot.
+
+The live test exposed two integration defects. The generic wallet proposal
+builder wrote a transaction hash into the content field. It now encodes the
+parameter and proposed value, clears unrelated payment origin data, and shares
+the canonical parameter-name parser with RPC. Constitutional proposals use the
+full-content builder; the generic builder now reports that requirement instead
+of constructing an invalid block. Certified admission also now rejects missing
+or stale parameter hashes. Previously it only logged a warning even though
+replay rejected the same block. Startup and checkpoint installation both enable
+this exact-parameter check. Legacy development admission remains unchanged.
+
+The fast node group passes 572 tests in 22.03 seconds, excluding 21 network or
+expensive tests (`governance-auto-final-fast.log`). Governance, RPC and wallet
+library tests pass 125, 23 and 108 cases respectively
+(`governance-auto-final-libraries.log`). Strict Clippy across all targets of
+those crates and the node passes in 1.92 seconds after the final regression edit
+(`governance-auto-final-clippy.log`). One old archive test expected governance
+to remain unsupported; it now checks proposal replay without ballot authority.
+The whitepaper and decisions hashes are unchanged. Coverage remains 388 indexed
+sections, 386 not signed off and zero index errors; it is not a completion score.
+
+The new live regression passes in 72.13 seconds (`governance-auto-live.log`).
+Three native nodes submit and confirm signed wallet transactions over TCP.
+After bootstrap verification, the three independent human representatives
+certify a delegated 2-to-1 ballot and its scheduled BRN-rate activation. A
+delegation revocation between those certificates does not change the ballot.
+The test rejects an old-rule payment, confirms a new-rule payment, restarts
+all three nodes, and catches up a fourth empty observer through all three
+checkpoint records. RPC on every node retains the effective tally and new rules.
+No ballot or activation certificate is injected by the test. Time is controlled;
+this is not production clock or partition evidence.
+
+The pre-cut finality fence, coincident lifecycle boundaries, in-flight
+verification rule changes, conflicting amendment effects and scoped delegation
+keys remain open. The live case pauses ordinary submissions while a boundary
+installs. It does not prove continuous-traffic liveness at that boundary, or
+competing constitutional amendments. Release gates remain closed.
+
+### Iteration 108: governance and lifecycle effects at one boundary
+
+Governance cuts now settle panels due at that exact timestamp before deriving
+the electorate and counting ballots. They then apply approved changes in the
+existing hash order and settle pending expiry under the resulting rules.
+Preparation rejects earlier unclosed panels or pending expiry. Both sets of
+effects are bound into the governance-cut v3 commitment. Wire generation 15
+separates that commitment from earlier records; block format remains v5.
+
+This preserves decisions 6.9 and 6.16 together. Extending expiry at a pending
+transfer's deadline keeps the receiver's claim alive. Shortening expiry can
+return a pending transfer immediately. A transfer already returned at an earlier
+certified cut stays with the sender when a later extension revives it. The
+whitepaper's zero-expiry case means instant expiry. The first new regression
+incorrectly treated zero as no expiry; the test was corrected, not the protocol.
+
+The focused governance group passes 27 tests in 2.79 seconds
+(`governance-lifecycle-focused.log`). The new cases cover finite extensions,
+the maximum period, zero and shorter periods, prior returns, skipped earlier
+expiry, archival installation and receiver claims. A simultaneous challenge
+deadline test revokes the challenged account before counting its governance
+vote, rejects a changed settlement root and reconstructs the result in a fresh
+ledger. These are signed-history tests, not independent live challenge evidence.
+
+The native expiry-extension journey passes in 71.46 seconds
+(`governance-expiry-live.log`). Three independent human representatives certify
+the delegated ballot and scheduled extension without injected certificates.
+A burn pending at the activation timestamp remains claimable. A receive with
+the old parameter hash is rejected; the new-rule receive confirms. All three
+nodes restart, and a fresh fourth observer imports the certificates and payment.
+Every node retains the activated proposal, effective tally, parameter hash and
+received balance. The test controls time and pauses ordinary traffic at the
+boundaries; it does not prove partition or continuous-traffic liveness.
+
+The returned-token cases also distinguish portfolio state from the signed
+account balance. An unsigned expiry return can regain a transferable portfolio
+balance after an extension, but it has no signed Receive credit. The current
+wallet/send path cannot spend more than its signed balance. Completing that
+credit path, including single-use claims and fresh-node replay, remains required
+by decision 6.9. Do not treat portfolio restoration as proof of spendability.
+
+No source release gate was opened. The whitepaper and decisions hashes are
+unchanged. The writing pass keeps this evidence scoped to the exercised paths.
+
+The final fast node group passes 574 tests in 23.97 seconds, excluding 22
+network or expensive tests (`governance-lifecycle-final-fast.log`). Strict
+all-target node Clippy passes in 8.86 seconds
+(`governance-lifecycle-final-clippy.log`). Coverage remains 388 indexed sections,
+386 unsigned and zero index errors. Builds used one job on two low-priority
+CPUs. The disposable live test exited; no manual ledger or Azure resource was
+changed.
+
+### Iteration 109: signed credit for expired pending returns
+
+Expiry returns now leave a one-time receipt for the original sender. The
+certified return already puts the tokens in that sender's portfolio. A signed
+Receive consumes the receipt and credits the account balance without delivering
+the tokens twice. Claims require the exact amount and owner; rejection and
+duplicate claims fail. Expiry and revocation still restrict spending after a
+claim. Returned receipts are excluded from outgoing pending totals and from
+pending-token revocation and restoration.
+
+This closes the missing signed-balance mechanism identified in iteration 108.
+Wire generation 16 and pending format 2 distinguish the new semantics. Signed
+blocks remain v5. Older ledgers are rejected without migration or deletion.
+The RPC exposes `return_credit`; the SDK refuses to return these owned funds
+again. The wallet labels them as returned funds and offers Claim, without a
+return-to-sender action.
+
+The focused fraud regression passes in 0.01 seconds
+(`return-credit-fraud-focused.log`). It returns a merged 100-token holding,
+revokes 40, restores and revokes that origin again, then revokes another 30.
+After governance-style expiry extension, claiming the nominal 100 leaves only
+30 transferable. Sending 31 fails; sending 30 succeeds. The initial fixture
+used a 1000-second period against test ticks lasting 30 seconds, so its expected
+revival was wrong. The corrected period is derived from the fixture timestamps.
+No expiry or revocation rule was relaxed to make the test pass.
+
+The combined panel-deadline and pending-return check passes in 0.31 seconds
+(`return-credit-deadline-focused.log`). Its old empty-pending expectation now
+requires exactly one sender receipt for 40. The preceding fast run passed 574
+tests and failed these two fixtures; that run is not recorded as a pass.
+
+The live SDK journey passes in 95.68 seconds (`return-credit-sdk-live.log`).
+Three independent human representatives certify an expiry extension after a
+pending burn has returned. The SDK reads the receipt and refuses a rejection,
+then authors the claim under the installed rules. The returned value is sent
+and received. A stale-rule receive and a duplicate claim fail. All three nodes
+restart, and a fresh fourth observer reconstructs the certificates, activated
+proposal and final balance. The test controls time and pauses ordinary traffic
+at the boundaries; it does not prove partition or continuous-traffic safety.
+
+Storage, RPC and SDK library checks pass 204 tests (73, 23 and 108 respectively)
+in `return-credit-libraries.log`. They include receipt persistence without
+outgoing double counting, old-format rejection without rewriting the ledger,
+portfolio totals and exact-source lookup rejecting a receipt for another owner.
+The final fast node group passes 576 tests in 23.32 seconds, excluding 23
+network or expensive tests (`return-credit-final-fast.log`). The separately
+scheduled combined challenge/expiry check passes in 1.93 seconds
+(`return-credit-challenge-expiry.log`). Fraud returns remain revoked while
+inactivity returns remain expired; each leaves one owned receipt per return.
+
+Three browser checks pass in 3.58 seconds (`return-credit-wallet-ui.log`),
+covering returned-funds claims, partial receive progress and explicit payment
+returns. The new receipt review fits 1000px and 320px viewports, supports an
+Enter-key claim and submits no rejection. The 320px screenshot is retained at
+`/tmp/burst-wallet-return-credit.png`. These use mocked Tauri commands, not
+native signing. The wallet TypeScript/Vite build passes
+(`return-credit-wallet-build.log`). Emil's UI review found no blocking issue
+in the exercised claim dialog; the writing pass keeps its native and browser
+evidence separate. The native wallet pending-parser test passes
+(`return-credit-wallet-backend.log`), preserving the receipt flag through RPC
+parsing and UI serialization. Its cold desktop-dependency build took 2 minutes
+36 seconds; the test took under 0.01 seconds. The toolchain was selected only
+for that command, without changing the user's global Rust default. This is not
+a native desktop signing journey.
+Both source release gates remain closed. No manual ledger or Azure resource
+was changed.
+
+### Iteration 110: vote limits for certified governance activations
+
+Each installed checkpoint now derives its next outstanding governance activation
+and atomically stores an epoch-bound vote limit. Ordinary soft and final vote
+reservations read that limit in their writer transaction. A block with a signed
+timestamp beyond it cannot consume a sequence or reserve a final choice. The
+timestamp-free reservation API also refuses an active limit. Earlier promises
+remain intact; only certified installation advances the epoch and its limit.
+
+Startup recomputes the limit from authenticated history rather than trusting the
+mutable governance cache. Missing, malformed, wrong-epoch or altered limits fail
+closed. Wire generation 17 separates the voting rule; pending format 2 and
+signed block v5 remain unchanged. The source gates are still closed.
+
+The focused signed-history regression passes in 0.06 seconds
+(`governance-vote-limit-focused.log`). It installs a ballot schedule, refuses
+post-activation soft and final votes, restarts, rejects two altered limits
+without repairing them, accepts a pre-cutoff final promise and installs the
+activation with that promise included. The focused storage check passes
+(`governance-vote-limit-storage.log`), covering durable limits, missing
+timestamps, malformed encodings and unchanged sequences after rejection.
+The live traffic journey passes in 76.11 seconds
+(`governance-vote-limit-live.log`). Three independent human representatives
+install a delegated ballot's activation schedule. An old-rule block dated after
+activation is admitted provisionally but gains no final promise. Three payments
+before the cutoff confirm while that block remains unconfirmed. Activation
+retires the unconfirmed tail, new-rule payment succeeds, and all three nodes
+restart. A fresh fourth observer reconstructs the activated proposal and rules.
+The fixture controls time; this does not establish partition or arbitrary
+continuous-traffic liveness.
+
+The fast node group passes 577 tests in 23.44 seconds, excluding 24 network or
+expensive tests (`governance-vote-limit-fast.log`). All 74 LMDB library tests pass
+in 0.02 seconds (`governance-vote-limit-storage-all.log`). The all-target node
+lint check passes in 4.37 seconds (`governance-vote-limit-final-clippy.log`).
+The newer compiler first flagged an existing test module placed before
+implementation items and a redundant test-only boolean branch. Moving the
+module and expressing the same branch directly resolves those warnings.
+After that cleanup and the orphaned-limit guard, seven scoped authority and
+settlement tests pass in 0.04 seconds (`governance-vote-limit-final-scoped.log`).
+The orphaned-limit check rejects partial genesis authority without rewriting it.
+The 577-test fast count predates this last added regression. Tests use one build
+job on two low-priority CPUs. All build and test processes exited.
+
+This is not complete pre-cut finality. Newly confirmed proposals can introduce
+counting boundaries before their schedules have a certificate. That path still
+needs a fence which cannot be removed by a provisional withdrawal or introduced
+by an unconfirmed proposal to freeze the network. The writing pass keeps this
+remaining obligation separate from the installed-schedule guard.
+The whitepaper and decisions hashes are unchanged. Coverage remains 388 indexed
+sections, 386 unsigned and zero index errors. No manual ledger or Azure resource
+was changed.
+
+### Iteration 111: counting limits from confirmed proposal support
+
+Cementation now maintains an epoch-bound governance schedule. Confirmed
+proposals, support and withdrawals update it in the same writer transaction as
+their confirmation heights. Ordinary vote reservations check its earliest
+counting deadline alongside the certified activation limit. Provisional
+admission does not change either limit. An aborted cementation cannot publish a
+deadline or lift one, and block rollback cannot rewrite the schedule.
+
+Certified installation replaces the schedule from replay. Startup reconstructs
+it from the certified baseline and cemented tail, rejecting missing, altered or
+fabricated records without repair. A legacy confirmed governance history cannot
+partially initialize certified authority. An already voting proposal retains its
+deadline if an intervening parameter change raises the support threshold.
+Normal and emergency deadlines share the ballot engine's checked arithmetic.
+Wire generation is 18; pending format 2 and signed block v5 are unchanged.
+
+The native three-human journey passes in 70.48 seconds
+(`governance-counting-live.log`). Confirmed support publishes a counting limit.
+A later-dated payment is admitted provisionally but gains no final promise while
+three pre-counting payments confirm. Counting retires that unconfirmed tail;
+activation and a governed payment succeed. All three nodes restart and a fresh
+fourth observer recovers. The fixture controls time and does not prove partition
+liveness or the case where final promises predate the confirmed support.
+
+Four schedule tests pass (`governance-counting-scoped.log`). The fast group
+initially passed 583 tests and failed the new pre-certificate restart fixture
+(`governance-counting-fast.log`, 24.73 seconds). That fixture incorrectly replayed
+through the counting deadline without supplying its required certificate.
+Moving its setup to just before the deadline fixes it; the focused rerun passes
+in 0.01 seconds (`governance-counting-restart-fixed.log`). The other tests were
+not repeated after this fixture-only correction. All 75 LMDB tests pass in
+0.02 seconds (`governance-counting-storage.log`), including counting-limit
+reservation, persistent final choices and rollback-protection checks. The prior
+certified activation/restart regression also passes
+(`governance-counting-baseline-fixed.log`).
+The strict all-target node lint check passes in 16.30 seconds
+(`governance-counting-clippy.log`). Builds used one job on two low-priority CPUs;
+all build and test processes exited.
+
+Earlier final promises are not erased. A threshold endorsement that cements
+after such a promise can still introduce a counting boundary behind it. Closing
+that ordering race is the next finality task, followed by the remaining recorded
+lifecycle and UI work. The source gates remain closed. Whitepaper and decision
+hashes are unchanged; coverage remains 388 indexed, 386 unsigned, zero errors.
+No manual ledger or Azure resource was changed. The writing skill kept the
+evidence claims limited to the paths exercised above.
+
+### Iteration 112: order governance deadlines with final promises
+
+Final vote reservation now records the greatest signed timestamp promised by
+each representative in the installed epoch. A final support vote reserves its
+proposal's counting deadline in that same writer transaction. If an earlier
+final promise crosses the deadline, the support promise fails without consuming
+a sequence. In the opposite order, the saved limit refuses the later promise.
+Soft support does not publish a deadline. Final choices and limits survive
+restart and cannot be changed by block rollback.
+
+First paid support reserves the boundary, even below the proposal's threshold.
+This avoids depending on different representatives having already cemented the
+same subset of endorsements. The threshold still controls entry into voting.
+A zero threshold reserves the boundary with the proposal's own final vote.
+Timestamp-free final votes are refused in certified mode; old journals without
+timestamp history are not silently repaired.
+
+The counting certificate can now close a supported proposal that failed its
+threshold, or one withdrawn by its proposer. Their phases become Rejected or
+remain Withdrawn. Neither case votes on or activates a change, and endorsement
+burns are not refunded. The next epoch releases the old voting limit while
+retaining its promises. A different lifecycle certificate containing a terminal
+proposal also closes that obligation. Replay derives the closed set from
+certificates, not a mutable snapshot. The governance-cut commitment is v4;
+wire generation is 19. Pending format 2 and signed block v5 are unchanged.
+
+The two focused signed-history checks pass in 0.03 seconds
+(`governance-promise-scoped.log`). They exercise both promise orders across
+reopen, and terminal closure without activation. The final fast group passes
+587 tests in 23.18 seconds with 26 expensive/network cases excluded
+(`governance-promise-fast.log`). It also covers soft support, zero-threshold
+deadline derivation and a withdrawal closed by an earlier roster certificate.
+The first run passed 581 tests and rejected three fixtures that reserved final
+votes without timestamps. Those fixtures now supply their signed block times.
+All 78 LMDB tests pass in 0.02 seconds (`governance-promise-storage.log`), including
+concurrent incompatible reservations, monotonically increasing timestamps,+tightening limits and journal protection. Strict all-target node lint passes
+in 13.47 seconds (`governance-promise-clippy.log`).
+
+The native network group passes both tests in 144.91 seconds
+(`governance-promise-live.log`). Its three journeys cover counting traffic,
+under-supported rejection and supported withdrawal. Each uses three independent
+human representatives, confirms new-epoch payments, restarts all nodes and
+recovers a fresh fourth observer. The clocks are controlled. This is not live
+partition evidence or a proof of every independent-branch recovery case.
+The stronger terminal-traffic rerun passes in 76.15 seconds
+(`governance-promise-terminal-traffic.log`). In both terminal cases it admits a
+post-deadline payment provisionally while three earlier payments confirm.
+The later payment gains no final promise, including after withdrawal removes
+the confirmed-schedule limit. The closing certificate retires that tail and
+new-epoch payments succeed, followed by restart and fresh-node recovery.
+The final strict lint check also passes (`governance-promise-final-clippy.log`);
+the unchanged lint inputs reuse the prior build in 0.09 seconds. All test and
+build processes exited. Runs used one build job on two low-priority CPUs.
+
+The next governance tasks are in-flight rule changes, competing proposals and
+partition/recovery evidence. Nonpayment fork replacement remains in its existing
+queue; a refused late support promise does not prove that its provisional branch
+can be replaced. The source gates remain closed. Whitepaper and decisions hashes
+are unchanged. The writing pass keeps these limits attached to the evidence.
+No manual ledger or Azure resource was changed.
+
+### Iteration 113: preserve proposal windows across rule changes
+
+A signed-history regression exposed a duration-change failure. Shortening voting
+could move another proposal's counting deadline behind the activation certificate.
+Installation then refused the history because it required an earlier counting
+cut. The old installed authority remained intact, but the chain could not advance.
+`governance-timing-baseline.log` records that failure.
+
+The governance engine now records the proposal window, voting window and counting
+buffer at submission. Admission, replay, final-vote limits and RPC deadlines use
+that timing. New proposals use the new durations. Elapsed proposal windows close
+under the old qualification rules before an activation changes the threshold.
+Quorum and supermajority still use pre-activation counting rules; endorsement
+costs remain transaction-time rules. Certified activation timestamps stay fixed.
+The transition choice is recorded in `spec/DECISION_RESOLUTIONS.md` rather than
+silently editing the whitepaper.
+
+The confirmed-governance index is v2 and the wire generation is 20. Pending
+format 2, block v5 and governance-cut commitment v4 are unchanged. Missing timing
+for registered proposals fails closed. The schedule writer validates its deadline
+before writing either index or limit, including when its caller commits after
+an error.
+
+The first focused regression passes. The governance library passes 125 tests
+in 0.04 seconds and the node fast group passes 589 in 23.36 seconds. Logs are
+`governance-timing-focused.log`, `governance-timing-library.log` and
+`governance-timing-fast.log`. These results precede the RPC clock adjustment.
+
+The first live journey failed on its RPC deadline assertion in 43.75 seconds.
+The checkpoint workers used the controlled node clock, but RPC projected phases
+using the host's date. RPC now uses the same node clock for governance display.
+When trusted time is unavailable, only this read-only display falls back to host
+time; signing authority does not. The original deadline assertion is retained.
+
+That rerun passed all six transitions but failed its 40-second recovery wait
+(`governance-timing-live-clock.log`, 134.86 seconds overall). Sync waited five
+seconds after successful downloads as well as failures, alternating new records
+with older-record refreshes. Six records therefore need at least 50 seconds of
+inter-record waits on that path. Successful validated imports and identical
+stored records now use the one-second polling interval. Invalid or stalled
+peers retain their five-second timeout and peer rotation; transfer size, inbox
+and serving limits are unchanged. The recovery wait remains 40 seconds.
+
+The grouped timing checks first exposed an independent replay-ordering omission.
+Governance actions validated wallet eligibility but did not request its verified
+history as a causal prerequisite. They now depend on bootstrap admission or the
+applicable certified verification history, as spending already does. The test
+keeps its independent proposer and delegation rather than moving them onto the
+genesis account to force an order. All three timing tests now pass in 0.27
+seconds (`governance-timing-matrix-fixed.log`), including duration shortening,
+extension, a buffer change and rejection before a threshold reduction.
+The live recovery rerun passes in 108.47 seconds
+(`governance-timing-live-recovery.log`). Three human representatives certify six
+checkpoints across overlapping proposals. An existing proposal keeps its voting
+window after another proposal shortens voting to zero; a new proposal uses that
+zero window and closes without votes. RPC reports the original deadlines. The
+existing proposal accepts its remaining votes, activates its rate change and
+admits a payment under that rate. All three nodes restart and a fresh fourth
+observer recovers the same phases, parameters and confirmed payment. The
+original 40-second recovery wait passes with the faster sync path.
+
+The final fast node group passes 592 tests in 22.70 seconds
+(`governance-timing-final-fast.log`). It includes the malformed-transfer check
+that preserves the failed-peer backoff. The governance and RPC libraries pass
+125 and 23 tests (`governance-timing-final-libraries.log`). Builds and tests used
+one build job and two low-priority CPUs, with one heavy group running at a time.
+Strict all-target node lint passes in 14.60 seconds
+(`governance-timing-final-clippy.log`). Coverage validation reports 388 indexed
+sections, 386 not signed off and no format errors. That remains a review
+backlog, not a completion percentage.
+
+This uses controlled clocks and connected local nodes. It does not establish
+partition safety, production clock trust or every in-flight verification rule.
+Both source gates remain closed. The whitepaper and decisions hashes are
+unchanged; no manual ledger or Azure resource was changed.
+
+### Iteration 114: separate committee selection from governed vote rules
+
+The existing whole-parameter-hash check blocked an already selected panel after
+any governance change, even an unrelated BRN-rate change. The first regression
+fails with "verification vote parameters differ from its request"
+(`verification-governed-rules-baseline.log`).
+
+The committee remains bound to its selection context. New votes use the active
+parameter hash and stake amount, while earlier votes retain their actual paid
+stakes. Deadline completion validates the original activation window against
+its saved rules and applies current counting rules. Normal settlement still
+checks every stake amount against its signed receipt. The activation rule
+snapshot is bounded to 4096 bytes on decode and checked against its hash.
+Wire generation is 21; normal deadline commitment is v2. Source gates stay closed.
+
+The verification library initially passes all 112 tests
+(`verification-governed-rules-library.log`). The first node fast pass has 591
+passes and one failure (`verification-governed-rules-fast.log`). Its corruption
+test showed that committee publication still needs an authenticated current
+parameter check. The check now compares local rules to the installed certified
+epoch instead of requiring the original selection's parameters forever. The
+negative corruption assertion is retained. All six committee-installation checks
+pass in 0.10 seconds (`verification-governed-rules-selection.log`).
+
+The native live journey passes in 120.07 seconds
+(`verification-governed-rules-live.log`). Four human representatives certify a
+normal panel, then activate BRN-rate, verifier-stake and timeout changes between
+two verifier votes. The original deadline and committee remain unchanged. The
+third verifier defaults at that deadline; settlement releases the actual old
+and new stake amounts. A verifier spends its returned balance and the newly
+verified wallet spends its BRN. All nodes restart and a fresh observer recovers
+the same completion and payments. The test uses controlled clocks and a local
+relay of pinned drand proofs. It does not prove challenge transitions, partitions
+or production clock trust.
+
+The final fast group passes 594 tests in 23.06 seconds
+(`verification-governed-rules-final-fast.log`). The added signed-history case
+selects a committee, certifies a timeout change, then activates that same panel
+under the new duration. Its next governed vote and startup authority validation
+pass. Admission also rejects the old transaction hash or stake amount after a
+rule change. All 112 verification library tests pass in 0.07 seconds
+(`verification-governed-rules-final-library.log`), including a threshold change
+that affects counting without rewriting prior stakes. Strict all-target node
+lint passes in 11.81 seconds (`verification-governed-rules-clippy.log`). Coverage
+validation reports 388 indexed sections, 386 not signed off and no errors.
+The whitepaper and decisions hashes are unchanged. No manual ledger or Azure
+resource was changed. Builds and tests ran one heavy group at a time, with one
+build job on two low-priority CPUs. All processes from this batch exited.
+
+### Iteration 115: approved constitutional conflicts do not stall the ledger
+
+Admission now checks a constitutional patch against the current document.
+Unknown targets fail before endorsement admission. Concurrent patches retain
+the existing chronological-cut and ascending-hash activation order. A patch
+whose target an earlier activation removed becomes `Conflicted`. Its edits
+are atomic, its votes remain recorded, and its durable conflict reason names
+the unavailable article. Other proposals continue. Content validation and
+arithmetic errors still reject the cut. This resolves the unspecified conflict
+case in decisions 20.6 and 21.3–21.4 without changing voting thresholds or
+numeric last-activation-wins behavior. See `spec/DECISION_RESOLUTIONS.md`.
+
+Governance-cut commitment v5 binds the conflict outcome. Wire generation 22
+separates the new rules and constitution journal from older nodes. Proposal-info
+RPC returns `activation_conflict` for a conflicted patch. No source gate was
+opened and no existing ledger was migrated or deleted.
+
+The live certified journey passes in 108.57 seconds
+(`constitutional-conflicts-live.log`). Three independent human representatives
+approve two competing add-and-repeal patches plus an independent modification.
+The lower-hash competing patch applies; the other retains all three votes but
+does not leak its addition. The unrelated modification applies and a later
+payment confirms. All three nodes restart and a fresh observer recovers the
+same phases, conflict reason, constitution and payment. This uses controlled
+clocks and connected local TCP nodes. It is not partition or native desktop
+evidence. The source whitepaper and decisions hashes remain unchanged.
+
+The signed-history admission regression passes in 0.03 seconds
+(`constitutional-conflicts-replay.log`). The initial library pass has 25 Consti
+and 23 RPC tests (`constitutional-conflicts-library.log`), including atomic
+modify-after-repeal and repeat-repeal conflicts, retained tallies, terminal
+duplicate rejection, and errors that must not become conflicts. A later
+component check also covers ordered modifications of the same live article.
+The final library pass has 26 Consti and 23 RPC tests
+(`constitutional-conflicts-final-library.log`). The final fast node group
+passes 594 tests in 23.35 seconds (`constitutional-conflicts-final-fast.log`).
+Strict all-target node lint passes in 14.30 seconds
+(`constitutional-conflicts-clippy.log`). Coverage validation reports 388 indexed
+sections, 386 not signed off and no errors. W-060 now records partial live
+evidence rather than an unverified placeholder; no requirement was signed off
+from these tests alone. Builds and tests used one heavy group at a time on two
+low-priority CPUs. All batch processes exited. No manual ledger or Azure
+resource was changed.
+
+### Iteration 116: carry scoped key grants through the ledger
+
+The encrypted grant component now has a signed account-block path. Version-6
+blocks bind an inline, bounded grant or revocation payload. Proposal-specific
+operations depend on the proposal block. Format checks reject foreign owners,
+wrong operation types, oversized payloads and trailing bytes. Primary account
+signatures remain mandatory. No secondary key can sign a payment or account
+block. Wire generation 23 separates this format from older nodes.
+
+The shared live/replay governance executor checks the configured network and
+genesis, verifies the owner's grant signature and applies exact next-generation
+updates. Grants require a verified owner; revocation does not require retaining
+verified status. The journal shares the block's storage transaction and is
+reconstructed into the checkpoint's replay-owned metadata. Checkpoint replacement
+clears only its journal namespace alongside the other replayed lifecycle state.
+
+Wallet core can build and sign these operations and has a submission method
+that checks the node's `delegation_key_journal` capability. Ordinary builds
+advertise false and reject registration behind `LEDGER_DELEGATION_ENABLED`.
+The journal alone creates no delegated voting weight. Secondary-ballot transport,
+causal ordering against revocations, transitive counting and native wallet UI
+are still unfinished. The existing encrypted-ballot component is not a live
+vote path, and this iteration does not claim otherwise.
+The bounded whole-registry snapshot still needs incremental storage before
+production scale, as recorded in iteration 7.
+
+The live journal journey passes in 88.21 seconds
+(`key-delegation-live-final.log`). Three independent human nodes receive
+wallet-core-signed parameter and proposal grants over RPC/TCP, reject a
+secondary-key account signature and a grant for another network, revoke both
+scopes, reject a stale generation and install a fresh parameter grant. The
+proposal tombstone blocks fallback to that broader grant. Counting and activation
+certificates retain the journal; a payment succeeds. All nodes restart and a
+fresh observer recovers byte-identical canonical journal snapshots. The delegate
+can still decrypt the replacement grant, while another recipient cannot decrypt
+the original. Clocks are controlled. This is not delegated-ballot, partition or
+native desktop evidence. The initial live build failed on four missing test-key
+clones (`key-delegation-live.log`); that run did not execute a test.
+
+The final fast node group passes 594 tests in 23.25 seconds
+(`key-delegation-final-fast.log`). Targeted library tests pass 125 governance,
+43 ledger and 108 wallet-core checks (`key-delegation-libraries.log`). The ledger
+checks cover payload hash binding, dependencies, round-trip storage, wrong
+operation types, trailing bytes and the payload size bound. The whole-workspace
+all-target compile passes in 36.33 seconds (`key-delegation-workspace-check.log`);
+strict all-target node lint passes in 15.64 seconds (`key-delegation-clippy.log`).
+These commands do not claim a full workspace test run.
+
+Coverage validation reports 388 indexed sections, 386 not signed off and no
+errors. W-063 now records partial journal evidence. The whitepaper and decisions
+hashes are unchanged. Checkpoint selection, full governance content and the new
+key journal all retain closed source gates. No existing ledger or Azure resource
+was changed; running applications were not restarted. Builds and tests ran one heavy group
+at a time on two low-priority CPUs. All batch processes exited.
+
+### Iteration 117: count secondary ballots from certified authority
+
+Secondary ballots now travel in primary-signed blocks on the named recipient's
+account chain. Each ballot names its owner's grant block as a causal dependency.
+The shared admission/replay executor checks the grant's configured network and
+genesis, owner, recipient, proposal scope and secondary signature. The recipient
+and owner must be eligible. Duplicate choices for one owner, grant and proposal
+are rejected; one recipient account orders those choices. Secondary keys still
+cannot sign account blocks or payments. Wire generation 24 separates the new
+operation and governance snapshot semantics; block format remains v6.
+
+Admission authenticates the historical grant, not its current activity. A
+correctly signed candidate can be recorded after revocation but cannot acquire
+weight through that revoked grant at counting. Rejecting that candidate based on
+the current grant would make independent-chain packet order affect account-block
+validity. The certified counting cut resolves proposal scope before parameter
+scope, preserves revocation tombstones, checks every person in a transitive
+chain and follows only active grant generations. An owner's direct vote takes
+precedence for that owner. Cycles, excessive depth and ineligible intermediates
+contribute no delegated vote. Revocation after certified counting cannot rewrite
+the closed result. These rules implement revocable transitive delegation from
+decisions 20.7 and 20.8 without transferring account-signing authority.
+
+The durable journal now stores one bounded record for each owner and scope under
+`key_delegation/v2/`. Updating one grant no longer serializes a global registry or
+consumes that registry's shared 16,384-entry allowance. Replay reconstructs these
+records; checkpoint installation replaces their namespace. Record decoding
+rejects another owner, scope or chain, multi-entry snapshots, oversized input
+and trailing bytes. This change does not establish production-scale replay or
+compaction performance.
+
+The first native journey passed in 136.15 seconds (`secondary-ballot-live.log`).
+Three independent human representatives count four proposals through an
+encrypted A-to-B-to-C delegation chain. Proposal-specific revocation before or
+after a candidate removes its inherited weight. Direct owner votes override
+delegation. Revocation after counting leaves the result intact. The passing
+proposal activates, a payment uses the new rules, all nodes restart, and a fresh
+observer recovers the same results. Wrong-recipient and duplicate ballots are
+rejected. Clocks are controlled. This is not a partition or native desktop test.
+The final run also passes forged-signature and wrong-grant rejection, then checks
+byte-identical per-scope grants and revocation tombstones before and after
+recovery (`secondary-ballot-live-final.log`, 137.33 seconds).
+
+Library checks pass 127 governance, 43 ledger and 108 wallet-core tests
+(`secondary-ballot-libraries-final.log`). The two new governance tests cover
+bounded scope records and a key-only electorate with no direct votes, including
+direct-vote precedence and suppression of legacy fallback after revocation.
+The fast node group passes 596 tests in 23.34 seconds
+(`secondary-ballot-fast.log`), including verified-chain, generation, cycle,
+depth and proposal-precedence checks. Strict all-target node lint passes in
+11.43 seconds (`secondary-ballot-clippy.log`). Coverage validation still reports
+388 indexed sections, 386 not signed off and no errors. The coverage checker's
+five tests pass. The whitepaper and decisions hashes are unchanged.
+All three source release gates remain closed. Native key discovery, delegate
+ballot signing/review and scoped owner controls in the wallet remain open.
+The current wallet still calls the legacy blanket-delegation commands; those
+controls must be replaced, not presented as the completed secondary-key flow.
+No running application, manual ledger or Azure resource was changed. Each heavy
+group ran alone on two low-priority CPUs, and all test/build processes exited.
+
+### Iteration 118: connect scoped delegation to the wallet
+
+The node now exposes `delegation_keys` for outgoing and incoming grants. Signed
+grant/revocation processing writes owner and recipient indexes in the same
+transaction as the scope record. Rotation retires the old recipient's row;
+revocation retains the owner's tombstone. Certified replay rebuilds both indexes.
+Each page reads at most 51 index rows in one LMDB snapshot, returns up to 50,
+and carries an exclusive cursor. Exact owner/scope lookup supports review before
+signing. The result contains the encrypted grant, its source block, generation
+and confirmation status. It never contains the decrypted secondary key.
+
+The initial recovery run caught a new lookup bug. Its RPC adapter derived the
+genesis hash from current governed parameters after restart. It now uses the
+persisted original genesis parameters, matching admission and replay. The final
+three-human journey passes in 143.98 seconds
+(`delegation-discovery-live-final.log`). It discovers and decrypts the live grant,
+checks recipient removal after revocation, finds outgoing tombstones and exact
+scope generations, and repeats these checks after all-node restart and fresh-node
+catch-up. The earlier failed run is retained in `delegation-discovery-live.log`.
+Wire generation 25 separates the replay-derived discovery-index semantics.
+
+Wallet core validates the returned signed grants and supplies scoped registration,
+revocation and secondary-ballot submission methods. Native commands serialize
+signing with the existing wallet lock and stop competing automation. Owner
+actions recheck the reviewed generation and genesis identity. Ballots recheck
+the grant block and confirmation before local decryption and signing. Native
+commands also check the reviewed wallet address. Revocation does not require
+the owner to retain verified status.
+
+The wallet page now replaces blanket delegation with proposal/parameter controls,
+an incoming-grant view and separate signing reviews. It shows the release gate
+instead of silently falling back to the old pointer operation. The design skills
+guided compact rows, labelled controls, explicit selection and focus restoration;
+scope explanations sit behind a disclosure. Screenshots were inspected at 390px
+and 1000px widths. Four browser contracts pass in 5.11 seconds
+(`scoped-wallet-browser-final.log`). They check reviewed scope/generation/genesis,
+unverified-owner revocation, delegated-ballot review, gate display, wallet-change
+cancellation and mobile overflow. IPC is mocked in these tests.
+
+The wider wallet browser run passed 52 of 54 checks. Two older checks still
+expected a combined active-plus-expired TRST total. The dashboard already keeps
+those states separate; no balance logic was changed. Both corrected assertions
+pass in the focused rerun (`scoped-wallet-regression-fixed.log`, 2.01 seconds).
+The original run remains in `scoped-wallet-regression.log`.
+The production frontend build passes (`scoped-wallet-build-final.log`). Its first
+attempt used two JavaScript APIs outside the existing ES2020 target; the code
+was corrected without raising that target.
+
+Focused storage pagination and stale-review tests pass
+(`delegation-discovery-store.log`, `delegation-discovery-client.log`). The final
+native wallet compile passes in 1.53 seconds (`scoped-wallet-native-final.log`);
+strict all-target node lint passes in 15.89 seconds
+(`delegation-discovery-clippy.log`). Coverage validation still reports 388 indexed
+sections, 386 not signed off and no errors. The whitepaper and decisions hashes
+are unchanged. The full native
+desktop registration-to-ballot journey has not run yet; browser tests and a
+native compile do not establish it. All three release gates remain closed.
+No manual ledger, running application or Azure resource was changed. Rust
+build/test groups ran one at a time on two low-priority CPUs. All such processes
+exited; the isolated browser sessions also closed.
+
+### Iteration 119: native scoped delegation through certified recovery
+
+The desktop wallet now has end-to-end evidence for scoped delegation. The new
+ignored test `native_delegation::desktop_scoped_signing_counts_and_recovers_on_certified_nodes`
+starts three disposable nodes and an isolated Tauri/WebKit session. It imports
+public fixture keys through onboarding, registers parameter and proposal grants
+through the wallet controls, reads encrypted grants, and submits two secondary
+ballots through review dialogs. A direct vote also confirms. Owner revocation
+then removes one grant before counting. All three nodes certify two supporting
+votes, not three, and activate the proposal. Restarting every node and syncing
+a fresh fourth observer preserve the result and grant indexes.
+
+The desktop checks also reject stale generations, a changed genesis identity,
+a mismatched wallet, a revoked grant and a locked signer. Cancelling a review
+leaves the account head unchanged. Native IPC, local signing and node admission
+are real. No mock signing calls or ledger injection are used. The debug desktop
+loads the current Vite frontend; this is not a packaged-release test.
+
+The first two attempts failed during fixture setup. The wall clock let a roster
+cut retire the payment epoch while hand-built setup blocks were still in flight.
+Setup now completes under a held clock before installing the three-human roster.
+Only then does the fixture follow wall time for desktop signing. Counting and
+activation advance the controlled clock afterward. The earlier logs remain in
+`scoped-desktop-live.log` and `scoped-desktop-debug.log`. They are not passing
+evidence for concurrent roster-transition payments.
+
+The first complete journey passed in 58.42 seconds (`scoped-desktop-signing.log`).
+Its screenshot exposed two UI defects. The sidebar depended on a dashboard visit
+to replace the imported wallet's offline verification state. It now reads current
+account status on every page and shows unavailable status when that read fails.
+Generated governance titles also exposed raw token units. They now display exact
+BRN amounts without redundant trailing zeros; custom proposal titles and
+constitutional text are preserved. The forms/accessibility skills guided the
+review checks, and the design-foundations skill guided these presentation fixes.
+
+The final native journey, including sidebar and readable-title assertions,
+passes in 58.59 seconds (`scoped-desktop-final.log`). Its inspected screenshot is
+`/tmp/burst-native-wallet-KyUCdJ/scoped-ballots.png`. Six focused browser checks
+pass in 7.94 seconds (`scoped-desktop-browser.log`); three focused formatting and
+governance regressions pass in 4.11 seconds
+(`scoped-desktop-governance-regression.log`). Those browser checks use mocked IPC;
+the native journey supplies the signing and recovery evidence.
+
+The native wallet build passes (`scoped-desktop-build.log`, 14.72 seconds), as
+does the final production frontend build (`scoped-desktop-ui-build-final.log`).
+Strict all-target node Clippy passes in 2.60 seconds
+(`scoped-desktop-clippy.log`). Coverage validation reports 388 indexed sections,
+386 not signed off and no errors (`scoped-desktop-coverage.log`). No broad test
+suite was rerun. Rust groups ran one at a time on two low-priority CPUs.
+
+All source release gates remain closed. Partitioned delegation traffic,
+production-scale replay and the other recorded lifecycle/UI work remain open.
+The whitepaper and implementation decisions are unchanged. No manual ledger,
+running user application or Azure resource was changed.
+
+### Iteration 120: native constitutional authoring and certified activation
+
+The wallet now authors ordered add, replace and repeal operations. It displays
+the full UTF-8 text before publishing, preserves emoji and counts Unicode
+characters against the 50,000-character article-text limit. Article numbers
+cross native IPC as decimal strings to avoid JavaScript integer rounding.
+Current article text is available in the review. Unsupported or incomplete
+operations disable voting rather than hiding part of the proposal.
+
+Native publishing checks the reviewed wallet and a revision of the constitution,
+original genesis identity, active rules and endorsement cost under the signing
+lock. The signed proposal builder checks the reviewed parameter identity again.
+Endorsement has a separate review showing the exact permanent BRN burn. Direct
+and scoped secondary-key ballots display typed amendments. Drafts survive
+cancellation and submission errors. Field errors appear after review is requested
+and clear when corrected. The forms/accessibility skills guided these controls.
+
+`native_delegation::desktop_constitution_authoring_and_votes_activate_and_recover`
+passes in 71.39 seconds, after 22.08 seconds compiling. It runs the real
+Tauri/WebKit wallet against three independent human representatives on disposable
+local nodes. Through the UI it publishes a Chinese/emoji amendment with all three
+operation types, endorses it, registers a scoped grant and casts direct and
+secondary-key votes. It rejects stale reviews, a mismatched wallet, oversized
+text and locked signing. Cancellation leaves the account head unchanged.
+Certified counting records two supporting votes and activates the exact diff.
+All nodes restart and a fresh observer recovers the same constitution and result.
+Evidence is in `target/validation-evidence/constitution-desktop-live.log`; the
+inspected native screenshot is
+`/tmp/burst-native-wallet-1N50Sv/constitution-review.png`.
+
+Setup and final counting use a controlled clock. Native signing follows wall
+time. This is a debug desktop with the current Vite frontend, not a packaged
+release or a partition-safety test. The maximum-length native rejection and
+Unicode parser check do not replace the earlier full-length transport fixture.
+The native parser unit passes in `constitution-native-parser.log`. The native
+wallet build passes in `constitution-native-build.log`; the production frontend
+build passes in `constitution-wallet-build-final.log`. Strict all-target node
+Clippy passes in 5.38 seconds (`constitution-clippy.log`). Logs are under
+`target/validation-evidence/` unless otherwise specified.
+
+Five browser checks pass in 6.51 seconds (`constitution-browser-confirm.log`),
+including field-level accessible errors, ordered edits, cancellation, the Unicode
+boundary, stale reviews, both voting controls and disabled capabilities. An
+earlier run passed four checks but timed out opening the mocked wallet for the
+fifth (`constitution-browser-final.log`). That failure occurred before the text
+boundary assertion. The isolated boundary check then passed in 1.32 seconds
+(`constitution-browser-boundary.log`), followed by the five-check pass. Its setup
+timeout now reports the rendered page and closes the failed test page. This does
+not establish the cause of the intermittent fixture startup failure. Six focused
+legacy/scoped browser regressions also pass in `constitution-browser-regression.log`.
+
+The source release gates remain closed. No whitepaper decision, manual ledger,
+running user application or Azure resource was changed. The remaining queue
+below retains the rest of the objective.
+
+### Iteration 121: native parameter proposal authoring
+
+The wallet now proposes changes to the active registered governance parameters.
+The node supplies a lossless catalog of current values, units and storage widths
+in `protocol_params`. Amounts remain decimal strings across RPC and native IPC.
+The form accepts BRN/TRST amounts, percentages or whole-number values as
+appropriate. It reviews current and proposed values separately and has an
+explicit no-expiry option. Four legacy fields that no longer affect behavior
+are not offered as active controls. This does not remove their stored fields
+or change the protocol's existing governance rules.
+
+Native signing checks the wallet and reviewed rule revision under its signing
+lock. It rejects unknown/inactive parameters, fractional raw units, overflow,
+unchanged values and incompatible unit/width metadata. The compact signed
+proposal builder rechecks the reviewed parameter identity. Storage-width checks
+prevent a proposal from promising a value that activation would saturate. They
+do not impose a new constitutional percentage floor or ceiling. Proposal and
+delegation views now format other token amounts, percentages and no-expiry
+values consistently with the authoring review.
+
+`native_delegation::desktop_parameter_authoring_and_votes_activate_and_recover`
+passes in 77.38 seconds, after 39.34 seconds compiling
+(`parameters-desktop-live.log`). The real desktop proposes a BRN rate of
+2.000000000000000001, reviews and burns an endorsement, registers a scoped grant
+and casts direct and secondary ballots. Wrong-wallet, stale-revision, overflow,
+inactive-field and locked-signing requests fail. Cancelling leaves the account
+head unchanged. Three independent human representatives certify two supporting
+votes and activate the exact rate. Restarting all nodes and syncing a fresh
+observer retain the value and proposal result; the constitution is unchanged.
+The inspected desktop screenshot is
+`/tmp/burst-native-wallet-7MakQn/parameter-review.png`. Setup and counting use
+controlled clocks; signing follows wall time. This is not a partition or
+packaged-release test.
+
+The catalog unit passes (`parameters-catalog.log`), as do two native parsing
+checks (`parameters-native-parser.log`). The native wallet build passes in
+17.10 seconds (`parameters-native-build.log`), the final production frontend
+build in 2.06 seconds (`parameters-ui-build-verified.log`), and strict all-target
+node Clippy in 15.51 seconds (`parameters-clippy.log`). Evidence logs are under
+`target/validation-evidence/`.
+
+Two focused browser interaction checks pass in 2.85 seconds
+(`parameters-browser-final.log`). After extending value formatting, both pass
+again, but a separate formatting regression times out during mocked-wallet
+setup (`parameters-browser-verified.log`). An earlier attempt also used an
+ambiguous label shared with delegation controls (`parameters-browser.log`).
+The selectors now address the parameter form. Both governance browser fixtures
+now enter through the app's onboarding controls with mocked import IPC, rather
+than injecting an unlocked flag through a separately imported Vite store.
+Five final focused browser checks pass in 6.16 seconds
+(`parameters-browser-onboarding.log`). The inspected 390px review screenshot is
+`/tmp/burst-scoped-ui.WIyarw/parameter-review-mobile.png`.
+The component/forms/accessibility skills guided the form and review; the
+writing skill keeps these results separate from release claims.
+
+The catalog covers registered governable parameters, not every numeric field
+required by decision 20.2. `min_verification_age_secs` and
+`neither_penalty_cooldown_secs` still lack `GovernableParam` variants and live
+activation/replay evidence. Keep that gap in the protocol queue rather than
+claiming all-parameter parity from this wallet flow. All source gates stay
+closed. The whitepaper, decisions and block/wire formats are unchanged. No
+manual ledger or Azure resource was changed; no user application was restarted.
+
+### Iteration 122: govern verifier age and Neither cooldown
+
+`min_verification_age_secs` and `neither_penalty_cooldown_secs` now have
+governance variants, activation mappings and wallet labels. The catalog test
+compares its names with every stored `ProtocolParams` field, so another stored
+field cannot silently miss the authoring catalog. The new variants are appended
+to preserve existing enum tags. Wire version is 26; block format remains v6.
+No ledger is migrated or deleted.
+
+The live active-panel test passes in 125.83 seconds after 23.82 seconds compiling
+(`verifier-parameters-live-final.log`). Four independent human representatives
+activate age and cooldown changes alongside rate, stake and timeout changes.
+Raising minimum age excludes future verifier candidates but does not invalidate
+the selected panel. Its original deadline survives, the second vote pays the
+governed stake, and the absent voter receives a seven-second Neither penalty.
+Stakes settle and returned BRN is spent. All nodes restart and a fresh observer
+reconstructs the same parameters, eligibility and penalty. The fixture uses
+controlled clocks and pinned signed beacon responses, not a partition.
+
+The first live attempt failed. Its port allocator checked localhost while the
+node binds all interfaces; another service held the selected port on a different
+interface. Test ports now check the actual bind address and are not reused within
+the process. Activation-timeout diagnostics now report each node's parameter
+identity and proposal records. The passing retry is evidence; the failed attempt
+is not.
+
+All 129 governance unit tests pass, including storage-width activation and stable
+enum encoding (`verifier-parameters-governance-final.log`). The exact wire-version
+compatibility test passes (`verifier-parameters-wire.log`). Two native wallet
+parser tests pass (`verifier-parameters-native-parser.log`), and the native build
+passes in 13.39 seconds (`verifier-parameters-native-build.log`). The frontend
+build passes in 1.78 seconds (`verifier-parameters-ui-build.log`). The focused
+browser authoring check for both new fields passes in 1.50 seconds
+(`verifier-parameters-browser-final.log`); an earlier combined run timed out in
+mocked onboarding before reaching its assertions. These browser checks use
+mocked IPC, not native network signing.
+
+Strict all-target node Clippy passes in 14.05 seconds
+(`verifier-parameters-clippy.log`). The coverage index has no format errors and
+both worktrees pass `git diff --check`.
+
+The writing skill keeps this entry's claims tied to the checks above. The
+whitepaper and decisions are unchanged. All source release gates remain closed.
+This closes the two missing stored-field mappings, not every numeric rule or
+every activation interaction. Partitioned governance, appeal/reward reversal
+and the other work below remain open.
+
+### Iteration 123: withdraw proposals from the wallet
+
+The wallet now offers withdrawal to the proposer during the Proposal phase.
+The review names the proposal and says that withdrawal is permanent and does
+not refund endorsement burns. Cancellation submits nothing. Successful
+withdrawal returns keyboard focus to the proposal; stale reviews and network
+rejections remain visible instead of reporting success.
+
+The native command checks the unlocked wallet under the signing lock, the
+reviewed network revision, proposer identity and current proposal deadline.
+The node still validates the signed withdrawal. The UI does not add a new
+verification requirement to the existing owner-only protocol operation.
+The component, forms, foundations and accessibility skills guided the reuse of
+the existing dialog and buttons rather than a separate confirmation pattern.
+
+Replay now accepts support followed by withdrawal in the same second on the
+proposer's account chain. Signed ancestry orders those operations. Equal-time
+support on another account remains ambiguous, and an endorsement after the
+withdrawal cannot be reordered across its ancestor. The focused signed-history
+regression covers all three cases and passes in 0.01 seconds
+(`withdrawal-replay.log`).
+
+Two browser interaction checks pass in 13.10 seconds (`withdrawal-browser.log`).
+Three native parser checks pass (`withdrawal-native-parser.log`), the native
+build passes in 7.21 seconds (`withdrawal-native-build.log`), and the final
+frontend build passes in 2.21 seconds (`withdrawal-ui-build-final.log`).
+The 390px confirmation screenshot was inspected at
+`/tmp/burst-scoped-ui.WIyarw/withdrawal-review-mobile.png`.
+
+The extended native certified journey passes in 90.60 seconds
+(`withdrawal-desktop-verified.log`). The desktop creates and endorses a proposal,
+cancels its first withdrawal review without a ledger change, then withdraws it.
+Stale revision, wrong-wallet, repeated, late and locked-wallet requests fail.
+Endorsement BRN stays spent. A subsequent proposal still receives direct and
+secondary votes and activates the exact rate. All nodes restart, and a fresh
+observer retains both the withdrawn record and the activated proposal.
+The inspected desktop confirmation is
+`/tmp/burst-native-wallet-cmzExs/withdrawal-review.png`.
+
+The first attempt stopped at a duplicate JavaScript declaration. The next completed the
+desktop actions but hit the fixture's fixed checkpoint-height assumption:
+withdrawal added an earlier checkpoint, so checkpoint three was not yet the
+activation. The fixture now waits for the actual Activated state, records its
+certified height and requires the same checkpoint after recovery. Neither
+failed attempt is passing end-to-end evidence.
+
+This is controlled-clock, debug-desktop evidence, not a partition or packaged
+release test. Source release gates remain closed. The whitepaper, decisions and
+wire/block formats are unchanged from iteration 122.
+Strict all-target node Clippy passes in 5.70 seconds (`withdrawal-clippy.log`).
+The coverage index and both worktree whitespace checks pass. Disposable node,
+WebKit and Xvfb processes have exited; user applications were not restarted.
+
+### Iteration 124: coincident challenge settlement and pending expiry
+
+The combined live journey passes for both fraud and inactivity in 224.81
+seconds (`challenge-expiry-live-verified.log`). Four independent representatives
+certify a five-human electorate. A pending payment contains two merged origins,
+one belonging to the challenged wallet. Both expire at the challenge deadline.
+One selected verifier votes; the other two default to Neither at the certified
+deadline. Every node installs the same completion and releases the paid stakes.
+
+Fraud revokes only the challenged origin's portion. Inactivity revokes neither
+origin. Both cases return the expired payment to its sender, reject a withheld
+old-epoch receive and reject a fresh receive of the removed pending entry.
+All four nodes restart. A fresh non-voting observer independently catches up;
+account heads, payment epochs, BRN accounting, portfolios and pending receipts
+match the live result, and the recovered heads are cemented.
+
+An earlier attempt failed because the test expected expiry to rewrite the
+account's signed nominal TRST balance. That expectation was wrong. The passing
+test preserves the last signed balance and checks transferable, expired and
+revoked amounts separately. No production economic rule changed for this test.
+The recovery helper now explicitly disables representative signing on its fresh
+observer instead of inheriting the last original node's key.
+
+Strict all-target node Clippy passes in 2.62 seconds
+(`challenge-expiry-clippy.log`). The specification files and source gates are
+unchanged. This is controlled-clock, local TCP evidence with authenticated
+fixture beacons. It does not cover a network partition, a hard crash, appeals,
+reward reversal or production beacon unpredictability.
+
+### Iteration 125: minority partitions cannot settle the shared deadline
+
+The four-representative challenge/expiry fixture now also splits into two
+internally connected halves before the deadline. Test-only filtering drops
+cross-partition frames on send and before receive decoding, including bootstrap
+and checkpoint traffic. Filters follow authenticated peer identities across
+reconnections. Production builds contain neither the filter nor its controls.
+
+The new journey passes in 107.77 seconds (`challenge-expiry-partition.log`).
+During the six-second split, every node retains its payment epoch, the target's
+verified state, the original pending transfer and the paid verifier stake. No
+deadline completion appears. The filter drops 71 frames. Once communication
+resumes, the nodes settle the fraud/expiry boundary, reject late receives and
+recover matching economic state and cemented heads after all-node restart and
+fresh-observer catch-up.
+
+This checks one honest 2+2 partition with four independent signing keys in a
+five-human electorate. It does not establish Byzantine safety, hard-crash
+recovery, long-partition liveness, competing payment branches or partitioned
+governance ballots. Those requirements remain open. The existing unpartitioned
+fraud/inactivity test remains available as a separate journey.
+
+The conformance README no longer calls supported governance and pending-expiry
+replay missing, and it names the current block version. These corrections
+follow the writing skill's requirement to tie claims to recorded evidence;
+they do not change the whitepaper or decisions. Source release gates remain
+closed. Strict all-target node Clippy passes in 6.48 seconds
+(`challenge-expiry-partition-clippy.log`). The coverage inventory and worktree
+whitespace checks pass, and both specification hashes are unchanged. The test
+and compiler processes have exited; no user application was closed.
+
+### Iteration 126: durable outcome history for meta-challenges
+
+Settlement now records the target, canonical settlement source, completion
+time, verdict and preceding outcome. Challenge records bind the original signed
+admission and its fraud/inactivity reason. Each reward records its recipient,
+amount and exact TRST origin. The reward-origin calculation and economic effects
+are unchanged. This history identifies the outcome and funds an appeal would
+need to address; it does not authorize reversal on its own.
+
+The shared settlement code produces these records in both live candidates and
+signed-history replay. Records and the latest-outcome reference commit with the
+settlement. A duplicate outcome or a missing, mismatched or later predecessor
+fails. Checkpoint installation replaces these derived namespaces without
+clearing finality journals or changing the payment epoch independently.
+
+Thirty settlement checks pass in 0.95 seconds
+(`outcome-receipts-settlement.log`). Two focused receipt checks pass in 0.06
+seconds (`outcome-receipts-focused.log`), including aborted commits, preserved
+earlier outcomes, reward identities, malformed records and atomic lifecycle
+replacement. The compiler took 32.10 seconds for the first run and 13.85 seconds
+after adding the namespace-replacement check.
+
+The extended partitioned fraud/expiry journey passes in 105.62 seconds with a
+warm build (`outcome-receipts-live.log`). Its live nodes agree on the receipt,
+including the fraud bounty's exact origin and amount. All four restarted nodes
+and a fresh observer reconstruct the same receipt as well as the previously
+checked economic state and cemented account heads.
+
+This is the outcome-history part of decision 7.4, not a completed meta-challenge
+protocol. Signed appeal admission, committee selection, overturning effects,
+reward reversal and wallet controls remain open. Ordinary re-verification is
+not renamed as an appeal. The writing skill guided these scope limits in the
+evidence notes. The whitepaper, decisions, wire/block formats and release gates
+are unchanged. Strict all-target node Clippy passes in 13.44 seconds
+(`outcome-receipts-clippy.log`). The coverage inventory and whitespace checks
+pass; both specification hashes match the prior iteration. Test and compiler
+processes have exited.
+
+### Iteration 127: outcome-specific reward invalidation
+
+The TRST engine can now invalidate named issuance origins for a specific
+outcome, without revoking the recipient's other origins. Removing that reason
+restores funds only when no other outcome reason or identity revocation remains.
+Normal identity revocation and re-verification use the same token-splitting
+code, but cannot clear an outstanding outcome invalidation. Origin requests are
+validated before mutation and applied in deterministic hash order.
+
+Ordinary snapshots keep the existing version-3 encoding. A snapshot with
+outcome invalidations uses version 4 and preserves each reason plus any
+independent identity revocation. The reader still accepts version 3. It rejects
+unknown origins, empty/duplicate/zero reasons and disagreement with the merger
+graph. Older readers cannot read version 4; appeal activation will need an
+explicit compatible-peer release. No ledger was migrated or deleted here.
+
+All 58 TRST tests pass in 0.05 seconds after a 2.38-second build
+(`outcome-origin-reversal-trst-final.log`). The added cases cover merged rewards,
+pending delivery, expiry, restart, overlapping causes, both orders of identity
+revocation and malformed requests. An initial compile failed on helper method
+names and sorting `TxHash` directly; those were corrected before this pass.
+
+All 32 node settlement checks pass in 0.97 seconds after a 41.77-second build
+(`outcome-origin-reversal-node.log`). The new component case takes an actual
+recorded verifier reward, invalidates its pending origin, revokes and re-verifies
+the recipient, and reopens storage between transitions. Re-verification restores
+unrelated funds but leaves the reward invalidated. Removing the outcome reason
+then restores its pending portion without adding a second payment or altering
+the historical outcome receipt.
+
+These engine operations are not an appeal endpoint or authorization mechanism.
+No certified appeal uses them yet. The next step is signed appeal admission and
+certified selection/settlement against the recorded outcome, followed by a live
+appeal journey and wallet controls. There was no new end-to-end appeal run in
+this iteration. The writing skill guided that distinction in the evidence
+record. Whitepaper intent and all source release gates are unchanged.
+Strict all-target Clippy for node and TRST passes in 14.71 seconds
+(`outcome-origin-reversal-clippy.log`). Cargo reports its existing unused
+manifest dependency warning for `burst-brn` in TRST. The coverage inventory and
+whitespace checks pass, and both specification hashes are unchanged. Test and
+compiler processes have exited.
+
+### Iteration 128: signed appeal references and review panels
+
+Challenge transactions now carry an optional `appeal_of` reference. The wallet
+builder signs it in the existing `target_head` field and rejects a supplied zero
+reference instead of turning it into an ordinary challenge. The referenced
+outcome is a causal dependency. Ordinary challenges retain a zero reference.
+Block format stays at version 6; wire version 27 excludes older peers that do
+not recognize the new meaning. No existing ledger or running app was upgraded.
+
+The verification state machine now distinguishes an appeal from ordinary
+re-verification. An appeal retains the reviewed outcome and previous judgment
+through selection, revotes and restart. Both possible verdicts wait for a
+certified settlement boundary. Legacy admission-time expiry cannot resolve an
+appeal or restore the target's status. Appeal candidates emit their review
+context without ordinary fraud/deactivation events that could bypass the
+separate reversal path. Snapshot version 6 stores this context and reads
+version 5 and older supported snapshots without inventing appeals.
+
+Node receipt checks require the latest outcome for the same target, a completed
+challenge judgment, the same reason and matching signed source blocks. A later
+re-verification cannot be misrepresented as the disputed challenge. Stale,
+future-dated and mismatched references fail. These checks run against the
+candidate ledger; a receipt in a live database alone is not certified authority.
+
+All 118 verification tests pass in 0.11 seconds after a 5.22-second build
+(`appeal-verification-all.log`). They include appeal selection commitments,
+version-5 decoding, restart after each vote, all target-verdict combinations for
+fraud/inactivity, legacy timeout rejection and certified-selection deadline
+candidates with missing voters. All 36 node settlement tests pass in 1.34
+seconds after a 6.42-second build (`appeal-settlement-all.log`). The receipt
+cases cover successful and rejected fraud/inactivity challenges, storage
+reopen, invalid appeal references and admission rejection without stake changes.
+The signed-reference checks also passed for wallet-core and ledger
+(`appeal-reference.log`). These are component checks, not a live appeal journey.
+
+Appeal admission remains closed in the block processor and candidate transition.
+Settlement explicitly rejects appeal events until the certified reversal path
+is integrated. Next work must connect validated receipt history to appeal
+admission, outcome/deadline checkpoint derivation, reward-origin correction and
+identity restoration, then exercise repeated appeals and live recovery. The
+wallet has a signing builder, not user-facing appeal controls. No new rule for
+rewinding historical BRN stake settlements was introduced here.
+
+Strict all-target Clippy for verification, node, wallet-core and ledger passes
+in 21.08 seconds (`appeal-clippy.log`). The existing live partitioned fraud/expiry
+journey passes in 136.70 seconds after a 4.69-second build
+(`appeal-snapshot-live-recovery.log`). The 2+2 split dropped 66 peer frames;
+settlement waited for quorum, then all four restarted representatives and a
+fresh fifth node matched the recorded outcomes and economic state. This checks
+ordinary challenge recovery with the new snapshot writer. It submits no appeal
+and cannot establish appeal settlement correctness.
+
+The format regression run also passes all 44 ledger, 15 protocol and 110
+wallet-core library tests (`appeal-format-regressions.log`). The specification
+hashes are unchanged. The coverage inventory reports 388 indexed sections,
+386 not signed off and zero format errors; this is not a completion percentage.
+All test and compiler processes for this iteration exited. The writing pass
+keeps component checks separate from the live recovery result and the still
+missing end-to-end appeal proof.
+
+### Iteration 129: certified appeal settlement and live integration
+
+Appeal admission now requires a certification marker derived while replaying
+the accepted checkpoint chain. A local outcome receipt alone cannot authorize
+review. Checkpoint installation clears and rebuilds these markers with the
+other replay-owned projections. The ordinary build rejects signed appeals
+before queueing; `META_CHALLENGES_ENABLED` remains false.
+
+Both appeal judgments now use certified outcome settlement. The old human
+roster approves restoration before the target can regain voting weight. Reward
+correction follows the original challenge through failed and repeated reviews,
+invalidating or restoring the recorded origins without changing unrelated
+funds, historical BRN burns or signed balances. The first fraud finding pays
+the bounded bounty; later reversals reuse that issuance. Resolution C08 records
+these mechanics and their limits without changing the historical specification.
+
+Two settlement tests passed in 0.20 seconds after a 22.58-second build
+(`appeal-reversal-component.log`). The signed-history test passed for fraud and
+inactivity in 3.79 seconds after a 14.86-second build
+(`appeal-certified-replay-fixed.log`). It rejects a restoration certificate
+that substitutes the revoked target for a necessary old-roster voter, then
+checks valid settlement, storage reopen and reconstruction from authenticated
+history in a fresh store. It does not run independent node workers.
+All 36 node settlement tests then passed in 1.40 seconds after a 22.75-second
+build (`appeal-settlement-integrated.log`), including certification-marker
+admission checks and atomic cleanup during checkpoint replacement.
+
+The first live attempt failed after 158.55 seconds while waiting for appeal
+selection (`appeal-live-recovery.log`). The original panel had two missing
+voters, so its Neither cooldown must be considered before reusing that pool.
+The follow-up fixture checks admission and selection readiness directly,
+then advances simulated time past the existing seven-day cooldown and supplies
+the real drand round 20266 proof. It does not shorten the protocol penalty.
+Its direct replay confirmed the cooldown, then rejected premature selection
+because pending entries also expire during that interval
+(`appeal-live-cooldown-recovery-fixed.log`, 101.28 seconds). The fixture now
+checks for that required deadline checkpoint and lets the running workers
+certify expiry before selecting the appeal panel. Live settlement and recovery
+then passed in 186.33 seconds with a 0.08-second cached build
+(`appeal-live-ordered-recovery.log`). Four independent running representatives
+admitted the signed appeal, waited through the simulated cooldown and certified
+expiry, selected and activated the new committee, then restored the target after
+its legitimate verdict. The old bounty origins became invalid, expired target
+TRST stayed expired, and the restored target made a new BRN payment. All four
+nodes restarted with matching state; a fresh observer reconstructed the same
+accounts, portfolio, pending entries, accrual pauses and latest appeal receipt.
+This was an honest connected fraud appeal, not an appeal partition or hard crash.
+All three ordinary-library gate tests passed after a 14.63-second build
+(`appeal-release-gates.log`). They reject signed appeals before admission and
+reject gated outcome, roster, activation and deadline records during import or
+recovery. The test-only live path has not opened these production gates.
+Strict all-target Clippy for node, verification and TRST passed in 18.11 seconds
+(`appeal-integrated-clippy.log`). Existing Cargo manifest warnings remain.
+The source inventory still reports 388 sections, 386 unsigned and zero coverage
+errors. This is an audit index, not a completion percentage. Whitepaper and
+decision-file hashes are unchanged, and `git diff --check` passes.
+
+The writing pass keeps component results separate from live evidence. Wallet
+controls, repeated and failed live reviews, partitioned appeals and the broader
+release prerequisites remain open.
+
+### Iteration 130: wallet appeal discovery and reviewed signing
+
+The node now exposes `appeal_review` through its existing RPC bridge. One LMDB
+read transaction supplies the latest outcome, its certification marker, active
+challenge state and governed stake. An uncertified or superseded judgment is
+not offered for appeal. Storage corruption stays an error. The response reports
+the closed source gate; a read endpoint does not enable submission.
+
+The wallet client validates the response and rechecks it before signing. A
+changed outcome, reason, stake or certification reference requires a new
+review. Disabled appeals and active reviews stop before submission. Preflight
+connection errors are reported as not submitted, while failures after signing
+retain the existing uncertain-transaction handling.
+
+Verification now includes a compact "Appeal a decision" disclosure. Users
+enter the target wallet address, read the latest judgment and exact BRN stake,
+then confirm before signing. Outcome hashes stay in selectable details. Revoked
+wallets can inspect a decision but need a verified sponsor. The design skills
+guided visible risk copy, keyboard cancellation/focus return, 44px controls,
+and wrapping the amount as a whole on narrow screens. No new icons, animation
+or component library were added.
+
+The client review test passed after a 5.56-second build
+(`appeal-wallet-review.log`). The node discovery test passed after a
+39.72-second build (`appeal-discovery-fixed.log`). The wallet production build
+passed. Browser contracts cover confirmation/cancellation, exact amounts,
+closed gates, revoked sponsors, active/missing outcomes, errors, connection
+changes and 320px layouts in both themes. Those tests mock IPC; they are not
+evidence that a native window signed a transaction.
+
+The connected appeal journey passed using the real `appeal_review` RPC and
+wallet-client `appeal_signed` path in 198.91 seconds after a 0.11-second cached
+build (`appeal-wallet-live-recovery.log`). All four representatives returned the
+matching certified judgment before signing and reported the active appeal
+after admission. Restoration, bounty correction, expiry preservation, a new
+payment, all-node restart and fresh-observer reconstruction passed again.
+Four browser tests passed in 11.10 seconds (`appeal-wallet-browser.log`), and
+desktop/mobile screenshots were inspected. A native Tauri/WebKit appeal journey
+is still required. The native Tauri library check passed in 4.93 seconds
+(`appeal-native-check.log`), and the final wallet build passed
+(`appeal-wallet-build.log`). These build checks do not replace the desktop
+signing journey. Failed/repeated
+live reviews, inactivity appeals, partitions and the wider release queue also
+remain open. Neither the whitepaper nor the resolved decisions changed.
+Strict all-target Clippy for node, RPC and wallet core passed in 12.95 seconds
+after moving the discovery test into its own module
+(`appeal-wallet-clippy-fixed.log`). The source inventory has zero coverage
+errors; 386 of 388 indexed sections remain unsigned. Both repository whitespace
+checks pass. No existing app process, ledger or Azure node was upgraded.
+
+### Iteration 131: whitepaper gap review and rolling verifier penalties
+
+Re-read the whitepaper and compared the recorded queue with current runtime
+boundaries. `spec/README.md` now separates missing implementation, gated
+integration, validation and research. Several coverage notes still described
+agreement transport, encrypted delegation and appeal correction as absent;
+they now point to the existing integration evidence without signing off release
+safety. The complete source scope remains unchanged.
+
+Decision 15.3 exposed a real mismatch. `NeitherVoteTracker` kept lifetime totals,
+not a rolling window. A long history of participation could hide recent repeated
+Neither votes. Its 50% threshold was also hardcoded despite the governable-rules
+requirement. C09 records the unspecified window choice as 100 completed
+assignments and makes both values governable.
+
+The tracker now stores ordered recent votes with a checked Neither count.
+Threshold comparison uses exact cross multiplication rather than truncating
+basis points. Shrinking a window discards oldest votes; growing it fills
+prospectively. Zero disables tracking. Existing cooldowns and settled rewards
+remain intact. Cooldown timestamps saturate at the timestamp limit instead of
+overflowing. Version-7 snapshots validate order/count consistency; older
+nonempty lifetime counters require replay because they cannot supply order.
+
+The new fields are included in parameter hashes, governance encoding, the
+lossless RPC catalog and wallet proposal labels. Certified activation applies
+the rules in replay order, including multiple activations in one cut. The
+legacy activation writer stages its verification snapshot in the same commit.
+Wire generation is 28; block version remains 6. The changed genesis-parameter
+encoding rejects older data rather than silently interpreting missing fields.
+No existing ledger, running app or Azure node was changed.
+
+Verification and governance component suites passed, 121 and 130 tests
+respectively, after a 17.25-second build (`rolling-neither-components.log`).
+The independent-node active-panel governance journey passed in 140.02 seconds
+after a 47.65-second build (`rolling-neither-live.log`). It votes in a
+four-assignment window and a 100% threshold, verifies that the absent verifier
+is counted but no longer penalized, settles the panel, spends the resulting
+funds, restarts all nodes and checks a fresh observer. This is controlled-clock,
+honest connected evidence, not partition or production-clock validation.
+
+The focused wallet browser contract passed in 2.48 seconds
+(`rolling-neither-browser.log`). It reviews and submits the new rules, including
+75.01% as exactly 7501 basis points. IPC is mocked; the separate live node test
+establishes certified activation and recovery. No desktop appeal test was run.
+Release gates remain closed. Verifier minimum BRN and other hardcoded numeric
+rules still need the broader audit; the new rolling window is not a claim that
+all numeric protocol policy is governable.
+
+Strict all-target Clippy for node, verification and governance passed in 20.55
+seconds (`rolling-neither-clippy.log`). The wallet production build passed
+(`rolling-neither-wallet-build.log`). Both repository whitespace checks and the
+coverage-format check pass. Whitepaper and implementation-decision hashes are
+unchanged. All jobs from this iteration exited; no test runner remains active.
+
+### Iteration 132: governable verifier balance and emergency participation
+
+The numeric-policy audit found three mismatches with the selected decisions.
+Verifier eligibility still hardcoded 50 BRN. Emergency governance used 95%
+approval but ordinary participation, despite decision 20.11's higher quorum.
+The default governance endorsement burn was 336 BRN rather than the 100 BRN in
+decision 20.1. C10 records the interpretation separately from the source text.
+
+There are now 41 registered parameters. The new verifier minimum reads available
+BRN at the selection cut, independently of age, opt-in, external activity and the
+vote stake. Emergency voting duration, quorum and approval have separate governed
+values, initially 24 hours, 95% and 95%. An emergency cannot lower the existing
+constitutional self-protection by selecting the emergency route.
+
+Tracing the runtime found that signed emergency content entered ordinary proposal
+support. The shared verified-proposer entry point now starts its voting phase
+immediately. Confirmed submission reserves the emergency counting boundary without
+endorsements, and recovery retains that schedule. No genesis override is granted.
+Duplicate submission cannot replace a ballot. Counting no longer evaluates an
+irrelevant normal support deadline when the emergency voting start already exists.
+Both full-content and compact emergency admission remain behind the existing gate.
+
+The connected active-panel fixture now certifies eleven ordinary policy changes.
+It then accepts two emergency proposals from a non-genesis human: four of four
+votes activate one; three of four fail the governed 75.01% quorum despite 100%
+approval. The panel selected before these changes still finishes with its original
+deadline and paid stakes. All nodes restart and a fresh observer reconstructs the
+same outcomes and rules. The passing run took 218.92 seconds after a 24.10-second
+build (`target/validation-evidence/governed-policy-live.log`). The first run stopped
+the fixture clock exactly at activation, leaving that cut outside the service's
+safe past. Its failure is retained in `governed-policy-live-boundary.log`; advancing
+one more second fixed the fixture without changing production timing.
+
+Focused validation used `CARGO_BUILD_JOBS=1 nice -n 15 taskset -c 0,1`:
+
+- `cargo test -p burst-types -p burst-governance --lib -- --test-threads=1`:
+  13 type tests and 135 governance tests passed (`governed-policy-components-final.log`).
+- `cargo test -p burst-node --lib governed_verifier_balance -- --nocapture`:
+  exact-balance, one-unit and zero-minimum checks passed (`governed-policy-balance.log`).
+- `cargo test -p burst-node --lib emergency_submission -- --nocapture`:
+  immediate counting fence and frozen timing passed (`governed-policy-fence.log`).
+- `cargo test -p burst-node --test outcome_release_gate -- --test-threads=1`:
+  four ordinary-build gate tests passed, including compact emergencies
+  (`governed-policy-gates.log`).
+- `cargo clippy -p burst-node -p burst-governance --all-targets -- -D warnings`:
+  passed (`governed-policy-clippy.log`).
+
+The wallet parameter labels and units include all four new fields. Its focused
+browser contract passes exact 18-decimal BRN and basis-point proposals in 3.11
+seconds (`governed-policy-browser.log`); IPC is mocked. The production build passes
+(`governed-policy-wallet-build.log`). Emil's writing guidance kept the new labels
+and audit notes direct; this was not a layout redesign.
+
+Wire generation is 29; block version stays 6 and verification snapshot version
+stays 7. New parameter encoding requires separate fresh development data. No
+existing wallet, node, ledger or Azure deployment was changed. Source hashes and
+release gates are unchanged. The inventory still has 386 unsigned sections and
+zero format errors. `spec/NUMERIC_POLICY_AUDIT.md` records the remaining constant
+classification work. Connected controlled-clock recovery is not production-clock,
+partition, native emergency-authoring or full whitepaper sign-off.
+
+The WASM compilation target was installed to check decision 34.3 next. Installing
+the target does not make the existing browser client functional.
+
+### Iteration 133: functional browser wallet core
+
+Decision 34.3's first target check failed because `getrandom` had no browser entropy
+backend (`wasm-baseline.log`). The old NodeClient only stored a URL. Native-only
+module gates also hid signing, appeals, delegation and provenance from WASM.
+
+The wallet core now exposes the same RPC and signing APIs on both targets. A small
+`burst-browser` crate supplies page/worker timers and bounded Fetch transport for
+the wallet and group client. It omits cookies, rejects redirects before forwarding
+queries, keeps CORS enabled, disables caching, limits streamed bodies and aborts
+on timeout or cancellation. Ambiguous browser transport failures do not trigger
+automatic group fallback. The existing explicit timeout/server-error fallback
+remains separate from malformed or negative group responses.
+
+Crypto uses Web Crypto-backed `getrandom`; timestamps use the browser clock. File
+keystore functions are native-only while encryption and JSON remain portable.
+Local WASM work generation is single-threaded and documented for worker use.
+Wallet confirmation now has an outer deadline that cancels a stalled RPC on both
+platforms. The pending-confirmation error still preserves the signed hash.
+
+`cargo check -p burst-wallet-core -p burst-crypto --target wasm32-unknown-unknown`
+passed in 56.27 seconds on the first target build (`wasm-check.log`). WASM Clippy
+with `-D warnings` passed in 2.92 seconds (`wasm-clippy.log`). CI now runs these
+target checks. It does not yet run Chromium.
+
+The gated `browser_check` example exports only test probes, including a clearly
+fixed test signing key. After building it and generating bindings with
+`wasm-bindgen` 0.2.126, `wallet_core/tests/browser.cjs` passed in 1.06 seconds
+(`wasm-browser-worker.log`). It runs real compiled WASM in Chromium, generates
+fresh keys, checks clock and local work, signs a payment, independently verifies
+its Ed25519 signature in Node.js, submits it to a loopback RPC contract server and
+checks confirmation. It also tests group requests, redirects, cookies, declared
+and streamed size limits, body timeout, malformed/error replies and cancellation
+of an in-flight confirmation request. Crypto and RPC pass in a Web Worker too.
+The RPC contract server is not a BURST node and does not prove live settlement.
+
+The first adapter build used the wrong wallet constructor; the first HTTP fixture
+mistook the browser's favicon request for RPC. Both test-adapter errors were fixed;
+their logs remain in `wasm-browser-build.log` and `wasm-browser.log`. Neither failure
+was addressed by relaxing runtime checks.
+
+Native regression tests passed: crypto 41, groups 19, wallet core 111 and work 25
+(`wasm-native-regressions.log`). The build took 37.45 seconds and the wallet suite
+18.47 seconds. Native all-target Clippy passed in 19.90 seconds
+(`wasm-native-clippy.log`). All heavy jobs used one Cargo worker, two CPUs and nice
+priority 15. `wallet_core/BROWSER.md` has the complete browser reproduction steps.
+
+D-34.3 is signed off for its platform compilation requirement. A production browser
+wallet, browser storage/backup UI, live-ledger browser journeys and Safari/mobile
+checks are not signed off by that entry. Group transitivity and weighted policies
+remain absent. No existing ledger, app process or Azure deployment was changed.
+The source documents and protocol release gates remain unchanged.
+
+### Iteration 134: disjoint snapshot recovery and verifier-preference forks
+
+Fork replacement previously required whole TRST snapshots to match a block's
+after-image. A later payment on an unrelated account could prevent replacement,
+even when the dependency closure and all finality checks were satisfied.
+
+TRST now restores only map entries changed between a journal's before/after
+images. The current value of each changed entry must still match the after-image.
+Unrelated portfolios, origin ownership and outcome invalidations survive. The
+merger graph applies the same check to nodes, edges, revoked origins and revision
+records. A retained downstream merge cannot lose its parent. Snapshots must decode
+canonically; malformed, overlapping or missing images fail closed.
+
+The LMDB hook accepts only the two named TRST aggregate snapshots. It cannot
+rewrite account indexes, final votes or confirmation promises. Preflight and
+installation use the same reconciliation, with a 256 MiB aggregate input-work
+budget and a 64 MiB restored-journal limit. Errors poison or abort the
+whole transaction. The runtime still publishes rebuilt engines only after commit.
+These limits are bounds, not a claim of incremental or production-scale recovery.
+
+Verifier opt-in/out now use the shared account transition for fork replacement.
+Opt-in still requires a verified wallet. Neither preference block can change a
+balance. Opt-out remains available to revoked wallets. Certified selections still
+read their frozen cut; changing a provisional preference does not replace an
+active panel. Identity outcomes and governance forks remain outside this path.
+
+All five running-node tests pass in `fork-recovery-final-live.log` (13.60 seconds
+after a 20.13-second build). The fixture uses signed blocks, real admission and
+storage, then injects election votes at the authenticated boundary. It is not an
+independent wire-quorum or partition test. One case finalizes a separate payment
+after the losing branch, replaces that branch, restarts and receives the winning
+payment. Another replaces both provisional branches in sequence and checks that
+retained journals cannot resurrect old balances. The preference case checks both
+opt-in and opt-out, descendant removal, restart and the next signed block.
+
+The first payment fixture attempted to spend from an unverified wallet and
+correctly failed. It now uses a signed bootstrap endorsement; no runtime
+eligibility rule was relaxed. The failure is retained in
+`target/validation-evidence/disjoint-snapshot-live.log`.
+
+Final validation logs are in `target/validation-evidence/`:
+
+- `fork-recovery-final-components.log`: 81 LMDB and 64 TRST tests pass.
+- `fork-recovery-final-rollback.log`: 14 rollback tests pass, including finality,
+  transaction aborts and the new shared reconciliation budget.
+- `preference-fork-components.log`: eight transition tests pass, including
+  forged preference balances and revoked-wallet eligibility.
+- `fork-recovery-merge-wire.log`: the signed two-node TCP merge replacement
+  regression passes in 5.80 seconds. This still does not prove partition safety.
+- `fork-recovery-clippy.log`: node, LMDB and TRST all-target Clippy with
+  `-D warnings` passes in 19.85 seconds. Existing Cargo manifest warnings remain.
+
+The coverage checker reports 388 sections, 385 not signed off and no format errors;
+its five tests pass. D-10.6 and D-15.4 remain partial. Source hashes and
+`git diff --check` pass. Heavy jobs ran serially with one Cargo worker, two CPUs
+and nice priority 15. No test process was left running.
+
+Source documents, wire versions, snapshot formats and release gates are unchanged.
+No existing ledger, app session or Azure deployment was modified.
+
+### Iteration 135: relay outages and shutdown recovery
+
+The node now uses the drand client's exact-round relay support. Operators can
+configure one to four mirrors; the approved chained-mainnet key, hash and period
+remain fixed. Requests run concurrently, so a stalled relay cannot delay an
+authenticated response from a healthy mirror. Returning a proof cancels the
+remaining requests. Each request retains the existing ten-second timeout and
+response-size bound. Remote endpoints require HTTPS; numeric loopback HTTP is
+allowed for local relays. Configuration rejects credentials, queries, fragments
+and duplicate URLs. Configured clients do not follow redirects.
+
+The beacon-worker fixture now includes an unavailable mirror and interruption
+while the valid response is withheld. Restart restores the original certificate
+and frozen request, fetches the same round, and installs the same committee.
+Once the proof is stored, another restart does not fetch it again. Relay errors
+leave selection pending, as decision 19.3 requires. The fixtures use historical
+BLS proofs, not future randomness observed under production clocks.
+
+Shutdown previously saved BRN, TRST, verification and delegation caches back to
+storage. That could overwrite a successful transaction if cache publication had
+failed afterward. Shutdown now drains workers and flushes committed storage;
+it never treats those caches as recovery authority. Flush and task failures are
+returned to the caller. Fatal checkpoint replay, installation and worker errors
+retain their first cause, request node shutdown and survive cleanup. The daemon
+also cleans up after a failed startup before returning its error.
+
+The stale-cache regression accepts and confirms a signed payment, replaces live
+engines with older or empty copies, stops the node and checks that the stored
+snapshots remain unchanged. Restart recovers the BRN burn and receives the
+committed payment. The legacy-snapshot regression also verifies that failed
+startup cleanup leaves the original bytes available for explicit recovery.
+
+The publishing workflow now requires the existing conformance release check.
+Platform jobs may still upload CI artifacts, but the rolling public release
+cannot update while that check fails. This changes local workflow source only;
+it does not remove or alter an existing GitHub release. The normal coverage check
+still distinguishes an accurate inventory from a completed implementation.
+
+Validation evidence is retained under `target/validation-evidence/`:
+
+- `drand-relay-final-components.log`: all 50 VRF tests pass, including stalled
+  primary cancellation, relay validation and redirect rejection.
+- `shutdown-safety-components.log`: eight shutdown tests pass, including fatal
+  error propagation through `BurstNode::stop` and task-panic reporting.
+- `drand-corruption-final.log`: corrupt local checkpoint state requests shutdown
+  without overwriting the stored evidence.
+- `drand-node-final-components.log`: seven configuration tests, the corrupt-local-
+  queue test and three beacon-worker recovery tests pass.
+- `shutdown-safety-recovery.log`: all eight recovery tests pass in 2.96 seconds.
+- `shutdown-safety-forks.log`: all five fork replacement tests pass in 13.29 seconds.
+- `shutdown-safety-certified-journey.log`: the independent-node verification and
+  rejected-challenge journey passes in 161.09 seconds. It includes signed votes,
+  stake/reward checks, restart and fresh-observer catch-up. It uses controlled
+  clocks and historical proofs; it does not establish partition safety.
+- `drand-shutdown-clippy.log`: node, VRF and daemon all-target Clippy with
+  `-D warnings` passes in 19.99 seconds. Existing Cargo manifest warnings remain.
+
+These runs cover 83 distinct Rust tests. Heavy jobs ran serially with one Cargo
+worker, two CPUs and nice priority 15; no test process was left running.
+The coverage check reports 388 sections, 385 not signed off and no format errors;
+its five tests pass. Release mode exits 2 as expected because review remains open.
+The release YAML parses and its publication job requires the non-optional check.
+The source whitepaper and decisions, wire and snapshot versions, and protocol
+gates are unchanged. No existing ledger, app session or Azure deployment was
+modified.
+
+This closes the tested relay and stale-cache shutdown cases, not general crash
+safety. Aborting an async task cannot forcibly stop an already-running blocking
+operation. Production-time boundaries, independent partitions/crashes and the
+remaining recovery work below still need evidence before public release.
+
+## Iteration 136: release transport, clock recovery and repeated appeals
+
+This iteration is in progress. The source release gates remain closed.
+
+Wire generation 30 separates the choices in decisions 8.2 and 23.3. P2P
+envelopes now use typed Protobuf messages; signed transaction bytes and stored
+ledger records keep their existing Bincode encoding. Peer handshakes, votes,
+bootstrap, checkpoint agreement/sync and content transfer use the new codec.
+The envelope no longer implements Serde, so an accidental Bincode call fails
+to compile. Fixed-width hashes/signatures, checked integer conversions and the
+64 KiB body bound remain enforced. Older wire generations are rejected.
+The schema and field mappings are in `protocol/wire.proto` and
+`node/src/wire_message/protobuf/`. `protocol/WIRE.md` describes the boundary.
+
+The 25 codec tests passed, including malformed input, framing, all existing
+message variants and unchanged block bytes. The independent `protoc` schema
+check also passed. It is now in CI. The root `Cargo.lock` is no longer ignored;
+release builds need the dependency versions that were actually tested.
+The message fuzz target now calls the active Protobuf decoder rather than the
+unused generic message records. Repeated-appeal restart and fresh-node recovery
+now pass over the new transport. The message-format requirement is signed off;
+this does not sign off networking performance or adversarial safety.
+
+Public NTS probes returned authenticated observations from all four configured
+operators. The opt-in live-clock test persisted a signing promise before real
+drand round 6544949 was released, reopened storage after release and recovered
+the same request, proof and committee. It rejected a fresh late proposal without
+writing a signing journal. This uses signed fixture history and one genesis
+signer. It does not prove independent-node partition or crash safety.
+
+Cancelling `ParallelBlockProcessor::process` previously released its account
+lock and concurrency permit while its blocking closure could still be running.
+The closure now owns both guards until it finishes. Eight component tests pass,
+including same-account exclusion and the global capacity limit after caller
+cancellation. The economic runtime still has one writer; this does not close
+decision 25.7.
+
+The expanded appeal journey exercises restoration, a failed repeat appeal and
+a later reversal to fraud. The first attempt had an incorrect test expectation
+that failed sponsor stakes fund verifier rewards. That expectation was removed;
+the specified sponsor burn and existing verifier reward pool were preserved.
+The corrected run passed the first two judgments but timed out activating the
+third panel. A diagnostic run with a longer wait completed all three judgments,
+four-node restart and fresh-observer catch-up in 430.17 seconds. No installation
+rejection was reported. Candidate discovery had been loading the same validated
+chain separately for each candidate kind, and the beacon worker replayed an
+unchanged completed queue on every poll.
+
+Discovery now shares one authenticated parent chain within a poll. The beacon
+worker skips completed work only while the LMDB transaction revision is unchanged;
+pending requests keep retrying. A new test confirms a subsequent corrupt write
+still stops the worker and preserves the evidence. With the original 60-second
+activation limit restored, the complete three-appeal/restart/fresh-node journey
+passes in 357.23 seconds. It also checks that payments created after restoration
+are revoked by the later fraud judgment. These debug runs are not a throughput
+benchmark. The separate inactivity appeal passes in 166.43 seconds, including
+restored accrual, no fraud bounty or TRST revocation, four-node restart and
+fresh-observer recovery. Its first run failed because the fixture expected a
+fraud-bounty expiry boundary after an inactivity judgment. The corrected
+assertion distinguishes the two outcomes; accounting rules are unchanged.
+The new honest 2+2 partition journey passes in 219.74 seconds. During both the
+original challenge and the appeal deadline, neither half changes the identity,
+payment epoch or settlement receipt, and the appeal sponsor's stake stays held.
+After transport heals, settlement completes; four restarted nodes and a fresh
+observer recover the result. This uses controlled clocks and historical beacon
+proofs, not Byzantine peers or independent production clocks.
+
+The publishing workflow now requires reusable CI on the same revision as well
+as the conformance gate. Network fixtures are deterministically sharded over four
+CI runners, each executing its assigned tests serially. Seven runner tests verify
+exact-name execution, complete non-overlapping assignment and resource limits.
+All build/test commands use the root dependency lockfile. Ignored native-device
+and public-network checks still need explicit evidence.
+
+Release-path checks also found unsafe daemon defaults: an unreadable or invalid
+explicit config fell back to defaults, unknown network names selected Dev, and
+absent flags overwrote configured RPC/WebSocket settings. Those paths now reject
+invalid inputs and preserve configured server settings unless explicitly overridden;
+seven daemon tests pass, including supervised shutdown and reopening the same
+ledger. A later bind-address regression adds an eighth daemon test. WebSocket
+subscriptions now default to localhost, with an explicit config/CLI override.
+P2P, RPC and WebSocket listener failures request shutdown and retain their cause;
+an occupied-port test checks all three. All 15 WebSocket tests and strict linting
+pass. The Unix executable smoke check passes RPC readiness, disabled test funding,
+graceful stop and same-ledger restart. CI now runs that check instead of testing
+only whether the process is alive. Initial installer downloads now verify the
+exact asset checksum before replacing a binary. Linux/macOS helper tests pass for
+success, malformed/duplicate/missing checksums, tampering and HTTP failures.
+Windows parser checks are wired into CI but have not run on this host. Checksums
+detect mismatched assets; they are not independent release signatures. Linux/macOS
+updates now use the same strict download helper, private staging and an update
+lock. They retain the previous executable, report failures and do not start a
+stopped service. Four mocked updater tests pass, including special-character path
+escaping. Windows updates now have equivalent strict checks and atomic replacement
+with a retained backup; their native contract checks still need execution. No
+updater rolls back ledger data. Existing configs retain their data-directory
+setting when the installer creates the service. Native installation and upgrade
+journeys still need evidence. Windows service support now connects
+SCM start/stop reporting to the node's ordinary drain and storage flush. CI has
+native start, local RPC, stop, restart and invalid-config checks. These checks
+have not yet run on Windows; Linux tests do not sign off the platform module.
+
+The wider regression pass completed with 627 fast node tests, 1,229 tests across
+the other workspace crates and 81 node integration tests. The opt-in public-clock
+test, a documentation example and the independent schema test are excluded from
+those totals; the clock and schema checks passed separately above. All 15 release
+tool tests passed initially; the expanded suite now has 19 passing tests.
+CI and release builds pin the tested nightly-2026-10-11 toolchain. The decoder
+completed a 10,000-input uninstrumented smoke run. A subsequent coverage-guided
+run found a remotely supplied empty voter address reaching a panicking address
+constructor. The wire decoder now rejects invalid prefixes before construction.
+An exact-input regression and malformed-address cases pass in the 26-test wire
+suite. A 61-second coverage-guided rerun completes 3,019,729 inputs without another
+failure. This run used libFuzzer instrumentation without an address sanitizer;
+it is bounded decoder evidence, not a protocol security audit.
+Strict node/VRF/daemon Clippy passes. Workspace formatting was
+applied without changing protocol rules. These results do not close the remaining
+conformance or operational release gates.
+
+Evidence is under `target/validation-evidence/`:
+
+- `parallel-cancellation.log`
+- `public-nts-probe.log`
+- `authenticated-future-beacon.log`
+- `beacon-fixtures.log`
+- `protobuf-components-final.log`
+- `protobuf-schema.log`
+- `repeated-appeals-live.log` and `repeated-appeals-live-final.log` (failed runs)
+- `repeated-appeals-protobuf-diagnostic.log` (failed 60-second activation run)
+- `repeated-appeals-installation.log` (passing extended-time diagnostic)
+- `repeated-appeals-optimized.log` (passing with original activation timeout)
+- `beacon-idle-invalidation.log`
+- `inactivity-appeal-live.log` (failed fixture assertion)
+- `inactivity-appeal-final.log`
+- `daemon-release-config.log`
+- `release-node-fast.log`
+- `release-workspace-components.log`
+- `release-node-integration.log`
+- `release-runtime-clippy.log`
+- `release-tools.log`
+- `release-tools-final.log`
+- `local-api-daemon.log`
+- `listener-failure.log`
+- `listener-clippy.log`
+- `daemon-process-smoke.log`
+- `updater-contracts.log`
+- `protobuf-fuzz-smoke.log`
+- `protobuf-guided-fuzz.log` (address-constructor panic)
+- `protobuf-address-regression.log`
+- `protobuf-guided-fuzz-fixed.log`
+- `partitioned-appeal.log`
+
+## Iteration 137: optional group-to-group trust
+
+The whitepaper's group graph is now implemented as an off-chain, opt-in REST
+extension. A selected group can publish `/trust` with a versioned list of other
+group IDs. Only the receiver's registered endpoints resolve those IDs; responses
+cannot import endpoints or replace saved URLs. Direct membership remains the
+default for both new and existing wallet settings.
+
+Traversal handles cycles, follows at most eight group edges, visits at most
+64 groups and times out after 30 seconds. Each response is bounded to 64 KiB;
+endorsement lists contain at most 32 distinct IDs. No responses are cached for
+later checks. A valid path can satisfy membership; missing configuration, invalid
+data and exhausted resource limits require review rather than outage fallback.
+Only transport outages can use the receiver's explicit protocol fallback.
+
+Wallet-core applies the graph independently to every surviving original creator
+in a confirmed payment. Any/all rules apply to directly trusted roots. The
+desktop settings distinguish those roots from other endpoints the receiver
+permits traversal to contact. Loading a directory still selects nothing, and
+manual receiving stays available. No consensus, balances or verification rules
+changed. HTTP remains supported for local endpoints; remote groups should use
+HTTPS. These statements are not signed on-chain proofs of membership.
+
+Validation passes 26 group tests and all 113 wallet-core tests, including 16
+trust-policy tests. Two native
+settings-parser tests and four focused browser tests. Native and WASM compilation
+and focused Clippy pass. The browser test covers default-off migration, malformed
+saved settings, keyboard selection, explicit save, endpoint pinning and 320px
+layout. A focused native Tauri/WebKit journey also passes against a fresh local
+Dev ledger. It signs real payments and receipts, checks direct-only rejection,
+transitive acceptance, removed endorsements, negative membership, unknown-group
+holds and explicit outage fallback. The original-creator addresses match the
+group queries, and the final balance is three TRST. The broader group fixture
+was interrupted by Vite reloading on generated `tsconfig.tsbuildinfo` during a
+concurrent build; that failed log is retained. The wallet's watcher now ignores
+TypeScript build metadata and test files, alongside the existing native-source
+exclusion. UI source changes still reload normally.
+The new `wallet/tests/build-watch.test.cjs` runs a forced TypeScript build while
+a browser page is open and verifies that its state survives with no navigation;
+`wallet-build-watch.log` records the pass.
+It is not recorded as a passing full native suite. Logs are in `target/validation-evidence/`
+under `group-transitivity.log`, `wallet-group-transitivity.log`,
+`desktop-group-policy.log`, `wallet-group-graph-browser.log`,
+`group-graph-clippy.log`, `group-graph-wasm.log`, `groups-wallet-final.log`, `native-group-graph.log`
+(interrupted) and `native-group-graph-focused.log` (pass). The passing native
+fixture retains its isolated logs and data in `/tmp/burst-native-wallet-Y8DTPW`.
+Reproduce it from `wallet/` with the current wallet binary and Vite on port 1430:
+
+```sh
+TAURI_DRIVER=/home/nitesh/.cargo/bin/tauri-driver \
+BURST_DAEMON=../protocol/target/debug/burst-daemon \
+node tests/native-session.mjs --group-graph-only
+```
+
+The compiled WASM adapter also passes graph queries in a Chromium page and Web
+Worker, including cycles, changed endorsements, missing IDs, redirect rejection
+and omission of ambient cookies. `group-graph-wasm-browser.log` retains that
+contract test; its local HTTP fixture is not a live browser ledger journey.
+
+The temporary Azure Windows validation VM was left outside this local work after
+a Codex safety notice interrupted its diagnostics. Windows lifecycle validation
+is still unsigned; no Linux result substitutes for it. A deallocation request
+for that disposable VM was accepted at 06:24 UTC on 2026-10-12; disk data was
+preserved. Completion must be confirmed before claiming compute charges stopped.
+
+## Iteration 138: parallel authentication and the rsnano comparison
+
+The rsnano reference at `414dd884c162f78f151b9d912a029bbc9a340866`
+starts multiple block-processing workers. `Ledger::process_batch` validates
+against a read transaction, then inserts through an LMDB write transaction.
+`BlockInserter` checks the account head and required pending entry again before
+insertion. Calling BURST's single writer a missing feature was too broad.
+Serialized persistence does not imply serialized validation.
+
+BURST previously verified signatures while holding the block-processor mutex
+inside the economic processing task. The running node now uses
+`BlockValidationQueue` to authenticate immutable block contents in blocking
+workers. The worker count follows available CPUs, uses two on small multicore
+hosts and is capped at eight. At most that many candidates are prefetched.
+Workers retain dequeue order, including when authentication finishes out of
+order. A newly arriving higher-work block can precede queued work, but cannot
+preempt the bounded window already selected for authentication.
+
+Stored duplicates are dropped before signature work. Format, content hash and
+PoW checks precede Ed25519 verification. A result owns its exact block, including
+the signature; it is not a hash-only signature cache. Work-rule or signature-
+policy changes invalidate an earlier worker result. Current payment epoch,
+cutoff, parameters, time, dependencies and frontier are checked at admission.
+Economic application still reads predecessor and pending state in its writer
+transaction. No worker changes balances, provenance, votes or the ledger.
+
+Cancelling a `next()` wait leaves selected work in the queue. A worker panic is
+a fatal node error, never an accepted block. Shutdown cancels unstarted work;
+already-running blocking jobs finish with their private inputs and no ledger
+locks. Processing-time metrics include authentication CPU time, not just the
+shortened serialized stage. No consensus encoding, economic rule or release
+gate changed.
+
+Evidence:
+
+- Eight focused tests cover changed contents/signatures, stale epochs and
+  cutoffs, time and work-rule changes, signature-policy changes, forks and gaps,
+  closed appeal admission, priority order, duplicate filtering, bounded worker
+  overlap, cancelled waits and worker failure. The manual benchmark is ignored
+  in ordinary tests.
+- A real RPC test submits missing-predecessor blocks across 24 accounts,
+  then their parents concurrently. All 48 blocks reach storage in dependency
+  order. Invalid signatures and signed self-reported balances are rejected.
+  Account heads and counts survive reopening. It also passes with a four-CPU
+  affinity, which selects two authentication workers.
+- Existing live payment-epoch/restart and merge-fork replacement tests pass.
+- The broader node-library run passed 644 tests, with two ignored and 34
+  filtered by `--skip certified_network_tests`. It took 297.95 seconds;
+  several existing network-agreement fixtures wait on protocol timers.
+- Strict node library/test Clippy passed. The final focused rerun checks the
+  small-host worker-count policy without repeating the five-minute library run.
+
+One test-profile microbenchmark authenticated 4,096 signed blocks in 160.1 ms
+serially, 192.5 ms with one blocking worker, 101.4 ms with two and 66.5 ms with
+four. An earlier run under concurrent host load was slower. These are local
+authentication measurements, not release-build throughput or confirmation
+latency. One-worker scheduling has overhead; the worker path also keeps CPU
+authentication off Tokio's async executor.
+
+Logs are in `target/validation-evidence/parallel-authentication-*.log`.
+Reproduction commands:
+
+```sh
+cargo test -p burst-node --lib block_validation --locked --offline -- --test-threads=1
+cargo test -p burst-node --test parallel_authentication_network --test payment_epoch_network --test merge_fork_network --locked --offline -- --test-threads=1
+cargo test -p burst-node --lib authentication_throughput --locked --offline -- --ignored --nocapture
+cargo clippy -p burst-node --lib --tests --locked --offline -- -D warnings
+```
+
+Decision 25.7 remains partial. Global BRN/TRST candidate copies and whole-state
+snapshot persistence remain in economic application. Account-scoped preparation
+must account for transfers, shared provenance and lifecycle effects before it
+can replace those copies. The unused per-account helper is not evidence of
+that integration. Public-release readiness is unchanged by this batch.
+
+## Iteration 139: avoid copying unchanged economic state
+
+Every admitted block previously cloned both economic engines and serialized all
+wallets and provenance, even when only account metadata changed. The live commit
+path now borrows those engines for empty openings and representative changes.
+It materializes isolated copies on the first economic operation or lifecycle
+hook. Publishing those copies still happens only after the LMDB commit succeeds.
+
+A representative change can acknowledge returned stakes. That case still uses
+the full economic path, as does any pending claim. Hash, signature, timestamp,
+epoch, predecessor and balance checks are unchanged. Account persistence,
+counters, bootstrap observation and undo records remain in the same transaction.
+Skipping unchanged snapshots does not skip a block commit.
+
+Five focused tests pass. They compare effects with full evaluation, check stake
+acknowledgements and invalid pending data, verify later mutation creates isolated
+state, and force an LMDB map-full failure without publishing candidate state.
+Unchanged economics adds no entries to the block undo journal. Nine live tests
+pass across concurrent account admission, payment epochs, merge replacement and
+fork replacement, including restart checks. Strict node library/test Clippy passes.
+
+The manual test-profile benchmark uses five preparations per state size and
+active undo recording. At 100, 1,000 and 10,000 portfolios, full copying and
+persistence took about 2.0, 10.4 and 126.5 ms per preparation. Borrowing unchanged
+state took about 52, 16 and 14 microseconds. These measurements exclude signature
+checks, network propagation and confirmation. They are not TPS claims or a
+release-build performance sign-off.
+
+Logs are in `target/validation-evidence/economic-staging-*.log`.
+
+```sh
+cargo test -p burst-node --lib economic_candidate --locked --offline -- --test-threads=2
+cargo test -p burst-node --test parallel_authentication_network --test payment_epoch_network --test merge_fork_network --test fork_replacement --locked --offline -- --test-threads=1
+cargo test -p burst-node --lib account_only_preparation_cost --locked --offline -- --ignored --nocapture
+cargo clippy -p burst-node --lib --tests --locked --offline -- -D warnings
+```
+
+Mutating payments and lifecycle transitions still copy shared economic state.
+Decision 25.7 remains partial. No whitepaper rule or source release gate changed.
+
+## Iteration 140: per-engine staging and shared merger indexes
+
+The live candidate now requests BRN and TRST mutation separately. Ordinary
+TRST sends and receipts do not clone or persist BRN. A returned-stake
+acknowledgement does not clone or persist TRST. Receiving an expiry return
+credit validates its pending record without delivering tokens twice. Governance
+and verification hooks can still request both isolated engines before commit.
+
+Both borrowed and fully owned candidates use the same transition function.
+There is no separate account-only validation bypass. Invalid pending data and
+spending limits are checked before mutation. A new test with a missing challenge
+target exposed a pre-existing empty-address panic in the low-level bridge.
+That handler now rejects the block before locking a stake.
+
+Merger-graph clones share seven read-only indexes. The first write to an index
+detaches it with `Arc::make_mut`; other snapshots retain their previous state.
+The persistence path skips the graph only when every index still shares the
+original storage. Independently decoded graphs take the full persistence path,
+even when their contents happen to match. The serialized format is unchanged.
+Tests compare it byte-for-byte with the previous owned-map shape, including
+revocation revisions and downstream merge bases.
+
+The nine staging tests pass. All 66 TRST tests pass, including snapshot rewind,
+proportional revocation and restoration. The explicit clone benchmark also
+passes. At 10,000 merges it measured about 2.1 ms per deep clone/drop and 140 ns
+per shared clone/drop in the local test profile. This excludes mutations,
+portfolio copying, persistence and networking; it is not transaction throughput.
+The final account-only preparation benchmark measured about 117 ms with full
+copies/persistence and 14 microseconds with borrowed state at 10,000 portfolios.
+
+The final regression run passes 49 integration tests, including nine live-node
+cases for account admission, payment epochs and fork replacement. Eleven bridge
+and 18 ledger-updater tests pass. Strict node/TRST library/test Clippy passes.
+The certified fraud-appeal journey also passes settlement, restoration, expiry
+preservation, all-node restart and fresh-observer recovery in 183.61 seconds.
+The three-human certified governance activation/recovery test passes in 59.21
+seconds. Its log includes a temporarily rejected candidate with insufficient
+endorsements during replay; the final state and recovery assertions pass.
+Controlled clocks and historical authenticated beacon proofs do not establish
+production timing or Byzantine safety.
+
+Evidence is in `target/validation-evidence/economic-staging-final-*.log` and
+`economic-staging-certified-*.log`.
+
+```sh
+cargo test -p burst-node --lib economic_candidate --locked --offline -- --test-threads=2
+cargo test -p burst-trst --lib --locked --offline -- --include-ignored --nocapture
+cargo test -p burst-node --test parallel_authentication_network --test payment_epoch_network --test merge_fork_network --test fork_replacement --test integration_tests --locked --offline -- --test-threads=2
+cargo test -p burst-node --lib certified_appeal_restores_after_expiry_then_restarts_and_catches_up --locked --offline -- --nocapture
+cargo clippy -p burst-node -p burst-trst --lib --tests --locked --offline -- -D warnings
+```
+
+Wallet-portfolio copying and whole-portfolio persistence remain. Account-scoped
+economic preparation is not complete, and no release gate is opened. A read-only
+Azure status check also confirmed the temporary Windows validation VM is
+deallocated; it did not run remote scripts or validate the Windows release.
+
+## Iteration 141: preserve outcome revocation causes at startup
+
+The startup path decoded a complete TRST snapshot, then copied only its public
+`wallets` and `wallet_origins` fields into the live engine. This discarded the
+private outcome-invalidation map. Snapshot codec tests retained that map, and
+certified recovery could reconstruct it later, so those tests did not prove
+that ordinary startup preserved it.
+
+Startup now attaches the restored merger graph to the complete decoded engine,
+validates their consistency, and publishes that engine. It retains the private
+cause sets and their independent identity-revocation flags. It also retains the
+indexes rebuilt by the snapshot loader. No storage version or economic rule
+changes.
+
+The new `outcome_restart` test failed against the previous code with "startup
+lost outcome causes". It now passes for two independent outcome causes, with
+and without a separate identity revocation, through two start/stop cycles.
+Re-verifying the owner cannot erase outcome causes. Removing one cause cannot
+erase the other; clearing the last cause cannot erase identity revocation.
+An inconsistent graph/snapshot pair fails before services start and remains
+unchanged on disk. The test seeds local snapshots to isolate restoration; it
+does not substitute for certified authorization or network settlement.
+
+All eight existing `confirmation_recovery` tests also pass. The full certified
+appeal journey passes against the startup fix in 192.03 seconds, including
+expiry, restarts and fresh-node catch-up. Strict node library/test Clippy passes.
+The wallet-core and browser crates also compile for `wasm32-unknown-unknown`;
+that check does not exercise browser interactions. Logs, including the initial failure, are retained
+under `target/validation-evidence/outcome-restart-*.log`.
+
+```sh
+cargo test -p burst-node --test outcome_restart --test confirmation_recovery --locked --offline -- --test-threads=2
+cargo clippy -p burst-node --lib --tests --locked --offline -- -D warnings
+cargo test -p burst-node --lib certified_appeal_restores_after_expiry_then_restarts_and_catches_up --locked --offline -- --nocapture --test-threads=1
+cargo check -p burst-wallet-core -p burst-browser --target wasm32-unknown-unknown --locked --offline
+```
+
+Release gates remain closed. This fixes restoration of existing state; it does
+not complete native appeal signing, adversarial consensus validation or the
+remaining release work.
+
+## Iteration 142: bind native appeals to the reviewed sponsor
+
+The appeal form checked the selected account in the frontend, but native signing
+did not require that account. The IPC command now requires `expectedAccount`.
+After taking the signing lock, it derives the address from the actual signing
+keys and rejects a mismatch before contacting the node. Wallet import and lock
+use that same signing lock. Missing keys and sponsor mismatches are explicitly
+unsubmitted appeals; they do not produce an uncertain receipt.
+
+Four native adapter tests cover a different or malformed sponsor, a wallet
+switch while waiting for the signing lock, a locked wallet, and a matching
+sponsor querying the target's current decision without submitting a changed
+review. All 14 native library tests pass. Five mocked-IPC browser tests pass,
+including exact raw stake, cancellation, narrow layouts, account changes and
+the new expected-account argument. The production wallet build passes.
+
+Strict native Clippy remains blocked by two existing warnings: the eight-argument
+automation command and the constitutional edit enum's `Article` suffixes. No
+warning suppression or unrelated API rewrite was added for this pass. Evidence:
+`native-appeal-all-unit.log`, `native-appeal-ui-final.log`,
+`native-appeal-build.log`, and `native-appeal-clippy.log` under
+`target/validation-evidence/`. The initial browser launch failed because its
+default Chromium revision was absent; the final run used installed Chromium 1200.
+
+The forms skill guided the confirmation and submission-state review. These are
+native adapter and mocked frontend checks, not a completed desktop-to-certified-
+settlement journey. That full journey remains open.
+
+## Iteration 143: preserve independent merges sharing an origin
+
+Undo previously treated each origin's consumer list as one snapshot entry.
+Two independent merges of different holdings from the same burn therefore
+conflicted, even when neither depended on the other. Reverse-edge undo now
+removes only the journaled insertion's consumers. It preserves other consumers'
+order and multiplicity. It rejects missing or changed insertion edges, changes
+to the same merge/revision, and descendants that would lose their source.
+Successive rewinds also remove empty indexes without restoring an earlier
+discarded consumer from a retained journal.
+
+A new running-node test splits one burn between two verified development
+wallets. Each merges its own holdings. The second merge is cemented; an elected
+representative-change block replaces the first. The cemented merge and both
+balances remain correct, origin revocation still reaches both holdings, and
+the saved holdings/graph match after restart. Votes enter at the authenticated
+election boundary, not as an independent-signer wire quorum.
+
+Validation: all six live fork-replacement tests pass, the existing signed TCP
+merge-fork test passes, and the startup outcome-cause regression passes. All
+69 TRST unit tests pass; one manual benchmark is ignored. Strict node/TRST
+library/test Clippy passes. The 14 rollback planner tests and eight payment
+transition tests pass too. Logs are `shared-origin-fork-final.log`,
+`shared-origin-undo-final.log`, and `shared-origin-clippy.log` under
+`target/validation-evidence/`.
+
+This closes the shared reverse-index conflict, not arbitrary overlapping
+holdings/revisions, identity/governance branch switching or partition safety.
+No finality check, durable vote reservation, release gate or economic rule changed.
+
+## Iteration 144: bind every manual wallet action to its reviewed signer
+
+The appeal audit also found manual payment, transfer, receive, endorsement,
+challenge, representative and legacy delegation commands that did not require
+a reviewed account. They now require `expectedAccount`, as direct voting does.
+A shared check derives the account from the actual signing keys after acquiring
+the signing lock. It runs before transaction construction or RPC. Import and
+locking continue to use the same lock through submission. Existing return,
+automation, scoped delegation and constitutional commands retain their guards.
+
+The transaction hook supplies its captured review account, not an overridable
+argument from a caller. Direct receive and representative controls supply their
+account too. Native fixture callers were updated explicitly; tests do not fill
+in a missing expected account behind the application's back.
+
+All 16 native library tests and the production wallet build pass. The 76-check
+browser run passed 74 checks and failed two outdated assertions, one expecting
+old governance copy and one matching both challenge and appeal address fields.
+Both assertions were corrected without removing their no-signing checks. A
+four-test rerun passes those cases plus payment/transfer signer assertions.
+
+A real Tauri/WebKit test verifies all 11 manual commands reject omitted and
+wrong expected accounts before RPC. It also checks locked-wallet rejection.
+This uses public development keys in an isolated profile, not a user wallet.
+The native session also exercises the updated callers against a disposable
+development ledger. Its first attempt stopped at stale onboarding copy; that
+assertion now checks the current direct-group-trust guidance.
+
+The full native rerun passes all eight scripts: backup/restore, onboarding,
+signer guards, payment/merge/transfer adapters, the payment UI, returns/reclaim,
+automation cancellation and group policies. The group checks include original
+creator provenance, outages, malformed responses, manual acceptance priority,
+lock cancellation, pagination and receive from page two. Evidence and isolated
+app data are retained at `/tmp/burst-native-wallet-IzG9zG`; the runner shut down
+its daemon and desktop processes. This used the freshly built debug daemon and
+wallet with the configured development-network work threshold unchanged.
+
+Evidence is retained under `target/validation-evidence/wallet-reviewed-signers-*`.
+These changes do not enable closed protocol gates or prove the complete native
+appeal settlement journey. Windows and macOS packaging remain unverified.
+
+## Iteration 145: remove debug proof-of-work overhead from development runs
+
+The native suite requests real work at the configured development threshold.
+Its debug daemon spent substantial CPU time in unoptimized hashing. The dev
+profile now optimizes only `burst-work` and `blake2`; protocol debug assertions,
+network difficulty, nonce construction and validation rules are unchanged.
+Release builds were already optimized, so this is not a release-throughput claim.
+
+The existing `pow_validate_valid` benchmark, pinned to two CPUs at low process
+priority, measured 6.76 microseconds before and 112 nanoseconds after, about 60x
+faster per check on this machine. Optimizing only `burst-work` first gave 4.81
+microseconds; the Blake2 override accounts for most of the gain. These are local
+microbenchmarks, not transaction throughput or a network-capacity estimate.
+
+All 25 work unit tests and five property tests pass under the final dev profile,
+including the pinned rsnano work vector and threshold validation. The daemon
+rebuild and work Clippy checks pass. Cargo still reports existing manifest
+warnings, including the unused work crate's crypto dependency. Logs are
+`dev-work-before.log`, `dev-work-after.log`, `dev-work-final.log`,
+`dev-work-tests-final.log`, `dev-work-daemon-build.log` and
+`dev-work-clippy.log` under `target/validation-evidence/`.
+
+The rebuilt daemon passes the full eight-script native wallet suite in 49.129
+seconds (`dev-work-native-final.log`, isolated data at
+`/tmp/burst-native-wallet-DBpQ78`). The preceding same-suite run took roughly
+279 seconds by its log creation/completion times. Both used two CPUs, low
+priority, fresh local development ledgers and unchanged network difficulty.
+This end-to-end comparison is approximate and includes desktop/test scheduling;
+the hashing benchmark above isolates the changed work. All temporary native
+processes were shut down by the runner.
+
+```sh
+cargo bench -p burst-work --bench work_bench --profile dev --locked --offline -- pow_validate_valid --warm-up-time 0.2 --measurement-time 0.5 --sample-size 10
+cargo test -p burst-work --profile dev --locked --offline
+```
+
+## Iteration 146: native desktop appeal through certified recovery
+
+The Tauri/WebKit wallet now has an opt-in appeal journey against four independent
+local representatives. It uses the existing historical, authenticated drand
+fixture. The desktop process alone receives its historical wall clock through
+[libfaketime](https://github.com/wolfcw/libfaketime); the host clock, test runner,
+monotonic timers and filesystem timestamps stay unchanged. Production signing,
+timestamp validation and release gates are unchanged.
+
+The desktop imports the public development sponsor key through onboarding,
+looks up the real certified fraud outcome, reviews and cancels without staking,
+then submits through the confirmation dialog. It checks stale outcome/stake and
+wrong-signer rejection, focus restoration, a double click producing one block,
+the exact stake increase, unchanged revoked status during review, active-review
+rejection and refusal to sign after locking. The node checks the stored block's
+signer, timestamp and outcome reference. The same block then reaches certified
+settlement, identity restoration and reward correction without reviving expired
+TRST. All four restarted nodes and a fresh observer recover matching economic
+state and the outcome receipt.
+
+The final journey passed in 207.42 seconds. Evidence is
+`target/validation-evidence/native-appeal-journey-final.log`; the desktop profile
+and reviewed-dialog screenshot are in `/tmp/burst-native-wallet-RTdqwM`.
+Strict node library/test Clippy, Rust formatting and both changed JavaScript
+syntax checks pass. The native screenshot was inspected.
+The normal eight-script desktop suite also passes with the updated runner
+(`native-appeal-runner-regression.log`, isolated profile
+`/tmp/burst-native-wallet-4WU2p9`). It ran without the historical clock and
+retains the ordinary payment, return, automation and group-policy checks.
+
+Two earlier attempts failed and are retained. `native-appeal-journey.log` timed
+out waiting for the original challenge selection before launching the desktop.
+That transient liveness failure is not explained by the passing retry.
+`native-appeal-journey-debug.log` reached confirmed native admission, then failed
+because the test expected different locked-wallet wording. The assertion now
+matches the actual refusal, `appeal not submitted: Wallet not loaded`.
+
+To reproduce, build the debug wallet and run its Vite server on loopback port
+1430. This run used libfaketime v0.9.12, commit
+`3ccdd344aadf1e317156fa5fb7c881f2c4404778`, built outside the repository.
+Only its `libfaketimeMT.so.1` target is needed. On this host its two existing
+const-qualifier warnings needed `-Wno-error=discarded-qualifiers`; this flag was
+not applied to BURST builds. With the library and desktop dependencies available:
+
+```sh
+NATIVE_FAKETIME_LIBRARY=/absolute/path/to/libfaketimeMT.so.1 \
+TAURI_DRIVER=/absolute/path/to/tauri-driver \
+CARGO_BUILD_JOBS=1 cargo test -p burst-node --lib \
+  desktop_appeal_is_certified_then_restarts_and_catches_up \
+  --locked --offline -- --ignored --nocapture
+```
+
+The native inactivity variant also passes in 166.20 seconds
+(`native-inactivity-appeal.log`, desktop profile `/tmp/burst-native-wallet-8131nT`).
+It reviews an inactivity decision, keeps the target deactivated during appeal,
+then restores accrual and transaction rights without fraud rewards or TRST
+revocation. All-node restart and fresh-observer state/receipt recovery pass.
+
+The native repeated-review journey passes in 375.34 seconds
+(`native-repeated-appeals.log`). Three desktop sessions restore the target,
+unsuccessfully challenge that restoration, then reverse it. Both directions of
+the confirmation warning are checked. The failed sponsor stake stays burned;
+historical receipts are unchanged; no duplicate bounty or verifier reward is
+minted. The final reversal includes a payment made after restoration, followed
+by all-node restart and fresh-observer recovery of the exact economic state and
+receipt. Desktop evidence is in `/tmp/burst-native-wallet-hvkkLq`,
+`/tmp/burst-native-wallet-rW8KU1` and `/tmp/burst-native-wallet-f6P32i`.
+The reverse-direction dialog screenshot was inspected. Final strict node
+library/test Clippy, formatting, JavaScript syntax and all five coverage-checker
+tests pass. Owned desktop, node and Vite processes were stopped.
+
+These connected native journeys do not establish production-clock behavior,
+Byzantine liveness, Windows/macOS desktop behavior or public-release readiness.
+
+The existing Azure Windows validation VM was started for a bounded retry.
+Azure continued reporting `Updating` without a guest-agent status; diagnostic
+Run Command requests failed because an earlier command was still in progress.
+The retained `validation-progress` resource remained `Pending` without a start
+or end time. No new Windows validation script was accepted in this attempt. Evidence is
+in `windows-resume-instance.json` and `windows-resume-command.json` under
+`target/validation-evidence/`. The VM was deallocated again and Azure confirmed
+`VM deallocated` with provisioning `Succeeded`. Its disk and source data were
+not deleted. Repair or replacement of that validation host remains necessary
+before its platform checks can be signed off.
+
+## Iteration 147: bounded checkpoint delivery delays
+
+Two transport delays now have failing-before/passing-after regression tests.
+A full 16-message cache previously advertised only four messages in four
+seconds. Its complete cycle took 16 seconds, longer than the first proposal
+window. Advertisement spacing now depends on cache size: one second for up to
+four messages, half a second for five to eight, and 250 ms above eight. A full
+cache cycles in four seconds when the worker is serviced on schedule. Chunk
+retries remain one second. Delayed polls send one advertisement, without a
+catch-up burst. Peer, message, cache and serving limits are unchanged.
+
+A connected peer that stopped answering could also occupy a separate five-second
+timeout for each of its queued offers. When its active transfer times out, the
+transport now drops that peer's queued offers and tries the next source. A late
+chunk cannot overwrite the new active download. A recovered peer can offer again
+at the back of the queue; the timeout does not ban it.
+
+All five transport tests pass in `checkpoint-delivery-final-unit.log`. The
+reproduced failures remain in `checkpoint-advertisement-before.log` and
+`checkpoint-stalled-peer-before.log`, under `target/validation-evidence/`.
+The original challenge-selection timeout now prints each node's durable round,
+phase, ballots, parent and installed payment epoch if it recurs.
+
+Before the small-cache rate refinement, connected fraud and inactivity passed
+settlement, all-node restart and fresh-observer recovery in 164.20 seconds
+(`checkpoint-advertisement-live.log`). The partitioned fraud/appeal journey also
+passed in 162.16 seconds (`checkpoint-delivery-partition-fast-cadence.log`).
+Those runs used a fixed 250 ms advertisement interval.
+
+The final adaptive-rate build passes the partitioned fraud/appeal journey in
+179.61 seconds (`checkpoint-delivery-partition-final.log`). Both deadline
+partitions preserve identity, stakes and the payment epoch without quorum.
+Healing restores settlement; all four restarts and the fresh observer match.
+Final strict node library/test Clippy, Rust formatting, the five coverage-checker
+tests and coverage-format validation pass. The index remains 388 sections with
+381 unsigned; no requirement was promoted to complete.
+
+These tests reproduce scheduling delays, not the exact cause of iteration 146's
+unlogged timeout. That failure remains unexplained. No quorum, signed timestamp,
+beacon, economic rule or release gate changed.
+
+## Iteration 148: Windows validation inputs and installer strings
+
+Redeploying the existing Windows validation VM restored its guest-agent status.
+A current diagnostic then found a PowerShell validation invocation with
+`SourceUrl` but no `SourceSha256`, no validation transcript and no compiler
+process. The old runner declared both parameters mandatory, so an incomplete
+interactive invocation could wait for input before reaching its first statement.
+The runner now checks missing URL and malformed SHA-256 values explicitly and
+throws before file or network work. Six input cases pass under PowerShell 7.6.6
+on Linux (`windows-runner-input-tests.log`). Windows CI now runs those cases.
+
+Running the installer contracts also reproduced a TOML quoting bug. Its control
+character filter returned the matching character, then used that character as a
+Boolean. A single NUL evaluated to false and escaped rejection. The validator
+now checks each character's Boolean `IsControl` result. The tests reject all
+C0/C1 controls, including NUL, while preserving slash and quote escaping.
+The existing checksum, update-failure, stopped-service and backup contracts now
+pass under PowerShell 7.6.6 on Linux. The failing and passing logs are
+`windows-installer-contracts-linux.log` and
+`windows-installer-contracts-linux-final.log` in `target/validation-evidence/`.
+These are script contracts, not native Windows service evidence.
+
+The replacement validation VM passes both script suites under Windows PowerShell
+5.1 and PowerShell 7.6.6. The native MSVC daemon build and all eight daemon tests
+pass. The elevated service check creates a disposable `BurstNode` service, checks
+its loopback Dev RPC with the faucet disabled, stops and restarts the same ledger,
+then verifies that a missing config produces a service failure. It removes the
+service and its disposable ledger. The complete run succeeded from 10:16:31 to
+10:21:50 UTC on 2026-10-12, recorded in
+`target/validation-evidence/windows-148-native-final.json`.
+
+The source archive SHA-256 was
+`04cea991f356659e9f8d7ddddd559e163df56714a7e692956feb499d87bb4a6c`.
+The Windows runner checked it before extraction. Build artifacts under the
+tracked `fuzz/target` directory were excluded from the source archive; they were
+not removed from the checkout. The VM used Windows Server 2022 build
+20348.5622.260906, `Standard_D4as_v7`, no public inbound rules, and the pinned
+`nightly-2026-10-11` toolchain with one Cargo build job. Setup evidence is in
+`windows-148-setup-final.json`. CI now exercises the script contracts under both
+PowerShell hosts.
+
+The old validation VM's deallocation did not finish, so it was removed with its
+OS disk explicitly set to `Detach`. Azure confirmed the disk remained unattached.
+Its unused NIC and public IP were also removed. The old disk is recoverable;
+the VM and network resources would need recreation. The replacement is named
+`burst-release-windows-148` in `burst-release-windows-20261012-rg`.
+Azure confirmed the replacement VM is deallocated after the successful run.
+Its disk and public IP remain allocated; the saved build environment can be
+reused without another toolchain installation.
+
+This closes the recorded native Windows daemon/service check. It does not sign
+off Windows wallet/node-GUI bundles, signed distribution, macOS devices, public
+network operation or the protocol's closed release gates.
+
+## Iteration 149: desktop claim of a governed expiry return
+
+The real Tauri/WebKit wallet now claims an expired pending return after three
+independent human representatives certify a longer expiry period. This exercises
+decisions 6.9 and 6.16 together: expiry returns the original holding to its sender,
+governance can restore transferability, and a signed Receive acknowledges the
+one-time balance receipt without delivering another holding or refunding BRN.
+
+The desktop journey imports only the public disposable Dev key. It checks the
+exact raw-unit amount, original-creator disclosure, cancellation and restored
+focus, reviewed-signer rejection, blocked return-to-sender action, same-task
+double clicks, confirmation, duplicate claims and locked-wallet rejection. The
+portfolio is identical before and after claiming: origin, age and quantity do
+not change. The node fixture then spends and receives the restored value,
+restarts all three nodes and checks a fresh observer's certified recovery.
+
+The complete journey passed in 64.47 seconds, recorded in
+`target/validation-evidence/native-expiry-return-final.log`. The isolated desktop
+profile and inspected review screenshot are under
+`/tmp/burst-native-wallet-JJtcIO/`. An initial run reached review and then failed
+on a missing parenthesis in the new browser test expression; its log remains
+`native-expiry-return.log`. That was a harness error, not a wallet defect.
+
+Reproduce with the current debug wallet, Vite on loopback port 1430, and the
+desktop dependencies described in iteration 146:
+
+```sh
+NATIVE_FAKETIME_LIBRARY=/absolute/path/to/libfaketimeMT.so.1 \
+TAURI_DRIVER=/absolute/path/to/tauri-driver \
+CARGO_BUILD_JOBS=1 cargo test -p burst-node --lib \
+  desktop_expiry_return_is_claimed_spent_and_recovers_across_certified_nodes \
+  --locked --offline -- --ignored --nocapture
+```
+
+Only the disposable wallet process uses the fixture's fixed signing timestamp;
+WebKit and monotonic timers retain their real clocks. The wallet uses its normal
+signing and RPC commands. No production rule, gate or UI implementation changed.
+This is debug-desktop evidence, not packaged-platform or adversarial consensus
+sign-off.
+
+## Iteration 150: governed expiry across counting and activation partitions
+
+A new three-human network journey splits the established mesh 2+1 before the
+expiry-extension vote is counted, then splits it again before activation. No
+partition has the required checkpoint quorum. At each boundary it checks all
+three nodes for six seconds: payment epochs, stored accounts and original pending
+entries must remain unchanged. The partition harness confirms it dropped real
+peer frames, rather than merely delaying a test-side notification.
+
+After each heal, the certified transition completes. The returned receipt is
+claimed once, its restored value is spent and received, all nodes restart, and
+a fresh observer reconstructs the governed balance. The journey passed in
+91.48 seconds, with 40 and 37 peer frames dropped at the respective boundaries.
+Evidence: `target/validation-evidence/partitioned-governed-expiry.log`.
+
+```sh
+bash tools/test-node.sh focused \
+  certified_network_tests::governance_certified::partitioned_expiry_count_and_activation_wait_for_quorum_then_recover
+```
+
+All eight existing native-wallet scripts also pass with the extended desktop
+runner (`native-return-runner-regression.log`, isolated profile
+`/tmp/burst-native-wallet-i6Edb8/`). That includes onboarding, backup/restore,
+reviewed signing, payments, manual returns, automation cancellation and group
+policy/pagination. No production protocol or UI code changed in iterations
+149–150. These are honest-node partition and debug-desktop checks, not Byzantine,
+hard-crash, packaged-platform or public-network sign-off.
+
+## Iteration 151: abrupt signer-process termination
+
+The checkpoint journal now has a Unix subprocess regression at four boundaries:
+after an emitted prevote, inside an uncommitted prepared-state write, after an
+emitted precommit, and after a durable decision. The parent waits for the child
+to reach the requested boundary, sends SIGKILL to that child alone, verifies its
+termination signal, and opens the same LMDB directory in the parent process.
+No store destructor or orderly shutdown runs in the killed child.
+
+All four boundaries pass. The unfinished write loses both its test marker and
+prepared-state update while retaining the preceding prevote. Committed votes,
+precommit locks and the decided certificate survive; resume retransmits the
+retained choice. A conflicting proposal at the same round is rejected without
+changing the recovered journal. The child readiness and exit waits are bounded.
+
+Evidence is `target/validation-evidence/checkpoint-process-crash-final.log`;
+all four subprocess cases took 0.03 seconds after compilation. Reproduce with:
+
+```sh
+bash tools/test-node.sh focused \
+  checkpoint_agreement::tests::process_crash::abrupt_exit_keeps_votes_locks_and_decisions_but_not_uncommitted_writes
+```
+
+This checks process-crash durability of the real signer transaction path using
+a private fixture validator. It does not check full economic replay, a crash
+during node installation, kernel/power loss or storage-controller durability.
+No production hook, environment override, quorum rule or release gate changed.
+
+## Iteration 152: small positive amounts stay visibly nonzero
+
+The native return screenshot exposed a display bug shared by both apps: a
+positive amount below six decimal places was rendered as zero. Wallet and node
+GUI summaries now show `<0.000001` for those amounts. Actual zero stays zero;
+wallet reviews retain the exact 18-decimal value. The formatters still use
+string arithmetic, including for the full u128 range. Whole-unit wallet displays
+also omit the dangling decimal point, and invalid display precision is rejected.
+The legacy accrual formatter explicitly requests full precision before parsing,
+so it cannot mistake a less-than label for a number.
+
+The new regression tests fail on the old formatters. All 11 wallet amount/BRN
+tests and both node-GUI amount tests pass after the fix. Both production frontend
+builds pass. Logs under `target/validation-evidence/` are
+`wallet-small-amount-{before,final,build}.log` and
+`node-small-amount-{before,final,build}.log`.
+
+The real desktop return journey passes again in 78.67 seconds with the compact
+nonzero list label and the exact seven-raw-unit review, followed by certified
+spending, all-node restart and fresh-observer recovery
+(`native-expiry-small-amount.log`). Its list and review screenshots were inspected
+under `/tmp/burst-native-wallet-4w4DGD/`. No signing amount or protocol arithmetic
+changed. Owned Vite, browser-test and node-test processes were stopped afterward.
+
+Iteration 151's complete signer-journal regression also passes: nine tests, with
+the subprocess helper intentionally ignored in the ordinary test inventory.
+Strict node Clippy and formatting checks pass. The source index remains 388
+sections, 381 unsigned, with no coverage errors; these checks do not constitute
+public-release sign-off.
+
+## Iteration 153: checkpoint installation after abrupt process death
+
+Six Unix subprocess cases now exercise the real checkpoint installer. Two stop
+before installation or after its committed, synchronized return. Four race
+SIGKILL against the commit after the prepared replay is ready. Every killed
+process is reaped before its database is reopened.
+
+The comparison enumerates all 28 named LMDB tables. Each recovered database must
+equal the complete pre-installation or post-installation state. It includes
+accounts, economic snapshots, pending and provenance indexes, lifecycle data,
+the payment electorate, orphaned local blocks and retained minority promises.
+Unordered collections inside verification and constitution snapshots are compared
+by content; their random serialization order is not a ledger difference. Ordered
+lists remain ordered. Every other entry is compared byte for byte.
+
+All six cases pass. Both old and new states were observed in the race cases.
+Replaying an interrupted installation produces the complete expected state;
+an installed successor is not applied twice. The installation group passes six
+tests, with one ignored subprocess helper, in 0.30 seconds after compilation.
+Evidence is `target/validation-evidence/checkpoint-installation-crash-final.log`.
+The earlier logs record test-comparison failures on unordered snapshot encoding,
+not partial database commits.
+
+This is process-crash coverage of certified replay and durable installation.
+The race cases do not identify the instruction at which termination occurred.
+They do not cover a full daemon's cache publication, arbitrary Byzantine
+certificates, power loss or storage-controller failures. No production hook,
+protocol rule or release gate changed.
+
+## Iteration 154: scoped revocation across a network partition
+
+The three-human journal journey now splits its established mesh 2+1 while an
+owner revokes a proposal-scoped grant. Neither side has the required quorum.
+For six seconds, every node retains its previous confirmation height and payment
+epoch. After healing, the revocation confirms on all three nodes. The proposal
+tombstone, newer parameter grant and previously certified vote count survive
+activation, a payment, all-node restart and a fresh observer's catch-up.
+
+The partitioned journey passes in 92.42 seconds and intercepts 72 peer frames
+(`target/validation-evidence/partitioned-key-revocation-final.log`). Foreign-chain
+and stale-generation rejection errors in that log are expected assertions.
+This covers an honest partition with controlled clocks, not Byzantine branches
+or partitioned secondary-ballot admission.
+
+The first runs exposed a stale fixture assumption from iteration 116. After
+iteration 117, a scoped grant overrides blanket delegation even when its
+recipient has not cast a secondary ballot. The old fixture therefore obtained
+one Yea and one Nay, correctly rejected its proposal, then waited for an
+activation that could never occur. The boundary diagnostic log records that
+rejection and `Ok(None)` for all three nodes' next governance cut. This was not
+an agreement stall, and the protocol must not be changed to approve that ballot.
+
+Both journal scenarios now explicitly cast the owner's direct Yea. Successful
+governance journeys assert the certified Cooldown phase and 2-to-1 count before
+waiting for activation. Installation timeout diagnostics also retain each
+signer's round, phase and ballots. These changes make a wrong count fail at its
+cause instead of becoming an unexplained 40-second timeout. Secondary-ballot
+semantics remain covered by their separate journey. No production behavior or
+release gate changed.
+
+The connected journal regression also passes in 64.70 seconds
+(`key-journal-updated-regression.log`). Strict node library/test Clippy, workspace
+formatting, diff checks, the coverage checker and its five tests pass. The index
+still has 388 sections and 381 unsigned sections. No requirement was promoted
+to verified on the strength of these two journeys.
+
+## Iteration 155: shared portfolios and incremental candidate writes
+
+TRST candidates now share their wallet map, individual portfolios and holder,
+origin and outcome-invalidation indexes until mutation. A debit detaches the
+wallet map and the affected portfolio; unrelated token vectors stay shared.
+Balance reads and expiry checks with nothing due no longer detach portfolios.
+Actual expiry, revocation and restoration still change isolated candidate state.
+The canonical wallet snapshot encoding is unchanged.
+
+Candidate persistence compares BRN states with the still-locked live engine.
+It serializes and writes changed or added wallets, deletes removed wallets, and
+writes rate history or the stake sequence only when those values change.
+Deletion uses the same atomic writer and before/after journal as insertion.
+Startup and authenticated replay retain full persistence. TRST wallet snapshots
+and merger snapshots are independently skipped when their persisted fields still
+share storage with the live engine.
+
+The old portfolio-copy test failed before the change. Current component evidence
+is `target/validation-evidence/economic-cow-components.log`: 32 BRN, 81 LMDB and
+73 TRST tests pass; two manual TRST benchmarks are ignored in the normal run.
+Tests cover unchanged encoding, isolation of debits/revocation/expiry, snapshot
+change detection and wallet deletion through restart and journal rewind.
+Candidate persistence tests compare a delta with a full write, detect changed
+stake-release contents, preserve untouched sentinel records and abort both
+updates and deletion after a map-full failure.
+
+The final fast node run passes 653 tests with five ignored helpers and 47
+slower/network cases excluded (`economic-cow-node-fast.log`). Four live tests
+pass across merge-fork replacement, concurrent-account admission, payment-epoch
+validation and restart (`economic-cow-network.log`). Strict Clippy for the node,
+BRN, TRST and LMDB libraries/tests passes (`economic-cow-clippy.log`). These runs
+use one build job and two low-priority CPUs. Formatting, diff checks and the
+coverage checker's five tests pass; all release gates remain unchanged.
+The workspace all-target check also passes (`economic-cow-workspace-check.log`).
+
+The explicitly invoked clone-cost benchmark passed at 100, 1,000 and 10,000
+one-token wallets. At 10,000 wallets, 20 plain deep copies took 251.218 ms and
+20 complete shared-engine clones took 8.957 microseconds in the test profile.
+This measures clone/drop cost, not payment latency, throughput, serialization
+or first-write cost. The log is `target/validation-evidence/wallet-cow-copy-cost.log`.
+
+This does not complete decision 25.7. BRN candidates still copy their wallet
+map and delta detection still scans it. The first TRST map/index mutation can
+copy the whole affected map; modified portfolios still use whole-snapshot
+persistence. Economic application is still serialized. Account-scoped execution,
+authenticated snapshots/pruning and adversarial release prerequisites remain
+open. No consensus rule, whitepaper requirement or release gate changed.
+
+## Iteration 156: secondary ballots and counting across partitions
+
+The secondary-key journey now has an honest 2+1 partition at ballot admission
+and another at certified counting. Three independent human representatives keep
+the original quorum. A ballot submitted on the two-node side is admitted but
+does not advance the relayer's confirmation height on any node during the six-second hold.
+Healing confirms it on all three nodes. Duplicate ballot rejection still applies.
+
+After the votes and scope revocations, a second partition holds every payment
+epoch unchanged while the counting deadline passes. Healing completes counting
+and activation. The journey preserves transitive delegation and direct-owner
+precedence across four proposals, including revocations before and after the
+candidate ballot and a revocation after counting. The expected tallies, grant
+discovery and byte-identical scope records survive all-node restart and recovery
+on a fresh fourth observer. A payment under the activated rate also confirms.
+
+The focused test passes in 155.71 seconds. Evidence is
+`target/validation-evidence/partitioned-secondary-ballots.log`. Reproduce with:
+
+```sh
+bash tools/test-node.sh focused \
+  certified_network_tests::governance_certified::partitioned_secondary_ballots_and_counting_wait_for_quorum_then_recover
+```
+
+This is controlled-clock, honest-partition evidence. It does not establish
+Byzantine branch safety, a production-clock soak or snapshot/compaction behavior.
+No runtime code, quorum rule, timeout or source release gate changed.
+Strict node library/test Clippy passes (`partitioned-secondary-ballots-clippy.log`).
+Formatting, diff checks and the coverage checker pass. The index remains at
+388 sections, 381 unsigned and zero format errors; this test does not sign off
+the entire delegation requirement. All fixture processes exited.
+
+## Iteration 157: crashes during cache publication
+
+Four Unix child processes now stop inside the real checkpoint publication path:
+after the durable commit, after economic engines are replaced, after voting
+authority is replaced, and after the remaining caches are replaced. The parent
+waits for the exact boundary, kills that child with SIGKILL, and compares all
+28 LMDB tables with an uninterrupted installation. Each case retains the complete
+committed projection.
+
+The interrupted publisher uses a constructed `BurstNode` with seeded stale
+counters, a stale frontier, queued election/rebroadcast work and the old roster
+epoch. No network workers run in that child. The uninterrupted control verifies
+that publication replaces those values and clears the queues. Each killed case
+then starts a real node on the recovered directory, rejects a signed old-epoch
+payment and admits a signed payment in the installed epoch through RPC.
+Afterward, the live engines, authority, frontiers and counters match durable
+state before cleanup. Governance and constitution maps are compared by content,
+as are the unordered verification collections.
+
+The final four-boundary test passes in 5.61 seconds after compilation. Evidence
+is `target/validation-evidence/checkpoint-publication-crash-final.log`. Reproduce
+with:
+
+```sh
+bash tools/test-node.sh focused \
+  confirmed_replay::tests::certified_votes::installation::process_crash::publication::publication_crashes_restore_caches_and_admit_only_the_installed_epoch
+```
+
+The pause callbacks exist only under `cfg(test)`; ordinary binaries have no
+environment-controlled pause or crash hook. The runner places this test in the
+network group because recovery starts RPC and node workers. No quorum, timestamp,
+commit or publication rule changed. This covers controlled publication boundaries
+and startup recovery, not concurrent network-worker crashes, power loss or
+storage-controller behavior. Missed pre-beacon recovery remains a separate gap.
+
+## Iteration 158: publication crashes in a running node
+
+The second publication fixture starts the node's ordinary workers from a valid
+replayed baseline with a certified successor waiting to install. The actual
+block-processing worker reaches each of the four publication boundaries. The
+child confirms that its RPC and P2P listeners accept connections before reporting
+readiness, then the parent kills it with SIGKILL. These are process crashes,
+not task cancellation or orderly shutdown.
+
+All four cases pass in 10.87 seconds after compilation. The recovered stores
+match the uninterrupted economic projection across 12 complete ledger/economic
+tables and eight selected metadata values, including the installed authority,
+cutoff, epoch, verification, delegation, constitution and TRST snapshots.
+Peer telemetry and unrelated metadata are not compared in this running-node
+fixture. Iteration 157 retains the stricter all-28-table comparison for its
+controlled publisher.
+
+Every killed node then completes normal startup, rejects an old-epoch signed
+payment and admits a payment under the installed epoch. Its BRN/TRST engines,
+verification state, governance, delegation, constitution, voting authority,
+frontiers and counters match durable state. Readiness and process exit waits
+are bounded, and all children belong to the fixture. The test uses public
+development fixture keys, a fixed clock and no other representative; it does not test
+Byzantine traffic or prove the safety of every possible crash interleaving.
+
+Evidence is `target/validation-evidence/checkpoint-live-publication-crash.log`.
+Reproduce with:
+
+```sh
+bash tools/test-node.sh focused \
+  confirmed_replay::tests::certified_votes::installation::process_crash::publication::live::live_worker_publication_crashes_recover_epoch_and_economics
+```
+
+The only node/runtime additions are test-only publication callbacks. Ordinary
+builds retain the same startup, commit and publication code with no pause hook.
+The test-runner catalog includes the new network group, and its seven contract
+tests pass. No release gate was opened.
+
+Final combined evidence is `checkpoint-publication-complete.log`: both tests
+pass across eight crash points in 16.38 seconds; two child helpers remain ignored
+in ordinary runs. `checkpoint-publication-fast-final.log` records 653 passing
+fast tests, five ignored helpers and 52 excluded slower/network cases in
+32.96 seconds. Strict node library/test Clippy and the ordinary node library
+check pass (`checkpoint-publication-clippy-final.log` and
+`checkpoint-publication-production-check-final.log`). Formatting, diff checks,
+the runner's seven tests and the coverage checker's five tests pass. All fixture
+processes exited. The coverage index remains at 388 sections, 381 unsigned and
+zero format errors; these crash cases do not sign off the whole selection protocol.
+
+## Iteration 159: reject damaged economic snapshots at recovery
+
+The TRST snapshot readers previously accepted inconsistent cached balances and
+incomplete merger-graph indexes. Startup also treated a missing graph or holdings
+snapshot as empty state. That can lose revocation history without reporting a
+recovery error. Decision 26.1 requires detection and refusal, not automatic repair.
+
+`trst/src/merger_graph/snapshot_validation.rs` now checks node identity, positive
+source amounts, checked source and revocation totals, exact reverse-edge
+multiplicity and acyclicity. Traversal is iterative. The loader rejects oversized
+and noncanonical encodings, including duplicate map keys that deserialization
+would otherwise collapse. Repeated inputs remain valid and retain their exact
+edge counts. No ancestry is flattened and no revocation rounding rule changed.
+
+`trst/src/engine/snapshot_validation.rs` checks holding IDs, timestamp order,
+revocation tags and the active-balance cache. Loading checks the earliest-expiry
+cache against the restored governed period without reclassifying tokens using
+the receiving node's clock. Undo images can span different periods; their
+structural decoder does not assume today's period. The final restored engine
+still has to pass the normal loader. Combined holdings/graph validation checks
+burn ownership for graph sources, plain holdings and revoked origins, and rejects
+a hash registered as both a burn and a merge.
+
+New genesis creation commits empty holdings and graph snapshots with its block
+and account. An initialized ledger now refuses missing TRST snapshots. Genesis
+creation also refuses an empty block table with leftover accounts, pending
+transfers or either TRST snapshot. The startup errors direct the operator to a
+known-good backup or a new data directory. No existing data is deleted or repaired. Older incomplete
+development stores that lack these snapshots now require recovery rather than
+silently starting empty.
+
+The first integration run caught a regression in the new genesis writes: a
+pre-existing legacy snapshot in an otherwise empty block store was overwritten.
+The run was stopped after the negative test entered normal node startup. The
+guard above fixes that case; the existing preservation test now passes. That
+interrupted run is not counted as evidence.
+
+Validation uses one Cargo build worker, two CPU cores and low priority:
+
+- `cargo test -p burst-trst --lib --locked --offline -- --test-threads=2` passes
+  83 tests, with two manual benchmarks ignored. This includes a 10,000-level
+  graph reload and revocation/restoration round trips with repeated inputs.
+- `cargo test -p burst-node --locked --offline --test economic_snapshot_recovery
+  --test confirmation_recovery --test merge_fork_network -- --test-threads=1`
+  passes all 11 tests. The new tests reject six corrupt snapshot cases and two
+  missing-snapshot cases on two consecutive opens, preserving the stored data.
+  Existing recovery and signed-wire merge replacement still pass.
+- `bash tools/test-node.sh fast` passes all 653 fast tests, with five ignored
+  helpers and 52 excluded slow/network tests, in 31.12 seconds.
+- `bash tools/test-node.sh focused
+  certified_network_tests::governance_certified::revived_expiry_return_is_claimed_once_and_spent_across_restart_and_fresh_catchup`
+  passes in 69.63 seconds. Three human representatives certify the expiry change;
+  the returned-fund claim and spending survive all-node restart and fresh-node
+  catch-up. This uses the existing controlled-clock fixture, not production-time
+  beacon availability or packaged desktop clients.
+- Strict TRST/node library and test Clippy, the ordinary node library check,
+  formatting, diff checks and the coverage checker's five tests pass.
+
+Logs are `target/validation-evidence/snapshot-structure-trst-final.log` and
+`snapshot-structure-recovery-final.log`, with the fast, live, Clippy and ordinary
+build results in the corresponding `snapshot-structure-*-final.log` files and
+`snapshot-structure-live-expiry.log`. These are local recovery checks, not
+authenticated peer snapshot import, incremental replay or pruning. Structurally
+consistent snapshots still need consensus authentication and semantic validation.
+The whitepaper, decisions, history limits and release gates are unchanged.
+
+## Iteration 160: delayed prepare recovery and authenticated economic state
+
+The running agreement driver rejected prepare proofs from older rounds even
+though `RoundState::observe_prepared` supports them. The driver now authenticates
+the proposal, exact manifest and human quorum, replays the candidate, and persists
+the old prepare proof. Receiving it does not create a fresh current-round vote or
+clear a lock. A regression moves a signer to round 4 without the proof, rejects
+an expired fresh proposal and a minority proof, accepts the delayed round-0
+proof, reopens the store, and certifies the original checkpoint in round 4 with
+no clock authorization. Its request, pool, ledger cut and drand round do not change.
+
+`consensus/src/snapshot.rs` adds a separate state-attestation domain. It binds the
+network, genesis, certified epoch, height, cutoff, roster, quorum, encoding version,
+body length and complete state hash. Votes count verified humans through the
+trusted epoch's delegation roster. A snapshot authority step must carry a valid
+checkpoint certificate from the preceding trusted electorate and a roster matching
+that signed commitment. This implements the quorum-trust route chosen in decision
+11.2; it does not claim independent semantic replay of the authority history.
+
+`PreparedSnapshot::at_tip` reconstructs the exact certified cut rather than copying
+live provisional balances. Its body contains accounts, pending receipts, BRN
+wallets/rate history/stake sequence, TRST holdings and merger graph, verification
+and appeals, bootstrap phase, lifecycle metadata, governed parameters, endorsement
+and trigger history, counterparties, governance/delegation/constitution state,
+proposal content and closed governance windows. It excludes private keys, local
+consensus signing journals, peer lists, provisional afterimages and undo journals.
+
+The new versioned body uses CBOR with recursively sorted map keys. Binary payloads
+use byte strings rather than per-byte value arrays. The encoder checks its byte
+budget before expanding the body into a sortable value tree. Set fields
+serialize in sorted order; ordinary vectors retain semantic order. Full-width
+`u128` values round-trip. Existing block, checkpoint and wallet encodings are not
+replaced. `from_authenticated_snapshot` checks the trusted context and quorum
+before hashing/decoding the body, enforces the 64 MiB body cap, rejects unsupported
+or noncanonical state, validates BRN/TRST persistence invariants and reconstructs
+the economic replay object. Tail execution checks the certified base commitment
+and executes only the new epoch tail.
+
+This is not complete fast sync. Tail dependency checks still require the complete
+signed prefix. There is no operator command, peer snapshot transfer, atomic
+snapshot installation or snapshot-aware pruning. The existing history and
+checkpoint limits are unchanged. Those integrations must be completed before
+claiming decision 11.1 or opening the source gates.
+
+The no-prepare-quorum deadline case is also still open. A receiver's timeout
+cannot establish that another participant has no hidden prepare proof. Switching
+to a different pool or beacon after seeing the output would change the
+whitepaper's pre-beacon agreement rule and decisions 19.3/19.4. The delayed-proof
+fix does not make that change. Recovery for that case needs an explicit protocol
+rule and adversarial review, not a timer-based unlock.
+
+Validation:
+
+- 656 node fast tests pass, with five ignored helpers and 52 network/slow tests
+  excluded from that run. This includes economic snapshot authentication,
+  deterministic encoding, full-width integers, byte-string size limits, tail
+  equivalence and the delayed-proof/restart/final-decision regression.
+- All 245 consensus, 135 governance and 121 verification library tests pass.
+- The running seven-of-nine-human TCP agreement test passes in 40.72 seconds.
+  It checks the existing wire quorum path, not peer snapshot transfer or the
+  no-prepare-quorum recovery policy.
+- Strict Clippy passes for the consensus, governance, verification and node
+  libraries and tests. Formatting and diff checks pass.
+- The ordinary daemon build and local RPC/disabled-faucet/graceful-stop/restart
+  smoke test pass. The smoke run preceded the binary-blob encoding optimization;
+  the subsequent node suite and Clippy include that optimization. Neither run
+  tested native packaged Windows or macOS clients.
+- All 19 coverage, test-runner, download-verification and updater tooling checks
+  pass. Coverage still has 388 sections, 381 unsigned and zero format errors.
+  The release gate exits 2 because conformance is not signed off.
+
+Evidence is in `target/validation-evidence/snapshot-deadline-*.log`. The first
+snapshot test invocation used a shortened name with an exact-name runner and
+ran no test; the final full fast runs include the named snapshot regression.
+During development, compilation caught missing bootstrap serialization and
+test comparisons on types without `PartialEq`; both were corrected before the
+passing runs. No existing data directory was deleted, no VM was started and
+nothing was published. The whitepaper, decisions and source release gates are
+unchanged.
+
+## Iteration 161: expired-proposal recovery and snapshot archives
+
+The owner authorized deadline recovery on 2026-10-12. The whitepaper selection
+section and decision 19.4 now distinguish expired unagreed proposals from fixed
+certified selections. `spec/DEADLINE_RECOVERY.md` records the amended rule and
+its limits. This does not authorize local fallback randomness, timer-based
+unlocking or a different beacon for a finalized request.
+
+At an unsigned start in a later consensus round, the service can refresh an
+expired selection with a newly replayed cut. It requires a trusted clock that
+establishes expiry and a still-future beacon for the new proposal. Fresh signing
+rechecks the time bound after replay and writer-lock waits. Refresh cannot
+replace a signed current-round proposal, a known prepare proof or a decision.
+It changes no durable lock or voting promise. The round machine still requires
+human participation evidence to advance; a missing voter stays in the quorum
+denominator. Late prepare evidence keeps the existing lock/valid-round behavior.
+
+The independent-store test starts with six of nine humans. They cannot prepare
+or finish the vote phase alone. Returning humans provide nil votes; the signed
+participation lets the round finish. A restarted proposer refreshes its expired
+candidate and all nine decide the same later cut. The service test exercises
+this through TCP transport and automatic scheduling. Two late signers learn the
+decision without fresh clock authority. These tests use controlled clocks.
+They do not prove resistance to adversarial message scheduling or selective
+abort. That security review remains a release blocker, not an implied result of
+consensus lock safety.
+
+Snapshot archives contain a bounded authority path, quorum certificate and the
+existing canonical economic body. The reader authenticates the header before
+reading the body, then checks the hash and restored state. Tests cover complete
+round trips, a locally trusted tip as the base, wrong authority, minority
+exports, truncation, tampering and appended data. A bad signature is rejected
+before the reader consumes the economic body. The new `snapshot verify` daemon
+command opens no ledger and starts no listeners. It accepts an independent
+minimum height and exact epoch to guard against stale but valid archives.
+See `spec/SNAPSHOT_ARCHIVE.md` for the format and command.
+
+This is not fast sync. Operator export/signature collection, peer scheduling,
+atomic snapshot installation and retained-dependency proofs for pruning remain
+unfinished. `spec/RELEASE_STATUS.md` lists the current release blockers.
+
+Validation evidence in `target/validation-evidence/`:
+
+- `deadline-recovery-focused.log`: independent-store recovery passes, 1.35 s.
+- `deadline-recovery-tcp.log`: service recovery passes, 52.05 s.
+- `recovery-archive-fast.log`: 658 node tests pass, five child-process helpers
+  ignored and 53 expensive/network tests filtered, 33.55 s.
+- `recovery-archive-daemon-tests.log`: all 10 daemon tests pass, including
+  rejection without ledger writes and same-ledger supervised restart.
+- `recovery-archive-clippy.log`: strict node/daemon library, binary and test
+  Clippy passes. Existing Cargo manifest warnings remain.
+- `recovery-archive-daemon-build.log` and `recovery-archive-daemon-smoke.log`:
+  ordinary debug executable builds and passes local RPC, disabled test funding,
+  graceful stop and same-ledger restart.
+- `recovery-archive-tooling.log`: all 12 coverage and test-runner checks pass.
+- `recovery-archive-coverage.log`: 388 indexed sections, 381 unsigned, no errors.
+- `recovery-archive-release-gate.log`: exit 2, still blocked. This is not a
+  passing release check.
+
+Initial compilation caught a snapshot marker length mismatch and a daemon
+command match-arm return mismatch. Both were corrected before the passing
+runs. No user data was removed, no VM was started and no public artifacts were
+published. Source gates remain closed.
+
+## Iteration 162: desktop resource protection after reboot
+
+The optimized build in `recovery-release-build.log` was interrupted by a host
+reboot and has no successful completion or smoke result. Its process handle is
+absent and no BURST compiler/test process survived. Available memory after
+reboot was about 10 GiB, with no swap used. Retained kernel logs do not establish
+the reboot's cause. Do not treat the interrupted build as validation.
+
+`tools/limited-run.sh` now puts local validation in one systemd user service with
+a 3 GiB total memory cap, zero swap, one CPU equivalent, nice level 19 and a
+20-minute deadline. It defers work below 4 GiB available memory and has no
+uncapped fallback. A live process confirmed the kernel cgroup limits. Ten
+wrapper/runner contract tests pass in `local-limits-tests.log`. Workspace
+`AGENTS.md` records these constraints and defers optimized desktop builds.
+
+The delayed-prepare regression passes under the new limits in
+`limited-delayed-prepare.log`, including receipt of the original proof after
+refreshing an unsigned candidate. Starting a second job while that test's build
+was active failed with the expected existing-unit error. No swap was used in
+the observed run. The job completed and its process handle was reaped.
+`spec/RELEASE_STATUS.md` was empty after the interruption; it now contains the
+current release blockers and links to the detailed evidence. No gate changed.
+
+## Iteration 163: operator snapshots and bounded peer staging
+
+Decision 11.3 selects on-demand creation. `snapshot attest` independently replays
+an explicit certified epoch and records the signer's exact manifest in a durable
+local journal before returning a signature. A repeat choice is idempotent; a
+conflicting choice is refused. `snapshot export` replays that epoch again,
+collects matching human-quorum attestations and publishes an authenticated
+archive without replacing files. Optional genesis-parameter JSON comes from the
+ledger's original pinned parameters, not current governed values. Verification
+accepts an independently trusted parameter file and never opens a ledger.
+
+The executable journey passed with seven representative keys, insufficient-quorum
+rejection, no-overwrite behavior and read-only epoch/height checks. The separate
+library regression uses seven independently replayed stores and reopens signer
+journals. It rejects unknown/duplicate signers, altered manifests and signatures.
+These tests do not establish Byzantine safety beyond the certificate trust model.
+
+Opt-in `snapshot_transfer` settings serve an already authenticated archive or
+fetch an explicitly pinned epoch over existing peer connections. Protobuf
+checkpoint-sync tags 3 and 4 carry bounded requests/chunks. The worker handles one
+download, rotates stalled peers and enforces idle and total deadlines. It checks
+the completed authority header before requesting further body chunks. The final
+digest, signed body and restored economic state must pass before no-replace file
+publication. Existing downloads are reauthenticated after restart. Peer requests
+cannot name local paths, and no network message triggers signing or snapshot
+creation. See `spec/SNAPSHOT_ARCHIVE.md` for configuration and operator commands.
+
+The multi-chunk TCP service test passes with the production registry writers and
+sync workers. It checks exact bytes, unchanged payment authority and restart.
+Its sockets are registered by the fixture; it is not a full-node handshake or
+fresh-ledger bootstrap test. Forged headers, modified bodies, truncation, appended
+data and a destination created during download all fail without replacing files.
+Separate tests cover retries, peer rotation, total deadlines, unsolicited data,
+fixed serving limits and packet bounds.
+
+This closes manual creation/collection and bounded archive staging, not fast
+sync. Availability discovery, atomic installation, retained-dependency replay
+and pruning still need implementation and validation. No source gate was opened,
+no user ledger was replaced and no public artifact was published. Local checks
+used the one-CPU, 3 GiB, zero-swap wrapper.
+
+Evidence is in `target/validation-evidence/snapshot-operator-*.log` and
+`snapshot-peer-*.log`. The operator journey passed in 5.38 seconds after its
+build. The expanded snapshot group passed 12 tests in 0.57 seconds; its executable
+journey is ignored in that group and run separately with a freshly built daemon.
+Strict node/daemon Clippy passed. `snapshot-peer-validation.log` also records the
+independent `protoc` schema check, 11 daemon tests and 15 coverage/resource-runner
+tests passing. `snapshot-final-validation.log` records 663 fast node tests passing
+in 59.93 seconds, with six ignored and 54 excluded. The rebuilt daemon's explicit
+operator journey then passed in 5.40 seconds. Ignored and excluded tests are not
+counted as passes. Decision 11.3's on-demand frequency is now signed off with that
+reproduction command; fast sync and installation remain partial. The inventory
+has 388 source sections and 380 unsigned entries. No complete-release claim follows
+from this narrower sign-off.
+`snapshot-final-coverage.log` reports zero coverage errors. The release-mode
+check in `snapshot-release-gate.log` exits 2 because requirements remain unsigned;
+that result is still a blocked release, not a passing validation. All validation
+processes from this iteration finished and the capped service is inactive.
+
+## Iteration 164: snapshot discovery and full-node transfer
+
+Snapshot fetching can now query connected peers when the operator omits an exact
+epoch pin. Queries carry an independently chosen minimum checkpoint height. A
+peer's offer cannot change that policy: the completed archive header must prove
+the exact offered epoch/height, bind its length and meet the local minimum before
+the worker asks for further body chunks. The default minimum is 1, not a claim
+that a snapshot is current. The receiver accepts the first qualifying archive;
+it does not discover a globally latest checkpoint.
+
+One query or download is active at a time. Unanswered queries retry, time out and
+rotate peers. Unsolicited, late and below-minimum offers cannot start a transfer.
+Queries and chunk requests share the existing serving budget. A completed file
+is checked against the minimum and optional epoch pin on restart, never silently
+replaced. Wire tags 5 and 6 are documented and included in the independent schema
+check. Configuration rejects a zero minimum and round-trips through TOML.
+
+`snapshot-discovery-validation.log` records 16 snapshot-related tests passing,
+one explicitly ignored executable journey, the independent schema check and
+strict node/daemon Clippy. Negative archive cases include a recomputed transport
+digest over forged data and offers whose claimed height exceeds the authenticated
+height. These fail before publishing files. Both pinned and discovered service
+transfers preserve exact bytes and survive reopen.
+
+The full-node test initializes two separate disposable certified ledgers, starts
+both nodes, discovers the archive over their normal authenticated peer route,
+downloads it and checks that payment authority is unchanged. It then restarts
+the receiver without a serving peer and checks RPC readiness and the retained
+file. It passed in 0.35 seconds after compilation, recorded in
+`snapshot-discovery-full-node-retry.log`. The first run refused startup because
+the fixture omitted the test-only certified-runtime switch; that failure remains
+in `snapshot-discovery-full-node.log`. The corrected fixture enables the gated
+development runtime with no trusted clock and disables representative voting.
+Production gates were not changed. This is graceful restart evidence, not a
+process-crash or compact snapshot installation test.
+
+The final focused regression passes 58 node tests and 11 daemon tests, followed
+by strict node/daemon Clippy. One executable operator journey is ignored in that
+focused group; its prior iteration evidence is not counted as a new run.
+`snapshot-discovery-final-retry.log` retains these results and the unchanged
+388-section/380-unsigned coverage inventory with zero errors. The first final
+command put several test filters before Cargo's argument separator and ran no
+tests; `snapshot-discovery-final.log` retains that command-line error. The corrected
+run passed. All checks used the resource wrapper and its service is inactive.
+
+The replay audit confirms that account heads alone are insufficient to prune:
+pending sources, appeal receipts/admissions, endorsement targets, governance
+ordering and certified panel votes still consume older signed blocks. The next
+installation step must supply authenticated retained witnesses and bounded tails
+for those paths. Existing archives and full-prefix installers cannot yet remove
+those dependencies. `spec/SNAPSHOT_ARCHIVE.md` records this boundary.
+
+## Iteration 165: authenticated historical references and bounded suffixes
+
+Historical recovery now follows account hashes backwards from heads committed
+by an authenticated economic snapshot. A cursor accepts at most 128 blocks and
+1 MiB per chunk. Every block must match the expected hash, account, height,
+cutoff and signature. The configured genesis retains its existing unsigned
+format. A failed chunk changes no cursor state. Recovery can continue across
+partial archival sources without starting again. Returned witnesses remain
+bound to the snapshot context; an unsigned persisted flag grants no trust.
+
+Decision 4.9 excludes work and signatures from the block hash. Signatures are
+checked independently. Historical membership deliberately makes no claim about
+the received work nonce or a historic work threshold. It is not new admission.
+
+The new suffix reader stops at those authenticated heads. It requires every
+opened base account, exact head extension, valid signed epoch/time context and
+explicit witnesses for older non-head dependencies. Witnesses from another
+snapshot and duplicate witnesses are rejected. Limits apply to the suffix and
+retained bodies, not total account age: 8,192 new blocks and 16 MiB. This is a
+structural candidate reader, not an economic executor or pruning permission.
+It does not yet load proposal bodies or replace certified panel history.
+
+Seven focused tests pass in 0.34 seconds after compilation. A separate suffix
+store contains no account prefixes; its commitment matches full history for
+cross-account creation and representative changes. A pending historical burn
+requires a recovered witness before its later open can be structurally accepted.
+The rejection cases include malformed chunks, reordered hashes, a correctly
+signed alternate fork, missing accounts, rollback, bad signatures, wrong epochs
+and incorrect time bounds. A work-nonce test preserves the decision 4.9 boundary.
+
+`target/validation-evidence/snapshot-history-tail-retry.log` records that pass.
+The first attempt failed to compile because a test called a private context
+helper; the test now compares public anchor/certificate fields. The original
+failure remains in `snapshot-history-tail.log`. The broader regression in
+`snapshot-history-regression.log` passes 31 tests with one executable journey
+explicitly ignored, followed by strict node/daemon Clippy. No ignored journey is
+counted as a new pass. All checks used the desktop resource wrapper.
+
+The fast node regression also passes: 673 passed, six ignored and 56 excluded
+slow/network tests, in 62.08 seconds. Evidence is retained in
+`snapshot-history-fast.log`. The observed validation-process memory peak was
+83,968,000 bytes during the run, with no swap use and a one-CPU quota. This is
+not a peak measurement for compilation or the whole desktop. Coverage remains
+388 sections, 380 unsigned and zero indexing errors; `git diff --check` passes.
+
+No source gate, whitepaper rule, wire format or live database was changed.
+Compact economic replay across all lifecycle/governance paths, archival peer
+retrieval and atomic installation/restart remain next. Full-prefix execution
+and authority-chain caps still constrain a long-running node. This iteration
+does not close fast sync, pruning or public release.
+
+## Iteration 166: compact same-epoch economic execution
+
+The snapshot suffix now executes through the same `append_input` path as full
+history. It applies ordinary payment, verification and governance rules to new
+blocks while treating authenticated retained blocks as already executed. It
+checks the resulting account heads and refuses pending expiry, incomplete panel
+deadlines or due governance transitions that need another certified boundary.
+It does not install a database or change live authority.
+
+Version 2 economic bodies bind the exact ordered selection-checkpoint IDs and
+the old vote/challenge/governance support/withdrawal references needed for replay
+ordering. A caller cannot drop those references or substitute another chain's
+selection records. Full proposal bodies are hash-checked under the suffix's
+existing 16 MiB byte budget. Replay consumes its private state on error, so no
+partial economic result is returned. The existing full-prefix API remains.
+
+This conservatively retains historical lifecycle ordering blocks. It is not yet
+a bounded long-term retention policy. Selection records still come from the
+full-history chain loader. Cross-epoch compact execution, compact certificate
+reconstruction, archival peer retrieval and atomic live installation remain
+required before pruning or public release.
+
+Six compact tests pass, including complete canonical state comparisons for
+payments and governance support, a completed verifier panel followed by spending
+from its newly verified wallet, proposal withdrawal using old support, and a full
+constitutional proposal body. An activated panel restores with its agreed
+deadline; a partial panel cannot skip that deadline. Negative cases cover absent
+or foreign selection records, missing predecessor/ordering witnesses, double
+claims and missing/corrupt proposal bodies. The suffix stores contain no old
+account chains. `compact-replay-expanded.log` records the six passes in 0.88s.
+
+The first complete-state comparison exposed nondeterministic embedded verifier
+metadata. Bincode encoded `OrchestratorSnapshot` and nested attempt maps in
+random HashMap order. The snapshot's outer canonical CBOR could not normalize
+those byte strings. Sorted map serializers now preserve the existing bincode
+shape while producing identical bytes across insertion orders and reopen.
+Neither verification outcomes nor semantic sequence ordering was changed.
+The verification suite passes all 122 tests, including a new nested-map
+determinism check. `compact-replay-canonical.log` records that result and the
+initial three compact execution tests passing after the fix.
+
+The unsuccessful attempts remain recorded: `compact-replay-execution.log` has a
+test-helper API compile error; `compact-replay-execution-retry.log` has the
+complete-state mismatch; `compact-replay-difference.log` identifies the embedded
+`verification_orchestrator` metadata. These are not counted as passes.
+
+The broader regression passes 679 fast node tests, with six ignored and 56
+slow/network cases excluded, in 51.74s. Three real snapshot transfer/restart
+tests pass in 2.62s. Strict node/daemon/verification Clippy also passes.
+`compact-replay-regression.log` retains those results. All builds and tests used
+the one-CPU, 3 GiB, zero-swap wrapper. No source release gate was opened.
+
+Version 1 experimental economic archive bodies are no longer accepted. Operators
+must create version 2 at a new certified epoch if their representatives already
+attested version 1 there. The anti-equivocation journal must not be cleared to
+sign different bytes for the old epoch. Archive framing is unchanged.
+
+A freshly rebuilt debug daemon also passes the explicitly invoked operator
+attest/export/verify journey with version 2 bodies in 4.73s, recorded in
+`compact-replay-daemon.log`. This is current executable evidence; the earlier
+version 1 result is not substituted for it. No optimized package was built.
+
+## Iteration 167: compact execution across certified boundaries
+
+An authenticated snapshot can now continue through exact successor checkpoints.
+The continuation checks signatures against the old roster, matches the bounded
+tail's heads, cutoff and commitment, and applies the same lifecycle effects as
+full replay. Both paths now share `apply_boundary`. A new cursor context binds
+the derived state after each successful handoff. Old-context witnesses, skipped
+checkpoints and mismatched cuts fail without publishing state.
+
+Complete canonical state comparisons pass for committee selection and
+activation, multiple due panels, pending-expiry returns, fraud revocation,
+fraud and inactivity appeals, roster delegation, governance counting and BRN
+rate activation. Suffix stores contain only new blocks and proposal bodies;
+the archival source supplies historical proofs and the independent full replay.
+This proves compact event execution, not compact event construction. The input
+`CertifiedEvent` and old selection records still come from the full chain loader.
+Live installation, archival peer retrieval and pruning remain unfinished.
+
+`compact-boundary-events.log` records five passing lifecycle comparisons in
+3.10s. `compact-boundary-governance-appeals.log` records three further tests in
+7.53s, including negative continuation cases, and strict node/daemon Clippy.
+The earlier governance fixture used only two of three required human signers;
+`compact-boundary-negative-governance.log` preserves that failure. The fixture
+now signs with the actual consensus electorate. Governance delegation does not
+change representative consensus weight.
+
+`compact-boundary-regression.log` records 681 fast node tests passing in 60.79s,
+with six ignored and 56 slow/network tests excluded. Validation used the fixed
+one-CPU, 3 GiB, zero-swap service. Source gates remain closed.
+
+`compact-boundary-daemon.log` also records three snapshot peer transfer/restart
+checks and the explicitly invoked operator journey against a fresh debug daemon.
+Attest/export/verify passes in 5.95s. No optimized package was built.
+
+## Iteration 168: direct compact checkpoint-manifest validation
+
+Compact continuation now accepts untrusted manifests and old-roster quorum
+certificates directly for roster, activation, deadline, challenge outcome and
+governance events. It does not use a full-history constructor to grant these
+events authority. It checks the exact suffix cut, event domain, effect root,
+governance proposal inventory, next roster and parameters. Roster updates cannot
+be no-ops, and manifests cannot change the quorum threshold. Manifest size and
+activation proof checks retain the existing bounds.
+
+The lifecycle comparison helper now deserializes manifests before applying
+these events to a suffix-only store. Complete state bytes still match full
+replay for panels, pending returns, fraud outcomes, appeals, roster delegation,
+governance counting and activation. Selection events still use their full-history
+certified constructor, and prior selection records are still required. The new
+manifest entry point rejects selection manifests rather than trusting their
+claimed request state. Snapshot installation and pruning remain gated.
+
+Eleven rejection cases cover missing quorum, wrong event kind, mismatched heads,
+altered selection reference, a signed bad beacon, changed quorum, false roster/effect
+commitments, no-op roster, mismatched manifest/certificate and oversized proof.
+The governance comparison also rejects an altered proposal inventory. Failed
+execution publishes no state or payment authority.
+
+`compact-manifest-focused.log` records the first two focused tests passing in
+1.09s. Adding byte/proof guards exposed error-conversion compile failures in
+`compact-manifest-regression.log` and `compact-manifest-regression-retry.log`.
+Those logs remain as failures. After correction, `compact-manifest-validated.log`
+records 682 fast node tests passing in 62.00s, six ignored, 56 excluded, strict
+node/daemon Clippy, zero coverage-format errors and a clean whitespace check.
+The 380 unsigned source sections remain unsigned. No source gate was opened.
+
+The rebuilt debug daemon passes the explicitly invoked attest/export/verify
+operator journey in 5.46s (`compact-manifest-daemon.log`). Every validation job
+used the resource-limited service; the service was inactive after completion.
+No optimized build, cloud allocation or public publication occurred.
+
+## Iteration 169: compact successor selection reconstruction
+
+`SnapshotContinuation::replay_selection` now derives a certified successor's
+request from the compact economic state and bounded suffix. Full and compact
+construction share endorsement-freeze, lifecycle, attempt, pool, roster and
+history checks. The old roster's certificate must match the entire derived
+checkpoint. Later replay uses the resulting record without reconstructing that
+selection from the full ledger. Its exact beacon can be authenticated in memory;
+there is no relay fallback or changed round.
+
+The signing boundary remains separate. A compact record has no complete
+history inventory. Both candidate validation and the inclusion-inventory
+accessor reject it. Tests exercise proposal and decided-input commands and
+confirm that neither creates a signer journal. This does not implement compact
+local signing or reconciliation of durable payment promises.
+
+Complete-state comparisons now use recovered successor selections for later
+activation, panel deadlines, fraud outcomes and appeals. The initial three
+comparisons pass in 9.70s (`compact-selection-focused.log`). Ten forged selection
+inputs fail; four malformed beacons leave the record unchanged. Repeating a
+valid beacon is harmless, and a later height cannot replace a frozen attempt.
+The first guard run expected the duplicate-attempt error, but the existing
+freeze check rejects that case earlier. `compact-selection-guards.log` preserves
+the failed assertion; the corrected test checks the actual freeze rejection.
+
+`compact-selection-regression.log` records 684 fast node tests passing in
+64.85s, six ignored and 56 slow/network cases excluded, plus strict node/daemon
+Clippy. Source gates stay closed and snapshot body/wire versions are unchanged.
+Pre-base selection records still require the full-history loader. Authenticated
+retention/restoration of those records, compact installation and pruning remain
+necessary for fast sync and long-running operation.
+
+`compact-selection-daemon.log` records a fresh debug build and the explicitly
+invoked snapshot attest/export/verify journey passing in 5.81s. All validation
+used the one-CPU, 3 GiB, zero-swap service. No optimized artifact, cloud resource
+or public release was created.
+
+## Iteration 170: snapshot restoration of historical selections
+
+Version 3 economic bodies retain canonical frozen selection inputs and their
+ordered checkpoint identities. The authenticated archive's authority path
+supplies each old-roster certificate and parent. Recovery reads no ledger and
+returns execution-only records without full-history inclusion inventories.
+Exact beacon proofs remain independently checked. A tip-pinned archive with no
+historical path can verify its state but cannot restore older selections.
+
+Differential comparisons now start at the first and penultimate checkpoints
+where available. Pre-base selection records come from the archive, including
+in deadline, appeal and governance replay. Three additional tests cover recovery
+after deleting the source ledger, ten inconsistent frozen inputs and mismatched
+or omitted historical parent authority. The first guard run called the obsolete
+selection-only loader on a mixed roster/selection chain and failed. That failure
+is retained in `snapshot-selection-restoration-guards.log`; the corrected test
+uses the mixed-event loader only for its independent expected result.
+
+`snapshot-selection-restoration-regression.log` records the three guards passing
+in 0.83s and 687 fast node tests passing in 66.48s, with six ignored and 56
+slow/network cases excluded. Snapshot versions 1 and 2 are not accepted by this
+build. Operators need a new certified epoch if they already attested old bytes;
+signer journals must not be cleared to permit a replacement attestation.
+
+Strict node/daemon Clippy also passes. A rebuilt debug daemon passes the explicit
+attest/export/verify journey in 5.96s, followed by three snapshot transfer/restart
+tests in 0.87s. `snapshot-selection-restoration-daemon-and-proofs.log` records
+those passes, then a separate proof-independence regression failure addressed
+in the next iteration. The command's overall result is failure, not a pass.
+
+This removes pre-base full-history construction from the compact library path.
+It does not replace the live installer, wire archival witness requests into peers
+or compact long-running retention. Source release gates remain closed.
+
+## Iteration 171: proof-independent verifier execution state
+
+A new regression demonstrated that equivalent valid checkpoint certificates
+produced different persisted verification bytes. The orchestrator retained the
+certificate's signature list and agreement round inside economic state. Those
+fields authorize a decision but do not change the agreed checkpoint or committee.
+The failing regression remains in
+`snapshot-selection-restoration-daemon-and-proofs.log`.
+
+Installation still checks the full certificate and exact beacon before changing
+state, including repeated installation. The private persisted selection now
+stores the checkpoint and beacon instead of the variable certificate. The node's
+authority chain retains the actual proofs. No fabricated or empty certificate
+replaces them. Deadline and vote contexts use the same checkpoint identity.
+
+Local verification persistence is version 8. Migration tests cover versions 4
+through 7 with active selections, context preservation and trailing-byte
+rejection. The version 7 migration also produces identical complete current
+bytes. The economic archive body is version 4 and refuses earlier signed body
+versions; signer journals remain untouched.
+
+`snapshot-proof-independence-focused.log` records all 123 verification tests
+passing in 0.21s and a node-level comparison passing in 1.03s. Five independent
+stores replay roster, selection and activation with reordered signatures,
+different valid quorum subsets, extra valid signers and another agreement round.
+Their complete economic snapshot bytes match. Every archive also authenticates
+and recovers its historical selection.
+
+`snapshot-proof-independence-regression.log` records 688 fast node tests passing
+in 59.92s, six ignored and 56 slow/network cases excluded. Strict node, daemon and
+verification Clippy passes. A fresh debug daemon passes the version 4 operator
+journey in 4.99s, followed by three peer transfer/restart tests in 0.83s. The
+snapshot test also rejects unsupported body versions after verifying valid test
+quorum signatures. Coverage reports 388 sections, 380 unsigned and zero format
+errors. Formatting and whitespace checks pass. No source gate was opened.
+
+`snapshot-proof-independence-network.log` records two running-node journeys
+passing in 215.54s. One settles signed committee votes and a rejected challenge;
+the other settles a partial panel at its certified deadline. Both exercise
+restart and fresh-observer catch-up with the changed verification persistence.
+These use controlled clocks and historical beacon proofs, not production timing
+or adversarial scheduling. All jobs used the one-CPU, 3 GiB, zero-swap service;
+it was inactive after completion. No optimized package or release was published.
+
+## Iteration 172: transaction-owned snapshot reconciliation
+
+Snapshot installation now checks local finality while owning the database
+writer. A separate consistent read identifies membership proofs to fetch first;
+the exclusive check never trusts that earlier read as authorization.
+
+The archive must carry authority from configured genesis and advance the local
+installed epoch. Reconciliation checks accepted checkpoint records, decisions
+still in agreement journals, genesis parameters, installed authority and cutoff,
+cemented heads and queued confirmation targets. It authenticates historical
+selection receipts against their actual parent authority too. Missing proofs or
+conflicting decisions abort the transaction. It leaves all signer promises,
+locks and fences unchanged. Promises absent from supplied witnesses are retained
+without claiming that the snapshot excludes them.
+
+The guard has no commit method. Compact projection, durable base recovery and
+live publication still need integration. No running-node path uses the guard.
+
+`snapshot-installation-reconciliation-validated.log` records ten new node tests
+passing in 1.84s and 81 LMDB tests passing in 0.08s, with one ignored doctest.
+The same command then failed Clippy's type-complexity check. A named row type
+fixes that failure. The earlier guard log preserves an empty-prefix metadata
+scan failure; empty prefixes now use the full bounded iterator.
+
+`snapshot-installation-reconciliation-regression.log` records strict node,
+daemon and LMDB Clippy passing, followed by 698 fast node tests in 60.41s. Six
+tests remain ignored and 56 slow/network cases excluded. Checks used the limited
+validation service; it was inactive after completion. No release gate changed.
+
+## Iteration 173: sparse ledger projection under the reconciled writer
+
+The reconciled snapshot now accepts authenticated account-head bodies and
+projects sparse ledger indexes without downloading the full prefix. Existing
+cemented bodies remain indexed. The storage scan visits retained rows rather
+than every logical height, and reports logical block count separately from the
+number of retained bodies. It invents no rows for missing history.
+
+Every opened account needs an authenticated head body. Earlier reconciliation
+witnesses remain available to the projection. Missing, duplicate or foreign
+bodies fail. Local cemented positions cannot be replaced or moved. Unproven
+provisional bodies are archived without claiming the certified history excludes
+them. Signer journals and the installed epoch remain unchanged.
+
+The node-facing projected guard cannot commit. Economics, durable base recovery
+and runtime publication still need to join the transaction. No live caller,
+source gate, archive version or pruning policy changed.
+
+`snapshot-compact-projection-guards.log` records two node tests passing in 0.33s,
+85 storage tests in 0.07s and strict node/storage Clippy. An additional late-failure
+test then checks byte-identical rollback of every database table after the
+writer has already archived one provisional block. It also checks that successful
+projection leaves signer records and the epoch untouched. Five new storage tests
+cover reopen and another sparse projection, 17 inconsistent inputs, stale/dirty/
+undo boundaries and bounded scanning at a large logical height.
+
+`snapshot-compact-projection-regression.log` records all 86 storage tests passing
+in 0.06s, strict node/daemon/storage Clippy, and 700 fast node tests in 60.25s.
+One storage doctest and six node tests are ignored; 56 slow/network node tests
+are excluded. Coverage reports 388 sections, 380 unsigned and zero errors.
+Formatting and whitespace checks pass. The limited validation service stopped
+after completion; approximately 10 GiB of desktop memory remained available.
+
+## Iteration 174: compact economic projection and durable recovery base
+
+Full-history and compact installation now share the economic projection code.
+The compact writer holds ledger rows, BRN/TRST state, pending transfers,
+verification, governance, governed parameters and authority together. It also
+stores the authenticated archive and closes the previous payment epoch. Old
+signer promises and fences remain byte-identical; sparse membership does not
+classify an absent promise as excluded. The prepared-state guard still cannot
+commit. Compact startup and live cache publication must be integrated first.
+
+Economic snapshot version 5 retains each replayed burn's identity and timestamp.
+Those records rebuild mint-origin and expiry indexes without downloading every
+burn body. Current holdings alone cannot recover a fully sent or merged burn's
+original index. The full-history installer produces the same index rows from
+that replay-derived inventory. This changes neither minting nor expiry rules.
+Versions 1 through 4 are rejected; existing attestation journals are unchanged.
+An operator who attested an older body must export at a new certified epoch.
+
+The stored base reader reauthenticates against configured genesis after reopen,
+including historical selection recovery. Ordinary block undo cannot overwrite
+the base. Lifecycle metadata is restricted to owned namespaces and the exact
+verification-state key; an archive cannot write local signing journals through
+that map. Full and compact paths also share checks for unsupported or damaged
+provisional tails before replacing their economics.
+
+Reconciliation now accepts the valid genesis-authority descriptor created by
+actual certified startup. It still rejects orphaned, incomplete or inconsistent
+authority markers. The earlier fresh-store test had not initialized that
+descriptor and missed this compatibility issue.
+
+`snapshot-economic-projection-focused.log` records the first four focused tests
+passing. `snapshot-economic-projection-regression.log` preserves 18 failures
+caused by an overly narrow metadata allowlist in this iteration. The legitimate
+`verification_orchestrator` singleton is now explicitly allowed and replaced;
+signer namespaces remain forbidden. The next validated log records those
+regressions fixed, then one new test failing because its certified vote fixture
+omitted the required timestamp. The fixture now supplies the block's timestamp.
+
+`snapshot-economic-projection-final-regression.log` records five new node tests
+passing in 0.93s, 705 fast node tests in 61.61s, all 88 storage tests in 0.09s,
+and strict node/daemon/storage Clippy. Six node tests and one storage doctest
+are ignored; 56 slow/network node tests are excluded. Two new storage tests
+exercise promise-preserving epoch handoff, atomic abort, reopen and invalid
+fences or stale epochs. No source gate was opened.
+
+`snapshot-economic-projection-runtime.log` records two process-crash publication
+tests passing in 1.24s, including the running admission worker. These validate
+the shared full-history installer, not compact startup. A rebuilt debug daemon
+passes the version-5 attest/export/verify journey in 4.84s. All three snapshot
+peer-transfer/restart tests pass in 0.83s, including normal full-node discovery
+and receiver restart. The one-CPU, 3 GiB, zero-swap service was inactive after
+completion. No optimized package, cloud deployment or public release was made.
+
+## Iteration 175: stored certified-tail recovery
+
+Recovery can now load later checkpoint records relative to an authenticated
+snapshot without rebuilding the pre-base ledger. Retained older records must
+agree with the archive authority path; later records must have consecutive
+heights, matching head commitments and valid previous-roster certificates.
+Each successor goes through compact economic replay before its electorate can
+authenticate the next record. Recovered selections still cannot authorize local
+checkpoint signing.
+
+The recovery result names the accepted chain tip, not necessarily the installed
+payment epoch. This is a read-only recovery API. Startup must still check local
+installed authority, sparse indexes, provisional payments and signer journals,
+then publish recovered engines under the admission barrier. The compact
+installation guard still cannot commit.
+
+Three new tests cover reopened suffix-only storage, retained beacon validation,
+and nine malformed or incomplete recovery cases. The existing lifecycle and
+governance boundary comparisons now exercise stored recovery from the first and
+penultimate checkpoint where available. They compare complete canonical state
+with independent full replay. The archival source supplies membership witnesses;
+automatic peer retrieval is not implemented by these tests.
+
+The first regression run found two missing-beacon fixtures and three assertions
+that counted archived suffix bodies as live block rows. A snapshot taken before
+a beacon arrives cannot contain that later proof. The fixtures now retain the
+proof-bearing selection record, without copying pre-base ledger bodies. Recovery
+reauthenticates that proof; a new negative test rejects altered randomness and
+missing quorum. The storage assertions now compare metadata before and after
+recovery, proving that the read-only path leaves it unchanged.
+
+`/tmp/burst-snapshot-recovery-175.log` retains that failed run.
+`/tmp/burst-snapshot-recovery-175-final.log` records four focused checks passing
+in 0.82s, 708 fast node tests in 66.90s and strict node/daemon Clippy. Six tests
+remain ignored and 56 slow/network tests are excluded. All validation used the
+one-CPU, 3 GiB, zero-swap wrapper. No source gate, wire/body format, whitepaper
+rule or public release changed.
+
+## Iteration 176: discover recovery witnesses from the suffix
+
+`plan_tail` now reads signed post-snapshot blocks and their proposal bodies, then
+builds a sorted request list for historical witnesses. The list includes direct
+old dependencies, retained ordering records and frozen selection heads. Discovery
+does not read the pre-base ledger. The existing 8,192-hash witness limit and
+16 MiB shared body budget remain in place; the historical inventory still needs
+long-running compaction.
+
+Stored certified recovery uses this plan before calling its proof provider. The
+provider in the restart and cross-boundary tests no longer performs full replay
+to discover dependencies. It fetches bounded ancestry chunks and retains only
+the requested authenticated witnesses. Full replay remains the independent test
+oracle. Automatic archival-peer retrieval and compact node startup are not yet
+connected.
+
+The plan checks completeness, witness context and duplicates before returning
+an ordered tail. It retains the signed suffix bytes checked during planning;
+changing the store afterwards cannot substitute a different block. Economic
+replay and writer-owned installation checks remain mandatory. The older
+`read_tail` API retains its structural-reader behavior.
+
+`/tmp/burst-tail-planning-176-focused.log` records the four stored-snapshot checks
+passing after the refactor. `/tmp/burst-tail-planning-176-regression.log` records
+two new planning tests passing in 0.20s, 710 fast node tests in 77.26s and strict
+node/daemon Clippy. Six tests remain ignored and 56 slow/network tests are
+excluded. No release gate, format or whitepaper rule changed. Validation used
+the desktop resource wrapper.
+
+## Iteration 177: fetch historical witnesses through peers
+
+Running nodes now expose on-demand historical proof fetching through their
+authenticated peer connections. Requests start from an independently
+authenticated account cursor. Responses carry bounded raw ancestry batches;
+the transport digest detects mixed transfers, while the cursor checks signed
+membership against the snapshot head. No downloaded body enters the ledger.
+
+The worker allows one active request and one queued request. It rotates away
+from a peer after five seconds without progress and stops a job after two
+minutes. Limits cover chunk size, decoded bodies, retained witnesses and total
+walk bytes and blocks. The server also limits responses and database loads.
+Cancellation drops the active walk. The two new protobuf alternatives are
+optional additions to wire generation 30; older peers cannot serve them.
+
+Five new tests cover framing bounds, server rates, multi-batch transfer, forged
+membership with a matching transport digest, wrong peers, retries, cancellation
+and local request limits. The existing two-node snapshot journey now retrieves
+and authenticates a historical proof over real TCP before stopping and
+restarting the nodes. Both nodes still have full histories. This does not prove
+compact startup, automatic multi-account recovery or safe pruning.
+
+`/tmp/burst-witness-transfer-177-focused.log` retains the first failed test run.
+Its empty-store assertion incorrectly expected no metadata after opening LMDB.
+The corrected test compares metadata before and after transfer on both stores.
+`/tmp/burst-witness-transfer-177-regression.log` records seven focused checks
+passing in 0.62s, the full-node journey in 3.32s, independent protobuf schema
+validation in 0.38s, 715 fast node tests in 77.64s and strict node/daemon Clippy.
+Six tests remain ignored and 56 slow/network tests are excluded. All validation
+used the desktop resource wrapper. No source gate or whitepaper rule changed.
+
+## Iteration 178: connect stored recovery to multi-account peer fetching
+
+`fetch_plan` now retrieves the historical dependencies of a checked suffix
+without requiring the caller to know which account owns each hash. It requests
+a hash-matching body as an account hint, then proves membership from that
+account's authenticated snapshot head. Hints cannot create witnesses. A genuine
+signed body outside the authenticated prefix is rejected. Selected account
+prefixes are walked once, and all hints and walks share the existing two-minute,
+64 MiB and 131,072-block limits. The retained-body bounds are unchanged.
+
+`recover_stored_successors_from_peers` connects that fetcher to certified
+successor recovery. It shares planning and execution with the synchronous
+provider API. Planning and replay use blocking workers; no writer or runtime
+lock crosses the network wait. The result remains private recovered state, not
+an installed authority. The node still needs a compact startup phase that can
+run transport before payment admission and validate its installed state.
+
+Two new transport tests cover automatic account discovery, exact witness sets,
+foreign plans and signed bodies outside the authenticated prefix. A new async
+recovery test matches full replay without local prefix bodies or metadata
+writes. `/tmp/burst-peer-recovery-178-focused.log` records those checks, the
+existing stored-recovery regressions and the initial multi-account TCP case.
+
+The expanded full-node test now uses two authenticated snapshots. The newer
+one exercises multi-account requests; the older one recovers a certified
+successor over the same TCP connections into a separate store with no ledger
+bodies. Its complete economic bytes match full replay, and metadata stays
+unchanged. Both transport nodes still use full-history startup. Receiver restart
+without the source preserves its installed payment authority.
+
+`/tmp/burst-peer-recovery-178-regression.log` retains a failed fixture assertion:
+the older snapshot needed proofs from only one account, while the test required
+multiple accounts. Separating the two snapshot cases fixes that assertion;
+the production path was not changed to make it pass. The test stops and reaps
+both nodes before assertions.
+
+`/tmp/burst-peer-recovery-178-final.log` records the expanded full-node TCP test
+passing in 6.83s, 718 fast node tests in 75.47s and strict node/daemon Clippy.
+Six tests remain ignored and 56 slow/network tests are excluded. The validation
+service is stopped. All work used the desktop limits, with no optimized build,
+VM allocation, format change, source-gate change or public release.
+
+## Iteration 179: validate compact installed metadata and cemented governance
+
+`plan_cemented_tail` reads the account inventory, retained snapshot heads and
+post-base cemented suffix in one database view. Authenticated account cursors
+check the retained heads. The reader checks both directions of each required
+height index and never walks the pruned prefix. Only post-base confirmed blocks
+enter the suffix; provisional blocks above confirmation height do not enter the
+governance schedule. The observed heads and suffix rows share the existing
+8,192-row and 16 MiB bounds.
+
+After historical witnesses arrive, `verify_installed_metadata` takes one writer
+lock and rechecks the observed accounts, body bytes and indexes. It compares the
+installed descriptor, cutoff and vote limit with the authenticated continuation,
+rejects a closed epoch, then checks the governance schedule and counting limit.
+The full-history startup path and compact validator share the schedule promotion
+and comparison code. The validator never repairs or commits metadata.
+
+Three tests cover sparse-store reopen with confirmed proposal/endorsement and
+an excluded provisional withdrawal, nine damaged-state cases, and a changed
+account cut between planning and verification. The first focused run failed
+because the test used the normal account update API to lower confirmation
+height. That API correctly preserves finality. The corruption fixture now uses
+raw test-store bytes to exercise the reader's rejection path. The failed run
+remains in `/tmp/burst-compact-startup-179-focused.log`; an initial compile error
+is retained in `/tmp/burst-compact-startup-179-check.log`.
+
+`/tmp/burst-compact-startup-179-regression.log` records the three focused tests
+passing in 0.35s, 721 fast node tests in 74.54s and strict node/daemon Clippy.
+Six tests remain ignored and 56 slow/network tests are excluded. No source gate,
+wire format, economic format or whitepaper rule changed. The desktop resource
+wrapper bounded all validation.
+
+This is one compact startup check, not permission to start the node. Other
+retained historical rows, provisional economics, cached engines and signer
+journals still need validation and integration. Recovery must target the installed
+epoch rather than treating a newer accepted tip as installed. The compact
+projection guard still cannot commit, and no release was published.
+
+## Iteration 180: recover the exact installed epoch
+
+Stored recovery can now stop at an exact certified epoch. The target must name
+the authenticated base or a retained successor, and every required predecessor
+still passes certificate checks and economic replay. A newer accepted tip is
+left unapplied. Unknown, malformed, zero and pre-base installed targets do not
+trigger historical proof requests.
+
+`installed::recover_metadata_from_peers` connects the stored base, exact epoch
+recovery, peer witness provider and cemented-metadata validator. It reads the
+base bytes and installed epoch from one database view. After proof retrieval,
+one writer-owned recheck covers the base bytes, checkpoint records used by
+recovery, accepted-tip marker, account observations and installed metadata.
+The returned guard can repeat that check before eventual publication. It cannot
+commit or authorize payment admission.
+
+Three new tests cover a newer accepted tip with either epoch installed, sparse
+store reopen, absent compact state, invalid targets and four changes injected
+during proof delivery. They preserve metadata and retained block counts. The
+first run incorrectly required a peer request even when the installed epoch
+equaled the base and no historical witnesses were needed. That assertion is
+corrected; the failure remains in `/tmp/burst-installed-recovery-180-focused.log`.
+
+The full-node TCP journey now also recovers installed metadata at both epochs
+from the same earlier snapshot and running peer connections. Recovered economic
+bytes match the expected states, and both recovery stores remain unchanged.
+The transport nodes themselves still start with full histories. This does not
+prove compact node startup or live compact installation.
+
+`/tmp/burst-installed-recovery-180-regression.log` records the three focused tests
+passing in 0.69s, the expanded full-node TCP journey in 11.70s, 724 fast node tests
+in 74.67s and strict node/daemon Clippy. Six tests remain ignored and 56 slow/network
+tests are excluded. All validation used the desktop resource wrapper. No source
+gate, format or whitepaper rule changed, and no public release was published.
+
+The remaining compact startup checks cover other retained historical rows,
+provisional economics, cached engines and local signer journals. Startup must
+provide proof transport before payment admission and consume these checks before
+the compact projection guard can safely expose a commit operation.
+
+## Iteration 181: authenticate retained physical history
+
+Installed recovery now inventories all physical block rows and checks that both
+height indexes form a bijection with them. The scan is bounded to 131,072 rows
+and 64 MiB, including index bytes. It does not walk missing logical heights.
+Account ownership and local height limits are checked before ancestry retrieval.
+
+Rows within the authenticated account prefix require membership proofs.
+Contiguous local bodies advance the authenticated cursor without peer requests.
+Across gaps, the existing witness service proves batches of retained hashes.
+Only an opaque proof from the same authenticated account and context can resume
+the cursor below a missing span. The local body still passes its signature and
+height checks; a valid peer body cannot hide a damaged local signature.
+
+The recovery guard pins the complete physical inventory and account observations
+until the caller's writer-owned recheck. It catches added or deleted rows as well
+as changed bodies or indexes. This does not validate provisional economics or
+authorize admission. No storage repair is performed.
+
+Four focused installed-recovery tests pass, including contiguous local history,
+sparse proof retrieval, wrong heights, damaged signatures and stale body bytes.
+Two storage tests cover sparse extreme heights, bounds, consistent transactions
+and eight corruption cases. The two-node TCP journey also passes with an older
+retained row across a gap at both installed epochs.
+
+The first node test command omitted `--lib` and compiled unrelated integration
+targets. The owned validation unit was stopped, then the focused library tests
+passed in 0.77s. That interrupted command is not counted as validation. Every
+build and test used the existing desktop resource wrapper.
+
+`/tmp/burst-retained-history-181-regression.log` records the expanded TCP journey
+passing in 13.81s, 725 fast node tests in 69.26s, all 90 LMDB tests and strict
+storage/node/daemon Clippy. Six tests remain ignored and 56 slow/network tests
+remain excluded. The validation unit exited and its process handle was reaped.
+Release gates remain closed; no format or protocol rule changed.
+
+## Iteration 182: preserve signing promises and replay applied state
+
+Installed recovery now validates local signing journals against authenticated
+authority. The observed records include checkpoint rounds, final payment
+promises, fences, closed epochs, signing counters, timestamp high-water marks,
+governance deadline promises and snapshot attestations. A later local decision
+requires an authenticated accepted path, without advancing installed authority.
+Recovery retains the promises and rejects malformed or foreign journal records.
+
+Applied suffixes have a distinct type from cemented suffixes. Shared economic
+replay checks their effects without advancing confirmation heights, executing
+deadline settlements or granting signing rights. Stored accounts, BRN state,
+pending transfers, TRST provenance and merger graphs must match replay.
+Private copies normalize derived expiry state to the same clock. Revocation
+and ownership must still match; the local clock cannot explain a difference.
+Verification, bootstrap, governed parameters, constitution, governance,
+persisted delegation graphs and replay-owned lifecycle metadata also compare
+against replay. Secondary indexes, undo reconstruction and live publication
+remain unfinished. No admission or compact-install commit API was enabled.
+
+Nine focused recovery tests pass. They include twelve damaged journal cases,
+a correctly signed but economically invalid provisional block, a mismatched
+account afterimage and eleven changed engine/cache cases. Valid later decisions
+preserve the earlier installed epoch. The initial journal fixture omitted the
+later accepted suffix bodies from its history archive. After adding them, its
+peer-request assertion also needed removal because those local bodies sufficed.
+Both failed attempts remain in the focused logs and are not counted as passes.
+
+`/tmp/burst-startup-recovery-182-regression.log` records eight focused tests in
+1.40s, the two-node TCP recovery/restart test in 13.45s, 729 fast node tests in
+70.01s, 90 LMDB tests and strict storage/node/daemon Clippy. Six tests remain
+ignored and 56 slow/network tests remain excluded. Every build used the desktop
+resource wrapper; the unit exited and the process handle was reaped. Release
+gates remain closed. No whitepaper rule or wire format changed.
+
+The additional expiry-cache test passes in
+`/tmp/burst-startup-expiry-182.log`. It uses a received token, advances the local
+expiry cache, and confirms recovery accepts it without rewriting storage.
+Changing the token's holder or marking it revoked rejects recovery. All nine
+focused tests passed in 1.43s and strict node/daemon Clippy passed again. Only
+the test and documentation changed after the broader regression run.
+
+## Iteration 183: validate lookup indexes and bound expiry cleanup
+
+Installed recovery now verifies frontier lookups against account heads and
+pending-sender lookups against primary pending transfers. Missing, extra,
+wrong-key and wrong-value rows reject in the caller's writer transaction.
+The scans are bounded and perform no repair. Sparse test stores now include the
+frontier rows that real compact projection writes.
+
+The expiry worker previously queried rows before the current cutoff, then tried
+to delete each token using that cutoff as its expiry key. Cleanup now deletes
+the exact stored keys in one transaction, limited to 1,024 rows per tick. It
+preserves origin and reverse mappings, portfolios and ledger bodies. A malformed
+row aborts the entire batch. This is derived-index cleanup, not ledger pruning
+or permission to forget revocable provenance.
+
+Seven lookup-corruption cases and two cleanup tests pass among all 93 LMDB
+tests. Nine installed-recovery tests and strict storage/node/daemon Clippy also
+pass in `/tmp/burst-recovery-indexes-183-retry.log`. The first lookup test failed
+because its extra-row fixture used an address without the required prefix.
+That fixture is corrected; the initial failed run remains recorded separately.
+Token provenance indexes, undo recovery, proof-only startup transport and atomic
+runtime publication remain unfinished. Release gates stay closed.
+
+`/tmp/burst-recovery-indexes-183-regression.log` records the TCP recovery/restart
+journey passing in 9.43s and 730 fast node tests in 70.61s. Six tests remain
+ignored and 56 slow/network tests remain excluded. All validation used the
+desktop resource wrapper; no user data directory was modified or upgraded.
+
+## Iteration 184: reconstruct token indexes from authenticated mint history
+
+Recovered installed state now stages token-index reconstruction in a fresh
+writer after rechecking its authenticated inputs and observed database state.
+Origin, expiry and reverse lookups come from the replayed mint inventory and
+governed expiry period, not current holdings or surviving index rows. The
+storage operation bounds the inventory and poisons the writer on failure.
+The node-facing result owns the transaction and has no commit method. Dropping
+it aborts reconstruction. Undo recovery and runtime publication must consume it
+before compact startup can authorize admission.
+
+The storage test covers abort, commit, zero mint identities and duplicate mints.
+The received-token recovery test now removes the original index and adds a
+foreign row, then checks that the staged reconstruction restores the original
+mint and excludes the foreign row. Dropping the node guard leaves the original
+database unchanged. The initial node test build used a field as a method; that
+compile error was corrected and is retained in the first validation log.
+
+`/tmp/burst-token-index-recovery-184-retry.log` records all nine focused recovery
+tests passing in 1.43s, all 94 LMDB tests and strict storage/node/daemon Clippy.
+The preceding turn's 730-test fast run and TCP restart run were not repeated for
+this uncommitted projection API. All checks used the desktop resource wrapper.
+No release gate changed and no live database was repaired.
+
+## Iteration 185: protect snapshot promises from rollback
+
+The undo metadata denylist omitted `snapshot_attestation/`. Both recording and
+decoding now reject that namespace. A forged persisted undo record cannot make
+the rollback path erase a prior snapshot-signing promise. The transaction test
+also verifies that attempting to record such a write poisons the writer and
+preserves the existing promise on disk.
+
+Recovery now validates the bounded undo inventory's key versions, block
+identities and canonical records, then pins their bytes with the other local
+journals. Fifteen damaged-journal cases include unsupported undo versions,
+malformed keys and damaged records. A newly inserted undo row invalidates an
+existing recovery observation. These are structural checks, not authentication
+of economic before-images. Missing-record reconstruction and live startup
+integration remain unfinished.
+
+All 95 LMDB tests passed in `/tmp/burst-undo-recovery-185.log`. The first node
+test build failed because a new assertion was placed before its recovered
+fixture existed. That placement was corrected before rerunning validation.
+
+`/tmp/burst-undo-recovery-185-retry.log` records nine recovery tests in 1.47s,
+14 rollback tests in 0.07s and strict storage/node/daemon Clippy passing. The
+broader fast and network suites were not repeated for this change. All checks
+used the desktop resource wrapper. No release gate was enabled.
+
+## Iteration 186: stream authenticated replay transitions
+
+Applied-tail replay now exposes its starting state and each successfully
+executed block to a fallible internal observer. It uses the existing signature,
+economic and causal-order checks. Replay keeps one private candidate rather
+than cloning and retaining the whole state for each block. An observer can
+reject when its own retained-delta budget is exhausted. Results remain private
+until the final head check succeeds.
+
+The provisional-chain recovery test checks the before/after account head and
+representative, unchanged confirmation height, and observer failure at both
+boundaries. Neither failure mutates the authenticated base. This provides the
+execution boundary for deriving undo deltas; it does not yet reconstruct or
+authenticate stored undo records, publish engines, or enable compact startup.
+
+The focused test and strict node/daemon Clippy pass in
+`/tmp/burst-replay-observer-186.log`, using the desktop resource wrapper.
+The fast node suite passed 730 tests in 70.69s, with six ignored helpers and
+56 excluded tests, in `/tmp/burst-replay-observer-186-regression.log`. The
+excluded network suite and packaged releases were not run in this iteration.
+
+## Iteration 187: derive economic undo rows from replay
+
+The uncommitted startup projection now derives per-block economic deltas before
+opening its writer. It serializes replayed accounts, pending transfers, BRN,
+TRST provenance and lifecycle/governance state in their storage formats. Deltas
+include created and removed rows, sorted by table and key. It does not read
+economic before-images from the local undo inventory.
+
+The collector retains only the previous/current row views and changed rows.
+Each view and the retained delta payload have a 64 MiB bound; aggregate retained
+changes are limited to 131072 entries and serialized work to 256 MiB. Exceeding
+a bound aborts before any index writes. These are temporary recovery limits,
+not a solution to the long-run retention/scaling item below.
+
+These are economic deltas, not complete BlockUndo records. Primary ledger and
+index changes, confirmation-height reconciliation, local expiry normalization,
+and per-block identity dependencies still need to be composed before journal
+replacement and runtime publication can commit. No startup or release gate
+changed. The projection continues to abort on drop.
+
+Nine installed-recovery tests, a row-budget test and strict node/daemon Clippy
+passed in `/tmp/burst-replay-deltas-187.log`. The representative-change fixture
+compares derived account before/after bytes with its authenticated base and
+stored account. The already-certified token fixture produces no tail deltas.
+A signed burn/open-receive fixture also passes in
+`/tmp/burst-replay-deltas-187-payment.log`. Its replay-derived account, pending
+and BRN-wallet deltas match the undo rows produced by the normal payment
+transition, including pending creation and consumption. Dropping the projection
+leaves those original journals unchanged. The broader fast/TCP suites were not
+repeated for this uncommitted projection change.
+
+## Iteration 188: reconstruct ledger indexes and identity bindings
+
+Replay-derived changes now include block bytes, account height and reverse
+height indexes, frontiers, the verified-person count, and origin/expiry/reverse
+mint indexes. Block records carry their replayed account and height. The
+burn/open-receive fixture compares all ten ledger/economic/index tables against
+normal admission's stored undo. Ten recovery tests and strict node/daemon
+Clippy passed in `/tmp/burst-replay-ledger-188.log` before the identity change.
+
+Normal admission bound a wallet's first block after verification to its identity
+source, but replay did not call that helper. The helper now accepts the shared
+ledger interface, and replay invokes it before applying lifecycle effects. A
+test checks that the first block records the verification dependency and later
+blocks inherit it through their predecessor. Its first run exposed a second
+omission: bootstrap replay did not record the identity source. Bootstrap replay
+now calls the same source-recording helper as admission. The first validation
+build also exposed an error-type conversion mismatch; it was corrected before
+retrying. Neither failed attempt counts as passing evidence.
+The identity test initially assumed timestamps ordered an independent open
+after verification. It now receives a burn from the endorser's subsequent block,
+making that ordering causal. Replay ordering rules were not changed to satisfy
+the fixture. Equivalent arrival-order/local-binding histories still need review
+before recovery can replace complete lifecycle journals.
+
+The reconstructed rows still cannot be installed as complete journals. Actual
+confirmation heights, local expiry normalization, complete lifecycle comparison
+and atomic journal/engine publication remain unfinished. No release gate changed.
+
+`/tmp/burst-replay-identity-188-causal.log` records the corrected identity test,
+733 passing fast node tests in 71.78s, six ignored helpers and 56 exclusions.
+Strict node/daemon Clippy also passed. All validation used the desktop resource
+wrapper; no optimized desktop build was started.
+The focused TCP archive-transfer/full-node restart test passed in 13.54s in
+`/tmp/burst-replay-identity-188-tcp.log`. This does not cover the other excluded
+network journeys, packaged platforms or long-run retention.
+
+## Iteration 189: preserve actual finality in reconstructed changes
+
+The startup projection now reconciles replay-derived records under its writer,
+after rechecking the authenticated cuts and before replacing token indexes. It
+checks both height indexes and excludes blocks at or below the account's
+existing confirmation height. Remaining account before/after images retain
+that height. A provisional record cannot restore an account below already
+confirmed history, or smuggle in a different account key or regressed finality.
+
+The reconciliation test covers finalized-record exclusion, a provisional
+successor, wrong block indexes, foreign account keys, crossing confirmed
+history, regressed finality and trailing encoding bytes. It performs no writes.
+Ten installed-recovery tests and strict node/daemon Clippy also passed in
+`/tmp/burst-undo-finality-189.log`.
+The payment fixture then admitted a successor, cemented only the preceding
+burn, fetched compact recovery proofs again and rebuilt provisional changes.
+The finalized burn was excluded; both successor account images kept the burn's
+confirmation height, and dropping the projection left the successor unconfirmed.
+That test and strict Clippy passed in `/tmp/burst-undo-finality-189-payment.log`.
+The broader fast/TCP suites were not repeated for this uncommitted projection
+change; their latest full results remain iteration 188.
+
+The result is still uncommitted. Expiry normalization, equivalent lifecycle
+arrival orders, complete journal replacement and atomic engine publication
+remain required. No ordinary or certified confirmation rule changed.
+
+## Iteration 190: normalize replay-derived expiry caches
+
+The rollback row collector now clones TRST into a private expiry view at the
+authenticated checkpoint cutoff. Every intermediate image uses that same
+clock and its replayed governed expiry period. Account expiry/revocation
+counters are recomputed from those portfolios. Signed balances, BRN spending,
+confirmation heights and pending-return semantics are not rewritten by the
+cache view. Revoked tokens stay revoked; the merger graph is unchanged.
+
+The expiry test checks earlier/later cache views, unchanged input state,
+revocation preservation and unchanged signed/account-finality fields. Ten
+installed-recovery tests and strict node/daemon Clippy passed in
+`/tmp/burst-undo-expiry-190.log`.
+The signed payment fixture also passed after a later local expiry refresh
+changed live portfolio caches and the receiver's expired counter. Derived rows
+still matched the original payment transition, and dropping the projection
+preserved the refreshed live counter. Its subsequent cemented-burn/provisional-
+successor recovery still passed. Evidence and strict Clippy are in
+`/tmp/burst-undo-expiry-190-payment.log`. The broader fast/TCP suites were not
+repeated for this uncommitted collector change.
+
+The reconstructed cache bytes are not yet published to the live database.
+Complete journal replacement must install matching cache state atomically and
+handle subsequent local expiry refreshes. Equivalent lifecycle arrival orders
+and startup/engine publication remain open. This change neither grants spending
+rights nor enables a release gate.
+
+## Iteration 191: stage reconstructed journals with matching engine bytes
+
+`RecoveredIndexProjection::stage_undo` now rechecks its recovery inputs, stages
+the final replay-derived account/engine bytes, and replaces the provisional
+undo inventory in the same writer. It retains the exact final row encoding from
+replay so aggregate engine after-images match their reconstructed journals.
+Confirmation heights and the normalized expiry view are preserved.
+
+The storage replacement requires one record per indexed provisional block,
+rejects finalized or duplicate records, bounds encoded bytes including keys,
+and verifies each record's block and two height-index insertions. Canonical
+decoding rejects attempts to modify signing promises. Failure poisons the
+writer; no partial replacement can commit.
+
+The node-facing result has no production commit method. A test-only method
+published into a disposable fixture, then normal storage rollback rewound its
+provisional receive and successor. The confirmed burn remained intact and its
+pending payment was restored. A separate staged-and-dropped projection left
+the original journals and later expiry cache unchanged. This fixture and strict
+storage/node/daemon Clippy passed in `/tmp/burst-recovered-undo-191.log`.
+The expanded storage run passed all 96 LMDB tests, including poisoned-writer
+rejection of missing, duplicate, finalized/mismatched and incomplete records,
+and attempted snapshot-promise changes. Ten installed-recovery tests and strict
+storage/node/daemon Clippy passed again in
+`/tmp/burst-recovered-undo-191-regression.log`.
+
+Live engine publication, startup transport ordering, post-publication expiry
+refreshes and complete lifecycle/arrival-order validation remain unfinished.
+No live database was replaced and no release gate changed.
+
+## Iteration 192: expiry-aware snapshot rewind
+
+`TrstEngine::rewind_wallet_snapshot_at` compares the before, after and current
+snapshots at one supplied clock and governed expiry period. It normalizes only
+derived expiry state before applying the existing conflict-checked delta.
+Independent wallet changes survive. Later spending, ownership changes and
+revocation on the affected holding still reject. All input snapshots must be
+canonical before normalization; malformed bytes cannot be repaired this way.
+
+Tests cover expired holdings, unrelated spending, governance extending the
+period under decision 6.9, the infinite period, retained revocation and malformed
+input in each of the three positions. The original strict API is unchanged.
+The initial run passed 85 TRST tests with two ignored and strict TRST/node/daemon
+Clippy in `/tmp/burst-undo-expiry-reconcile-192.log`.
+The expanded run passed 87 TRST tests with two ignored and 735 fast node tests
+with six ignored and 56 excluded in `/tmp/burst-expiry-recovery-regression-192.log`.
+The node test execution took 71.13 seconds within the desktop resource limit.
+The TCP archive-transfer/full-node restart test passed in 11.51 seconds.
+Strict TRST/storage/node/daemon Clippy, formatting, coverage-format validation
+and whitespace checks passed in `/tmp/burst-expiry-recovery-final-192.log`.
+The coverage inventory remains 388 sections with 380 unsigned entries.
+
+This helper is not wired into live rollback. Account expiry counters must be
+recomputed from the restored portfolios in the same transaction, with finality,
+signed balances and identity fields still checked. Merely accepting expiry
+differences in account bytes would leave inconsistent cache state. Compact
+startup publication and lifecycle arrival-order validation remain unfinished.
+
+## Iteration 193: stage recovery caches at one startup clock
+
+`project_token_indexes_at` now accepts the caller's validated startup clock.
+Replay derives account expiry counters and portfolio caches at that same clock
+for every journal image and the final staged state. The default projection
+still uses the authenticated cutoff. A clock before that cutoff rejects before
+opening a writer. Signed execution and the certified cutoff do not change; this
+does not run pending returns or lifecycle deadlines.
+
+The payment fixture now publishes expired account and portfolio caches together
+through its test-only commit method. Ordinary journal rewind succeeds, restores
+the pending payment and preserves the confirmed burn. The initial focused test
+and strict node/daemon Clippy passed in `/tmp/burst-recovery-cache-clock-193.log`.
+The expanded fixture also rejects a pre-cutoff clock without metadata writes.
+All ten installed-recovery tests and fourteen rollback tests passed, followed
+by strict node/daemon Clippy, formatting, coverage-format and whitespace checks
+in `/tmp/burst-recovery-cache-clock-193-regression.log`. The broader fast/TCP
+results remain those from iteration 192; they were not repeated for this change.
+
+Production publication remains unavailable. Later expiry refreshes still need
+atomic reconciliation in the live fork path, and compact startup still needs
+transport ordering, engine publication and lifecycle arrival-order validation.
+
+## Iteration 194: reauthenticate reconstructed journals after reopening
+
+The payment recovery fixture now force-syncs its test-only publication, checks
+that no other store reference remains, closes LMDB and reopens it. Peer recovery
+reauthenticates the saved state. A second projection at the same cache clock
+derives the same rollback order and exact journal records. Dropping that writer
+leaves those persisted records unchanged. Expired account/portfolio caches and
+the confirmed prefix survive reopening and the subsequent provisional rewind.
+The focused check passed in `/tmp/burst-recovery-reopen-194.log`.
+All ten installed-recovery tests, strict node/daemon Clippy, formatting and
+whitespace checks then passed in `/tmp/burst-recovery-reopen-194-final.log`.
+
+Inspection of `checkpoint_installation::Runtime` confirms its existing lock
+order and post-commit publication boundary. Compact recovery is not connected
+to it. A clean LMDB reopen does not prove crash recovery, live worker exclusion
+or startup proof-transport ordering. The next implementation work remains
+lifecycle arrival-order reconciliation and proof-only startup transport before
+admission and signing, followed by atomic engine publication.
+
+## Iterations 195-196: preserve local applied-tail identity ordering
+
+A signed regression confirms that opening a wallet before or after its bootstrap
+endorsement produces identical snapshot state except for the block carrying the
+local identity binding. Those links are rollback prerequisites, not cosmetic
+metadata. Deleting the comparison or ignoring them would hide a safety issue.
+
+Applied-tail recovery now derives ordering hints from local identity bindings
+and unbound identity sources, then reruns signed execution. A binding brackets
+its source between the account predecessor and bound block. An unbound source
+follows the account's current tail. Journal reconstruction uses the same order.
+The hints grant no rights and do not supply before-images: all resulting
+accounts, engines and lifecycle metadata must still match the stored state.
+
+Only applied replay accepts hints. Certified replay rejects them. The shared
+dependency budget bounds additional edges; unknown dependencies, duplicate edges,
+cycles and attempts to reorder retained history reject. The regression checks
+both valid orders and these rejection paths. Ten installed-recovery tests and
+strict node/daemon Clippy passed in `/tmp/burst-applied-order-196-regression.log`.
+An earlier run passed recovery tests but failed Clippy on newly unused wrappers;
+the empty-order path now uses those existing wrappers.
+The fast suite then passed 736 node tests, with six ignored and 56 excluded, in
+71.08 seconds. Formatting, coverage-format and whitespace checks also passed in
+`/tmp/burst-applied-order-196-fast.log`. No new TCP or native-package evidence
+was collected in this iteration.
+
+This is not complete lifecycle recovery. Mixed transitions, multiple identity
+generations, sparse historical source retrieval and admission-to-recovery
+journeys still need evidence. The current hint reader requires binding sources
+in the authenticated input inventory and fails if they are missing. Compact
+startup publication and subsequent live expiry reconciliation remain unfinished.
+
+## Iteration 197: use authenticated base identity sources for suffix ordering
+
+The ordering reader now distinguishes new transitions from transitions already
+executed in the authenticated base. A historical binding must match that exact
+wallet's base identity-source record. It adds no suffix edge and needs no old
+block body solely for ordering. Unknown sources and malformed or zero hashes
+reject. New transitions retain both ordering edges when the predecessor is also
+new; retained predecessors are never reordered.
+
+Two focused tests cover exact historical-source matching, malformed sources,
+new transitions and retained predecessors. Those tests, all ten installed-
+recovery tests and strict node/daemon Clippy passed in
+`/tmp/burst-historical-order-197.log`. The broad fast suite remains iteration
+196's evidence, not a new run.
+
+This closes the ordering reader's unnecessary old-body requirement. It does not
+make live rollback proof-aware: that path still reads historical source bodies.
+Mixed identity generations and admission-to-recovery journeys remain required,
+along with proof-only startup transport and atomic engine publication.
+
+## Iteration 198: recover admission-written identity ordering
+
+A new stored-recovery fixture uses the payment and endorsement admission
+transaction helpers to write three valid interleavings: endorsement before the
+new account's Open, between Open and ChangeRepresentative, and after both.
+The configured bootstrap threshold is ten, so this endorsement also closes
+bootstrap from a nine-person authenticated base. Existing selection fixtures
+retain their default parameters.
+
+Peer-backed recovery authenticates each resulting store. The reconstructed
+journal order matches admission, including the unbound-source case. A test-only
+commit preserves lifecycle metadata, and normal storage rewind removes all
+three provisional blocks while preserving the confirmed genesis-account prefix
+and restoring the verified count to nine.
+
+All eleven installed-recovery tests, strict node/daemon Clippy, formatting and
+whitespace checks passed in `/tmp/burst-admitted-order-198-regression.log`.
+The initial focused journey passed in `/tmp/burst-admitted-order-198.log`.
+These are transaction-helper and recovery-service tests, not a running-node
+admission/election journey. Mixed non-bootstrap transitions, historical rollback
+sources, proof-only startup transport and atomic runtime publication remain.
+
+## Iteration 199: separate proof transport from checkpoint authority
+
+Ancestry witness transfer now has its own bounded inbox and worker. The worker
+has no signing key, admission queue or checkpoint driver; it can start before
+authority recovery. Starting it again reuses the active request queue, so normal
+checkpoint synchronization can take over without dropping a recovery request.
+ConnectionRegistry owns the worker's lifetime and routes witness messages to it.
+The checkpoint driver still validates its durable chain before handling ordinary
+checkpoint records. Proof transfer remains read-only and validates the caller's
+authenticated cursors as before.
+
+Tests start the proof service with unreadable payment-authority metadata, check
+queue reuse, reject an invalid request, stop the worker and verify that metadata
+is unchanged. Routing tests cover separate queues, capacity and malformed
+packets. Eighteen sync tests, the routing test and strict node/daemon Clippy
+passed in `/tmp/burst-proof-service-199-regression.log`. The initial compile
+found two simultaneous mutable borrows of the shutdown receiver; the scheduler
+now owns a separate subscription.
+The full-node TCP archive/recovery/restart journey passed in 9.48 seconds. The
+fast suite passed 741 node tests, with six ignored and 56 excluded, in 76.04
+seconds. Formatting, coverage-format and whitespace checks passed too. Evidence
+is in `/tmp/burst-proof-service-199-network.log`.
+
+Normal synchronization starts this service before constructing its checkpoint
+driver. BurstNode's listener/startup order has not changed yet. Early connections
+still need a proof-only ingress mode before admission, voting or RPC writes can
+be enabled, followed by authenticated recovery and atomic runtime publication.
+
+## Iteration 200: recovery traffic boundary
+
+BurstNode now creates its connection registry in recovery mode. The socket read
+loop permits handshake, keepalive and bounded ancestry-witness packets in this
+mode. It drops other decoded messages before gossip deduplication, admission,
+vote handling or governance dispatch. The outbound queue applies the same rule
+and rejects malformed envelopes during recovery. Normal startup opens ordinary
+traffic after its existing state restoration, before launching admission tasks.
+Closing the registry remains terminal; finishing recovery cannot reopen it.
+
+A TCP regression sends a block followed by a proof request during recovery. The
+proof reaches its inbox while the admission queue stays empty. After handoff,
+the identical block reaches admission, proving that recovery did not poison
+its gossip-dedup entry. The test also checks outbound filtering and terminal
+closure. All 13 connection-registry tests and strict node/daemon Clippy passed
+in `/tmp/burst-recovery-ingress-200.log`. The full-node TCP archive transfer and
+restart test passed in 11.44 seconds in
+`/tmp/burst-recovery-ingress-200-network.log`. The fast suite passed 742 tests,
+with six ignored and 56 excluded, in 78.62 seconds. Formatting, coverage-format
+and whitespace checks passed. Coverage still has 380 unsigned sections; the
+index check does not establish release readiness.
+
+This adds the traffic boundary, not compact startup itself. The listener still
+starts after the existing full-history restoration. Early peer connection,
+compact recovery and atomic engine publication must still be joined before
+the compact installer can commit in production.
+
+## Iteration 201: early authenticated recovery listener
+
+BurstNode starts its existing authenticated listener and the read-only witness
+service after genesis initialization, before authority and engine restoration.
+The listener uses the recovery traffic gate from iteration 200. Its bind is
+awaited, so an occupied port fails startup directly. Authority replay runs on a
+blocking worker rather than occupying the async thread that serves proofs.
+Ordinary traffic remains closed until restoration completes; an early fatal
+worker error prevents that handoff.
+
+Startup errors now stop and join early workers, close peer connections and
+consume the startup receiver so a failed node object cannot be restarted with
+a closed registry. The original startup error is preserved if cleanup also
+fails. Normal shutdown still uses the existing stop path.
+
+Two regression tests passed in `/tmp/burst-early-listener-201.log`, along with
+strict node/daemon Clippy. One pauses actual startup on its BRN engine lock,
+completes a signed-cookie handshake and retrieves a genesis ancestry proof over
+TCP while the block admission queue stays empty. Releasing the lock exposes an
+injected invalid constitution snapshot. Startup fails, joins its workers,
+closes the proof queue, preserves the invalid bytes and releases the port.
+The other test checks that an occupied listener port leaves no workers.
+After moving authority replay to its blocking worker, both tests passed again.
+The full-node TCP archive transfer/recovery/restart journey passed in 13.42
+seconds, followed by strict node/daemon Clippy. Evidence is in
+`/tmp/burst-early-listener-201-regression.log`. The full fast suite was not rerun
+for this iteration; its latest result remains iteration 200's 742 passing tests.
+
+This does not yet connect early outbound seed/cache dialing or compact-state
+publication. Startup still authenticates authority through full history. The
+compact projection still cannot commit through the production API.
+
+## Iteration 202: outbound recovery peers
+
+Recovery now dials configured seeds and cached peer addresses before authority
+restoration. The worker uses the existing connector, including handshake checks,
+identity routing and shared dial claims. It rotates addresses on a two-second
+timer, retries failed connections and stops dialing after the recovery gate
+opens. Existing connections remain available to normal synchronization. Shutdown
+interrupts the dial worker; registry closure clears its outstanding claims.
+
+All three startup tests and strict node/daemon Clippy passed in
+`/tmp/burst-recovery-peers-202.log`. The new test pauses target restoration and
+checks two separate cases: a configured seed and a cached peer with no configured
+seed. Each target connects outbound, receives an ancestry chunk from the source
+proof service and remains in recovery mode. Injected restoration failure then
+closes its connections and joins its startup workers. The test redirects the
+target witness inbox to observe transport replies; it does not claim a complete
+compact recovery or a real-router NAT test.
+The full-node archive transfer/recovery/restart test passed in 13.56 seconds
+with the early dialer enabled. Evidence is in
+`/tmp/burst-recovery-peers-202-network.log`.
+
+The remaining startup boundary is atomic compact-state publication. Early
+transport no longer requires ordinary admission or full-history restoration,
+but production startup still uses full-history authority recovery.
+
+## Iteration 203: pair recovery rows with matching runtime engines
+
+The staged undo projection now retains a replay-derived runtime bundle instead
+of discarding its recovered engines. It includes BRN, TRST, verification,
+governance, delegation, constitution, parameters, the installed anchor, sorted
+frontiers and ledger counts. The TRST engine uses the same cache clock as the
+staged account and portfolio rows.
+
+Construction rechecks economic and lifecycle state against the transaction,
+requires the exact installed epoch and rejects a cache clock before its cut.
+It compares staged TRST holdings and provenance with the prepared engine, then
+checks account fields including expiry and revocation counters at that clock.
+The projection exposes only a shared reference to this bundle. Production
+commit is still unavailable; the live coordinator must commit and replace all
+runtime consumers before enabling admission.
+
+All 11 installed-recovery tests and strict node/daemon Clippy passed in
+`/tmp/burst-recovery-runtime-203.log`. The expiry/reopen fixture now compares the
+prepared engine bytes, frontiers and counts with the committed disposable store.
+Existing admitted lifecycle-order tests also construct and check the bundle.
+This is not a full-node compact-startup or crash-publication test.
+
+## Iteration 204: gated compact runtime publication
+
+Startup now checks for an authenticated installed compact base after early peer
+transport starts. When present, it uses the checked recovery bundle instead of
+the full-prefix authority and engine-restoration branch. Without a base, the
+existing full-history branch remains. Certified-mode release gates stay closed.
+
+The publication coordinator requires certified startup and recovery-mode
+ingress. It acquires the same engine, processor, frontier, weight, scheduler,
+election, backlog and broadcaster locks used by checkpoint installation, before
+opening a writer. It stages checked recovery rows and journals, prepares new
+elections and frontiers, then commits and force-syncs. Commit or sync errors
+request shutdown. Engine replacement, parameter installation and cache resets
+have no await after commit; the coordinator does not open ingress itself.
+
+All 11 installed-recovery tests, three startup tests and strict node/daemon
+Clippy passed in `/tmp/burst-compact-publication-204-regression.log`. The
+admitted identity-order fixture now recovers into a node coordinator for each
+arrival order. It checks installed election authority and matching TRST and
+verification bytes, while ingress stays in recovery mode. Its rollback checks
+still pass after publication. The initial build failed on a private canonical
+encoder reference in the test; the assertion now uses the snapshot's own
+deterministic encoder.
+The TCP archive transfer/recovery/restart test passed in 12.37 seconds. The
+first fast run passed 744 tests and failed the older occupied-listener assertion:
+early P2P bind failure now returns directly from startup rather than arriving
+through a later worker failure. The assertion now checks that direct error and
+clean shutdown; RPC and WebSocket worker-failure checks are unchanged. Its
+focused rerun passed. The initial broad result is retained in
+`/tmp/burst-compact-publication-204-network.log`.
+The final fast rerun passed 745 tests, with six ignored and 56 excluded, in
+82.54 seconds. Formatting, coverage-format and whitespace checks passed in
+`/tmp/burst-compact-publication-204-final.log`.
+
+This proves the coordinator against checked fixtures, not a complete running
+pruned node. Other workers still have full-history replay dependencies. They
+must consume authenticated compact history too; process interruption at commit
+and engine-publication boundaries also needs its own compact-startup evidence.
+
+## Iteration 205: compact authentication for sync initialization
+
+Checkpoint synchronization now obtains checked initialization inputs through a
+separate async authenticator. Without a retained base it runs the existing full
+chain replay. With a base, it decodes the exact retained archive against local
+genesis configuration and replays all stored successors using authenticated
+peer ancestry witnesses. A final writer-owned check pins the base bytes and
+observed checkpoint records. No writer crosses a proof fetch.
+
+The resulting value initializes the transfer driver only. It grants no signing,
+import or installation authority. Existing checkpoint import and export paths
+retain their checks and still need compact-history support, as does the
+agreement worker. Initialization waits are shutdown-cancellable; the separate
+proof service remains available during authentication.
+
+The first validation attempt was deferred by the resource guard below 4 GiB
+available memory. A fresh memory check showed recovery above that limit, so the
+same bounded command was retried without terminating user applications.
+The sparse admitted-order regression passed for all three arrival orders. It
+first confirms that the full-history chain loader rejects the pruned fixture,
+then authenticates it through the new sync path. All 18 checkpoint-sync tests
+also passed in `/tmp/burst-sync-authority-205-regression.log`. Linking took
+3m 48s inside the existing memory and CPU limits. Clippy then rejected an unused
+import, which was removed without changing runtime behavior.
+Strict node/daemon Clippy, formatting, coverage-format and whitespace checks
+then passed in `/tmp/burst-sync-authority-205-lint.log`. No full fast-suite or
+full-node TCP rerun was performed in this iteration; their latest passing
+evidence remains iteration 204.
+
+## Iteration 206: sync recovery tip consistency
+
+Sync initialization now compares the stored accepted height with the recovered
+anchor while holding the final validation writer. A valid archive cannot hide
+a missing or older accepted-tip marker. This does not change the standalone
+archive recovery API, which can authenticate an archive without installing it.
+
+New regression cases damage the archive, successor record or accepted-tip marker
+before authentication. They check rejection and preservation of all metadata
+and block counts. The unchanged case keeps the installed epoch behind the
+accepted certificate, so initialization must authenticate the suffix too.
+A separate case checks rejection of an archive with no accepted-tip marker.
+
+Agreement integration remains unfinished. Its startup and height rotation load
+the full chain; proposal recovery, candidate preparation and decision admission
+also require full-prefix replay. An anchor-only replacement would omit the old
+decision relay and would not supply safe signing inputs. No such replacement
+was made, and no production feature gate was opened.
+
+Both new tests and all eleven installed-recovery tests passed in
+`/tmp/burst-sync-tip-206-final.log`. Strict node/daemon Clippy, formatting,
+coverage-format and whitespace checks passed too. The coverage index still has
+380 unsigned sections; passing its format check is not release signoff.
+No full fast-suite or full-node TCP rerun was performed in this iteration.
+
+Two attempted race fixtures did not request witnesses and
+failed their coverage assertions. The successor uses an empty ledger suffix;
+those tests were replaced with pre-authentication corruption cases rather than
+counting them as proof-delivery races. Existing installed-recovery tests cover
+changes during proof delivery.
+
+## Iteration 207: compact publication crash boundaries
+
+A Unix subprocess test exercises compact publication before commit, after
+force-sync, after economic engine replacement and after complete publication.
+The parent waits for an explicit boundary marker, sends SIGKILL, reaps the
+child, reopens the same sparse database and repeats authenticated recovery and
+publication. The fixture checks the recovered certified state, authority epoch,
+TRST and verification caches, frontiers and ledger counts. Application metadata
+and the retained archive must survive unchanged; ingress stays closed.
+
+The child runs inside the resource-limited validation service. The test is in
+the slow lane so the fast suite does not overlap subprocess recovery with its
+ordinary workers. Its temporary runtime directory survives until node teardown.
+
+The first attempt timed out because the readiness parser required an entire
+line, while Rust's runner prepended its test label. Timeout cleanup killed and
+reaped the child. The parser now recognizes the explicit marker within that
+line. The corrected test passed all four boundaries in 0.65 seconds in
+`/tmp/burst-compact-crash-207-final.log`. Strict node/daemon Clippy, formatting,
+shell syntax, coverage-format and whitespace checks also passed. The fast suite
+passed 747 tests, with six ignored and 58 excluded, in 72.89 seconds in
+`/tmp/burst-fast-207.log`. The new subprocess test and its ignored child helper
+are excluded from that lane. Validation exited and no child remained running.
+
+This is a coordinator crash test using a disposable node and a fixture store.
+It does not claim full startup, networking or new checkpoint agreement after
+pruning. Those workers still need compact-history integration.
+
+## Iteration 208: recovered decision relay
+
+Compact successor recovery now retains the last successfully replayed decision
+with its original parent anchor, certificate and manifest. It can construct the
+same bounded decision relay used by full-history agreement. Construction checks
+the certificate against that parent and requires an exact manifest/checkpoint
+match. Recovery replaces this retained decision only after replay succeeds.
+
+Base-only recovery returns no relay. The archive's authority path has
+certificates and rosters, but not every original decision manifest; recovery
+does not invent one. This relay cache cannot authorize a candidate or signature.
+The agreement worker's startup, rotation, candidate replay and durable signing
+checks still require compact-history integration.
+
+The stored-recovery fixture compares relay contexts and serialized offers
+against full-history replay, including base-only recovery. All 63 snapshot-history
+tests passed, with one subprocess helper ignored; four agreement-service tests
+and strict node/daemon Clippy also passed in `/tmp/burst-compact-relay-208.log`.
+The mixed deadline/pending-expiry fixture and certified fraud-outcome authority
+fixture also passed, exercising the shared comparison after non-selection
+decisions. All five transport tests passed, as did formatting and whitespace
+checks, in `/tmp/burst-compact-relay-208-mixed.log`. No full fast-suite or full-node
+TCP rerun was performed; the latest fast result remains iteration 207.
+
+## Iteration 209: compact selection proposal replay
+
+An authenticated continuation can now replay a proposed selection without a
+decision certificate. It runs the signed tail and derives the target request,
+pool, parameters and roster on a private state copy. The derived manifest must
+equal the proposed manifest. The accepted base does not advance or acquire a
+selection receipt during proposal validation.
+
+Certified selection recovery uses the same derivation helper, after checking
+the certificate and its manifest match. An eight-case regression accepts the
+exact proposal and rejects changed selection/parameter/roster commitments,
+target, parent, heads or cutoff. It also checks unchanged base state and absent
+signer journals. The resulting compact candidate still fails the existing
+complete-history signing requirement; no signing check or release gate changed.
+
+All 64 snapshot-history tests passed, with one helper ignored, and strict
+node/daemon Clippy passed in `/tmp/burst-compact-proposal-209.log`. The fast suite
+passed 748 tests, with six ignored and 58 excluded, in 71.41 seconds in
+`/tmp/burst-compact-proposal-209-fast.log`. Formatting, coverage-format and
+whitespace checks passed; the validation service exited. Durable
+compact signing still needs a checked inventory that binds replay to the
+installed epoch, confirmed cut and local promises. Non-selection proposal replay
+and live worker integration also remain open.
+
+## Iteration 210: compact final-vote coverage preflight
+
+Compact selection replay can now retain bounded membership coverage from
+authenticated base heads, historical witnesses and its replayed suffix. The
+coverage object owns the replay result and does not expose a mutable hash set.
+Historical witnesses must match the exact authenticated base context.
+
+A read-only storage preflight checks the installed payment epoch, existing
+fence and all durable final-vote promises against that coverage. The ordinary
+atomic sealing operation uses the same check and still poisons its transaction
+on failure. Preflight neither freezes voting nor writes a signer journal. A
+successful check can become stale immediately after releasing the writer; the
+eventual signing transaction must repeat it.
+
+Five vote-fence tests, four compact-selection tests and strict
+storage/node/daemon Clippy passed in `/tmp/burst-compact-coverage-210.log`.
+The regression checks included promises, rejection after an additional omitted
+promise, changed-epoch rejection and unchanged metadata. The extended test also
+passes with a final promise for a historical non-head block supplied through a
+membership witness. All 96 LMDB tests, strict Clippy, formatting, coverage-format
+and whitespace checks passed in `/tmp/burst-compact-coverage-210-final.log`.
+Validation exited. The fast node suite was not rerun; its latest result remains
+iteration 209.
+
+The existing compact-candidate signing rejection remains. Binding the candidate
+to current installed authority, finality and persisted recovery observations in
+the same journal transaction is still required before enabling compact signing.
+
+## Iteration 211: compact candidate authority and finality guard
+
+Compact selection coverage now retains exact installed-authority bytes, the
+base cutoff and payment-vote limit, account floors and authenticated membership
+positions. Positions come from base heads, matching historical witnesses and
+the causally ordered replay suffix. The constructor rejects conflicting or
+duplicate positions and keeps the existing 131,072-position bound.
+
+A read-only writer-owned check rejects changed authority, cutoff, vote limits,
+closed epochs, missing or regressed base accounts, inconsistent cemented indexes
+and confirmation targets not proved in the candidate. It checks current rows
+each time, not just observations saved during proposal replay. Successful
+preflight still cannot stand in for checks inside the signer-journal transaction.
+
+The nine-case fixture includes matching state and an included confirmation
+target, plus damaged authority/cutoff/limit, a closed epoch, regressed finality,
+a conflicting account head and an omitted confirmation target. Each check must
+leave metadata and accounts unchanged. The first run failed because the normal
+account writer preserved confirmation height and prevented the intended fault
+injection. The fixture now writes that damaged row directly. All five compact
+selection tests, strict node/daemon Clippy, formatting, coverage-format and
+whitespace checks passed in `/tmp/burst-compact-finality-211-final.log`.
+Validation exited. No signing or release gate was opened, and the latest full
+fast-suite result remains iteration 209.
+
+## Iteration 212: atomic compact selection signing
+
+A gated compact-selection entry point now uses the existing durable round
+transition, journal encoding, retained-manifest checks, locks and signature
+publication order. It separates semantic commitment validation from the old
+full-history inventory requirement without relaxing that requirement for callers
+of the original API. Compact callers must supply sealed replay coverage.
+
+Before signing, the journal writer rechecks installed authority and finality,
+requires the accepted tip to equal the parent, and seals included final-vote
+promises in the same transaction. Signatures are returned only after commit and
+force-sync. Fresh selection signatures retain the observed-clock deadline;
+prepared values retain their exact checkpoint and original beacon. Observing
+a verified quorum decision preserves minority promises without emitting a new
+local signature or installing economic state.
+
+Coverage construction also requires all frozen selection receipts from the
+authenticated base, in their original order and with identical contents. A
+caller cannot omit an old receipt and still obtain compact signing coverage.
+
+The first fixtures omitted timestamps from certified final-vote reservations
+and were rejected by the existing storage check. Corrected fixtures supply the
+timestamps. Three compact-signing tests and nine agreement tests passed, with
+one helper ignored, and strict Clippy passed in
+`/tmp/burst-compact-signing-212-final.log`. The extended late-prepare/reopen test
+initially expected a precommit before the fixture had entered prevote. The
+existing state machine correctly withheld it. The fixture now records prevote,
+reopens the database, then submits late prepare evidence for that exact value.
+The corrected test passed. The fast suite passed 753 tests, with six ignored
+and 58 excluded, in 71.96 seconds. Strict node/daemon Clippy, formatting,
+coverage-index validation and whitespace checks passed. Evidence is in
+`/tmp/burst-compact-signing-212-verified.log`. The coverage check still reports
+380 unsigned sections; it does not establish completeness.
+
+This implements a signing boundary, not a complete compact agreement worker.
+Live candidate discovery/recovery, mixed event kinds, decision persistence and
+checkpoint import/export still require integration. The production gate remains
+closed and no public release was published.
+
+## Iteration 213: retained compact journal recovery
+
+Agreement exposes the validated retained manifests without loading a full block
+prefix. The existing full-history reader uses the same journal decoder. These
+manifests only identify what to replay; they cannot authorize a signature.
+Compact recovery must authenticate witnesses and replay each retained value,
+and the signing transaction rechecks the current journal.
+
+The compact restart fixture now reads its saved manifest after reopening the
+database and reconstructs coverage from authenticated snapshot evidence. It no
+longer resumes with only the original in-memory candidate. After late prepare
+and another restart, the fixture damages the journal checksum and checks that
+both manifest recovery and signing reject it without changing metadata.
+Three compact-signing tests and nine agreement tests passed, with one helper
+ignored. Strict node/daemon Clippy, formatting and whitespace checks passed in
+`/tmp/burst-compact-journal-recovery-213.log`. The strengthened fixture also
+confirms that full-history recovery fails on the sparse store while compact
+coverage reconstruction succeeds without changing metadata. All three compact
+tests passed again in `/tmp/burst-compact-journal-recovery-213-pruned.log`.
+The full fast suite was not rerun after this change; its latest result is the
+753-test run from iteration 212.
+
+The fixture still obtains proofs from its source store. Live peer retrieval,
+mixed-event recovery and worker integration remain open. Release gates stay
+closed.
+
+## Iteration 214: asynchronous compact candidate preparation
+
+Recovered snapshots can prepare a selection candidate through the existing peer
+proof service. Planning and semantic replay run in blocking tasks. No database
+writer crosses the proof request. After replay, one writer view rechecks the
+observed checkpoint records, installed authority, accepted tip and finality.
+The method returns coverage without signing, persisting a decision or advancing
+the base. The atomic agreement transition still rechecks signing conditions.
+
+The frozen-base test passed all four cases, including changed payment epoch,
+changed accepted tip and a wrong proposal parent. Strict node/daemon Clippy
+passed. Evidence is in `/tmp/burst-compact-peer-candidate-214.log`.
+A second fixture requires a historical proof and injects authority changes
+while the proof service responds. Both candidate tests passed, including valid
+retrieval and rejection of a changed epoch or accepted tip. The injected marker
+was the only metadata change on rejected attempts. Strict Clippy, formatting
+and whitespace checks passed in
+`/tmp/burst-compact-peer-candidate-214-network.log`. This fixture uses the proof
+service channel and authenticated witness exchange, not real TCP peers.
+
+All 71 snapshot-history tests passed, with one helper ignored, in 12.60 seconds.
+Evidence is in `/tmp/burst-compact-peer-candidate-214-regression.log`. The
+coverage-index check passed its format checks and still reports 380 unsigned
+sections. Neither result establishes public-release completeness.
+
+This adds candidate preparation, not a running compact agreement session. Mixed
+event candidates, retained-candidate orchestration and live worker integration
+remain open. No release gate changed.
+
+## Iteration 215: retained candidates through peer proof recovery
+
+Compact agreement now reconstructs every retained selection through the peer
+proof service. It decodes the durable journal once, pins its exact bytes across
+retrieval, and checks them again in a final writer view. Missing journals are
+pinned as absent. Mixed-event journals fail before retrieval; no saved lock is
+silently omitted. The final view rechecks every recovered candidate and the
+observed checkpoint records. Recovery itself writes nothing and signs nothing.
+
+The focused fixture passed valid recovery and proposal resumption without a
+fresh clock, an absent journal, a corrupt journal, and a journal changed during
+proof retrieval. The latter change was the only metadata mutation. Evidence and
+strict node/daemon Clippy results are in
+`/tmp/burst-compact-journal-peers-215.log`. The strengthened fixture closes and
+reopens the database before recovery. All 72 snapshot-history tests and nine
+agreement tests passed, with one helper ignored in each group. Formatting and
+whitespace checks also passed. Evidence is in
+`/tmp/burst-compact-journal-peers-215-regression.log`. The peer service fixture
+uses authenticated witness exchange over its command channel, not TCP sockets.
+
+This connects retained journal inputs to authenticated proof retrieval. It does
+not yet integrate a compact driver into the running agreement session. Mixed
+event recovery, live candidate discovery, compact decision persistence and
+import/export remain open. Release gates stay closed.
+
+## Iteration 216: compact mode in the shared agreement driver
+
+The existing checkpoint driver now accepts sealed compact selection coverage.
+It uses the same proposal, vote, prepare, timeout, catch-up and evidence code as
+the full-history driver. Construction checks installed authority and requires
+every journal-retained manifest. Incoming proposals need cached authenticated
+coverage; the driver cannot fall back to a full-prefix replay or trust a peer's
+advertised manifest. Its signing call preserves the original observed clock
+through the atomic compact transition.
+
+A compact decision remains in the durable signer journal and can be relayed.
+The driver explicitly rejects chain persistence through the old full-history
+path. It does not advance payment authority. Compact candidate refresh still
+needs async discovery and replay; it retains the existing candidate and its
+deadline rather than inventing a replacement or clearing a lock.
+
+Nine independent sparse stores reached the same checkpoint through driver
+message exchange. Every store then closed and reopened, and its driver resumed
+its own durable certificate. Accepted chain heights and payment epochs stayed
+at the parent. This is an in-process message test, not TCP or a complete live
+node journey. It passed in 1.26 seconds; strict node/daemon Clippy also passed.
+Evidence is in `/tmp/burst-compact-driver-216.log`. The fast regression suite
+passed 757 tests, with six ignored and 58 excluded, in 73.69 seconds. Formatting,
+coverage-index format and whitespace checks passed. Evidence is in
+`/tmp/burst-compact-driver-216-fast.log`. The index still has 380 unsigned
+sections and does not establish release readiness.
+
+Runtime integration, compact decision persistence, mixed event support and
+fresh-candidate discovery remain open. The production gate is unchanged.
+
+## Iteration 217: compact selection decision persistence
+
+Compact replay coverage now retains the authenticated suffix, historical bodies
+and proposal contents needed for durable replay. Certificate persistence checks
+the human quorum and exact replayed checkpoint, then writes those archive rows,
+the selection record and accepted head in one transaction and force-syncs it.
+Conflicting archive bytes abort the transaction. Existing decisions accept a
+different valid quorum certificate for the same checkpoint without replacing
+the original record or beacon.
+
+The shared driver uses this path for explicit compact decision persistence.
+Finished-height recovery can relay its verified journaled decision after the
+accepted head advances. It does not make a fresh signature or install economic
+state. Payment epochs, final-vote promises and other economic metadata remain
+unchanged by persistence.
+
+The nine-driver fixture now persists decisions, retries persistence, reopens
+each database, resumes its journaled certificate and replays the stored compact
+successor. Its first replay callback incorrectly called a proof exchange with
+an empty request; the fixture now returns no proofs for that case. A separate
+test passes six cases covering successful persistence, invalid signatures,
+changed epoch, changed tip, conflicting archive bytes and an orphan record.
+Rejected attempts leave metadata unchanged. Both tests passed in
+`/tmp/burst-compact-persistence-217-final.log`; strict Clippy then found an
+unnecessary unwrap, which was replaced with pattern matching. All 74
+snapshot-history tests passed, with one helper ignored, in 14.80 seconds.
+Strict node/daemon Clippy, formatting, coverage-index format and whitespace
+checks passed in `/tmp/burst-compact-persistence-217-regression.log`.
+The idempotent path also enforces the existing 4 KiB beacon bound before beacon
+verification. Its final lint check is recorded separately in
+`/tmp/burst-compact-persistence-217-beacon-bound.log`.
+
+This closes the selection driver's persistence gap, not the running-node
+rotation path. Mixed event persistence, compact discovery, live runtime
+integration and end-to-end release validation remain open. Gates stay closed.
+
+## Iteration 218: terminal journal recovery after persistence
+
+Peer-assisted retained-candidate recovery previously required the old accepted
+head even when the journal already held a verified final decision. That blocked
+the relay path after compact persistence. Recovery now distinguishes an active
+round from a terminal journal. A terminal journal's quorum certificate is
+verified before its saved inputs are replayed. All retained manifests still
+undergo semantic replay, and exact journal bytes and checkpoint observations
+are rechecked after retrieval. Only active rounds require the old installed
+parent and finality checks at this stage. The atomic signer still rereads the
+journal and cannot create a new proposal from a decided state.
+
+The extended fixture reopens the database after persistence, recovers through
+the proof service, and resumes the same decision without a fresh clock. It also
+checks a changed payment-epoch marker, rejection of an unfinished journal after
+the head advances, and rejection of a fresh proposal from a recovered terminal
+journal without metadata changes. The epoch-marker case does not simulate a
+complete economic installation. Initial focused validation and strict
+node/daemon Clippy passed in `/tmp/burst-compact-terminal-recovery-218.log`.
+
+A further case retains both the signer's original proposal and a different
+value decided by the quorum. All eight fixture cases passed. All 74
+snapshot-history tests also passed, with one helper ignored, in 15.20 seconds.
+Strict Clippy, formatting and whitespace checks passed. Evidence is in
+`/tmp/burst-compact-terminal-recovery-218-final.log`.
+Live runtime rotation, discovery, mixed-event support and end-to-end release
+verification remain open. No gate was enabled.
+
+## Iteration 219: scheduled compact agreement over TCP
+
+The existing single-height service can now initialize a compact session through
+retained-journal recovery and authenticated candidate preparation. It accepts a
+new manifest or restores a saved candidate when none is supplied. The ordinary
+service loop schedules proposals, handles transport messages and persists a
+compact decision once reached. Persistence still does not install economics or
+rotate the service to another height.
+
+Seven independent sparse stores passed agreement and persistence over
+preconnected localhost TCP sockets in 6.28 seconds. All workers shut down and
+the stores reopened with verified journal decisions, advanced accepted heads
+and unchanged payment epochs. Strict node/daemon Clippy passed. Evidence is in
+`/tmp/burst-compact-service-219.log`. This test runs the actual single-height
+service and wire transport, but bypasses peer discovery and handshake setup.
+It is not evidence for NAT behavior or complete node startup.
+
+The strengthened test compares account rows before and after agreement and
+reconstructs each reopened session from its journal without a new candidate.
+It passed in 6.29 seconds. The fast suite passed 758 tests, with six ignored and
+59 excluded, in 75.76 seconds. Strict Clippy, formatting, coverage-index format
+and whitespace checks passed. Evidence is in
+`/tmp/burst-compact-service-219-regression.log`. The index still reports 380
+unsigned sections and does not establish implementation completeness.
+The TCP test is assigned to the network test group rather than the fast group.
+
+Compact multi-height runtime integration, mixed-event support, candidate
+discovery and full release verification remain open. Production gates stay
+closed.
+
+## Iteration 220: previously unseen compact peer proposals
+
+The single-height service now retains a shared authenticated replay base.
+Received compact proposals, prepare messages and decisions are authenticated
+before an unknown selection manifest is replayed through the proof service.
+Only successful replay enters the driver's candidate cache. Agreement then uses
+the ordinary durable transition and a current clock observation. Mixed event
+manifests remain rejected until their compact replay path is implemented.
+
+Proof retrieval runs without a database writer and is cancellable by shutdown.
+The shared base survives a rejected candidate or failed retrieval, so a later
+message can retry without reconstructing or copying the entire base. Existing
+owned recovery APIs retain their return shape through the shared implementation.
+
+The seven-store TCP fixture now starts the six non-proposers with a different
+valid candidate. They must independently replay the proposer's previously
+uncached value before voting. Agreement, persistence, unchanged account state,
+database reopen and journal-based session reconstruction passed in 5.94 seconds.
+Strict node/daemon Clippy passed. Evidence is in
+`/tmp/burst-compact-peer-proposal-220.log`. The fixture's frozen-base proposal
+needs no historical proof download; it does not establish live proof-service
+delivery over TCP or full-node height rotation.
+
+The shared-base rejection/retry assertion passed. The fast suite passed 758
+tests, with six ignored and 59 excluded, in 74.87 seconds. Strict Clippy,
+formatting and whitespace checks passed. Evidence is in
+`/tmp/burst-compact-peer-proposal-220-regression.log`.
+Compact multi-height integration, new-candidate discovery, mixed-event support
+and full release verification remain open. Gates stay closed.
+
+## Iteration 221: compact selection discovery
+
+Authenticated continuations can now derive the next eligible selection from a
+replayed cut without a caller-supplied manifest or target. Discovery uses the
+full-history path's lifecycle and attempt checks and skips requests already
+frozen by certified selections. It requires every authenticated selection
+receipt and closed governance at the cut. Coverage construction is shared with
+received-proposal replay, so discovery retains the same membership, archive and
+finality evidence without executing the suffix twice.
+
+An async entry point plans the cut, requests authenticated historical proofs,
+replays discovery off the async worker, and rechecks checkpoint observations and
+installed signing authority before returning a candidate. It writes nothing.
+The caller must still schedule due governance and lifecycle events before
+selection discovery and obey durable locks and the pre-beacon signing deadline.
+
+Two focused tests passed exact comparison with full-history discovery at the
+original cut and a later cut with a newer future beacon. They also check that a
+certified request is not resampled, missing receipts are rejected, the base is
+unchanged, and bare compact replay remains unusable as full-prefix evidence.
+Strict Clippy passed in `/tmp/burst-compact-discovery-221.log`.
+All three discovery tests passed, including async rejection of changed local
+authority without metadata writes. All 78 snapshot-history tests passed, with
+one helper ignored, in 20.82 seconds. Strict node/daemon Clippy, formatting and
+whitespace checks passed. Evidence is in
+`/tmp/burst-compact-discovery-221-regression.log`.
+
+Discovery is not yet wired into the compact proposer scheduler. Multi-height
+runtime integration, mixed events and complete release verification remain
+open. No production gate changed.
+
+## Iteration 222: compact candidate replacement after expiry
+
+The compact driver can replace an expired initial selection in a later round
+when its conservative clock bound establishes expiry. Replacement changes the
+proposal cache only. It requires a newer replayed cut, current installed parent
+and a future beacon deadline. A saved proposal, prepare proof or decision
+prevents replacement. The normal signing transition still checks the clock and
+durable journal before producing a signature.
+
+The restart test checks absent and uncertain clocks, unchanged journal bytes
+during replacement, successful fresh proposal construction, and late prepare
+proof priority after another round change. The focused test and strict Clippy
+passed in `/tmp/burst-compact-refresh-222.log`. All 79 snapshot-history tests
+passed, with one helper ignored, in 22.58 seconds. The full-history expired
+minority recovery test also passed. Formatting and whitespace checks passed in
+`/tmp/burst-compact-refresh-222-regression.log`.
+
+Automatic compact cut discovery and proposer scheduling are still separate
+work. This API does not enable them or change any production gate.
+
+## Iteration 223: confirmed cuts after pruning
+
+An authenticated continuation can now choose timestamp-bounded account heads
+from a proof-checked cemented suffix. It starts from authenticated snapshot
+heads and processes the suffix in causal order. Future blocks and their
+dependent descendants are excluded, even when a descendant has an earlier
+timestamp. Provisional blocks cannot enter through this API. The operation
+does not read the pruned prefix or write metadata.
+
+The test compares exact heads with the full-history selector at four cutoffs.
+It also checks an independent confirmed branch, an unconfirmed tip, an invalid
+pre-snapshot cutoff, and unchanged metadata. Two initial fixture failures were
+corrected without changing protocol validation: governance support cannot
+precede its proposal, and a stored confirmation height cannot be lowered.
+
+All 80 snapshot-history tests passed, with one helper ignored, in 22.22 seconds.
+Strict node/daemon Clippy, formatting and whitespace checks passed in
+`/tmp/burst-compact-cut-223-final.log`. The validation service exited and no
+validation process remains running.
+
+This is cut construction, not economic replay or signing authority. Async
+proof retrieval, discovery and the proposer scheduler still need to use it
+together with lifecycle priority and current finality checks. Multi-height
+runtime integration and the other release checks remain open. No gate changed.
+
+## Iteration 224: selection discovery from local compact finality
+
+`RecoveredSnapshot::discover_cemented_selection_from_peers` now joins confirmed
+suffix planning, authenticated historical proof retrieval, timestamp cut
+construction and selection replay. Callers supply a cutoff, not account heads.
+The replay reuses the fetched witnesses. Before returning, discovery rechecks
+stored checkpoint observations, the installed authority and governance metadata,
+the account inventory and indexed suffix rows. A returned candidate must also
+pass the signing-parent checks. No writer is held during proof retrieval.
+
+The frozen-base comparison passed against the existing explicit-head API.
+A nonempty confirmed suffix also produces the exact full-history manifest.
+The peer test rejects payment-epoch, checkpoint-tip and account changes during
+proof retrieval. It uses the witness request channel and authenticated proof
+exchange, not TCP or full-node scheduling. The focused tests and strict Clippy
+passed in `/tmp/burst-compact-local-discovery-224.log` and
+`/tmp/burst-compact-local-discovery-224-peer.log`.
+
+All 80 snapshot-history tests passed, with one helper ignored, in 22.73 seconds.
+The regression includes exact account and metadata comparisons after injected
+changes. Strict node/daemon Clippy, formatting and whitespace checks passed in
+`/tmp/burst-compact-local-discovery-224-regression.log`.
+
+Lifecycle scheduling must still precede selection discovery. This operation
+does not sign, install state, rotate heights or enable a production gate.
+
+## Iteration 225: compact deadline proposal construction
+
+Compact continuations can now derive a deadline manifest before a quorum
+certificate exists. Construction replays the bounded suffix in deadline mode,
+requires the complete selection receipts and closed governance, then applies
+the existing panel and pending-expiry rules to a private state copy. Full and
+compact replay share deadline manifest construction, including the parent,
+height bound, active parameter hash, human roster and effect commitment.
+The compact result remains a manifest, not full-prefix signing evidence.
+
+The signed-history comparison now derives each deadline from its compact parent
+before replaying the certified boundary and checks the exact manifest against
+full replay. It also verifies that proposal construction leaves the base state
+unchanged. Eight deadline tests and three selection-discovery tests passed,
+including combined panel/pending expiry, no-due-effect cuts and missing receipt
+rejection. Strict node/daemon Clippy passed in
+`/tmp/burst-compact-deadline-225-retry.log`. The initial build caught a borrowed
+manifest in the new assertion; only the assertion needed correction.
+
+The bounded fast suite passed 763 node tests, with six ignored and 59 excluded,
+in 76.61 seconds. Formatting and whitespace checks passed in
+`/tmp/burst-compact-deadline-225-fast.log`. The validation service exited.
+
+Compact deadline signing, persistence and automatic lifecycle scheduling are
+not enabled by this change. Mixed-event coverage and runtime rotation remain
+required. No production gate changed.
+
+## Iteration 226: shared compact selection and deadline signing
+
+Compact selections and deadlines now share private cut coverage for installed
+authority, account finality, historical membership and durable payment-vote
+fences. Deadline coverage can only be constructed through authenticated
+continuation replay. `apply_compact_candidates` accepts both kinds and uses the
+existing round journal and transition transaction. It neither persists a chain
+record nor installs economics. The selection-only API delegates to this path.
+
+The full-history and compact paths also share non-selection event validation.
+Fresh deadline signatures need a cut in the trusted past. A verified prepare
+proof retains its existing authority without requiring a new clock observation.
+Activation keeps its additional beacon-time check on fresh signatures.
+
+The four existing compact-signing tests and strict node/daemon Clippy passed in
+`/tmp/burst-compact-mixed-signing-226-retry.log`. The first compile found a moved
+validation input in the refactor; the helper now borrows it. The first deadline
+signing fixture placed its clock exactly at the cutoff. The observed-clock
+guard correctly rejected it after accounting for elapsed time; the success
+fixture now uses a past cut and retains separate absent/uncertain-clock checks.
+
+All eight deadline tests and strict Clippy passed in
+`/tmp/burst-compact-mixed-signing-226-deadline-retry.log`. The compact deadline
+signing checks cover proposal and prevote signatures, database reopen, exact
+retained manifests, re-derived coverage, precommit from a verified prepare proof
+without a clock, and another reopen with unchanged journal bytes on resume.
+
+The first fast run passed 762 tests but failed activation's clock-error check.
+The shared validator had moved the generic past-cut check ahead of activation's
+beacon-time check. The callback now preserves the original validation order;
+prepared and decided events still bypass fresh-time checks.
+
+The corrected activation regression and strict node/daemon Clippy passed.
+The final fast suite passed 763 tests, with six ignored and 59 excluded, in
+76.24 seconds. Formatting and whitespace checks passed in
+`/tmp/burst-compact-mixed-signing-226-final.log`. The validation service exited.
+
+Mixed driver/service recovery, deadline persistence and automatic scheduling
+still need integration. No production gate changed.
+
+## Iteration 227: compact deadline certificate persistence
+
+Compact deadline certificates now use the same atomic archive and chain-head
+writer as compact selections. Deadline records use the existing canonical
+version-five encoding. Acceptance verifies the certificate and exact replayed
+manifest, rechecks installed authority on a new record, enforces retained-chain
+bounds, and commits the archive with the new head before forcing synchronization.
+Retries verify the stored certificate, manifest and every supplied archive row.
+They do not rewrite the record or install economic effects.
+
+The deadline fixture rejects an empty-signature certificate without writes,
+compares the accepted record with full-history encoding, and checks unchanged
+accounts, payment epoch and all metadata outside the exact expected record,
+head and archive keys. It checks idempotence, rejects a damaged archive without
+repairing it, then records the decision in the round journal. After another
+database reopen, the journal resumes the exact decision and persistence remains
+idempotent. These are storage and signer checks, not a running-node installation.
+
+Eight deadline tests and the compact selection persistence regression passed.
+Strict node/daemon Clippy, formatting and whitespace checks passed in
+`/tmp/burst-compact-deadline-persistence-227-final.log`. Earlier focused passes
+are in the matching `-227.log` and `-227-deadline.log` files. The validation
+service exited. The last full fast-suite result remains iteration 226.
+
+Mixed driver/service recovery and automatic lifecycle scheduling remain open.
+No production gate changed.
+
+## Iteration 228: authenticated deadline proposal retrieval
+
+Peer proposal replay now returns an owned compact selection or deadline
+candidate. Both use the same bounded tail planning, historical proof retrieval
+and final authority recheck. Unsupported event kinds are rejected before
+retrieval. Deadline replay derives its effects and requires exact equality with
+the supplied manifest. The operation leaves the recovered base and database
+unchanged; signing still requires the atomic round transition.
+
+The existing selection replay APIs delegate through this shared path, including
+the separate terminal-journal recovery mode. Candidate variants are boxed to
+keep async state smaller. Strict Clippy caught their initial inline size and an
+unnecessary borrow; both were corrected.
+
+The new deadline test performs actual historical proof requests. It accepts
+the full-replay manifest and rejects a forged effect commitment, a changed
+payment epoch and a changed accepted tip during retrieval. It checks unchanged
+base state and metadata outside the injected marker. This is witness-channel
+evidence, not TCP agreement. The focused test and strict node/daemon Clippy
+passed in `/tmp/burst-compact-deadline-peer-228-retry.log`.
+
+All 80 snapshot-history tests passed, with one helper ignored, in 23.44 seconds.
+All nine deadline tests passed in 8.08 seconds. Formatting and whitespace checks
+passed in `/tmp/burst-compact-deadline-peer-228-regression.log`. The validation
+service exited. The last full fast-suite result remains iteration 226.
+
+Mixed driver/service journal recovery and automatic lifecycle scheduling still
+need integration. No production gate changed.
+
+## Iteration 229: retained deadline journal recovery
+
+The shared compact journal reader now recovers selection and deadline candidates
+through authenticated peer replay. It verifies and pins the journal before any
+retrieval, rejects unsupported saved event kinds, and rechecks the exact journal
+and every candidate in one final writer view. The selection-only wrapper retains
+its stricter accepted-kind filter. Neither entry point writes recovery results.
+
+A terminal journal's verified certificate permits replay under its original
+parent after the accepted head or installed epoch advances. Active journals
+still require the installed and accepted parent. The atomic signer remains
+responsible for rereading the terminal state before returning a decision.
+
+The new deadline test reopens the database before proof-based recovery. It covers
+an active proposal, a persisted terminal decision, concurrent journal corruption,
+an advanced head without a terminal journal, and a terminal journal after a
+payment-epoch marker change. Valid recovery resumes the exact saved output;
+rejections do not write repairs. The epoch-change case changes only the marker,
+not a full economic installation.
+
+The existing selection journal regression and strict Clippy passed in
+`/tmp/burst-compact-mixed-recovery-229.log`. The focused deadline recovery test
+and strict Clippy passed in `/tmp/burst-compact-mixed-recovery-229-deadline.log`.
+The final deadline test also rejects fresh proposals from recovered terminal
+rounds without changing journal bytes. It and all 80 snapshot-history tests
+passed, with one snapshot helper ignored. Strict node/daemon Clippy, formatting
+and whitespace checks passed in `/tmp/burst-compact-mixed-recovery-229-final.log`.
+The validation service exited.
+Driver/service use of the new mixed reader and automatic lifecycle scheduling
+remain open. No production gate changed.
+
+## Iteration 230: compact deadline driver and service integration
+
+The compact checkpoint driver now retains owned selection and deadline
+candidates. Manifest lookup, signing, replay-cache pruning and certificate
+persistence use the shared candidate interface. Selection refresh still applies
+only to expired selections and retains its clock, round and prepare-proof guards.
+Single-height sessions use the mixed journal reader and can start from either
+event kind. Incoming unknown deadlines now pass authenticated peer replay before
+the ordinary driver transition. Unsupported event kinds still fail closed.
+
+The shared TCP fixture runs seven independent stores and service workers from a
+nine-human roster. Six followers start with a different valid candidate from the
+proposer. Selection and deadline runs both reach agreement, persist the chosen
+certificate, stop their workers, reopen every store and reconstruct each finished
+session from its journal. Accounts and the installed payment epoch remain
+unchanged. The deadline run checks that historical proof requests occurred.
+Agreement messages use TCP; proof delivery uses the authenticated test channel.
+This does not cover full-node startup, peer discovery, NAT or height rotation.
+
+Both service tests passed in 14.17 seconds, followed by strict node/daemon Clippy,
+in `/tmp/burst-compact-mixed-driver-230-service.log`. Clippy's first run identified
+two selection-only wrappers with no remaining production callers; those wrappers
+are now test-only. Their shared production paths remain exercised.
+
+The fast suite passed 765 tests, with six ignored and 60 excluded, in 78.06
+seconds. Both TCP service tests are in the network lane. Formatting and whitespace
+checks passed in `/tmp/burst-compact-mixed-driver-230-fast.log`. The validation
+service exited.
+
+Automatic lifecycle discovery, other event kinds, economic installation handoff
+and multi-height runtime integration remain open. No production gate changed.
+
+## Iteration 231: compact challenge-outcome agreement
+
+Compact outcome proposals now use the same settlement executor and manifest
+constructor as full-history outcomes. The checked result includes the target,
+cut, resulting roster and economic commitment. Forged commitments fail without
+changing the authenticated base. The common candidate path now carries outcomes
+through peer proof retrieval, signing, retained-journal recovery, the driver and
+single-height service. Certificate persistence uses the existing version 2
+record encoding. No fraud, inactivity or reward rule changed.
+
+The boundary fixture now exercises outcome signing and restart, retained
+manifests, prepare-proof recovery without a fresh clock, certificate persistence
+and terminal-journal recovery. It checks invalid-clock and invalid-certificate
+rejection, byte-for-byte equivalence with full-history records, idempotence and
+damaged-archive rejection. Persistence leaves accounts and the installed payment
+epoch unchanged.
+
+Seven independent compact stores also agree over TCP with six followers starting
+from a different valid outcome proposal. Every store reopens and reconstructs
+the finished session through peer-backed journal recovery. The fixture supplies
+only post-base bodies and retained proof-bearing selection records, not the old
+ledger prefix. Historical witness requests occur. Agreement uses TCP; witness
+delivery uses the authenticated test channel. This is not a full-node startup or
+multi-height installation test.
+
+The first TCP attempt correctly rejected a fixture missing its historical
+selection beacon. The fixture now retains the proof-bearing selection record
+and recovery reauthenticates it; no production check was relaxed. The passing
+retry took 9.92 seconds. The mixed-chain signing/persistence check, ten deadline
+checks and strict node/daemon Clippy also passed in
+`/tmp/burst-compact-outcome-231-service-retry.log`. The earlier outcome run passed
+32 checks, including existing full-history TCP cases, in 122.67 seconds in
+`/tmp/burst-compact-outcome-231.log`.
+
+Both existing compact TCP service tests passed again. The fast suite passed
+765 tests, with six ignored and 61 excluded, in 78.02 seconds. The new outcome
+TCP test is in the network lane. Formatting and whitespace checks passed in
+`/tmp/burst-compact-outcome-231-fast.log`. The validation service exited.
+
+Automatic lifecycle discovery, remaining compact event kinds, economic
+installation handoff and multi-height runtime integration remain open. No
+production gate changed.
+
+## Iteration 232: compact roster agreement
+
+Roster proposals now use a shared full-history/compact manifest constructor.
+Both paths require a changed human roster and keep the previous roster as the
+signing authority. Compact replay rejects forged authority, event commitments
+and account heads without changing the authenticated base.
+
+The common candidate path now carries roster updates through peer proof
+retrieval, atomic signing, journal recovery, certificate persistence and the
+single-height service. Persistence uses the existing version 3 chain record.
+The delegation boundary test also runs compact signing/restart, proof-backed
+precommit recovery, idempotent persistence and damaged-archive rejection.
+
+Eight roster tests passed. A seven-store TCP test passed in 8.59 seconds with
+six followers initially proposing a different valid cut. All stores reopened
+and recovered their chosen decision, while account bytes and the installed
+payment epoch remained unchanged. Historical proof requests occurred through
+the authenticated test channel; only agreement messages used TCP. Strict
+node/daemon Clippy passed. Evidence is in `/tmp/burst-compact-roster-232.log`.
+
+The fast suite passed 765 tests, with six ignored and 62 excluded, in 79.11
+seconds. The roster TCP test is covered by the existing network-lane filter.
+Formatting and whitespace checks passed in `/tmp/burst-compact-roster-232-fast.log`.
+The validation service exited.
+
+Compact activation and governance proposal integration, automatic lifecycle
+discovery, economic handoff and multi-height runtime integration remain open.
+No production gate changed.
+
+## Iteration 233: compact committee activation
+
+Activation proposals now share manifest construction with full-history replay.
+Compact candidates require the complete authenticated selection receipts and
+verify the proposed beacon through the existing activation executor. They use
+the same signing deadline check as archival candidates. Prepare-proof and
+decided recovery still retain the agreed start time without requiring a fresh
+clock.
+
+The full-history constructor previously bounded fresh signatures using genesis
+parameters while activation itself used current governed parameters. Both now
+use the timeout at the activation cut. Regressions cover extension to 90 seconds
+and reduction to 30 seconds, including uncertainty and arithmetic overflow.
+The existing 60-second fresh-signature cap is unchanged.
+
+Activation now passes through compact peer replay, the shared journal/driver,
+single-height agreement and version 4 certificate persistence. The seven-store
+TCP fixture deliberately omits the later beacon-bearing selection record.
+The activation manifest supplies that proof. All stores agree and recover their
+finished sessions after reopening, without changing account bytes or the
+installed payment epoch. Historical witness delivery uses the authenticated
+test channel; agreement uses TCP.
+
+The network check passed in 6.64 seconds, both governed-activation checks passed
+in 3.34 seconds, and strict node/daemon Clippy passed in
+`/tmp/burst-compact-activation-233-retry.log`. The first build caught a test-only
+u64/u128 mismatch in proposal encoding; the fixture now converts explicitly.
+
+The fast suite passed 766 tests, with six ignored and 63 excluded, in 81.97
+seconds. Activation boundaries also exercise expired-clock rejection without
+journal changes, valid prepare-proof recovery without a fresh clock, exact
+record persistence and reopen. Formatting and whitespace checks passed in
+`/tmp/burst-compact-activation-233-fast.log`. The validation service exited.
+
+Compact governance proposals, automatic lifecycle discovery, economic handoff
+and multi-height runtime integration remain open. No production gate changed.
+
+## Iteration 234: compact governance agreement
+
+Governance proposals now use the existing exact-cut executor and a shared
+full-history/compact manifest constructor. Ballot counting, coincident deadlines
+and parameter activation retain their existing order. The compact candidate
+checks the resulting parameters, ordered proposal IDs and event commitment
+without changing its authenticated base.
+
+Governance now passes through peer-backed compact replay, the common signing
+journal, the driver, single-height service and version 6 certificate persistence.
+All six existing manifest kinds have compact candidate support. Exhaustive
+matches replace the former unsupported-event fallback; a future manifest kind
+still needs an explicit implementation.
+
+Boundary fixtures now check forged governance commitments, parameters and
+proposal lists, followed by signing, prepare-proof recovery, persistence and
+reopen. They retain the existing checks for unchanged economics, invalid clocks,
+invalid certificates, duplicate persistence and damaged archived records.
+
+The seven-store TCP test starts six followers with a different valid ballot cut
+that omits the final vote. Every signer agrees on the proposer's cut, persists
+the certificate and recovers its finished session after reopening. Account bytes
+and payment authority remain unchanged. Witness retrieval uses the authenticated
+test channel; agreement uses TCP. The test passed in 6.46 seconds. Twenty
+governance tests and strict node/daemon Clippy also passed in
+`/tmp/burst-compact-governance-234.log`.
+
+The fast suite passed 766 tests, with six ignored and 64 excluded, in 96.68
+seconds. The new TCP check is in the network lane. Formatting and whitespace
+checks passed in `/tmp/burst-compact-governance-234-fast.log`. The validation
+service exited.
+
+Automatic lifecycle discovery, economic installation handoff and multi-height
+runtime integration remain open. No production gate changed.
+
+## Iteration 235: compact automatic candidate discovery
+
+Authenticated continuations can now derive the next candidate from a bounded,
+confirmed local suffix. Discovery uses the archival runtime's order: deadline,
+outcome, activation, governance, selection, then roster. It finds the earliest
+governance cut first and limits earlier lifecycle work to the preceding second.
+Selections retain their future-beacon clock check; activation retains its fresh
+signing window. The existing event executors and manifest constructors supply
+the effects and commitments.
+
+The peer-backed entry point fetches bounded historical proofs, derives the
+candidate, then rechecks retained records and installed metadata in one writer
+view. Candidate signing-parent checks remain mandatory. Discovery does not sign,
+write a journal, persist a certificate or install state.
+
+All six seven-store TCP fixtures now first derive their expected candidate from
+a sparse confirmed store without supplying its manifest. The result matches
+the full-history proposal, and discovery preserves base bytes and metadata.
+The fixtures then run their existing agreement, persistence and reopen checks.
+All six passed in 50.37 seconds, followed by strict node/daemon Clippy, in
+`/tmp/burst-compact-discovery-235-retry.log`. The first invocation supplied test
+filters to Cargo rather than the test binary and ran no tests; the retry used
+the correct argument boundary.
+
+The peer-backed discovery regression passes both unchanged and changed local
+authority cases without metadata writes. The fast suite passed 766 tests, with
+six ignored and 64 excluded, in 81.51 seconds. Formatting and whitespace checks
+passed in `/tmp/burst-compact-discovery-235-fast.log`. The validation service exited.
+
+The running compact service still needs to call discovery when idle, preserve
+retained choices before discovering new ones, and coordinate economic handoff
+and height rotation. Coincident competing lifecycle discovery needs more
+evidence. No production gate changed.
+
+## Iteration 236: recover or discover compact service startup
+
+The compact service can now start without an explicit manifest. Startup first
+authenticates every retained journal candidate. If any exist, it builds the
+session from those choices, even without a clock. Only an empty retained set
+permits fresh discovery. Missing time or no due event returns the authenticated
+base as an idle result, without creating a signer journal.
+
+All six network fixtures now start the proposer through this path. The proposer
+has a confirmed sparse suffix; followers retain their alternate candidates and
+stage incoming bodies separately. Activation discovery requires the proposer's
+known beacon, while followers authenticate the proof carried by the proposal.
+Every node reopens through the same recover-or-discover entry point without a
+clock. All six tests passed in 42.65 seconds in
+`/tmp/burst-compact-startup-236.log`.
+
+An additional idle fixture checks a trusted clock with no due event and unchanged
+base/metadata. The journal fixture checks that an active saved deadline wins
+over a later discovery clock. Terminal choices also resume after the accepted
+tip or installed epoch marker advances. Both targeted checks and strict
+node/daemon Clippy passed in `/tmp/burst-compact-startup-236-retry.log`. The first
+lint pass identified an oversized private startup-mode enum; its explicit
+manifest is now boxed.
+
+The fast suite passed 767 tests, with six ignored and 64 excluded, in 81.38
+seconds. Formatting and whitespace checks passed in
+`/tmp/burst-compact-startup-236-fast.log`. The validation service exited.
+
+The continuous runtime still needs idle retry, observer admission, economic
+handoff and height rotation. This constructor does not substitute for those
+running-node paths. No production gate changed.
+
+## Iteration 237: compact observer decision admission
+
+A recovered compact observer can now authenticate and persist a decision without
+a signing key or signer journal. It verifies the parent quorum and exact manifest
+before requesting historical proofs, replays the effects, then checks the
+recovery records again inside the persistence transaction. Acceptance advances
+the certified head only. It does not install economic state or change payment
+authority. Callers must reload recovery observations before another admission.
+
+Each of the six TCP agreement fixtures now passes its decision to a separate
+sparse observer. These checks cover acceptance, unchanged accounts and payment
+epoch, no signer journal, reopening and an idempotent retry. Invalid signatures
+and certificate/manifest mismatches fail without writes. The six tests passed in
+43.05 seconds in `/tmp/burst-compact-observer-237.log`; strict node/daemon Clippy
+also passed. Observer admission uses the API and authenticated proof test channel,
+not a running observer's checkpoint packet loop.
+
+The deadline adversarial fixture also exercises observer admission while the
+payment epoch or accepted head changes during proof retrieval. A quorum-signed
+manifest with false replay effects is rejected too. These checks preserve all
+metadata except the fixture's injected change and leave the recovered base
+unchanged. Targeted validation passed in
+`/tmp/burst-compact-observer-237-final.log`.
+
+The same run passed 767 fast node tests, with six ignored and 64 excluded, in
+82.37 seconds. Strict node/daemon Clippy, formatting and whitespace checks passed.
+The resource-limited validation service exited.
+
+Continuous idle retry, observer packet routing, economic handoff and height
+rotation still need live-node integration. No production gate changed.
+
+## Iteration 238: compact observer packet worker
+
+`run_compact_observer` receives compact decisions through the bounded agreement
+inbox and existing pull transport. It uses the keyless admission path from
+iteration 237 and publishes a decision only after replay and persistence succeed.
+It then serves the accepted decision without replaying against stale recovery
+observations. Non-decision traffic cannot make this worker sign or relay proposals.
+Transport decoding and publication run on blocking workers; proof retrieval does
+not hold a registry or database writer lock. Shutdown can interrupt proof waits.
+
+All six agreement fixtures now send their certificate to the observer over a
+separate localhost TCP connection. Each waits for the observer to offer and serve
+the exact accepted decision back through the pull protocol, then shuts down and
+joins the worker. Existing assertions still check unchanged accounts and payment
+authority, no signer journal, reopen and idempotent admission. Historical proofs
+still use the authenticated test channel. This is a single-height worker test,
+not a daemon bootstrap or multi-height installation journey.
+
+The first compile rejected a test assertion because agreement messages do not
+implement equality. The test now compares their serialized bytes. All six TCP
+tests passed in 45.60 seconds and strict node/daemon Clippy passed in
+`/tmp/burst-compact-observer-worker-238-retry.log`.
+
+The fast suite passed 767 tests, with six ignored and 64 excluded, in 82.17
+seconds. Formatting and whitespace checks passed in
+`/tmp/burst-compact-observer-worker-238-fast.log`. The validation service exited.
+
+The node's continuous runtime still uses the full-history path. It must select
+compact workers from recovered authority, retry discovery while idle, reconcile
+economic installation and rotate heights. The new worker does not replace those
+requirements or open a release gate.
+
+## Iteration 239: retain compact recovery state across startup failures
+
+Compact startup now accepts a shared authenticated base. A runtime can keep that
+base when discovery finds nothing or historical proof retrieval fails, then
+retry without cloning economic state or reloading the archive. The existing
+owned startup API delegates to the same implementation. Journal recovery still
+replays every retained choice, pins the journal bytes across proof retrieval and
+rechecks all candidates against one final writer view. No failure permits a
+fresh candidate to replace a saved choice.
+
+The saved-deadline fixture now starts with an unavailable proof service. Startup
+fails without changing metadata or retaining an extra base reference. Retrying
+with the restored service and the same base resumes the saved choice without a
+clock. Dropping that session leaves the journal and all metadata unchanged. The
+existing terminal-journal and changed-authority checks exercise the shared path
+too. This establishes retry-safe startup, not the continuous retry scheduler.
+
+All eight focused checks passed in 48.21 seconds, including the six TCP agreement
+and observer fixtures, idle discovery and deadline journal recovery. Strict
+node/daemon Clippy passed in `/tmp/burst-compact-shared-startup-239-final.log`.
+The same run passed 767 fast node tests, with six ignored and 64 excluded, in
+83.24 seconds. Formatting and whitespace checks passed; the validation service
+exited.
+
+Continuous runtime role selection, incoming proposals while idle, economic
+handoff and height rotation remain unfinished. No production gate changed.
+
+## Iteration 240: compact idle discovery and incoming session startup
+
+`run_compact_height` now chooses observer behavior for a missing or ineligible
+local key. An eligible signer retains the authenticated base while idle and
+retries recover-or-discover startup every five seconds. Missing time or proof
+availability does not end the worker. An authenticated proposal or prepare proof
+can also start a session before local discovery finds a candidate. Both paths
+recover every retained journal choice before constructing the signer.
+
+Incoming proposal authentication runs on a blocking worker. Once replay and
+startup succeed, the existing session worker handles the message, signing and
+transport. Failed fresh signing still respects the clock checks and leaves the
+durable session available for retry. The observer path continues to replay and
+persist decisions without installing economics, then serves only its accepted
+decision at that height.
+
+The six TCP fixtures now start their proposer without a session. Its first clock
+observation is unavailable; a later scheduled attempt discovers the candidate.
+A second signer starts without a candidate and receives no clock until its
+session journal exists. It must therefore enter through an incoming proposal,
+then obtain time before casting fresh value signatures. Other signers retain
+their alternate candidate fixtures. Historical proofs still use the authenticated
+test channel rather than these agreement TCP sockets.
+
+All six TCP fixtures passed in 66.56 seconds. Strict node/daemon Clippy and the
+fast suite passed in `/tmp/burst-compact-idle-worker-240-final.log`: 767 tests,
+six ignored and 64 excluded, in 82.11 seconds. Formatting and whitespace checks
+passed, and the resource-limited validation service exited. The earlier
+proposer-only run also passed; the final run adds incoming follower startup.
+
+This worker covers one height. The daemon still needs compact worker selection,
+economic handoff, authority reload and height rotation. No production gate changed.
+
+## Iteration 241: installed authority handoff for compact workers
+
+`recover_compact_authority` recovers the exact installed epoch and its checked
+economic metadata. It does not substitute a newer accepted certificate. Before
+returning the worker context, it rechecks the archive, recovery records,
+inventories, signer journals, applied tail and economic state under one writer.
+That writer is dropped without committing any changes.
+
+Rotation also requires a strictly newer authority whose authenticated path
+contains the current worker's authority at the same height and hash. Network and
+genesis must match. An absent compact base returns None only for initial loading;
+once rotating a compact worker, a missing base is an error rather than permission
+to fall back to another recovery path. This extraction neither installs economic
+state nor publishes runtime caches.
+
+The new sparse-store fixture passes ten cases: initial loading while the
+accepted tip is newer, a valid installed successor, same-height and backward
+rotation, foreign authority, an epoch marker without matching state, an epoch
+change during proof retrieval, and missing-base behavior for startup and rotation.
+Only the fixture's injected epoch change survives; the handoff writes nothing.
+The focused test passed in 0.51 seconds and strict node/daemon Clippy passed in
+`/tmp/burst-compact-authority-handoff-241.log`.
+
+The first fast run failed the existing stored-successor peer recovery test, with
+767 other tests passing. Its helper panicked when the proof channel closed and
+hid the recovery result. An isolated retry passed, but improved diagnostics in
+the next full run exposed the fixture error: recovery succeeded without needing
+any historical proofs. The old test could hide this by aborting its helper before
+the helper reported the closed channel. The fixture now starts from a selection
+snapshot and adds a representative change afterward. Recovery must fetch its
+historical dependencies, and the test requires the helper to serve them. The
+timeout is unchanged. The failed runs remain recorded in
+`/tmp/burst-compact-authority-handoff-241-fast.log` and
+`/tmp/burst-compact-authority-handoff-241-fast-retry.log`.
+
+The corrected peer fixture passed in 0.24 seconds. The final fast run passed
+768 tests, with six ignored and 64 excluded, in 112.76 seconds. Strict
+node/daemon Clippy, formatting and whitespace checks passed in
+`/tmp/burst-compact-authority-handoff-241-final.log`. The validation service exited.
+
+The coordinator still needs to call this check after economic installation,
+stop the old worker, retain its decision relay and start the next height. No
+production gate changed.
+
+## Iteration 242: compact multi-height coordinator, validation pending
+
+Added `run_compact_node` and its coordinator. It loads checked installed
+authority, routes bounded packets to one height worker and attempts authority
+refresh once per second. Recovery errors leave the old worker in place. A
+successful refresh prepares the previous decision relay before stopping and
+joining the old worker, then starts the successor. A missing replayed decision
+blocks rotation instead of silently discarding catch-up service. Shutdown joins
+the owned child; an interrupted join retains its task handle for cleanup.
+
+The new fixture starts with an accepted tip ahead of installed state, checks
+that an epoch-marker-only change cannot rotate the coordinator, then supplies
+the successor's checked economic projection. It checks the new authority,
+previous relay context and unchanged metadata through refresh and shutdown.
+The fixture supplies projection directly, so it is not a live economic publisher
+or daemon installation journey.
+
+Validation has not run. The resource guard refused the attempt because less than
+4 GiB was available. The desktop had about 2.1 GiB available and nearly full swap;
+no compiler was launched and no user applications were stopped. The refusal is
+recorded in `/tmp/burst-compact-runtime-242.log`. Formatting, compilation and the
+new test still need validation. The daemon's `run_node` dispatch is unchanged.
+Do not count this coordinator as completed integration or enable release gates.
+
+## Iteration 243: validate compact coordination and select it at startup
+
+Memory initially remained below the local guard's threshold, so validation was
+deferred again. A read-only Azure inventory found the existing validation VMs;
+none were started or changed. Once desktop memory recovered, validation ran
+through the unchanged resource wrapper.
+
+The coordinator transition test passed its authority and relay checks but timed
+out during test cleanup: the test retained the stopped coordinator's registry
+reference while waiting for the proof service to close. It now drops that owner
+before joining the service. A new sparse-store fixture receives the previous
+decision through a TCP output channel and requests its chunks through the
+agreement inbox. It checks the exact certificate/manifest and unchanged metadata.
+The store deliberately lacks the full chain prefix, so the ordinary full-history
+loader cannot initialize it. Historical proofs still use the test service.
+
+Both focused tests passed in 0.48 seconds, and strict node/daemon Clippy passed
+in `/tmp/burst-compact-runtime-243-focused-retry.log`. An earlier compilation of
+the new fixture failed on a missing test import; that import is now explicit.
+Previous-decision cache construction now also runs on a blocking worker.
+
+`run_node` now selects the compact coordinator when the installed snapshot base
+is present at startup. Stores without that base retain the ordinary runtime.
+The sparse-store relay fixture now calls this shared entry point. The coordinator
+uses the checked installed epoch, stops and joins its old child before starting
+the new height, and retains the recovered previous-decision relay.
+
+Both tests passed through the final code in 0.55 seconds. The fast suite passed
+770 tests, with six ignored and 64 excluded, in 95.99 seconds. Strict
+node/daemon Clippy, formatting and whitespace checks passed in
+`/tmp/burst-compact-runtime-243-final.log`. The validation service exited. This
+supersedes iteration 242's pending-validation status, not the wider release gates.
+
+Live compact economic publication, switching an already-running full-history
+worker after a new snapshot installation, rotation across base replacement, and
+full-node multi-height/crash journeys still need integration and evidence. No
+production release gate changed.
+
+## Iteration 244: prepare compact economic installation
+
+The live installer still reads the full ledger prefix. The new
+`RecoveredInstalledMetadata::prepare_next_from_peers` prepares its compact
+replacement input without changing the database. It selects the immediate
+accepted successor of the checked installed epoch and replays its bounded tail
+through the existing economic executor. Activation authenticates the original
+selection beacon before replay.
+
+The returned preparation retains the installed-state checks and checkpoint
+record observations. Its writer check repeats those checks and rejects a cut
+that would omit local finality or queued confirmations. No writer or runtime
+lock crosses a peer wait. There is deliberately no commit operation yet;
+sparse ledger projection and atomic live publication remain required.
+
+Initial compilation caught an attempted clone of a non-cloneable certificate.
+The replay now attaches authenticated activation evidence to its owned recovery
+context. The first focused run then caught a test assumption that selection
+must fetch a historical proof; this fixture can replay without one. The test
+no longer asserts a request that its inputs do not require. Both failed logs
+remain at `/tmp/burst-compact-installation-244.log` and
+`/tmp/burst-compact-installation-244-retry.log`.
+
+The first expanded run passed seven checks but failed challenge-outcome installed
+recovery before successor preparation. It found an intermediate
+`verification_orchestrator` entry retained in replay lifecycle metadata. Durable
+projection writes the final engine separately. Recovery incorrectly expected that
+intermediate entry in the lifecycle-only inventory, and undo-row reconstruction
+would emit the engine key twice. Projection, validation and undo rows now use
+the same lifecycle iterator, excluding that separately persisted engine. The
+engine's independent decoded-state comparison remains mandatory. Snapshot bytes
+and protocol rules have not changed. The diagnostic failures are retained in
+`/tmp/burst-compact-installation-244-final.log`,
+`/tmp/burst-compact-installation-244-outcome-retry.log` and
+`/tmp/burst-compact-installation-244-lifecycle.log`.
+
+The three-height fixture proves that preparation chooses the immediate successor
+instead of the accepted tip. Its roster transition requires peer membership
+proofs and matches full replay. The shared TCP observer fixture now also stages
+and drops undo reconstruction after preparation. Five post-preparation metadata
+changes fail the writer recheck without further writes. All eight focused checks
+passed in 77.37 seconds. The fast suite passed 772 tests, with six ignored and
+64 excluded, in 149.81 seconds. Strict node/daemon Clippy, formatting and
+whitespace checks passed in `/tmp/burst-compact-installation-244-complete-retry.log`.
+Two earlier launches were deferred by the unchanged memory guard; neither started
+a compiler. No release gate changed.
+
+## Iteration 245: connect compact successors to live publication
+
+The compact preparation now has a gated commit used by the existing checkpoint
+publication runtime. Before writing, it repeats installed-state, record and
+finality checks under one clean writer. It projects authenticated sparse bodies,
+economic state and the next epoch together, commits, then force-syncs before
+returning the engine bundle. Runtime publication holds the same locks as the
+full-history path. The original signed base archive remains unchanged; recovery
+authenticates the new state through its retained successor records.
+
+Sparse membership cannot prove that an old promise was excluded. Compact handoff
+therefore retains every old promise without classifying it as a minority vote.
+Full-history preparation and commit now reject an installed compact base, so a
+concurrent mode switch cannot silently use the full-history replacement path.
+
+The six TCP agreement fixtures now commit the observer's compact successor and
+recover the installed state, comparing it with the prepared state. Those checks
+and the two preparation tests passed in 79.36 seconds; strict node/daemon Clippy
+passed in `/tmp/burst-compact-publication-245.log`. The coordinator rotation test
+now uses this checked commit instead of directly writing economic state.
+
+The first live-cache fixture failed while setting up its vote promise because
+it omitted the timestamp required by certified authority. It now supplies the
+timestamp through the existing reservation API. The next attempt correctly
+rejected its head-only store as an unidentified network. The runnable fixture
+now retains the pinned genesis block while still omitting the old account prefix.
+Both setup failures remain in `/tmp/burst-compact-publication-245-final.log` and
+`/tmp/burst-compact-publication-245-final-retry.log`.
+
+The five final focused checks passed in 1.32 seconds. They cover runtime engine,
+frontier and count publication, stale queue clearing, promise preservation,
+idempotence, coordinator rotation and rejected stale commits. The fast suite
+passed 774 tests, with six ignored and 64 excluded, in 96.14 seconds. Strict
+node/daemon Clippy, formatting and whitespace checks passed in
+`/tmp/burst-compact-publication-245-genesis.log`. The validation service exited.
+
+The runtime-object check is not a started-node admission or crash journey.
+Full-node multi-height publication and recovery, full-to-compact worker switching
+and rotation across base replacement still need evidence. No release gate changed.
+
+## Iteration 246: started-node compact installation and payment recovery
+
+The new journey starts an archival node and a sparse node with their normal TCP
+listeners, handshake, proof service, checkpoint workers and wallet RPC. The
+sparse node starts at a signed roster snapshot and installs two retained,
+certified successors. It rejects a stale-epoch payment, stores and relays a valid
+payment, restarts, restores that account head and stores another valid payment.
+The base archive stays byte-identical. Full-prefix checkpoint replay still fails
+on the sparse store before and after restart, ruling out that fallback.
+
+The first completed journey passed in 104.24 seconds in
+`/tmp/burst-compact-live-246-admission.log`. The certificates are supplied by the
+fixture; this does not test new Byzantine agreement or downloading a first base.
+The processor clock is controlled, and the beacon relay is unavailable locally.
+No source gate was opened.
+
+The journey exposed and corrected three integration problems:
+
+- The beacon worker required the full checkpoint prefix. Compact stores now
+  recover their queue from the authenticated base and successor proofs. The
+  committee authority lookup starts at the selected certificate, because an
+  earlier installed epoch cannot authorize it.
+- Concurrent local proof requests were rejected as busy. The one-slot queue now
+  applies backpressure until the active transfer finishes or is cancelled.
+  Shutdown and the overall request timeout still bound waiting. A new transfer
+  polls immediately rather than waiting for the next retry tick.
+- Installed authority could advance during peer retrieval, invalidating the
+  old recovery attempt's journal checks. The coordinator retries from scratch
+  only if its durable epoch changed. An unchanged-epoch error still fails.
+
+The fixture also needed two corrections. Its archival node must install earlier
+epochs before cementing the newer suffix; the original ordering correctly failed
+the cemented-history guard. RPC acknowledges queued blocks, so the stale-payment
+check now waits for rejection and checks absence from storage. Valid payments
+must enter storage before the test proceeds. Traces showed completed proof jobs
+and a successful first installation beyond the original 30-second window; the
+readiness bound is now 90 seconds. Repeated retained-inventory retrieval remains
+a measured performance issue, not a closed performance requirement.
+
+Earlier failures remain in `/tmp/burst-compact-live-246-focused.log`,
+`/tmp/burst-compact-live-246-diagnostic.log`,
+`/tmp/burst-compact-live-246-beacon-retry.log`,
+`/tmp/burst-compact-live-246-trace.log` and
+`/tmp/burst-compact-live-246-progress.log`. Two initial attempts were deferred by
+the memory guard before compilation.
+
+Final validation passed in `/tmp/burst-compact-live-246-final.log`: the repeated
+full-node journey and the proof-queue cancellation regression passed in 104.88
+seconds. The queue test checks that a second caller waits, cancellation releases
+the active slot, shutdown closes the remaining request, and no metadata changes.
+The fast suite passed 775 tests, with six ignored and 65 excluded, in 96.68
+seconds. Strict node/daemon Clippy, formatting and whitespace checks passed.
+The network journey is excluded from fast workers. The validation service exited.
+
+## Iteration 247: live compact successor crash recovery
+
+The started-node fixture now supports a subprocess killed during its second
+compact successor installation. Five cases pass: before commit, after commit,
+after economic cache publication, after authority publication and after complete
+publication. Both TCP listeners are open before the kill. Each case checks the
+durable epoch, unchanged signed base and authenticated economic projection, then
+restarts the node through its normal peer and RPC paths. A stale-epoch payment is
+rejected and a valid payment enters storage. Restored BRN, TRST, authority and
+ledger-count caches match persisted state.
+
+The first attempt failed because serialized NodeConfig omits protocol parameters.
+The subprocess fixture now restores its original selection parameters explicitly.
+The next attempt exposed a production recovery race: an ordinary payment could
+change retained history during peer retrieval without changing the installed
+epoch. The coordinator treated that stale recovery attempt as database corruption
+and shut down. Recovery now retries authentication when the LMDB transaction
+revision changes during a failed attempt. It never publishes the failed attempt;
+errors against an unchanged database still fail closed.
+
+The five-boundary test passes in 593.04 seconds in
+`/tmp/burst-compact-crash-247-revision.log`. Earlier failed attempts remain in
+`/tmp/burst-compact-crash-247.log` and
+`/tmp/burst-compact-crash-247-params.log`. These tests use disposable stores,
+fixture certificates and controlled clocks. They do not establish power-loss
+durability, downloaded-base installation, Byzantine agreement or pruning safety.
+Repeated authenticated proof retrieval still needs bounded reuse. No release
+gate changed.
+
+Final regression checks pass in `/tmp/burst-compact-crash-247-final.log`.
+The two-node installation/payment/restart journey passed again in 109.55 seconds.
+The fast suite passed 775 tests, with six ignored and 67 excluded, in 87.62
+seconds. Strict node/daemon Clippy, formatting and whitespace checks passed.
+The crash subprocess helper and network journey stay outside the fast suite.
+The resource-limited validation job exited successfully.
+
+## Iteration 248: bounded authenticated proof reuse
+
+The historical-proof service now retains successfully authenticated requested
+bodies in memory. Reuse requires the same network, genesis, checkpoint and state
+hash, the same account and a height within the requested authenticated prefix.
+Equal-height reuse also checks the head hash. Invalid requests fail before cache
+lookup. A miss follows the existing peer transfer path. FIFO eviction caps the
+cache at 128 bodies and 1 MiB of encoded block data, plus bounded entry overhead.
+The cache does not write ledger rows or replace final installation rechecks.
+
+Two new tests cover reuse without peers, wrong snapshot/account rejection and
+eviction after 140 requested bodies. Existing tests now also check multi-account
+plan reuse and invalid requests against a populated cache. Cancellation and
+timeout checks use a fresh uncached transfer so they still exercise waiting.
+The focused run passed 11 tests in `/tmp/burst-witness-cache-248.log`.
+
+Final validation passed in `/tmp/burst-witness-cache-248-final.log`: 777 fast tests,
+six ignored and 67 excluded, in 87.70 seconds. The two-node restart journey and
+all five second-successor process-crash cases passed in 275.33 seconds combined.
+The subprocess helper is ignored outside its parent test. Those same journeys
+took 702.59 seconds across iteration 247's runs. This comparison covers the
+controlled fixture, not production throughput or arbitrary history sizes.
+Strict node/daemon Clippy, formatting and whitespace checks passed. The bounded
+validation service exited successfully; no source release gate changed.
+
+Downloaded-base installation, worker switching across base replacement, pruning
+and the other recorded release requirements remain unfinished.
+
+## Iteration 249: snapshot checkpoint-head reconciliation
+
+Downloaded-base preparation previously staged payment authority without moving
+the accepted checkpoint head. That would leave ordinary successor installation
+without the parent head it requires. Economic projection now stages the accepted
+head in its existing writer, before storing the new archive. Dropping the guard
+still aborts the head, ledger and economic projection together. The guard still
+has no public commit API; startup integration remains unfinished.
+
+Snapshot path reconciliation now accepts sparse pre-base records only when a
+stored archive authenticates that prefix and matches the incoming authority path.
+Every post-base accepted successor must remain present. All retained records are
+checked against the incoming certificate path and their certified account-head
+commitment, within the existing chain byte limit. No retained record or signing
+promise is removed or rewritten.
+
+The focused run passed all 18 reconciliation tests in 3.40 seconds in
+`/tmp/burst-snapshot-head-249-focused.log`. The new seven-case test covers sparse
+and retained prefixes, a missing successor, damaged archive, conflicting record,
+missing head and noncanonical record key. The economic projection test checks
+the staged head, absence of fabricated records and isolation from readers. The
+first attempt in `/tmp/burst-snapshot-head-249.log` failed to compile because the
+test used a nonexistent writer deletion method; the fixture now omits that key.
+
+Final regression checks pass in `/tmp/burst-snapshot-head-249-final.log`: 778 fast
+tests, six ignored and 67 excluded, in 87.15 seconds. Strict node/daemon Clippy,
+formatting and whitespace checks pass. The resource-limited job exited. No live
+downloaded-base installation is claimed and no source gate changed.
+
+## Iteration 250: startup snapshot integration in progress
+
+The explicit `snapshot_bootstrap` configuration path now authenticates an archive
+against configured genesis, retrieves its head/finality witnesses through the
+recovery peer service, then reconciles and commits the sparse projection under
+one writer. Startup force-syncs and runs ordinary installed-state/cache recovery
+before admission. The source release gate is checked before genesis creation.
+The crate-private commit also checks the gate. An identical installed base is
+not reinstalled on restart; its installed epoch and tail still undergo recovery.
+Automatic download-to-install coordination remains separate unfinished work.
+
+The new live test starts an empty node beside an archival peer and attempts
+bootstrap, payment admission, restart and another payment. It is currently
+failing, not release evidence. The first failure showed that fresh-node genesis
+bytes included an optional local signature while snapshot authentication requires
+the canonical genesis block. Initialization now uses the canonical block without
+depending on locally available private keys. Later authority transactions still
+require their ordinary signatures. Existing databases are not rewritten.
+
+After that fix, the live run reaches installed-state startup but the beacon worker
+fails with `selection chain record is missing`. It is trying to publish an
+archive-recovered selection through the retained-record path. The next work must
+authenticate selection publication and exact beacon persistence against the
+stored archive, including installed ancestry and lifecycle checks. Do not skip
+the committee work or fabricate full-history selection records to pass this test.
+
+Evidence is in `/tmp/burst-snapshot-bootstrap-250.log`,
+`/tmp/burst-snapshot-bootstrap-250-genesis.log` and
+`/tmp/burst-snapshot-bootstrap-250-runtime.log`. A separate rejection test covers
+the closed gate and damaged archive. No release gate was changed.
+
+The fast regression run passed 779 tests, with six ignored and 68 excluded, in
+94.80 seconds. It includes the startup gate/archive rejection test. Strict
+node/daemon Clippy, formatting and whitespace checks passed. Evidence is in
+`/tmp/burst-snapshot-bootstrap-250-fast.log`. The validation job exited; the
+separate live bootstrap failure above remains unresolved.
+
+## Iteration 251: archive-backed selection publication
+
+Selection publication now authenticates pre-base receipts against the persisted
+snapshot instead of requiring absent checkpoint records. It checks the receipt,
+certificate and parent, installed authority, applicable parameters and confirmed
+snapshot heads. Existing lifecycle, history-commitment and committee checks still
+run. Selections after the archive base retain the ordinary record path.
+
+Exact beacon proofs use `snapshot_selection_beacon/v1/{selection}`. Attachment
+validates the frozen round and proof before taking the writer, checks the stored
+archive under that writer, rejects replacement with different bytes, commits and
+force-syncs. Recovery observes these rows and authenticates each proof against
+its recovered selection. No missing historical records are manufactured and no
+signing promises are cleared.
+
+The formerly failing empty-node bootstrap test passes in 16.47 seconds in
+`/tmp/burst-archive-selection-251-live.log`. It installs an explicitly supplied
+archive, retrieves authenticated bodies from an archival peer, rejects stale
+payment context, stores a payment, restarts with the same archive option and
+stores another payment. It uses fixture certificates and a controlled clock.
+Automatic peer-download-to-install coordination is not part of this test.
+
+A new committee test passes wrong-round rejection without writes, valid beacon
+attachment, committee publication, reopen and recovery without historical
+checkpoint records. Its focused run passed in 0.27 seconds. Initial compilation
+errors in `/tmp/burst-archive-selection-251.log` were corrected before validation.
+Activated/settled lifecycle bootstrap, crash boundaries and base replacement
+still need their full-node evidence. No source release gate changed.
+
+Final validation passed in `/tmp/burst-archive-selection-251-final.log`: the
+focused committee test, 780 fast tests with six ignored and 68 excluded in
+94.62 seconds, strict node/daemon Clippy, formatting and whitespace checks.
+The resource-limited validation job exited successfully.
+
+## Iteration 252: startup archive crash boundaries
+
+The bootstrap journey now kills a disposable node before the snapshot commit,
+immediately after commit, after force-sync, after economic-cache publication and
+after final runtime-cache publication. Test-only hooks expose the first three
+boundaries; the existing recovery hooks cover the last two. The subprocess helper
+accepts an explicit occurrence count so bootstrap tests stop on the first startup
+publication while successor tests retain their original counts.
+
+Every boundary keeps RPC closed while the recovery P2P listener is available.
+After SIGKILL, reopening the database finds only genesis before commit or the
+complete authenticated snapshot after commit. Postcommit cases compare recovered
+economic state with the source snapshot. The node then restarts normally, rejects
+a stale-epoch payment and stores a valid payment. Full-prefix checkpoint replay
+still fails on the compact store.
+
+All five cases pass in 249.39 seconds in `/tmp/burst-bootstrap-crash-252.log`.
+These are process crashes under controlled clocks with fixture certificates.
+They do not establish power-loss durability, active/settled lifecycle bootstrap,
+base replacement or automatic download handoff. No release gate changed.
+
+Final checks pass in `/tmp/burst-bootstrap-crash-252-final.log`: the normal
+bootstrap/payment/restart journey in 15.29 seconds, 780 fast tests with six ignored
+and 69 excluded in 93.75 seconds, strict node/daemon Clippy, formatting and
+whitespace checks. The crash test remains in the serialized network group. The
+resource-limited validation service exited successfully.
+
+## Iteration 253: active-panel archive bootstrap
+
+The active-panel bootstrap test reproduced a shutdown after startup: the economic
+state retained its committee, but the archive omitted the exact beacon proof
+needed by selection publication. The existing check correctly refused to accept
+an unverifiable installed panel.
+
+Archive framing version 2 carries exact beacon supplements outside the unchanged
+version-5 economic body. Export collects proofs from authenticated selections.
+Import verifies each proof against its frozen request, certificate and pinned
+drand configuration. Supplements must follow selection order, cannot repeat or
+name an unknown selection, and have bounded count and size. Durable archive
+installation preserves the supplements for restart. Framing version 1 is refused;
+re-export does not require changing state attestations or clearing signer journals.
+
+The started-node active-panel journey passes in 14.68 seconds in
+`/tmp/burst-bootstrap-active-253-fix.log`. It compares the original selection
+context, selected committee and activation metadata before and after restart.
+Both runs reject a stale-epoch payment and store a valid payment. Historical
+checkpoint records remain absent from the bootstrapped store. The original
+failure is retained in `/tmp/burst-bootstrap-active-253.log`.
+
+The final run passes malformed signature, wrong-round, unknown-selection,
+duplicate, altered-value and oversized-proof rejection. The state manifest stays
+identical before and after beacon attachment. Both bootstrap journeys pass in
+30.14 seconds, followed by 781 fast tests in 98.90 seconds, six ignored and 70
+excluded. Strict node/daemon Clippy, formatting and whitespace checks also pass in
+`/tmp/burst-bootstrap-active-253-final.log`. The resource-limited job exited
+successfully. This does not cover
+settled-panel archives, automatic download handoff, base replacement or production
+clock behavior. No release gate changed.
+
+## Iteration 254: completed-verification archive bootstrap
+
+The bootstrap fixture now completes a normal verification with signed legitimate
+votes and certifies the resulting human roster. A fresh node installs the exported
+archive, recovers the verified identity, rejects a stale-epoch payment, stores a
+valid payment, restarts and stores another payment. Full-prefix checkpoint replay
+remains unavailable on the compact node.
+
+The initial run passes in 17.23 seconds in `/tmp/burst-bootstrap-settled-254.log`.
+The expanded final run compares the entire verification snapshot, activation
+metadata, pending rewards for fixture wallets and BRN state for wallets other
+than the payment sender. The sender's burn counter and returned-stake consumption
+can legitimately change with the test payment. The first expanded run failed
+because JSON could not encode a 128-bit amount in the test assertion. The
+comparison now uses the protocol's deterministic snapshot encoding. Pending
+comparisons exclude only the known test payment, whose relay can arrive at the
+source asynchronously. All three bootstrap journeys pass in 46.81 seconds in
+`/tmp/burst-bootstrap-settled-254-verified.log`; the failed assertion remains in
+`/tmp/burst-bootstrap-settled-254-final.log`. Test-inclusive Clippy then found an
+existing test-module ordering warning in the proof service. Its unchanged tests
+were moved to `witness/service/tests.rs`. Strict test-inclusive Clippy, the
+proof-service test, formatting and whitespace checks pass in
+`/tmp/burst-bootstrap-settled-254-static.log`. The validation job exited successfully.
+
+This is started-node recovery from fixture-certified history, not a new live
+consensus or Byzantine test. No production code or release gate changed.
+Challenge/appeal archive bootstrap, automatic download handoff and base replacement
+still need their own end-to-end evidence.
+
+## Iteration 255: startup download-to-install handoff
+
+When `snapshot_bootstrap` matches `snapshot_transfer.fetch.output`, startup now
+runs the existing authenticated downloader before installation. A completed file
+is checked against the configured epoch and freshness floor again on restart.
+Fetch by itself retains its staging-only behavior.
+
+Recovery registers an exclusive bounded archive inbox. The transport permits
+bounded snapshot traffic only while that inbox is active; blocks and checkpoint
+agreement remain closed. The download has a 120-second overall deadline and
+shutdown cancellation. File publication and proof checks reuse the existing
+transfer code on a blocking worker. The installation path still fetches account
+witnesses, commits atomically, force-syncs and validates installed state before
+publishing caches or admitting payments.
+
+The live fixture starts without a target archive and downloads an active-panel
+archive from a separate node. It then checks lifecycle state, payment admission,
+restart and another payment. The expanded test also starts the target before
+the server and checks that recovery P2P is available while RPC remains closed.
+Cancellation and recovery-inbox isolation have focused checks. The initial live
+download/install/payment/restart run passes in 16.68 seconds in
+`/tmp/burst-snapshot-download-255-live-fixed.log`. Strengthened admission checks
+also pass in the final four-journey run, which takes 70.08 seconds in
+`/tmp/burst-snapshot-download-255-final.log`. Cancellation and inbox isolation pass
+in the earlier run. The final run also passes 783 fast tests in 94.92 seconds,
+six ignored and 72 excluded, strict node/daemon test-and-binary Clippy, formatting
+and whitespace checks. The resource-limited job exited successfully. The downloader
+also rejects calls outside startup recovery before opening a file. No release gate
+changed. Download interruption, already-used-node replacement and broader lifecycle
+archives remain separate release requirements.
+
+## Iteration 256: replacement of an existing compact base
+
+The started-node bootstrap fixture now starts with an older authenticated base
+and already accepted successor certificates. It installs the newer active-panel
+archive and checks that the existing certificate bytes remain unchanged. The
+new base is stored exactly, full-prefix replay remains unavailable, lifecycle
+state matches the source, stale-epoch payments fail and valid payments work
+before and after restart.
+
+The first replacement run passes in 10.66 seconds in
+`/tmp/burst-base-replacement-256.log`. The strengthened run adds an unresolved
+final-vote promise through the durable reservation API and checks its original
+bytes after replacement and restart. All five bootstrap journeys pass in 79.32
+seconds in `/tmp/burst-base-replacement-256-final.log`. Strict test-inclusive node
+Clippy, formatting and whitespace checks pass too. The capped job exited
+successfully. The 783-test regression result remains iteration 255's evidence;
+this pass changes only tests and documentation.
+
+The starting database is fixture-initialized; this does not prove in-place
+rotation of running full-history workers, all provisional-tail cases or crashes
+during base replacement. No production code or release gate changed.
+
+## Iteration 257: interrupted archive download recovery
+
+The new process test pauses a disposable downloading node after a partial chunk,
+after complete authentication but before file publication, and after publication
+but before installation. The active-panel archive spans multiple transport chunks.
+Each case checks that RPC stays closed, kills the child with SIGKILL and reopens
+the database. Only genesis may be installed at these boundaries. Before publication
+there must be no final archive file; after publication its bytes must match the
+authenticated source archive.
+
+Restart must download again or revalidate the published file, install the archive,
+recover verification and economic state, reject an old-epoch payment and store a
+valid payment. Expected state comes from the original authenticated archive so
+payments relayed to the serving node by earlier cases cannot change the expected
+snapshot. The existing bootstrap crash test shares the same child-control helper.
+
+The pause hooks are compiled only for tests. Production transfer logic and release
+gates are unchanged. The first run passed the partial-download boundary, then
+failed a test comparison against the serving node's newer payment state. The
+comparison now uses the original archive's verification, BRN and pending state.
+That failure remains in `/tmp/burst-download-crashes-257.log`; a corrected field
+name from the assertion change is recorded in `/tmp/burst-download-crashes-257-final.log`.
+All three boundaries pass in 131.07 seconds in
+`/tmp/burst-download-crashes-257-verified.log`. The same run passes 783 fast tests
+in 99.14 seconds, six ignored and 74 excluded, strict node/daemon test-and-binary
+Clippy, formatting and whitespace checks. The capped job exited successfully.
+These are process-crash checks, not power-loss or Byzantine scheduling evidence.
+
+## Iteration 258: crashes during compact base replacement
+
+The new full-node test copies a closed compact database with an older installed
+base and accepted successors. It reserves an unresolved final vote, then kills
+the child node before commit, after commit, after force-sync, during economic
+cache publication and after final cache publication. RPC remains closed at each
+stop. Before commit, the prior base, epoch, block count and metadata survive.
+After commit, authenticated peer-assisted recovery matches the complete new
+archive state. Every case preserves accepted certificate bytes and the signing
+promise, restarts, rejects a stale-epoch payment and stores a valid payment.
+
+All five boundaries pass in one test in 250.69 seconds in
+`/tmp/burst-base-replacement-crashes-258.log`. The capped job exited successfully.
+No production code or release gate changed. This covers process termination,
+not power loss, arbitrary provisional tails or replacement under running workers.
+The normal replacement test and strict node/daemon test-and-binary Clippy pass,
+as do formatting and whitespace checks, in
+`/tmp/burst-base-replacement-crashes-258-static.log`. The fast suite was not rerun;
+its latest result remains iteration 257's 783 passing tests.
+
+## Iteration 259: challenge and appeal archive bootstrap
+
+Two new full-node tests cover settled fraud and inactivity challenges, then
+successful appeals of both outcomes. Their sources install each signed-history
+prefix and certificate in order before exporting an archive. Bootstrap fetches
+historical proofs from a running peer, restores the economic state, admits a
+payment, restarts and admits another payment. Checks compare outcome receipts,
+certification markers, verification state, stake state and pending rewards.
+TRST wallet bytes and the merger graph match before the first payment. Selected
+holder balances and identity states match both before and after restart.
+
+The initial challenge run exposed a fixture epoch without installed authority.
+Sequential installation fixes that setup; the next run also required retaining
+the canonical genesis block when rebuilding prefixes. The passing challenge run
+is `/tmp/burst-challenge-bootstrap-259-genesis.log`, 54.40 seconds for both reasons.
+Both appeal cases pass in 61.01 seconds in
+`/tmp/burst-lifecycle-bootstrap-259-final.log`. That run then exposed an assertion
+which assumed every bootstrap fixture had opened the target account. The shared
+check now accepts absence only when both nodes lack the account; other errors
+still fail. All seven bootstrap tests pass in 190.46 seconds in
+`/tmp/burst-lifecycle-bootstrap-259-verified.log`.
+That run also passes 783 fast tests in 96.61 seconds, six ignored and 77 excluded,
+strict node/daemon test-and-binary Clippy, formatting and whitespace checks. The
+capped job exited successfully. The two new network tests are classified outside
+the fast group in `tools/test-node.sh`.
+
+These use fixture certificates and controlled clocks. They do not establish
+adversarial consensus, recovery during an active appeal, or rotation of a running
+worker to a replacement base. Production code and source gates are unchanged.
+
+## Iteration 260: active challenge and appeal archive recovery
+
+Two full-node tests restore active fraud/inactivity challenges and active appeals
+of both judgments. The challenge fixture uses a certified activation with a
+five-second review window. The appeal fixture accepts its exact selected beacon
+and certifies activation before export. The same archive bootstrap checks compare
+verification snapshots, activation records, outcome receipts, certification
+markers, stakes and token state with the installed full-history source.
+Bootstrap and restart must preserve the existing judgment rather than applying
+an appeal before certification. Both starts reject stale-epoch payments and admit
+valid payments.
+
+The challenge test passes both reasons in 34.68 seconds; the appeal test passes
+both in 48.28 seconds. Evidence is `/tmp/burst-active-review-bootstrap-260.log`.
+This is active-state restoration, not proof that a restored committee completes
+another certified outcome. Clocks and signed history are fixtures. Production
+code and release gates are unchanged.
+The refactored fixture also passes settled-appeal bootstrap in 56.68 seconds and
+783 fast regressions in 86.77 seconds, six ignored and 79 excluded. Strict
+node/daemon test-and-binary Clippy, formatting and whitespace checks pass in
+`/tmp/burst-active-review-bootstrap-260-regression.log`. The capped job exited
+successfully.
+
+## Iteration 261: certified review progression after snapshot recovery
+
+The new progression helper builds an archival peer only through the snapshot
+height. It starts both nodes and waits for the target to expose that installed
+epoch before importing later certified transfers into the peer. The target must
+receive the successor through normal checkpoint synchronization and install it
+while running. No target-side transfer import or second snapshot installation
+is used. The stored base bytes stay unchanged and full-history loading still
+fails, so the successor must use compact recovery.
+
+Fraud/inactivity challenges advance from activation to certified deadline
+settlement. Appeals of both judgments advance from explicit activation to a
+certified restoring outcome. The helper checks lifecycle records, stake/reward
+state, identity, holder balances and the TRST graph, then admits a payment,
+restarts and admits another. Stale snapshot-epoch payments reject after the
+successor. Deadline cases pass in 53.25 seconds in
+`/tmp/burst-review-progression-261.log`; appeal cases pass in 83.40 seconds in
+`/tmp/burst-review-progression-261-final.log`.
+
+This closes receipt and installation of these certified successors after archive
+bootstrap. It does not establish independent quorum formation, Byzantine
+scheduling or live base replacement. The certificates and clocks are fixtures;
+production code and gates are unchanged.
+The final capped job also passes settled-appeal regression in 58.92 seconds,
+783 fast tests in 84.88 seconds, six ignored and 81 excluded, strict node/daemon
+test-and-binary Clippy, formatting and whitespace checks. It exited successfully.
+
+## Iteration 262: full-history checkpoint-service handoff
+
+The checkpoint service previously chose full-history or compact mode only at
+startup. It now checks for a compact base before processing the next packet or
+poll. On detection it drops the full-history runtime and enters authenticated
+compact recovery, retaining the receiver and any packet already dequeued.
+Compact startup validates installed authority and journals before creating its
+height worker. A corrupt base returns an error rather than falling back to the
+old full-history runtime.
+
+The service regression waits for a full-history protocol frame before publishing
+a valid base in its disposable store and removing a pre-base certificate. The
+same service must fetch compact proofs and relay the previous certified decision
+without changing metadata. A second case publishes invalid archive bytes and
+requires the service to fail. Existing compact startup and checked epoch rotation
+also pass. The four service checks pass in 1.42 seconds in
+`/tmp/burst-live-base-handoff-262-final.log`. The initial compile error in the test
+used a nonexistent write-batch deletion method; it is retained in
+`/tmp/burst-live-base-handoff-262-runtime.log`.
+
+The initial-packet reader also gives shutdown priority and handles the carried
+packet exactly once before later queued input. This is a service-level handoff,
+not a live snapshot-install API: the regression publishes the already-valid base
+directly in a test store without changing installed economics. Live replacement
+still needs coordinated economic publication, signing races and full-node
+crash/restart coverage. No release gate changed.
+
+The broader run in `/tmp/burst-live-base-handoff-262-final.log` passed eleven
+live tests but failed settled-verification bootstrap when RPC reported
+`block queue full`. The queue returns that same response on `try_lock`
+contention, so the log does not prove capacity exhaustion. The payment helper
+now retries only this existing transient response, at most 100 times with a
+10 ms delay, as the parallel-authentication test already does. Other RPC errors,
+persistent unavailability, stale-epoch acceptance and missing valid payments
+remain failures. The original failed run is retained; focused rerun evidence
+is in `/tmp/burst-live-base-handoff-262-verified.log`. Settled-verification
+bootstrap passes in 18.98 seconds and all four runtime checks in 1.43 seconds.
+The same job passes 787 fast tests in 87.88 seconds, six ignored and 81 excluded,
+strict node/daemon test-and-binary Clippy, formatting and whitespace checks. Both
+handoff-packet ordering tests pass in the fast group. The capped job exited
+successfully.
+
+## Iteration 263: coordinated live snapshot installation
+
+`BurstNode::snapshot_installer()` returns a local control handle. Installation
+remains behind the checkpoint release gate. The handle bounds archive input,
+authenticates its authority and state, and fetches authenticated account history
+without holding ledger or engine locks. A semaphore permits one operation,
+including its queued publication. Cancelling preparation drops its proof request;
+cancelling an already-submitted operation does not undo a commit in progress.
+
+The single ledger worker publishes snapshots through the existing checkpoint
+installation lock order. Reconciliation, economic projection, finality and local
+signing-promise checks run again in one writer after proof retrieval. Commit is
+followed by force-sync before publishing engines, authority, frontiers and counts.
+A failed post-commit sync shuts the node down rather than serving old engines
+against a changed durable epoch. The new path adds no remote RPC or pruning.
+
+Two running-node journeys install from genesis or replace an earlier compact
+base. They preserve an unresolved final-vote promise, reject corrupt and
+nonadvancing archives, compare verification and TRST provenance against the
+archival source, reject stale-epoch payments and accept valid payments before
+and after restart. Both pass in 9.88 seconds in
+`/tmp/burst-live-snapshot-install-263-replacement.log`; strict node/daemon
+test-and-binary Clippy passes in the same successful capped job.
+
+Initial installation uses a controlled proof-transport adapter with authenticated
+history proofs. Restart uses the real peer connection. Certificates and clocks
+are fixtures. This does not establish independent quorum formation, real peer
+delivery during live installation, concurrent signing safety or process-crash
+recovery of the live publisher. Release gates remain closed.
+
+The expanded first-install journey holds a proof request, rejects an overlapping
+install, cancels preparation and checks that no base was published or signing
+promise lost. A later install on the same handle succeeds. Both live journeys
+pass in 9.77 seconds in `/tmp/burst-live-snapshot-install-263-verified.log`.
+The earlier compile failure in `/tmp/burst-live-snapshot-install-263-final.log`
+used a unit pattern for the tuple `StoreError::NotFound` variant in the new test;
+the corrected assertion checks the missing-base error explicitly.
+The verified job also passes 787 fast tests in 94.93 seconds, six ignored and
+83 excluded, strict node/daemon test-and-binary Clippy, formatting and whitespace
+checks. Coverage validation reports 388 sections, 380 not signed off and no
+format errors. The job exited successfully. All four source gates remain false.
+
+## Iteration 264: live installation rechecks late local obligations
+
+The first-install journey now pauses after preparation requests its history
+proofs. It writes a second unresolved final-vote promise, then resumes proof
+delivery. The running publisher must retain both promises. Payments and restart
+preserve the added promise too.
+
+A separate running-node test queues a new confirmation target at that same
+boundary. The requested proofs cannot cover the new target. Publication rejects
+with `snapshot omits a durable confirmation target`; the installed epoch,
+block count and all metadata remain unchanged, including the queue record.
+No snapshot base appears. This checks writer-owned revalidation rather than
+only the earlier read used to select proofs.
+
+All three live-install tests pass in
+`/tmp/burst-live-snapshot-races-264-final.log`. Strict node/daemon test-and-binary
+Clippy, formatting and whitespace checks pass in the same successful capped
+job. The fast suite was not rerun; iteration 263 retains that evidence.
+No production source or release gate changed. These are controlled proof
+handoffs with direct local journal/queue writes, not full concurrent signer
+coverage, peer-delivered live installation or live-install crash evidence.
+
+## Iteration 265: live installation with peer-delivered history proofs
+
+Two new journeys use the running nodes' normal authenticated peer connections
+and witness services, with no replacement proof-command adapter. They install
+from genesis or replace an older compact base, preserve signing promises and
+verification/TRST state, reject corrupt and nonadvancing archives, and check
+stale/valid payments before and after restart. The first-install variant also
+runs cancellation, overlap and late signing-promise checks against the real
+witness service.
+
+The test temporarily redirects the source's ordinary checkpoint inbox while
+keeping its worker and original sender alive. Ancestry-proof routing is separate
+and unchanged. The withheld inbox must receive peer traffic. Restoring the
+original inbox after installation permits normal catch-up during restart. This
+controls which synchronization path advances the target; it does not bypass
+archive, witness, handshake or publication validation. The new inbox getter is
+test-only. Production behavior and release gates are unchanged.
+
+All five live-install tests pass in 40.80 seconds in
+`/tmp/burst-live-snapshot-peer-265.log`. This adds peer-delivered live installation
+evidence, not independent quorum formation, arbitrary network schedules or
+live-install crash recovery. The 787-test fast run remains iteration 263's
+evidence and was not rerun for these test-only changes.
+Strict node/daemon test-and-binary Clippy, formatting, whitespace and coverage
+index validation pass in `/tmp/burst-live-snapshot-peer-265-static.log`.
+The index has 388 sections, 380 not signed off and no format errors. Both capped
+jobs exited successfully, and all four source gates remain false.
+
+## Iteration 266: initial live-install process-crash recovery
+
+A disposable child starts with normal RPC and P2P admission, reserves an
+unresolved final-vote promise, then starts local snapshot installation with
+real peer-delivered history proofs. Its publication probe arms only after RPC
+reports the old epoch, so startup publication cannot satisfy the requested
+boundary. Ordinary checkpoint requests remain withheld as in iteration 265.
+
+The parent sends SIGKILL at prepared, committed, economics, authority and
+complete. The committed hook follows force-sync. At each boundary the child
+reports its ledger count while the publisher holds admission locks; reopening
+must preserve that count and the exact promise key/value. Before commit there
+must be no compact base and the old epoch must remain. After commit the stored
+archive must match, and offline authenticated recovery must match the fixed
+exported state. That offline comparison uses the controlled proof adapter;
+the child installation and restarted node use real peer transport. The
+pre-commit case completes installation through the startup path. Every restart
+rejects a stale-epoch payment and accepts a valid payment.
+
+The first run failed because the test assumed a pre-commit ledger contained
+only genesis. Normal block sync had already admitted 42 more blocks. The fixed
+assertion compares the count at the actual publication boundary rather than
+disabling that valid activity. The failure remains in
+`/tmp/burst-live-snapshot-crashes-266.log`.
+
+All five boundaries pass in 251.08 seconds in
+`/tmp/burst-live-snapshot-crashes-266-fixed.log`. Strict node/daemon test-and-binary
+Clippy, formatting and whitespace checks also pass; the capped job exited
+successfully. No production behavior or source gate changed. The fast suite was
+not rerun for this test-only addition. Existing-base live replacement crashes,
+power loss, disk failures and arbitrary network scheduling remain separate work.
+
+## Iteration 267: existing-base live replacement crashes
+
+The live-install crash runner now also starts a child on an older authenticated
+compact base. The child waits for RPC to report that epoch, reserves its local
+final-vote promise, then arms the probe and starts the newer live installation.
+Startup recovery cannot trigger the live crash boundary.
+
+SIGKILL at prepared must retain the exact old archive and recover its old state.
+The committed, economics, authority and complete boundaries must instead retain
+the new archive and recover its new state. Each comparison uses a fixed export,
+not the changing peer ledger. Every case preserves the ledger count captured
+under publication locks and the exact final-vote promise from the old epoch.
+Restart completes or recovers the replacement, rejects stale-epoch payments and
+accepts valid payments. Proof retrieval and restart use real peers; the offline
+state comparison uses the authenticated proof adapter. Ordinary checkpoint sync
+remains withheld to control which path advances the child.
+
+All five boundaries pass in 261.60 seconds in
+`/tmp/burst-live-snapshot-replacement-crashes-267.log`. Strict node/daemon
+test-and-binary Clippy, formatting and whitespace checks pass in the same capped
+job, which exited successfully. The initial-install crash and fast-suite results
+remain the earlier iterations' evidence; they were not rerun here. No production
+behavior or release gate changed. Process termination does not establish power
+loss, disk-fault handling or safety under every signing/network schedule.
+
+## Iteration 268: post-commit synchronization error handling
+
+A test-only per-installer flag now injects one error between transaction commit
+and force-sync. The flag follows the prepared request; it is not global and is
+absent from production builds. Normal execution still calls the same force-sync
+before publishing runtime state.
+
+The running-node test uses real peer proofs with controlled checkpoint delivery.
+After the injected error, the database contains the new epoch and authenticated
+archive while the in-memory election authority remains at genesis. Cleanup must
+report the injected cause and close both listeners. Restart without injection
+authenticates the installed state, restores matching lifecycle records, rejects
+a stale payment and accepts a valid one.
+
+The first compile used a nonexistent `AuthenticationRules.payment_epoch` field
+in the assertion; it is retained in `/tmp/burst-live-snapshot-sync-failure-268.log`.
+The corrected assertion reads the election authority. The journey passes in
+10.64 seconds in `/tmp/burst-live-snapshot-sync-failure-268-fixed.log`. Strict
+node/daemon test-and-binary Clippy, formatting and whitespace checks pass in that
+successful capped job. This establishes error propagation and fail-closed node
+cleanup after commit, not an operating-system sync fault, disk corruption or
+power-loss durability. Production behavior and release gates are unchanged.
+The fast regression passes 787 tests in 95.56 seconds, with six ignored and
+90 excluded, in `/tmp/burst-live-snapshot-sync-failure-268-regression.log`.
+Whitespace and coverage-index checks pass; the index has 388 sections, 380 not
+signed off and no format errors. That capped job exited successfully.
+The normal real-peer live-install journey passes with injection disabled in
+10.82 seconds in `/tmp/burst-live-snapshot-sync-failure-268-normal.log`.
+All four source gates remain false.
+
+## Iteration 269: reconcile historical origin ownership per origin
+
+TRST snapshot undo compared each creator's complete historical-origin set as one
+map value. A later disjoint origin under the same creator therefore conflicted
+with a rewind, even when holdings were disjoint. The reconciler now applies
+the before/after membership delta within each changed creator's set. It stages
+all replacements before mutating the map, preserving atomic rejection if a
+later membership conflicts. Exact restoration retains the distinction between
+an absent creator entry and an existing empty entry.
+
+The restored snapshot still passes canonical decoding and global origin-owner
+uniqueness checks. Holding, revocation and graph reconciliation remain unchanged.
+The node still requires the full dependency closure and forbids replacing
+cemented state or durable confirmation obligations. This storage reconciliation
+does not authorize an otherwise-invalid branch replacement.
+
+The new tests cover disjoint origins for one creator, owner creation, empty sets,
+and conflicting membership without partial updates. The first fixture reversed
+the mint receiver and creator arguments and failed; that run is retained in
+`/tmp/burst-origin-undo-269.log`. The corrected full TRST suite passes 90 tests,
+two ignored, and the node's 14 rollback-plan tests pass in
+`/tmp/burst-origin-undo-269-fixed.log`. Strict TRST/node/daemon test-and-binary
+Clippy, formatting and whitespace checks pass in that successful capped job.
+Overlapping holdings/revisions and implicit lifecycle dependencies remain open.
+The broader run passes 787 fast node tests in 98.39 seconds, six ignored and
+90 excluded, and the existing authenticated wire-level merge-fork test in 5.78
+seconds in `/tmp/burst-origin-undo-269-regression.log`. The capped job exited
+successfully. The wire test guards existing behavior; it does not add a new
+independent-signer scenario for the same-creator origin delta. Release gates
+remain closed. The conformance summary's stale history/sync row now points to
+the implemented gated paths and the remaining validation/pruning work.
+
+## Iteration 270: keep quorum latency out of fork admission timing
+
+An admitted payment fork was checked against the local admission window again
+when its election winner was installed. Waiting for quorum could therefore make
+a previously admitted candidate too old to install. Fresh admission still checks
+the timestamp window. The elected path checks supported payment operations,
+signature, work and parameters, then runs the same economic transition against
+the rewound writer state, including its payment-epoch checks.
+
+Only the existing installer calls this path in production, after matching the
+cached hash to a confirmed election. Dependency closure, cemented-state protection
+and confirmed dependency checks are unchanged. This does not allow a cached
+payload to authorize itself or admit fresh backdated payments.
+
+All 10 payment-transition tests pass. The new cases distinguish fresh admission
+from delayed replay and reject forged signatures, wrong parameters and stale
+epochs without changing the account head. They do not simulate an independent
+representative quorum delayed over the network. Release gates remain closed.
+
+The first broader regression failed three of six fork-replacement tests in
+`/tmp/burst-elected-fork-270-regression.log`. Two could not admit a burn fork
+because rewinding the first payment removed the genesis BRN wallet. A preference
+fork exposed the same missing wallet on restart. Startup had persisted rate
+metadata and TRST snapshots before tracking genesis in memory, so its later
+missing-snapshot check skipped the BRN wallet baseline. Genesis creation now
+persists the genesis BRN wallet and both economic snapshots in the same writer
+transaction as the genesis block. Existing-chain missing-history rejection is
+unchanged. The failed run did not reach wire regression or lint checks.
+After the fix, all six running-node fork tests pass in 13.57 seconds, followed
+by the wire-level merge-fork test in 5.78 seconds and all 10 payment-transition
+tests. Strict node/daemon test-and-binary Clippy, formatting, whitespace and
+coverage-index checks pass in `/tmp/burst-elected-fork-270-fixed.log`. The capped
+job exited successfully. The fork tests inject election votes at the authenticated
+boundary; the separate wire test uses a shared development key. Neither proves
+independent-representative Byzantine safety.
+
+The follow-up startup run passes 789 fast node tests in 98.00 seconds, six
+ignored and 90 excluded; eight confirmation-recovery tests in 2.84 seconds;
+and both economic-snapshot recovery tests in 0.08 seconds. The capped job exits
+successfully in `/tmp/burst-elected-fork-270-startup.log`. Corrupt and missing
+TRST snapshots still reject startup without replacement by empty state.
+
+## Iteration 271: persist the genesis-only startup baseline
+
+Iteration 271 closes the matching genesis-only startup path. If the genesis BRN
+wallet is missing but the account has one block and no recorded burn or stake,
+startup already reconstructs its initial state. It now commits that wallet before
+publishing it in memory. This prevents the first reversible payment from recording
+an absent wallet as its undo baseline. Missing history after recorded spending
+still rejects without creating a replacement wallet or changing the counter.
+All six startup tests pass in 0.27 seconds, followed by strict node/daemon
+test-and-binary Clippy and whitespace checks in
+`/tmp/burst-genesis-baseline-271.log`. The capped job exited successfully.
+This checks controlled startup recovery, not storage failure or power loss.
+
+## Iteration 272: use the selected clock tolerance
+
+Iteration 272 aligns fresh admission with decision 23.7. Ordinary blocks allowed
+60 seconds ahead but one hour behind the local clock; fork admission reused the
+same asymmetric constants. Both directions now allow 60 seconds. Tests check
+the inclusive boundaries and rejection one second outside them. The historical
+transfer's exact-hash authorization and elected-fork replay remain separate
+from fresh admission. All 793 fast node tests pass in 98.20 seconds, with six
+ignored and 90 excluded, followed by strict node/daemon test-and-binary Clippy
+and whitespace checks in `/tmp/burst-clock-window-272.log`. The capped job exits
+successfully. This is not full adversarial clock or network-delay evidence.
+The wire merge-fork regression passes in 6.25 seconds, and both payment-epoch
+integration tests pass in 1.41 seconds, in
+`/tmp/burst-clock-window-272-network.log`. Formatting and whitespace checks pass;
+the capped job exits successfully. No source release gate was opened.
+
+## Iteration 273: enumerate bounded checkpoint inventories
+
+Iteration 273 starts replacing numeric checkpoint-key probes with a bounded
+inventory scan. Full-history loading now enumerates the actual prefix in
+16-row pages under one read transaction, orders records by numeric height and
+rejects noncanonical keys or records beyond the stored tip. This catches orphan
+records above 128 that the former fixed scan missed. The storage API checks the
+remaining key/value byte budget before copying each row. Inventory limits count
+retained records, independently of their numeric heights.
+
+The byte-budget test and three inventory tests pass. The initial snapshot-view
+fixture incorrectly opened two read transactions on one LMDB thread and failed
+with `MDB_BAD_RSLOT`; `/tmp/burst-checkpoint-inventory-273.log` retains that run.
+The corrected inventory tests pass in `/tmp/burst-checkpoint-inventory-273-fixed.log`.
+That job then failed strict storage test lint on two existing test-module ordering
+errors. Their modules were moved without changing test contents. Neither failed
+job is counted as a complete validation pass.
+
+The corrected regression passes all 97 storage tests in 0.13 seconds and 796
+fast node tests in 95.73 seconds, with six ignored and 90 excluded. One storage
+documentation test is ignored. Strict storage/node/daemon test-and-binary Clippy
+and whitespace checks pass in `/tmp/burst-checkpoint-inventory-273-regression.log`.
+The capped job exits successfully.
+
+This does not remove the absolute height cap. Compact recovery, retained-record
+revalidation, authority archive framing and live proposal/transfer limits still
+need coordinated incremental history. No pruning or release gate was enabled.
+
+## Iteration 274: revalidate compact recovery inventories
+
+Iteration 274 uses the bounded inventory scan for compact recovery too. It reads
+actual retained keys instead of probing heights 1 through 128, retains numeric
+successor ordering and rejects gaps through the accepted tip. Each retained
+record still undergoes its certificate, head-commitment and content checks.
+
+Recovery now records the complete checkpoint key set alongside its existing
+per-record observations. Installation compares that set in the writer's view,
+so an insertion outside the former probe range cannot pass unnoticed while peer
+proofs are being fetched. The inventory observation survives recovery truncation
+to an earlier installed epoch. Separate head and record observations continue
+to protect values. Two tests pass for hidden records and writer-visible insertions
+or deletions. This does not remove archive authority or proposal height limits.
+The complete fast suite passes 798 tests in 95.68 seconds, with six ignored and
+90 excluded, followed by strict node/daemon test-and-binary Clippy and whitespace
+checks in `/tmp/burst-compact-inventory-274.log`. The capped job exits successfully.
+The real-peer live snapshot-installation journey passes in 11.97 seconds in
+`/tmp/burst-compact-inventory-274-live.log`, including restart and payment checks.
+The capped job exits successfully. This is normal-path regression evidence;
+the newly added inventory races are controlled writer-level tests.
+
+## Iteration 275: verify authority in bounded pages
+
+Iteration 275 adds an authority cursor that verifies at most 32 steps per call
+and retains only the current authenticated anchor. A failed page does not partly
+advance its height or electorate. Tests traverse 288 heights through changing
+rosters, resume from an authenticated anchor and reject stale pages, bad
+signatures, skipped heights and attempts by the new electorate to certify itself.
+The cursor cannot be deserialized from a peer. Transport still must bound encoded
+page bytes before decoding.
+
+Archive authentication now uses that cursor and no longer imposes a separate
+128-step count limit. The existing 16 MiB header limit remains. Export checks
+encoded header size before cloning the authority vector or authenticating its
+steps. This format still carries the complete authority path in its header;
+it is not yet a streamed, persisted authority journal or unbounded-lifetime node.
+
+All three consensus snapshot tests pass in 0.13 seconds. The snapshot-history
+regression passes 98 tests in 60.69 seconds, with one ignored and live-installation
+fixtures excluded, followed by strict consensus/node/daemon test-and-binary
+Clippy and whitespace checks in `/tmp/burst-authority-pages-275.log`. The capped
+job exits successfully. Runtime proposal/storage and checkpoint wire height
+limits remain. No release gate was opened.
+The direct framed-header test authenticates a 129-step path under the unchanged
+byte bound, rejects the wrong requested epoch and then rejects its deliberately
+invalid state body. It also checks borrowed-field size encoding against the real
+header. Both header tests pass in 0.11 seconds, followed by strict lint and
+whitespace checks, in `/tmp/burst-authority-pages-275-header.log`. The capped job
+exits successfully. This proves header authentication, not a running height-129
+checkpoint transition.
+The normal economic snapshot export/restore regression passes in 0.25 seconds
+after the early header-size check, followed by formatting, whitespace and
+coverage-index validation in `/tmp/burst-authority-pages-275-export.log`. The
+capped job exits successfully.
+
+## Iteration 276: separate compact heights from full-prefix limits
+
+Iteration 276 separates checkpoint height decoding from full-history work limits.
+Stored tips and record decoders no longer reject a height solely for exceeding
+128. Full-prefix replay checks its limit explicitly before traversing heights.
+Compact snapshot-head staging accepts later authenticated paths; compact decision
+persistence counts actual retained keys and bytes instead of probing 1 through
+128. It still rejects capacity exhaustion and malformed or out-of-tip records.
+The sync refresh counter now uses checked increment.
+
+The new storage fixture authenticates 129 consecutive certificates before staging
+the compact head. It checks later-height record decoding, bounded rejection by
+the full-prefix loader and rejection of an impossible successor inventory at
+`u64::MAX`. This is storage-level coverage, not a running height-129 transition.
+Proposal height checks, bounded-history compaction and wire progression remain
+separate work. No source release gate was opened.
+
+All 10 checkpoint-storage tests and 800 fast node tests pass, with six fast tests
+ignored and 90 excluded. Strict node/daemon test-and-binary Clippy and whitespace
+checks also pass in `/tmp/burst-compact-height-276.log`. The capped job exited
+successfully without changing desktop resource limits.
+
+The real-peer compact snapshot installation, restart and payment regression
+passes in 11.11 seconds in `/tmp/burst-compact-height-276-live.log`. This is
+normal-path regression coverage, not a live height-129 transition.
+
+## Iteration 277: compact manifest heights
+
+Iteration 277 removes the absolute height ceiling from the shared compact
+deadline, governance, roster, activation and outcome manifest builders. Successor
+arithmetic is checked; full-prefix entry points retain their work limits. The new
+construction fixture signs 129 deadline-shaped certificates and checks governance
+and outcome manifests at height 130, including wrong-parent state rejection.
+It does not execute the claimed lifecycle effects or prove live node progress.
+The construction fixture and all 801 fast node tests pass, with six fast tests
+ignored and 90 excluded. Strict node/daemon test-and-binary Clippy and whitespace
+checks pass in `/tmp/burst-compact-proposals-277-retry.log`; the capped job exited
+successfully. The first attempt was deferred by the desktop memory guard,
+before running any validation. Release gates remain closed.
+
+Wire catch-up also needs a compact import path. `checkpoint_sync::Driver` calls
+`CertifiedCheckpoint::import_transfer`, which calls the full-prefix loader.
+Removing wire height checks alone would leave snapshot-based catch-up broken.
+The existing compact decision admission replays against a recovered base and
+rechecks storage under the writer; wire integration must preserve those checks.
+
+## Iteration 278: wire heights and transfer bounds
+
+Iteration 278 separates wire height validation from transfer-size bounds.
+Requests and chunks accept positive `u64` heights; exact request matching,
+chunk alignment, digests, peer matching and the existing byte cap still apply.
+Polling advances beyond 128 with checked arithmetic and falls back to refresh
+at integer exhaustion. New tests cover later-height reassembly and scheduling,
+wrong-height rejection before allocation, and unchanged transfer byte limits.
+These are transport checks, not authenticated compact import. All six sync tests
+and strict node/daemon test-and-binary Clippy pass in
+`/tmp/burst-wire-heights-278.log`. Formatting and whitespace checks pass in the
+same successful capped job.
+
+The certified deadline transfer/restart test and real-peer compact snapshot
+installation/restart/payment test pass in
+`/tmp/burst-wire-heights-278-integration.log`, followed by coverage-index and
+whitespace checks. This is existing-path regression evidence, not later-height
+compact import evidence.
+
+The compact import integration must also handle delayed selection beacons.
+`RecoveredSnapshot::accept_decision_from_peers` replays and persists a certified
+decision without installing economics. A transferred beacon needs separate
+validation against that replayed selection before durable attachment. Compact
+export cannot depend on `ConfirmedHistory::read_certified` from genesis after
+old ledger blocks have been pruned. Proof retrieval must stay outside writers
+and socket readers, using the existing independent witness worker.
+
+## Iteration 279: atomic compact beacon import
+
+Iteration 279 adds beacon-aware compact decision persistence and a peer-replay
+entry point. Incoming beacons are size-bounded and checked against the exact
+replayed selection and certificate before opening the writer. A new selection
+and beacon commit together; delayed attachment retains the first stored
+certificate and rejects conflicting bytes. Existing parent, history and writer
+observation checks remain. Payment authority and local vote promises do not move.
+The new fixture covers initial and delayed attachment, invalid round/proof/output,
+oversized proof, changed writer observation and idempotent alternative signer sets.
+The first compile found private-field access in the test; the test now reads the
+stored serialization without exposing those fields. The new beacon test and
+existing atomic persistence test pass, followed by strict node/daemon
+test-and-binary Clippy and whitespace checks in
+`/tmp/burst-compact-beacon-279-fixed.log`. The capped job exited successfully.
+Wire routing and pruned export remain unfinished; no release gate was opened.
+
+All 99 snapshot-history tests pass in 57.55 seconds, with one ignored and
+live-installation fixtures excluded, in `/tmp/burst-compact-beacon-279-regression.log`.
+Coverage-index and whitespace checks also pass. Beacon-bearing wire import
+remains untested because that integration is not yet present.
+
+## Iteration 280: snapshot-based transfer import and export
+
+Iteration 280 routes completed transfers at snapshot-based nodes through compact
+replay. The sync worker yields to async proof retrieval without holding a writer
+or registry lock. A bounded version-3 transfer carries the checkpoint record
+without pre-base ledger history. Version-2 history bundles remain readable by
+compact receivers, but their supplied ledger rows are not trusted or persisted;
+replay fetches cursor-checked witnesses instead. Nodes without a snapshot still
+use bounded full-history import and reject the compact-only format.
+
+The integration fixture imports both versions with a beacon, rejects a wrong
+requested height without mutation, recovers the accepted selection through peer
+proofs and exports it from sparse storage. The payment epoch remains unchanged.
+The fixture and six sync tests pass, followed by strict node/daemon test-and-binary
+Clippy and whitespace checks in `/tmp/burst-compact-transfer-280-fixed.log`.
+The first run failed because test setup used a selection-only loader for mixed
+roster/selection history; it now uses the mixed-event loader.
+
+This fixture calls the new importer directly with a real peer proof service;
+it is not an automatic running-node transfer journey. Delayed refresh for
+selections older than the snapshot base still needs receipt-based routing, and
+later-height end-to-end catch-up, retained-history compaction and persisted
+incremental authority remain open. Release gates stay closed.
+
+All 805 fast node tests pass in 88.54 seconds, with six ignored and 90 excluded.
+The real-peer compact snapshot installation/restart/payment regression passes
+in 12.05 seconds. Coverage-index and whitespace checks pass in
+`/tmp/burst-compact-transfer-280-regression.log`; the capped job exited
+successfully. Automatic record-only catch-up is still unverified.
+
+## Iteration 281: automatic catch-up exposes a replay mismatch
+
+Iteration 281 adds a running-node record-only catch-up regression. It starts a
+receiver from an older authenticated archive and disables the source's separate
+agreement inbox. The source retains proof bodies and starts before the fixture
+adds its authenticated base marker to select record-only export. This is not
+proof of a fully pruned source's startup. An earlier setup put that marker in
+place before source startup and stalled without a proof peer.
+
+The corrected journey still fails its 90-second readiness bound. The diagnostic
+run `/tmp/burst-record-catchup-281-diagnostic.log` reports `verification snapshot:
+database is corrupted: persisted engine differs from applied replay` during
+checkpoint installation. Later height-4 imports reject because their parent is
+not the installed authority. Direct importer success from iteration 280 does not
+close this gap. The test remains enabled; iteration 282 fixes the observed
+mismatch. No release gate changed.
+
+Investigate the independently derived committee state before activation.
+`checkpoint_selection` can publish a certified beacon-derived committee while
+compact selection replay first records the frozen request; installed cache
+verification compares complete orchestrator snapshots. Determine the exact
+divergent fields and reproduce the permitted publication states. Do not remove
+the cache equality guard or skip certificate/beacon checks to pass this test.
+
+## Iteration 282: derive published committees during applied recovery
+
+Iteration 282 confirms the verification mismatch at field level: actual state
+had Voting and the certified selected verifiers; replay had Endorsing and an
+empty committee. Applied recovery now reconstructs the optional local publication
+from its authenticated selection and beacon in the pinned writer view. The
+stored context chooses which publication to reconstruct, never its contents.
+Every field must then match, and the derived orchestrator is retained for runtime
+recovery. Invalid reconstruction leaves the candidate unchanged.
+
+The focused fixture covers unpublished and published states, altered membership,
+altered timestamps and absent selection evidence. It passes alongside the TCP
+record-only catch-up/activation/payment/restart journey, which completes in 34.97
+seconds. Strict node/daemon test-and-binary Clippy and whitespace checks pass in
+`/tmp/burst-verification-projection-282-fixed.log`. Temporary snapshot dumps were
+removed. The source retains proof bodies; fully pruned-source and later-height
+journeys remain separate release requirements. Release gates remain closed.
+
+The regression run passes 806 fast node tests in 91.03 seconds, with six ignored
+and 91 excluded, then 101 snapshot-history tests in 58.96 seconds, with one
+ignored and live-installation fixtures excluded. Strict node/daemon
+test-and-binary Clippy, coverage-index and whitespace checks pass in
+`/tmp/burst-verification-projection-282-regression.log`. The capped job exited
+successfully and the validation service is inactive.
+
+## Iteration 283: refresh a pruned selection from its snapshot receipt
+
+Compact transfer import now recognizes selections at or below the authenticated
+snapshot boundary. It verifies the incoming certificate against the receipt's
+parent, requires the same manifest and attaches the beacon through the existing
+writer-rechecked receipt path. It preserves the receipt certificate. Missing
+physical selection records can be exported from the authenticated receipt with
+the separately persisted beacon; absent non-selection records below the base
+return no export, while missing successor records remain errors.
+
+The new peerless fixture uses a selection at the snapshot boundary with no
+physical checkpoint record. Changed rounds, heads and checkpoint parents are
+rejected. Valid import and duplicate retry preserve payment epoch and do not
+recreate that record. Five compact-persistence tests and six sync tests pass,
+followed by strict node library/test Clippy in
+`/tmp/burst-receipt-refresh-283.log`. Initial test compilation errors were fixed.
+This does not establish running-node refresh scheduling or delayed-beacon export
+when an older physical record remains. Those cases and fully pruned-source
+catch-up remain in the release queue.
+
+## Iteration 284: export delayed beacons with retained records
+
+The exporter previously returned physical record bytes before checking for a
+beacon stored with a snapshot receipt. It now verifies the receipt and retained
+certificate, compares heads and target, and validates the saved beacon before
+adding it to the exported record. The original certificate remains unchanged;
+export does not rewrite the physical record. Conflicting or invalid beacon data
+is rejected.
+
+The receipt fixture now restores an older physical record and checks that export
+still includes the beacon. It checks version-3 transfer contents, invalid saved
+randomness and database reopen. Five compact-persistence tests, six sync tests
+and strict node library/test Clippy pass in
+`/tmp/burst-retained-beacon-284.log`. Running-node delayed-refresh scheduling
+remains separate work; this fixture imports the transfer directly.
+
+The existing TCP record-only catch-up/activation/payment/restart regression passes
+in 34.92 seconds in `/tmp/burst-retained-beacon-284-live.log`. Its source retains
+proof bodies and already has the beacon before catch-up. Both capped jobs exited
+successfully; the validation service is inactive. Release gates remain closed.
+
+## Iteration 285: live pre-base refresh and publication restart
+
+A new TCP fixture starts a receiver from a height-3 snapshot with a pending
+height-2 selection and no physical selection record. After both nodes are ready,
+the source attaches the exact beacon. The separate agreement relay is disabled
+and drand relays are unavailable. Automatic checkpoint refresh must import the
+beacon, publish the independently derived complete verification state and retain
+it after restart, without changing payment epoch or recreating the pruned record.
+
+The initial storage-only fixture passed in 31.90 seconds. Waiting for publication
+before restart then exposed a cache-staging mismatch. Applied economics already
+reconstructed publication, but final cache rows still came from frozen replay.
+Cache derivation now reconstructs the authenticated publication before capturing
+final rows. It retains strict state checks and the existing work budget.
+The stronger journey passes in 30.10 seconds in
+`/tmp/burst-live-refresh-285-fixed.log`; the earlier restart failure remains in
+`/tmp/burst-live-refresh-285-publication.log`. Source proof bodies and the original
+selection record remain retained. Fully pruned-source catch-up is still open.
+
+The fixed run also passes 102 snapshot-history tests in 57.57 seconds, with one
+ignored and live-installation fixtures excluded, followed by strict node
+library/test Clippy. The capped job exited successfully. Release gates stay closed.
+
+## Iteration 286: pruned selection serving and both-node restart
+
+The delayed-refresh fixture now has retained-record and pruned-record source
+variants. Each restarts both nodes after the receiver publishes its complete
+derived committee. The pruned variant deletes only the original selection record
+in its temporary source database; it still retains historical block bodies.
+
+Both-node restart first timed out. Starting both nodes before checking readiness
+did not fix it. The diagnostic log showed unavailable historical witnesses at
+the sparse peer. The source's witness service never attempted its own retained
+bodies after a memory-cache miss. It now tries one bounded local batch through
+the existing chunk validation and authenticated cursor path before polling peers.
+The byte, block and retained-witness budgets remain enforced, and unavailable
+local bodies fall back to peer retrieval. This path does not publish ledger rows.
+
+Both live variants pass in 92.50 seconds. The receiver's complete committee and
+payment epoch survive restart, and the pruned records stay absent. Eighteen
+witness tests and strict node library/test Clippy pass afterward in
+`/tmp/burst-pruned-record-refresh-286-local.log`. Earlier readiness failures are
+recorded in `/tmp/burst-pruned-record-refresh-286.log` and
+`/tmp/burst-pruned-record-refresh-286-retry.log`; those two-case jobs were stopped
+after the first failure to avoid repeating the same wait. The diagnostic run was
+stopped after establishing the unavailable-witness loop. One attempted retry
+was refused by the overlap guard while shutdown completed. No limits were raised.
+Fully pruned-body serving and broader scheduling remain open. Release gates stay
+closed.
+
+## Iteration 287: local witness rejection and peer fallback
+
+The local-witness regression covers valid retained history, absent local bodies
+and signature corruption with an unchanged block hash. Invalid or absent local
+input leaves the original request pending; peer transport completes it using a
+valid source. The returned block is checked again against the original snapshot
+cursor, and metadata remains byte-identical across recovery. The exchange loop
+is bounded.
+
+The focused test passes, followed by all 19 witness tests and strict node
+library/test Clippy in `/tmp/burst-local-witness-validation-287.log`. This adds
+rejection evidence for the iteration-286 local path, not fully pruned-body serving
+or a release sign-off. Gates remain closed.
+
+The broader snapshot run passed 102 tests and failed the queue-cancellation test.
+It supplied a full local store but expected its request to wait indefinitely for
+peers. The fixture now uses an empty service store with the same authenticated
+request, preserving its pending-request, queue capacity and cancellation checks.
+The initial result remains in
+`/tmp/burst-local-witness-validation-287-regression.log`.
+
+The corrected cancellation test passes in 1.19 seconds. The broader run passes
+103 snapshot-history tests in 60.38 seconds, with one ignored and live-installation
+fixtures excluded, followed by strict node library/test Clippy. Evidence is in
+`/tmp/burst-local-witness-validation-287-regression-fixed.log`. The capped job
+finished successfully and the validation service is inactive.
+
+## Iteration 288: sparse-source bootstrap exposes historical dependency retention
+
+The new sparse-source test first bootstraps a node from an active-panel snapshot,
+then stops the full-history source. It requires the sparse node to restart alone,
+serve a snapshot download and historical witnesses to a fresh observer, preserve
+the committee and admit a payment. It currently stalls during sparse restart.
+The diagnostic log records repeated unavailable historical-body requests after
+the source is removed. These runs were stopped after identifying the repeated
+wait; they are not successful integration evidence. The test remains enabled.
+
+The witness walker also traversed irrelevant old account history after finding
+a requested head, even when all remaining requests matched other authenticated
+heads. It now switches accounts in that exact case. A direct fixture retaining
+only requested heads passes without any peer or intermediate bodies. Genuine
+historical requests still require ancestry validation.
+
+The remaining startup requests include historical selection-receipt heads and
+replay dependencies from `SnapshotTailPlan::read`. These commitments survive in
+the archive, but the recovery path still needs historical bodies and proofs
+across newer account heads. Complete authenticated dependency retention/recovery
+before calling the sparse node independently restartable or a bootstrap source.
+Evidence is in `/tmp/burst-sparse-source-288.log`,
+`/tmp/burst-sparse-source-288-heads.log` and
+`/tmp/burst-sparse-source-288-diagnostic.log`. No release gates changed.
+
+All 20 witness tests and strict node library/test Clippy pass in
+`/tmp/burst-sparse-source-288-witness.log`. The capped job finished successfully;
+the validation service is inactive. The live sparse-source journey remains open.
+
+## Iteration 289: recover snapshot-committed historical dependencies
+
+Authenticated snapshot selection receipts already commit account, height and
+hash for their historical heads. Recovery can now start a cursor at those exact
+heads or the pinned genesis. It does not promote arbitrary peer hashes to roots.
+The cursor retains the current snapshot context and validates the supplied body.
+Retained-index validation uses the same commitments and checks local row heights.
+Coordinated startup retains verified dependency bodies in its existing writer.
+
+Fresh snapshot bootstrap and live installation now share the committed-root
+request path with suffix recovery. Aggregate byte and block limits apply across
+the separate account requests. The exact-head/signature test passes in 0.87
+seconds and the sparse-source journey passes in 9.95 seconds in
+`/tmp/burst-committed-bootstrap-289.log`. After the archival source stops, the
+sparse relay restarts alone and serves the observer's snapshot and witnesses.
+The observer retains the committee and accepts a valid payment while rejecting
+the stale epoch. The earlier live attempt timed out in
+`/tmp/burst-committed-history-289-fixed.log`. The broader run passed 103 tests
+and failed a mock witness service that exited after one request. The fixture
+now serves requests until recovery closes its channel; full state equality and
+no-write checks remain. The original failure is in
+`/tmp/burst-committed-bootstrap-289-regression.log`. The rerun passes 104
+snapshot-history tests, with one ignored and live-installation tests excluded,
+followed by strict node library/test Clippy in
+`/tmp/burst-committed-bootstrap-289-regression-fixed.log`. The capped job exited
+successfully and the validation service is inactive.
+Release gates remain closed; bounded history compaction is not implemented here.
+
+## Iteration 290: refresh retained selections rather than lifetime heights
+
+Checkpoint refresh used a numeric cursor from 1 to the stored tip. After pruning,
+this repeatedly requested absent records and made late-beacon latency depend on
+the entire checkpoint lifetime. The driver now queues retained selection records
+and authenticated snapshot selection receipts. A sorted, deduplicated cycle
+alternates with forward sync and rebuilds after exhaustion. Non-selection gaps
+are not requested. Scheduling grants no import authority and deletes no data.
+
+Validation passes in `/tmp/burst-selection-refresh-290.log`. It includes a
+synthetic selection at height 1,000,000, wrong-height rejection, an authenticated
+receipt with its physical record absent, both live delayed-beacon/restart
+variants in 20.40 seconds and six checkpoint-sync tests, followed by strict node
+library/test Clippy. The capped job finished successfully. The synthetic
+certificate tests scheduling only, not consensus acceptance. Bounded retention
+and incremental authority storage remain release work.
+
+## Historical correctness queue (superseded)
+
+The current plan is `spec/COMPLETION_PLAN.md` and the concise status ledger is
+`spec/COMPLETION_LEDGER.md`. The queue below preserves the iteration-290 record;
+it is not the active priority order and does not add requirements by itself.
+
+This is the current queue of recorded gaps, updated during iteration 290. The
+complete scope remains the whitepaper, decisions and all indexed requirements
+in `spec/coverage.json`. A passing test closes only the behavior it exercises.
+
+1. Complete certified governance. Iteration 122 closes the two missing stored
+   numeric parameter mappings noted in iteration 121; activation interactions
+   and hard-coded numeric rules still need review. Certified ballot cuts retain the verified
+   electorate and delegated result through storage, mixed-epoch replay and
+   installation. Ordered parameter/amendment activation and governed payment
+   replay have signed-history tests. One parameter-change journey now passes
+   automatic counting, activation, governed payments, restart and fresh-node
+   catch-up with three independent human representatives. Complete cutoff
+   finality fencing, remaining coincident lifecycle cases, challenge and
+   pre-selection rule changes, other governance interactions and
+   scoped secondary-key delegation. Its journal and secondary-ballot/transitive
+   counting path now have native certified restart/fresh-node evidence. Key
+   discovery now passes those recovery checks too. Scoped owner controls and
+   delegate ballot commands now pass a real Tauri/WebKit registration, ballot
+   and revocation journey, followed by certified counting, all-node restart and
+   fresh-observer catch-up. The separate key-journal gate remains closed.
+   Iteration 154 adds honest partitioned revocation, activation, restart and
+   fresh-observer recovery. Iteration 156 adds honest partitions at secondary-ballot
+   admission and counting, followed by activation, all-node restart and fresh-node
+   recovery. Byzantine branches and production-scale replay still need evidence. The older
+   three-human legacy activation regression from iteration 104 was not rerun;
+   its fresh-node tally failure is not evidence about the passing certified path.
+   Overlapping timing changes now pass six live certified transitions and
+   recovery. Active normal panels also pass governed stake, rate and timeout
+   changes through settlement and recovery. Competing approved constitutional
+   diffs now pass atomic conflict handling, independent activation, payments,
+   restart and fresh-node recovery. Extend evidence to partitioned traffic at
+   the boundaries.
+   The expiry-extension boundary now has native restart/fresh-node evidence;
+   earlier expiry returns now have native signed-claim, spend, restart and
+   fresh-node evidence. Their browser, production build and native parser checks
+   pass. Iteration 149 adds the complete native desktop receipt claim, followed
+   by spending, all-node restart and fresh-observer recovery. Iteration 150 adds
+   honest 2+1 partitions at expiry counting and activation with the same recovery
+   checks. Packaged platforms, conflicting branches and other activation types
+   remain separate checks.
+   `durable_votes::generate_vote` now checks the next certified activation in
+   the reservation transaction, with live pre-cutoff/post-cutoff traffic and
+   restart evidence. Confirmed support now fences counting with a live traffic,
+   restart and fresh-observer journey. Final support now reserves its boundary
+   atomically against earlier promises, with both-order/reopen checks and live
+   terminal-closure journeys. Extend evidence to independent competing branches
+   and partitions; do not discard durable promises to make a candidate fit.
+2. Complete remaining lifecycle outcomes. Normal verification, upheld/rejected
+   challenges, inactivity recovery and pending-transfer journeys have evidence
+   recorded above. Iteration 124 adds combined live challenge/pending-expiry
+   settlement, late-receive rejection and recovery for fraud and inactivity.
+   Iteration 125 adds a passing honest 2+2 partition at the fraud/expiry deadline,
+   followed by settlement and recovery. Iteration 126 adds replay-derived
+   outcome history with exact reward origins and live recovery evidence.
+   Iteration 127 adds origin-specific reward invalidation and restoration with
+   independent causes, persistence and component evidence. Iteration 128 adds
+   signed appeal references, receipt checks and persisted review panels with
+   component selection/deadline evidence. Iteration 129 integrates certified
+   appeal admission and reversal with component and signed-history evidence.
+   One connected fraud appeal now passes live settlement, all-node restart and
+   fresh-observer recovery. Iteration 130 adds wallet discovery and reviewed
+   signing controls. Iteration 146 adds native desktop fraud, inactivity and
+   repeated appeals through certified settlement, all-node restart and
+   fresh-observer recovery. Iteration 147 removes two reproduced delivery delays
+   and adds timeout diagnostics; the original unlogged selection timeout still
+   needs confirmation of its cause. Iteration 136
+   adds repeated and failed connected reviews with all-node restart and fresh-node
+   recovery. The connected inactivity appeal also passes restored accrual without
+   fraud rewards or revocation, all-node restart and fresh-node catch-up.
+   The honest 2+2 appeal partition now passes held stakes, unchanged identity and
+   epoch until quorum recovery, settlement and the same restart checks. Remaining
+   adversarial lifecycle traffic stays open. Derive every
+   effect from a dependency-closed certified cut. A receiving node's clock or
+   packet order cannot authorize releases or change confirmed eligibility.
+3. Extend live fork replacement beyond payments and verifier preferences. Disjoint
+   TRST snapshot entries and independent same-origin merges now survive replacement.
+   Iteration 269 also preserves disjoint origin ownership entries for the same
+   creator. Resolve overlapping holding/revision snapshot
+   conflicts, implicit lifecycle dependencies and unprovable orphaned
+   fork payloads. Test independent-signer competing branches and partitions. Never replace
+   cemented state or an ancestor of a durable confirmation handoff.
+4. Finish adversarial validation of checkpoint agreement, recovery, transport,
+   certificate catch-up and exact-round selection. Cover partitions, crash points,
+   conflicting independent signers and recovery around deadline/beacon boundaries.
+   Iteration 151 covers abrupt signer-process termination at prevote, uncommitted
+   prepared write, precommit and decision. Iteration 153 adds process crashes
+   around durable economic installation, with all 28 tables compared. Controlled
+   cache-publication boundaries and startup recovery pass in iteration 157;
+   iteration 158 adds the running block-processing worker with RPC/P2P listeners.
+   Iteration 161 adds amended missed-deadline recovery with independent-store
+   restart and TCP service evidence. Adversarial scheduling bias and production
+   timing remain open, along with the traffic cases above.
+   Normal-path tests and corrected scheduler tests do not prove those cases.
+   Keep the source release gates closed until their prerequisites pass.
+   Snapshot archives now have operator export, availability discovery and
+   full-node peer staging. Gated ledger bootstrap and atomic live installation
+   now have real-peer, restart and process-crash evidence; finish the remaining
+   adversarial and retained-dependency cases below. Compact tails
+   execute across certified boundaries and reconstruct successor selections.
+   Current archives restore pre-base selections from frozen inputs and the
+   historical authority path without ledger reads. Transaction-owned reconciliation and sparse ledger
+   projection now exist. Gated startup owns compact commit, force-sync and cache
+   publication under the runtime locks. Checkpoint startup now selects the compact
+   coordinator from the stored base. Iteration 244 prepares immediate compact
+   successors and rechecks installed state and local finality without writes.
+   Iteration 245 connects gated sparse successor projection to the existing
+   live publication runtime. Iteration 246 adds a started-node, two-successor
+   publication and RPC payment/restart journey. Iteration 247 checks process
+   crashes at five publication boundaries of that second successor. Iterations
+   251–252 add explicit archive startup, payment/restart and bootstrap process-crash
+   evidence. Iteration 253 adds active-panel archive bootstrap with preserved
+   committee/deadline and payment/restart evidence. Iteration 254 adds completed
+   normal-verification archive recovery with stake/reward checks. Iteration 255
+   connects explicit startup download-to-install with active-panel payment/restart
+   and closed-admission evidence. Iteration 256 adds startup replacement of an
+   older compact base while preserving accepted certificates and an unresolved
+   final-vote promise. Iteration 257 adds process crashes during download and
+   around file publication, followed by archive recovery and payment admission.
+   Iteration 258 adds five replacement process-crash boundaries with preserved
+   accepted certificates, signing promises and restarted payment admission.
+   Iteration 259 adds settled fraud/inactivity challenge and successful appeal
+   archive bootstrap and restart. Iteration 260 adds active challenge/appeal
+   archive recovery for both reasons, preserving the original judgment, panel,
+   deadline and stakes. Iteration 261 adds live peer delivery and installation
+   of later challenge deadlines and restoring appeal outcomes, with payment and
+   restart checks. Iteration 262 adds full-history-to-compact checkpoint-service
+   handoff without restarting the service. Iteration 263 adds coordinated live
+   installation and base replacement with a controlled proof adapter, plus
+   payments and real-peer restart. Iteration 264 checks late signing promises
+   and confirmation obligations; iteration 265 adds real-peer proof delivery
+   during live installation and base replacement. Complete arbitrary network
+   scheduling, the remaining signing races and mixed-lifecycle
+   multi-height evidence. Iteration 266 covers five initial live-install
+   process-crash boundaries; iteration 267 covers the five existing-base live
+   replacement boundaries. Storage-fault and power-loss coverage remain open. Historical inventories
+   still need compaction. Iterations 273–276 separate inventory counts, archive
+   authority traversal and compact record heights from the former absolute cap.
+   Shared compact manifest construction no longer imposes height 128 in iteration
+   277; iteration 278 removes the transport ceiling. Iteration 280 connects
+   compact import and sparse export, with direct importer/peer-proof evidence.
+   Iteration 282 passes a TCP sync-loop catch-up, activation, payment and restart
+   journey with retained source proof bodies. Fully pruned-source catch-up and
+   broader pre-base selection refresh scheduling remain open; iteration 283 covers
+   direct receipt-based import/export with the physical selection record absent.
+   Iteration 284 covers retained-record beacon export. Check running-node
+   delayed-refresh under arbitrary scheduling next. Iteration 285 passes delayed
+   pre-base beacon import, complete committee publication and restart over TCP,
+   with source proof bodies and its original selection record retained.
+   Iteration 286 also removes the source selection record and restarts both nodes,
+   after adding locally retained witness recovery. Historical bodies remain.
+   Iteration 289 passes the sparse-source restart/bootstrap journey added in
+   iteration 288. Exact snapshot-committed selection heads can authenticate
+   retained dependency bodies without newer ancestry. Startup retains those
+   verified bodies atomically; a fresh observer bootstraps and pays after the
+   archival source is stopped. General dependency-aware compaction remains open.
+   Full-prefix paths stay bounded.
+   Full-prefix replay remains bounded, and archive authority still occupies a
+   bounded complete header. These are release blockers, not protocol lifetime
+   limits. Persisted incremental authority, bounded retention and remaining
+   runtime integration must replace them; increasing constants alone is not a fix.
+   Stored successor recovery now fetches multi-account membership proofs through
+   running peers and matches full replay in the TCP test. Startup must run this
+   transport before admission, authenticate the installed epoch rather than
+   merely the accepted tip, and check sparse indexes and the provisional tail.
+   The compact metadata validator now checks installed authority and voting
+   limits plus the cemented governance suffix. Exact-installed-epoch recovery
+   now connects that validator to the stored base and peer proof provider.
+   Retained physical history now passes index and authenticated membership checks,
+   including sparse peer retrieval and writer-owned inventory revalidation.
+   Signer journals and applied economic/engine state now pass recovery checks.
+   Frontier and pending-sender indexes now have bounded consistency checks.
+   Token indexes and undo now have replay-derived reconstruction in gated startup
+   publication. Finish the remaining live paths and their full-node evidence
+   before opening release gates. Neither staging nor larger caps authorize pruning.
+5. Finish wallet/node integration against those protocol paths. Native-wallet
+   authoring, readable review, endorsement and direct/delegated voting on typed
+   constitutional diffs now pass certified activation and recovery. Parameter
+   authoring now has a native certified rate-change/recovery journey. The
+   owner withdrawal flow also has native signing, no-refund and certified
+   restart/fresh-observer evidence. Remaining native lifecycle/payment journeys
+   and recorded UI checks still
+   need completion and evidence.
+   Mocked browser tests do not establish native signing or network acceptance.
+   Preserve consumer-focused wallet presentation and expose technical state in
+   the node UI without hiding errors or unsupported actions.
+6. Review and supply evidence for the unsigned sections in `spec/coverage.json`,
+   including wallet, networking, verification outcomes, revocation and economics.
+   Follow the resolutions in `spec/DECISION_RESOLUTIONS.md` when implementing
+   dependent behavior. Component tests alone do not establish economic or Sybil-resistance
+   claims. The index currently has 388 sections, 380 not signed off and no
+   coverage-format errors. That is a review backlog, not a percentage-complete
+   estimate or proof that all unsigned behavior is missing.
+
+`CHECKPOINT_SELECTION.md` records the checkpoint-specific prerequisites. The
+old root-level `RSNANO_PORT_PLAN.md` contains useful leads but also stale paths
+and superseded monetary-weight assumptions. Treat its claims as questions to
+check against the current source, not instructions to apply wholesale.
+
+## Validation for these iterations
+
+After iterations 5–6, `cargo test --workspace --locked --offline --quiet` passed,
+including 283 node unit tests, the two recovery tests, 36 LMDB tests and the
+70.45-second governance network test. One documentation example is ignored.
+Library Clippy passed with argument-count warnings on `endorsement_commit::apply`
+and `ledger_updater::persist_block`. `git diff --check` passed.
+Offline Tauri backend checks also passed for both `wallet` and `node-gui`.
+
+The latest `bash ./run-validation.sh` passed with evidence retained in
+`/tmp/burst-validation.pgesPGaq`. It includes the durable handoff, deferred worker
+startup and strict BRN restoration changes. An earlier pass at
+`/tmp/burst-validation.qbAULbhO` predates the startup changes. Both used disposable
+local nodes; no existing app or Azure node was upgraded.
+
+The first recovery-test fixture omitted the genesis BRN snapshot and correctly
+failed startup. The fixture now persists that snapshot before simulating restart;
+the passing test does not bypass the missing-history check.
+
+The expanded signed-wallet fixture passed at
+`/tmp/burst-validation.rKikGwAi`. In addition to payments and rejection/return,
+it covers paid governance support, duplicate rejection without another burn,
+proposer-only withdrawal, the governance record after hard restart, and its
+reconstruction by a fresh fourth node. This run includes the final electorate
+filtering changes and verified-counter repair.
+
+`cargo test -p burst-node --test governance_network --locked --offline -- --nocapture`
+passed in 75.52 seconds after the electorate fixes. Three real nodes submit,
+endorse and vote through signed RPC blocks, activate the approved rate after
+cooldown, and agree on the proposal record and spending counter. A fresh fourth
+node replays that history. The first node then restarts and retains the active
+parameters and proposal. Timelines and endorsement cost are shortened only in
+the test's in-process configuration. The test uses a shared public development
+key and is not an independent-representative or partition-safety test.
+
+Earlier failed attempts exposed the missing genesis counter and shutdown
+handling. Programmatic shutdown now wakes the node's start waiter and remains
+latched for subscribers that start after the request. Tests cover both races.
+Those failed attempts are not counted as passes.
+
+The wallet production build passed after removing the second-ballot UI. The
+writing pass keeps this log explicit about incomplete protocol work; it does
+not present passing component tests as whitepaper parity.
+
+### Earlier election/cementation checks
+
+`cargo test --workspace --locked --offline --quiet` passed, including 223
+consensus tests, 266 node unit tests and 31 LMDB tests. One documentation test
+remains ignored. The new tests cover shared conflict routing, duplicate final
+votes, separate open roots, bounded route cleanup, quorum rounding, causal
+source ordering, missing-source atomic abort, corrupt indexes/hashes, restart
+persistence and continuation after a 4096-block batch.
+
+Library Clippy checks for consensus, LMDB and node passed with the existing
+argument-count warning on `ledger_updater::persist_block`. `git diff --check`
+passed.
+
+`bash ./run-validation.sh` passed with fresh local nodes. Evidence is retained
+in `/tmp/burst-validation.vfPSEXxS`. It covers payments, merges with provenance,
+delegation/revocation, gated verification/challenge rejection without balance
+changes, hard-crash recovery, a new payment after restart, and fresh-node catch-up.
+The fixture uses genesis bootstrap authority and a shared public development
+key. It does not test independent Byzantine representatives or certified
+verifier selection. Test processes exited; the existing wallet, node GUI and
+RPC-7077 node were not restarted or upgraded.

@@ -10,6 +10,9 @@
 pub mod engine;
 pub mod error;
 pub mod merger_graph;
+mod shared;
+mod snapshot_encoding;
+mod snapshot_undo;
 pub mod token;
 
 pub use engine::{
@@ -18,4 +21,5 @@ pub use engine::{
 };
 pub use error::TrstError;
 pub use merger_graph::{MergeNode, MergeSource, MergerGraph, TaintEvent, UnTaintEvent};
+pub use shared::Shared;
 pub use token::TrstToken;

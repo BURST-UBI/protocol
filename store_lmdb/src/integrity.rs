@@ -4,7 +4,6 @@
 //! processing blocks.
 
 use std::path::Path;
-use std::sync::Arc;
 
 use heed::Env;
 
@@ -52,7 +51,7 @@ const EXPECTED_DATABASES: &[&str] = &[
 ///
 /// Opens each expected database and attempts to count entries. Any read
 /// failures are recorded in the report rather than causing a hard error.
-pub fn check_integrity(env: &Arc<Env>) -> Result<IntegrityReport, LmdbError> {
+pub fn check_integrity(env: &Env) -> Result<IntegrityReport, LmdbError> {
     let mut report = IntegrityReport {
         databases_checked: 0,
         total_entries: 0,

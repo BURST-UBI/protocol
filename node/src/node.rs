@@ -13,9 +13,7 @@ use burst_consensus::{
 };
 use burst_governance::delegation::DelegationEngine;
 use burst_governance::GovernanceEngine;
-use burst_ledger::{
-    BlockType, DagFrontier, LedgerPruner, PruningConfig, StateBlock, CURRENT_BLOCK_VERSION,
-};
+use burst_ledger::{BlockType, DagFrontier, StateBlock, CURRENT_BLOCK_VERSION};
 use burst_messages::PeerAddress;
 use burst_network::{Broadcaster, ClockSync, PeerManager, PortMapper, UpnpState};
 use burst_rpc::{BlockProcessorCallback, ProcessResult as RpcProcessResult, RpcServer, RpcState};
@@ -29,16 +27,14 @@ use burst_websocket::{WebSocketServer, WsState};
 use burst_work::WorkGenerator;
 
 use burst_store::account::AccountStore;
-use burst_store::delegation::{DelegationRecord, DelegationStore};
+use burst_store::delegation::DelegationStore;
 use burst_store::meta::MetaStore;
 use burst_store::pending::PendingStore;
 use burst_store::rep_weights::RepWeightStore;
-use burst_store::trst_index::TrstIndexStore;
 
 use crate::block_processor::{BlockProcessor, ProcessResult};
 use crate::bounded_backlog::BoundedBacklog;
 use crate::config::NodeConfig;
-use crate::confirmation_processor::{CementResult, ConfirmationProcessor, LmdbChainWalker};
 use crate::confirming_set::ConfirmingSet;
 use crate::connection_registry::{spawn_peer_read_loop, ConnectionRegistry};
 use crate::error::NodeError;
@@ -53,9 +49,9 @@ use crate::verification_processor::{VerificationProcessor, VerifierPool};
 use crate::wire_message::{WireMessage, WireVote};
 
 /// Default LMDB map size: 1 GiB.
-const DEFAULT_MAP_SIZE: usize = 1 << 30;
+pub(crate) const DEFAULT_MAP_SIZE: usize = 1 << 30;
 /// Number of named LMDB databases.
-const MAX_DBS: u32 = 29;
+pub(crate) const MAX_DBS: u32 = 29;
 /// Channel capacity for the block-processing pipeline.
 const BLOCK_CHANNEL_CAPACITY: usize = 4096;
 /// Channel capacity for outbound peer messages.
@@ -64,8 +60,6 @@ const OUTBOUND_CHANNEL_CAPACITY: usize = 4096;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// Meta-store key used to persist the serialized MergerGraph.
 const MERGER_GRAPH_META_KEY: &str = "merger_graph";
-/// Meta-store key used to persist the verification orchestrator snapshot.
-const VERIFICATION_ORCHESTRATOR_META_KEY: &str = "verification_orchestrator";
 
 use crate::genesis_key;
 
@@ -74,19 +68,105 @@ use crate::genesis_key;
 /// Adapts the node's concrete [`BlockProcessor`] into the trait expected by
 /// the RPC crate, breaking the circular dependency.
 struct NodeBlockProcessor {
+    checkpoint_sync_status: Arc<crate::checkpoint_sync::tip::Published>,
+    historical_lookup: crate::historical_lookup::Reader,
+    recovery_store: Arc<LmdbStore>,
+    appeal_view: crate::appeal_view::Reader,
+    delegation_view: crate::delegation_view::Reader,
     block_queue: Arc<BlockPriorityQueue>,
+    submission_results: Arc<crate::submission_results::SubmissionResults>,
+    governance_transfers: Arc<crate::governance_content::transfer::Transfers>,
 }
 
 impl BlockProcessorCallback for NodeBlockProcessor {
+    fn checkpoint_sync_status(&self) -> Result<serde_json::Value, String> {
+        let epoch = self.recovery_store.meta_store().payment_epoch().map_err(|e| e.to_string())?;
+        Ok(self.checkpoint_sync_status.read(epoch))
+    }
+    fn historical_account_page(
+        &self, account: burst_types::WalletAddress, first: u64, count: u32,
+    ) -> burst_rpc::server::HistoricalAccountPageFuture<'_> {
+        Box::pin(self.historical_lookup.account_page(account, first, count))
+    }
+    fn historical_block(
+        &self,
+        hash: burst_types::BlockHash,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<burst_ledger::StateBlock>, String>> + Send + '_>> {
+        Box::pin(self.historical_lookup.read(hash))
+    }
+    fn confirmed_account_slot(
+        &self, query: burst_types::payment_recovery::SlotQuery,
+    ) -> Result<burst_types::payment_recovery::SlotReview, String> {
+        crate::payment_exclusion::slot(&self.recovery_store, query)
+    }
+    fn payment_exclusion(
+        &self,
+        query: burst_types::payment_recovery::ExclusionQuery,
+    ) -> Result<burst_types::payment_recovery::ExclusionReview, String> {
+        crate::payment_exclusion::read(&self.recovery_store, query)
+    }
+    fn appeal_review(
+        &self,
+        account: &WalletAddress,
+    ) -> Result<burst_types::appeal::AppealReview, String> {
+        self.appeal_view.read(
+            account,
+            cfg!(test)
+                || (crate::release_policy::appeals(self.delegation_view.network)
+                    && burst_verification::checkpoint_selection_enabled(
+                        self.delegation_view.network,
+                    )),
+        )
+    }
+    fn delegation_keys(
+        &self,
+        query: burst_governance::key_delegation::view::Query,
+    ) -> Result<burst_governance::key_delegation::view::Page, String> {
+        self.delegation_view
+            .read(query, self.supports_delegation_key_journal())
+    }
+    fn supports_full_governance_content(&self) -> bool {
+        crate::governance_content::enabled(self.delegation_view.network)
+    }
+    fn supports_delegation_key_journal(&self) -> bool {
+        cfg!(test) || crate::release_policy::delegation(self.delegation_view.network)
+    }
+    fn process_block_with_content(
+        &self,
+        block_bytes: &[u8],
+        content: &[u8],
+    ) -> Result<RpcProcessResult, String> {
+        if !self.supports_full_governance_content() {
+            return Err("full governance content is behind the release gate".into());
+        }
+        let block: StateBlock =
+            bincode::deserialize(block_bytes).map_err(|error| error.to_string())?;
+        self.governance_transfers.offer(&block, content)?;
+        self.submission_results.track(block_bytes);
+        // The content service retries queue admission if this immediate push
+        // encounters contention or a full queue. The result remains queued.
+        self.block_queue.try_push(block);
+        Ok(RpcProcessResult::Queued)
+    }
+
     fn process_block(&self, block_bytes: &[u8]) -> Result<RpcProcessResult, String> {
         let block: StateBlock = bincode::deserialize(block_bytes)
             .map_err(|e| format!("failed to deserialize block: {e}"))?;
 
+        self.submission_results.track(block_bytes);
         if self.block_queue.try_push(block) {
             Ok(RpcProcessResult::Queued)
         } else {
             Err("block queue full — try again later".to_string())
         }
+    }
+
+    fn wait_for_result<'a>(
+        &'a self,
+        block_bytes: &'a [u8],
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<RpcProcessResult>> + Send + 'a>>
+    {
+        Box::pin(self.submission_results.wait(block_bytes))
     }
 }
 
@@ -94,23 +174,14 @@ impl BlockProcessorCallback for NodeBlockProcessor {
 const RECENTLY_CONFIRMED_CAPACITY: usize = 65_536;
 /// Default maximum concurrent elections.
 const MAX_ACTIVE_ELECTIONS: usize = 5000;
-/// Default initial online weight estimate.
+/// Conservative placeholder; replaced from ledger-derived weight before networking.
 const DEFAULT_ONLINE_WEIGHT: u128 = 1_000_000;
-/// Bootstrap voting weight granted to the genesis representative on every node
-/// (the analog of Nano's genesis premine, for VOTING WEIGHT only — not spendable
-/// TRST). Consistent across nodes, so genesis's votes aggregate network-wide and
-/// consensus can confirm at launch before many humans run voting nodes.
-///
-/// Denominated in the hybrid weight's units, where one verified human ≈
-/// `WEIGHT_PER_HUMAN` (10_000). This is ≈ 10,000 verified-human-equivalents:
-/// dominant at genuine launch (a handful of verified wallets), and a shrinking
-/// fraction as the verified, participating population grows past ~10k, so
-/// consensus decentralises organically.
-const GENESIS_BOOTSTRAP_WEIGHT: u128 = 10_000 * burst_consensus::rep_weights::WEIGHT_PER_HUMAN;
 /// Default vote cache size.
 /// A running BURST node.
 pub struct BurstNode {
     pub config: NodeConfig,
+    /// Immutable replay inputs, separate from the currently governed rules.
+    initial_params: ProtocolParams,
     pub brn_engine: Arc<Mutex<BrnEngine>>,
     pub trst_engine: Arc<Mutex<TrstEngine>>,
     pub governance: Arc<Mutex<GovernanceEngine>>,
@@ -133,7 +204,7 @@ pub struct BurstNode {
     pub vote_generator: Arc<Mutex<VoteGenerator>>,
     /// Cached representative weights for vote routing.
     pub rep_weights: Arc<RwLock<RepWeightCache>>,
-    /// Confirming set — blocks waiting to be cemented.
+    /// Cementation counters. Pending work is persisted in LMDB metadata.
     pub confirming_set: Arc<Mutex<ConfirmingSet>>,
     /// Bounded backlog of unconfirmed blocks for DoS protection.
     pub backlog: Arc<Mutex<BoundedBacklog>>,
@@ -151,7 +222,7 @@ pub struct BurstNode {
     pub request_aggregator: Arc<Mutex<burst_consensus::RequestAggregator>>,
     /// SYN cookies — challenge-response handshake validation for inbound connections.
     pub syn_cookies: Arc<Mutex<burst_network::SynCookies>>,
-    /// Online weight sampler — tracks recently-active reps for quorum calculation.
+    /// Online weight sampler for telemetry, never the consensus denominator.
     pub online_weight_sampler: Arc<Mutex<OnlineWeightSampler>>,
     /// Message deduplication filter — prevents processing duplicate P2P messages.
     pub message_dedup: Arc<Mutex<burst_network::MessageDedup>>,
@@ -160,8 +231,8 @@ pub struct BurstNode {
     /// Delegation engine for governance vote delegation.
     pub delegation_engine: Arc<Mutex<DelegationEngine>>,
     /// VRF client for fetching drand randomness (verifier selection).
-    pub vrf_client: Arc<Mutex<burst_vrf::DrandClient>>,
-    /// Delegation store for scope-enforced delegation key verification.
+    pub vrf_client: Arc<burst_vrf::DrandClient>,
+    /// Legacy delegation records; not used to authorize secondary signatures.
     pub delegation_store: Arc<dyn DelegationStore + Send + Sync>,
     /// Verification orchestrator — end-to-end UHV workflow engine.
     pub verification_orchestrator: Arc<Mutex<burst_verification::VerificationOrchestrator>>,
@@ -177,6 +248,11 @@ pub struct BurstNode {
     /// Priority queue for submitting blocks into the processing pipeline.
     /// Blocks are ordered by PoW difficulty (higher = processed first).
     block_queue: Arc<BlockPriorityQueue>,
+    submission_results: Arc<crate::submission_results::SubmissionResults>,
+    snapshot_installer: crate::snapshot_installation::SnapshotInstaller,
+    snapshot_install_rx: Option<mpsc::Receiver<crate::snapshot_installation::Request>>,
+    recovered_checkpoint: Option<crate::confirmed_replay::snapshot::installed::ReplayCache>,
+    pub(crate) governance_transfers: Arc<crate::governance_content::transfer::Transfers>,
     /// Broadcaster for flooding messages to connected peers.
     broadcaster: Broadcaster,
     /// Node identity private key for P2P handshakes.
@@ -189,21 +265,70 @@ pub struct BurstNode {
     pub ledger_cache: Arc<LedgerCache>,
     /// Handles for spawned background tasks (joined during shutdown).
     task_handles: Vec<JoinHandle<()>>,
+    /// Taken only after persisted engines have been restored during start.
+    outbound_rx: Option<mpsc::Receiver<(String, Vec<u8>)>>,
+    /// Shared with payment voting so both paths keep the startup identity.
+    representative_key: Arc<burst_types::PrivateKey>,
+    nts_service: Option<burst_network::trusted_clock::NtsClock>,
+    pub signing_clock: Option<Arc<burst_network::trusted_clock::TrustedClock>>,
+    #[cfg(test)]
+    pub(crate) verification_fixture_clock: Option<crate::checkpoint_service::Clock>,
+    #[cfg(test)]
+    pub(crate) checkpoint_publication_probe: Option<fn(&str)>,
 }
 
+mod recovery_peers;
+mod recovery_publication;
+mod snapshot_bootstrap;
+#[cfg(test)]
+mod startup_tests;
+
 impl BurstNode {
+    /// Obtain local control before moving this node into its running task.
+    pub fn snapshot_installer(&self) -> crate::snapshot_installation::SnapshotInstaller {
+        self.snapshot_installer.clone()
+    }
+
+    fn certified_selection_enabled(&self) -> bool {
+        #[cfg(test)]
+        if self.verification_fixture_clock.is_some() {
+            assert_eq!(self.config.network, burst_types::NetworkId::Dev);
+            return true;
+        }
+        burst_verification::checkpoint_selection_enabled(self.config.network)
+    }
+
     /// Create and initialize a new BURST node.
     ///
     /// Opens the LMDB environment at `config.data_dir` and prepares all
     /// subsystems. Call [`start`] to begin accepting connections and
     /// processing blocks.
     pub async fn new(mut config: NodeConfig) -> Result<Self, NodeError> {
+        genesis_key::validate_identity(config.network)
+            .map_err(|error| NodeError::Config(error.into()))?;
+        config.validate_drand_relays()?;
+        config
+            .snapshot_transfer
+            .validate()
+            .map_err(|error| NodeError::Config(error.to_string()))?;
         let min_work_difficulty = config.params.min_work_difficulty;
+        let nts_service = if config.nts_sources.is_empty() || !config.enable_representative {
+            None
+        } else {
+            Some(
+                burst_network::trusted_clock::NtsClock::new(config.nts_sources.clone())
+                    .map_err(|e| NodeError::Config(format!("invalid signing time sources: {e}")))?,
+            )
+        };
+        let signing_clock = nts_service.as_ref().map(|service| service.clock());
 
         // Open LMDB storage
         let store = LmdbStore::open(&config.data_dir, MAX_DBS, DEFAULT_MAP_SIZE)
             .map_err(|e| NodeError::Other(format!("failed to open LMDB: {e}")))?;
         let store = Arc::new(store);
+        crate::network_identity::verify_network(&store, config.network)?;
+        let initial_params =
+            crate::network_identity::genesis_params(&store, config.network, &config.params)?;
 
         // Peer manager
         let peer_manager = PeerManager::with_config(
@@ -214,7 +339,8 @@ impl BurstNode {
         let peer_manager = Arc::new(RwLock::new(peer_manager));
 
         // Block priority queue (replaces FIFO channel — higher PoW = higher priority)
-        let block_queue = Arc::new(BlockPriorityQueue::new(BLOCK_CHANNEL_CAPACITY));
+        let retention = crate::block_retention::BlockRetention::new(crate::block_retention::MAX_RETAINED_BLOCKS);
+        let block_queue = Arc::new(BlockPriorityQueue::with_retention(BLOCK_CHANNEL_CAPACITY, retention.clone()));
 
         // Outbound message channel
         let (outbound_tx, outbound_rx) =
@@ -231,15 +357,20 @@ impl BurstNode {
         let ws_state = Arc::new(WsState::new(256));
 
         // Connection registry (maps peer_id -> TCP write half)
-        let connection_registry = Arc::new(RwLock::new(ConnectionRegistry::new()));
+        let connection_registry = Arc::new(RwLock::new(ConnectionRegistry::for_recovery()));
 
         // Block processor + frontier (loaded from store)
         let frontier = Self::load_frontier_from_store(&store)?;
         let frontier = Arc::new(RwLock::new(frontier));
-        let block_processor = Arc::new(Mutex::new(BlockProcessor::with_genesis_account(
+        let mut block_processor = BlockProcessor::with_genesis_account(
             min_work_difficulty,
             genesis_key::genesis_address(config.network),
-        )));
+            crate::genesis_state::block(config.network, &initial_params).hash,
+        )
+        .with_network(config.network);
+        block_processor.set_retention(retention);
+        block_processor.block_store = Some(Arc::new(store.block_store()));
+        let block_processor = Arc::new(Mutex::new(block_processor));
 
         // Consensus subsystems
         let active_elections = Arc::new(RwLock::new(ActiveElections::new(
@@ -256,28 +387,30 @@ impl BurstNode {
         // from persistent configuration.
         //
         // Nano-style: a node votes AS A REAL LEDGER ACCOUNT so its voting weight
-        // is consistent across the whole network (weight = confirmed balance of
-        // that account's delegators). The genesis-authority node (the one holding
-        // the genesis seed) votes as the GENESIS account, which carries the
-        // bootstrap voting weight every node agrees on (seeded below). Any other
-        // node votes as its own key and only carries weight once real TRST is
-        // delegated to it — so a weightless node's votes are correctly ignored.
-        let vote_generator = {
-            let (rep_addr, rep_key) = match genesis_key::genesis_signing_key(config.network) {
-                Some(kp) => (genesis_key::genesis_address(config.network), kp.private.0),
+        // comes from verified people delegating to that account. The genesis-key
+        // node votes as genesis, which has exactly the same unit per verified
+        // delegator as everyone else. A fresh node key has no weight until a
+        // verified person delegates to it; running extra nodes adds no weight.
+        let (vote_generator, representative_key) = {
+            let (rep_addr, rep_key) = match config
+                .representative_key()?
+                .or_else(|| genesis_key::genesis_signing_key(config.network))
+            {
+                Some(kp) => (burst_crypto::derive_address(&kp.public), kp.private),
                 None => {
                     let kp = burst_crypto::generate_keypair();
-                    (burst_crypto::derive_address(&kp.public), kp.private.0)
+                    (burst_crypto::derive_address(&kp.public), kp.private)
                 }
             };
-            let mut vg = VoteGenerator::new(rep_addr.clone(), rep_key);
+            let rep_key = Arc::new(rep_key);
+            let mut vg = VoteGenerator::with_shared_key(rep_addr.clone(), rep_key.clone());
             if config.enable_representative {
                 vg.set_representative(true);
                 tracing::info!(representative = %rep_addr, "node voting as representative (enabled)");
             } else {
                 tracing::info!(representative = %rep_addr, "node representative voting disabled");
             }
-            Arc::new(Mutex::new(vg))
+            (Arc::new(Mutex::new(vg)), rep_key)
         };
         let node_kp = burst_crypto::generate_keypair();
         let node_address = burst_crypto::derive_address(&node_kp.public);
@@ -322,7 +455,11 @@ impl BurstNode {
         let clock_sync = Arc::new(Mutex::new(ClockSync::new(5_000)));
 
         let delegation_engine = Arc::new(Mutex::new(DelegationEngine::default()));
-        let vrf_client = Arc::new(Mutex::new(burst_vrf::DrandClient::new()));
+        let vrf_client = Arc::new(
+            burst_vrf::DrandClient::mainnet()
+                .and_then(|client| client.with_relays(&config.drand_relays))
+                .map_err(|e| NodeError::Other(format!("invalid drand configuration: {e}")))?,
+        );
 
         let verification_orchestrator = Arc::new(Mutex::new(
             burst_verification::VerificationOrchestrator::new(),
@@ -339,11 +476,16 @@ impl BurstNode {
                         config.params = persisted;
                     }
                     Err(e) => {
-                        tracing::warn!(error = %e, "failed to deserialize persisted params, using config defaults");
+                        return Err(NodeError::Other(format!("cannot decode persisted protocol params; refusing to replace governed rules with defaults: {e}")));
                     }
                 },
-                _ => {
+                Ok(None) => {
                     tracing::info!("no persisted protocol params found, using config defaults");
+                }
+                Err(e) => {
+                    return Err(NodeError::Other(format!(
+                        "cannot read persisted protocol params: {e}"
+                    )))
                 }
             }
         }
@@ -356,7 +498,11 @@ impl BurstNode {
                     tracing::info!(wallets = wallet_count, "BRN engine state loaded from LMDB");
                     // On a fresh database the rate_history has rate=0 (default).
                     // Ensure it matches the protocol's configured brn_rate.
-                    if loaded.current_rate() != config.params.brn_rate {
+                    let has_rate_history = brn_store
+                        .get_meta(b"rate_history")
+                        .map_err(|e| NodeError::Other(e.to_string()))?
+                        .is_some();
+                    if !has_rate_history && loaded.wallets.is_empty() {
                         tracing::info!(
                             stored_rate = loaded.current_rate(),
                             protocol_rate = config.params.brn_rate,
@@ -364,15 +510,29 @@ impl BurstNode {
                         );
                         loaded.rate_history =
                             burst_brn::RateHistory::new(config.params.brn_rate, Timestamp::new(0));
-                        if let Err(e) = loaded.save_to_store(&brn_store) {
-                            tracing::warn!(error = %e, "failed to persist corrected BRN rate");
-                        }
+                        let rates = bincode::serialize(&loaded.rate_history)
+                            .map_err(|e| NodeError::Other(e.to_string()))?;
+                        let mut batch = store
+                            .tx_begin_write()
+                            .map_err(|e| NodeError::Other(e.to_string()))?;
+                        batch
+                            .put_brn_meta(b"rate_history", &rates)
+                            .map_err(|e| NodeError::Other(e.to_string()))?;
+                        batch
+                            .put_brn_meta(b"next_stake_id", &loaded.next_stake_id().to_be_bytes())
+                            .map_err(|e| NodeError::Other(e.to_string()))?;
+                        batch.commit().map_err(|e| {
+                            NodeError::Other(format!("cannot persist initial BRN state: {e}"))
+                        })?;
+                    } else if loaded.current_rate() != config.params.brn_rate {
+                        return Err(NodeError::Other("persisted BRN rate differs from governed params; refusing to overwrite historical earnings".into()));
                     }
                     loaded
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "failed to load BRN engine state, starting fresh");
-                    BrnEngine::with_rate(config.params.brn_rate, Timestamp::new(0))
+                    return Err(NodeError::Other(format!(
+                        "cannot load persisted BRN state: {e}"
+                    )));
                 }
             }
         };
@@ -394,8 +554,18 @@ impl BurstNode {
             Arc::new(LedgerCache::new(bc, ac, pc))
         };
 
-        let mut node = Self {
+        let (snapshot_installer, snapshot_install_rx) =
+            crate::snapshot_installation::SnapshotInstaller::channel(
+                config.snapshot_transfer.max_archive_bytes,
+                store.clone(),
+                config.network,
+                initial_params.clone(),
+                connection_registry.clone(),
+                shutdown.clone(),
+            );
+        let node = Self {
             config,
+            initial_params,
             brn_engine: Arc::new(Mutex::new(brn_engine)),
             trst_engine: Arc::new(Mutex::new(TrstEngine::with_expiry(trst_expiry))),
             governance: {
@@ -411,13 +581,19 @@ impl BurstNode {
                             Arc::new(Mutex::new(engine))
                         }
                         Err(e) => {
-                            tracing::warn!(error = %e, "failed to deserialize GovernanceEngine, starting fresh");
-                            Arc::new(Mutex::new(GovernanceEngine::new()))
+                            return Err(NodeError::Other(format!(
+                                "invalid persisted governance engine: {e}"
+                            )));
                         }
                     },
-                    _ => {
+                    Ok(None) => {
                         tracing::info!("no persisted GovernanceEngine state, starting fresh");
                         Arc::new(Mutex::new(GovernanceEngine::new()))
+                    }
+                    Err(e) => {
+                        return Err(NodeError::Other(format!(
+                            "cannot read persisted governance engine: {e}"
+                        )))
                     }
                 }
             },
@@ -462,19 +638,28 @@ impl BurstNode {
                 60_000_000, // minimum weight floor
             ))),
             block_queue,
+            submission_results: Arc::new(crate::submission_results::SubmissionResults::new(4096)),
+            snapshot_installer,
+            snapshot_install_rx: Some(snapshot_install_rx),
+            recovered_checkpoint: None,
+            governance_transfers: Arc::new(
+                crate::governance_content::transfer::Transfers::default(),
+            ),
             broadcaster,
             node_private_key,
             node_address,
             port_mapper: None,
             ledger_cache,
             task_handles: Vec::new(),
+            outbound_rx: Some(outbound_rx),
+            representative_key,
+            nts_service,
+            signing_clock,
+            #[cfg(test)]
+            verification_fixture_clock: None,
+            #[cfg(test)]
+            checkpoint_publication_probe: None,
         };
-
-        // Stash the receivers on the node so start() can consume them.
-        // We use a trick: store them in Options that start() takes.
-        // Since Rust doesn't allow partial moves from &mut self, we'll
-        // pass them through start() via a separate helper.
-        node.spawn_initial_tasks(outbound_rx).await?;
 
         Ok(node)
     }
@@ -503,14 +688,61 @@ impl BurstNode {
     }
 
     /// Initialize the genesis block if the database is empty.
-    fn initialize_genesis(&self) -> Result<(), NodeError> {
+    pub fn initialize_genesis(&self) -> Result<(), NodeError> {
         let block_store = self.store.block_store();
 
         match block_store.block_count() {
-            Ok(0) | Err(_) => {
+            Err(error) => return Err(NodeError::Other(format!("cannot read ledger: {error}"))),
+            Ok(0) => {
+                let error = || {
+                    NodeError::Other(
+                    "ledger blocks are missing but economic state remains; explicit ledger replay required, using a known-good backup or a new data directory".into(),
+                )
+                };
+                if self.store.account_store().account_count()? != 0
+                    || self.store.pending_store().pending_count()? != 0
+                {
+                    return Err(error());
+                }
+                for key in [
+                    TrstEngine::meta_key(),
+                    crate::trst_storage::FORMAT_KEY,
+                    crate::graph_storage::FORMAT_KEY,
+                    MERGER_GRAPH_META_KEY,
+                    "consti_engine",
+                    DelegationEngine::meta_key(),
+                    crate::endorsement_commit::SNAPSHOT_KEY,
+                ] {
+                    match self.store.meta_store().get_meta(key) {
+                        Ok(_) => return Err(error()),
+                        Err(burst_store::StoreError::NotFound(_)) => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                if self
+                    .store
+                    .brn_store()
+                    .get_meta(b"governance_engine")?
+                    .is_some()
+                {
+                    return Err(error());
+                }
                 tracing::info!("empty database — creating genesis block");
             }
             Ok(count) => {
+                crate::bootstrap_phase::require(&self.store)
+                    .map_err(|error| NodeError::Other(error.to_string()))?;
+                let genesis =
+                    crate::genesis_state::block(self.config.network, &self.initial_params);
+                let mut batch = self.store.tx_begin_write()?;
+                crate::genesis_state::confirm_anchor(&mut batch, &genesis)?;
+                let installed = batch.payment_epoch()?;
+                if installed != genesis.hash && !self.certified_selection_enabled() {
+                    return Err(NodeError::Other(
+                        "certified payment context requires the gated runtime".into(),
+                    ));
+                }
+                batch.commit()?;
                 tracing::info!(blocks = count, "database already initialized");
                 return Ok(());
             }
@@ -518,34 +750,11 @@ impl BurstNode {
 
         let genesis_network = self.config.network;
         let genesis_account = genesis_key::genesis_address(genesis_network);
-        let representative = genesis_account.clone();
+        // The trust anchor has canonical bytes on every node, independent of
+        // whether the creator's signing key is available locally.
+        let genesis_block = crate::genesis_state::block(genesis_network, &self.initial_params);
 
-        let mut genesis_block = StateBlock {
-            version: CURRENT_BLOCK_VERSION,
-            block_type: BlockType::Open,
-            account: genesis_account.clone(),
-            previous: BlockHash::ZERO,
-            representative,
-            brn_balance: 0,
-            trst_balance: 0,
-            link: BlockHash::ZERO,
-            origin: TxHash::ZERO,
-            transaction: TxHash::ZERO,
-            timestamp: Timestamp::new(0),
-            params_hash: self.config.params.params_hash(),
-            merge_sources: Vec::new(),
-            work: 0,
-            signature: Signature([0u8; 64]),
-            hash: BlockHash::ZERO,
-        };
-        genesis_block.hash = genesis_block.compute_hash();
-        // Signed by the creator's node if it holds the seed; a zero signature
-        // on other nodes is safe — genesis is trusted by its (signature-
-        // independent) hash, identical on every node.
-        genesis_block.signature =
-            genesis_key::sign_genesis(genesis_network, genesis_block.hash.as_bytes());
-
-        // Persist genesis block, frontier, and schema version in a single write batch
+        // Genesis account and block must become visible together.
         let block_bytes =
             bincode::serialize(&genesis_block).map_err(|e| NodeError::Other(e.to_string()))?;
         let mut batch = self
@@ -562,30 +771,68 @@ impl BurstNode {
         batch
             .put_frontier(&genesis_account, &genesis_block.hash)
             .map_err(|e| NodeError::Other(format!("failed to batch genesis frontier: {e}")))?;
+        let genesis_info =
+            crate::genesis_state::account_to_write(None, genesis_account, genesis_block.hash)
+                .expect("a new genesis account always needs initialization");
         batch
-            .put_meta("schema_version", b"1")
-            .map_err(|e| NodeError::Other(format!("failed to batch schema version: {e}")))?;
+            .put_account_info(&genesis_info, false)
+            .map_err(|e| NodeError::Other(format!("failed to batch genesis account: {e}")))?;
+        crate::genesis_state::confirm_anchor(&mut batch, &genesis_block)?;
+        crate::payment_epoch::initialize(&mut batch, genesis_block.hash)?;
+        crate::bootstrap_phase::initialize(&mut batch, &self.initial_params)
+            .map_err(|e| NodeError::Other(format!("failed to initialize bootstrap phase: {e}")))?;
+        crate::confirmed_authority::ConfirmedAuthority::initialize(&mut batch, &genesis_info)
+            .map_err(|e| {
+                NodeError::Other(format!("failed to initialize confirmed authority: {e}"))
+            })?;
+        let trst = TrstEngine::with_expiry(self.initial_params.trst_expiry_secs);
+        let mut brn = BrnEngine::with_rate(self.initial_params.brn_rate, Timestamp::EPOCH);
+        brn.track_wallet(
+            genesis_info.address.clone(),
+            burst_brn::BrnWalletState::new(Timestamp::EPOCH),
+        );
+        crate::ledger_updater::persist_economics(&mut batch, &brn, &trst)
+            .map_err(NodeError::Other)?;
+        crate::governance_commit::CandidateGovernance::initial(
+            self.initial_params.clone(),
+            genesis_network,
+            genesis_block.hash,
+        )
+        .persist(&mut batch)
+        .map_err(NodeError::Other)?;
+        let mut verification = burst_verification::VerificationOrchestrator::new();
+        verification.apply_governed_rules(&self.initial_params);
+        crate::genesis_state::initialize_verification(&mut batch, &genesis_block, &verification)?;
         batch
             .commit()
             .map_err(|e| NodeError::Other(format!("failed to commit genesis batch: {e}")))?;
 
         self.ledger_cache.inc_block_count();
+        self.ledger_cache.inc_account_count();
         tracing::info!(hash = %genesis_block.hash, "genesis block created");
         Ok(())
     }
 
-    /// Spawn the core background tasks. Called once from `new()`.
+    /// Spawn core tasks after restoring all persisted state in `start()`.
     async fn spawn_initial_tasks(
         &mut self,
         outbound_rx: mpsc::Receiver<(String, Vec<u8>)>,
     ) -> Result<(), NodeError> {
         // ── Block processor task ──────────────────────────────────────────
+        self.block_processor.lock().await.historical_finality = self
+            .connection_registry
+            .read()
+            .await
+            .historical_finality
+            .clone();
         let bp = Arc::clone(&self.block_processor);
         let frontier = Arc::clone(&self.frontier);
         let store = Arc::clone(&self.store);
         let metrics = Arc::clone(&self.metrics);
         let mut shutdown_rx = self.shutdown.subscribe();
         let block_queue = Arc::clone(&self.block_queue);
+        let submission_results_bp = Arc::clone(&self.submission_results);
+        let governance_transfers_bp = Arc::clone(&self.governance_transfers);
         let active_elections_bp = Arc::clone(&self.active_elections);
         let vote_generator_bp = Arc::clone(&self.vote_generator);
         let online_weight_sampler_bp = Arc::clone(&self.online_weight_sampler);
@@ -597,7 +844,6 @@ impl BurstNode {
         let brn_engine_bp = Arc::clone(&self.brn_engine);
         let trst_engine_bp = Arc::clone(&self.trst_engine);
         let ledger_cache_bp = Arc::clone(&self.ledger_cache);
-        let trst_expiry_secs = self.config.params.trst_expiry_secs;
         let mut config_params_bp = self.config.params.clone();
         let genesis_network_bp = self.config.network;
         let fork_cache_bp = Arc::clone(&self.fork_cache);
@@ -605,29 +851,265 @@ impl BurstNode {
         let ws_state_bp = Arc::clone(&self.ws_state);
         let governance_bp = Arc::clone(&self.governance);
         let delegation_bp = Arc::clone(&self.delegation_engine);
-        let delegation_store_bp = Arc::clone(&self.delegation_store);
-        let vrf_client_bp = Arc::clone(&self.vrf_client);
         let _verification_processor_bp = Arc::clone(&self.verification_processor);
         let verification_orch_bp = Arc::clone(&self.verification_orchestrator);
+        let certified_selection_bp = self.certified_selection_enabled();
         let difficulty_adjuster_bp = Arc::clone(&self.difficulty_adjuster);
         let priority_scheduler_bp = Arc::clone(&self.priority_scheduler);
         let consti_engine_bp = Arc::clone(&self.consti_engine);
+        let (fork_install_tx, mut fork_install_rx) = mpsc::channel::<BlockHash>(32);
+        let fork_runtime = crate::fork_resolution::Runtime {
+            store: self.store.clone(),
+            brn: self.brn_engine.clone(),
+            trst: self.trst_engine.clone(),
+            processor: self.block_processor.clone(),
+            frontier: self.frontier.clone(),
+            weights: self.rep_weights.clone(),
+            scheduler: self.priority_scheduler.clone(),
+            elections: self.active_elections.clone(),
+            backlog: self.backlog.clone(),
+            broadcaster: self.local_broadcaster.clone(),
+            counts: self.ledger_cache.clone(),
+        };
+        let recovered_checkpoint = self.recovered_checkpoint.take();
+        let last_complete = recovered_checkpoint.as_ref().map(|cache| {
+            let anchor = cache.recovered.continuation.anchor();
+            (anchor.height(), anchor.hash())
+        });
+        let mut checkpoint_runtime = crate::checkpoint_installation::Runtime {
+            registry: self.connection_registry.clone(),
+            ledger: fork_runtime.clone(),
+            verification: self.verification_orchestrator.clone(),
+            governance: self.governance.clone(),
+            delegation: self.delegation_engine.clone(),
+            constitution: self.consti_engine.clone(),
+            network: self.config.network,
+            initial_params: self.initial_params.clone(),
+            shutdown: self.shutdown.clone(),
+            last_complete,
+            recovery: recovered_checkpoint,
+            #[cfg(test)]
+            publication_probe: self.checkpoint_publication_probe,
+        };
 
+        let key_chain_bp = (
+            self.config.network,
+            crate::genesis_state::block(self.config.network, &self.initial_params).hash,
+        );
+        let fork_governance = crate::fork_resolution::GovernanceRuntime {
+            genesis: key_chain_bp.1,
+            governance: self.governance.clone(),
+            delegation: self.delegation_engine.clone(),
+            constitution: self.consti_engine.clone(),
+        };
+        let mut validation_queue = crate::block_validation::BlockValidationQueue::new(
+            block_queue.clone(),
+            bp.lock().await.authentication_rules(),
+            Arc::new(store.block_store()),
+        );
+        let mut snapshot_install_rx = self
+            .snapshot_install_rx
+            .take()
+            .ok_or_else(|| NodeError::Other("snapshot installer already started".into()))?;
+        let (checkpoint_accepted, checkpoint_installed) = {
+            let registry = self.connection_registry.read().await;
+            (
+                registry.checkpoint_accepted.clone(),
+                registry.checkpoint_installed.clone(),
+            )
+        };
+        let (historical_dependencies, history_task) = crate::historical_dependencies::start(
+            self.store.clone(),
+            self.config.network,
+            self.initial_params.clone(),
+            self.connection_registry.clone(),
+            self.block_processor.clone(),
+            self.block_queue.clone(),
+            self.ledger_cache.clone(),
+            self.shutdown.clone(),
+        );
+        self.task_handles.push(history_task);
         let bp_handle = tokio::spawn(async move {
+            let mut checkpoint_tick = tokio::time::interval(Duration::from_secs(1));
+            checkpoint_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut last_checkpoint_error: Option<String> = None;
             loop {
                 // Pop the highest-priority block (by PoW difficulty).
                 // Use select! to remain responsive to shutdown signals.
-                let block = tokio::select! {
+                let authenticated = tokio::select! {
                     biased;
                     _ = shutdown_rx.recv() => {
                         tracing::info!("block processor task shutting down");
                         break;
                     }
-                    block = block_queue.pop() => block,
+                    Some(request) = snapshot_install_rx.recv(), if certified_selection_bp => {
+                        if request.reply.is_closed() {
+                            continue;
+                        }
+                        let epoch = request.candidate.anchor().hash();
+                        let result = match checkpoint_runtime.install_snapshot(request.candidate).await {
+                            Ok(params) => {
+                                config_params_bp = params;
+                                validation_queue.set_rules(bp.lock().await.authentication_rules());
+                                last_checkpoint_error = None;
+                                checkpoint_installed.notify_one();
+                                Ok(epoch)
+                            }
+                            Err(error) => Err(error.to_string()),
+                        };
+                        let _ = request.reply.send(result);
+                        continue;
+                    }
+                    _ = async {
+                        tokio::select! {
+                            _ = checkpoint_tick.tick() => (),
+                            _ = checkpoint_accepted.notified() => (),
+                        }
+                    }, if certified_selection_bp => {
+                        match checkpoint_runtime.install_next().await {
+                            Ok(Some(params)) => {
+                                config_params_bp = params;
+                                validation_queue.set_rules(bp.lock().await.authentication_rules());
+                                last_checkpoint_error = None;
+                                checkpoint_installed.notify_one();
+                            }
+                            Ok(None) => last_checkpoint_error = None,
+                            Err(error) => {
+                                let error = error.to_string();
+                                if last_checkpoint_error.as_deref() != Some(error.as_str()) {
+                                    tracing::warn!(%error, "checkpoint state installation deferred");
+                                    last_checkpoint_error = Some(error);
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    Some(winner) = fork_install_rx.recv() => {
+                        match fork_runtime.install(winner, &config_params_bp, genesis_network_bp,
+                            certified_selection_bp.then_some(&verification_orch_bp),
+                            certified_selection_bp.then_some(&fork_governance)).await {
+                            Ok(released) => for dependent in released {
+                                if !block_queue.try_push_retained(dependent) {
+                                    tracing::warn!(%winner, "block queue full after fork replacement");
+                                }
+                            },
+                            Err(error) => tracing::debug!(%winner, %error, "fork replacement deferred"),
+                        }
+                        continue;
+                    }
+                    result = validation_queue.next() => match result {
+                        Ok(block) => block,
+                        Err(error) => {
+                            tracing::error!(%error, "block authentication worker failed; stopping node");
+                            checkpoint_runtime.shutdown.fail("block authentication", &error);
+                            break;
+                        }
+                    },
                 };
+                let block = authenticated.block().clone();
 
                 let start = std::time::Instant::now();
+                tracing::debug!(hash = %block.hash,
+                    authentication_ms = authenticated.authentication_time().as_millis(),
+                    "authenticated block reached admission");
                 let _loop_now_secs = unix_now_secs();
+
+                // Do not revalidate spent pending entries for blocks already
+                // committed. Cross-account catch-up may deliver them again.
+                if store.block_store().exists(&block.hash).unwrap_or(false) {
+                    continue;
+                }
+
+                // Authenticate before retaining a dependency gap. The same
+                // pipeline handles live and replay arrival orders; economics
+                // starts only after the signed predecessor and sources exist.
+                let admission = {
+                    let mut processor = bp.lock().await;
+                    let f = frontier.read().await;
+                    processor.validate_authenticated_candidate(&authenticated, &f)
+                };
+                tracing::debug!(hash = %block.hash, elapsed_ms = start.elapsed().as_millis(),
+                    "block admission validation finished");
+                match &admission {
+                    ProcessResult::Accepted | ProcessResult::Fork => (),
+                    ProcessResult::GapSource if certified_selection_bp => {
+                        let _ = historical_dependencies.try_send(block.clone());
+                        continue;
+                    }
+                    ProcessResult::Rejected(reason) => {
+                        tracing::debug!(hash = %block.hash, account = %block.account, %reason,
+                            "block admission rejected");
+                        if certified_selection_bp && reason.contains("backdating rejected") {
+                            if let Err(error) = crate::checkpoint_recovery::request(&store, &block) {
+                                tracing::error!(%error, "cannot retain checkpoint recovery demand");
+                            }
+                            if let Ok(Some(authority)) =
+                                crate::payment_authority::PaymentAuthority::read(&store)
+                            {
+                                let registry = checkpoint_runtime.registry.read().await;
+                                registry.historical_finality.request(&block, authority);
+                            }
+                        }
+                        governance_transfers_bp.remove(block.hash);
+                        if let Ok(payload) = bincode::serialize(&block) {
+                            submission_results_bp
+                                .complete(&payload, RpcProcessResult::Rejected(reason.clone()));
+                        }
+                        continue;
+                    }
+                    _ => continue,
+                }
+
+                let proposal_content = if crate::governance_content::is_full(&block) {
+                    if !crate::governance_content::enabled(genesis_network_bp) {
+                        if let Ok(payload) = bincode::serialize(&block) {
+                            submission_results_bp.complete(
+                                &payload,
+                                RpcProcessResult::Rejected(
+                                    "full governance content is behind the release gate".into(),
+                                ),
+                            );
+                        }
+                        continue;
+                    }
+                    if !store
+                        .account_store()
+                        .get_account(&block.account)
+                        .is_ok_and(|account| account.state.is_verified())
+                    {
+                        governance_transfers_bp.remove(block.hash);
+                        if let Ok(payload) = bincode::serialize(&block) {
+                            submission_results_bp.complete(
+                                &payload,
+                                RpcProcessResult::Rejected(
+                                    "full proposal requires a verified proposer".into(),
+                                ),
+                            );
+                        }
+                        continue;
+                    }
+                    let ready = governance_transfers_bp.ready(block.hash).and_then(|ready| {
+                        if ready.is_some() {
+                            return Ok(ready);
+                        }
+                        store
+                            .meta_store()
+                            .fork_content(&block.hash)
+                            .map(|bytes| bytes.map(Arc::new))
+                            .map_err(|e| e.to_string())
+                    });
+                    match ready {
+                        Ok(Some(bytes)) => Some(bytes),
+                        _ => {
+                            if let Err(error) = governance_transfers_bp.defer(&block) {
+                                tracing::debug!(%error, "proposal content admission deferred");
+                            }
+                            continue;
+                        }
+                    }
+                } else {
+                    None
+                };
 
                 // Load previous block (if any) for balance validation and
                 // ledger updater context.
@@ -655,6 +1137,73 @@ impl BurstNode {
                         continue;
                     }
                 };
+
+                // Fork economics must be checked against the common ancestor,
+                // not balances/pending entries already consumed by the incumbent.
+                let mut admitted_fork = false;
+                let mut new_fork_payload = false;
+                if prev_account
+                    .as_ref()
+                    .is_some_and(|a| a.block_count != 0 && a.head != block.previous)
+                {
+                    let admission_time = bp.lock().await.admission_time();
+                    let _governance = if certified_selection_bp {
+                        Some((
+                            fork_governance.governance.lock().await,
+                            fork_governance.delegation.lock().await,
+                            fork_governance.constitution.lock().await,
+                        ))
+                    } else {
+                        None
+                    };
+                    let _brn = brn_engine_bp.lock().await;
+                    let _trst = trst_engine_bp.lock().await;
+                    let _verification = if certified_selection_bp {
+                        Some(verification_orch_bp.lock().await)
+                    } else {
+                        None
+                    };
+                    let evaluated = crate::fork_resolution::evaluate(
+                        &store,
+                        &block,
+                        &config_params_bp,
+                        admission_time,
+                        genesis_network_bp,
+                        certified_selection_bp,
+                        certified_selection_bp.then_some(crate::fork_resolution::GovernanceInput {
+                            genesis: key_chain_bp.1,
+                            content: proposal_content.as_ref().map(|bytes| bytes.as_slice()),
+                        }),
+                    )
+                    .and_then(|target| {
+                        if target.is_some() {
+                            let bytes = bincode::serialize(&block).map_err(|e| {
+                                burst_store::StoreError::Serialization(e.to_string())
+                            })?;
+                            new_fork_payload =
+                                store.meta_store().fork_candidate(&block.hash)?.is_none();
+                            store.meta_store().put_fork_candidate_with_content(
+                                &block.hash,
+                                &bytes,
+                                proposal_content.as_ref().map(|bytes| bytes.as_slice()),
+                            )?;
+                        }
+                        Ok(target.is_some())
+                    });
+                    match evaluated {
+                        Ok(fork) => admitted_fork = fork,
+                        Err(error) => {
+                            tracing::debug!(hash = %block.hash, %error, "fork not admitted");
+                            if let Ok(payload) = bincode::serialize(&block) {
+                                submission_results_bp.complete(
+                                    &payload,
+                                    RpcProcessResult::Rejected(error.to_string()),
+                                );
+                            }
+                            continue;
+                        }
+                    }
+                }
 
                 // Pre-validate balance transition when the previous block is
                 // available in the store.
@@ -719,1453 +1268,275 @@ impl BurstNode {
                     None
                 };
 
-                // Validate BRN-spending blocks against the computed counter:
-                // the odometer delta (burn or stake amount) must be covered by
-                // BRN(w) = rate-accrual(verified_at → block.timestamp) − burned
-                // − staked, computed independently by this node. This is the
-                // whitepaper's core property — BRN exists only as computation,
-                // and the ledger verifies the computation at spend time.
-                let brn_spend_rejected = if matches!(
-                    block.block_type,
-                    BlockType::Burn
-                        | BlockType::Endorse
-                        | BlockType::Challenge
-                        | BlockType::VerificationVote
-                ) {
-                    let spend = block.brn_balance.saturating_sub(prev_brn_balance);
-                    if spend > 0 {
-                        let brn = brn_engine_bp.lock().await;
-                        match brn.wallets.get(&block.account) {
-                            Some(state) => {
-                                let available = brn.compute_balance(state, block.timestamp);
-                                if spend > available {
-                                    Some(format!(
-                                        "BRN spend of {} exceeds computed available balance {}",
-                                        spend, available
-                                    ))
-                                } else {
-                                    None
-                                }
-                            }
-                            None => Some(
-                                "account has no BRN accrual state (not verified) — cannot spend BRN"
-                                    .to_string(),
-                            ),
-                        }
-                    } else {
+                let verification_vote_rejected =
+                    if block.block_type == BlockType::VerificationVote && certified_selection_bp {
+                        let orchestrator = verification_orch_bp.lock().await;
+                        crate::verification_vote::validate(
+                            &block,
+                            prev_brn_balance,
+                            &orchestrator,
+                            &config_params_bp,
+                        )
+                        .err()
+                    } else if block.block_type == BlockType::Challenge && certified_selection_bp {
                         None
-                    }
-                } else {
-                    None
-                };
-
-                // Enforce verification status: these actions require a Verified
-                // account (incl. opting in as a verifier — only verified humans
-                // may verify others).
-                let verification_rejected = if matches!(
-                    block.block_type,
-                    BlockType::Send
-                        | BlockType::Burn
-                        | BlockType::Merge
-                        | BlockType::Endorse
-                        | BlockType::Challenge
-                        | BlockType::VerifierOptIn
-                ) {
-                    match prev_account.as_ref() {
-                        // Account exists but isn't verified — cannot spend.
-                        Some(acct) if acct.state != burst_types::WalletState::Verified => {
-                            Some(format!(
-                                "account must be verified to perform {:?} (current state: {:?})",
-                                block.block_type, acct.state
-                            ))
-                        }
-                        // Account exists and is verified — allowed.
-                        Some(_) => None,
-                        // No account record: only an opening block (zero previous)
-                        // may establish a chain; a non-open spend from an unknown
-                        // account is invalid.
-                        None if block.previous.is_zero() => None,
-                        None => Some("account not found for verification check".to_string()),
-                    }
-                } else {
-                    None
-                };
-
-                // Enforce new wallet spending limits
-                let spending_limit_rejected =
-                    if matches!(block.block_type, BlockType::Send | BlockType::Burn) {
-                        prev_account.as_ref().and_then(|acct| {
-                            let amount = if block.block_type == BlockType::Send {
-                                acct.trst_balance.saturating_sub(block.trst_balance)
-                            } else {
-                                block.brn_balance.saturating_sub(prev_brn_balance)
-                            };
-                            let now = Timestamp::new(unix_now_secs());
-                            crate::limits::check_wallet_limits(acct, amount, now, &config_params_bp)
-                                .err()
-                        })
                     } else {
-                        None
+                        crate::verification_vote::availability_error(
+                            &block.block_type,
+                            genesis_network_bp,
+                        )
                     };
 
-                // Reject sends of expired or revoked TRST.
-                // The TrstEngine tracks per-wallet token portfolios in memory;
-                // if the sender is tracked, verify the send amount doesn't
-                // exceed the non-expired, non-revoked (transferable) balance.
-                let trst_transferable_rejected = if matches!(block.block_type, BlockType::Send) {
-                    let send_amount = prev_account
-                        .as_ref()
-                        .map(|acct| acct.trst_balance.saturating_sub(block.trst_balance))
-                        .unwrap_or(0);
-                    if send_amount > 0 {
-                        let mut trst = trst_engine_bp.lock().await;
-                        // Bounded block timestamp: deterministic across nodes
-                        // (a local clock would let honest nodes disagree at
-                        // the expiry margin).
-                        let now = block.timestamp;
-                        match trst.transferable_balance(&block.account, now) {
-                            Some(transferable) if send_amount > transferable => {
-                                tracing::warn!(
-                                    account = %block.account,
-                                    send_amount,
-                                    transferable,
-                                    "rejected send: insufficient transferable TRST (expired/revoked tokens excluded)"
-                                );
-                                Some(format!(
-                                    "insufficient transferable TRST: need {} but only {} is transferable",
-                                    send_amount, transferable
-                                ))
-                            }
-                            Some(_) => {
-                                // Send must never cross origin boundaries — the
-                                // wallet must merge first (whitepaper §Merging).
-                                // Check the referenced origin actually covers
-                                // the amount.
-                                let origin_avail =
-                                    trst.origin_transferable(&block.account, &block.origin, now);
-                                if send_amount > origin_avail {
-                                    tracing::warn!(
-                                        account = %block.account,
-                                        origin = %block.origin,
-                                        send_amount,
-                                        origin_avail,
-                                        "rejected send: amount exceeds the referenced origin's tokens (merge first)"
-                                    );
-                                    Some(format!(
-                                        "send of {} exceeds the {} transferable TRST of origin {} — merge tokens first",
-                                        send_amount, origin_avail, block.origin
-                                    ))
-                                } else {
-                                    None
-                                }
-                            }
-                            None => None,
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-
-                let result = if let Some(reason) = balance_rejected {
+                let result = if certified_selection_bp
+                    && block.block_type == BlockType::GovernanceActivation
+                {
+                    ProcessResult::Rejected(
+                        "governance activation requires its certified boundary".into(),
+                    )
+                } else if admitted_fork {
+                    ProcessResult::Fork
+                } else if let Some(reason) = balance_rejected {
                     ProcessResult::Rejected(reason)
                 } else if let Some(reason) = open_rejected {
                     ProcessResult::Rejected(reason)
                 } else if let Some(reason) = receive_rejected {
                     ProcessResult::Rejected(reason)
-                } else if let Some(reason) = brn_spend_rejected {
-                    ProcessResult::Rejected(reason)
-                } else if let Some(reason) = verification_rejected {
-                    ProcessResult::Rejected(reason)
-                } else if let Some(reason) = spending_limit_rejected {
-                    ProcessResult::Rejected(reason)
-                } else if let Some(reason) = trst_transferable_rejected {
+                } else if let Some(reason) = verification_vote_rejected {
                     ProcessResult::Rejected(reason)
                 } else {
-                    let mut processor = bp.lock().await;
-                    let mut f = frontier.write().await;
-                    processor.process(&block, &mut f)
+                    admission
                 };
 
                 metrics.blocks_processed.inc();
 
+                if let ProcessResult::Rejected(reason) = &result {
+                    if let Ok(payload) = bincode::serialize(&block) {
+                        submission_results_bp
+                            .complete(&payload, RpcProcessResult::Rejected(reason.clone()));
+                    }
+                }
+
                 match &result {
                     ProcessResult::Accepted => {
-                        let bytes = match bincode::serialize(&block) {
-                            Ok(b) => b,
-                            Err(e) => {
-                                tracing::error!(hash = %block.hash, error = %e, "block serialization failed");
-                                continue;
-                            }
-                        };
-
-                        // ── In-memory bookkeeping (no LMDB) ──────────────────
-                        {
-                            let mut bl = backlog_bp.lock().await;
-                            bl.insert(
-                                block.hash,
-                                block.account.clone(),
-                                block.work,
-                                unix_now_secs(),
-                            );
-                        }
-                        {
-                            let balance = block.trst_balance.min(u64::MAX as u128) as u64;
-                            let mut sched = priority_scheduler_bp.lock().await;
-                            sched.push(block.hash, block.account.clone(), balance);
-                        }
-
                         // ── Acquire all locks needed before the unified write
                         // batch. RwTxn is !Send so no awaits are possible while
                         // the batch exists. (Rep weights are NOT touched here —
                         // they're rebuilt from the ledger by the periodic weight
                         // task, so no rep-weight lock is held during the batch.)
-                        let mut brn = brn_engine_bp.lock().await;
-                        let mut trst = trst_engine_bp.lock().await;
-
-                        // ── In-memory economics ──────────────────────────────
-                        // The bounded, signed block timestamp — NOT the local
-                        // clock — drives all economic computation so every
-                        // node stamps identical token timestamps and computes
-                        // identical expiry/accrual results.
-                        let econ_now = block.timestamp;
-                        let econ_result = crate::ledger_bridge::process_block_economics(
-                            &block,
-                            &mut brn,
-                            &mut trst,
-                            econ_now,
-                            trst_expiry_secs,
-                            prev_brn_balance,
-                        );
-                        tracing::trace!(hash = %block.hash, ?econ_result, "block economics processed");
-
-                        if let crate::ledger_bridge::EconomicResult::Rejected { ref reason } =
-                            econ_result
-                        {
-                            tracing::error!(hash = %block.hash, %reason, "block rejected due to economic invariant violation");
-                            drop(trst);
-                            drop(brn);
-                            continue;
-                        }
-
-                        // Token tracking and deferred LMDB write collection
-                        // (in-memory — collects data for the unified batch).
-                        let mut deferred_pending: Option<(
-                            u128,
-                            burst_types::WalletAddress,
-                            Vec<burst_trst::ConsumedProvenance>,
-                        )> = None;
-                        let mut deferred_trst_indices: Option<(
-                            burst_types::TxHash,
-                            burst_types::TxHash,
-                            Timestamp,
-                        )> = None;
-
-                        match &econ_result {
-                            crate::ledger_bridge::EconomicResult::BurnAndMint {
-                                mint_token: Some(token),
-                                ..
-                            } => {
-                                // Two-phase burn (8.4a): the freshly minted TRST
-                                // goes to PENDING — the provider must publish a
-                                // Receive block to claim it, exactly like a send.
-                                // This keeps the receiver's on-chain balance in
-                                // sync with the engine and lets them reject it.
-                                let provenance = vec![burst_trst::ConsumedProvenance {
-                                    amount: token.amount,
-                                    origin: token.origin,
-                                    origin_wallet: token.origin_wallet.clone(),
-                                    origin_timestamp: token.origin_timestamp,
-                                    effective_origin_timestamp: token.effective_origin_timestamp,
-                                }];
-                                deferred_pending =
-                                    Some((token.amount, token.holder.clone(), provenance));
-                                let expiry_ts = Timestamp::new(
-                                    token
-                                        .effective_origin_timestamp
-                                        .as_secs()
-                                        .saturating_add(trst_expiry_secs),
-                                );
-                                deferred_trst_indices = Some((token.origin, token.id, expiry_ts));
-                            }
-                            crate::ledger_bridge::EconomicResult::Send {
-                                ref sender,
-                                trst_balance_after,
-                                ..
-                            } => {
-                                if let Some(acct) = prev_account.as_ref() {
-                                    let send_amount =
-                                        acct.trst_balance.saturating_sub(*trst_balance_after);
-                                    let token_origin = &block.origin;
-                                    let provenance = trst.debit_wallet_with_provenance(
-                                        sender,
-                                        token_origin,
-                                        send_amount,
-                                    );
-                                    if let Some(destination) =
-                                        crate::ledger_bridge::extract_receiver_from_link(
-                                            &block.link,
-                                        )
-                                    {
-                                        deferred_pending =
-                                            Some((send_amount, destination, provenance));
-                                    }
-                                }
-                            }
-                            crate::ledger_bridge::EconomicResult::Receive {
-                                ref receiver,
-                                send_block_hash,
-                                ..
-                            } => {
-                                let send_hash =
-                                    burst_types::TxHash::new(*send_block_hash.as_bytes());
-                                if let Ok(pend) =
-                                    store.pending_store().get_pending(receiver, &send_hash)
-                                {
-                                    let received_token =
-                                        crate::ledger_bridge::create_received_token(
-                                            &block,
-                                            &pend,
-                                            trst_expiry_secs,
-                                        );
-                                    // Applies any revocation that landed while the
-                                    // send was in flight (O(1) graph lookup), then
-                                    // tracks the token.
-                                    let revocations = trst.receive_token(received_token, econ_now);
-                                    for ev in &revocations {
-                                        tracing::warn!(
-                                            %receiver,
-                                            %send_block_hash,
-                                            revoked_origin = %ev.revoked_origin,
-                                            revoked_amount = ev.revoked_amount,
-                                            "TRST receive: revocation applied to in-flight token"
-                                        );
-                                    }
-                                    tracing::debug!(
-                                        %receiver,
-                                        %send_block_hash,
-                                        amount = pend.amount,
-                                        "TRST receive: token tracked in receiver portfolio"
-                                    );
-                                } else {
-                                    tracing::trace!(
-                                        %receiver,
-                                        %send_block_hash,
-                                        "no pending entry found for receive — receiver portfolio not updated"
-                                    );
-                                }
-                            }
-                            crate::ledger_bridge::EconomicResult::Merge { ref account } => {
-                                if let Some(portfolio) = trst.get_portfolio(account) {
-                                    // Input selection: the block's signed source
-                                    // list when the wallet chose one (6.17b),
-                                    // otherwise a deterministic expiry-grouped
-                                    // auto-selection — merging tokens with similar
-                                    // expiries maximizes retained value under the
-                                    // earliest-expiry floor rule (whitepaper
-                                    // §Merging).
-                                    let selected: Vec<burst_trst::TrstToken> = if !block
-                                        .merge_sources
-                                        .is_empty()
-                                    {
-                                        let mut chosen =
-                                            Vec::with_capacity(block.merge_sources.len());
-                                        let mut all_found = true;
-                                        for id in &block.merge_sources {
-                                            match portfolio.tokens.iter().find(|t| t.id == *id) {
-                                                Some(t) => chosen.push(t.clone()),
-                                                None => {
-                                                    tracing::warn!(
-                                                        %account,
-                                                        token = %id,
-                                                        "merge block references a token not in the portfolio — merge skipped"
-                                                    );
-                                                    all_found = false;
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                        if all_found {
-                                            chosen
-                                        } else {
-                                            Vec::new()
-                                        }
-                                    } else {
-                                        select_expiry_merge_group(
-                                            portfolio,
-                                            econ_now,
-                                            trst.expiry_secs,
-                                        )
-                                    };
-                                    if selected.len() >= 2 {
-                                        let merge_tx =
-                                            burst_types::TxHash::new(*block.hash.as_bytes());
-                                        match trst.merge(
-                                            &selected,
-                                            account.clone(),
-                                            merge_tx,
-                                            econ_now,
-                                        ) {
-                                            Ok(merged) => {
-                                                let ids_to_remove: std::collections::HashSet<_> =
-                                                    selected.iter().map(|t| t.id).collect();
-                                                trst.bulk_untrack(account, &ids_to_remove);
-                                                trst.track_token(merged);
-                                                tracing::info!(%account, count = selected.len(), "TRST merge: tokens merged in portfolio");
-                                            }
-                                            Err(e) => {
-                                                tracing::warn!(%account, error = %e, "TRST merge failed");
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-
-                        // Drop TRST engine lock before verification orchestrator
-                        drop(trst);
-
-                        // ── Unified write batch — single fsync ───────────────
-                        // All block, frontier, account, pending, and TRST index
-                        // writes are batched into one LMDB transaction.
-                        let persisted = 'persist: {
-                            let mut batch = match store.tx_begin_write() {
-                                Ok(b) => b,
-                                Err(e) => {
-                                    tracing::error!(hash = %block.hash, "failed to start write batch: {e}");
-                                    break 'persist false;
-                                }
+                        // Governance tick takes governance -> delegation. Keep
+                        // that order here before acquiring economic state.
+                        let mut live_governance =
+                            if crate::governance_commit::CandidateGovernance::applies_to(
+                                &block.block_type,
+                            ) {
+                                Some((
+                                    governance_bp.lock().await,
+                                    delegation_bp.lock().await,
+                                    consti_engine_bp.lock().await,
+                                ))
+                            } else {
+                                None
                             };
-                            let height = prev_account.as_ref().map_or(1, |a| a.block_count + 1);
-                            if let Err(e) = batch.put_block_with_account(
-                                &block.hash,
-                                &bytes,
-                                &block.account,
-                                height,
-                            ) {
-                                tracing::error!(hash = %block.hash, "failed to batch block: {e}");
-                                break 'persist false;
-                            }
-                            if let Err(e) = batch.put_frontier(&block.account, &block.hash) {
-                                tracing::error!(hash = %block.hash, "failed to batch frontier: {e}");
-                                break 'persist false;
-                            }
-                            if let Err(e) = crate::ledger_updater::update_account_on_block(
-                                &mut batch,
-                                &block,
-                                prev_account.as_ref(),
-                                prev_brn_balance,
-                            ) {
-                                tracing::error!(hash = %block.hash, "failed to update account: {e}");
-                            }
-                            if let Err(e) =
-                                crate::ledger_updater::delete_pending_entry(&mut batch, &block)
-                            {
-                                tracing::warn!(hash = %block.hash, "failed to delete pending: {e}");
-                            }
-                            if let Some((amount, ref dest, ref provenance)) = deferred_pending {
-                                if let Err(e) = crate::ledger_updater::create_pending_entry(
-                                    &mut batch,
-                                    &block,
-                                    amount,
-                                    dest,
-                                    provenance.clone(),
-                                ) {
-                                    tracing::warn!(hash = %block.hash, "failed to create pending in unified batch: {e}");
-                                }
-                            }
-                            if let Some((origin, token_id, expiry_ts)) = deferred_trst_indices {
-                                if let Err(e) = batch.put_origin_index(&origin, &token_id) {
-                                    tracing::warn!(origin = %origin, token_id = %token_id, "failed to batch TRST origin index: {e}");
-                                }
-                                if let Err(e) = batch.put_expiry_index(expiry_ts, &token_id) {
-                                    tracing::warn!(token_id = %token_id, "failed to batch TRST expiry index: {e}");
-                                }
-                            }
+                        let mut staged_governance = None;
+                        let mut live_brn = brn_engine_bp.lock().await;
+                        let mut live_trst = trst_engine_bp.lock().await;
+                        // Compute on isolated state. Failed economic validation
+                        // or persistence must not consume BRN/TRST in memory.
+                        let mut engines =
+                            crate::economic_candidate::StagedEngines::new(&live_brn, &live_trst);
 
-                            if let Err(e) = batch.commit() {
-                                tracing::error!(hash = %block.hash, "failed to commit unified batch: {e}");
-                                break 'persist false;
-                            }
-
-                            // Update atomic ledger cache counters
-                            ledger_cache_bp.inc_block_count();
-                            if block.block_type == BlockType::Open {
-                                ledger_cache_bp.inc_account_count();
-                            }
-                            if block.block_type == BlockType::Send {
-                                ledger_cache_bp.inc_pending_count();
-                            }
-                            if block.block_type == BlockType::Receive {
-                                ledger_cache_bp.dec_pending_count();
-                            }
-
-                            true
+                        // Abort the entire primary-state transaction on any
+                        // failed write; publish isolated engines only on success.
+                        let mut live_orchestrator = if matches!(
+                            block.block_type,
+                            BlockType::Endorse
+                                | BlockType::Challenge
+                                | BlockType::VerificationVote
+                                | BlockType::GovernanceActivation
+                        ) {
+                            Some(verification_orch_bp.lock().await)
+                        } else {
+                            None
                         };
-
-                        if !persisted {
+                        let mut staged_orchestrator = None;
+                        let mut commit_attempted = false;
+                        tracing::debug!(hash = %block.hash, elapsed_ms = start.elapsed().as_millis(),
+                            "block commit locks acquired");
+                        let commit = (|| -> Result<crate::economic_candidate::CandidateEconomics, String> {
+                            let mut batch = store.tx_begin_write().map_err(|e|e.to_string())?;
+                            if live_orchestrator.is_some() {
+                                staged_orchestrator = Some(crate::endorsement_commit::restore(&batch)?);
+                            }
+                            if live_governance.is_some() {
+                                staged_governance = Some(crate::governance_commit::CandidateGovernance::restore(
+                                    &batch, config_params_bp.clone(), key_chain_bp.0, key_chain_bp.1,
+                                )?);
+                            }
+                            let economics = crate::economic_candidate::stage(
+                                &mut batch, &block, &config_params_bp, &mut engines)?;
+                            if let Some(bytes) = &proposal_content {
+                                crate::governance_content::stage(&mut batch, &block, bytes)?;
+                            }
+                            if let Some(orch) = staged_orchestrator.as_mut() {
+                                if crate::verification_transition::supports(&block.block_type) {
+                                    crate::verification_transition::apply(&mut batch, &block, &economics.effect,
+                                        &config_params_bp, genesis_network_bp, orch, engines.mutable())?;
+                                }
+                            }
+                            if let Some(governance) = staged_governance.as_mut() {
+                                let (brn, trst) = engines.mutable();
+                                governance.apply(&mut batch, &block, &economics.effect, brn, trst)?;
+                                if block.block_type == BlockType::GovernanceActivation {
+                                    let orch = staged_orchestrator.as_mut().ok_or("missing activation verification state")?;
+                                    orch.apply_governed_rules(&governance.params);
+                                    batch.put_meta(crate::endorsement_commit::SNAPSHOT_KEY,
+                                        &orch.snapshot().encode().map_err(|e| e.to_string())?)
+                                        .map_err(|e| e.to_string())?;
+                                }
+                            }
+                            crate::bootstrap_phase::observe(&mut batch,
+                                staged_governance.as_ref().map_or(&config_params_bp, |governance| &governance.params))?;
+                            crate::ledger_updater::refresh_token_counters(&mut batch, &block.account, crate::economic_candidate::Engines::trst(&engines), block.timestamp)?;
+                            engines.persist(&mut batch)?;
+                            commit_attempted = true;
+                            batch.commit().map_err(|e|e.to_string())?;
+                            governance_transfers_bp.remove(block.hash);
+                            Ok(economics)
+                        })();
+                        let economics = match commit {
+                            Ok(economics) => economics,
+                            Err(error) => {
+                                tracing::error!(hash = %block.hash, %error, "block persistence failed; candidate not published");
+                                if !commit_attempted {
+                                    if let Ok(payload) = bincode::serialize(&block) {
+                                        submission_results_bp
+                                            .complete(&payload, RpcProcessResult::Rejected(error));
+                                    }
+                                }
+                                continue;
+                            }
+                        };
+                        let deferred_pending = economics.pending;
+                        tracing::debug!(hash = %block.hash, elapsed_ms = start.elapsed().as_millis(),
+                            "block durable commit finished");
+                        if let (Some((gov, del, consti)), Some(staged)) =
+                            (live_governance.as_mut(), staged_governance)
+                        {
+                            **gov = staged.governance;
+                            **del = staged.delegation;
+                            **consti = staged.constitution;
+                            config_params_bp = staged.params;
+                        }
+                        drop(live_governance);
+                        if let (Some(live), Some(staged)) =
+                            (live_orchestrator.as_mut(), staged_orchestrator)
+                        {
+                            **live = staged;
+                        }
+                        drop(live_orchestrator);
+                        let (brn, trst) = engines.into_staged();
+                        if let Some(brn) = brn {
+                            *live_brn = brn;
+                        }
+                        if let Some(trst) = trst {
+                            *live_trst = trst;
+                        }
+                        let brn = live_brn;
+                        drop(live_trst);
+                        {
+                            let mut processor = bp.lock().await;
                             let mut f = frontier.write().await;
-                            if block.previous.is_zero() {
-                                f.remove(&block.account);
-                            } else {
-                                f.update(block.account.clone(), block.previous);
-                            }
-                            tracing::warn!(
-                                hash = %block.hash,
-                                "frontier rolled back due to persistence failure"
-                            );
+                            processor.set_params_hash(config_params_bp.params_hash());
+                            processor.publish_committed(&block, &mut f);
                         }
-
-                        if let Some((ref origin, ref token_id, expiry_ts)) = deferred_trst_indices {
-                            tracing::debug!(
-                                token_id = %token_id,
-                                origin = %origin,
-                                expiry = expiry_ts.as_secs(),
-                                "TRST token indices persisted to LMDB"
-                            );
+                        ledger_cache_bp.inc_block_count();
+                        if block.block_type == BlockType::Open {
+                            ledger_cache_bp.inc_account_count();
                         }
-
-                        // Release unchecked dependents: any blocks that arrived
-                        // before this one (gap-previous) or before its linked send
-                        // (gap-source) were parked in the unchecked map. Now that
-                        // this block is in the ledger, drain them and re-enqueue for
-                        // full processing. This is what lets a bootstrap batch that
-                        // the PoW priority queue reordered converge — each accepted
-                        // block releases the next, cascading down the chain.
-                        if persisted {
-                            let released = {
-                                let mut processor = bp.lock().await;
-                                let mut deps = processor.process_unchecked(&block.hash);
-                                deps.extend(processor.process_unchecked_source(&block.hash));
-                                deps
-                            };
-                            for dep in released {
-                                if !block_queue.push(dep).await {
-                                    tracing::warn!(
-                                        parent = %block.hash,
-                                        "block queue full re-enqueuing unchecked dependent"
-                                    );
-                                }
-                            }
+                        if deferred_pending.is_some() {
+                            ledger_cache_bp.inc_pending_count();
                         }
-
-                        // Post-commit: verification, governance, etc. (can await)
-
-                        if let crate::ledger_bridge::EconomicResult::Endorse {
-                            target: Some(ref target_addr),
-                            burn_amount,
-                            ..
-                        } = econ_result
+                        if block.block_type == BlockType::Receive
+                            || (block.block_type == BlockType::Open && block.trst_balance > 0)
                         {
-                            tracing::info!(
-                                endorser = %block.account,
-                                target = %target_addr,
-                                burn_amount,
-                                "endorsement recorded"
-                            );
-
-                            let genesis_addr = genesis_key::genesis_address(genesis_network_bp);
-                            let verified_count =
-                                store.account_store().verified_account_count().unwrap_or(0);
-                            let bootstrap_threshold =
-                                config_params_bp.bootstrap_exit_threshold as u64;
-                            let in_bootstrap = verified_count < bootstrap_threshold;
-
-                            if in_bootstrap && block.account == genesis_addr {
-                                let mut orch = verification_orch_bp.lock().await;
-                                match orch.genesis_verify(
-                                    target_addr,
-                                    &genesis_addr,
-                                    verified_count,
-                                    bootstrap_threshold,
-                                ) {
-                                    Ok(()) => {
-                                        tracing::info!(
-                                            target = %target_addr,
-                                            verified_count,
-                                            "genesis bootstrap: wallet directly verified"
-                                        );
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            error = %e,
-                                            target = %target_addr,
-                                            "genesis bootstrap verification failed"
-                                        );
-                                    }
-                                }
-                            } else {
-                                {
-                                    let mut orch = verification_orch_bp.lock().await;
-                                    if let Err(e) = orch.process_endorsement(
-                                        target_addr,
-                                        &block.account,
-                                        burn_amount,
-                                        &config_params_bp,
-                                    ) {
-                                        tracing::warn!(error = %e, "endorsement processing failed in orchestrator");
-                                    }
-                                }
-
-                                // Fetch VRF randomness and feed selected verifiers to the orchestrator
-                                let vrf = Arc::clone(&vrf_client_bp);
-                                let orch_vrf = Arc::clone(&verification_orch_bp);
-                                let target_for_vrf = target_addr.clone();
-                                let params_vrf = config_params_bp.clone();
-                                let store_vrf = Arc::clone(&store);
-                                tokio::spawn(async move {
-                                    let client = vrf.lock().await;
-                                    match client.fetch_latest().await {
-                                        Ok(beacon) => {
-                                            let randomness = hex::decode(&beacon.randomness)
-                                                .unwrap_or_else(|_| vec![0u8; 32]);
-                                            let mut rand_bytes = [0u8; 32];
-                                            let copy_len = randomness.len().min(32);
-                                            rand_bytes[..copy_len]
-                                                .copy_from_slice(&randomness[..copy_len]);
-
-                                            // Eligible verifier pool derived from
-                                            // CONFIRMED account state (opted in +
-                                            // verified + old enough) so every node
-                                            // computes the same set → deterministic
-                                            // VRF selection.
-                                            let verifier_addrs = eligible_verifiers(
-                                                &store_vrf,
-                                                &params_vrf,
-                                                unix_now_secs(),
-                                            );
-
-                                            let mut orch = orch_vrf.lock().await;
-                                            match orch.select_verifiers(
-                                                &target_for_vrf,
-                                                &verifier_addrs,
-                                                &rand_bytes,
-                                                &params_vrf,
-                                            ) {
-                                                Ok(selected) => {
-                                                    tracing::info!(
-                                                        target = %target_for_vrf,
-                                                        selected_count = selected.len(),
-                                                        drand_round = beacon.round,
-                                                        "verifiers selected via VRF for endorsement"
-                                                    );
-                                                }
-                                                Err(e) => {
-                                                    tracing::error!(
-                                                        error = %e,
-                                                        target = %target_for_vrf,
-                                                        "failed to assign verifiers via orchestrator"
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            tracing::error!(
-                                                error = %e,
-                                                "failed to fetch VRF randomness for verification"
-                                            );
-                                        }
-                                    }
-                                });
-                            }
+                            ledger_cache_bp.dec_pending_count();
                         }
 
-                        // Process challenge through verification/revocation system.
-                        // When a challenge is accepted, the target wallet is queued
-                        // for re-verification. Pending the re-verification outcome,
-                        // if the target is found to be fraudulent (i.e. not a unique
-                        // human), all TRST originating from that wallet is revoked
-                        // through the merger graph, and the target's wallet state is
-                        // set to Unverified.
-                        if let crate::ledger_bridge::EconomicResult::Challenge {
-                            target: Some(ref target_addr),
-                            stake_amount,
-                            ..
-                        } = econ_result
-                        {
-                            tracing::info!(
-                                challenger = %block.account,
-                                target = %target_addr,
-                                stake_amount = stake_amount,
-                                "challenge recorded — initiating re-verification"
-                            );
-
-                            // Register the challenge with the orchestrator for
-                            // re-verification. Do NOT revoke TRST or change
-                            // account state here — that only happens if the
-                            // orchestrator confirms fraud via WalletUnverified.
-                            let challenger_verified = prev_account
-                                .as_ref()
-                                .is_some_and(|a| a.state == burst_types::WalletState::Verified);
-                            // A Challenge block's `origin` field marks whether this
-                            // is a Fraud challenge (revoke on upheld) or a benign
-                            // Inactivity challenge (deactivate, no revoke).
-                            let reason = burst_verification::ChallengeReason::from_origin(
-                                block.origin.as_bytes(),
-                            );
-                            let mut orch = verification_orch_bp.lock().await;
-                            if let Err(e) = orch.initiate_challenge(
-                                target_addr,
-                                &block.account,
-                                challenger_verified,
-                                stake_amount,
-                                reason,
-                                &config_params_bp,
-                            ) {
-                                tracing::warn!(
-                                    target = %target_addr,
-                                    challenger = %block.account,
-                                    error = %e,
-                                    "challenge initiation failed in orchestrator"
-                                );
-                            }
-                        }
-
-                        // TRST token indices are now persisted in the
-                        // unified write batch above — no separate fsync.
-
-                        // BurnOnly: BRN was burned but no valid receiver was found,
-                        // so no TRST was minted. The burn was already recorded by
-                        // process_block_economics; log for visibility.
-                        if let crate::ledger_bridge::EconomicResult::BurnOnly { burn_amount } =
-                            econ_result
-                        {
-                            tracing::info!(
-                                account = %block.account,
-                                burn_amount,
-                                "BRN burned without TRST mint (no valid receiver)"
-                            );
-                        }
-
-                        // Process governance blocks through the GovernanceEngine
-                        if let crate::ledger_bridge::EconomicResult::GovernanceProposal {
-                            ref proposer,
-                            proposal_hash,
-                            ref content,
-                        } = econ_result
-                        {
-                            let mut gov = governance_bp.lock().await;
-
-                            let proposal_content = content.clone().unwrap_or_else(|| {
-                                    tracing::warn!(proposer = %proposer, "governance proposal content not decoded from block, using default");
-                                    burst_governance::proposal::ProposalContent::ParameterChange {
-                                        param: burst_governance::GovernableParam::BrnRate,
-                                        new_value: 0,
-                                    }
-                                });
-
-                            let total_eligible =
-                                store.account_store().verified_account_count().unwrap_or(0) as u32;
-
-                            let proposer_verified = store
-                                .account_store()
-                                .get_account(proposer)
-                                .map(|a| a.state == burst_types::WalletState::Verified)
-                                .unwrap_or(false);
-
-                            let proposal = burst_governance::proposal::Proposal {
-                                hash: proposal_hash,
-                                proposer: proposer.clone(),
-                                content: proposal_content,
-                                phase: burst_governance::proposal::GovernancePhase::Proposal,
-                                created_at: Timestamp::new(unix_now_secs()),
-                                endorsement_count: 0,
-                                exploration_votes_yea: 0,
-                                exploration_votes_nay: 0,
-                                exploration_votes_abstain: 0,
-                                promotion_votes_yea: 0,
-                                promotion_votes_nay: 0,
-                                promotion_votes_abstain: 0,
-                                exploration_started_at: None,
-                                cooldown_started_at: None,
-                                promotion_started_at: None,
-                                activation_at: None,
-                                total_eligible_voters: total_eligible,
-                                round: 0,
-                            };
-                            let brn_balance = brn
-                                .wallets
-                                .get(&block.account)
-                                .map(|ws| {
-                                    ws.available_balance(
-                                        &brn.rate_history,
-                                        Timestamp::new(unix_now_secs()),
-                                    )
-                                })
-                                .unwrap_or(0);
-                            match gov.submit_proposal(
-                                proposal,
-                                brn_balance,
-                                proposer_verified,
-                                &config_params_bp,
-                            ) {
-                                Ok(hash) => {
-                                    tracing::info!(%hash, proposer = %proposer, "governance proposal registered in engine")
-                                }
-                                Err(e) => {
-                                    tracing::warn!(proposer = %proposer, "governance proposal rejected by engine: {e}")
-                                }
-                            }
-                        }
-
-                        // Drop BRN engine lock — no longer needed after governance balance check.
-                        // CRITICAL: must drop before verification events which re-acquire.
                         drop(brn);
 
-                        if let crate::ledger_bridge::EconomicResult::GovernanceVote {
-                            ref voter,
-                            proposal_hash,
-                            vote,
-                        } = econ_result
+                        // Publish scheduler work and release dependencies only
+                        // after all durable state for this block has committed.
                         {
-                            let mut gov = governance_bp.lock().await;
-                            let now = Timestamp::new(unix_now_secs());
-
-                            let voting_power = {
-                                let del = delegation_bp.lock().await;
-                                del.voting_power(voter)
-                            };
-                            tracing::debug!(
-                                %proposal_hash,
-                                voter = %voter,
-                                voting_power,
-                                ?vote,
-                                "governance vote with delegated voting power"
-                            );
-
-                            match gov.cast_exploration_vote(
-                                &proposal_hash,
-                                voter,
-                                vote,
-                                now,
-                                &config_params_bp,
-                            ) {
-                                Ok(()) => {
-                                    tracing::info!(%proposal_hash, voter = %voter, ?vote, "governance exploration vote recorded")
-                                }
-                                Err(burst_governance::GovernanceError::WrongPhase) => {
-                                    match gov.cast_promotion_vote(
-                                        &proposal_hash,
-                                        voter,
-                                        vote,
-                                        now,
-                                        &config_params_bp,
-                                    ) {
-                                        Ok(()) => {
-                                            tracing::info!(%proposal_hash, voter = %voter, ?vote, "governance promotion vote recorded")
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(%proposal_hash, voter = %voter, "governance vote rejected: {e}")
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!(%proposal_hash, voter = %voter, "governance vote rejected: {e}")
-                                }
-                            }
-                        }
-
-                        // Process delegation blocks through the DelegationEngine
-                        if block.block_type == BlockType::Delegate {
-                            let target =
-                                crate::ledger_bridge::extract_receiver_from_link(&block.link);
-                            if let Some(ref target_addr) = target {
-                                let mut del = delegation_bp.lock().await;
-                                match del.delegate(&block.account, target_addr) {
-                                    Ok(()) => tracing::info!(
-                                        delegator = %block.account,
-                                        delegate = %target_addr,
-                                        "governance delegation registered"
-                                    ),
-                                    Err(e) => tracing::warn!(
-                                        delegator = %block.account,
-                                        delegate = %target_addr,
-                                        "governance delegation rejected: {e}"
-                                    ),
-                                }
-
-                                // Store delegation record for scope-enforced signature verification.
-                                // The delegation public key is derived from the transaction hash field.
-                                let delegation_public_key: [u8; 32] = *block.transaction.as_bytes();
-                                let record = DelegationRecord {
-                                    delegator: block.account.clone(),
-                                    delegate: target_addr.clone(),
-                                    delegation_public_key,
-                                    created_at: block.timestamp,
-                                    revoked: false,
-                                };
-                                if let Err(e) = delegation_store_bp.put_delegation(&record) {
-                                    tracing::warn!(
-                                        delegator = %block.account,
-                                        "failed to store delegation record: {e}"
-                                    );
-                                }
-                            } else {
-                                tracing::warn!(
-                                    delegator = %block.account,
-                                    "delegate block has no valid target in link field"
+                            let mut backlog = backlog_bp.lock().await;
+                            // The durable scan rediscovers accepted work even when
+                            // this optional in-memory tracking cache is full.
+                            if backlog.can_accept(&block.account) {
+                                backlog.insert(
+                                    block.hash,
+                                    block.account.clone(),
+                                    block.work,
+                                    unix_now_secs(),
                                 );
                             }
                         }
-
-                        if block.block_type == BlockType::RevokeDelegation {
-                            let mut del = delegation_bp.lock().await;
-                            del.undelegate(&block.account);
-                            tracing::info!(
-                                delegator = %block.account,
-                                "governance delegation revoked"
-                            );
-
-                            // Revoke delegation in the scope-enforcement store
-                            if let Err(e) = delegation_store_bp.revoke_delegation(&block.account) {
-                                tracing::warn!(
-                                    delegator = %block.account,
-                                    "failed to revoke delegation record: {e}"
-                                );
-                            }
-                        }
-
-                        // GovernanceActivation: apply the on-chain parameter change
-                        // (Tezos-style self-amendment recorded on the genesis chain).
-                        if let crate::ledger_bridge::EconomicResult::GovernanceActivation {
-                            proposal_hash,
-                            new_params_hash,
-                        } = &econ_result
-                        {
-                            let mut gov = governance_bp.lock().await;
-                            if let Some(proposal) = gov.get_proposal(proposal_hash) {
-                                let p = proposal.clone();
-                                let mut params = config_params_bp.clone();
-                                if gov.activate(&p, &mut params).is_ok() {
-                                    let computed = params.params_hash();
-                                    if computed == *new_params_hash {
-                                        config_params_bp = params.clone();
-                                        let changes = gov.drain_pending_changes();
-                                        if !changes.is_empty() {
-                                            for (param, value) in &changes {
-                                                match param {
-                                                    burst_governance::GovernableParam::BrnRate => {
-                                                        let mut brn_lock =
-                                                            brn_engine_bp.lock().await;
-                                                        if let Err(e) = brn_lock.apply_rate_change(
-                                                            *value,
-                                                            Timestamp::new(unix_now_secs()),
-                                                        ) {
-                                                            tracing::warn!(error = %e, "failed to propagate BRN rate change from activation block");
-                                                        }
-                                                    }
-                                                    burst_governance::GovernableParam::TrstExpirySecs => {
-                                                        // 6.9: expiry is computed from inception +
-                                                        // CURRENT period — previously expired TRST
-                                                        // can become transferable again.
-                                                        let new_expiry = *value as u64;
-                                                        let mut trst_lock =
-                                                            trst_engine_bp.lock().await;
-                                                        trst_lock.set_expiry_period(
-                                                            new_expiry,
-                                                            Timestamp::new(unix_now_secs()),
-                                                        );
-                                                        tracing::info!(
-                                                            expiry_secs = new_expiry,
-                                                            "TRST expiry period changed via governance — portfolios re-evaluated"
-                                                        );
-                                                    }
-                                                    other => {
-                                                        tracing::info!(param = ?other, value = value, "governance parameter activated via on-chain block");
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        let amendments = gov.drain_activated_amendments();
-                                        if !amendments.is_empty() {
-                                            let mut consti = consti_engine_bp.lock().await;
-                                            for amendment_content in &amendments {
-                                                if let burst_governance::ProposalContent::ConstitutionalAmendment { ref title, ref text } = amendment_content {
-                                                    let amendment = burst_consti::Amendment {
-                                                        hash: TxHash::ZERO,
-                                                        proposer: WalletAddress::new("governance"),
-                                                        title: title.clone(),
-                                                        text: text.clone(),
-                                                        phase: burst_governance::GovernancePhase::Activated,
-                                                        votes_yea: 0,
-                                                        votes_nay: 0,
-                                                        votes_abstain: 0,
-                                                        created_at: Timestamp::new(unix_now_secs()),
-                                                        operations: Vec::new(),
-                                                    };
-                                                    match consti.activate_amendment_internal(&amendment) {
-                                                        Ok(()) => tracing::info!(title = %title, "constitutional amendment applied via activation block"),
-                                                        Err(e) => tracing::warn!(title = %title, "failed to apply constitutional amendment from activation block: {e}"),
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        // ORV evictions/reinstatements: set or
-                                        // clear the target's `orv_evicted` flag in
-                                        // confirmed account state. Applied on EVERY
-                                        // node as it processes this activation block
-                                        // (so all nodes agree), and picked up by the
-                                        // periodic rep-weight rebuild. Idempotent.
-                                        let evictions = gov.drain_pending_evictions();
-                                        for (target, evict) in &evictions {
-                                            match store.account_store().get_account(target) {
-                                                Ok(mut acct) => {
-                                                    acct.orv_evicted = *evict;
-                                                    if let Err(e) =
-                                                        store.account_store().put_account(&acct)
-                                                    {
-                                                        tracing::warn!(%target, "failed to persist ORV eviction: {e}");
-                                                    } else {
-                                                        tracing::warn!(%target, evict = *evict, "representative ORV eviction/reinstatement applied via activation block");
-                                                    }
-                                                }
-                                                Err(_) => {
-                                                    tracing::warn!(%target, "ORV eviction target account not found — skipping");
-                                                }
-                                            }
-                                        }
-                                        // Persist to LMDB
-                                        if let Ok(bytes) = bincode::serialize(&config_params_bp) {
-                                            let brn_store_meta = store.brn_store();
-                                            if let Err(e) =
-                                                brn_store_meta.put_meta(b"protocol_params", &bytes)
-                                            {
-                                                tracing::warn!(error = %e, "failed to persist params from activation block");
-                                            } else {
-                                                tracing::info!(%proposal_hash, "self-amended protocol params persisted via on-chain activation block");
-                                            }
-                                        }
-                                    } else {
-                                        tracing::warn!(
-                                            %proposal_hash,
-                                            expected = %new_params_hash,
-                                            computed = %computed,
-                                            "params hash mismatch in governance activation block — skipping"
-                                        );
-                                    }
-                                } else {
-                                    tracing::warn!(%proposal_hash, "governance activation failed");
-                                }
-                            } else {
-                                tracing::warn!(%proposal_hash, "governance activation block references unknown proposal");
-                            }
-                        }
-
-                        // Merge: balance is handled at the ledger level by
-                        // update_account_on_block (trst_balance comes from the block).
-                        // Individual token provenance tracking (TrstEngine merge)
-                        // is deferred until per-token persistence via TrstIndexStore.
-                        if let crate::ledger_bridge::EconomicResult::Merge { ref account } =
-                            econ_result
-                        {
-                            tracing::info!(%account, "TRST merge processed at ledger level");
-                        }
-
-                        // Send: pending entry already created in the write batch above
-                        // via ledger_updater::create_pending_entry.
-                        if let crate::ledger_bridge::EconomicResult::Send {
-                            ref sender,
-                            ref receiver,
-                            trst_balance_after,
-                        } = econ_result
-                        {
-                            tracing::debug!(
-                                %sender,
-                                receiver = receiver.as_ref().map(|r| r.as_str()).unwrap_or("unknown"),
-                                trst_balance_after,
-                                "TRST send processed, pending entry created in write batch"
-                            );
-                        }
-
-                        // Receive: pending entry already deleted in the write batch above
-                        // via ledger_updater::delete_pending_entry.
-                        if let crate::ledger_bridge::EconomicResult::Receive {
-                            ref receiver,
-                            send_block_hash,
-                            trst_balance_after,
-                        } = econ_result
-                        {
-                            tracing::debug!(
-                                %receiver,
-                                %send_block_hash,
-                                trst_balance_after,
-                                "TRST receive processed, pending entry deleted in write batch"
-                            );
-                        }
-
-                        // RejectReceive: pending entry deleted in the write batch above
-                        // (delete_pending_entry handles both Receive and RejectReceive).
-                        if let crate::ledger_bridge::EconomicResult::RejectReceive {
-                            ref rejecter,
-                            send_block_hash,
-                        } = econ_result
-                        {
-                            tracing::info!(
-                                %rejecter,
-                                %send_block_hash,
-                                "TRST receive rejected, pending entry deleted in write batch"
-                            );
-                        }
-
-                        // RepChange: rep weight cache is already updated atomically
-                        // in the write batch via update_account_on_block, which calls
-                        // RepWeightCache::remove_weight/add_weight. No duplicate update
-                        // needed here.
-                        if let crate::ledger_bridge::EconomicResult::RepChange {
-                            ref account,
-                            ref old_rep,
-                            ref new_rep,
-                            balance,
-                        } = econ_result
-                        {
-                            tracing::debug!(
-                                %account,
-                                old_rep = old_rep.as_ref().map(|r| r.as_str()).unwrap_or("none"),
-                                new_rep = %new_rep,
-                                balance,
-                                "representative changed, rep weight cache updated in write batch"
-                            );
-                        }
-
-                        if let crate::ledger_bridge::EconomicResult::VerificationVoteResult {
-                            ref voter,
-                            target: Some(ref target_addr),
-                            vote,
-                            stake: _,
-                        } = econ_result
-                        {
-                            let vote_enum = match vote {
-                                1 => burst_verification::Vote::Legitimate,
-                                2 => burst_verification::Vote::Illegitimate,
-                                _ => burst_verification::Vote::Neither,
-                            };
-                            let mut orch = verification_orch_bp.lock().await;
-                            match orch.process_vote(
-                                target_addr,
-                                voter,
-                                vote_enum,
-                                &config_params_bp,
-                            ) {
-                                Ok(maybe_event) => {
-                                    tracing::info!(
-                                        voter = %voter,
-                                        target = %target_addr,
-                                        vote,
-                                        completed = maybe_event.is_some(),
-                                        "verification vote processed by orchestrator"
-                                    );
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        voter = %voter,
-                                        target = %target_addr,
-                                        error = %e,
-                                        "verification vote processing failed"
-                                    );
-                                }
-                            }
-
-                            // Challenge re-votes don't auto-tally: finalize as
-                            // soon as the last selected verifier has voted.
-                            // The resulting WalletUnverified/ChallengeResolved
-                            // events queue into pending_events and are drained
-                            // just below.
-                            match orch.try_resolve_challenge(target_addr, &config_params_bp) {
-                                Ok(Some(_)) => {
-                                    tracing::info!(target = %target_addr, "challenge vote complete — resolving");
-                                }
-                                Ok(None) => {}
-                                Err(e) => {
-                                    tracing::warn!(target = %target_addr, error = %e, "challenge resolution failed");
-                                }
-                            }
-
-                            // Drain orchestrator events and act on them
-                            let events = orch.drain_events();
-                            for event in events {
-                                match event {
-                                        burst_verification::VerificationEvent::EndorsementComplete { ref wallet } => {
-                                            tracing::info!(%wallet, "endorsement threshold reached");
-                                        }
-                                        burst_verification::VerificationEvent::VerifiersSelected { ref wallet, ref verifiers } => {
-                                            tracing::info!(%wallet, count = verifiers.len(), "verifiers assigned by orchestrator");
-                                        }
-                                        burst_verification::VerificationEvent::VerificationComplete { ref wallet, ref result, ref outcomes } => {
-                                            tracing::info!(%wallet, ?result, "verification complete");
-                                            if *result == burst_verification::VerificationResult::Verified {
-                                                // Create-or-update: a freshly endorsed wallet
-                                                // (e.g. genesis bootstrap) has no account yet —
-                                                // verification is what brings it on-chain.
-                                                let mut acct = store
-                                                    .account_store()
-                                                    .get_account(wallet)
-                                                    .unwrap_or_else(|_| {
-                                                        burst_store::account::AccountInfo {
-                                                            address: wallet.clone(),
-                                                            state: burst_types::WalletState::Unverified,
-                                                            verified_at: None,
-                                                            head: BlockHash::ZERO,
-                                                            block_count: 0,
-                                                            confirmation_height: 0,
-                                                            representative: wallet.clone(),
-                                                            total_brn_burned: 0,
-                                                            total_brn_staked: 0,
-                                                            trst_balance: 0,
-                                                            expired_trst: 0,
-                                                            revoked_trst: 0,
-                                                            epoch: 0,
-                                                            verifier_opted_in_at: None,
-                                                            orv_evicted: false,
-                                                        }
-                                                    });
-                                                let was_revoked = acct.state == burst_types::WalletState::Revoked;
-                                                let was_deactivated = acct.state == burst_types::WalletState::Deactivated;
-                                                acct.state = burst_types::WalletState::Verified;
-                                                acct.verified_at = Some(Timestamp::now());
-                                                if let Err(e) = store.account_store().put_account(&acct) {
-                                                    tracing::error!(%wallet, "failed to persist Verified account: {e}");
-                                                }
-
-                                                // 6.15(b): re-verification un-revokes the TRST
-                                                // this wallet originated, restoring it to all
-                                                // current holders.
-                                                if was_revoked {
-                                                    let mut trst_inner = trst_engine_bp.lock().await;
-                                                    let restored = trst_inner.un_revoke_by_origin(wallet, Timestamp::now());
-                                                    drop(trst_inner);
-                                                    if !restored.is_empty() {
-                                                        // Restore to each CURRENT HOLDER (mirror of
-                                                        // revocation), not just the originator.
-                                                        let total_restored =
-                                                            apply_unrevocations_to_holders(&store, &restored);
-                                                        tracing::info!(
-                                                            %wallet,
-                                                            restored_count = restored.len(),
-                                                            total_restored,
-                                                            "TRST un-revoked after re-verification"
-                                                        );
-                                                    }
-                                                }
-                                                // Activate (or resume) BRN accrual. Endorsers
-                                                // receive NO protocol reward (decision 33.8a) —
-                                                // endorsement is a social obligation; their BRN
-                                                // was permanently burned by the Endorse block.
-                                                let mut brn_inner = brn_engine_bp.lock().await;
-                                                if was_deactivated {
-                                                    // Benign deactivation → re-verification
-                                                    // resumes accrual, keeping the balance the
-                                                    // wallet had earned (gap-shifted).
-                                                    if let Some(ws) = brn_inner.get_wallet_mut(wallet) {
-                                                        ws.resume_accrual(Timestamp::now());
-                                                        tracing::info!(%wallet, "BRN accrual resumed after re-verification of deactivated wallet");
-                                                    } else {
-                                                        brn_inner.track_wallet(wallet.clone(), burst_brn::BrnWalletState::new(Timestamp::now()));
-                                                    }
-                                                } else {
-                                                    // Fresh verification (or fraud re-verification
-                                                    // — "new BRN starts fresh", 6.15).
-                                                    let ws = burst_brn::BrnWalletState::new(Timestamp::now());
-                                                    brn_inner.track_wallet(wallet.clone(), ws);
-                                                    tracing::info!(%wallet, "BRN accrual activated after verification");
-                                                }
-                                                drop(brn_inner);
-                                            }
-
-                                            // Resolve verifier stakes and burn-backed TRST
-                                            // rewards (decision 33.7d): dissenter stakes are
-                                            // forfeited (burned) and the majority receives
-                                            // that value as TRST via pending entries claimed
-                                            // with normal Receive blocks.
-                                            {
-                                                let mut brn_inner = brn_engine_bp.lock().await;
-                                                crate::ledger_bridge::resolve_verifier_outcomes(
-                                                    &mut brn_inner,
-                                                    &store.pending_store(),
-                                                    &outcomes.verifiers,
-                                                    wallet,
-                                                    block.timestamp,
-                                                );
-                                            }
-                                        }
-                                        burst_verification::VerificationEvent::WalletUnverified { ref wallet } => {
-                                            tracing::warn!(%wallet, "wallet unverified (fraud confirmed)");
-                                            let mut trst_inner = trst_engine_bp.lock().await;
-                                            let revocations = trst_inner.revoke_by_origin(wallet);
-                                            drop(trst_inner);
-                                            // Charge each AFFECTED HOLDER (not just the
-                                            // fraudulent originator): via the merger graph the
-                                            // revoked TRST may now be held by any downstream
-                                            // account, so debit every holder's AccountInfo
-                                            // (transferable balance). Returns the true total
-                                            // revoked. (Consensus weight is expired-TRST based
-                                            // and untouched here — see the helper's docs.)
-                                            let total_revoked =
-                                                apply_revocations_to_holders(&store, &revocations);
-                                            if !revocations.is_empty() {
-                                                tracing::warn!(
-                                                    %wallet,
-                                                    revoked_count = revocations.len(),
-                                                    total_revoked,
-                                                    "TRST revoked via orchestrator fraud confirmation"
-                                                );
-                                            }
-                                            // Fraud stops BRN accrual — the whitepaper's
-                                            // "loses all BRN accrual and transaction rights".
-                                            {
-                                                let mut brn_inner = brn_engine_bp.lock().await;
-                                                if let Some(ws) = brn_inner.get_wallet_mut(wallet) {
-                                                    ws.stop_accrual(Timestamp::now());
-                                                }
-                                            }
-                                            // Mark the originator Revoked (its own holdings, if
-                                            // any, were already debited above as a holder).
-                                            if let Ok(mut acct) = store.account_store().get_account(wallet) {
-                                                acct.state = burst_types::WalletState::Revoked;
-                                                if let Err(e) = store.account_store().put_account(&acct) {
-                                                    tracing::error!(%wallet, "failed to persist account Revoked state: {e}");
-                                                }
-                                            }
-                                        }
-                                        burst_verification::VerificationEvent::WalletDeactivated { ref wallet } => {
-                                            // Benign unverification (whitepaper §Unverification
-                                            // Without Revocation): death, prolonged inactivity,
-                                            // or other Consti-defined grounds. BRN accrual stops
-                                            // and transaction rights are lost, but originated
-                                            // TRST is NOT revoked — it was legitimately earned.
-                                            tracing::info!(%wallet, "wallet deactivated (benign unverification — TRST NOT revoked)");
-                                            {
-                                                let mut brn_inner = brn_engine_bp.lock().await;
-                                                if let Some(ws) = brn_inner.get_wallet_mut(wallet) {
-                                                    ws.stop_accrual(Timestamp::now());
-                                                }
-                                            }
-                                            if let Ok(mut acct) = store.account_store().get_account(wallet) {
-                                                acct.state = burst_types::WalletState::Deactivated;
-                                                if let Err(e) = store.account_store().put_account(&acct) {
-                                                    tracing::error!(%wallet, "failed to persist account Deactivated state: {e}");
-                                                }
-                                            }
-                                        }
-                                        burst_verification::VerificationEvent::ChallengeResolved { ref wallet, ref outcome } => {
-                                            tracing::info!(%wallet, ?outcome.outcome, "challenge resolved via orchestrator");
-
-                                            // Resolve the challenger's BRN stake.
-                                            {
-                                                let mut brn_inner = brn_engine_bp.lock().await;
-                                                if let Some(ws) = brn_inner.get_wallet_mut(&outcome.challenger) {
-                                                    match outcome.outcome {
-                                                        burst_verification::ChallengeResult::FraudConfirmed => {
-                                                            // Stake returned in full.
-                                                            ws.total_staked = ws.total_staked.saturating_sub(outcome.challenger_stake);
-                                                            tracing::info!(challenger = %outcome.challenger, stake = outcome.challenger_stake, "challenger stake returned (fraud confirmed)");
-                                                        }
-                                                        burst_verification::ChallengeResult::ChallengeRejected => {
-                                                            // Stake forfeited (burned).
-                                                            ws.total_staked = ws.total_staked.saturating_sub(outcome.challenger_stake);
-                                                            ws.total_burned = ws.total_burned.saturating_add(outcome.challenger_stake);
-                                                            tracing::info!(challenger = %outcome.challenger, stake = outcome.challenger_stake, "challenger stake forfeited (challenge rejected)");
-                                                        }
-                                                        burst_verification::ChallengeResult::Expired => {
-                                                            // Half returned, half burned (time-wasting penalty).
-                                                            let penalty = outcome.challenger_stake / 2;
-                                                            ws.total_staked = ws.total_staked.saturating_sub(outcome.challenger_stake);
-                                                            ws.total_burned = ws.total_burned.saturating_add(penalty);
-                                                            tracing::info!(challenger = %outcome.challenger, penalty, "challenge expired — half the stake forfeited");
-                                                        }
-                                                    }
-                                                } else {
-                                                    tracing::warn!(challenger = %outcome.challenger, "challenger wallet not tracked in BRN engine, cannot resolve stake");
-                                                }
-
-                                                // Resolve challenge-vote verifier stakes and
-                                                // burn-backed TRST rewards (33.7d).
-                                                crate::ledger_bridge::resolve_verifier_outcomes(
-                                                    &mut brn_inner,
-                                                    &store.pending_store(),
-                                                    &outcome.verifier_outcomes,
-                                                    wallet,
-                                                    block.timestamp,
-                                                );
-                                            }
-
-                                            // Challenger TRST reward on confirmed fraud:
-                                            // min(revoked × bps, cap) per the parameter table.
-                                            // The WalletUnverified event is emitted before
-                                            // ChallengeResolved, so the revocation total is
-                                            // already recorded on the account. Backed by the
-                                            // destroyed revoked TRST (≥ 100x the reward), so
-                                            // never net-inflationary.
-                                            if outcome.outcome == burst_verification::ChallengeResult::FraudConfirmed {
-                                                let revoked_total = store
-                                                    .account_store()
-                                                    .get_account(wallet)
-                                                    .map(|a| a.revoked_trst)
-                                                    .unwrap_or(0);
-                                                let reward = std::cmp::min(
-                                                    revoked_total.saturating_mul(config_params_bp.challenge_reward_bps as u128) / 10_000,
-                                                    config_params_bp.challenge_reward_cap,
-                                                );
-                                                if reward > 0 {
-                                                    match crate::ledger_bridge::create_reward_pending(
-                                                        &store.pending_store(),
-                                                        &outcome.challenger,
-                                                        wallet,
-                                                        b"challenger-reward",
-                                                        reward,
-                                                        block.timestamp,
-                                                    ) {
-                                                        Ok(reward_hash) => tracing::info!(
-                                                            challenger = %outcome.challenger,
-                                                            reward,
-                                                            revoked_total,
-                                                            %reward_hash,
-                                                            "challenger TRST reward granted as pending"
-                                                        ),
-                                                        Err(e) => tracing::error!(
-                                                            challenger = %outcome.challenger,
-                                                            error = %e,
-                                                            "failed to create challenger reward pending entry"
-                                                        ),
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        burst_verification::VerificationEvent::VerifierPenalized { ref verifier, ref reason, cooldown_until } => {
-                                            tracing::warn!(
-                                                %verifier,
-                                                %reason,
-                                                cooldown_until,
-                                                "verifier penalized — excluded from future selection"
-                                            );
-                                        }
-                                    }
+                        priority_scheduler_bp.lock().await.push(
+                            block.hash,
+                            block.account.clone(),
+                            block.trst_balance.min(u64::MAX as u128) as u64,
+                        );
+                        let released = {
+                            let mut processor = bp.lock().await;
+                            processor.release_retained(&block.hash)
+                        };
+                        for dep in released {
+                            if !block_queue.push_retained(dep).await {
+                                tracing::warn!(parent = %block.hash, "block queue full re-enqueuing unchecked dependent");
                             }
                         }
 
                         // Track acceptance (NOT confirmation — that happens via consensus)
+                        if let Err(error) = crate::backlog_scan::register_candidate(
+                            &store,
+                            &mut *active_elections_bp.write().await,
+                            &block,
+                            Timestamp::new(unix_now_secs()),
+                        ) {
+                            tracing::debug!(hash = %block.hash, %error, "election deferred to scheduler");
+                        }
                         metrics.blocks_accepted.inc();
                         difficulty_adjuster_bp
                             .lock()
                             .await
                             .record_block(block.timestamp.as_secs());
-                        tracing::debug!(hash = %block.hash, "block accepted and persisted");
+                        tracing::debug!(hash = %block.hash, elapsed_ms = start.elapsed().as_millis(),
+                            "block accepted and persisted");
+                        if let Ok(payload) = bincode::serialize(&block) {
+                            submission_results_bp.complete(&payload, RpcProcessResult::Accepted);
+                        }
 
-                        // Publish block acceptance event to WebSocket subscribers
-                        ws_state_bp.publish_confirmation(
-                            &block.account.to_string(),
-                            &format!("{}", block.hash),
-                            &block.trst_balance.to_string(),
-                        );
+                        // Account update is provisional; acceptance is not finality.
                         ws_state_bp.publish_account_update(
                             &block.account.to_string(),
                             &block.trst_balance.to_string(),
                             &format!("{:?}", block.block_type),
                         );
 
-                        // TASK 2: Generate and broadcast a vote for the accepted block
-                        {
+                        // Every node publishes accepted blocks, including nodes
+                        // that do not vote or whose vote is currently spaced.
+                        if let Ok(bytes) = WireMessage::Block(Box::new(block.clone())).encode() {
+                            let peers: Vec<_> = peer_manager_bp
+                                .read()
+                                .await
+                                .iter_connected()
+                                .map(|(_, peer)| peer.clone())
+                                .collect();
+                            let _ = broadcaster_bp
+                                .broadcast_with_fanout(&bytes, &peers, 4)
+                                .await;
+                        }
+
+                        // Persist voting intent before signing or broadcasting.
+                        'local_vote: {
                             let mut vg = vote_generator_bp.lock().await;
                             if vg.is_representative {
                                 let mut vs = vote_spacing_bp.lock().await;
@@ -2175,17 +1546,21 @@ impl BurstNode {
                                 // distinct `previous`, so they're all votable;
                                 // only genuine forks at the same position share a
                                 // root and get rate-limited. Open blocks have no
-                                // `previous` (ZERO), so key them by their own hash
-                                // to avoid cross-account collisions on ZERO.
-                                let spacing_root = if block.previous.is_zero() {
-                                    block.hash
-                                } else {
-                                    block.previous
-                                };
+                                // `previous` (ZERO), so use an account-specific
+                                // open root, distinct from its first successor.
+                                let spacing_root = crate::ledger_updater::election_root(&block);
                                 if vs.votable(&spacing_root, &block.hash) {
                                     vs.record(spacing_root, block.hash);
                                     drop(vs);
-                                    let vote = vg.generate_vote(block.hash);
+                                    let vote = match crate::durable_votes::generate_vote(
+                                        &store, &mut vg, block.hash, false,
+                                    ) {
+                                        Ok(vote) => vote,
+                                        Err(error) => {
+                                            tracing::error!(hash = %block.hash, %error, "refusing vote without durable reservation");
+                                            break 'local_vote;
+                                        }
+                                    };
                                     drop(vg);
 
                                     // Count OUR OWN vote in OUR election tally.
@@ -2194,25 +1569,43 @@ impl BurstNode {
                                     // local active_elections, so a single node (or
                                     // this node's own view) could never reach soft
                                     // quorum → nothing ever confirmed/cemented.
-                                    // Start the election for this block (root = its
-                                    // own hash) and record our vote + online weight.
+                                    // All candidates at this account position share
+                                    // an election, including later-arriving forks.
                                     {
                                         let now = Timestamp::new(unix_now_secs());
                                         let our_weight =
                                             rep_weights_bp.read().await.weight(&vote.voter);
-                                        if our_weight > 0 {
+                                        if our_weight > 0
+                                            || active_elections_bp
+                                                .read()
+                                                .await
+                                                .has_authorized_voter(&vote.voter)
+                                        {
                                             online_weight_sampler_bp
                                                 .lock()
                                                 .await
                                                 .record_vote(&vote.voter, now.as_secs());
                                             let mut ae = active_elections_bp.write().await;
-                                            let _ = ae.start_election(block.hash, now);
-                                            let _ = ae.process_vote(
-                                                &block.hash,
-                                                &vote.voter,
-                                                block.hash,
-                                                our_weight,
-                                                false,
+                                            match crate::backlog_scan::register_candidate(
+                                                &store, &mut ae, &block, now,
+                                            ) {
+                                                Ok(true) => {}
+                                                Ok(false) => break 'local_vote,
+                                                Err(error) => {
+                                                    tracing::warn!(hash = %block.hash, %error, "local vote election deferred");
+                                                    break 'local_vote;
+                                                }
+                                            }
+                                            let _ = ae.process_signed_vote(
+                                                &spacing_root,
+                                                burst_consensus::VoteInfo::new(
+                                                    vote.voter.clone(),
+                                                    block.hash,
+                                                    our_weight,
+                                                    false,
+                                                    Timestamp::new(vote.timestamp / 1000),
+                                                    vote.sequence,
+                                                ),
                                                 now,
                                             );
                                         }
@@ -2230,19 +1623,7 @@ impl BurstNode {
                                         let pm = peer_manager_bp.read().await;
                                         pm.iter_connected().map(|(_, s)| s.clone()).collect()
                                     };
-                                    // Flood the BLOCK itself (Nano-style block
-                                    // publishing) so peers have it and can vote —
-                                    // without this, peers only got blocks via the
-                                    // slow ~30s bootstrap pull. Receive-side
-                                    // message dedup breaks re-flood loops.
-                                    if let Ok(block_bytes) = bincode::serialize(
-                                        &WireMessage::Block(Box::new(block.clone())),
-                                    ) {
-                                        let _ = broadcaster_bp
-                                            .broadcast_with_fanout(&block_bytes, &peers, 4)
-                                            .await;
-                                    }
-                                    if let Ok(msg_bytes) = bincode::serialize(&wire_msg) {
+                                    if let Ok(msg_bytes) = wire_msg.encode() {
                                         let _ = broadcaster_bp
                                             .broadcast_with_fanout(&msg_bytes, &peers, 4)
                                             .await;
@@ -2258,17 +1639,34 @@ impl BurstNode {
                         }
                     }
                     ProcessResult::Fork => {
+                        let root = crate::ledger_updater::election_root(&block);
+                        if let Ok(payload) = bincode::serialize(&block) {
+                            submission_results_bp.complete(&payload, RpcProcessResult::Fork);
+                        }
+                        if new_fork_payload {
+                            let peers: Vec<_> = peer_manager_bp
+                                .read()
+                                .await
+                                .iter_connected()
+                                .map(|(_, peer)| peer.clone())
+                                .collect();
+                            if let Ok(bytes) = WireMessage::Block(Box::new(block.clone())).encode()
+                            {
+                                let _ = broadcaster_bp
+                                    .broadcast_with_fanout(&bytes, &peers, 4)
+                                    .await;
+                            }
+                        }
                         // Cache the fork block for election consideration
                         {
                             let mut fc = fork_cache_bp.lock().await;
-                            fc.insert(block.previous, block.hash);
+                            fc.insert(root, block.hash);
                         }
-                        // Fork detected — start an election on the root (previous block)
+                        // Join the existing election for this account position.
                         let now = Timestamp::new(unix_now_secs());
-                        let root = block.previous;
                         {
                             let mut ae = active_elections_bp.write().await;
-                            if let Err(e) = ae.start_election(root, now) {
+                            if let Err(e) = ae.register_candidate(root, block.hash, now) {
                                 tracing::debug!(root = %root, error = %e, "could not start election for fork");
                             } else {
                                 tracing::info!(root = %root, fork_hash = %block.hash, "election started for fork");
@@ -2284,13 +1682,13 @@ impl BurstNode {
                         // accept path), so it could never confirm.
                         let competitor = {
                             let bs = store.block_store();
-                            match bs.height_of_block(&root) {
+                            match bs.height_of_block(&block.previous) {
                                 Ok(Some(h)) => {
                                     bs.block_at_height(&block.account, h + 1).ok().flatten()
                                 }
                                 // Open-block fork (no `previous`): the competitor
                                 // is the account's first block (height 1).
-                                _ if root.is_zero() => {
+                                _ if block.previous.is_zero() => {
                                     bs.block_at_height(&block.account, 1).ok().flatten()
                                 }
                                 _ => None,
@@ -2298,6 +1696,10 @@ impl BurstNode {
                         };
                         if let Some(accepted) = competitor {
                             if accepted != block.hash {
+                                let _ = active_elections_bp
+                                    .write()
+                                    .await
+                                    .register_candidate(root, accepted, now);
                                 let (our_rep, is_rep) = {
                                     let vg = vote_generator_bp.lock().await;
                                     (vg.representative.clone(), vg.is_representative)
@@ -2305,12 +1707,34 @@ impl BurstNode {
                                 if is_rep {
                                     let our_weight =
                                         { rep_weights_bp.read().await.weight(&our_rep) };
-                                    let vote =
-                                        { vote_generator_bp.lock().await.generate_vote(accepted) };
+                                    let vote = {
+                                        let mut generator = vote_generator_bp.lock().await;
+                                        match crate::durable_votes::generate_vote(
+                                            &store,
+                                            &mut generator,
+                                            accepted,
+                                            false,
+                                        ) {
+                                            Ok(vote) => vote,
+                                            Err(error) => {
+                                                tracing::error!(%accepted, %error, "refusing conflicting or non-durable fork vote");
+                                                continue;
+                                            }
+                                        }
+                                    };
                                     {
                                         let mut ae = active_elections_bp.write().await;
-                                        let _ = ae.process_vote(
-                                            &root, &our_rep, accepted, our_weight, false, now,
+                                        let _ = ae.process_signed_vote(
+                                            &root,
+                                            burst_consensus::VoteInfo::new(
+                                                our_rep.clone(),
+                                                accepted,
+                                                our_weight,
+                                                false,
+                                                Timestamp::new(vote.timestamp / 1000),
+                                                vote.sequence,
+                                            ),
+                                            now,
                                         );
                                     }
                                     let wire = WireMessage::Vote(WireVote {
@@ -2321,7 +1745,7 @@ impl BurstNode {
                                         sequence: vote.sequence,
                                         signature: vote.signature,
                                     });
-                                    if let Ok(bytes) = bincode::serialize(&wire) {
+                                    if let Ok(bytes) = wire.encode() {
                                         let peers: Vec<burst_network::PeerState> = {
                                             let pm = peer_manager_bp.read().await;
                                             pm.iter_connected().map(|(_, s)| s.clone()).collect()
@@ -2340,7 +1764,8 @@ impl BurstNode {
                     }
                 }
 
-                let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+                let elapsed =
+                    (start.elapsed() + authenticated.authentication_time()).as_secs_f64() * 1000.0;
                 metrics.block_process_time_ms.observe(elapsed);
             }
         });
@@ -2356,17 +1781,20 @@ impl BurstNode {
         let broadcaster_ct = self.broadcaster.clone();
         let peer_manager_ct = Arc::clone(&self.peer_manager);
         let rep_weights_ct = Arc::clone(&self.rep_weights);
-        let block_processor_ct = Arc::clone(&self.block_processor);
-        let frontier_ct = Arc::clone(&self.frontier);
         let store_ct = Arc::clone(&self.store);
-        let confirming_set_ct = Arc::clone(&self.confirming_set);
         let backlog_ct = Arc::clone(&self.backlog);
-        let governance_ct = Arc::clone(&self.governance);
-        let brn_engine_ct = Arc::clone(&self.brn_engine);
         let local_broadcaster_ct = Arc::clone(&self.local_broadcaster);
+        let historical_ct = self
+            .connection_registry
+            .read()
+            .await
+            .historical_finality
+            .clone();
 
         let confirmation_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(500));
+            let mut request_cursor = 0usize;
+            let mut last_request = std::time::Instant::now();
             loop {
                 tokio::select! {
                     biased;
@@ -2375,6 +1803,50 @@ impl BurstNode {
                         break;
                     }
                     _ = interval.tick() => {
+                        if last_request.elapsed() >= Duration::from_secs(1) {
+                            last_request = std::time::Instant::now();
+                            let mut candidates = active_elections_ct.read().await.unconfirmed_candidates();
+                            candidates.extend(historical_ct.awaiting_votes());
+                            candidates.sort();
+                            candidates.dedup();
+                            if !candidates.is_empty() {
+                                request_cursor %= candidates.len();
+                                let hashes: Vec<_> = candidates[request_cursor..].iter().chain(&candidates[..request_cursor])
+                                    .take(8).copied().collect();
+                                request_cursor = (request_cursor + hashes.len()) % candidates.len();
+                                for hash in &hashes {
+                                    let vote = {
+                                        let mut generator = vote_generator_ct.lock().await;
+                                        let ae = active_elections_ct.read().await;
+                                        let already_voted = ae.candidate_root(hash).and_then(|root| ae.get_election(&root))
+                                            .is_some_and(|election| election.last_votes.contains_key(&generator.representative));
+                                        drop(ae);
+                                        if already_voted { continue; }
+                                        crate::durable_votes::respond_vote(&store_ct, &mut generator, *hash)
+                                    };
+                                    match vote {
+                                        Ok(Some(vote)) => {
+                                            let weight = rep_weights_ct.read().await.weight(&vote.voter);
+                                            let mut ae = active_elections_ct.write().await;
+                                            if let Some(root) = ae.candidate_root(hash) {
+                                                let _ = ae.process_signed_vote(&root, burst_consensus::VoteInfo::new(
+                                                    vote.voter, *hash, weight, vote.is_final,
+                                                    Timestamp::new(vote.timestamp / 1000), vote.sequence,
+                                                ), Timestamp::new(unix_now_secs()));
+                                            }
+                                        }
+                                        Ok(None) => {}
+                                        Err(error) => tracing::warn!(%hash, %error, "cannot seed recovered election vote"),
+                                    }
+                                }
+                                let request = WireMessage::ConfirmReq(crate::wire_message::ConfirmReqMsg { block_hashes: hashes, remaining_hops: 3 });
+                                if let Ok(bytes) = request.encode() {
+                                    let peers: Vec<_> = peer_manager_ct.read().await.iter_connected().map(|(_, peer)| peer.clone()).collect();
+                                    let result = broadcaster_ct.broadcast_with_fanout(&bytes, &peers, 4).await;
+                                    tracing::debug!(candidates = candidates.len(), sent = result.sent, failed = result.failed, "requested missing consensus votes");
+                                }
+                            }
+                        }
                         // Phase 1: emit FINAL votes for elections that reached
                         // SOFT quorum (rsnano two-phase: soft quorum → final
                         // votes → confirmation). Confirmation is gated on final
@@ -2396,13 +1868,22 @@ impl BurstNode {
                                     let now = Timestamp::new(unix_now_secs());
                                     for (root, winner) in ready {
                                         let fv = {
-                                            vote_generator_ct.lock().await.generate_final_vote(winner)
+                                            let mut generator = vote_generator_ct.lock().await;
+                                            match crate::durable_votes::generate_vote(&store_ct, &mut generator, winner, true) {
+                                                Ok(vote) => vote,
+                                                Err(crate::durable_votes::VoteGenerationError::DependenciesPending) => continue,
+                                                Err(error) => {
+                                                    tracing::error!(%winner, %error, "refusing conflicting or non-durable final vote");
+                                                    continue;
+                                                }
+                                            }
                                         };
                                         // Count our own final weight locally.
                                         {
                                             let mut ae = active_elections_ct.write().await;
-                                            let _ = ae.process_vote(
-                                                &root, &our_rep, winner, our_weight, true, now,
+                                            let _ = ae.process_signed_vote(
+                                                &root, burst_consensus::VoteInfo::new(our_rep.clone(), winner,
+                                                    our_weight, true, Timestamp::new(fv.timestamp / 1000), fv.sequence), now,
                                             );
                                         }
                                         let wire = WireMessage::Vote(WireVote {
@@ -2413,7 +1894,7 @@ impl BurstNode {
                                             sequence: fv.sequence,
                                             signature: fv.signature,
                                         });
-                                        if let Ok(bytes) = bincode::serialize(&wire) {
+                                        if let Ok(bytes) = wire.encode() {
                                             let peers: Vec<burst_network::PeerState> = {
                                                 let pm = peer_manager_ct.read().await;
                                                 pm.iter_connected().map(|(_, s)| s.clone()).collect()
@@ -2433,149 +1914,48 @@ impl BurstNode {
                             ae.confirmed_elections()
                         };
 
+                        let mut processed_winners = std::collections::HashSet::new();
                         for status in &confirmed {
                             let winner = status.winner;
-
-                            // Mark as recently confirmed
+                            // A fork hash may have votes before its full state can
+                            // be installed. Do not advertise or cement it until
+                            // validation and persistence have actually succeeded.
+                            if !store_ct.block_store().get_block(&winner).ok()
+                                .and_then(|bytes| bincode::deserialize::<StateBlock>(&bytes).ok())
+                                .is_some_and(|block| block.hash == winner && block.compute_hash() == winner)
                             {
-                                let mut rc = recently_confirmed_ct.write().await;
-                                rc.insert(winner);
+                                if store_ct.meta_store().fork_candidate(&winner).ok().flatten().is_some() {
+                                    let _ = fork_install_tx.try_send(winner);
+                                }
+                                tracing::debug!(%winner, "election winner unavailable in ledger; confirmation deferred");
+                                continue;
                             }
-
-                            // Add to confirming set for batched cementation
-                            {
-                                let mut cs = confirming_set_ct.lock().await;
-                                if !cs.add(winner) {
-                                    tracing::warn!(%winner, "confirming set full — backpressure");
+                            // Persist the handoff before retiring the election. A
+                            // restart must resume cementation without new votes.
+                            let handoff: Result<bool, burst_store::StoreError> = (|| {
+                                let mut batch = store_ct.tx_begin_write()?;
+                                if !crate::causal_cementation::handoff(&mut batch, winner)? {
+                                    return Ok(false);
+                                }
+                                batch.commit()?;
+                                Ok(true)
+                            })();
+                            match handoff {
+                                Ok(true) => {}
+                                Ok(false) => continue,
+                                Err(error) => {
+                                    tracing::error!(%winner, %error, "confirmation handoff failed; election retained");
+                                    continue;
                                 }
                             }
-
-                            // Remove from bounded backlog
-                            {
-                                let mut bl = backlog_ct.lock().await;
-                                bl.remove(&winner);
-                            }
-
-                            // Remove from local broadcaster (stop re-broadcasting)
-                            {
-                                let mut lb = local_broadcaster_ct.lock().await;
-                                lb.confirmed(&winner);
-                            }
-
-                            // Increment confirmed metric (only here, via consensus)
-                            metrics_ct.blocks_confirmed.inc();
-
-                            // Record confirmation latency
-                            metrics_ct
-                                .confirmation_latency_ms
-                                .observe(status.election_duration_ms as f64);
-
-                            // Publish WebSocket notification
-                            ws_state_ct.publish_confirmation(
-                                "",
-                                &format!("{}", winner),
-                                "0",
-                            );
-
-                            tracing::info!(
-                                winner = %winner,
-                                tally = status.tally,
-                                duration_ms = status.election_duration_ms,
-                                "block confirmed by consensus"
-                            );
-
-                            // TASK 3: Generate and broadcast a FINAL vote for the winner.
-                            //
-                            // TODO(consensus-port step 9): this emits the final
-                            // vote AFTER confirmation, which is backwards. rsnano
-                            // emits a final vote when an election reaches soft
-                            // quorum (`Election::has_quorum`), and confirmation
-                            // then requires a supermajority of those FINAL votes
-                            // (now enforced in `Election::try_confirm`). Until the
-                            // node vote-lifecycle is reworked to emit on
-                            // has_quorum, fork elections won't self-resolve — but
-                            // the non-fork hot path never creates an election, so
-                            // live operation is unaffected. This post-confirm
-                            // broadcast is now a harmless finalization echo.
-                            {
-                                let mut vg = vote_generator_ct.lock().await;
-                                if vg.is_representative {
-                                    let final_vote = vg.generate_final_vote(winner);
-                                    let wire_msg = WireMessage::Vote(WireVote {
-                                        voter: final_vote.voter,
-                                        block_hashes: vec![final_vote.block_hash],
-                                        is_final: true,
-                                        timestamp: final_vote.timestamp,
-                                        sequence: final_vote.sequence,
-                                        signature: final_vote.signature,
-                                    });
-                                    if let Ok(bytes) = bincode::serialize(&wire_msg) {
-                                        let peers: Vec<burst_network::PeerState> = {
-                                            let pm = peer_manager_ct.read().await;
-                                            pm.iter_connected()
-                                                .map(|(_, s)| s.clone())
-                                                .collect()
-                                        };
-                                        let _ = broadcaster_ct
-                                            .broadcast_with_fanout(&bytes, &peers, 4)
-                                            .await;
-                                    }
-                                }
-                            }
-
-                            // Process unchecked dependents that were waiting for this block
-                            {
-                                let mut bp = block_processor_ct.lock().await;
-                                let deps = bp.process_unchecked(&winner);
-                                if !deps.is_empty() {
-                                    tracing::debug!(
-                                        count = deps.len(),
-                                        winner = %winner,
-                                        "replayed unchecked dependents after confirmation"
-                                    );
-                                }
-                            }
-
-                            // Roll back losing fork blocks: look up the winner's
-                            // account, check if the frontier disagrees, and if so
-                            // roll back the loser so the winner can be cemented.
-                            {
-                                let block_store = store_ct.block_store();
-                                if let Ok(winner_bytes) = block_store.get_block(&winner) {
-                                    if let Ok(winner_block) = bincode::deserialize::<StateBlock>(&winner_bytes) {
-                                        let frontier_read = frontier_ct.read().await;
-                                        if let Some(&frontier_hash) = frontier_read.get_head(&winner_block.account) {
-                                            if frontier_hash != winner {
-                                                drop(frontier_read);
-                                                if let Ok(loser_bytes) = block_store.get_block(&frontier_hash) {
-                                                    if let Ok(loser_block) = bincode::deserialize::<StateBlock>(&loser_bytes) {
-                                                        let mut bp = block_processor_ct.lock().await;
-                                                        let mut frontier_write = frontier_ct.write().await;
-                                                        let result = bp.rollback(&loser_block, &mut frontier_write);
-                                                        if result == crate::block_processor::RollbackResult::Success {
-                                                            if let Err(e) = block_store.delete_block(&frontier_hash) {
-                                                                tracing::warn!(hash = %frontier_hash, "failed to delete rolled-back block: {e}");
-                                                            }
-                                                            tracing::info!(
-                                                                account = %winner_block.account,
-                                                                rolled_back = %frontier_hash,
-                                                                winner = %winner,
-                                                                "rolled back fork loser after confirmation"
-                                                            );
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                            processed_winners.insert(winner);
+                            metrics_ct.confirmation_latency_ms.observe(status.election_duration_ms as f64);
                         }
 
                         // Cleanup confirmed elections from active set to free capacity.
                         if !confirmed.is_empty() {
                             let mut ae = active_elections_ct.write().await;
-                            let cleaned = ae.cleanup_confirmed();
+                            let cleaned = ae.cleanup_confirmed_where(|winner| processed_winners.contains(winner));
                             if !cleaned.is_empty() {
                                 tracing::debug!(
                                     count = cleaned.len(),
@@ -2584,51 +1964,12 @@ impl BurstNode {
                             }
                         }
 
-                        // Drain pending governance parameter changes and propagate
-                        {
-                            let mut gov = governance_ct.lock().await;
-                            let changes = gov.drain_pending_changes();
-                            if !changes.is_empty() {
-                                let prop_now = Timestamp::new(unix_now_secs());
-                                let mut brn = brn_engine_ct.lock().await;
-                                for (param, value) in changes {
-                                    match param {
-                                        burst_governance::GovernableParam::BrnRate => {
-                                            if let Err(e) = brn.apply_rate_change(value, prop_now) {
-                                                tracing::warn!(error = %e, "failed to apply BRN rate change");
-                                            } else {
-                                                tracing::info!(
-                                                    new_rate = value,
-                                                    "propagated BRN rate change to all tracked wallets"
-                                                );
-                                            }
-                                        }
-                                        burst_governance::GovernableParam::TrstExpirySecs => {
-                                            tracing::info!(
-                                                new_expiry = value,
-                                                "governance updated TRST expiry (applied at block processing)"
-                                            );
-                                            // TRST expiry is read from params at block processing time,
-                                            // so no engine update needed — the governance store is the
-                                            // source of truth.
-                                        }
-                                        other => {
-                                            tracing::info!(
-                                                param = ?other,
-                                                value = value,
-                                                "governance parameter changed"
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
 
                         // Cleanup expired elections
                         let now = Timestamp::new(unix_now_secs());
                         {
                             let mut ae = active_elections_ct.write().await;
-                            let expired = ae.cleanup_expired(30_000, now);
+                            let expired = ae.cleanup_expired(300_000, now);
                             if !expired.is_empty() {
                                 tracing::debug!(
                                     count = expired.len(),
@@ -2647,11 +1988,14 @@ impl BurstNode {
         // ── Cementation task — durably cements confirmed blocks in batches ─
         let confirming_set_cement = Arc::clone(&self.confirming_set);
         let store_cement = Arc::clone(&self.store);
+        let metrics_cement = Arc::clone(&self.metrics);
+        let rep_weights_cement = Arc::clone(&self.rep_weights);
+        let elections_cement = Arc::clone(&self.active_elections);
         let mut shutdown_rx_cement = self.shutdown.subscribe();
 
         let cementation_handle = tokio::spawn(async move {
-            let processor = ConfirmationProcessor;
             let mut interval = tokio::time::interval(Duration::from_millis(100));
+            let mut cursor: Option<BlockHash> = None;
             loop {
                 tokio::select! {
                     biased;
@@ -2660,52 +2004,57 @@ impl BurstNode {
                         break;
                     }
                     _ = interval.tick() => {
-                        let batch = {
-                            let mut cs = confirming_set_cement.lock().await;
-                            cs.next_batch()
+                        let pending = match store_cement.meta_store().pending_confirmations() {
+                            Ok(pending) => pending,
+                            Err(error) => {
+                                tracing::error!(%error, "cannot read durable confirmation queue");
+                                continue;
+                            }
                         };
+                        let start = cursor.map_or(0, |after| pending.partition_point(|hash| hash.as_bytes() <= after.as_bytes()));
+                        let batch: Vec<_> = pending[start..].iter().chain(&pending[..start]).take(256).copied().collect();
                         if !batch.is_empty() {
                             let mut total_cemented: u64 = 0;
-                            let account_store = Arc::new(store_cement.account_store());
-                            let block_store = Arc::new(store_cement.block_store());
-
                             for block_hash in &batch {
-                                let mut walker = LmdbChainWalker::new(
-                                    account_store.clone(),
-                                    block_store.clone(),
-                                );
-                                match processor.process(block_hash, &mut walker) {
-                                    (CementResult::Cemented { blocks_cemented, new_height }, _cemented_hashes) => {
-                                        tracing::debug!(
-                                            blocks = blocks_cemented,
-                                            height = new_height,
-                                            hash = %block_hash,
-                                            "cemented blocks"
-                                        );
-                                        total_cemented += blocks_cemented;
+                                cursor = Some(*block_hash);
+                                match crate::causal_cementation::cement(&store_cement, *block_hash) {
+                                    Ok(result) => {
+                                        if let Err(error) = rebuild_rep_weights(&store_cement, &rep_weights_cement, &elections_cement).await {
+                                            tracing::error!(%error, "cannot publish confirmed authority");
+                                        }
+                                        total_cemented += result.hashes.len() as u64;
+                                        // Publish only after the heights and queue acknowledgment
+                                        // have committed together. Causal ancestors are final too.
+                                        for hash in &result.hashes {
+                                            recently_confirmed_ct.write().await.insert(*hash);
+                                            backlog_ct.lock().await.remove(hash);
+                                            local_broadcaster_ct.lock().await.confirmed(hash);
+                                            metrics_cement.blocks_confirmed.inc();
+                                            if let Ok(bytes) = store_cement.block_store().get_block(hash) {
+                                                if let Ok(block) = bincode::deserialize::<StateBlock>(&bytes) {
+                                                    elections_cement.write().await.remove_root(&crate::ledger_updater::election_root(&block));
+                                                    ws_state_ct.publish_confirmation(block.account.as_str(), &hash.to_string(), &block.trst_balance.to_string());
+                                                }
+                                            }
+                                        }
+                                        tracing::debug!(hash = %block_hash, complete = result.complete, "committed causal cementation");
                                     }
-                                    (CementResult::AlreadyCemented, _) => {}
-                                    (CementResult::BlockNotFound, _) => {
-                                        tracing::warn!(hash = %block_hash, "block not found for cementation");
-                                    }
-                                    (CementResult::AccountNotFound, _) => {
-                                        tracing::warn!(hash = %block_hash, "account not found for cementation");
+                                    Err(error) => {
+                                        tracing::error!(hash = %block_hash, %error, "causal cementation failed; retrying");
                                     }
                                 }
                             }
 
                             if total_cemented > 0 {
+                                if let Err(error) = crate::fork_resolution::prune_finalized(&store_cement) {
+                                    tracing::error!(%error, "finalized fork payload cleanup failed; cache retained");
+                                }
                                 let cs = confirming_set_cement.lock().await;
                                 cs.record_cemented(total_cemented);
                                 tracing::debug!(count = total_cemented, "cemented block batch");
                             }
                         }
 
-                        // Retry any deferred blocks
-                        {
-                            let mut cs = confirming_set_cement.lock().await;
-                            cs.retry_deferred();
-                        }
                     }
                 }
             }
@@ -2724,8 +2073,12 @@ impl BurstNode {
         let mut shutdown_rx_gov = self.shutdown.subscribe();
         let mut gov_params = self.config.params.clone();
         let genesis_network_gov = self.config.network;
+        let certified_governance = self.certified_selection_enabled();
 
         let gov_tick_handle = tokio::spawn(async move {
+            if certified_governance {
+                return;
+            }
             let mut interval = tokio::time::interval(Duration::from_secs(10));
             loop {
                 tokio::select! {
@@ -2739,23 +2092,47 @@ impl BurstNode {
                         // Lock order gov → del matches the governance-vote path
                         // (no deadlock). The tally resolves delegated votes and
                         // uses the live verified-wallet count as the denominator.
-                        let mut gov = governance_tick.lock().await;
-                        let verified_count = store_gov
-                            .account_store()
-                            .verified_account_count()
-                            .unwrap_or(0) as u32;
+                        let live_governance = governance_tick.lock().await;
+                        let verified_wallets: Vec<_> = match store_gov.account_store().iter_verified_accounts() {
+                            Ok(accounts) if accounts.len() <= u32::MAX as usize => accounts.into_iter().map(|a| a.address).collect(),
+                            Ok(_) => {
+                                tracing::error!("governance electorate exceeds supported size");
+                                continue;
+                            }
+                            Err(error) => {
+                                tracing::error!(%error, "cannot tally governance without the electorate");
+                                continue;
+                            }
+                        };
                         let del = delegation_gov.lock().await;
-                        let activated = gov.tick(now, &mut gov_params, &del, verified_count);
+                        match store_gov.brn_store().get_meta(b"protocol_params") {
+                            Ok(Some(bytes)) => match bincode::deserialize(&bytes) {
+                                Ok(params) => gov_params = params,
+                                Err(error) => {
+                                    tracing::error!(%error, "cannot schedule governance with corrupt parameters");
+                                    continue;
+                                }
+                            },
+                            Ok(None) => {},
+                            Err(error) => {
+                                tracing::error!(%error, "cannot read governance parameters");
+                                continue;
+                            }
+                        }
+                        let gov = live_governance.project_at(now, &gov_params, &del, &verified_wallets);
+                        let activated = gov.due_activation_hashes(now);
                         drop(del);
+                        drop(live_governance);
                         if !activated.is_empty() {
                             // For each activated proposal, create a GovernanceActivation
                             // block on the genesis chain. The block processing loop
                             // applies the param change when it processes the block.
-                            for proposal_hash in &activated {
+                            // One candidate per account head. Remaining proposals
+                            // are retried after this activation commits.
+                            for proposal_hash in activated.iter().take(1) {
                                 let proposal_snapshot = gov.get_proposal(proposal_hash).cloned();
                                 if let Some(proposal) = proposal_snapshot {
-                                    let mut tentative_params = gov_params.clone();
-                                    if gov.activate(&proposal, &mut tentative_params).is_ok() {
+                                    if let Ok(tentative_params) = gov.preview_activation(&proposal, &gov_params) {
                                         let new_params_hash = tentative_params.params_hash();
 
                                         let kp = match genesis_key::genesis_signing_key(genesis_network_gov) {
@@ -2778,26 +2155,41 @@ impl BurstNode {
                                             }
                                         };
 
-                                        let genesis_acct = store_gov.account_store().get_account(&genesis_addr);
-                                        let (brn_bal, trst_bal) = match genesis_acct {
-                                            Ok(acct) => (0u128, acct.trst_balance),
-                                            Err(_) => (0, 0),
+                                        let genesis_acct = match store_gov.account_store().get_account(&genesis_addr) {
+                                            Ok(acct) if acct.head == previous => acct,
+                                            _ => continue,
+                                        };
+                                        let predecessor: StateBlock = match store_gov.block_store().get_block(&previous)
+                                            .ok().and_then(|bytes| bincode::deserialize(&bytes).ok()) {
+                                                Some(block) => block,
+                                                None => continue,
+                                            };
+                                        let Some(activation_at) = proposal.activation_at else { continue; };
+                                        let payment_epoch = match store_gov.meta_store().payment_epoch() {
+                                            Ok(epoch) => epoch,
+                                            Err(error) => {
+                                                tracing::error!(%error, "cannot author activation without payment epoch");
+                                                continue;
+                                            }
                                         };
 
                                         let mut block = StateBlock {
-                                            version: CURRENT_BLOCK_VERSION,
+                                            signing_grant: predecessor.active_signing_grant(),
+                                            delegation_payload: Vec::new(),
+                                            version: CURRENT_BLOCK_VERSION, payment_epoch,
                                             block_type: BlockType::GovernanceActivation,
                                             account: genesis_addr,
                                             previous,
-                                            representative: WalletAddress::new("brst_genesis"),
-                                            brn_balance: brn_bal,
-                                            trst_balance: trst_bal,
+                                            representative: genesis_acct.representative,
+                                            brn_balance: predecessor.brn_balance,
+                                            trst_balance: genesis_acct.trst_balance,
                                             link: BlockHash::new(*proposal_hash.as_bytes()),
                                             origin: TxHash::ZERO,
                                             transaction: TxHash::new(*new_params_hash.as_bytes()),
-                                            timestamp: now,
+                                            timestamp: activation_at,
                                             params_hash: gov_params.params_hash(),
-                                            merge_sources: Vec::new(),
+                                            target_head: burst_types::BlockHash::ZERO,
+                                            merge_sources: Vec::new(), release_sources: Vec::new(),
                                             work: 0,
                                             signature: Signature([0u8; 64]),
                                             hash: BlockHash::ZERO,
@@ -2815,7 +2207,7 @@ impl BurstNode {
                                             burst_work::WorkBlockKind::Epoch,
                                         );
                                         let generator = WorkGenerator;
-                                        match generator.generate(&block.hash, threshold) {
+                                        match generator.generate(&block.work_root(), threshold) {
                                             Ok(nonce) => block.work = nonce.0,
                                             Err(e) => {
                                                 tracing::warn!(error = %e, "failed to generate PoW for activation block");
@@ -2836,41 +2228,6 @@ impl BurstNode {
                                         }
                                     }
                                 }
-                            }
-                            // Drain pending changes/amendments so they don't accumulate
-                            // (actual application happens in block processing loop).
-                            let _ = gov.drain_pending_changes();
-                            let _ = gov.drain_activated_amendments();
-                        }
-
-                        // Update adaptive quorum EMA with current participation data.
-                        let total_verified = store_gov
-                            .account_store()
-                            .verified_account_count()
-                            .unwrap_or(0) as u32;
-
-                        if total_verified > 0 {
-                            for hash in gov.active_proposal_hashes() {
-                                if let Some(proposal) = gov.get_proposal(&hash) {
-                                    let participation_bps = burst_governance::GovernanceEngine::compute_participation_bps(
-                                        proposal.exploration_votes_yea,
-                                        proposal.exploration_votes_nay,
-                                        proposal.exploration_votes_abstain,
-                                        total_verified,
-                                    );
-                                    if participation_bps > 0 {
-                                        burst_governance::GovernanceEngine::update_ema(&mut gov_params, participation_bps);
-                                    }
-                                }
-                            }
-                        }
-
-                        // Persist GovernanceEngine state to LMDB so in-flight
-                        // proposals survive restarts.
-                        if let Ok(bytes) = bincode::serialize(&*gov) {
-                            let brn_store = store_gov.brn_store();
-                            if let Err(e) = brn_store.put_meta(b"governance_engine", &bytes) {
-                                tracing::trace!(error = %e, "failed to persist GovernanceEngine state");
                             }
                         }
                     }
@@ -2964,9 +2321,7 @@ impl BurstNode {
         //  3. clean up stale expiry index entries
         let store_expiry = Arc::clone(&self.store);
         let trst_engine_expiry = Arc::clone(&self.trst_engine);
-        let orch_expiry = Arc::clone(&self.verification_orchestrator);
-        let brn_engine_expiry = Arc::clone(&self.brn_engine);
-        let challenge_duration_secs = self.config.params.challenge_duration_secs;
+        let certified_expiry = self.certified_selection_enabled();
         let mut shutdown_rx_expiry = self.shutdown.subscribe();
 
         let expiry_handle = tokio::spawn(async move {
@@ -2983,144 +2338,27 @@ impl BurstNode {
                         let now = Timestamp::new(now_secs);
                         let cutoff = Timestamp::new(now_secs);
 
-                        // 1. Flush expired tokens in the engine so cached
-                        //    balances and account-facing state stay honest, and
-                        //    surface the newly-expired amount into each account's
-                        //    `expired_trst` counter. Per whitepaper §Expiry, the
-                        //    total `trst_balance` is NOT reduced — it stays as a
-                        //    permanent record ("virtue points"); only the
-                        //    transferable portion (trst_balance − expired − revoked)
-                        //    shrinks.
                         {
-                            let newly_expired = {
-                                let mut trst = trst_engine_expiry.lock().await;
-                                trst.flush_all_expired_by_wallet(now)
+                            let mut trst = trst_engine_expiry.lock().await;
+                            let result = if certified_expiry {
+                                crate::expiry_commit::apply_held(&store_expiry, &mut trst, now)
+                            } else {
+                                crate::expiry_commit::apply(&store_expiry, &mut trst, now)
                             };
-                            for (holder, amount) in newly_expired {
-                                if let Ok(mut acct) = store_expiry.account_store().get_account(&holder)
-                                {
-                                    // Accrue the holder's expired-TRST contribution
-                                    // reputation. This feeds the hybrid weight's
-                                    // (bounded) contribution multiplier — picked up
-                                    // by the periodic rebuild in the online-weight
-                                    // task, not patched here.
-                                    acct.expired_trst = acct.expired_trst.saturating_add(amount);
-                                    if let Err(e) = store_expiry.account_store().put_account(&acct) {
-                                        tracing::warn!(%holder, "failed to persist expired_trst: {e}");
-                                    }
-                                }
+                            if let Err(error) = result {
+                                tracing::error!(%error, "expiry transaction failed; live portfolios unchanged");
                             }
                         }
 
-                        // 2. Return expired pending TRST to senders (6.16a).
-                        //    A send whose token expired before the receiver
-                        //    claimed it auto-cancels back to the sender —
-                        //    expired (non-transferable), counting toward the
-                        //    sender's reputation, not the receiver's.
-                        match store_expiry.pending_store().get_all_pending() {
-                            Ok(all_pending) => {
-                                let mut trst = trst_engine_expiry.lock().await;
-                                let expiry_secs = trst.expiry_secs;
-                                for (destination, send_hash, info) in all_pending {
-                                    let expired = info
-                                        .provenance
-                                        .first()
-                                        .map(|p| p.effective_origin_timestamp.has_expired(expiry_secs, now))
-                                        .unwrap_or(false);
-                                    if !expired {
-                                        continue;
-                                    }
-                                    let returned = crate::ledger_bridge::create_returned_token(
-                                        &destination,
-                                        &send_hash,
-                                        &info,
-                                    );
-                                    let sender = info.source.clone();
-                                    let amount = info.amount;
-                                    trst.receive_token(returned, now);
-                                    if let Err(e) = store_expiry
-                                        .pending_store()
-                                        .delete_pending(&destination, &send_hash)
-                                    {
-                                        tracing::warn!(
-                                            %destination,
-                                            %send_hash,
-                                            "failed to delete returned pending entry: {e}"
-                                        );
-                                    } else {
-                                        tracing::info!(
-                                            %sender,
-                                            %destination,
-                                            amount,
-                                            %send_hash,
-                                            "expired pending TRST returned to sender"
-                                        );
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!("failed to scan pending entries for expiry returns: {e}");
-                            }
-                        }
-
-                        // 3. Expire challenges that ran past the governable
-                        //    review period without collecting all votes
-                        //    (challenge_duration_secs). Resolved in favor of
-                        //    the challenged wallet: the challenger forfeits
-                        //    half the stake, voters get their stakes back.
-                        {
-                            let mut orch = orch_expiry.lock().await;
-                            let expired_events =
-                                orch.cleanup_expired_challenges(now, challenge_duration_secs);
-                            drop(orch);
-                            for event in expired_events {
-                                if let burst_verification::VerificationEvent::ChallengeResolved {
-                                    ref wallet,
-                                    ref outcome,
-                                } = event
-                                {
-                                    tracing::info!(
-                                        challenged = %wallet,
-                                        challenger = %outcome.challenger,
-                                        "challenge expired without full vote — resolved in favor of the challenged wallet"
-                                    );
-                                    let mut brn = brn_engine_expiry.lock().await;
-                                    if let Some(ws) = brn.get_wallet_mut(&outcome.challenger) {
-                                        // Half returned, half burned (time-wasting penalty).
-                                        let penalty = outcome.challenger_stake / 2;
-                                        ws.total_staked =
-                                            ws.total_staked.saturating_sub(outcome.challenger_stake);
-                                        ws.total_burned = ws.total_burned.saturating_add(penalty);
-                                    }
-                                    // Voters on the expired challenge get their
-                                    // stakes back (no rewards — no dissenters).
-                                    crate::ledger_bridge::resolve_verifier_outcomes(
-                                        &mut brn,
-                                        &store_expiry.pending_store(),
-                                        &outcome.verifier_outcomes,
-                                        wallet,
-                                        now,
-                                    );
-                                }
-                            }
-                        }
+                        // Verification deadlines are installed by certified checkpoints.
 
                         // 4. Clean up expiry index entries (prevents index bloat).
                         let trst_idx = store_expiry.trst_index_store();
-                        match trst_idx.get_expired_before(cutoff) {
-                            Ok(expired) if !expired.is_empty() => {
-                                tracing::info!(
-                                    count = expired.len(),
-                                    cutoff = now_secs,
-                                    "found expired TRST tokens for index cleanup"
-                                );
-                                for tx_hash in &expired {
-                                    if let Err(e) = trst_idx.delete_expiry_index(cutoff, tx_hash) {
-                                        tracing::warn!(token = %tx_hash, "failed to clean up expiry index: {e}");
-                                    }
-                                }
+                        match trst_idx.clean_expiry_before(cutoff, 1024) {
+                            Ok(count) if count > 0 => {
+                                tracing::debug!(count, cutoff = now_secs, "cleaned expired TRST lookup rows");
                             }
-                            Ok(_) => {} // no expired tokens
+                            Ok(_) => {}
                             Err(e) => {
                                 tracing::warn!("failed to query expired TRST indices: {e}");
                             }
@@ -3131,58 +2369,9 @@ impl BurstNode {
         });
         self.task_handles.push(expiry_handle);
 
-        // ── Pruning task — periodically removes expired/revoked TRST history ──
-        let store_prune = Arc::clone(&self.store);
-        let trst_engine_prune = Arc::clone(&self.trst_engine);
-        let mut shutdown_rx_prune = self.shutdown.subscribe();
-        let pruner = LedgerPruner::new(PruningConfig {
-            enabled: true,
-            max_expired_age_secs: 30 * 24 * 3600,
-            prune_revoked: true,
-            batch_size: 1000,
-        });
-
-        let prune_handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(300));
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = shutdown_rx_prune.recv() => {
-                        tracing::info!("pruning task shutting down");
-                        break;
-                    }
-                    _ = interval.tick() => {
-                        let now = Timestamp::new(unix_now_secs());
-                        let trst_idx = store_prune.trst_index_store();
-                        let cutoff = Timestamp::new(now.as_secs().saturating_sub(pruner.config().max_expired_age_secs));
-                        let expired_hashes = trst_idx.get_expired_before(cutoff).unwrap_or_default();
-                        let revoked_hashes: Vec<burst_types::TxHash> = {
-                            let trst = trst_engine_prune.lock().await;
-                            trst.merger_graph.revoked_origins().iter().cloned().collect()
-                        };
-                        let result = pruner.prune(&expired_hashes, &revoked_hashes, now);
-                        if result.total_pruned > 0 {
-                            let pruneable = pruner.find_pruneable(&expired_hashes, &revoked_hashes, now);
-                            for hash in &pruneable {
-                                let _ = trst_idx.delete_token(hash);
-                            }
-                            tracing::info!(
-                                expired = result.expired_pruned,
-                                revoked = result.revoked_pruned,
-                                total = result.total_pruned,
-                                "pruned TRST entries"
-                            );
-                        }
-                    }
-                }
-            }
-        });
-        self.task_handles.push(prune_handle);
-
-        // ── Unchecked map cleanup — evict entries older than 4 hours ─────
+        // Expired unchecked blocks are removed on the next one-minute sweep.
         let block_processor_uc = Arc::clone(&self.block_processor);
         let mut shutdown_rx_uc = self.shutdown.subscribe();
-        const UNCHECKED_MAX_AGE_SECS: u64 = 4 * 3600;
 
         let unchecked_cleanup_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(60));
@@ -3196,7 +2385,7 @@ impl BurstNode {
                     _ = interval.tick() => {
                         let mut bp = block_processor_uc.lock().await;
                         let now = unix_now_secs();
-                        let removed = bp.cleanup_unchecked(UNCHECKED_MAX_AGE_SECS, now);
+                        let removed = bp.cleanup_unchecked(crate::unchecked::MAX_AGE_SECS, now);
                         if removed > 0 {
                             tracing::debug!(
                                 removed,
@@ -3213,10 +2402,13 @@ impl BurstNode {
         // ── Priority scheduler drain — creates elections for highest-priority blocks ──
         let priority_scheduler_drain = Arc::clone(&self.priority_scheduler);
         let active_elections_sched = Arc::clone(&self.active_elections);
+        let store_sched = Arc::clone(&self.store);
+        let rebroadcast_sched = Arc::clone(&self.local_broadcaster);
         let mut shutdown_rx_sched = self.shutdown.subscribe();
 
         let scheduler_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(100));
+            let mut scan = crate::backlog_scan::BacklogScan::default();
             loop {
                 tokio::select! {
                     biased;
@@ -3225,6 +2417,23 @@ impl BurstNode {
                         break;
                     }
                     _ = interval.tick() => {
+                        // One next-unconfirmed block per account, from a bounded
+                        // snapshot page. Elections must acquire fresh votes.
+                        match scan.next(&store_sched, 256) {
+                            Ok(pending) => {
+                                let mut scheduler = priority_scheduler_drain.lock().await;
+                                for block in pending {
+                                    match WireMessage::Block(Box::new(block.clone())).encode() {
+                                        Ok(bytes) => rebroadcast_sched.lock().await.track_pending(block.hash, bytes, unix_now_ms()),
+                                        Err(error) => tracing::error!(hash = %block.hash, %error, "cannot encode pending block for recovery"),
+                                    }
+                                    if active_elections_sched.read().await.candidate_root(&block.hash).is_none() {
+                                        scheduler.push(block.hash, block.account, block.trst_balance.min(u64::MAX as u128) as u64);
+                                    }
+                                }
+                            }
+                            Err(error) => tracing::error!(%error, "cannot scan unconfirmed account backlog"),
+                        }
                         let mut sched = priority_scheduler_drain.lock().await;
                         let ae = active_elections_sched.read().await;
                         let capacity = MAX_ACTIVE_ELECTIONS.saturating_sub(ae.election_count());
@@ -3234,10 +2443,18 @@ impl BurstNode {
                         while started < capacity {
                             match sched.pop() {
                                 Some((hash, _account)) => {
+                                    let block = store_sched.block_store().get_block(&hash).ok()
+                                        .and_then(|bytes| bincode::deserialize::<StateBlock>(&bytes).ok());
+                                    let Some(block) = block.filter(|block| block.hash == hash && block.compute_hash() == hash) else {
+                                        tracing::warn!(%hash, "scheduler candidate missing or corrupt");
+                                        continue;
+                                    };
                                     let now = Timestamp::new(unix_now_secs());
                                     let mut ae = active_elections_sched.write().await;
-                                    if ae.start_election(hash, now).is_ok() {
-                                        started += 1;
+                                    match crate::backlog_scan::register_candidate(&store_sched, &mut ae, &block, now) {
+                                        Ok(true) => started += 1,
+                                        Ok(false) => {},
+                                        Err(error) => tracing::warn!(%hash, %error, "scheduler candidate deferred"),
                                     }
                                 }
                                 None => break,
@@ -3271,11 +2488,12 @@ impl BurstNode {
                     }
                     _ = interval.tick() => {
                         let now_secs = unix_now_secs();
-                        // Refresh the hybrid rep-weight cache from the ledger so
-                        // newly-verified humans, delegation changes, and freshly
-                        // expired TRST are reflected in consensus weight. Cheap at
-                        // launch scale; the genesis bootstrap bonus is preserved.
-                        rebuild_rep_weights(&store_ow, &rep_weights_bg).await;
+                        // Refresh equal-person weights for verification and
+                        // delegation changes. TRST expiry cannot change weight.
+                        if let Err(error) = rebuild_rep_weights(&store_ow, &rep_weights_bg, &active_elections_ow).await {
+                            tracing::error!(%error, "cannot refresh confirmed voting authority");
+                            continue;
+                        }
                         let rw = rep_weights_bg.read().await;
                         let weight_map = rw.all_weights();
                         drop(rw);
@@ -3292,12 +2510,7 @@ impl BurstNode {
                         let effective = sampler.effective_weight(now_secs, &weight_map);
                         drop(sampler);
 
-                        // Update elections with effective weight (max of current, trended, floor)
-                        // to prevent quorum collapse on temporary online weight dips.
-                        {
-                            let mut ae = active_elections_ow.write().await;
-                            ae.set_online_weight(effective);
-                        }
+                        // Attendance is telemetry, never authority to lower quorum.
 
                         tracing::trace!(
                             total_online,
@@ -3321,6 +2534,206 @@ impl BurstNode {
         Ok(())
     }
 
+    async fn start_recovery_listener(
+        &mut self,
+        bootstrap_feedback_tx: &mpsc::Sender<crate::bootstrap::BootstrapFeedback>,
+    ) -> Result<(), NodeError> {
+        let p2p_port = self.config.port;
+        let peer_manager = Arc::clone(&self.peer_manager);
+        let mut shutdown_rx_p2p = self.shutdown.subscribe();
+        let metrics_p2p = Arc::clone(&self.metrics);
+        let conn_registry_p2p = Arc::clone(&self.connection_registry);
+        let block_queue_p2p = Arc::clone(&self.block_queue);
+        let active_elections_p2p = Arc::clone(&self.active_elections);
+        let rep_weights_p2p = Arc::clone(&self.rep_weights);
+        let vote_generator_p2p = Arc::clone(&self.vote_generator);
+        let syn_cookies_p2p = Arc::clone(&self.syn_cookies);
+        let message_dedup_p2p = Arc::clone(&self.message_dedup);
+        let online_weight_sampler_p2p = Arc::clone(&self.online_weight_sampler);
+        let store_p2p = Arc::clone(&self.store);
+        let node_address_p2p = self.node_address.clone();
+        let node_private_key_p2p = Arc::new(burst_types::PrivateKey(self.node_private_key.0));
+        let config_params_p2p = self.config.params.clone();
+        let network_p2p = self.config.network;
+        let peering_port_p2p = self.config.port;
+        let bootstrap_feedback_p2p = bootstrap_feedback_tx.clone();
+
+        let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{p2p_port}"))
+            .await
+            .map_err(|error| NodeError::Other(format!("cannot bind P2P listener: {error}")))?;
+        tracing::info!(port = p2p_port, "P2P recovery listener started");
+        let p2p_handle = tokio::spawn(async move {
+            let params_hash_p2p = config_params_p2p.params_hash();
+            let mut handshakes = tokio::task::JoinSet::new();
+
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = shutdown_rx_p2p.recv() => {
+                        tracing::info!("P2P listener shutting down");
+                        break;
+                    }
+                    Some(result) = handshakes.join_next(), if !handshakes.is_empty() => {
+                        if let Err(error) = result { tracing::debug!(%error, "inbound handshake task ended"); }
+                    }
+                    result = listener.accept() => {
+                        match result {
+                            Ok((stream, addr)) => {
+                                if let Err(error) = burst_network::connection::configure_peer_stream(&stream) {
+                                    tracing::debug!(%addr, %error, "inbound TCP setup failed");
+                                    continue;
+                                }
+                                // Handle each inbound connection in its own task so a
+                                // slow or malicious handshake never head-of-line-blocks
+                                // the accept loop (matches rsnano's per-connection model).
+                                let syn_cookies_c = Arc::clone(&syn_cookies_p2p);
+                                let conn_registry_c = Arc::clone(&conn_registry_p2p);
+                                let peer_manager_c = Arc::clone(&peer_manager);
+                                let metrics_c = Arc::clone(&metrics_p2p);
+                                let block_queue_c = Arc::clone(&block_queue_p2p);
+                                let active_elections_c = Arc::clone(&active_elections_p2p);
+                                let rep_weights_c = Arc::clone(&rep_weights_p2p);
+                                let vote_generator_c = Arc::clone(&vote_generator_p2p);
+                                let message_dedup_c = Arc::clone(&message_dedup_p2p);
+                                let online_weight_sampler_c = Arc::clone(&online_weight_sampler_p2p);
+                                let store_c = Arc::clone(&store_p2p);
+                                let our_node_id = node_address_p2p.clone();
+                                let node_private_key_c = Arc::clone(&node_private_key_p2p);
+                                let params_hash_c = params_hash_p2p;
+                                let network_c = network_p2p;
+                                let peering_port_c = peering_port_p2p;
+                                let bootstrap_feedback_c = bootstrap_feedback_p2p.clone();
+
+                                handshakes.spawn(async move {
+                                    let now_secs = unix_now_secs();
+                                    let peer_ip = addr.ip().to_string();
+                                    let peer_addr = PeerAddress { ip: peer_ip.clone(), port: addr.port() };
+                                    let peer_id = format!("{}:{}", addr.ip(), addr.port());
+
+                                    let cookie_id = addr.to_string();
+                                    let Some(cookie) = syn_cookies_c.lock().await.generate_for_connection(&peer_ip, &cookie_id) else {
+                                        tracing::debug!(peer = %peer_id, "handshake challenge unavailable");
+                                        return;
+                                    };
+                                    let (mut read_half, mut write_half) = stream.into_split();
+                                    let challenge = crate::wire_message::HandshakeMsg {
+                                        node_id: our_node_id.clone(),
+                                        cookie: Some(cookie),
+                                        cookie_signature: None,
+                                        params_hash: params_hash_c,
+                                        network_id: network_c,
+                                        peering_port: peering_port_c,
+                                        block_version: CURRENT_BLOCK_VERSION,
+                                        wire_version: burst_types::PROTOCOL_VERSION,
+                                    };
+                                    let exchange = async {
+                                        use crate::peer_handshake::{self, Role};
+                                        peer_handshake::write(&mut write_half, &challenge).await?;
+                                        let remote = peer_handshake::read(&mut read_half).await?;
+                                        let expected = syn_cookies_c.lock().await.take_cookie(&cookie_id)
+                                            .ok_or("expired listener challenge")?;
+                                        if challenge.cookie != Some(expected) { return Err("listener challenge changed".to_string()); }
+                                        peer_handshake::validate(&remote, &challenge)?;
+                                        peer_handshake::verify(Role::Dialer, &challenge, &remote,
+                                            remote.cookie_signature.as_ref().ok_or("missing dialer proof")?)?;
+                                        let mut proof = challenge.clone();
+                                        proof.cookie = None;
+                                        proof.cookie_signature = Some(peer_handshake::sign(Role::Listener, &challenge, &remote, &node_private_key_c)?);
+                                        peer_handshake::write(&mut write_half, &proof).await?;
+                                        Ok::<_, String>(remote)
+                                    };
+                                    let remote = match tokio::time::timeout(Duration::from_secs(15), exchange).await {
+                                        Ok(Ok(remote)) => remote,
+                                        result => {
+                                            tracing::debug!(peer = %peer_id, error = ?result, "mutual handshake failed");
+                                            return;
+                                        }
+                                    };
+                                    let remote_node_id = remote.node_id;
+                                    let remote_peering_port = remote.peering_port;
+
+                                    // The listening port is not a NAT mapping. Route by the
+                                    // authenticated identity, never public-IP:local-port.
+                                    // Retain the observed socket only as transport metadata.
+                                    let _ = remote_peering_port;
+                                    let peer_id = remote_node_id.as_str().to_string();
+
+                                    // Never accept a connection claiming our own node_id.
+                                    if remote_node_id == our_node_id {
+                                        tracing::debug!(peer = %peer_id, "dropping inbound self-connection");
+                                        return;
+                                    }
+
+                                    let our_nid = our_node_id.as_str().to_string();
+                                    let peer_nid = remote_node_id.as_str().to_string();
+
+                                    // Deterministic node_id dedup: if we already dialed this
+                                    // peer, keep exactly one (the connection from the lower
+                                    // node_id). `None` → this inbound lost; drop it.
+                                    let conn_id = {
+                                        let mut pm = peer_manager_c.write().await;
+                                        let mut registry = conn_registry_c.write().await;
+                                        match registry.register_dedup(
+                                            peer_nid,
+                                            crate::connection_registry::Direction::Inbound,
+                                            write_half,
+                                            &our_nid,
+                                        ) {
+                                            Some(id) => {
+                                                if !pm.register_connection(peer_id.clone(), peer_addr, false, now_secs) {
+                                                    registry.remove_if(&peer_id, id);
+                                                    metrics_c.peer_count.set(registry.len() as i64);
+                                                    return;
+                                                }
+                                                metrics_c.peer_count.set(registry.len() as i64);
+                                                id
+                                            }
+                                            None => {
+                                                tracing::debug!(peer = %peer_id, "inbound superseded by our outbound (tie-break)");
+                                                return;
+                                            }
+                                        }
+                                    };
+
+                                    // Only authenticated peers reach message dispatch.
+                                    let reader_registry = conn_registry_c.clone();
+                                    let mut registry = reader_registry.write().await;
+                                    let reader_task = spawn_peer_read_loop(
+                                        peer_id.clone(),
+                                        conn_id,
+                                        read_half,
+                                        block_queue_c,
+                                        conn_registry_c,
+                                        peer_manager_c,
+                                        metrics_c,
+                                        active_elections_c,
+                                        rep_weights_c,
+                                        message_dedup_c,
+                                        online_weight_sampler_c,
+                                        store_c,
+                                        params_hash_c,
+                                        bootstrap_feedback_c,
+                                        vote_generator_c,
+                                    );
+                                    registry.track_task(reader_task);
+
+                                    tracing::info!(peer = %peer_id, "inbound peer connected");
+                                });
+                            }
+                            Err(e) => {
+                                tracing::warn!("P2P accept error: {e}");
+                            }
+                        }
+                    }
+                }
+            }
+            handshakes.shutdown().await;
+        });
+        self.task_handles.push(p2p_handle);
+
+        Ok(())
+    }
+
     /// Start the node — begin listening for connections and processing blocks.
     ///
     /// This method:
@@ -3331,6 +2744,25 @@ impl BurstNode {
     /// 5. Optionally starts the WebSocket server
     /// 6. Waits for the shutdown signal
     pub async fn start(&mut self) -> Result<(), NodeError> {
+        if self.outbound_rx.is_none() {
+            return Err(NodeError::Other("node has already been started".into()));
+        }
+        let result = self.start_inner().await;
+        if result.is_err() {
+            self.outbound_rx.take();
+            if let Err(error) = self.stop().await {
+                tracing::error!(%error, "cleanup after failed startup");
+            }
+        }
+        result
+    }
+
+    async fn start_inner(&mut self) -> Result<(), NodeError> {
+        if self.config.snapshot_bootstrap.is_some() && !self.certified_selection_enabled() {
+            return Err(NodeError::Config(
+                "snapshot bootstrap is behind the release gate".into(),
+            ));
+        }
         tracing::info!(
             network = ?self.config.network,
             port = self.config.port,
@@ -3346,211 +2778,226 @@ impl BurstNode {
 
         // Initialize genesis if needed
         self.initialize_genesis()?;
-
-        // Auto-verify the genesis creator so it can endorse during bootstrap
+        #[cfg(test)]
         {
-            use burst_store::account::AccountInfo;
-            let genesis_addr = genesis_key::genesis_address(self.config.network);
-            let acct_store = self.store.account_store();
-            let existing = acct_store.get_account(&genesis_addr).ok();
+            self.connection_registry.write().await.recovery_probe =
+                self.checkpoint_publication_probe;
+        }
+        self.start_recovery_listener(&bootstrap_feedback_tx).await?;
+        if crate::governance_content::enabled(self.config.network) {
+            let (content_tx, content_rx) =
+                mpsc::channel(crate::governance_content::transfer::INBOX_CAPACITY);
+            let recovery = Arc::new(crate::governance_content::transfer::Transfers::default());
+            {
+                let mut registry = self.connection_registry.write().await;
+                registry.set_governance_inbox(content_tx);
+                registry.set_recovery_content(recovery.clone());
+            }
+            self.task_handles
+                .push(tokio::spawn(crate::governance_content::transfer::run(
+                    self.governance_transfers.clone(),
+                    recovery,
+                    self.store.clone(),
+                    self.block_queue.clone(),
+                    self.connection_registry.clone(),
+                    content_rx,
+                    self.shutdown.clone(),
+                )));
+        }
+        crate::checkpoint_sync::witness::start(
+            self.store.clone(),
+            self.connection_registry.clone(),
+            self.shutdown.clone(),
+        )
+        .await;
+        self.start_recovery_peers(&bootstrap_feedback_tx).await;
+        self.install_bootstrap_snapshot().await?;
+        let compact = if self.certified_selection_enabled() {
+            crate::confirmed_replay::snapshot::installed::recover_metadata_from_peers(
+                self.store.clone(),
+                self.config.network,
+                self.initial_params.clone(),
+                self.connection_registry.clone(),
+            )
+            .await?
+        } else {
+            None
+        };
+        if let Some(recovered) = compact {
+            let clock = self.clock_sync.lock().await.now();
+            #[cfg(test)]
+            let clock = self
+                .verification_fixture_clock
+                .as_ref()
+                .and_then(|clock| clock())
+                .map(|reading| Timestamp::new(reading.now))
+                .unwrap_or(clock);
+            self.publish_recovered(recovered, clock).await?;
+        } else {
+            if self.certified_selection_enabled() {
+                let store = self.store.clone();
+                let network = self.config.network;
+                let params = self.initial_params.clone();
+                let authority = tokio::task::spawn_blocking(move || {
+                    crate::payment_authority::initialize(&store, network, &params)
+                })
+                .await
+                .map_err(|error| {
+                    NodeError::Other(format!("authority recovery worker failed: {error}"))
+                })??;
+                let mut processor = self.block_processor.lock().await;
+                processor.install_payment_epoch(authority.epoch, authority.cutoff);
+                processor.install_params(&self.config.params);
+                drop(processor);
+            }
 
-            // The genesis block IS the account's first block, so the account
-            // record's head must point to it (block_count=1). Reading it back
-            // from the frontier `initialize_genesis` just wrote keeps head and
-            // block_count consistent — otherwise head==ZERO makes the account
-            // look empty, and the first genesis transaction (endorse/burn) gets
-            // built as an Open block that spends BRN, which every other node
-            // correctly rejects (breaking genesis-chain bootstrap).
-            let genesis_head = self
-                .store
-                .frontier_store()
-                .get_frontier(&genesis_addr)
-                .unwrap_or(BlockHash::ZERO);
-
-            // Write the record when genesis is unverified OR when a stale record
-            // still has head==ZERO (the pre-fix bug) while a genesis block
-            // exists — repair it in place, preserving any real chain counters.
-            let needs_write = match &existing {
-                None => true,
-                Some(a) => {
-                    a.state != burst_types::WalletState::Verified
-                        || (a.head.is_zero() && !genesis_head.is_zero())
-                }
-            };
-            if needs_write {
-                let base = existing.unwrap_or(AccountInfo {
-                    address: genesis_addr.clone(),
-                    state: burst_types::WalletState::Verified,
-                    verified_at: Some(Timestamp::new(0)),
-                    head: genesis_head,
-                    block_count: 1,
-                    confirmation_height: 0,
-                    representative: genesis_addr.clone(),
-                    total_brn_burned: 0,
-                    total_brn_staked: 0,
-                    trst_balance: 0,
-                    expired_trst: 0,
-                    revoked_trst: 0,
-                    epoch: 0,
-                    verifier_opted_in_at: None,
-                    orv_evicted: false,
-                });
-                let is_new = base.head.is_zero();
-                let info = AccountInfo {
-                    state: burst_types::WalletState::Verified,
-                    verified_at: base.verified_at.or(Some(Timestamp::new(0))),
-                    head: if base.head.is_zero() {
-                        genesis_head
-                    } else {
-                        base.head
-                    },
-                    block_count: base.block_count.max(1),
-                    ..base
+            // Initialize the creator once; restart must preserve later adjudications.
+            {
+                let genesis_addr = genesis_key::genesis_address(self.config.network);
+                let acct_store = self.store.account_store();
+                let existing = match acct_store.get_account(&genesis_addr) {
+                    Ok(account) => Some(account),
+                    Err(burst_store::StoreError::NotFound(_)) => None,
+                    Err(error) => {
+                        return Err(NodeError::Other(format!(
+                            "cannot read genesis account: {error}"
+                        )))
+                    }
                 };
-                if let Err(e) = acct_store.put_account(&info) {
-                    tracing::error!("failed to auto-verify genesis creator: {e}");
-                } else {
+
+                // The genesis block IS the account's first block, so the account
+                // record's head must point to it (block_count=1). Reading it back
+                // from the frontier `initialize_genesis` just wrote keeps head and
+                // block_count consistent — otherwise head==ZERO makes the account
+                // look empty, and the first genesis transaction (endorse/burn) gets
+                // built as an Open block that spends BRN, which every other node
+                // correctly rejects (breaking genesis-chain bootstrap).
+                let genesis_head = self
+                    .store
+                    .frontier_store()
+                    .get_frontier(&genesis_addr)
+                    .map_err(|error| {
+                        NodeError::Other(format!("cannot read genesis frontier: {error}"))
+                    })?;
+
+                let is_new = existing.is_none();
+                if let Some(info) = crate::genesis_state::account_to_write(
+                    existing,
+                    genesis_addr.clone(),
+                    genesis_head,
+                ) {
+                    acct_store.put_account(&info).map_err(|error| {
+                        NodeError::Other(format!("cannot initialize genesis account: {error}"))
+                    })?;
                     if is_new {
                         self.ledger_cache.inc_account_count();
                     }
-                    tracing::info!(%genesis_addr, head = %info.head, "genesis creator auto-verified for bootstrap");
+                    tracing::info!(%genesis_addr, head = %info.head, "genesis account initialized or frontier repaired");
+                }
+
+                // Track the genesis account in the BRN engine (accruing from epoch
+                // 0, matching its verified_at) so it has BRN to burn when authoring
+                // bootstrap endorsements — otherwise the endorse burn and the
+                // computed-BRN spend check would reject it.
+                {
+                    let mut brn = self.brn_engine.lock().await;
+                    if brn.get_wallet(&genesis_addr).is_none() {
+                        let account = acct_store.get_account(&genesis_addr).map_err(|error| {
+                            NodeError::Other(format!("cannot read genesis account: {error}"))
+                        })?;
+                        if account.state.accrues_brn() {
+                            if account.block_count != 1
+                                || account.total_brn_burned != 0
+                                || account.total_brn_staked != 0
+                            {
+                                return Err(NodeError::Other("missing BRN history for existing genesis account; refusing to reset earned/spent state".into()));
+                            }
+                            let verified_at = account.verified_at.ok_or_else(|| {
+                                NodeError::Other(
+                                    "verified genesis has no verification timestamp".into(),
+                                )
+                            })?;
+                            let wallet = burst_brn::BrnWalletState::new(verified_at);
+                            let bytes = bincode::serialize(&wallet)
+                                .map_err(|error| NodeError::Other(error.to_string()))?;
+                            let mut batch = self.store.tx_begin_write()?;
+                            batch.put_brn_wallet(&genesis_addr, &bytes)?;
+                            batch.commit()?;
+                            brn.track_wallet(genesis_addr.clone(), wallet);
+                        }
+                    }
                 }
             }
 
-            // Track the genesis account in the BRN engine (accruing from epoch
-            // 0, matching its verified_at) so it has BRN to burn when authoring
-            // bootstrap endorsements — otherwise the endorse burn and the
-            // computed-BRN spend check would reject it.
+            // Re-load frontier after genesis init (in case we just created it)
             {
-                let mut brn = self.brn_engine.lock().await;
-                if brn.get_wallet(&genesis_addr).is_none() {
-                    brn.track_wallet(
-                        genesis_addr.clone(),
-                        burst_brn::BrnWalletState::new(Timestamp::new(0)),
-                    );
-                }
+                let new_frontier = Self::load_frontier_from_store(&self.store)?;
+                let mut f = self.frontier.write().await;
+                *f = new_frontier;
             }
-        }
 
-        // Re-load frontier after genesis init (in case we just created it)
-        {
-            let new_frontier = Self::load_frontier_from_store(&self.store)?;
-            let mut f = self.frontier.write().await;
-            *f = new_frontier;
-        }
+            // Use the same complete persisted state as ordinary admission.
+            let restored = {
+                let batch = self.store.tx_begin_write()?;
+                crate::governance_commit::CandidateGovernance::restore(
+                    &batch,
+                    self.config.params.clone(),
+                    self.config.network,
+                    crate::genesis_state::block(self.config.network, &self.initial_params).hash,
+                )
+                .map_err(|error| {
+                    NodeError::Other(format!(
+                        "{error}; restore a known-good backup or re-sync into a new data directory"
+                    ))
+                })?
+            };
+            *self.governance.lock().await = restored.governance;
+            *self.delegation_engine.lock().await = restored.delegation;
+            *self.consti_engine.lock().await = restored.constitution;
 
-        // Restore the merger graph from LMDB if a previous snapshot exists.
-        {
-            let meta = self.store.meta_store();
-            match meta.get_meta(MERGER_GRAPH_META_KEY) {
-                Ok(bytes) => match burst_trst::MergerGraph::from_bytes(&bytes) {
-                    Ok(graph) => {
-                        let mut trst = self.trst_engine.lock().await;
-                        trst.merger_graph = graph;
-                        tracing::info!("restored merger graph from LMDB");
-                    }
-                    Err(e) => {
-                        tracing::warn!("failed to deserialize merger graph, starting fresh: {e}");
-                    }
-                },
-                Err(_) => {
-                    tracing::info!("no persisted merger graph found — starting fresh");
-                }
+            // Genesis persists both TRST snapshots atomically. A missing snapshot
+            // on an initialized ledger is not authority to reset economic history.
+            {
+                let graph = {
+                    let batch = self.store.tx_begin_write()?;
+                    crate::graph_storage::load(&batch).map_err(|error| {
+                        NodeError::Other(format!("cannot restore persisted merger graph: {error}"))
+                    })?
+                };
+                self.trst_engine.lock().await.merger_graph = graph;
+                tracing::info!("restored merger graph from LMDB");
             }
-        }
 
-        // Restore TRST engine per-wallet token portfolios from LMDB.
-        // Runs after the merger graph restore: rebuild_indexes needs the graph
-        // to classify merged origins (wallet_origins must only hold burn txs).
-        {
-            let meta = self.store.meta_store();
-            match meta.get_meta(TrstEngine::meta_key()) {
-                Ok(bytes) => {
-                    let mut trst = self.trst_engine.lock().await;
-                    let restored =
-                        TrstEngine::load_wallets(&bytes, self.config.params.trst_expiry_secs);
-                    trst.wallets = restored.wallets;
-                    trst.rebuild_indexes();
-                    tracing::info!("TRST engine wallet portfolios restored from LMDB");
-                }
-                Err(_) => {
-                    tracing::info!("no persisted TRST wallet portfolios — starting fresh");
-                }
+            // Restore the complete snapshot, including private outcome causes.
+            // Copying only portfolios and ownership loses independent revocations.
+            {
+                let mut trst = self.trst_engine.lock().await;
+                let batch = self.store.tx_begin_write()?;
+                let mut restored = crate::trst_storage::load(&batch, self.config.params.trst_expiry_secs)
+                    .map_err(|e| NodeError::Other(format!(
+                        "cannot restore persisted TRST holdings: {e}; restore a known-good backup or re-sync into a new data directory"
+                    )))?;
+                restored.merger_graph = trst.merger_graph.clone();
+                restored.validate_bases().map_err(|e| NodeError::Other(format!(
+                        "inconsistent persisted TRST snapshots: {e}; restore a known-good backup or re-sync into a new data directory"
+                    )))?;
+                *trst = restored;
+                tracing::info!("TRST engine wallet portfolios restored from LMDB");
             }
-        }
 
-        // Restore delegation engine state from LMDB.
-        {
-            let meta = self.store.meta_store();
-            match meta.get_meta(DelegationEngine::meta_key()) {
-                Ok(bytes) => {
-                    let restored = DelegationEngine::load_state(&bytes);
-                    let mut de = self.delegation_engine.lock().await;
-                    *de = restored;
-                    tracing::info!("delegation engine state restored from LMDB");
-                }
-                Err(_) => {
-                    tracing::info!("no persisted delegation engine state — starting fresh");
-                }
+            {
+                let mut live = self.verification_orchestrator.lock().await;
+                let batch = self.store.tx_begin_write()?;
+                *live = crate::endorsement_commit::restore(&batch).map_err(NodeError::Other)?;
             }
-        }
 
-        // Restore verification orchestrator state from LMDB.
-        {
-            let meta = self.store.meta_store();
-            match meta.get_meta(VERIFICATION_ORCHESTRATOR_META_KEY) {
-                Ok(bytes) => {
-                    match bincode::deserialize::<burst_verification::OrchestratorSnapshot>(&bytes) {
-                        Ok(snapshot) => {
-                            let restored =
-                                burst_verification::VerificationOrchestrator::restore(snapshot);
-                            let mut vo = self.verification_orchestrator.lock().await;
-                            *vo = restored;
-                            tracing::info!("verification orchestrator state restored from LMDB");
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "failed to deserialize orchestrator snapshot, starting fresh: {e}"
-                            );
-                        }
-                    }
-                }
-                Err(_) => {
-                    tracing::info!("no persisted verification orchestrator state — starting fresh");
-                }
-            }
-        }
-
-        // Rebuild representative weights from the confirmed account set on every
-        // startup (and periodically thereafter — see the online-weight task).
-        // Weight is the HYBRID: one vote per VERIFIED human delegating to a rep,
-        // amplified by that rep's expired-TRST contribution up to a cap (see
-        // RepWeightCache docs). It is a pure function of account state, so we
-        // rebuild it rather than persist a snapshot: a snapshot would need
-        // migration off the old numbers and, worse, used to be persisted *with*
-        // the genesis bootstrap baked in, so reloading it and re-seeding the
-        // bootstrap double-counted genesis per restart — diverging nodes by
-        // restart count. Rebuild + seed-bootstrap-once is deterministic.
-        rebuild_rep_weights(&self.store, &self.rep_weights).await;
-
-        // Give the GENESIS representative a bootstrap voting-weight bridge — a
-        // raw additive weight (NOT spendable TRST, so "no premine" holds), the
-        // analog of Nano's genesis premine. At launch few humans run voting
-        // nodes, so without this the one online genesis node couldn't clear the
-        // adaptive online-weight floor. Seeded for the WELL-KNOWN genesis account
-        // on EVERY node (deterministic), so all nodes agree on genesis's weight
-        // and its votes aggregate. `set_bonus` is preserved across the periodic
-        // rebuilds. As real verified humans delegate to online reps, this fixed
-        // bridge becomes a shrinking fraction and consensus decentralises.
-        {
-            let genesis_rep = genesis_key::genesis_address(self.config.network);
-            let mut rw = self.rep_weights.write().await;
-            rw.set_bonus(&genesis_rep, GENESIS_BOOTSTRAP_WEIGHT);
-            tracing::info!(
-                representative = %genesis_rep,
-                weight = GENESIS_BOOTSTRAP_WEIGHT,
-                "seeded genesis bootstrap voting weight (consistent across nodes)"
-            );
+            // Derive equal-person weights from ledger accounts, never a historical
+            // hybrid/bonus snapshot. No special genesis voting weight is injected.
+            rebuild_rep_weights(&self.store, &self.rep_weights, &self.active_elections)
+                .await
+                .map_err(|e| {
+                    NodeError::Other(format!("cannot restore confirmed voting authority: {e}"))
+                })?;
         }
 
         // Perform initial NTP clock synchronization
@@ -3561,6 +3008,127 @@ impl BurstNode {
             } else {
                 tracing::info!(offset_ms = cs.offset_ms, "initial NTP clock sync complete");
             }
+        }
+
+        // No expiry, governance, block-processing or cementation worker may
+        // observe the empty engines constructed by new() before this point.
+        // Record a fresh chain's economic baseline before its first reversible
+        // block. Never reconstruct missing history on an existing chain.
+        {
+            let brn = self.brn_engine.lock().await;
+            let trst = self.trst_engine.lock().await;
+            let mut batch = self
+                .store
+                .tx_begin_write()
+                .map_err(|e| NodeError::Other(e.to_string()))?;
+            let missing = batch
+                .undo_value(
+                    burst_store_lmdb::block_undo::UndoTable::BrnMeta,
+                    b"rate_history",
+                )
+                .map_err(|e| NodeError::Other(e.to_string()))?
+                .is_none()
+                || !crate::trst_storage::present(&batch)
+                    .map_err(|e| NodeError::Other(e.to_string()))?
+                || !crate::graph_storage::present(&batch)
+                    .map_err(|e| NodeError::Other(e.to_string()))?;
+            if missing {
+                if batch
+                    .ledger_counts()
+                    .map_err(|e| NodeError::Other(e.to_string()))?
+                    .0
+                    != 1
+                {
+                    return Err(NodeError::Other(
+                        "missing economic snapshot for existing history".into(),
+                    ));
+                }
+                crate::ledger_updater::persist_economics(&mut batch, &brn, &trst)
+                    .map_err(NodeError::Other)?;
+                batch
+                    .commit()
+                    .map_err(|e| NodeError::Other(e.to_string()))?;
+            }
+        }
+        // Recovery above has rebuilt missing provisional journals. Change only
+        // their storage representation before workers can admit new blocks.
+        let migration_store = self.store.clone();
+        let migration_expiry = self.config.params.trst_expiry_secs;
+        tokio::task::spawn_blocking(move || {
+            crate::trst_storage::migrate(&migration_store, migration_expiry)?;
+            crate::graph_storage::migrate(&migration_store)
+        })
+        .await
+        .map_err(|error| NodeError::Other(format!("TRST migration worker failed: {error}")))??;
+
+        // Cached candidates must pass normal fork admission again. Restoring
+        // their bytes does not restore a quorum or authorize installation.
+        crate::fork_resolution::prune_finalized(&self.store)
+            .map_err(|e| NodeError::Other(format!("cannot prune finalized fork payloads: {e}")))?;
+        for (hash, bytes) in self
+            .store
+            .meta_store()
+            .fork_candidates()
+            .map_err(|e| NodeError::Other(e.to_string()))?
+        {
+            if self
+                .store
+                .block_store()
+                .exists(&hash)
+                .map_err(|e| NodeError::Other(e.to_string()))?
+            {
+                continue;
+            }
+            let block: StateBlock =
+                bincode::deserialize(&bytes).map_err(|e| NodeError::Other(e.to_string()))?;
+            if block.hash != hash || block.compute_hash() != hash {
+                return Err(NodeError::Other("cached fork identity mismatch".into()));
+            }
+            if !self.block_queue.push(block).await {
+                return Err(NodeError::Other(
+                    "block queue full during fork recovery".into(),
+                ));
+            }
+        }
+        if let Some(error) = self.shutdown.failure() {
+            return Err(NodeError::Other(error));
+        }
+        let outbound_rx = self
+            .outbound_rx
+            .take()
+            .ok_or_else(|| NodeError::Other("node has already been started".into()))?;
+        let (sync_recovery, beacon_recovery, agreement_recovery) = if let Some(recovery) = self.recovered_checkpoint.take() {
+            let directory = self.store.env().path().to_path_buf();
+            let (recovery, sync, beacon, agreement) = tokio::task::spawn_blocking(move || {
+                let sync = recovery.fork(&directory)?;
+                let beacon = recovery.fork(&directory)?;
+                let agreement = recovery.fork(&directory)?;
+                Ok::<_, burst_store::StoreError>((recovery, sync, beacon, agreement))
+            })
+            .await
+            .map_err(|error| NodeError::Other(error.to_string()))??;
+            self.recovered_checkpoint = Some(recovery);
+            (Some(sync), Some(beacon), Some(agreement))
+        } else {
+            (None, None, None)
+        };
+        self.connection_registry.write().await.finish_recovery();
+        self.spawn_initial_tasks(outbound_rx).await?;
+
+        if let Some(service) = self.nts_service.take() {
+            let mut stop = self.shutdown.subscribe();
+            self.task_handles.push(tokio::spawn(async move {
+                let (cancel, receiver) = tokio::sync::watch::channel(false);
+                let worker = service.run(receiver);
+                tokio::pin!(worker);
+                tokio::select! {
+                    _ = &mut worker => {}
+                    _ = stop.recv() => {
+                        let _ = cancel.send(true);
+                        worker.await;
+                    }
+                }
+            }));
         }
 
         // Periodic NTP re-sync (every 5 minutes)
@@ -3612,241 +3180,9 @@ impl BurstNode {
             );
         }
 
-        // ── P2P TCP listener ──────────────────────────────────────────────
-        let p2p_port = self.config.port;
-        let peer_manager = Arc::clone(&self.peer_manager);
-        let mut shutdown_rx_p2p = self.shutdown.subscribe();
-        let metrics_p2p = Arc::clone(&self.metrics);
-        let conn_registry_p2p = Arc::clone(&self.connection_registry);
-        let block_queue_p2p = Arc::clone(&self.block_queue);
-        let active_elections_p2p = Arc::clone(&self.active_elections);
-        let rep_weights_p2p = Arc::clone(&self.rep_weights);
-        let syn_cookies_p2p = Arc::clone(&self.syn_cookies);
-        let message_dedup_p2p = Arc::clone(&self.message_dedup);
-        let online_weight_sampler_p2p = Arc::clone(&self.online_weight_sampler);
-        let store_p2p = Arc::clone(&self.store);
-        let node_address_p2p = self.node_address.clone();
-        let config_params_p2p = self.config.params.clone();
-        let network_p2p = self.config.network;
-        let peering_port_p2p = self.config.port;
-        let bootstrap_feedback_p2p = bootstrap_feedback_tx.clone();
-
-        let p2p_handle = tokio::spawn(async move {
-            let listener = match tokio::net::TcpListener::bind(format!("0.0.0.0:{p2p_port}")).await
-            {
-                Ok(l) => {
-                    tracing::info!(port = p2p_port, "P2P listener started");
-                    l
-                }
-                Err(e) => {
-                    tracing::error!("failed to bind P2P listener on port {p2p_port}: {e}");
-                    return;
-                }
-            };
-
-            let params_hash_p2p = config_params_p2p.params_hash();
-
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = shutdown_rx_p2p.recv() => {
-                        tracing::info!("P2P listener shutting down");
-                        break;
-                    }
-                    result = listener.accept() => {
-                        match result {
-                            Ok((stream, addr)) => {
-                                // Handle each inbound connection in its own task so a
-                                // slow or malicious handshake never head-of-line-blocks
-                                // the accept loop (matches rsnano's per-connection model).
-                                let syn_cookies_c = Arc::clone(&syn_cookies_p2p);
-                                let conn_registry_c = Arc::clone(&conn_registry_p2p);
-                                let peer_manager_c = Arc::clone(&peer_manager);
-                                let metrics_c = Arc::clone(&metrics_p2p);
-                                let block_queue_c = Arc::clone(&block_queue_p2p);
-                                let active_elections_c = Arc::clone(&active_elections_p2p);
-                                let rep_weights_c = Arc::clone(&rep_weights_p2p);
-                                let message_dedup_c = Arc::clone(&message_dedup_p2p);
-                                let online_weight_sampler_c = Arc::clone(&online_weight_sampler_p2p);
-                                let store_c = Arc::clone(&store_p2p);
-                                let our_node_id = node_address_p2p.clone();
-                                let params_hash_c = params_hash_p2p;
-                                let network_c = network_p2p;
-                                let peering_port_c = peering_port_p2p;
-                                let bootstrap_feedback_c = bootstrap_feedback_p2p.clone();
-
-                                tokio::spawn(async move {
-                                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                                    let now_secs = unix_now_secs();
-                                    let peer_ip = addr.ip().to_string();
-                                    let peer_addr = PeerAddress { ip: peer_ip.clone(), port: addr.port() };
-                                    let peer_id = format!("{}:{}", addr.ip(), addr.port());
-
-                                    // Generate + send the SYN cookie challenge.
-                                    // Bind in a separate `let` so the mutex guard drops
-                                    // before the match (a match scrutinee's temporaries
-                                    // otherwise live until the whole match ends).
-                                    let cookie_opt = syn_cookies_c.lock().await.generate(&peer_ip);
-                                    let cookie = match cookie_opt {
-                                        Some(c) => c,
-                                        None => return,
-                                    };
-                                    let (mut read_half, mut write_half) = stream.into_split();
-                                    let challenge = WireMessage::Handshake(crate::wire_message::HandshakeMsg {
-                                        node_id: our_node_id.clone(),
-                                        cookie: Some(cookie),
-                                        cookie_signature: None,
-                                        params_hash: params_hash_c,
-                                        network_id: network_c,
-                                        peering_port: peering_port_c,
-                                    });
-                                    match bincode::serialize(&challenge) {
-                                        Ok(bytes) => {
-                                            let len_bytes = (bytes.len() as u32).to_be_bytes();
-                                            if write_half.write_all(&len_bytes).await.is_err()
-                                                || write_half.write_all(&bytes).await.is_err()
-                                            {
-                                                return;
-                                            }
-                                            let _ = write_half.flush().await;
-                                        }
-                                        Err(_) => return,
-                                    }
-
-                                    // Read + verify the peer's signed cookie response so we
-                                    // learn their node_id BEFORE registering — reading directly
-                                    // off read_half leaves no buffered bytes for the read loop.
-                                    let mut len_buf = [0u8; 4];
-                                    match tokio::time::timeout(Duration::from_secs(10), read_half.read_exact(&mut len_buf)).await {
-                                        Ok(Ok(_)) => {}
-                                        _ => return,
-                                    }
-                                    let body_len = u32::from_be_bytes(len_buf) as usize;
-                                    if body_len == 0 || body_len > 65536 { return; }
-                                    let mut body = vec![0u8; body_len];
-                                    match tokio::time::timeout(Duration::from_secs(10), read_half.read_exact(&mut body)).await {
-                                        Ok(Ok(_)) => {}
-                                        _ => return,
-                                    }
-                                    let (remote_node_id, remote_peering_port) = match bincode::deserialize::<WireMessage>(&body) {
-                                        Ok(WireMessage::Handshake(hs)) => {
-                                            // Reject peers on a different network before verifying
-                                            // the cookie — hard Dev/Test/Live isolation.
-                                            if hs.network_id != network_c {
-                                                tracing::debug!(
-                                                    peer = %peer_id,
-                                                    ours = ?network_c,
-                                                    theirs = ?hs.network_id,
-                                                    "dropping inbound peer on different network"
-                                                );
-                                                return;
-                                            }
-                                            match &hs.cookie_signature {
-                                                Some(sig) => {
-                                                    let ok = { syn_cookies_c.lock().await.verify(&peer_ip, &hs.node_id, sig) };
-                                                    if !ok {
-                                                        tracing::warn!(peer = %peer_id, "SYN cookie verification failed");
-                                                        return;
-                                                    }
-                                                    (hs.node_id, hs.peering_port)
-                                                }
-                                                None => return,
-                                            }
-                                        }
-                                        _ => return,
-                                    };
-
-                                    // Re-key this peer by its *dialable* listening address
-                                    // (ip:peering_port) instead of the ephemeral TCP source
-                                    // port. This makes an inbound connection collapse onto the
-                                    // outbound connection to the same node (one peer_manager
-                                    // entry, correct count) and ensures gossip only advertises
-                                    // dialable addresses. Fall back to the ephemeral address if
-                                    // the peer didn't advertise a port (0).
-                                    let (peer_addr, peer_id) = if remote_peering_port != 0 {
-                                        (
-                                            PeerAddress { ip: peer_ip.clone(), port: remote_peering_port },
-                                            format!("{}:{}", peer_ip, remote_peering_port),
-                                        )
-                                    } else {
-                                        (peer_addr, peer_id)
-                                    };
-
-                                    // Never accept a connection claiming our own node_id.
-                                    if remote_node_id == our_node_id {
-                                        tracing::debug!(peer = %peer_id, "dropping inbound self-connection");
-                                        return;
-                                    }
-
-                                    let our_nid = our_node_id.as_str().to_string();
-                                    let peer_nid = remote_node_id.as_str().to_string();
-
-                                    // Deterministic node_id dedup: if we already dialed this
-                                    // peer, keep exactly one (the connection from the lower
-                                    // node_id). `None` → this inbound lost; drop it.
-                                    let conn_id = {
-                                        let mut registry = conn_registry_c.write().await;
-                                        match registry.register_dedup(
-                                            peer_id.clone(),
-                                            peer_nid,
-                                            crate::connection_registry::Direction::Inbound,
-                                            write_half,
-                                            &our_nid,
-                                        ) {
-                                            Some(id) => {
-                                                metrics_c.peer_count.set(registry.len() as i64);
-                                                id
-                                            }
-                                            None => {
-                                                tracing::debug!(peer = %peer_id, "inbound superseded by our outbound (tie-break)");
-                                                return;
-                                            }
-                                        }
-                                    };
-
-                                    {
-                                        let mut pm = peer_manager_c.write().await;
-                                        pm.add_peer(peer_addr);
-                                        pm.mark_connected(&peer_id, now_secs);
-                                    }
-
-                                    // Handshake already validated here — read loop needs no
-                                    // SYN cookie step (syn_cookies = None).
-                                    spawn_peer_read_loop(
-                                        peer_id.clone(),
-                                        conn_id,
-                                        read_half,
-                                        block_queue_c,
-                                        conn_registry_c,
-                                        peer_manager_c,
-                                        metrics_c,
-                                        active_elections_c,
-                                        rep_weights_c,
-                                        message_dedup_c,
-                                        online_weight_sampler_c,
-                                        None,
-                                        peer_ip,
-                                        store_c,
-                                        params_hash_c,
-                                        bootstrap_feedback_c,
-                                    );
-
-                                    tracing::info!(peer = %peer_id, "inbound peer connected");
-                                });
-                            }
-                            Err(e) => {
-                                tracing::warn!("P2P accept error: {e}");
-                            }
-                        }
-                    }
-                }
-            }
-        });
-        self.task_handles.push(p2p_handle);
-
         // ── UPnP port mapping (NAT traversal) ────────────────────────────
         let is_dev_network = matches!(self.config.network, burst_types::NetworkId::Dev);
-        if self.config.enable_upnp && !is_dev_network {
+        if self.config.enable_upnp && !is_dev_network && self.config.advertise_address.is_none() {
             let description = format!("BURST Node ({})", self.config.network.as_str());
             let mapper = PortMapper::start(self.config.port, description);
             tracing::info!(port = self.config.port, "UPnP: port mapping initiated");
@@ -3876,8 +3212,9 @@ impl BurstNode {
                                     );
                                 }
                                 UpnpState::NotFound | UpnpState::NonRoutable | UpnpState::Failed(_) => {
-                                    // Don't clear — preserve advertise_address from config
-                                    // (cloud VPSes have no UPnP IGD).
+                                    let mut pm = pm_upnp.write().await;
+                                    pm.clear_external_address();
+                                    if let Some(addr) = external_addr { pm.set_external_address(addr); }
                                 }
                                 _ => {}
                             }
@@ -3912,6 +3249,7 @@ impl BurstNode {
                         metrics: Arc::clone(&self.metrics),
                         active_elections: Arc::clone(&self.active_elections),
                         rep_weights: Arc::clone(&self.rep_weights),
+                        vote_generator: Arc::clone(&self.vote_generator),
                         message_dedup: Arc::clone(&self.message_dedup),
                         online_weight_sampler: Arc::clone(&self.online_weight_sampler),
                         store: Arc::clone(&self.store),
@@ -3977,7 +3315,8 @@ impl BurstNode {
             pm.bootstrap_peers().to_vec()
         };
 
-        if !bootstrap_peers.is_empty() {
+        // Configured seeds are optional; inbound peers can have newer history.
+        {
             let bs_ctx = crate::peer_connector::PeerConnectorContext {
                 peer_manager: Arc::clone(&self.peer_manager),
                 connection_registry: Arc::clone(&self.connection_registry),
@@ -3985,6 +3324,7 @@ impl BurstNode {
                 metrics: Arc::clone(&self.metrics),
                 active_elections: Arc::clone(&self.active_elections),
                 rep_weights: Arc::clone(&self.rep_weights),
+                vote_generator: Arc::clone(&self.vote_generator),
                 message_dedup: Arc::clone(&self.message_dedup),
                 online_weight_sampler: Arc::clone(&self.online_weight_sampler),
                 store: Arc::clone(&self.store),
@@ -3996,6 +3336,8 @@ impl BurstNode {
                 bootstrap_feedback: bootstrap_feedback_tx.clone(),
             };
             let frontier_bs = Arc::clone(&self.frontier);
+            let store_bs = Arc::clone(&self.store);
+            let block_queue_bs = Arc::clone(&self.block_queue);
             let conn_registry_bs = Arc::clone(&self.connection_registry);
             let peer_manager_bs = Arc::clone(&self.peer_manager);
             let mut shutdown_rx_bs = self.shutdown.subscribe();
@@ -4013,6 +3355,11 @@ impl BurstNode {
                 let mut bootstrapper = Bootstrapper::new(16, 20, ASC_PULL_MAX_BLOCKS);
                 let mut seeded = false;
                 let mut ticks: u64 = 0;
+                // Prefix sorts before every actual account (unlike genesis).
+                let mut frontier_cursor = WalletAddress::new(WalletAddress::PREFIX);
+                // Keep initial discovery due until a connected peer accepts it.
+                let mut frontier_page_pending = true;
+                let mut frontier_request: Option<(u64, String, WalletAddress, u64)> = None;
                 let mut interval = tokio::time::interval(Duration::from_secs(2));
 
                 loop {
@@ -4023,10 +3370,35 @@ impl BurstNode {
                             break;
                         }
                         Some(fb) = bs_feedback_rx.recv() => match fb {
-                            BootstrapFeedback::Blocks { id, last, full_batch } => {
-                                bootstrapper.on_blocks_ack(id, last, full_batch);
+                            BootstrapFeedback::Blocks { peer_id, id, blocks } => {
+                                tracing::debug!(peer = %peer_id, id, count = blocks.len(),
+                                    "received bootstrap block response");
+                                match bootstrapper.receive_blocks(id, &peer_id, &blocks) {
+                                    Ok(blocks) => for block in blocks {
+                                        if !block_queue_bs.push(block).await {
+                                            tracing::warn!(peer = %peer_id, "block queue full during bootstrap; retry from persisted frontier");
+                                            break;
+                                        }
+                                    },
+                                    Err(reason) => tracing::warn!(peer = %peer_id, %reason, "rejected bootstrap response"),
+                                }
                             }
-                            BootstrapFeedback::Frontiers(entries) => {
+                            BootstrapFeedback::Frontiers { peer_id, id, entries } => {
+                                let Some((expected_id, expected_peer, start, _)) = &frontier_request else { continue; };
+                                if id != *expected_id || peer_id != *expected_peer
+                                    || !crate::bootstrap::valid_frontier_page(start, &entries)
+                                {
+                                    tracing::warn!(peer = %peer_id, "rejected unsolicited or malformed frontier page");
+                                    continue;
+                                }
+                                frontier_request = None;
+                                frontier_page_pending = entries.len() == ASC_PULL_MAX_FRONTIERS as usize;
+                                if frontier_page_pending {
+                                    if let Some((last, _)) = entries.last() {
+                                        frontier_page_pending = last.as_str() > frontier_cursor.as_str();
+                                        frontier_cursor = last.clone();
+                                    }
+                                } else { frontier_cursor = WalletAddress::new(WalletAddress::PREFIX); }
                                 let f = frontier_bs.read().await;
                                 for (account, _remote) in entries {
                                     let our = f
@@ -4064,36 +3436,54 @@ impl BurstNode {
                                 seeded = true;
                             }
                             let now = unix_now_secs();
+                            let blocks = store_bs.block_store();
+                            let fronts = store_bs.frontier_store();
+                            bootstrapper.observe_persisted(
+                                |account| fronts.get_frontier(account).unwrap_or(BlockHash::ZERO),
+                                |hash| blocks.exists(hash).unwrap_or(false),
+                            );
                             bootstrapper.tick_timeouts(now);
+                            if frontier_request.as_ref().is_some_and(|(_, _, _, sent)| now.saturating_sub(*sent) >= 20) {
+                                frontier_request = None;
+                                frontier_page_pending = true;
+                            }
 
                             // Pull from any connected peer.
                             let peer_id = {
                                 let pm = peer_manager_bs.read().await;
-                                let first = pm.iter_connected().next().map(|(id, _)| id.clone());
-                                first
+                                let mut peers: Vec<_> = pm.iter_connected().map(|(id, _)| id.clone()).collect();
+                                peers.sort();
+                                if peers.is_empty() { None } else { Some(peers[ticks as usize % peers.len()].clone()) }
                             };
                             if let Some(peer_id) = peer_id {
                                 // Periodic frontier-scan discovery (~every 30s).
-                                if ticks % 15 == 1 {
+                                if frontier_request.is_none() && (ticks % 15 == 1 || frontier_page_pending) {
+                                    frontier_page_pending = false;
+                                    // Separate scan IDs from low, monotonically
+                                    // increasing block-query IDs.
+                                    let scan_id = u64::MAX - ticks;
                                     let msg = WireMessage::Bootstrap(
                                         BootstrapMessage::AscPullReq {
-                                            id: 0,
+                                            id: scan_id,
                                             payload: AscPullReqPayload::Frontiers {
-                                                start_account: genesis_addr_bs.clone(),
+                                                start_account: frontier_cursor.clone(),
                                                 count: ASC_PULL_MAX_FRONTIERS,
                                             },
                                         },
                                     );
-                                    if let Ok(bytes) = bincode::serialize(&msg) {
-                                        conn_registry_bs.read().await.send(&peer_id, bytes);
+                                    if let Ok(bytes) = msg.encode() {
+                                        if conn_registry_bs.read().await.send(&peer_id, bytes) {
+                                            frontier_request = Some((scan_id, peer_id.clone(), frontier_cursor.clone(), now));
+                                        } else { frontier_page_pending = true; }
                                     }
                                 }
                                 // Send queued block pulls.
                                 for (id, payload) in bootstrapper.next_requests(now) {
+                                    bootstrapper.bind_peer(id, &peer_id);
                                     let msg = WireMessage::Bootstrap(
                                         BootstrapMessage::AscPullReq { id, payload },
                                     );
-                                    if let Ok(bytes) = bincode::serialize(&msg) {
+                                    if let Ok(bytes) = msg.encode() {
                                         conn_registry_bs.read().await.send(&peer_id, bytes);
                                     }
                                 }
@@ -4110,10 +3500,8 @@ impl BurstNode {
         // connected, using their advertised listening address, up to a target
         // out-degree — the piece that lets a mesh self-form from one seed.
         //
-        // Gated OFF by default: enabling it triggers simultaneous-connect
-        // churn between mutually-dialing public nodes (connection dedup has no
-        // deterministic initiator tie-break, and NAT reachability isn't
-        // tracked). Enable once those land; until then use bootstrap_peers.
+        // Enabled by default. Identity-based dedup resolves simultaneous dials;
+        // inbound ephemeral ports are excluded from the discovery address book.
         if self.config.enable_peer_reachout {
             let target_out = self.config.max_peers.clamp(3, 8);
             let reach_ctx = crate::peer_connector::PeerConnectorContext {
@@ -4123,6 +3511,7 @@ impl BurstNode {
                 metrics: Arc::clone(&self.metrics),
                 active_elections: Arc::clone(&self.active_elections),
                 rep_weights: Arc::clone(&self.rep_weights),
+                vote_generator: Arc::clone(&self.vote_generator),
                 message_dedup: Arc::clone(&self.message_dedup),
                 online_weight_sampler: Arc::clone(&self.online_weight_sampler),
                 store: Arc::clone(&self.store),
@@ -4194,9 +3583,9 @@ impl BurstNode {
         }
 
         // ── Keepalive task ────────────────────────────────────────────────
-        // Alternates between two flood types each period (matching rsnano):
-        //   - "self" keepalive: includes own external address in slot 0, sent to ~25% of peers
-        //   - "random" keepalive: all 8 slots are random connected peers, sent to ~75%
+        // Rotate two randomized peer samples. Both reserve slot zero for self
+        // (0.0.0.0:0 when unavailable), so receivers never mistake a random peer
+        // for the sender's externally mapped listening address.
         let peer_manager_ka = Arc::clone(&self.peer_manager);
         let conn_registry_ka = Arc::clone(&self.connection_registry);
         let mut shutdown_rx_ka = self.shutdown.subscribe();
@@ -4255,7 +3644,7 @@ impl BurstNode {
                                 .map(|a| format!("{}:{}", a.ip, a.port))
                                 .collect();
                             let random_peers: Vec<String> = pm
-                                .random_known_peers(8)
+                                .random_peers_with_self(8)
                                 .iter()
                                 .map(|a| format!("{}:{}", a.ip, a.port))
                                 .collect();
@@ -4271,8 +3660,8 @@ impl BurstNode {
                                 },
                             );
 
-                            let self_bytes = bincode::serialize(&self_msg).ok();
-                            let random_bytes = bincode::serialize(&random_msg).ok();
+                            let self_bytes = self_msg.encode().ok();
+                            let random_bytes = random_msg.encode().ok();
 
                             // Send self-keepalive to ~25% of peers,
                             // random-keepalive to the remaining ~75%.
@@ -4308,6 +3697,7 @@ impl BurstNode {
                 metrics: Arc::clone(&self.metrics),
                 active_elections: Arc::clone(&self.active_elections),
                 rep_weights: Arc::clone(&self.rep_weights),
+                vote_generator: Arc::clone(&self.vote_generator),
                 message_dedup: Arc::clone(&self.message_dedup),
                 online_weight_sampler: Arc::clone(&self.online_weight_sampler),
                 store: Arc::clone(&self.store),
@@ -4396,6 +3786,99 @@ impl BurstNode {
             self.task_handles.push(ro_handle);
         }
 
+        let (checkpoint_tx, checkpoint_rx) = mpsc::channel(crate::checkpoint_sync::INBOX_CAPACITY);
+        let (agreement_tx, agreement_rx) = mpsc::channel(crate::checkpoint_service::INBOX_CAPACITY);
+        self.connection_registry
+            .write()
+            .await
+            .set_agreement_inbox(agreement_tx);
+        let signing_clock = self.signing_clock.clone();
+        let agreement_clock: crate::checkpoint_service::Clock = Arc::new(move || {
+            let time = signing_clock.as_ref()?.reading().ok()?;
+            Some(crate::checkpoint_replay::SigningClock {
+                now: time.now,
+                error_bound: time.error_bound,
+            })
+        });
+        #[cfg(test)]
+        let agreement_clock = self
+            .verification_fixture_clock
+            .clone()
+            .unwrap_or(agreement_clock);
+        let display_clock = agreement_clock.clone();
+        let agreement_settings = crate::checkpoint_service::Settings {
+            store: self.store.clone(),
+            network: self.config.network,
+            initial_params: self.initial_params.clone(),
+            // Deadline recovery and full lifecycle replay must pass before
+            // ordinary nodes issue new checkpoint commitments automatically.
+            key: (self.config.enable_representative && self.certified_selection_enabled())
+                .then(|| self.representative_key.clone()),
+        };
+        let agreement_registry = self.connection_registry.clone();
+        let agreement_shutdown = self.shutdown.clone();
+        self.task_handles.push(tokio::spawn(async move {
+            if let Err(error) = crate::checkpoint_service::run_node_with_recovery(
+                agreement_settings,
+                agreement_registry,
+                agreement_rx,
+                agreement_clock,
+                agreement_shutdown.clone(),
+                agreement_recovery,
+            )
+            .await
+            {
+                tracing::error!(%error, "checkpoint agreement worker stopped");
+                agreement_shutdown.fail("checkpoint agreement worker", &error);
+            }
+        }));
+        self.connection_registry
+            .write()
+            .await
+            .set_checkpoint_inbox(checkpoint_tx);
+        let historical_admissions = self
+            .block_processor
+            .lock()
+            .await
+            .historical_admissions
+            .clone();
+        self.task_handles
+            .push(tokio::spawn(crate::checkpoint_sync::run(
+                Arc::clone(&self.store),
+                crate::checkpoint_sync::Settings {
+                    network: self.config.network,
+                    params: self.initial_params.clone(),
+                    snapshots: self.config.snapshot_transfer.clone(),
+                    recovery: sync_recovery,
+                },
+                Arc::clone(&self.connection_registry),
+                checkpoint_rx,
+                Arc::clone(&self.shutdown),
+                historical_admissions,
+            )));
+        let beacon_interval = Duration::from_secs(30);
+        #[cfg(test)]
+        let beacon_interval = if self.verification_fixture_clock.is_some() {
+            Duration::from_millis(200)
+        } else {
+            beacon_interval
+        };
+        self.task_handles
+            .push(tokio::spawn(crate::checkpoint_beacon::run(
+                Arc::clone(&self.store),
+                self.config.network,
+                self.initial_params.clone(),
+                Arc::clone(&self.vrf_client),
+                Arc::clone(&self.shutdown),
+                beacon_interval,
+                self.certified_selection_enabled()
+                    .then(|| crate::checkpoint_beacon::Live {
+                        recovery: beacon_recovery,
+                        registry: Arc::clone(&self.connection_registry),
+                        orchestrator: Arc::clone(&self.verification_orchestrator),
+                    }),
+            )));
+
         // ── Periodic telemetry request task ────────────────────────────────
         let conn_registry_telem = Arc::clone(&self.connection_registry);
         let peer_manager_telem = Arc::clone(&self.peer_manager);
@@ -4419,7 +3902,7 @@ impl BurstNode {
                             continue;
                         }
                         let req = WireMessage::TelemetryReq;
-                        let bytes = match bincode::serialize(&req) {
+                        let bytes = match req.encode() {
                             Ok(b) => b,
                             Err(_) => continue,
                         };
@@ -4510,6 +3993,14 @@ impl BurstNode {
             };
 
             let rpc_state = Arc::new(RpcState {
+                display_now: Arc::new(move || {
+                    display_clock()
+                        .map(|reading| burst_types::Timestamp::new(reading.now))
+                        .unwrap_or_else(burst_types::Timestamp::now)
+                }),
+                meta_store: Arc::new(self.store.meta_store()),
+                network: self.config.network,
+                genesis_authoring: tokio::sync::Mutex::new(()),
                 started_at: unix_now_secs(),
                 metrics_registry,
                 account_store: Arc::new(self.store.account_store()),
@@ -4520,11 +4011,42 @@ impl BurstNode {
                 governance_store: Arc::new(self.store.governance_store()),
                 governance_engine: Some(Arc::clone(&self.governance)),
                 brn_engine: self.brn_engine.clone(),
+                brn_store: Arc::new(self.store.brn_store()),
+                clock_sync: self.clock_sync.clone(),
+                verification_engine: self.verification_orchestrator.clone(),
+                delegation_engine: self.delegation_engine.clone(),
+                trst_engine: self.trst_engine.clone(),
+                consti_engine: self.consti_engine.clone(),
                 rep_weight_cache: self.rep_weights.clone(),
                 work_generator: Arc::new(WorkGenerator),
                 params: Arc::new(self.config.params.clone()),
                 block_processor: Arc::new(NodeBlockProcessor {
+                    checkpoint_sync_status: self.connection_registry.read().await.checkpoint_sync_status.clone(),
+                    historical_lookup: crate::historical_lookup::Reader {
+                        store: self.store.clone(),
+                        registry: self.connection_registry.clone(),
+                        network: self.config.network,
+                        initial_params: self.initial_params.clone(),
+                        active: Arc::new(tokio::sync::Mutex::new(())),
+                        admitted: Arc::new(tokio::sync::Semaphore::new(3)),
+                    },
+                    recovery_store: self.store.clone(),
+                    appeal_view: crate::appeal_view::Reader {
+                        store: self.store.clone(),
+                        initial_params: self.initial_params.clone(),
+                    },
+                    delegation_view: crate::delegation_view::Reader {
+                        store: self.store.clone(),
+                        network: self.config.network,
+                        genesis: crate::genesis_state::block(
+                            self.config.network,
+                            &self.initial_params,
+                        )
+                        .hash,
+                    },
                     block_queue: Arc::clone(&self.block_queue),
+                    submission_results: Arc::clone(&self.submission_results),
+                    governance_transfers: Arc::clone(&self.governance_transfers),
                 }),
                 online_reps: Arc::new(std::sync::RwLock::new(Vec::new())),
                 peer_manager: Arc::clone(&self.peer_manager),
@@ -4541,18 +4063,19 @@ impl BurstNode {
 
             let rpc_server = RpcServer::with_bind(rpc_port, rpc_bind, rpc_state);
             let mut shutdown_rx_rpc = self.shutdown.subscribe();
+            let rpc_failure = self.shutdown.clone();
 
             let rpc_handle = tokio::spawn(async move {
-                tokio::select! {
-                    biased;
-                    _ = shutdown_rx_rpc.recv() => {
-                        tracing::info!("RPC server shutting down");
-                    }
-                    result = rpc_server.start() => {
-                        match result {
-                            Ok(()) => tracing::info!("RPC server exited"),
-                            Err(e) => tracing::error!("RPC server error: {e}"),
-                        }
+                let result = rpc_server
+                    .start(async move {
+                        let _ = shutdown_rx_rpc.recv().await;
+                    })
+                    .await;
+                match result {
+                    Ok(()) => tracing::info!("RPC server exited"),
+                    Err(e) => {
+                        tracing::error!("RPC server error: {e}");
+                        rpc_failure.fail("RPC server", &e);
                     }
                 }
             });
@@ -4563,20 +4086,25 @@ impl BurstNode {
         if self.config.enable_websocket {
             let ws_port = self.config.websocket_port;
             let ws_state_clone = Arc::clone(&self.ws_state);
-            let ws_server = WebSocketServer::with_state(ws_port, ws_state_clone);
+            let ws_server = WebSocketServer::with_bind(
+                ws_port,
+                self.config.websocket_bind.clone(),
+                ws_state_clone,
+            );
             let mut shutdown_rx_ws = self.shutdown.subscribe();
+            let ws_failure = self.shutdown.clone();
 
             let ws_handle = tokio::spawn(async move {
-                tokio::select! {
-                    biased;
-                    _ = shutdown_rx_ws.recv() => {
-                        tracing::info!("WebSocket server shutting down");
-                    }
-                    result = ws_server.start() => {
-                        match result {
-                            Ok(()) => tracing::info!("WebSocket server exited"),
-                            Err(e) => tracing::error!("WebSocket server error: {e}"),
-                        }
+                let result = ws_server
+                    .start(async move {
+                        let _ = shutdown_rx_ws.recv().await;
+                    })
+                    .await;
+                match result {
+                    Ok(()) => tracing::info!("WebSocket server exited"),
+                    Err(e) => {
+                        tracing::error!("WebSocket server error: {e}");
+                        ws_failure.fail("WebSocket server", &e);
                     }
                 }
             });
@@ -4595,8 +4123,8 @@ impl BurstNode {
     ///
     /// 1. Sends the shutdown signal to all background tasks.
     /// 2. Disconnects all peers.
-    /// 3. Flushes pending writes to LMDB.
-    /// 4. Waits for background tasks to complete (with timeout).
+    /// 3. Stops and joins background tasks and connections.
+    /// 4. Flushes committed LMDB state without overwriting it from caches.
     pub async fn stop(&mut self) -> Result<(), NodeError> {
         tracing::info!("BURST node stopping");
 
@@ -4609,10 +4137,10 @@ impl BurstNode {
             mapper.stop().await;
         }
 
-        // Drop all TCP write halves (causes peer read loops to terminate)
+        // Close admission and cancel both halves of every tracked connection.
         {
             let mut registry = self.connection_registry.write().await;
-            *registry = ConnectionRegistry::new();
+            registry.close();
             tracing::info!("connection registry cleared");
         }
 
@@ -4627,225 +4155,46 @@ impl BurstNode {
             tracing::info!("all peers disconnected");
         }
 
-        // Persist BRN engine state to LMDB.
-        {
-            let brn = self.brn_engine.lock().await;
-            let brn_store = self.store.brn_store();
-            if let Err(e) = brn.save_to_store(&brn_store) {
-                tracing::error!(error = %e, "failed to persist BRN engine state");
-            } else {
-                tracing::info!(
-                    wallets = brn.wallets.len(),
-                    "BRN engine state persisted to LMDB"
-                );
-            }
-        }
-
-        // Persist the merger graph to LMDB before flushing.
-        {
-            let trst = self.trst_engine.lock().await;
-            let bytes = trst.merger_graph.to_bytes();
-            let meta = self.store.meta_store();
-            if let Err(e) = meta.put_meta(MERGER_GRAPH_META_KEY, &bytes) {
-                tracing::warn!("failed to persist merger graph: {e}");
-            } else {
-                tracing::info!(bytes = bytes.len(), "merger graph persisted to LMDB");
-            }
-        }
-
-        // Persist TRST engine per-wallet token portfolios to LMDB.
-        {
-            let trst = self.trst_engine.lock().await;
-            let bytes = trst.save_wallets();
-            let meta = self.store.meta_store();
-            if let Err(e) = meta.put_meta(TrstEngine::meta_key(), &bytes) {
-                tracing::warn!("failed to persist TRST wallet portfolios: {e}");
-            } else {
-                tracing::info!(
-                    bytes = bytes.len(),
-                    "TRST wallet portfolios persisted to LMDB"
-                );
-            }
-        }
-
-        // Persist delegation engine state to LMDB.
-        {
-            let de = self.delegation_engine.lock().await;
-            let bytes = de.save_state();
-            let meta = self.store.meta_store();
-            if let Err(e) = meta.put_meta(DelegationEngine::meta_key(), &bytes) {
-                tracing::warn!("failed to persist delegation engine state: {e}");
-            } else {
-                tracing::info!(
-                    bytes = bytes.len(),
-                    "delegation engine state persisted to LMDB"
-                );
-            }
-        }
-
-        // Persist verification orchestrator state to LMDB.
-        {
-            let vo = self.verification_orchestrator.lock().await;
-            let snapshot = vo.snapshot();
-            match bincode::serialize(&snapshot) {
-                Ok(bytes) => {
-                    let meta = self.store.meta_store();
-                    if let Err(e) = meta.put_meta(VERIFICATION_ORCHESTRATOR_META_KEY, &bytes) {
-                        tracing::warn!("failed to persist verification orchestrator: {e}");
-                    } else {
-                        tracing::info!(
-                            bytes = bytes.len(),
-                            "verification orchestrator persisted to LMDB"
-                        );
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("failed to serialize verification orchestrator: {e}");
-                }
-            }
-        }
-
-        // NB: representative weights are intentionally NOT persisted here. They
-        // are a *derived* view of the account set (Σ expired TRST) plus the fixed
-        // genesis bootstrap weight, and are rebuilt deterministically from the
-        // ledger on every startup. Persisting them risked reloading a stale
-        // snapshot and double-counting the bootstrap weight across restarts.
-
-        // Flush LMDB
-        if let Err(e) = self.store.force_sync() {
-            tracing::warn!("LMDB force_sync failed: {e}");
-        } else {
-            tracing::info!("LMDB flushed to disk");
-        }
-
-        // Wait for all spawned tasks with a timeout
+        // Stop producers before flushing. Accepted transitions already persist
+        // their engine state atomically; caches are never a recovery authority.
         let handles: Vec<JoinHandle<()>> = std::mem::take(&mut self.task_handles);
-        let wait_all = async {
-            for handle in handles {
-                let _ = handle.await;
-            }
-        };
-
-        if tokio::time::timeout(SHUTDOWN_TIMEOUT, wait_all)
-            .await
-            .is_err()
-        {
-            tracing::warn!(
-                "shutdown timeout ({:?}) — some tasks may still be running",
-                SHUTDOWN_TIMEOUT
-            );
+        let workers = crate::shutdown::drain_tasks(handles, SHUTDOWN_TIMEOUT).await;
+        let connections = self.connection_registry.write().await.take_tasks();
+        for task in connections {
+            let _ = task.await;
         }
+        self.store
+            .force_sync()
+            .map_err(burst_store::StoreError::from)?;
 
         // Final metrics snapshot
         self.refresh_metrics().await;
 
+        if let Some(error) = self.shutdown.failure() {
+            return Err(NodeError::Other(error));
+        }
+        workers?;
         tracing::info!("BURST node stopped");
         Ok(())
     }
 
-    /// Process an incoming block through the full pipeline (synchronous path).
-    ///
-    /// Runs the block through the multi-stage block processor, writes accepted
-    /// blocks to LMDB, updates the frontier, and processes any unchecked
-    /// dependents that become unblocked (both gap-previous and gap-source).
+    /// Submit a signed block without waiting for admission or confirmation.
+    /// The running worker owns authentication and the durable ledger transaction.
     pub fn process_block(&self, block: &StateBlock) -> Result<ProcessResult, NodeError> {
-        // We can't hold the async locks from sync code, so use try_lock.
-        let mut processor = self
-            .block_processor
-            .try_lock()
-            .map_err(|_| NodeError::Other("block processor is busy".into()))?;
-
-        // We need a mutable reference to frontier. try_write for RwLock.
-        // Since this is sync context and the lock is tokio, we use
-        // blocking_write (available in tokio).
-        let mut frontier = self
-            .frontier
-            .try_write()
-            .map_err(|_| NodeError::Other("frontier is locked".into()))?;
-
-        // Pre-validate balance transition against previous block in the store.
-        if !block.previous.is_zero() {
-            if let Ok(prev_bytes) = self.store.block_store().get_block(&block.previous) {
-                if let Ok(prev_block) = bincode::deserialize::<StateBlock>(&prev_bytes) {
-                    if let Err(reason) = BlockProcessor::validate_balance_transition(
-                        block,
-                        prev_block.brn_balance,
-                        prev_block.trst_balance,
-                    ) {
-                        return Ok(ProcessResult::Rejected(reason));
-                    }
-                }
-            }
+        if self.block_queue.try_push(block.clone()) {
+            Ok(ProcessResult::Queued)
+        } else {
+            Err(NodeError::Other("block priority queue full or busy".into()))
         }
-
-        let result = processor.process(block, &mut frontier);
-
-        if result == ProcessResult::Accepted {
-            // Process gap-previous dependents
-            let dependents = processor.process_unchecked(&block.hash);
-            for dep_block in &dependents {
-                let dep_result = processor.process(dep_block, &mut frontier);
-                tracing::debug!(
-                    hash = %dep_block.hash,
-                    ?dep_result,
-                    "re-processed unchecked block (gap-previous)"
-                );
-            }
-
-            // Process gap-source dependents — blocks waiting on this block as their
-            // linked send block
-            let source_deps = processor.process_unchecked_source(&block.hash);
-            for dep_block in &source_deps {
-                let dep_result = processor.process(dep_block, &mut frontier);
-                tracing::debug!(
-                    hash = %dep_block.hash,
-                    ?dep_result,
-                    "re-processed unchecked block (gap-source)"
-                );
-            }
-        }
-
-        Ok(result)
     }
 
-    /// Roll back a block from the frontier after fork resolution.
-    ///
-    /// When the confirmation task determines a winner in a fork, the losing
-    /// block must be rolled back so the winning block can be applied.
+    /// Legacy entry point. Removing a frontier does not undo a ledger operation.
+    /// Keep this non-mutating until transactional branch installation is wired.
     pub fn rollback_block(
         &self,
-        block: &StateBlock,
+        _block: &StateBlock,
     ) -> Result<crate::block_processor::RollbackResult, NodeError> {
-        let mut processor = self
-            .block_processor
-            .try_lock()
-            .map_err(|_| NodeError::Other("block processor is busy".into()))?;
-
-        let mut frontier = self
-            .frontier
-            .try_write()
-            .map_err(|_| NodeError::Other("frontier is locked".into()))?;
-
-        let result = processor.rollback(block, &mut frontier);
-
-        if result == crate::block_processor::RollbackResult::Success {
-            // Also remove the block from LMDB so stale data cannot be read.
-            let block_store = self.store.block_store();
-            if let Err(e) = block_store.delete_block(&block.hash) {
-                tracing::warn!(
-                    hash = %block.hash,
-                    "failed to delete rolled-back block from store: {e}"
-                );
-            }
-
-            tracing::info!(
-                hash = %block.hash,
-                account = %block.account,
-                "block rolled back from frontier and store"
-            );
-        }
-
-        Ok(result)
+        Ok(crate::block_processor::RollbackResult::RequiresLedgerRollback)
     }
 
     /// Process an incoming transaction through the full pipeline (async path).
@@ -4879,7 +4228,7 @@ impl BurstNode {
         }
 
         // Step 4: Broadcast to peers
-        if let Ok(msg_bytes) = bincode::serialize(&block) {
+        if let Ok(msg_bytes) = WireMessage::Block(Box::new(block)).encode() {
             let peers: Vec<burst_network::PeerState> = {
                 let pm = self.peer_manager.read().await;
                 pm.iter_connected().map(|(_, s)| s.clone()).collect()
@@ -4961,7 +4310,8 @@ impl BurstNode {
             let state = brn.wallets.get(account).ok_or_else(|| {
                 NodeError::Other("account has no BRN accrual state (not verified)".into())
             })?;
-            let available = brn.compute_balance(state, now);
+            let available = brn.compute_balance_checked(state, now)
+                .map_err(|error| NodeError::Other(error.to_string()))?;
             if amount > available {
                 return Err(NodeError::Other(format!(
                     "insufficient BRN: need {}, computed available {}",
@@ -4979,7 +4329,8 @@ impl BurstNode {
                     check_brn_spend(&brn, &sender, burn.amount)?;
                 }
                 // Ascending odometer: spending BRN increases the field.
-                let new_brn = brn_balance.saturating_add(burn.amount);
+                let new_brn = brn_balance.checked_add(burn.amount)
+                    .ok_or_else(|| NodeError::Other("BRN spend overflow".into()))?;
                 (
                     if is_open {
                         BlockType::Open
@@ -5000,8 +4351,10 @@ impl BurstNode {
                 }
                 // Verify sender has enough transferable (non-expired, non-revoked) TRST
                 {
-                    let mut trst = self.trst_engine.lock().await;
-                    if let Some(transferable) = trst.transferable_balance(&sender, now) {
+                    let trst = self.trst_engine.lock().await;
+                    if let Some((transferable, _)) =
+                        trst.candidate_balances(&sender, &send.origin, now)
+                    {
                         if send.amount > transferable {
                             return Err(NodeError::Other(format!(
                                 "insufficient transferable TRST: need {} but only {} is transferable",
@@ -5029,7 +4382,8 @@ impl BurstNode {
                 }
                 (
                     BlockType::Endorse,
-                    brn_balance.saturating_add(endorse.burn_amount),
+                    brn_balance.checked_add(endorse.burn_amount)
+                        .ok_or_else(|| NodeError::Other("BRN spend overflow".into()))?,
                     trst_balance,
                     address_link(&endorse.target)?,
                 )
@@ -5041,7 +4395,8 @@ impl BurstNode {
                 }
                 (
                     BlockType::Challenge,
-                    brn_balance.saturating_add(challenge.stake_amount),
+                    brn_balance.checked_add(challenge.stake_amount)
+                        .ok_or_else(|| NodeError::Other("BRN spend overflow".into()))?,
                     trst_balance,
                     address_link(&challenge.target)?,
                 )
@@ -5053,7 +4408,8 @@ impl BurstNode {
                 }
                 (
                     BlockType::VerificationVote,
-                    brn_balance.saturating_add(vote.stake_amount),
+                    brn_balance.checked_add(vote.stake_amount)
+                        .ok_or_else(|| NodeError::Other("BRN spend overflow".into()))?,
                     trst_balance,
                     address_link(&vote.target_wallet)?,
                 )
@@ -5099,7 +4455,10 @@ impl BurstNode {
         };
 
         let mut block = StateBlock {
+            signing_grant: burst_types::BlockHash::ZERO,
+            delegation_payload: Vec::new(),
             version: CURRENT_BLOCK_VERSION,
+            payment_epoch: self.store.meta_store().payment_epoch()?,
             block_type,
             account: sender,
             previous,
@@ -5112,6 +4471,8 @@ impl BurstNode {
             timestamp: now,
             params_hash: BlockHash::ZERO,
             merge_sources,
+            release_sources: Vec::new(),
+            target_head: BlockHash::ZERO,
             work: 0,
             signature: tx.signature().clone(),
             hash: BlockHash::ZERO,
@@ -5127,14 +4488,17 @@ impl BurstNode {
         self.metrics
             .account_count
             .set(frontier.account_count() as i64);
+        drop(frontier);
 
         let bp = self.block_processor.lock().await;
         self.metrics
             .unchecked_count
             .set(bp.unchecked_count() as i64);
+        drop(bp);
 
         let pm = self.peer_manager.read().await;
         self.metrics.peer_count.set(pm.connected_count() as i64);
+        drop(pm);
 
         if let Ok(count) = self.store.block_store().block_count() {
             self.metrics.block_count.set(count as i64);
@@ -5152,176 +4516,42 @@ impl BurstNode {
     }
 }
 
-/// Deterministic expiry-grouped auto-merge selection (whitepaper §Merging:
-/// Derive the eligible verifier pool from CONFIRMED account state: every wallet
-/// that (a) is Verified, (b) has opted in to the verifier pool
-/// (`verifier_opted_in_at`), and (c) has been verified for at least
-/// `min_verification_age_secs`. Because it is computed purely from committed
-/// account state that every node agrees on, all nodes derive the SAME pool — a
-/// prerequisite for deterministic VRF verifier selection. Excluded/penalized
-/// filtering is applied afterwards by the orchestrator.
-fn eligible_verifiers(
+/// Refresh the installed agreed electorate without advancing its epoch here.
+/// Legacy mode uses the local confirmed projection until certified mode opens.
+async fn rebuild_rep_weights(
     store: &LmdbStore,
-    params: &burst_types::ProtocolParams,
-    now_secs: u64,
-) -> Vec<burst_types::WalletAddress> {
-    let accounts = match store.account_store().iter_verified_accounts() {
-        Ok(a) => a,
-        Err(e) => {
-            tracing::warn!("failed to list verified accounts for verifier pool: {e}");
-            return Vec::new();
+    rep_weights: &RwLock<RepWeightCache>,
+    elections: &RwLock<ActiveElections>,
+) -> Result<(), burst_store::StoreError> {
+    let mut rw = rep_weights.write().await;
+    if let Some(authority) = crate::payment_authority::PaymentAuthority::read(store)? {
+        let weights = authority.weights();
+        let mut active = elections.write().await;
+        if active
+            .authority_epoch()
+            .is_some_and(|epoch| epoch != authority.epoch)
+        {
+            return Err(burst_store::StoreError::Corruption(
+                "payment authority awaits coordinated publication".into(),
+            ));
         }
-    };
-    accounts
-        .into_iter()
-        .filter(|a| {
-            let opted_in = a.verifier_opted_in_at.is_some();
-            let old_enough = a.verified_at.is_some_and(|v| {
-                now_secs.saturating_sub(v.as_secs()) >= params.min_verification_age_secs
-            });
-            opted_in && old_enough
-        })
-        .map(|a| a.address)
-        .collect()
-}
-
-/// Rebuild the hybrid rep-weight cache from the confirmed account set: one vote
-/// per VERIFIED human delegating to a rep, plus that rep's expired-TRST
-/// contribution. Preserves the genesis bootstrap bonus (set via `set_bonus`).
-/// Called at startup and periodically by the online-weight task — weight is a
-/// pure function of account state, so it is derived, never patched per event.
-async fn rebuild_rep_weights(store: &LmdbStore, rep_weights: &RwLock<RepWeightCache>) {
-    match store.account_store().iter_accounts() {
-        Ok(accounts) => {
-            // Reps evicted from the ORV set by governance contribute zero weight.
-            let evicted: std::collections::HashSet<burst_types::WalletAddress> = accounts
-                .iter()
-                .filter(|a| a.orv_evicted)
-                .map(|a| a.address.clone())
-                .collect();
-            let mut rw = rep_weights.write().await;
-            rw.rebuild_from_accounts(accounts.into_iter().map(|a| {
-                (
-                    a.state == burst_types::WalletState::Verified,
-                    a.representative.clone(),
-                    a.expired_trst,
-                )
-            }));
-            rw.set_evicted(evicted);
-            tracing::debug!(
-                reps = rw.rep_count(),
-                "rep weights rebuilt from account store"
-            );
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to rebuild rep weights from account store");
-        }
+        active
+            .install_authority(authority.epoch, weights.all_weights(), authority.quorum_bps)
+            .map_err(|error| burst_store::StoreError::Corruption(error.to_string()))?;
+        *rw = weights;
+        return Ok(());
     }
-}
-
-/// Apply per-holder TRST revocation to the ledger. `revoke_by_origin` returns
-/// one [`burst_trst::RevocationEvent`] per affected live token, keyed by the
-/// CURRENT holder (which — via the merger graph — may be any downstream account,
-/// not just the fraudulent originator). This debits each affected holder's
-/// `AccountInfo` (transferable down, `revoked_trst` up). It deliberately does
-/// NOT touch consensus (rep) weight: ORV weight is EXPIRED TRST, a separate
-/// axis from spendable balance, and the remedy for a bad-acting ORV participant
-/// is governance eviction from the verified-node set, not value-layer
-/// revocation. Groups by holder so each account is written once. Returns the
-/// total revoked across all holders.
-fn apply_revocations_to_holders(
-    store: &LmdbStore,
-    revocations: &[burst_trst::RevocationEvent],
-) -> u128 {
-    use std::collections::HashMap;
-    let mut per_holder: HashMap<burst_types::WalletAddress, u128> = HashMap::new();
-    for ev in revocations {
-        let e = per_holder.entry(ev.holder.clone()).or_insert(0);
-        *e = e.saturating_add(ev.revoked_amount);
+    let mut active = elections.write().await;
+    if active.authority_epoch().is_some() {
+        return Err(burst_store::StoreError::Corruption(
+            "installed payment authority is missing".into(),
+        ));
     }
-    let mut total = 0u128;
-    for (holder, amount) in per_holder {
-        total = total.saturating_add(amount);
-        if let Ok(mut acct) = store.account_store().get_account(&holder) {
-            acct.trst_balance = acct.trst_balance.saturating_sub(amount);
-            acct.revoked_trst = acct.revoked_trst.saturating_add(amount);
-            if let Err(e) = store.account_store().put_account(&acct) {
-                tracing::error!(%holder, "failed to persist revocation to holder: {e}");
-            }
-        }
-    }
-    total
-}
-
-/// Inverse of [`apply_revocations_to_holders`]: restore un-revoked TRST to each
-/// current holder (transferable up, `revoked_trst` down). Used when a revoked
-/// originator is re-verified (decision §6.15b). Like revocation it does not
-/// touch rep weight — any restored tokens that are past expiry re-accrue the
-/// holder's expired-TRST consensus stake through the normal expiry flush.
-/// Returns the total restored.
-fn apply_unrevocations_to_holders(
-    store: &LmdbStore,
-    restored: &[burst_trst::UnRevocationResult],
-) -> u128 {
-    use std::collections::HashMap;
-    let mut per_holder: HashMap<burst_types::WalletAddress, u128> = HashMap::new();
-    for r in restored {
-        let e = per_holder.entry(r.holder.clone()).or_insert(0);
-        *e = e.saturating_add(r.amount);
-    }
-    let mut total = 0u128;
-    for (holder, amount) in per_holder {
-        total = total.saturating_add(amount);
-        if let Ok(mut acct) = store.account_store().get_account(&holder) {
-            acct.trst_balance = acct.trst_balance.saturating_add(amount);
-            acct.revoked_trst = acct.revoked_trst.saturating_sub(amount);
-            if let Err(e) = store.account_store().put_account(&acct) {
-                tracing::error!(%holder, "failed to persist un-revocation to holder: {e}");
-            }
-        }
-    }
-    total
-}
-
-/// wallets group "tokens with similar expiry dates to maximize retained
-/// value"). Under the earliest-expiry floor rule, merging a fresh token with
-/// an old one destroys the fresh token's remaining lifetime — so the group is
-/// the oldest token plus every live token whose effective timestamp falls
-/// within 10% of the expiry period of it. Deterministic across nodes: it
-/// depends only on portfolio state and the current expiry period.
-fn select_expiry_merge_group(
-    portfolio: &burst_trst::WalletPortfolio,
-    now: Timestamp,
-    expiry_secs: u64,
-) -> Vec<burst_trst::TrstToken> {
-    let mut live: Vec<&burst_trst::TrstToken> = portfolio
-        .tokens
-        .iter()
-        .filter(|t| {
-            t.state == burst_types::TrstState::Active
-                && t.revoked_origin.is_none()
-                && !t.is_expired(now, expiry_secs)
-        })
-        .collect();
-    if live.len() < 2 {
-        return Vec::new();
-    }
-    live.sort_by_key(|t| (t.effective_origin_timestamp.as_secs(), *t.id.as_bytes()));
-
-    let window = expiry_secs / 10;
-    let oldest = live[0].effective_origin_timestamp.as_secs();
-    let cutoff = oldest.saturating_add(window);
-    let group: Vec<burst_trst::TrstToken> = live
-        .into_iter()
-        .filter(|t| t.effective_origin_timestamp.as_secs() <= cutoff)
-        .take(burst_trst::MAX_MERGE_SOURCES)
-        .cloned()
-        .collect();
-    if group.len() < 2 {
-        Vec::new()
-    } else {
-        group
-    }
+    crate::confirmed_authority::ConfirmedAuthority::read(store)?.rebuild_weights(&mut rw);
+    active
+        .set_authority(rw.all_weights())
+        .map_err(|e| burst_store::StoreError::Corruption(e.to_string()))?;
+    Ok(())
 }
 
 /// Detect outbound (public) IP by binding a UDP socket to an external address.
@@ -5334,7 +4564,7 @@ fn detect_outbound_ip(port: u16) -> Option<std::net::SocketAddrV4> {
     let local = stream.local_addr().ok()?;
     if let std::net::SocketAddr::V4(v4) = local {
         let ip = *v4.ip();
-        if !ip.is_loopback() && !ip.is_private() && !ip.is_link_local() {
+        if burst_network::upnp::is_public_ipv4(ip) {
             return Some(std::net::SocketAddrV4::new(ip, port));
         }
     }

@@ -29,6 +29,9 @@ struct LocalBlockEntry {
 }
 
 impl LocalBroadcaster {
+    pub(crate) fn clear(&mut self) {
+        self.blocks.clear();
+    }
     pub fn new(max_entries: usize) -> Self {
         Self {
             blocks: HashMap::new(),
@@ -38,6 +41,14 @@ impl LocalBroadcaster {
 
     pub fn with_default() -> Self {
         Self::new(MAX_LOCAL_BLOCKS)
+    }
+
+    /// Repeated ledger scans must not reset backoff or displace pending work.
+    pub fn track_pending(&mut self, hash: BlockHash, block_bytes: Vec<u8>, now_ms: u64) {
+        if self.blocks.contains_key(&hash) || self.blocks.len() >= self.max_entries {
+            return;
+        }
+        self.track(hash, block_bytes, now_ms);
     }
 
     /// Track a locally created block for re-broadcasting.
@@ -114,6 +125,29 @@ mod tests {
         let mut bytes = [0u8; 32];
         bytes[0] = n;
         BlockHash::new(bytes)
+    }
+
+    #[test]
+    fn rediscovery_preserves_retry_time_and_full_queue_entries() {
+        let mut broadcaster = LocalBroadcaster::new(1);
+        broadcaster.track_pending(hash(1), vec![1], 0);
+        broadcaster.track_pending(hash(1), vec![1], 900);
+        broadcaster.track_pending(hash(2), vec![2], 900);
+        assert_eq!(
+            broadcaster.blocks_needing_rebroadcast(1000),
+            vec![(hash(1), vec![1])]
+        );
+        broadcaster.track_pending(hash(1), vec![1], 2900);
+        assert_eq!(
+            broadcaster.blocks_needing_rebroadcast(3000),
+            vec![(hash(1), vec![1])]
+        );
+        broadcaster.confirmed(&hash(1));
+        broadcaster.track_pending(hash(2), vec![2], 3000);
+        assert_eq!(
+            broadcaster.blocks_needing_rebroadcast(4000),
+            vec![(hash(2), vec![2])]
+        );
     }
 
     #[test]
@@ -211,8 +245,8 @@ mod tests {
         broadcaster.track(hash(4), vec![4], 400);
         assert_eq!(broadcaster.len(), 3);
         // hash(1) was evicted
-        assert!(broadcaster.blocks.get(&hash(1)).is_none());
-        assert!(broadcaster.blocks.get(&hash(4)).is_some());
+        assert!(!broadcaster.blocks.contains_key(&hash(1)));
+        assert!(broadcaster.blocks.contains_key(&hash(4)));
     }
 
     #[test]

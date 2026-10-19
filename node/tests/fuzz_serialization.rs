@@ -18,7 +18,7 @@ use burst_types::{BlockHash, Signature, Timestamp, TxHash, WalletAddress, Wallet
 // ---------------------------------------------------------------------------
 
 fn arb_wallet_address() -> impl Strategy<Value = WalletAddress> {
-    "[a-z0-9]{10,30}".prop_map(|s| WalletAddress::new(&format!("brst_{s}")))
+    "[a-z0-9]{10,30}".prop_map(|s| WalletAddress::new(format!("brst_{s}")))
 }
 
 fn arb_block_hash() -> impl Strategy<Value = BlockHash> {
@@ -90,7 +90,10 @@ fn arb_state_block() -> impl Strategy<Value = StateBlock> {
         .prop_map(
             |(bt, account, prev, rep, brn, trst, link, origin, ts, work, sig)| {
                 let mut block = StateBlock {
+                    signing_grant: burst_types::BlockHash::ZERO,
+                    delegation_payload: Vec::new(),
                     version: CURRENT_BLOCK_VERSION,
+                    payment_epoch: burst_types::BlockHash::new([1; 32]),
                     block_type: bt,
                     account,
                     previous: prev,
@@ -102,7 +105,9 @@ fn arb_state_block() -> impl Strategy<Value = StateBlock> {
                     transaction: TxHash::ZERO,
                     timestamp: ts,
                     params_hash: BlockHash::ZERO,
+                    target_head: burst_types::BlockHash::ZERO,
                     merge_sources: Vec::new(),
+                    release_sources: Vec::new(),
                     work,
                     signature: sig,
                     hash: BlockHash::ZERO,
@@ -204,6 +209,8 @@ fn arb_pending_provenance() -> impl Strategy<Value = PendingProvenance> {
         arb_timestamp(),
     )
         .prop_map(|(amt, origin, wallet, ots, eots)| PendingProvenance {
+            basis: Default::default(),
+            revoked_amounts: Default::default(),
             amount: amt,
             origin,
             origin_wallet: wallet,
@@ -220,6 +227,7 @@ fn arb_pending_info() -> impl Strategy<Value = PendingInfo> {
         proptest::collection::vec(arb_pending_provenance(), 0..5),
     )
         .prop_map(|(source, amount, ts, prov)| PendingInfo {
+            return_credit: false,
             source,
             amount,
             timestamp: ts,
@@ -258,6 +266,8 @@ fn arb_brn_wallet_state() -> impl Strategy<Value = BrnWalletState> {
                 total_staked: staked,
                 accrual_active: active,
                 accrual_stopped_at: stopped,
+                paused_intervals: vec![],
+                pending_releases: Default::default(),
             },
         )
 }
@@ -398,7 +408,7 @@ fn stress_lmdb_1000_accounts() {
 
     let accounts: Vec<AccountInfo> = (0u16..1000)
         .map(|i| {
-            let addr = WalletAddress::new(&format!("brst_{i:05}_{:032x}", i as u128));
+            let addr = WalletAddress::new(format!("brst_{i:05}_{:032x}", i as u128));
             AccountInfo {
                 address: addr.clone(),
                 state: if i % 3 == 0 {
@@ -458,7 +468,8 @@ fn stress_lmdb_1000_pending_entries() {
         hash_bytes[..4].copy_from_slice(&i.to_be_bytes());
         let source_hash = TxHash::new(hash_bytes);
         let info = PendingInfo {
-            source: WalletAddress::new(&format!("brst_sender_{i:028}")),
+            return_credit: false,
+            source: WalletAddress::new(format!("brst_sender_{i:028}")),
             amount: i as u128 * 10,
             timestamp: Timestamp::new(i as u64 * 100),
             provenance: Vec::new(),
@@ -480,7 +491,7 @@ fn stress_lmdb_account_pagination() {
     let store = env.account_store();
 
     for i in 0u16..100 {
-        let addr = WalletAddress::new(&format!("brst_{i:05}_{:032x}", i as u128));
+        let addr = WalletAddress::new(format!("brst_{i:05}_{:032x}", i as u128));
         let info = AccountInfo {
             address: addr,
             state: WalletState::Unverified,

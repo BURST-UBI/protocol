@@ -4,11 +4,11 @@
 //! `(account_bytes ++ height_be)` → `block_hash`. There is no separate flat
 //! list; `get_account_blocks` performs a prefix range-scan on `height_db`.
 
+use crate::shared_env::SharedEnv;
 use std::ops::Bound;
-use std::sync::Arc;
 
 use heed::types::Bytes;
-use heed::{Database, Env};
+use heed::Database;
 
 use burst_store::block::BlockStore;
 use burst_store::StoreError;
@@ -17,8 +17,11 @@ use burst_types::{BlockHash, WalletAddress};
 use crate::write_batch::LmdbReadTransaction;
 use crate::LmdbError;
 
+pub(crate) mod inventory;
+pub use inventory::IndexedBlock;
+
 pub struct LmdbBlockStore {
-    pub(crate) env: Arc<Env>,
+    pub(crate) env: SharedEnv,
     pub(crate) blocks_db: Database<Bytes, Bytes>,
     /// Forward height index: `(account_bytes ++ height_be_bytes)` → `block_hash_bytes`.
     pub(crate) height_db: Database<Bytes, Bytes>,
@@ -74,6 +77,68 @@ pub(crate) fn increment_prefix(prefix: &mut Vec<u8>) {
 }
 
 impl LmdbBlockStore {
+    pub fn height_of_block_txn(
+        &self,
+        txn: &LmdbReadTransaction<'_>,
+        hash: &BlockHash,
+    ) -> Result<Option<u64>, StoreError> {
+        let Some(key) = self
+            .block_height_db
+            .get(&txn.txn, hash.as_bytes())
+            .map_err(LmdbError::from)?
+        else {
+            return Ok(None);
+        };
+        if key.len() <= 8
+            || self.height_db.get(&txn.txn, key).map_err(LmdbError::from)?
+                != Some(hash.as_bytes().as_slice())
+        {
+            return Err(StoreError::Corruption(
+                "conflicting block height indexes".into(),
+            ));
+        }
+        let height = u64::from_be_bytes(
+            key[key.len() - 8..]
+                .try_into()
+                .expect("checked index length"),
+        );
+        if height == 0 {
+            return Err(StoreError::Corruption("zero block height".into()));
+        }
+        Ok(Some(height))
+    }
+
+    /// Validate both height indexes within the caller's read snapshot.
+    pub fn block_at_height_txn(
+        &self,
+        txn: &LmdbReadTransaction<'_>,
+        account: &WalletAddress,
+        height: u64,
+    ) -> Result<Option<BlockHash>, StoreError> {
+        let key = height_key(account, height);
+        let Some(bytes) = self
+            .height_db
+            .get(&txn.txn, &key)
+            .map_err(LmdbError::from)?
+        else {
+            return Ok(None);
+        };
+        let hash: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| StoreError::Corruption("invalid indexed block hash".into()))?;
+        if self
+            .block_height_db
+            .get(&txn.txn, &hash)
+            .map_err(LmdbError::from)?
+            != Some(key.as_slice())
+        {
+            return Err(StoreError::Corruption(
+                "conflicting block height indexes".into(),
+            ));
+        }
+        Ok(Some(BlockHash::new(hash)))
+    }
+
     /// Read a block within a caller-owned read transaction. The composable
     /// counterpart to [`BlockStore::get_block`] — lets callers read several
     /// stores under one consistent snapshot (rsnano txn-threading model).
@@ -159,9 +224,15 @@ impl BlockStore for LmdbBlockStore {
             .map_err(LmdbError::from)?
         {
             let hk = height_key_bytes.to_vec();
-            self.height_db
-                .delete(&mut wtxn, &hk)
-                .map_err(LmdbError::from)?;
+            // A replacement may already own this height. Removing an old
+            // block must not erase the replacement's forward index.
+            if self.height_db.get(&wtxn, &hk).map_err(LmdbError::from)?
+                == Some(hash.as_bytes().as_slice())
+            {
+                self.height_db
+                    .delete(&mut wtxn, &hk)
+                    .map_err(LmdbError::from)?;
+            }
             self.block_height_db
                 .delete(&mut wtxn, hash.as_bytes().as_slice())
                 .map_err(LmdbError::from)?;

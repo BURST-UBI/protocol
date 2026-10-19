@@ -14,7 +14,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use tracing::{debug, info, warn};
 
 use crate::subscriptions::{
@@ -120,53 +120,84 @@ impl WsState {
 /// The WebSocket server, configured with a port and shared state.
 pub struct WebSocketServer {
     pub port: u16,
+    pub bind_address: String,
     pub state: Arc<WsState>,
+}
+
+struct Sessions {
+    events: Arc<WsState>,
+    stopping: watch::Receiver<bool>,
+    active: watch::Sender<()>,
 }
 
 impl WebSocketServer {
     /// Create a new server with a default channel capacity of 256.
     pub fn new(port: u16) -> Self {
-        Self {
-            port,
-            state: Arc::new(WsState::new(256)),
-        }
+        Self::with_state(port, Arc::new(WsState::new(256)))
     }
 
     /// Create a new server with the provided shared state.
     pub fn with_state(port: u16, state: Arc<WsState>) -> Self {
-        Self { port, state }
+        Self::with_bind(port, "127.0.0.1".into(), state)
     }
 
-    /// Start listening for WebSocket connections. This runs until the server
-    /// is shut down.
-    pub async fn start(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let state = self.state.clone();
+    /// Non-local event access requires an explicit bind address.
+    pub fn with_bind(port: u16, bind_address: String, state: Arc<WsState>) -> Self {
+        Self {
+            port,
+            bind_address,
+            state,
+        }
+    }
+
+    /// Shutdown closes upgraded sockets and joins their subscription forwarders.
+    pub async fn start(
+        &self,
+        shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (stop, stopping) = watch::channel(false);
+        let (active, initial) = watch::channel(());
+        drop(initial);
+        let sessions = Arc::new(Sessions {
+            events: self.state.clone(),
+            stopping,
+            active,
+        });
         let app = Router::new()
             .route("/ws", get(ws_handler))
-            .with_state(state);
+            .with_state(sessions.clone());
 
-        let addr = format!("0.0.0.0:{}", self.port);
-        info!("WebSocket server listening on {}", addr);
-        let listener = tokio::net::TcpListener::bind(&addr).await?;
-        axum::serve(listener, app).await?;
+        let listener =
+            tokio::net::TcpListener::bind((self.bind_address.as_str(), self.port)).await?;
+        info!(address = %listener.local_addr()?, "WebSocket server listening");
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                shutdown.await;
+                stop.send_replace(true);
+            })
+            .await?;
+        sessions.active.closed().await;
         Ok(())
     }
 }
 
 /// Axum handler that upgrades an HTTP request to a WebSocket connection.
-async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<WsState>>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(sessions): State<Arc<Sessions>>,
+) -> impl IntoResponse {
+    let active = sessions.active.subscribe();
+    ws.on_upgrade(move |socket| async move {
+        let _active = active;
+        handle_socket(socket, sessions.events.clone(), sessions.stopping.clone()).await;
+    })
 }
 
-/// Handle a single WebSocket connection.
-///
-/// The flow:
-/// 1. Split the socket into sender and receiver halves.
-/// 2. Listen for client messages (subscribe, unsubscribe, ping).
-/// 3. For each active subscription, spawn a forwarder task that reads from
-///    the topic broadcast channel and sends matching events to the client.
-/// 4. Clean up all forwarder tasks when the client disconnects.
-async fn handle_socket(socket: WebSocket, state: Arc<WsState>) {
+async fn handle_socket(
+    socket: WebSocket,
+    state: Arc<WsState>,
+    mut stopping: watch::Receiver<bool>,
+) {
     let (ws_sender, mut ws_receiver) = socket.split();
 
     // Wrap the sender in an Arc<Mutex> so forwarder tasks can share it.
@@ -182,43 +213,55 @@ async fn handle_socket(socket: WebSocket, state: Arc<WsState>) {
 
     debug!("New WebSocket client connected");
 
-    while let Some(msg_result) = ws_receiver.next().await {
-        let msg = match msg_result {
-            Ok(msg) => msg,
-            Err(e) => {
-                warn!("WebSocket receive error: {}", e);
-                break;
-            }
-        };
+    let receive = async {
+        while let Some(msg_result) = ws_receiver.next().await {
+            let msg = match msg_result {
+                Ok(msg) => msg,
+                Err(e) => {
+                    warn!("WebSocket receive error: {}", e);
+                    break;
+                }
+            };
 
-        match msg {
-            Message::Text(text) => {
-                handle_text_message(
-                    &text,
-                    &state,
-                    &mut client_subs,
-                    &mut forwarder_handles,
-                    &ws_sender,
-                )
-                .await;
+            match msg {
+                Message::Text(text) => {
+                    handle_text_message(
+                        &text,
+                        &state,
+                        &mut client_subs,
+                        &mut forwarder_handles,
+                        &ws_sender,
+                    )
+                    .await;
+                }
+                Message::Close(_) => {
+                    debug!("Client sent close frame");
+                    break;
+                }
+                Message::Ping(data) => {
+                    let mut sender = ws_sender.lock().await;
+                    let _ = sender.send(Message::Pong(data)).await;
+                }
+                _ => {}
             }
-            Message::Close(_) => {
-                debug!("Client sent close frame");
-                break;
-            }
-            Message::Ping(data) => {
-                let mut sender = ws_sender.lock().await;
-                let _ = sender.send(Message::Pong(data)).await;
-            }
-            _ => {}
         }
+    };
+    tokio::select! {
+        biased;
+        _ = stopping.wait_for(|stopped| *stopped) => {},
+        () = receive => {},
     }
 
     // Client disconnected — abort all forwarder tasks.
     for (topic, handle) in forwarder_handles.drain() {
         debug!("Aborting forwarder for topic: {}", topic);
         handle.abort();
+        let _ = handle.await;
     }
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        ws_sender.lock().await.send(Message::Close(None)).await
+    })
+    .await;
     debug!("WebSocket client disconnected");
 }
 
@@ -252,6 +295,7 @@ async fn handle_text_message(
             // If already subscribed, abort the old forwarder first.
             if let Some(handle) = forwarder_handles.remove(&topic) {
                 handle.abort();
+                let _ = handle.await;
             }
 
             client_subs.subscribe(topic.clone(), filter.clone());
@@ -283,6 +327,7 @@ async fn handle_text_message(
             let was_subscribed = client_subs.unsubscribe(&topic);
             if let Some(handle) = forwarder_handles.remove(&topic) {
                 handle.abort();
+                let _ = handle.await;
             }
 
             let ack = if was_subscribed {
@@ -357,4 +402,94 @@ fn unix_timestamp_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio_tungstenite::{connect_async, tungstenite::Message as ClientFrame};
+
+    #[test]
+    fn external_event_access_requires_explicit_opt_in() {
+        assert_eq!(WebSocketServer::new(7078).bind_address, "127.0.0.1");
+        let state = Arc::new(WsState::new(8));
+        assert_eq!(
+            WebSocketServer::with_state(7078, state.clone()).bind_address,
+            "127.0.0.1"
+        );
+        assert_eq!(
+            WebSocketServer::with_bind(7078, "::1".into(), state).bind_address,
+            "::1"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_closes_sessions_and_reaps_subscription_forwarders() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        for generation in 0..2 {
+            let state = Arc::new(WsState::new(8));
+            let server = WebSocketServer::with_state(port, state.clone());
+            let (shutdown, stop) = tokio::sync::oneshot::channel();
+            let worker = tokio::spawn(async move {
+                server
+                    .start(async move {
+                        let _ = stop.await;
+                    })
+                    .await
+                    .unwrap();
+            });
+            let mut client = tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if let Ok((client, _)) =
+                        connect_async(format!("ws://127.0.0.1:{port}/ws")).await
+                    {
+                        break client;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            client
+                .send(ClientFrame::Text(
+                    r#"{"action":"subscribe","topic":"account_update"}"#.into(),
+                ))
+                .await
+                .unwrap();
+            let ack = tokio::time::timeout(Duration::from_secs(1), client.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let ack: serde_json::Value = serde_json::from_str(ack.to_text().unwrap()).unwrap();
+            assert_eq!(ack["type"], "ack");
+            assert_eq!(state.account_update_tx.receiver_count(), 1);
+            state.publish_account_update("fixture", &generation.to_string(), "balance");
+            let event = tokio::time::timeout(Duration::from_secs(1), client.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let event: serde_json::Value = serde_json::from_str(event.to_text().unwrap()).unwrap();
+            assert_eq!(event["data"]["balance"], generation.to_string());
+            shutdown.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(3), worker)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(state.account_update_tx.receiver_count(), 0);
+            let close = tokio::time::timeout(Duration::from_secs(1), client.next())
+                .await
+                .unwrap();
+            assert!(matches!(close, Some(Ok(ClientFrame::Close(_))) | None));
+            assert!(connect_async(format!("ws://127.0.0.1:{port}/ws"))
+                .await
+                .is_err());
+        }
+    }
 }

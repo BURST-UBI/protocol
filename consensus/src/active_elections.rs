@@ -9,6 +9,7 @@ use crate::error::ConsensusError;
 use crate::vote_info::VoteResult;
 use burst_types::{BlockHash, Timestamp, WalletAddress};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Container for all active consensus elections.
 ///
@@ -18,20 +19,33 @@ use std::collections::HashMap;
 pub struct ActiveElections {
     /// Root block hash -> election.
     elections: HashMap<BlockHash, Election>,
+    /// Validated candidate hash -> shared conflict root. Wire votes carry hashes,
+    /// not roots; never let a peer choose the election a candidate belongs to.
+    candidate_roots: HashMap<BlockHash, BlockHash>,
+    candidate_counts: HashMap<BlockHash, usize>,
     /// Maximum number of concurrent elections.
     max_elections: usize,
-    /// Effective online voting weight used for new elections.
-    /// Should be `max(current_online, trended_ema, min_floor)` to prevent
-    /// quorum collapse on temporary online weight dips.
+    /// Total frozen authority for new elections. Legacy component callers may
+    /// supply a weight directly; the node sets the complete confirmed map.
     effective_weight: u128,
+    authority: Option<Arc<HashMap<WalletAddress, u128>>>,
+    electorates: HashMap<BlockHash, Arc<HashMap<WalletAddress, u128>>>,
+    authority_epoch: Option<BlockHash>,
+    quorum_bps: u16,
 }
 
 impl ActiveElections {
     pub fn new(max_elections: usize, online_weight: u128) -> Self {
         Self {
             elections: HashMap::new(),
+            candidate_roots: HashMap::new(),
+            candidate_counts: HashMap::new(),
             max_elections,
             effective_weight: online_weight,
+            authority: None,
+            electorates: HashMap::new(),
+            authority_epoch: None,
+            quorum_bps: 6700,
         }
     }
 
@@ -44,16 +58,76 @@ impl ActiveElections {
         root: BlockHash,
         now: Timestamp,
     ) -> Result<(), ConsensusError> {
-        if self.elections.len() >= self.max_elections {
-            return Err(ConsensusError::ElectionCapacityReached(self.max_elections));
-        }
         if self.elections.contains_key(&root) {
             return Ok(());
         }
+        if self.elections.len() >= self.max_elections {
+            return Err(ConsensusError::ElectionCapacityReached(self.max_elections));
+        }
 
-        let election = Election::new(root, self.effective_weight, now);
+        let election = Election::with_quorum(root, self.effective_weight, now, self.quorum_bps);
+        if let Some(authority) = &self.authority {
+            self.electorates.insert(root, Arc::clone(authority));
+        }
         self.elections.insert(root, election);
         Ok(())
+    }
+
+    /// Register a locally validated candidate before accepting votes for it.
+    /// Competing candidates must use the same account-position root.
+    pub fn register_candidate(
+        &mut self,
+        root: BlockHash,
+        candidate: BlockHash,
+        now: Timestamp,
+    ) -> Result<(), ConsensusError> {
+        if let Some(existing) = self.candidate_roots.get(&candidate) {
+            return if *existing == root {
+                Ok(())
+            } else {
+                Err(ConsensusError::Other(
+                    "candidate already belongs to another election".into(),
+                ))
+            };
+        }
+        // Bound candidate routing independently of the number of elections.
+        if self.candidate_counts.get(&root).copied().unwrap_or(0) >= 16 {
+            return Err(ConsensusError::Other(
+                "election candidate limit reached".into(),
+            ));
+        }
+        self.start_election(root, now)?;
+        self.candidate_roots.insert(candidate, root);
+        *self.candidate_counts.entry(root).or_default() += 1;
+        Ok(())
+    }
+
+    pub fn candidate_root(&self, candidate: &BlockHash) -> Option<BlockHash> {
+        self.candidate_roots.get(candidate).copied()
+    }
+
+    pub fn unconfirmed_candidates(&self) -> Vec<BlockHash> {
+        let mut hashes: Vec<_> = self
+            .candidate_roots
+            .iter()
+            .filter(|(_, root)| {
+                self.elections
+                    .get(root)
+                    .is_some_and(|e| !e.is_confirmed() && !e.is_expired())
+            })
+            .map(|(hash, _)| *hash)
+            .collect();
+        hashes.sort_by_key(|hash| *hash.as_bytes());
+        hashes
+    }
+
+    fn prune_candidate_routes(&mut self) {
+        self.candidate_roots
+            .retain(|_, root| self.elections.contains_key(root));
+        self.candidate_counts
+            .retain(|root, _| self.elections.contains_key(root));
+        self.electorates
+            .retain(|root, _| self.elections.contains_key(root));
     }
 
     /// Route a vote to the appropriate election.
@@ -68,6 +142,10 @@ impl ActiveElections {
         is_final: bool,
         now: Timestamp,
     ) -> Result<Option<ElectionStatus>, ConsensusError> {
+        let weight = self
+            .electorates
+            .get(root)
+            .map_or(weight, |roster| roster.get(voter).copied().unwrap_or(0));
         let election = self
             .elections
             .get_mut(root)
@@ -85,6 +163,29 @@ impl ActiveElections {
                 let status = election.try_confirm(now);
                 Ok(status)
             }
+        }
+    }
+
+    /// Process an authenticated wire vote using its signed ordering metadata.
+    pub fn process_signed_vote(
+        &mut self,
+        root: &BlockHash,
+        mut vote: crate::vote_info::VoteInfo,
+        received_at: Timestamp,
+    ) -> Result<Option<ElectionStatus>, ConsensusError> {
+        if self.candidate_root(&vote.block_hash) != Some(*root) {
+            return Err(ConsensusError::Other("unregistered vote candidate".into()));
+        }
+        vote.weight = self.electorates.get(root).map_or(vote.weight, |roster| {
+            roster.get(&vote.voter).copied().unwrap_or(0)
+        });
+        let election = self
+            .elections
+            .get_mut(root)
+            .ok_or_else(|| ConsensusError::ElectionNotFound(root.to_string()))?;
+        match election.vote_signed(vote, received_at) {
+            VoteResult::Error(message) => Err(ConsensusError::FinalVoteAlreadyCast(message)),
+            _ => Ok(election.try_confirm(received_at)),
         }
     }
 
@@ -122,6 +223,7 @@ impl ActiveElections {
         for root in &expired {
             self.elections.remove(root);
         }
+        self.prune_candidate_routes();
 
         expired
     }
@@ -131,16 +233,29 @@ impl ActiveElections {
     /// Should be called after `confirmed_elections()` so the caller can
     /// collect and cement the results, then free the slots.
     pub fn cleanup_confirmed(&mut self) -> Vec<BlockHash> {
+        self.cleanup_confirmed_where(|_| true)
+    }
+
+    /// Keep a confirmed election until its winner has been handed to the ledger.
+    pub fn cleanup_confirmed_where(
+        &mut self,
+        processed: impl Fn(&BlockHash) -> bool,
+    ) -> Vec<BlockHash> {
         let confirmed: Vec<BlockHash> = self
             .elections
             .iter()
             .filter(|(_, e)| e.state == ElectionState::Confirmed)
+            .filter(|(_, e)| {
+                e.leading_final_block()
+                    .is_some_and(|(winner, _)| processed(&winner))
+            })
             .map(|(root, _)| *root)
             .collect();
 
         for root in &confirmed {
             self.elections.remove(root);
         }
+        self.prune_candidate_routes();
 
         confirmed
     }
@@ -148,6 +263,12 @@ impl ActiveElections {
     /// Get a reference to an election by its root.
     pub fn get_election(&self, root: &BlockHash) -> Option<&Election> {
         self.elections.get(root)
+    }
+
+    /// Retire an election whose account position was removed by ledger replacement.
+    pub fn remove_root(&mut self, root: &BlockHash) {
+        self.elections.remove(root);
+        self.prune_candidate_routes();
     }
 
     /// Get a mutable reference to an election by its root.
@@ -185,13 +306,89 @@ impl ActiveElections {
             .collect()
     }
 
-    /// Update the effective weight used for new elections.
-    ///
-    /// Callers should pass `OnlineWeightSampler::effective_weight()` which is
-    /// `max(current_online, trended_ema, min_floor)`. This prevents quorum
-    /// collapse when online weight dips temporarily.
+    /// Legacy component configuration. Once an authority map is installed,
+    /// attendance samples cannot change the denominator for new elections.
     pub fn set_online_weight(&mut self, weight: u128) {
-        self.effective_weight = weight;
+        if self.authority.is_none() {
+            self.effective_weight = weight;
+        }
+    }
+
+    /// Freeze confirmed representative weights when each election starts.
+    /// Online attendance and later delegation cannot rewrite an active tally.
+    pub fn set_authority(
+        &mut self,
+        weights: HashMap<WalletAddress, u128>,
+    ) -> Result<(), ConsensusError> {
+        if self.authority_epoch.is_some() && self.authority.as_deref() != Some(&weights) {
+            return Err(ConsensusError::Other(
+                "certified authority requires an epoch handoff".into(),
+            ));
+        }
+        let total = weights
+            .values()
+            .try_fold(0u128, |sum, weight| sum.checked_add(*weight))
+            .ok_or_else(|| ConsensusError::Other("authority weight overflow".into()))?;
+        self.authority = Some(Arc::new(weights));
+        self.effective_weight = total;
+        Ok(())
+    }
+
+    pub fn authority_epoch(&self) -> Option<BlockHash> {
+        self.authority_epoch
+    }
+
+    /// The caller authenticates the installed checkpoint. A new epoch retires
+    /// every old election and candidate route; attendance cannot reopen them.
+    /// Repeating the same epoch is allowed only with identical authority.
+    pub fn install_authority(
+        &mut self,
+        epoch: BlockHash,
+        weights: HashMap<WalletAddress, u128>,
+        quorum_bps: u16,
+    ) -> Result<(), ConsensusError> {
+        let total = weights
+            .values()
+            .try_fold(0u128, |sum, weight| sum.checked_add(*weight))
+            .ok_or_else(|| ConsensusError::Other("authority weight overflow".into()))?;
+        if epoch.is_zero()
+            || !(6667..=10000).contains(&quorum_bps)
+            || total == 0
+            || weights
+                .values()
+                .any(|weight| *weight == 0 || *weight % crate::rep_weights::WEIGHT_PER_HUMAN != 0)
+        {
+            return Err(ConsensusError::Other(
+                "invalid certified payment authority".into(),
+            ));
+        }
+        if self.authority_epoch == Some(epoch) {
+            if self.authority.as_deref() != Some(&weights) || self.quorum_bps != quorum_bps {
+                return Err(ConsensusError::Other(
+                    "installed payment authority changed".into(),
+                ));
+            }
+            return Ok(());
+        }
+        self.elections.clear();
+        self.candidate_roots.clear();
+        self.candidate_counts.clear();
+        self.electorates.clear();
+        self.authority = Some(Arc::new(weights));
+        self.effective_weight = total;
+        self.authority_epoch = Some(epoch);
+        self.quorum_bps = quorum_bps;
+        Ok(())
+    }
+
+    pub fn has_authorized_voter(&self, voter: &WalletAddress) -> bool {
+        self.authority
+            .as_ref()
+            .is_some_and(|r| r.get(voter).is_some_and(|w| *w > 0))
+            || self
+                .electorates
+                .values()
+                .any(|r| r.get(voter).is_some_and(|w| *w > 0))
     }
 
     /// Whether the container has reached its capacity limit.
@@ -245,6 +442,90 @@ impl ActiveElections {
 mod tests {
     use super::*;
 
+    #[test]
+    fn certified_epoch_retires_old_routes_and_freezes_its_quorum() {
+        let old = WalletAddress::new("brst_old");
+        let next = WalletAddress::new("brst_next");
+        let mut elections = ActiveElections::new(10, 0);
+        let first = BlockHash::new([1; 32]);
+        let second = BlockHash::new([2; 32]);
+        let root = BlockHash::new([3; 32]);
+        let candidate = BlockHash::new([4; 32]);
+        elections
+            .install_authority(first, HashMap::from([(old.clone(), 100_000)]), 6700)
+            .unwrap();
+        elections
+            .register_candidate(root, candidate, Timestamp::new(1))
+            .unwrap();
+        assert_eq!(
+            elections
+                .get_election(&root)
+                .unwrap()
+                .confirmation_threshold(),
+            67_000
+        );
+        elections
+            .install_authority(second, HashMap::from([(next.clone(), 100_000)]), 8000)
+            .unwrap();
+        assert_eq!(elections.election_count(), 0);
+        assert_eq!(elections.candidate_root(&candidate), None);
+        assert!(!elections.has_authorized_voter(&old));
+        assert!(elections.has_authorized_voter(&next));
+        elections.set_online_weight(1);
+        elections
+            .register_candidate(root, BlockHash::new([5; 32]), Timestamp::new(2))
+            .unwrap();
+        assert_eq!(
+            elections
+                .get_election(&root)
+                .unwrap()
+                .confirmation_threshold(),
+            80_000
+        );
+        elections
+            .install_authority(second, HashMap::from([(next.clone(), 100_000)]), 8000)
+            .unwrap();
+        assert_eq!(elections.election_count(), 1);
+        assert!(elections
+            .install_authority(second, HashMap::from([(next, 100_000)]), 6700)
+            .is_err());
+        assert!(elections
+            .set_authority(HashMap::from([(old, 100_000)]))
+            .is_err());
+        assert_eq!(
+            elections
+                .get_election(&root)
+                .unwrap()
+                .confirmation_threshold(),
+            80_000
+        );
+    }
+
+    #[test]
+    fn invalid_certified_authority_preserves_current_elections() {
+        let voter = WalletAddress::new("brst_human");
+        let mut elections = ActiveElections::new(10, 0);
+        let epoch = BlockHash::new([1; 32]);
+        elections
+            .install_authority(epoch, HashMap::from([(voter.clone(), 10_000)]), 6700)
+            .unwrap();
+        elections
+            .register_candidate(epoch, epoch, Timestamp::new(1))
+            .unwrap();
+        for (next, weight, quorum) in [
+            (BlockHash::ZERO, 10_000, 6700),
+            (BlockHash::new([2; 32]), 1, 6700),
+            (BlockHash::new([2; 32]), 10_000, 6666),
+            (BlockHash::new([2; 32]), 0, 6700),
+        ] {
+            assert!(elections
+                .install_authority(next, HashMap::from([(voter.clone(), weight)]), quorum)
+                .is_err());
+            assert_eq!(elections.authority_epoch(), Some(epoch));
+            assert_eq!(elections.candidate_root(&epoch), Some(epoch));
+        }
+    }
+
     fn make_hash(byte: u8) -> BlockHash {
         BlockHash::new([byte; 32])
     }
@@ -266,11 +547,159 @@ mod tests {
     }
 
     #[test]
+    fn frozen_authority_ignores_claimed_weights_attendance_and_later_delegation() {
+        let alice = make_voter("alice");
+        let bob = make_voter("bob");
+        let carol = make_voter("carol");
+        let mallory = make_voter("mallory");
+        let mut elections = ActiveElections::new(10, 0);
+        elections
+            .set_authority(HashMap::from([
+                (alice.clone(), 10_000),
+                (bob.clone(), 10_000),
+                (carol.clone(), 10_000),
+            ]))
+            .unwrap();
+        let root = make_hash(1);
+        let block = make_hash(2);
+        elections.register_candidate(root, block, ts(100)).unwrap();
+        elections.set_online_weight(1);
+        elections
+            .set_authority(HashMap::from([(mallory.clone(), 30_000)]))
+            .unwrap();
+        assert!(elections
+            .process_vote(&root, &mallory, block, u128::MAX, true, ts(101))
+            .unwrap()
+            .is_none());
+        assert!(elections
+            .process_vote(&root, &alice, block, u128::MAX, true, ts(102))
+            .unwrap()
+            .is_none());
+        assert!(elections
+            .process_vote(&root, &bob, block, 0, true, ts(102))
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            elections.get_election(&root).unwrap().final_tally[&block],
+            20_000
+        );
+        assert_eq!(
+            elections
+                .get_election(&root)
+                .unwrap()
+                .confirmation_threshold(),
+            20_100
+        );
+        assert!(elections
+            .process_vote(&root, &carol, block, 0, true, ts(102))
+            .unwrap()
+            .is_some());
+        let next = make_hash(3);
+        elections
+            .register_candidate(next, make_hash(4), ts(103))
+            .unwrap();
+        assert_eq!(
+            elections
+                .get_election(&next)
+                .unwrap()
+                .confirmation_threshold(),
+            20_100
+        );
+        assert!(elections
+            .process_vote(&next, &alice, make_hash(4), u128::MAX, true, ts(104))
+            .unwrap()
+            .is_none());
+        assert!(elections
+            .process_vote(&next, &mallory, make_hash(4), 0, true, ts(104))
+            .unwrap()
+            .is_some());
+        elections.cleanup_confirmed();
+        assert!(elections.electorates.is_empty());
+    }
+
+    #[test]
+    fn empty_or_overflowing_authority_cannot_manufacture_a_quorum() {
+        let mut elections = ActiveElections::new(10, 1);
+        assert!(elections
+            .set_authority(HashMap::from([
+                (make_voter("a"), u128::MAX),
+                (make_voter("b"), 1)
+            ]))
+            .is_err());
+        elections.set_authority(HashMap::new()).unwrap();
+        elections
+            .register_candidate(make_hash(1), make_hash(2), ts(100))
+            .unwrap();
+        assert!(elections
+            .process_vote(
+                &make_hash(1),
+                &make_voter("a"),
+                make_hash(2),
+                u128::MAX,
+                true,
+                ts(101)
+            )
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
     fn duplicate_election_is_noop() {
         let mut ae = ActiveElections::new(10, 1000);
         ae.start_election(make_hash(1), ts(100)).unwrap();
         ae.start_election(make_hash(1), ts(101)).unwrap();
         assert_eq!(ae.election_count(), 1);
+    }
+
+    #[test]
+    fn competing_candidates_share_one_election_even_at_capacity() {
+        let mut ae = ActiveElections::new(1, 3);
+        let root = make_hash(1);
+        ae.register_candidate(root, make_hash(2), ts(100)).unwrap();
+        ae.register_candidate(root, make_hash(3), ts(101)).unwrap();
+        assert_eq!(ae.election_count(), 1);
+        assert_eq!(ae.candidate_root(&make_hash(2)), Some(root));
+        assert_eq!(ae.candidate_root(&make_hash(3)), Some(root));
+        assert_eq!(ae.candidate_root(&make_hash(9)), None);
+        assert!(ae
+            .register_candidate(make_hash(4), make_hash(2), ts(101))
+            .is_err());
+        assert!(ae
+            .register_candidate(make_hash(4), make_hash(5), ts(101))
+            .is_err());
+        assert_eq!(ae.candidate_root(&make_hash(5)), None);
+        ae.process_vote(&root, &make_voter("alice"), make_hash(2), 1, true, ts(102))
+            .unwrap();
+        assert!(ae
+            .process_vote(&root, &make_voter("alice"), make_hash(3), 1, true, ts(103))
+            .is_err());
+        assert_eq!(
+            ae.get_election(&root)
+                .unwrap()
+                .final_tally
+                .get(&make_hash(3)),
+            None
+        );
+    }
+
+    #[test]
+    fn candidate_routes_are_bounded_and_removed_with_elections() {
+        let mut ae = ActiveElections::new(1, 1);
+        let root = make_hash(1);
+        for n in 2..18 {
+            ae.register_candidate(root, make_hash(n), ts(100)).unwrap();
+        }
+        assert!(ae.register_candidate(root, make_hash(18), ts(100)).is_err());
+        ae.register_candidate(root, make_hash(2), ts(100)).unwrap();
+        ae.cleanup_expired(1000, ts(102));
+        assert!(ae.candidate_roots.is_empty());
+        assert!(ae.candidate_counts.is_empty());
+        ae.register_candidate(root, make_hash(2), ts(103)).unwrap();
+        ae.process_vote(&root, &make_voter("alice"), make_hash(2), 1, true, ts(104))
+            .unwrap();
+        ae.cleanup_confirmed();
+        assert!(ae.candidate_roots.is_empty());
+        assert!(ae.candidate_counts.is_empty());
     }
 
     #[test]

@@ -1,14 +1,26 @@
 /target
+/fuzz/target/
+/fuzz/corpus/
+/fuzz/artifacts/
 # Runtime LMDB data directories — must never be committed (a committed
 # burst_data shipped baked-in live peers that leaked across networks).
 /burst_data/
 *.mdb
 **/*.rs.bk
 Cargo.lock
+!/Cargo.lock
+!/fuzz/Cargo.lock
 *.swp
 *.swo
 *~
 .env
+.env.*
+!.env.example
+!.env.sample
+*.seed
+*.pem
+*.p12
+*.pfx
 .idea/
 .vscode/
 *.log

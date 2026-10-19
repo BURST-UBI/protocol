@@ -4,37 +4,49 @@ use burst_types::{KeyPair, Timestamp, WalletAddress, WalletState};
 
 use crate::error::WalletError;
 
-#[cfg(not(target_arch = "wasm32"))]
 use serde::Deserialize;
-#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
 // ── NodeClient ──────────────────────────────────────────────────────────
 
 /// HTTP client for communicating with a BURST node via JSON-RPC.
 ///
-/// Wraps `reqwest::Client` with the node's base URL and provides typed
-/// methods for each RPC action the wallet needs.
-#[cfg(not(target_arch = "wasm32"))]
+/// Uses native HTTP or browser Fetch with the same typed RPC and signing API.
 #[derive(Clone)]
 pub struct NodeClient {
+    #[cfg(not(target_arch = "wasm32"))]
     http: reqwest::Client,
     node_url: String,
+    pub(crate) expected_signing_grant: burst_types::BlockHash,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) payment_journal: Option<std::path::PathBuf>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl NodeClient {
     /// Create a new NodeClient targeting the given base URL (e.g. `http://127.0.0.1:7076`).
     pub fn new(node_url: impl Into<String>) -> Result<Self, WalletError> {
+        #[cfg(not(target_arch = "wasm32"))]
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .connect_timeout(Duration::from_secs(10))
             .build()
             .map_err(|e| WalletError::Node(format!("failed to create HTTP client: {e}")))?;
         Ok(Self {
+            #[cfg(not(target_arch = "wasm32"))]
             http,
             node_url: node_url.into(),
+            expected_signing_grant: burst_types::BlockHash::ZERO,
+            #[cfg(not(target_arch = "wasm32"))]
+            payment_journal: None,
         })
+    }
+
+    /// Retain each signed action and proposal content before transmission. The caller must hold its
+    /// account/profile signing lease and resolve existing drafts before signing.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_payment_journal(mut self, path: std::path::PathBuf) -> Self {
+        self.payment_journal = Some(path);
+        self
     }
 
     /// The configured node URL.
@@ -42,8 +54,14 @@ impl NodeClient {
         &self.node_url
     }
 
+    /// Bind signing to this device's saved grant, never a freshly queried grant.
+    pub fn with_signing_grant(mut self, grant: burst_types::BlockHash) -> Self {
+        self.expected_signing_grant = grant;
+        self
+    }
+
     /// Send a JSON-RPC request and return the `result` field.
-    async fn rpc_call(
+    pub async fn rpc_call(
         &self,
         action: &str,
         params: serde_json::Value,
@@ -53,31 +71,50 @@ impl NodeClient {
             .ok_or_else(|| WalletError::Node("params must be a JSON object".into()))?
             .insert("action".to_string(), serde_json::json!(action));
 
-        let response = self
-            .http
-            .post(&self.node_url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| WalletError::Node(format!("request failed: {e}")))?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let json = {
+            let response = self
+                .http
+                .post(&self.node_url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| WalletError::Node(format!("request failed: {e}")))?;
 
-        if !response.status().is_success() {
-            return Err(WalletError::Node(format!(
-                "node returned HTTP {}",
-                response.status()
-            )));
-        }
+            if !response.status().is_success() {
+                return Err(WalletError::Node(format!(
+                    "node returned HTTP {}",
+                    response.status()
+                )));
+            }
 
-        let json: serde_json::Value = response
-            .json()
+            let json: serde_json::Value = response
+                .json()
+                .await
+                .map_err(|e| WalletError::Node(format!("invalid JSON response: {e}")))?;
+            json
+        };
+        #[cfg(target_arch = "wasm32")]
+        let json: serde_json::Value = {
+            let payload = serde_json::to_string(&body)
+                .map_err(|error| WalletError::Node(error.to_string()))?;
+            let bytes = burst_browser::fetch_bytes(
+                &self.node_url,
+                Some(&payload),
+                Duration::from_secs(30),
+                16 * 1024 * 1024,
+            )
             .await
-            .map_err(|e| WalletError::Node(format!("invalid JSON response: {e}")))?;
+            .map_err(|error| WalletError::Node(error.to_string()))?;
+            serde_json::from_slice(&bytes)
+                .map_err(|error| WalletError::Node(format!("invalid JSON response: {error}")))?
+        };
 
         if let Some(err) = json.get("error").and_then(|e| e.as_str()) {
             return Err(WalletError::Node(format!("node error: {err}")));
         }
 
-        json.get("result").cloned().unwrap_or(json).pipe_ok()
+        Ok(json.get("result").cloned().unwrap_or(json))
     }
 
     /// Fetch account balance (BRN + TRST).
@@ -132,7 +169,37 @@ impl NodeClient {
             .map_err(|e| WalletError::Node(format!("invalid pending response: {e}")))
     }
 
-    /// Request proof-of-work for a block hash.
+    /// Inspect a single receivable without relying on a truncated list page.
+    pub async fn account_pending_source(
+        &self,
+        account: &str,
+        hash: &str,
+    ) -> Result<Option<PendingBlock>, WalletError> {
+        let hash = crate::signed_client::parse_hash(hash)?.to_string();
+        let value = self
+            .rpc_call(
+                "account_pending",
+                serde_json::json!({"account":account,"hash":hash,"count":1}),
+            )
+            .await?;
+        let result: AccountPendingResult = serde_json::from_value(value)
+            .map_err(|error| WalletError::Node(format!("invalid pending source: {error}")))?;
+        if result.cursor.is_some()
+            || result.blocks.len() > 1
+            || result
+                .blocks
+                .iter()
+                .any(|entry| entry.hash != hash || (entry.return_credit && entry.source != account))
+        {
+            return Err(WalletError::Node(
+                "node did not return an exact pending source; update the node before receiving"
+                    .into(),
+            ));
+        }
+        Ok(result.blocks.into_iter().next())
+    }
+
+    /// Request proof-of-work for a predecessor or account-opening work root.
     pub async fn work_generate(&self, hash: &str) -> Result<WorkGenerateResult, WalletError> {
         let result = self
             .rpc_call("work_generate", serde_json::json!({ "hash": hash }))
@@ -144,7 +211,6 @@ impl NodeClient {
 }
 
 /// Balance response from the node.
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Deserialize)]
 pub struct AccountBalanceResult {
     pub brn_balance: String,
@@ -152,10 +218,10 @@ pub struct AccountBalanceResult {
 }
 
 /// Account info response from the node.
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Deserialize)]
 pub struct AccountInfoResult {
     pub address: String,
+    pub head: String,
     pub brn_balance: String,
     pub trst_balance: String,
     #[serde(default)]
@@ -176,7 +242,6 @@ pub struct AccountInfoResult {
 }
 
 /// Response from the `process` RPC (block submission).
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProcessResult {
     pub hash: String,
@@ -186,66 +251,33 @@ pub struct ProcessResult {
 }
 
 /// Response from the `account_pending` RPC.
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Deserialize)]
 pub struct AccountPendingResult {
-    #[serde(default)]
+    #[serde(default, rename = "pending", alias = "blocks")]
     pub blocks: Vec<PendingBlock>,
+    #[serde(default)]
+    pub cursor: Option<String>,
 }
 
 /// A single pending (receivable) block entry.
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Deserialize)]
 pub struct PendingBlock {
+    pub hash: String,
     pub source: String,
     pub amount: String,
     #[serde(default)]
     pub block_type: String,
+    #[serde(default)]
+    pub return_credit: bool,
 }
 
 /// Response from the `work_generate` RPC.
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Deserialize)]
 pub struct WorkGenerateResult {
     pub work: String,
     pub difficulty: String,
     #[serde(default)]
     pub hash: String,
-}
-
-/// Helper trait to wrap a value in `Ok`.
-#[cfg(not(target_arch = "wasm32"))]
-trait PipeOk: Sized {
-    fn pipe_ok(self) -> Result<Self, WalletError> {
-        Ok(self)
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl PipeOk for serde_json::Value {}
-
-/// WASM-compatible NodeClient stub.
-///
-/// On WASM targets, NodeClient uses fetch API instead of reqwest.
-/// This is a minimal stub that allows the wallet_core crate to compile
-/// to WASM. A full implementation would use `web-sys` or `gloo-net`.
-#[cfg(target_arch = "wasm32")]
-#[derive(Clone)]
-pub struct NodeClient {
-    node_url: String,
-}
-
-#[cfg(target_arch = "wasm32")]
-impl NodeClient {
-    pub fn new(node_url: impl Into<String>) -> Result<Self, WalletError> {
-        Ok(Self {
-            node_url: node_url.into(),
-        })
-    }
-
-    pub fn node_url(&self) -> &str {
-        &self.node_url
-    }
 }
 
 // ── Wallet ──────────────────────────────────────────────────────────────
@@ -269,6 +301,15 @@ pub struct Wallet {
 }
 
 impl Wallet {
+    /// Create a wallet recoverable through the existing BURST mnemonic
+    /// derivation. Return the phrase once so the caller can require backup.
+    pub fn create_with_mnemonic() -> Result<(Self, String), WalletError> {
+        let phrase =
+            burst_crypto::generate_mnemonic().map_err(|e| WalletError::Key(e.to_string()))?;
+        let wallet = Self::from_mnemonic(&phrase)?;
+        Ok((wallet, phrase))
+    }
+
     /// Create a new wallet with fresh key pair.
     pub fn create() -> Result<Self, WalletError> {
         use burst_crypto::{derive_address, generate_keypair};
@@ -355,7 +396,6 @@ impl Wallet {
     }
 
     /// Restore a wallet from a private key and immediately sync state from a node.
-    #[cfg(not(target_arch = "wasm32"))]
     pub async fn from_private_key_with_node(
         private_key_bytes: &[u8],
         node_url: &str,
@@ -380,7 +420,6 @@ impl Wallet {
     /// Fetch and apply the current account state from the connected node.
     ///
     /// Updates `state` and `verified_at` from the node's `account_info` response.
-    #[cfg(not(target_arch = "wasm32"))]
     pub async fn refresh_from_node(&mut self) -> Result<(), WalletError> {
         let client = self
             .node_client
@@ -412,8 +451,8 @@ impl Wallet {
     /// This is a simplified offline estimate assuming a constant rate.
     /// For correct results across governance rate changes, use
     /// `brn_balance_with_history` instead.
-    /// Returns 0 if the wallet is not yet verified.
-    pub fn brn_balance(&self, now: Timestamp, brn_rate: u128) -> u128 {
+    /// Returns 0 if the wallet is not yet verified, or an error on accrual overflow.
+    pub fn brn_balance(&self, now: Timestamp, brn_rate: u128) -> Result<u128, WalletError> {
         match self.verified_at {
             Some(verified_at) => crate::balance::compute_display_balance(
                 verified_at,
@@ -422,7 +461,7 @@ impl Wallet {
                 self.total_brn_burned,
                 self.total_brn_staked,
             ),
-            None => 0,
+            None => Ok(0),
         }
     }
 
@@ -431,12 +470,12 @@ impl Wallet {
     /// `BRN = Σ(rate_i × duration_i) − total_burned − total_staked`
     ///
     /// This correctly accounts for governance rate changes over the wallet's
-    /// lifetime. Returns 0 if the wallet is not yet verified.
+    /// lifetime. Returns 0 if the wallet is not yet verified, or an error on overflow.
     pub fn brn_balance_with_history(
         &self,
         now: Timestamp,
         rate_history: &burst_brn::state::RateHistory,
-    ) -> u128 {
+    ) -> Result<u128, WalletError> {
         match self.verified_at {
             Some(verified_at) => crate::balance::compute_balance_with_history(
                 verified_at,
@@ -445,12 +484,11 @@ impl Wallet {
                 self.total_brn_burned,
                 self.total_brn_staked,
             ),
-            None => 0,
+            None => Ok(0),
         }
     }
 
     /// Get transferable TRST balance by querying the connected node.
-    #[cfg(not(target_arch = "wasm32"))]
     pub async fn trst_balance(&self) -> Result<u128, WalletError> {
         let client = self
             .node_client
@@ -465,7 +503,6 @@ impl Wallet {
     }
 
     /// Get expired TRST (virtue points / reputation) by querying the connected node.
-    #[cfg(not(target_arch = "wasm32"))]
     pub async fn trst_expired(&self) -> Result<u128, WalletError> {
         let client = self
             .node_client
@@ -485,7 +522,6 @@ impl Wallet {
     /// requires the MergerGraph revocation subsystem to populate a dedicated
     /// counter on AccountInfo. The code path is complete so that once the node
     /// reports real data, the wallet will surface it without changes.
-    #[cfg(not(target_arch = "wasm32"))]
     pub async fn trst_revoked(&self) -> Result<u128, WalletError> {
         let client = self
             .node_client
@@ -593,7 +629,7 @@ mod tests {
     #[test]
     fn test_wallet_brn_balance_unverified() {
         let wallet = Wallet::create().unwrap();
-        assert_eq!(wallet.brn_balance(Timestamp::now(), 10), 0);
+        assert_eq!(wallet.brn_balance(Timestamp::now(), 10).unwrap(), 0);
     }
 
     #[test]
@@ -603,7 +639,7 @@ mod tests {
         wallet.verified_at = Some(Timestamp::new(1000));
 
         // 500 seconds elapsed × rate 10 = 5000 BRN
-        let balance = wallet.brn_balance(Timestamp::new(1500), 10);
+        let balance = wallet.brn_balance(Timestamp::new(1500), 10).unwrap();
         assert_eq!(balance, 5000);
     }
 
@@ -616,7 +652,7 @@ mod tests {
         wallet.total_brn_staked = 1000;
 
         // 500s × rate 10 = 5000 - 2000 burned - 1000 staked = 2000
-        let balance = wallet.brn_balance(Timestamp::new(1500), 10);
+        let balance = wallet.brn_balance(Timestamp::new(1500), 10).unwrap();
         assert_eq!(balance, 2000);
     }
 

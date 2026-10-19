@@ -4,11 +4,11 @@
 //! `account_bytes ++ tx_hash(32)` → empty. Listing all transactions for
 //! an account is a prefix range-scan.
 
+use crate::shared_env::SharedEnv;
 use std::ops::Bound;
-use std::sync::Arc;
 
 use heed::types::Bytes;
-use heed::{Database, Env};
+use heed::Database;
 
 use burst_store::transaction::TransactionStore;
 use burst_store::StoreError;
@@ -18,7 +18,7 @@ use crate::block::increment_prefix;
 use crate::LmdbError;
 
 pub struct LmdbTransactionStore {
-    pub(crate) env: Arc<Env>,
+    pub(crate) env: SharedEnv,
     pub(crate) transactions_db: Database<Bytes, Bytes>,
     pub(crate) account_txs_db: Database<Bytes, Bytes>,
 }

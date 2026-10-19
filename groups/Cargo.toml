@@ -5,10 +5,19 @@ edition.workspace = true
 license.workspace = true
 description = "Group Trust Layer — off-chain social verification groups"
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [dependencies]
 burst-types = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+futures-util = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+burst-browser = { workspace = true }

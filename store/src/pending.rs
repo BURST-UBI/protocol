@@ -14,6 +14,10 @@ pub struct PendingInfo {
     /// Empty if the sender wasn't tracked in the TRST engine.
     #[serde(default)]
     pub provenance: Vec<PendingProvenance>,
+    /// The tokens were already returned to `source` at an expiry boundary.
+    /// A Receive acknowledges their nominal signed balance once; it must not
+    /// deliver tokens again. This receipt itself neither expires nor revokes.
+    pub return_credit: bool,
 }
 
 /// Origin provenance for a consumed token portion, stored in pending entries.
@@ -23,11 +27,16 @@ pub struct PendingInfo {
 /// are found by following the merger graph.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PendingProvenance {
+    pub basis: burst_types::TrstBasis,
     pub amount: u128,
     pub origin: TxHash,
     pub origin_wallet: WalletAddress,
     pub origin_timestamp: Timestamp,
     pub effective_origin_timestamp: Timestamp,
+    /// Catch-time splits, retained even after restoration so the restored
+    /// origin cannot blend back into the clean remainder. Clean sends start
+    /// empty; delivery must not apply historical revocations again.
+    pub revoked_amounts: std::collections::BTreeMap<[u8; 32], burst_types::TrstRevocationChunk>,
 }
 
 /// Trait for tracking pending receives.
@@ -68,6 +77,13 @@ pub trait PendingStore {
         &self,
         destination: &WalletAddress,
     ) -> Result<Vec<(TxHash, PendingInfo)>, StoreError>;
+
+    /// Outgoing TRST remains attributed to this sender until receipt or return
+    /// (decision 33.4). It is not available for another spend.
+    fn get_pending_from_account(
+        &self,
+        source: &WalletAddress,
+    ) -> Result<Vec<(WalletAddress, TxHash, PendingInfo)>, StoreError>;
 
     /// Total number of pending receives across all accounts.
     fn pending_count(&self) -> Result<u64, StoreError>;

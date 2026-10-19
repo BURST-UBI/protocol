@@ -55,7 +55,12 @@ pub struct PeerTelemetry {
 /// Per-peer metadata tracked by the [`PeerManager`].
 #[derive(Clone, Debug)]
 pub struct PeerState {
+    /// Live routing key (handshake identity); discovered candidates use ip:port.
+    pub peer_id: String,
     pub address: PeerAddress,
+    /// Whether the transport address was successfully dialed. Inbound TCP
+    /// source ports are never dial targets or gossip/cache entries.
+    pub address_is_dialable: bool,
     pub connected: bool,
     pub last_seen_secs: u64,
     /// Reputation score. Starts at 0, clamped to [`SCORE_MIN`]..=[`SCORE_MAX`].
@@ -71,6 +76,14 @@ pub struct PeerState {
     /// Differs from `address` when the peer is behind NAT (the TCP
     /// `peer_addr` may use an ephemeral port).
     pub peering_addr: Option<PeerAddress>,
+}
+
+impl PeerState {
+    fn dialable_address(&self) -> Option<&PeerAddress> {
+        self.peering_addr
+            .as_ref()
+            .or_else(|| self.address_is_dialable.then_some(&self.address))
+    }
 }
 
 /// Score at or below which a peer is banned.
@@ -92,7 +105,7 @@ const LATEST_KEEPALIVES_CAPACITY: usize = 32;
 /// Central registry for peer discovery, keepalive scheduling, scoring, and
 /// ban management.
 pub struct PeerManager {
-    /// All known peers keyed by `"ip:port"`.
+    /// Discovered candidates keyed by ip:port; live peers by handshake identity.
     peers: HashMap<String, PeerState>,
     /// Upper bound on the number of peers we track.
     max_peers: usize,
@@ -167,6 +180,10 @@ impl PeerManager {
     pub fn add_peer(&mut self, address: PeerAddress) {
         let key = Self::peer_key(&address);
 
+        if self.is_connected(&key) {
+            return;
+        }
+
         if let Some(existing) = self.peers.get(&key) {
             if existing.banned {
                 return;
@@ -196,9 +213,11 @@ impl PeerManager {
         }
 
         self.peers.insert(
-            key,
+            key.clone(),
             PeerState {
+                peer_id: key.clone(),
                 address,
+                address_is_dialable: true,
                 connected: false,
                 last_seen_secs: 0,
                 score: 0,
@@ -210,10 +229,73 @@ impl PeerManager {
         );
     }
 
+    /// Register a live connection by identity, independently of its socket.
+    /// Multiple nodes behind one NAT can advertise the same listening port.
+    pub fn register_connection(
+        &mut self,
+        peer_id: String,
+        address: PeerAddress,
+        outbound: bool,
+        now: u64,
+    ) -> bool {
+        let candidate = Self::peer_key(&address);
+        if self.is_banned(&peer_id) || (outbound && self.is_banned(&candidate)) {
+            return false;
+        }
+        if !self.peers.contains_key(&peer_id)
+            && !(outbound && self.peers.contains_key(&candidate))
+            && self.peers.len() >= self.max_peers
+        {
+            let victim = self
+                .peers
+                .iter()
+                .filter(|(_, p)| !p.connected && !p.banned)
+                .min_by_key(|(_, p)| p.score)
+                .map(|(id, _)| id.clone());
+            if let Some(id) = victim {
+                self.peers.remove(&id);
+            } else {
+                return false;
+            }
+        }
+        let previous = self.peers.remove(&peer_id).or_else(|| {
+            if outbound {
+                self.peers.remove(&candidate)
+            } else {
+                None
+            }
+        });
+        let mut peer = previous.unwrap_or(PeerState {
+            peer_id: peer_id.clone(),
+            address: address.clone(),
+            address_is_dialable: outbound,
+            connected: false,
+            last_seen_secs: now,
+            score: 0,
+            banned: false,
+            ban_until_secs: None,
+            telemetry: None,
+            peering_addr: None,
+        });
+        peer.peer_id = peer_id.clone();
+        // Preserve a previously dialed listening endpoint through a simultaneous
+        // inbound/outbound tie-break, but never preserve an ephemeral source.
+        if outbound || !peer.address_is_dialable {
+            peer.address = address;
+            peer.address_is_dialable = outbound;
+        }
+        peer.connected = true;
+        peer.last_seen_secs = now;
+        self.peers.insert(peer_id, peer);
+        self.num_connected = self.iter_connected().count();
+        true
+    }
+
     /// Find the peer with the lowest reputation score.
     fn find_worst_peer(&self) -> Option<(String, i32)> {
         self.peers
             .iter()
+            .filter(|(_, p)| !p.connected)
             .min_by_key(|(_, p)| p.score)
             .map(|(key, p)| (key.clone(), p.score))
     }
@@ -235,6 +317,16 @@ impl PeerManager {
             }
             peer.connected = true;
             peer.last_seen_secs = now_secs;
+        }
+    }
+
+    /// A completed outbound handshake proves this endpoint reaches the live
+    /// identity even when deterministic dedup keeps its inbound connection.
+    /// Remember that association so bootstrap does not redial it forever.
+    pub fn record_dialed_address(&mut self, peer_id: &str, address: PeerAddress) {
+        if let Some(peer) = self.peers.get_mut(peer_id) {
+            peer.address = address;
+            peer.address_is_dialable = true;
         }
     }
 
@@ -265,12 +357,18 @@ impl PeerManager {
         self.iter_connected().count()
     }
 
-    /// Check if a peer is currently connected by its key (ip:port).
+    /// Check either a live identity or a dialable endpoint.
     pub fn is_connected(&self, key: &str) -> bool {
         self.peers
             .get(key)
             .map(|p| p.connected && !p.banned)
             .unwrap_or(false)
+            || self.iter_connected().any(|(_, p)| {
+                (p.address_is_dialable && Self::peer_key(&p.address) == key)
+                    || p.peering_addr
+                        .as_ref()
+                        .is_some_and(|a| Self::peer_key(a) == key)
+            })
     }
 
     /// Iterate over all connected (and not-banned) peers.
@@ -279,12 +377,11 @@ impl PeerManager {
     }
 
     /// Return peer IDs of all connected peers from this IP.
-    /// Used for one-connection-per-IP enforcement (avoids overcounting reconnects).
+    /// Multiple identities sharing one NAT IP remain separate peers.
     pub fn connected_peer_ids_from_ip(&self, ip: &str) -> Vec<String> {
-        let prefix = format!("{ip}:");
         self.peers
             .iter()
-            .filter(|(key, p)| key.starts_with(&prefix) && p.connected && !p.banned)
+            .filter(|(_, p)| p.address.ip == ip && p.connected && !p.banned)
             .map(|(k, _)| k.clone())
             .collect()
     }
@@ -294,7 +391,7 @@ impl PeerManager {
     pub fn get_connectable_peers(&self) -> Vec<&PeerState> {
         self.peers
             .values()
-            .filter(|p| !p.connected && !p.banned)
+            .filter(|p| !p.connected && !p.banned && p.dialable_address().is_some())
             .collect()
     }
 
@@ -313,7 +410,10 @@ impl PeerManager {
             .values()
             .filter(|p| !p.connected && !p.banned)
             .filter_map(|p| {
-                let a = p.peering_addr.as_ref().unwrap_or(&p.address);
+                let a = p.dialable_address()?;
+                if self.is_connected(&Self::peer_key(a)) {
+                    return None;
+                }
                 if a.ip.is_empty() || a.ip == "0.0.0.0" || a.ip == "::" {
                     return None;
                 }
@@ -350,11 +450,9 @@ impl PeerManager {
                 break;
             }
             let peer = connected[i];
-            result.push(
-                peer.peering_addr
-                    .clone()
-                    .unwrap_or_else(|| peer.address.clone()),
-            );
+            if let Some(addr) = peer.dialable_address() {
+                result.push(addr.clone());
+            }
         }
 
         result
@@ -380,11 +478,9 @@ impl PeerManager {
                 break;
             }
             let peer = known[i];
-            result.push(
-                peer.peering_addr
-                    .clone()
-                    .unwrap_or_else(|| peer.address.clone()),
-            );
+            if let Some(addr) = peer.dialable_address() {
+                result.push(addr.clone());
+            }
         }
 
         result
@@ -394,9 +490,14 @@ impl PeerManager {
     /// node's own external address in slot 0 (for self-advertisement).
     pub fn random_peers_with_self(&self, count: usize) -> Vec<PeerAddress> {
         let mut result = Vec::with_capacity(count);
-        if let Some(self_addr) = self.self_peer_address() {
-            result.push(self_addr);
+        if count == 0 {
+            return result;
         }
+        // Slot zero is ALWAYS self, never an unrelated discovered peer.
+        result.push(self.self_peer_address().unwrap_or(PeerAddress {
+            ip: "0.0.0.0".into(),
+            port: 0,
+        }));
         let rest = self.random_known_peers(count.saturating_sub(result.len()));
         result.extend(rest);
         result.truncate(count);
@@ -457,7 +558,9 @@ impl PeerManager {
             self.latest_keepalives.push_back(peers.clone());
         }
         for addr in peers {
-            self.add_peer(addr);
+            if addr.port != 0 && addr.ip != "0.0.0.0" && addr.ip != "::" && !addr.ip.is_empty() {
+                self.add_peer(addr);
+            }
         }
     }
 
@@ -474,7 +577,13 @@ impl PeerManager {
     /// Set a peer's reachable address (learned from keepalive self-advertisement).
     pub fn set_peering_addr(&mut self, peer_id: &str, addr: PeerAddress) {
         if let Some(peer) = self.peers.get_mut(peer_id) {
-            peer.peering_addr = Some(addr);
+            // Slot zero may withdraw a mapping. Never reinterpret a NAT source
+            // port or another peer's address as this node's listening endpoint.
+            peer.peering_addr = if addr.port != 0 && addr.ip == peer.address.ip {
+                Some(addr)
+            } else {
+                None
+            };
         }
     }
 
@@ -483,7 +592,10 @@ impl PeerManager {
         self.peers
             .iter()
             .filter(|(_, p)| p.connected && !p.banned)
-            .map(|(key, p)| (key.clone(), p.last_seen_secs))
+            .filter_map(|(_, p)| {
+                p.dialable_address()
+                    .map(|a| (Self::peer_key(a), p.last_seen_secs))
+            })
             .collect()
     }
 
@@ -604,6 +716,72 @@ mod tests {
 
         pm.mark_disconnected(&key("1.2.3.4", 7075));
         assert_eq!(pm.connected_count(), 0);
+    }
+
+    #[test]
+    fn shared_nat_identities_route_separately_without_gossiping_source_ports() {
+        let mut pm = PeerManager::new(10);
+        assert!(pm.register_connection("node-a".into(), addr("1.2.3.4", 41000), false, 100));
+        assert!(pm.register_connection("node-b".into(), addr("1.2.3.4", 42000), false, 100));
+        assert_eq!(pm.connected_count(), 2);
+        assert_eq!(pm.connected_peer_ids_from_ip("1.2.3.4").len(), 2);
+        assert!(pm.random_known_peers(8).is_empty());
+        assert!(pm.connected_peer_addresses().is_empty());
+        assert_eq!(pm.random_peers_with_self(8)[0].port, 0);
+        pm.set_peering_addr("node-a", addr("1.2.3.4", 17076));
+        assert_eq!(
+            pm.connected_peer_addresses(),
+            vec![("1.2.3.4:17076".into(), 100)]
+        );
+        pm.mark_disconnected("node-b");
+        assert!(pm.reachout_candidates().is_empty());
+        pm.mark_disconnected("node-a");
+        assert_eq!(pm.reachout_candidates(), vec!["1.2.3.4:17076"]);
+        pm.set_peering_addr("node-a", addr("0.0.0.0", 0));
+        assert!(pm.reachout_candidates().is_empty());
+    }
+
+    #[test]
+    fn identity_replacement_keeps_one_peer_and_preserves_dialable_endpoint() {
+        let mut pm = PeerManager::new(2);
+        pm.add_peer(addr("1.2.3.4", 7076));
+        assert!(pm.register_connection("node-a".into(), addr("1.2.3.4", 7076), true, 100));
+        assert!(pm.is_connected("1.2.3.4:7076"));
+        assert!(pm.register_connection("node-a".into(), addr("1.2.3.4", 41000), false, 101));
+        assert_eq!(pm.connected_count(), 1);
+        assert_eq!(
+            pm.connected_peer_addresses(),
+            vec![("1.2.3.4:7076".into(), 101)]
+        );
+        assert!(pm.register_connection("node-b".into(), addr("1.2.3.4", 42000), false, 101));
+        assert!(!pm.register_connection("node-c".into(), addr("1.2.3.4", 43000), false, 101));
+        pm.penalize("node-a", PenaltyReason::ProtocolViolation, 102);
+        assert!(!pm.register_connection("node-a".into(), addr("1.2.3.4", 44000), false, 103));
+    }
+
+    #[test]
+    fn keepalive_slot_zero_is_never_an_unrelated_peer() {
+        let mut pm = PeerManager::new(10);
+        pm.add_peer(addr("1.2.3.4", 7076));
+        let peers = pm.random_peers_with_self(8);
+        assert_eq!(peers[0].ip, "0.0.0.0");
+        assert_eq!(peers.len(), 2);
+        pm.process_keepalive(peers);
+        assert_eq!(pm.peers.len(), 1);
+        assert!(pm.random_peers_with_self(0).is_empty());
+    }
+
+    #[test]
+    fn losing_outbound_dial_associates_endpoint_with_inbound_identity() {
+        let mut pm = PeerManager::new(10);
+        pm.register_connection("node-a".into(), addr("1.2.3.4", 41000), false, 100);
+        assert!(!pm.is_connected("1.2.3.4:7076"));
+        pm.record_dialed_address("node-a", addr("1.2.3.4", 7076));
+        assert!(pm.is_connected("1.2.3.4:7076"));
+        pm.set_peering_addr("node-a", addr("1.2.3.4", 17076));
+        assert!(pm.is_connected("1.2.3.4:7076"));
+        assert!(pm.is_connected("1.2.3.4:17076"));
+        assert_eq!(pm.connected_count(), 1);
     }
 
     #[test]

@@ -81,6 +81,12 @@ struct PriorityEntry {
 }
 
 impl PriorityScheduler {
+    pub fn clear(&mut self) {
+        self.queue.clear();
+    }
+    pub fn remove(&mut self, hash: &BlockHash) {
+        self.queue.retain(|entry| entry.root != *hash);
+    }
     pub fn new(max_queue: usize) -> Self {
         Self {
             queue: Vec::new(),

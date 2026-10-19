@@ -3,12 +3,13 @@
 use crate::error::BrnError;
 use burst_types::Timestamp;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// A segment of BRN accrual at a specific rate.
 ///
 /// Rate segments are stored ONCE in the global `RateHistory`, not per-wallet.
 /// Every wallet uses the same rate at the same time.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RateSegment {
     /// The rate (raw units per second) during this segment.
     pub rate: u128,
@@ -24,7 +25,7 @@ pub struct RateSegment {
 /// Balance computation for any wallet intersects this history with the
 /// wallet's `verified_at` — O(k) where k = number of rate changes
 /// (typically 1-3 over the protocol's lifetime).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RateHistory {
     pub segments: Vec<RateSegment>,
 }
@@ -82,7 +83,7 @@ impl RateHistory {
             } else {
                 verified_at
             };
-            let effective_end = seg_end;
+            let effective_end = Timestamp::new(seg_end.as_secs().min(now.as_secs()));
             if effective_start.as_secs() >= effective_end.as_secs() {
                 continue;
             }
@@ -111,7 +112,7 @@ impl Default for RateHistory {
 ///
 /// Lightweight: only stores per-wallet data (verified_at, burned, staked).
 /// Rate segments are global and shared — see `RateHistory`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrnWalletState {
     /// When this wallet was verified (BRN accrual begins here).
     pub verified_at: Timestamp,
@@ -132,6 +133,12 @@ pub struct BrnWalletState {
     /// Used to cap accrual computation.
     #[serde(default)]
     pub accrual_stopped_at: Option<Timestamp>,
+    /// Completed de-verification intervals; preserve historical rates rather
+    /// than moving the original verification timestamp when accrual resumes.
+    #[serde(default)]
+    pub paused_intervals: Vec<(Timestamp, Timestamp)>,
+    /// Returned stakes not yet acknowledged by this account's signed chain.
+    pub pending_releases: BTreeMap<burst_types::BlockHash, crate::releases::StakeRelease>,
 }
 
 fn default_true() -> bool {
@@ -148,6 +155,8 @@ impl BrnWalletState {
             total_staked: 0,
             accrual_active: true,
             accrual_stopped_at: None,
+            paused_intervals: Vec::new(),
+            pending_releases: BTreeMap::new(),
         }
     }
 
@@ -162,9 +171,24 @@ impl BrnWalletState {
         let effective_now = if self.accrual_active {
             now
         } else {
-            self.accrual_stopped_at.unwrap_or(now)
+            Timestamp::new(
+                self.accrual_stopped_at
+                    .unwrap_or(now)
+                    .as_secs()
+                    .min(now.as_secs()),
+            )
         };
-        let accrued = rates.total_accrued_checked(self.verified_at, effective_now)?;
+        let mut accrued = 0u128;
+        let mut cursor = self.verified_at;
+        for &(start, end) in &self.paused_intervals {
+            if start.as_secs() >= effective_now.as_secs() {
+                break;
+            }
+            let until = Timestamp::new(start.as_secs().min(effective_now.as_secs()));
+            accrued = accrued.checked_add(rates.total_accrued_checked(cursor, until)?)?;
+            cursor = Timestamp::new(cursor.as_secs().max(end.as_secs()));
+        }
+        accrued = accrued.checked_add(rates.total_accrued_checked(cursor, effective_now)?)?;
         let after_burned = accrued.checked_sub(self.total_burned)?;
         after_burned.checked_sub(self.total_staked)
     }
@@ -176,25 +200,39 @@ impl BrnWalletState {
 
     /// Stop BRN accrual (e.g. on de-verification).
     pub fn stop_accrual(&mut self, at: Timestamp) {
+        if !self.accrual_active {
+            return;
+        }
         self.accrual_active = false;
         self.accrual_stopped_at = Some(at);
     }
 
     /// Resume BRN accrual (e.g. on re-verification of a deactivated wallet).
     ///
-    /// Shifts `verified_at` forward by exactly the paused gap so the wallet
-    /// keeps everything it earned before deactivation but accrues nothing
-    /// for the paused period — the birthright pauses, it is never clawed
-    /// back and never granted retroactively.
+    /// Keeps earned BRN at its original historical rates; grants nothing
+    /// for the paused period, including when governance changed the rate.
     pub fn resume_accrual(&mut self, at: Timestamp) {
         if !self.accrual_active {
             if let Some(stopped) = self.accrual_stopped_at {
-                let gap = at.as_secs().saturating_sub(stopped.as_secs());
-                self.verified_at = Timestamp::new(self.verified_at.as_secs().saturating_add(gap));
+                if at.as_secs() < stopped.as_secs() {
+                    return;
+                }
+                if at != stopped {
+                    self.paused_intervals.push((stopped, at));
+                }
             }
         }
         self.accrual_active = true;
         self.accrual_stopped_at = None;
+    }
+
+    /// Old records omit release accounting and require signed-history replay.
+    pub fn from_persisted_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
+        use bincode::Options;
+        let decode = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .reject_trailing_bytes();
+        decode.deserialize(bytes)
     }
 }
 
@@ -203,6 +241,20 @@ mod tests {
     use super::*;
 
     // --- RateHistory ---
+
+    #[test]
+    fn historical_query_does_not_accrue_future_part_of_closed_segment() {
+        let mut history = RateHistory::new(10, Timestamp::new(0));
+        history.apply_rate_change(20, Timestamp::new(100)).unwrap();
+        assert_eq!(
+            history.total_accrued_checked(Timestamp::new(0), Timestamp::new(50)),
+            Some(500)
+        );
+        assert_eq!(
+            history.total_accrued_checked(Timestamp::new(60), Timestamp::new(50)),
+            Some(0)
+        );
+    }
 
     #[test]
     fn rate_history_single_segment_accrual() {
@@ -328,9 +380,11 @@ mod tests {
         state.resume_accrual(Timestamp::new(100));
 
         assert!(state.accrual_active);
-        // The paused gap (50s) shifts verified_at forward: earned balance is
-        // preserved, but nothing accrues for the paused period.
-        assert_eq!(state.verified_at, Timestamp::new(50));
+        assert_eq!(state.verified_at, Timestamp::new(0));
+        assert_eq!(
+            state.paused_intervals,
+            vec![(Timestamp::new(50), Timestamp::new(100))]
+        );
         let balance = state.available_balance(&rates, Timestamp::new(200));
         // accrued = 100 * (200 - 50) = 15000, minus 5000 burned = 10000
         assert_eq!(balance, 10000);
@@ -344,5 +398,38 @@ mod tests {
         let s2 = BrnWalletState::new_compat(Timestamp::new(42), 999);
         assert_eq!(s1.verified_at, s2.verified_at);
         assert_eq!(s1.total_burned, s2.total_burned);
+    }
+
+    #[test]
+    fn pause_does_not_reprice_previously_earned_brn() {
+        let mut rates = RateHistory::new(100, Timestamp::new(0));
+        rates.apply_rate_change(200, Timestamp::new(75)).unwrap();
+        let mut state = BrnWalletState::new(Timestamp::new(0));
+        state.stop_accrual(Timestamp::new(50));
+        state.stop_accrual(Timestamp::new(70)); // repeated event is idempotent
+        assert_eq!(state.available_balance(&rates, Timestamp::new(25)), 2500);
+        state.resume_accrual(Timestamp::new(100));
+        assert_eq!(state.available_balance(&rates, Timestamp::new(150)), 15000);
+        assert_eq!(state.available_balance(&rates, Timestamp::new(60)), 5000);
+        let bytes = bincode::serialize(&state).unwrap();
+        assert_eq!(
+            BrnWalletState::from_persisted_bytes(&bytes)
+                .unwrap()
+                .available_balance(&rates, Timestamp::new(150)),
+            15000
+        );
+    }
+
+    #[test]
+    fn old_wallet_records_cannot_invent_empty_release_history() {
+        let bytes = bincode::serialize(&(
+            Timestamp::new(10),
+            20u128,
+            30u128,
+            false,
+            Some(Timestamp::new(50)),
+        ))
+        .unwrap();
+        assert!(BrnWalletState::from_persisted_bytes(&bytes).is_err());
     }
 }

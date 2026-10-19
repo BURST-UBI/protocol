@@ -21,6 +21,10 @@ pub struct ChallengeTx {
     /// the Challenge block's `origin` field by the transaction builder.
     #[serde(default)]
     pub reason: ChallengeReason,
+    /// Canonical source of the recorded outcome being appealed. None is an
+    /// ordinary challenge; a supplied source must be nonzero and owner-signed.
+    #[serde(default)]
+    pub appeal_of: Option<burst_types::BlockHash>,
     pub timestamp: Timestamp,
     pub work: u64,
     pub signature: Signature,

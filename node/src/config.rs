@@ -60,6 +60,10 @@ pub struct NodeConfig {
     #[serde(default = "default_ws_port")]
     pub websocket_port: u16,
 
+    /// Event subscriptions are local by default; remote access is opt-in.
+    #[serde(default = "default_rpc_bind")]
+    pub websocket_bind: String,
+
     /// Bootstrap peer addresses to connect to on startup.
     #[serde(default)]
     pub bootstrap_peers: Vec<String>,
@@ -109,12 +113,39 @@ pub struct NodeConfig {
     /// Defaults to true so testnet nodes vote out of the box.
     #[serde(default = "default_true")]
     pub enable_representative: bool,
+
+    /// File containing this representative's 32-byte Ed25519 seed as hex.
+    /// Use one durable node/data directory per signing key.
+    #[serde(default)]
+    pub representative_key_file: Option<PathBuf>,
+
+    /// Independent certificate-authenticated time services for checkpoint signing.
+    /// An empty list disables fresh checkpoint signatures, never weakens time checks.
+    #[serde(default = "burst_network::trusted_clock::NtsClock::public_sources")]
+    pub nts_sources: Vec<burst_network::trusted_clock::NtsSource>,
+
+    /// Mirrors for the fixed mainnet drand chain, never alternate randomness.
+    /// At most four HTTPS endpoints (loopback HTTP is allowed for local relays).
+    #[serde(default = "default_drand_relays")]
+    pub drand_relays: Vec<String>,
+
+    /// Optional archive serving/staging. Fetch alone never installs a ledger.
+    #[serde(default)]
+    pub snapshot_transfer: crate::checkpoint_sync::snapshot::Config,
+    /// Explicit startup installation; a matching fetch output downloads first.
+    /// Installation remains release-gated.
+    #[serde(default)]
+    pub snapshot_bootstrap: Option<PathBuf>,
 }
 
 // ── Serde default helpers ──────────────────────────────────────────────
 
 fn default_network() -> NetworkId {
     NetworkId::Dev
+}
+
+fn default_drand_relays() -> Vec<String> {
+    vec![burst_vrf::drand::DRAND_MAINNET_URL.into()]
 }
 
 fn default_data_dir() -> PathBuf {
@@ -160,6 +191,41 @@ fn default_work_threads() -> usize {
 // ── Impl ───────────────────────────────────────────────────────────────
 
 impl NodeConfig {
+    pub(crate) fn representative_key(&self) -> Result<Option<burst_types::KeyPair>, NodeError> {
+        use std::io::Read;
+        let Some(path) = &self.representative_key_file else {
+            return Ok(None);
+        };
+        let file = std::fs::File::open(path)
+            .map_err(|e| NodeError::Config(format!("cannot open representative key file: {e}")))?;
+        let metadata = file
+            .metadata()
+            .map_err(|e| NodeError::Config(e.to_string()))?;
+        if !metadata.is_file() {
+            return Err(NodeError::Config(
+                "representative key must be a regular file".into(),
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o077 != 0 {
+                return Err(NodeError::Config("representative key file must not be accessible to group or others (use mode 600)".into()));
+            }
+        }
+        let mut encoded = String::new();
+        file.take(129)
+            .read_to_string(&mut encoded)
+            .map_err(|_| NodeError::Config("cannot read representative key encoding".into()))?;
+        let mut seed = [0; 32];
+        if encoded.trim().len() != 64 || hex::decode_to_slice(encoded.trim(), &mut seed).is_err() {
+            return Err(NodeError::Config(
+                "representative key must contain exactly 32 hex-encoded bytes".into(),
+            ));
+        }
+        Ok(Some(burst_crypto::keypair_from_seed(&seed)))
+    }
+
     /// Load configuration from a TOML file.
     pub fn from_toml_file(path: &str) -> Result<Self, NodeError> {
         let content =
@@ -169,7 +235,19 @@ impl NodeConfig {
 
     /// Parse configuration from a TOML string.
     pub fn from_toml_str(s: &str) -> Result<Self, NodeError> {
-        toml::from_str(s).map_err(|e| NodeError::Config(e.to_string()))
+        let config: Self = toml::from_str(s).map_err(|e| NodeError::Config(e.to_string()))?;
+        config.validate_drand_relays()?;
+        config
+            .snapshot_transfer
+            .validate()
+            .map_err(|error| NodeError::Config(error.to_string()))?;
+        Ok(config)
+    }
+
+    pub(crate) fn validate_drand_relays(&self) -> Result<(), NodeError> {
+        burst_vrf::DrandClient::validate_relays(&self.drand_relays)
+            .map(|_| ())
+            .map_err(|error| NodeError::Config(error.to_string()))
     }
 
     /// Serialize the configuration to a TOML string.
@@ -192,6 +270,7 @@ impl Default for NodeConfig {
             rpc_bind: default_rpc_bind(),
             enable_websocket: false,
             websocket_port: default_ws_port(),
+            websocket_bind: default_rpc_bind(),
             bootstrap_peers: Vec::new(),
             log_format: default_log_format(),
             log_level: default_log_level(),
@@ -202,6 +281,11 @@ impl Default for NodeConfig {
             enable_upnp: true,
             advertise_address: None,
             enable_representative: true,
+            representative_key_file: None,
+            nts_sources: burst_network::trusted_clock::NtsClock::public_sources(),
+            drand_relays: default_drand_relays(),
+            snapshot_transfer: Default::default(),
+            snapshot_bootstrap: None,
         }
     }
 }
@@ -209,6 +293,49 @@ impl Default for NodeConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn representative_identity_is_explicit_and_malformed_keys_fail_closed() {
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let seed = [7; 32];
+        writeln!(file, "{}", hex::encode(seed)).unwrap();
+        let config = NodeConfig {
+            representative_key_file: Some(file.path().into()),
+            ..NodeConfig::default()
+        };
+        assert_eq!(
+            config.representative_key().unwrap().unwrap().public,
+            burst_crypto::keypair_from_seed(&seed).public
+        );
+        assert!(!config.to_toml_string().contains(&hex::encode(seed)));
+        file.as_file_mut().set_len(0).unwrap();
+        assert!(config.representative_key().is_err());
+        assert!(NodeConfig::default()
+            .representative_key()
+            .unwrap()
+            .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn representative_key_rejects_public_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let file = tempfile::NamedTempFile::new().unwrap();
+        file.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        let config = NodeConfig {
+            representative_key_file: Some(file.path().into()),
+            ..NodeConfig::default()
+        };
+        assert!(config
+            .representative_key()
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("mode 600"));
+    }
 
     #[test]
     fn default_config_round_trips_through_toml() {
@@ -223,8 +350,39 @@ mod tests {
     fn minimal_toml_uses_defaults() {
         let config = NodeConfig::from_toml_str("").expect("empty toml should use defaults");
         assert_eq!(config.rpc_port, 7077);
+        assert_eq!(config.websocket_bind, "127.0.0.1");
         assert_eq!(config.max_peers, 50);
         assert_eq!(config.log_format, "human");
+        assert_eq!(
+            config.drand_relays,
+            vec![burst_vrf::drand::DRAND_MAINNET_URL]
+        );
+    }
+
+    #[test]
+    fn drand_mirrors_round_trip_and_invalid_configuration_fails_before_startup() {
+        let config = NodeConfig::from_toml_str(
+            "drand_relays = ['https://relay.example/a', 'http://127.0.0.1:9090']",
+        )
+        .unwrap();
+        assert_eq!(
+            NodeConfig::from_toml_str(&config.to_toml_string())
+                .unwrap()
+                .drand_relays,
+            config.drand_relays
+        );
+        for toml in [
+            "drand_relays = []",
+            "drand_relays = ['http://remote.example']",
+            "drand_relays = ['https://user:secret@remote.example']",
+        ] {
+            assert!(NodeConfig::from_toml_str(toml).is_err());
+        }
+        let config = NodeConfig {
+            drand_relays: vec![],
+            ..NodeConfig::default()
+        };
+        assert!(config.validate_drand_relays().is_err());
     }
 
     #[test]

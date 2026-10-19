@@ -8,6 +8,7 @@
 
 use burst_crypto::sign_message;
 use burst_types::{BlockHash, PrivateKey, Signature, WalletAddress};
+use std::sync::Arc;
 
 /// Domain-separation tag for consensus vote signatures. Binding this (and the
 /// voter identity) into the signed payload prevents a vote signature from being
@@ -51,17 +52,21 @@ pub struct VoteGenerator {
     /// Whether this node is acting as a representative (has delegated weight).
     pub is_representative: bool,
     /// Signing key for vote generation.
-    signing_key: PrivateKey,
+    signing_key: Arc<PrivateKey>,
     /// Monotonically increasing sequence counter for vote ordering.
     sequence: u64,
 }
 
 impl VoteGenerator {
     pub fn new(representative: WalletAddress, signing_key: [u8; 32]) -> Self {
+        Self::with_shared_key(representative, Arc::new(PrivateKey(signing_key)))
+    }
+
+    pub fn with_shared_key(representative: WalletAddress, signing_key: Arc<PrivateKey>) -> Self {
         Self {
             representative,
             is_representative: false,
-            signing_key: PrivateKey(signing_key),
+            signing_key,
             sequence: 0,
         }
     }
@@ -115,6 +120,12 @@ impl VoteGenerator {
     /// Current sequence number.
     pub fn sequence(&self) -> u64 {
         self.sequence
+    }
+
+    /// Restore a durable sequence reservation before signing. Never rewind a
+    /// live generator, even when the caller supplies an older checkpoint.
+    pub fn advance_sequence_to(&mut self, sequence: u64) {
+        self.sequence = self.sequence.max(sequence);
     }
 
     /// Sign a vote over the canonical [`vote_signing_payload`] (domain-tagged and

@@ -190,6 +190,8 @@ mod tests {
 
     #[test]
     fn trst_unit_conversions() {
+        assert_eq!(TrstAmount::new(u128::MAX).raw(), u128::MAX);
+        assert_eq!(TrstAmount::new(1).raw(), 1);
         assert_eq!(TrstAmount::from_trst(1).raw(), TRST_UNIT);
         assert_eq!(TrstAmount::from_mtrst(1000).raw(), TRST_UNIT);
     }

@@ -1,8 +1,8 @@
 //! Top-level P2P wire message envelope.
 //!
 //! Every message sent between BURST nodes is wrapped in [`WireMessage`].
-//! The peer read loop deserializes incoming frames as `WireMessage` first;
-//! if that fails it falls back to bare `StateBlock` for backward compat.
+//! The peer read loop decodes bounded frames as `WireMessage`.
+//! Bare blocks are not an alternative wire format.
 
 use burst_ledger::StateBlock;
 use burst_types::{BlockHash, NetworkId, Signature, WalletAddress};
@@ -10,9 +10,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::bootstrap::BootstrapMessage;
 
+mod protobuf;
+
 /// Top-level P2P wire message.
 /// Every message sent between nodes is wrapped in this enum.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub enum WireMessage {
     /// A block (publish/flood)
     Block(Box<StateBlock>),
@@ -40,6 +42,11 @@ pub enum WireMessage {
     TelemetryReq,
     /// Telemetry acknowledgment with node stats
     TelemetryAck(TelemetryAckMessage),
+    /// Bounded transfer of replay-validated checkpoint certificates and manifests.
+    CheckpointSync(crate::checkpoint_sync::CheckpointSyncMessage),
+    /// Bounded agreement payload transfer; signed contents are checked by the driver.
+    CheckpointAgreement(crate::checkpoint_transport::Packet),
+    GovernanceContent(crate::governance_content::transfer::Packet),
 }
 
 /// A vote broadcast on the network.
@@ -57,6 +64,7 @@ pub struct WireVote {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConfirmReqMsg {
     pub block_hashes: Vec<BlockHash>,
+    pub remaining_hops: u8,
 }
 
 /// Response to a confirm_req — carries a vote (confirm_ack).
@@ -88,14 +96,21 @@ pub struct HandshakeMsg {
     /// `params_hash` match across networks, so it can't be relied on for this).
     #[serde(default)]
     pub network_id: NetworkId,
-    /// The sender's listening/peering port. An inbound TCP connection arrives
-    /// from an *ephemeral* source port that nothing listens on; keying the peer
-    /// by `ip:ephemeral` would double-count it against the outbound connection
-    /// to the same node and gossip a non-dialable address. Peers key each other
-    /// by `ip:peering_port` (the dialable address) so both directions collapse
-    /// to one entry.
+    /// The sender's listening port, authenticated as transport metadata.
+    /// It does not establish a public NAT mapping. Peers are keyed by their
+    /// proven node identity, not by a public-IP/local-port combination.
     #[serde(default)]
     pub peering_port: u16,
+    /// Reject incompatible consensus rules before registering a peer.
+    pub block_version: u8,
+    pub wire_version: u16,
+}
+
+impl HandshakeMsg {
+    pub fn supports_current_blocks(&self) -> bool {
+        self.block_version == burst_ledger::CURRENT_BLOCK_VERSION
+            && self.wire_version == burst_types::PROTOCOL_VERSION
+    }
 }
 
 /// UHV verification request: an endorser vouches for a target wallet's humanity.
@@ -160,12 +175,15 @@ mod tests {
     use burst_types::{Timestamp, TxHash};
 
     fn addr(s: &str) -> WalletAddress {
-        WalletAddress::new(&format!("brst_{s}"))
+        WalletAddress::new(format!("brst_{s}"))
     }
 
-    fn sample_block() -> StateBlock {
+    pub(super) fn sample_block() -> StateBlock {
         let mut block = StateBlock {
+            signing_grant: burst_types::BlockHash::ZERO,
+            delegation_payload: Vec::new(),
             version: CURRENT_BLOCK_VERSION,
+            payment_epoch: burst_types::BlockHash::new([1; 32]),
             block_type: BlockType::Send,
             account: addr("alice"),
             previous: BlockHash::new([1u8; 32]),
@@ -177,7 +195,9 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(42),
             params_hash: BlockHash::ZERO,
+            target_head: burst_types::BlockHash::ZERO,
             merge_sources: Vec::new(),
+            release_sources: Vec::new(),
             work: 0xDEAD,
             signature: Signature([0xFF; 64]),
             hash: BlockHash::ZERO,
@@ -186,7 +206,7 @@ mod tests {
         block
     }
 
-    fn sample_vote() -> WireVote {
+    pub(super) fn sample_vote() -> WireVote {
         WireVote {
             voter: addr("voter1"),
             block_hashes: vec![BlockHash::new([0xAA; 32])],
@@ -200,8 +220,8 @@ mod tests {
     #[test]
     fn block_message_roundtrip() {
         let msg = WireMessage::Block(Box::new(sample_block()));
-        let bytes = bincode::serialize(&msg).unwrap();
-        let decoded: WireMessage = bincode::deserialize(&bytes).unwrap();
+        let bytes = msg.encode().unwrap();
+        let decoded: WireMessage = WireMessage::decode(&bytes).unwrap();
         match decoded {
             WireMessage::Block(b) => assert_eq!(b.hash, sample_block().hash),
             other => panic!("expected Block, got {:?}", other),
@@ -211,13 +231,13 @@ mod tests {
     #[test]
     fn vote_message_roundtrip() {
         let msg = WireMessage::Vote(sample_vote());
-        let bytes = bincode::serialize(&msg).unwrap();
-        let decoded: WireMessage = bincode::deserialize(&bytes).unwrap();
+        let bytes = msg.encode().unwrap();
+        let decoded: WireMessage = WireMessage::decode(&bytes).unwrap();
         match decoded {
             WireMessage::Vote(v) => {
                 assert_eq!(v.voter, addr("voter1"));
                 assert_eq!(v.block_hashes.len(), 1);
-                assert_eq!(v.is_final, false);
+                assert!(!v.is_final);
             }
             other => panic!("expected Vote, got {:?}", other),
         }
@@ -227,9 +247,10 @@ mod tests {
     fn confirm_req_roundtrip() {
         let msg = WireMessage::ConfirmReq(ConfirmReqMsg {
             block_hashes: vec![BlockHash::new([1u8; 32]), BlockHash::new([2u8; 32])],
+            remaining_hops: 3,
         });
-        let bytes = bincode::serialize(&msg).unwrap();
-        let decoded: WireMessage = bincode::deserialize(&bytes).unwrap();
+        let bytes = msg.encode().unwrap();
+        let decoded: WireMessage = WireMessage::decode(&bytes).unwrap();
         match decoded {
             WireMessage::ConfirmReq(r) => assert_eq!(r.block_hashes.len(), 2),
             other => panic!("expected ConfirmReq, got {:?}", other),
@@ -241,8 +262,8 @@ mod tests {
         let msg = WireMessage::ConfirmAck(ConfirmAckMsg {
             vote: sample_vote(),
         });
-        let bytes = bincode::serialize(&msg).unwrap();
-        let decoded: WireMessage = bincode::deserialize(&bytes).unwrap();
+        let bytes = msg.encode().unwrap();
+        let decoded: WireMessage = WireMessage::decode(&bytes).unwrap();
         match decoded {
             WireMessage::ConfirmAck(a) => assert_eq!(a.vote.voter, addr("voter1")),
             other => panic!("expected ConfirmAck, got {:?}", other),
@@ -254,8 +275,8 @@ mod tests {
         let msg = WireMessage::Keepalive(KeepaliveMsg {
             peers: vec!["192.168.1.1:7075".into(), "10.0.0.1:7075".into()],
         });
-        let bytes = bincode::serialize(&msg).unwrap();
-        let decoded: WireMessage = bincode::deserialize(&bytes).unwrap();
+        let bytes = msg.encode().unwrap();
+        let decoded: WireMessage = WireMessage::decode(&bytes).unwrap();
         match decoded {
             WireMessage::Keepalive(k) => assert_eq!(k.peers.len(), 2),
             other => panic!("expected Keepalive, got {:?}", other),
@@ -271,18 +292,51 @@ mod tests {
             params_hash: burst_types::BlockHash::default(),
             network_id: NetworkId::Live,
             peering_port: 7076,
+            block_version: CURRENT_BLOCK_VERSION,
+            wire_version: burst_types::PROTOCOL_VERSION,
         });
-        let bytes = bincode::serialize(&msg).unwrap();
-        let decoded: WireMessage = bincode::deserialize(&bytes).unwrap();
+        let bytes = msg.encode().unwrap();
+        let decoded: WireMessage = WireMessage::decode(&bytes).unwrap();
         match decoded {
             WireMessage::Handshake(h) => {
                 assert_eq!(h.node_id, addr("node1"));
                 assert!(h.cookie.is_some());
                 assert!(h.cookie_signature.is_some());
                 assert_eq!(h.network_id, NetworkId::Live);
+                assert!(h.supports_current_blocks());
             }
             other => panic!("expected Handshake, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn handshake_requires_an_explicit_current_block_version() {
+        let mut handshake = HandshakeMsg {
+            node_id: addr("old_node"),
+            cookie: None,
+            cookie_signature: None,
+            params_hash: BlockHash::ZERO,
+            network_id: NetworkId::Dev,
+            peering_port: 27076,
+            block_version: CURRENT_BLOCK_VERSION,
+            wire_version: burst_types::PROTOCOL_VERSION,
+        };
+        assert!(handshake.supports_current_blocks());
+        handshake.block_version = 1;
+        assert!(!handshake.supports_current_blocks());
+        handshake.block_version = CURRENT_BLOCK_VERSION + 1;
+        assert!(!handshake.supports_current_blocks());
+        handshake.block_version = CURRENT_BLOCK_VERSION;
+        handshake.wire_version = burst_types::PROTOCOL_VERSION - 1;
+        assert!(!handshake.supports_current_blocks());
+        handshake.wire_version = burst_types::PROTOCOL_VERSION + 1;
+        assert!(!handshake.supports_current_blocks());
+        handshake.wire_version = burst_types::PROTOCOL_VERSION;
+
+        let mut old_bytes = 6u32.to_le_bytes().to_vec();
+        old_bytes.extend(bincode::serialize(&handshake).unwrap());
+        old_bytes.truncate(old_bytes.len() - 2); // Earlier handshakes omitted wire_version.
+        assert!(WireMessage::decode(&old_bytes).is_err());
     }
 
     #[test]
@@ -294,9 +348,11 @@ mod tests {
             params_hash: burst_types::BlockHash::default(),
             network_id: NetworkId::Dev,
             peering_port: 27076,
+            block_version: CURRENT_BLOCK_VERSION,
+            wire_version: burst_types::PROTOCOL_VERSION,
         });
-        let bytes = bincode::serialize(&msg).unwrap();
-        let decoded: WireMessage = bincode::deserialize(&bytes).unwrap();
+        let bytes = msg.encode().unwrap();
+        let decoded: WireMessage = WireMessage::decode(&bytes).unwrap();
         match decoded {
             WireMessage::Handshake(h) => {
                 assert!(h.cookie.is_none());
@@ -312,8 +368,8 @@ mod tests {
             target: addr("target"),
             endorser: addr("endorser"),
         });
-        let bytes = bincode::serialize(&msg).unwrap();
-        let decoded: WireMessage = bincode::deserialize(&bytes).unwrap();
+        let bytes = msg.encode().unwrap();
+        let decoded: WireMessage = WireMessage::decode(&bytes).unwrap();
         match decoded {
             WireMessage::VerificationRequest(v) => {
                 assert_eq!(v.target, addr("target"));
@@ -331,8 +387,8 @@ mod tests {
             vote: 0,
             signature: vec![1, 2, 3, 4],
         });
-        let bytes = bincode::serialize(&msg).unwrap();
-        let decoded: WireMessage = bincode::deserialize(&bytes).unwrap();
+        let bytes = msg.encode().unwrap();
+        let decoded: WireMessage = WireMessage::decode(&bytes).unwrap();
         match decoded {
             WireMessage::VerificationVote(v) => {
                 assert_eq!(v.vote, 0);
@@ -349,8 +405,8 @@ mod tests {
             proposer: addr("proposer"),
             content: b"change brn rate to 200".to_vec(),
         });
-        let bytes = bincode::serialize(&msg).unwrap();
-        let decoded: WireMessage = bincode::deserialize(&bytes).unwrap();
+        let bytes = msg.encode().unwrap();
+        let decoded: WireMessage = WireMessage::decode(&bytes).unwrap();
         match decoded {
             WireMessage::GovernanceProposal(g) => {
                 assert_eq!(g.proposer, addr("proposer"));
@@ -367,8 +423,8 @@ mod tests {
             voter: addr("voter"),
             vote: 1,
         });
-        let bytes = bincode::serialize(&msg).unwrap();
-        let decoded: WireMessage = bincode::deserialize(&bytes).unwrap();
+        let bytes = msg.encode().unwrap();
+        let decoded: WireMessage = WireMessage::decode(&bytes).unwrap();
         match decoded {
             WireMessage::GovernanceVote(g) => assert_eq!(g.vote, 1),
             other => panic!("expected GovernanceVote, got {:?}", other),
@@ -378,8 +434,8 @@ mod tests {
     #[test]
     fn telemetry_req_roundtrip() {
         let msg = WireMessage::TelemetryReq;
-        let bytes = bincode::serialize(&msg).unwrap();
-        let decoded: WireMessage = bincode::deserialize(&bytes).unwrap();
+        let bytes = msg.encode().unwrap();
+        let decoded: WireMessage = WireMessage::decode(&bytes).unwrap();
         assert!(matches!(decoded, WireMessage::TelemetryReq));
     }
 
@@ -401,8 +457,8 @@ mod tests {
             timestamp: 1700000000,
             params_hash: BlockHash::ZERO,
         });
-        let bytes = bincode::serialize(&msg).unwrap();
-        let decoded: WireMessage = bincode::deserialize(&bytes).unwrap();
+        let bytes = msg.encode().unwrap();
+        let decoded: WireMessage = WireMessage::decode(&bytes).unwrap();
         match decoded {
             WireMessage::TelemetryAck(t) => {
                 assert_eq!(t.block_count, 1_000_000);
@@ -416,22 +472,22 @@ mod tests {
     #[test]
     fn corrupt_bytes_rejected_gracefully() {
         let garbage = vec![0xFF, 0x00, 0xDE, 0xAD, 0xBE, 0xEF];
-        let result = bincode::deserialize::<WireMessage>(&garbage);
+        let result = WireMessage::decode(&garbage);
         assert!(result.is_err());
     }
 
     #[test]
     fn truncated_message_rejected() {
         let msg = WireMessage::Vote(sample_vote());
-        let bytes = bincode::serialize(&msg).unwrap();
+        let bytes = msg.encode().unwrap();
         let truncated = &bytes[..bytes.len() / 2];
-        let result = bincode::deserialize::<WireMessage>(truncated);
+        let result = WireMessage::decode(truncated);
         assert!(result.is_err());
     }
 
     #[test]
     fn empty_bytes_rejected() {
-        let result = bincode::deserialize::<WireMessage>(&[]);
+        let result = WireMessage::decode(&[]);
         assert!(result.is_err());
     }
 
@@ -446,8 +502,8 @@ mod tests {
             sequence: 42,
             signature: Signature([0x11; 64]),
         });
-        let bytes = bincode::serialize(&msg).unwrap();
-        let decoded: WireMessage = bincode::deserialize(&bytes).unwrap();
+        let bytes = msg.encode().unwrap();
+        let decoded: WireMessage = WireMessage::decode(&bytes).unwrap();
         match decoded {
             WireMessage::Vote(v) => {
                 assert_eq!(v.block_hashes.len(), 100);

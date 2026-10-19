@@ -3,8 +3,9 @@
 //! Prevents the same message from being processed or relayed twice by
 //! maintaining a bounded set of recently-seen Blake2b-256 message hashes.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 /// Default dedup capacity: track the last 65 536 message hashes.
 pub const DEFAULT_DEDUP_CAPACITY: usize = 65_536;
@@ -16,7 +17,7 @@ pub const DEFAULT_DEDUP_CAPACITY: usize = 65_536;
 /// Oldest entries are evicted when capacity is reached.
 pub struct MessageDedup {
     capacity: usize,
-    hashes: HashSet<[u8; 32]>,
+    hashes: HashMap<[u8; 32], Option<Instant>>,
     order: VecDeque<[u8; 32]>,
 }
 
@@ -25,7 +26,7 @@ impl MessageDedup {
     pub fn new(capacity: usize) -> Self {
         Self {
             capacity,
-            hashes: HashSet::with_capacity(capacity),
+            hashes: HashMap::with_capacity(capacity),
             order: VecDeque::with_capacity(capacity),
         }
     }
@@ -35,8 +36,25 @@ impl MessageDedup {
     /// Returns `true` if the hash is a duplicate (already seen).
     /// Returns `false` if the hash is new — it is recorded for future checks.
     pub fn is_duplicate(&mut self, hash: &[u8; 32]) -> bool {
-        if self.hashes.contains(hash) {
-            return true;
+        self.check(hash, None, Instant::now())
+    }
+
+    /// Suppress a burst, but allow identical gossip to retry after dependencies
+    /// change. Duplicate arrivals do not extend the suppression window.
+    pub fn is_duplicate_for(&mut self, hash: &[u8; 32], window: Duration, now: Instant) -> bool {
+        self.check(hash, Some(now + window), now)
+    }
+
+    fn check(&mut self, hash: &[u8; 32], expires: Option<Instant>, now: Instant) -> bool {
+        if let Some(previous) = self.hashes.get_mut(hash) {
+            if previous.is_none_or(|deadline| now < deadline) {
+                return true;
+            }
+            *previous = expires;
+            return false;
+        }
+        if self.capacity == 0 {
+            return false;
         }
         // Evict oldest if at capacity
         if self.hashes.len() >= self.capacity {
@@ -44,7 +62,7 @@ impl MessageDedup {
                 self.hashes.remove(&old);
             }
         }
-        self.hashes.insert(*hash);
+        self.hashes.insert(*hash, expires);
         self.order.push_back(*hash);
         false
     }
@@ -77,6 +95,36 @@ impl Default for MessageDedup {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retry_window_does_not_slide_or_grow_the_cache() {
+        let mut dedup = MessageDedup::new(2);
+        let now = Instant::now();
+        let window = Duration::from_secs(1);
+        let block = [1; 32];
+        let vote = [2; 32];
+        assert!(!dedup.is_duplicate_for(&block, window, now));
+        assert!(!dedup.is_duplicate(&vote));
+        assert!(dedup.is_duplicate_for(&block, window, now + window / 2));
+        for step in 1..100 {
+            assert!(!dedup.is_duplicate_for(&block, window, now + window * step));
+            assert_eq!(dedup.len(), 2);
+            assert_eq!(dedup.order.len(), 2);
+            assert!(dedup.is_duplicate(&vote));
+        }
+        assert!(!dedup.is_duplicate(&[3; 32]));
+        assert_eq!(dedup.len(), 2);
+        assert!(!dedup.hashes.contains_key(&block));
+    }
+
+    #[test]
+    fn zero_capacity_retains_no_messages() {
+        let mut dedup = MessageDedup::new(0);
+        assert!(!dedup.is_duplicate(&[1; 32]));
+        assert!(!dedup.is_duplicate_for(&[2; 32], Duration::from_secs(1), Instant::now()));
+        assert!(dedup.is_empty());
+        assert!(dedup.order.is_empty());
+    }
 
     #[test]
     fn new_dedup_is_empty() {

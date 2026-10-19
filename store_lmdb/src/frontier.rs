@@ -1,9 +1,9 @@
 //! LMDB implementation of FrontierStore.
 
-use std::sync::Arc;
+use crate::shared_env::SharedEnv;
 
 use heed::types::Bytes;
-use heed::{Database, Env};
+use heed::Database;
 
 use burst_store::frontier::FrontierStore;
 use burst_store::StoreError;
@@ -12,7 +12,7 @@ use burst_types::{BlockHash, WalletAddress};
 use crate::LmdbError;
 
 pub struct LmdbFrontierStore {
-    pub(crate) env: Arc<Env>,
+    pub(crate) env: SharedEnv,
     pub(crate) frontiers_db: Database<Bytes, Bytes>,
 }
 

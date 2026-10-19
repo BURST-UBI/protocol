@@ -18,3 +18,10 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 getrandom = { workspace = true }
 igd-next = { workspace = true }
+# ntpd-rs exposes an explicitly unstable protocol API; upgrades require review.
+ntp-proto = { version = "=1.9.0", default-features = false, features = ["__internal-api", "rustcrypto"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+
+[dev-dependencies]
+rcgen = "=0.13.2"
+tracing-subscriber = { workspace = true }

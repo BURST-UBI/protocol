@@ -1,14 +1,74 @@
 //! Delegation management — delegate and revoke voting power.
 //!
-//! BURST uses a plain, revocable, on-chain delegation POINTER (not the
-//! whitepaper's encrypted-secondary-key handoff). The delegate votes with their
-//! OWN key; the governance tally attributes the delegator's weight through the
-//! delegation graph (`count_effective_*`). So a delegation is simply a signed
-//! `delegator → delegate` pointer, and revocation is a signed marker by the
-//! delegator's primary key. No key escrow, no decryption step.
+//! Legacy pointer builders remain available. Scoped key operations below bind
+//! an encrypted grant or its revocation to the owner's signed account block.
+//! A recipient carries secondary-signed ballots on their own account chain.
 
 use crate::error::WalletError;
+pub use burst_governance::key_delegation::view;
 use burst_types::{Signature, WalletAddress};
+
+mod client;
+pub(crate) use client::{build_delegated_ballot, build_scoped_operation, require_review};
+
+pub fn build_key_operation(
+    state: &crate::transaction_builder::AccountState,
+    keys: &burst_types::KeyPair,
+    operation: &burst_governance::key_delegation::operation::DelegationOperation,
+    params_hash: burst_types::BlockHash,
+    now: burst_types::Timestamp,
+) -> Result<burst_ledger::StateBlock, WalletError> {
+    use crate::transaction_builder::*;
+    use burst_governance::key_delegation::operation::DelegationOperation;
+    let owner = burst_crypto::derive_address(&keys.public);
+    if operation
+        .identity()
+        .is_some_and(|identity| identity.2 != &owner)
+        || burst_crypto::public_from_private(&keys.private) != keys.public
+        || state.head.is_zero()
+        || state.payment_epoch.is_zero()
+        || params_hash.is_zero()
+    {
+        return Err(WalletError::TransactionBuild(
+            "delegation owner or signing context mismatch".into(),
+        ));
+    }
+    let tx = burst_transactions::Transaction::ChangeRepresentative(build_change_rep_tx(
+        &owner,
+        &state.representative,
+        now,
+    )?);
+    let mut block = build_state_block(state, &tx, burst_types::TxHash::ZERO, params_hash)?;
+    (block.block_type, block.link) = match operation {
+        DelegationOperation::Grant(grant) => (
+            burst_ledger::BlockType::Delegate,
+            burst_types::BlockHash::new(grant.delegate.0),
+        ),
+        DelegationOperation::Revoke(_) => (
+            burst_ledger::BlockType::RevokeDelegation,
+            burst_types::BlockHash::ZERO,
+        ),
+        DelegationOperation::Ballot { ballot, .. } => {
+            let mut choice = [0; 32];
+            choice[0] = match ballot.vote {
+                burst_transactions::governance::GovernanceVote::Yea => 0,
+                burst_transactions::governance::GovernanceVote::Nay => 1,
+                burst_transactions::governance::GovernanceVote::Abstain => 2,
+            };
+            block.transaction = burst_types::TxHash::new(choice);
+            (
+                burst_ledger::BlockType::GovernanceVote,
+                burst_types::BlockHash::new(*ballot.proposal.as_bytes()),
+            )
+        }
+    };
+    block.delegation_payload = operation.encode().map_err(WalletError::TransactionBuild)?;
+    block
+        .validate_format()
+        .map_err(|error| WalletError::TransactionBuild(error.into()))?;
+    block.hash = block.compute_hash();
+    Ok(sign_state_block(block, &keys.private))
+}
 
 /// Build a delegation transaction pointing `delegator`'s vote at `delegate`.
 /// Must be signed externally by the delegator's primary key (that signature is

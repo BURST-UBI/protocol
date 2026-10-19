@@ -40,7 +40,7 @@ impl Broadcaster {
         let mut result = BroadcastResult::default();
 
         for peer in peers.iter().filter(|p| p.connected && !p.banned) {
-            let peer_id = format!("{}:{}", peer.address.ip, peer.address.port);
+            let peer_id = peer.peer_id.clone();
             match self.outbound_tx.try_send((peer_id, message.to_vec())) {
                 Ok(()) => result.sent += 1,
                 Err(_) => result.failed += 1,
@@ -71,7 +71,7 @@ impl Broadcaster {
 
         for &i in &indices {
             let peer = eligible[i];
-            let peer_id = format!("{}:{}", peer.address.ip, peer.address.port);
+            let peer_id = peer.peer_id.clone();
             match self.outbound_tx.try_send((peer_id, message.to_vec())) {
                 Ok(()) => result.sent += 1,
                 Err(_) => result.failed += 1,
@@ -106,7 +106,7 @@ impl Broadcaster {
         let mut result = BroadcastResult::default();
 
         for peer in eligible.into_iter().take(count) {
-            let peer_id = format!("{}:{}", peer.address.ip, peer.address.port);
+            let peer_id = peer.peer_id.clone();
             match self.outbound_tx.try_send((peer_id, message.to_vec())) {
                 Ok(()) => result.sent += 1,
                 Err(_) => result.failed += 1,
@@ -128,6 +128,8 @@ mod tests {
 
     fn make_peer(ip: &str, port: u16, connected: bool) -> PeerState {
         PeerState {
+            peer_id: format!("{ip}:{port}"),
+            address_is_dialable: true,
             address: PeerAddress {
                 ip: ip.to_string(),
                 port,
@@ -139,6 +141,28 @@ mod tests {
             ban_until_secs: None,
             telemetry: None,
             peering_addr: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn every_broadcast_variant_routes_by_identity_not_shared_endpoint() {
+        let (tx, mut rx) = mpsc::channel(64);
+        let broadcaster = Broadcaster::new(tx);
+        let mut a = make_peer("1.2.3.4", 7076, true);
+        let mut b = a.clone();
+        a.peer_id = "node-a".into();
+        b.peer_id = "node-b".into();
+        let peers = [a, b];
+        for variant in 0..3 {
+            let result = match variant {
+                0 => broadcaster.broadcast_to_all(b"hello", &peers).await,
+                1 => broadcaster.broadcast_to_subset(b"hello", &peers, 2).await,
+                _ => broadcaster.broadcast_with_fanout(b"hello", &peers, 2).await,
+            };
+            assert_eq!(result.sent, 2);
+            let mut ids = vec![rx.recv().await.unwrap().0, rx.recv().await.unwrap().0];
+            ids.sort();
+            assert_eq!(ids, ["node-a", "node-b"]);
         }
     }
 

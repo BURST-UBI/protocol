@@ -15,8 +15,7 @@ const MAX_FORKS_PER_ROOT: usize = 10;
 pub struct ForkCache {
     entries: HashMap<BlockHash, Vec<BlockHash>>,
     total_count: usize,
-    /// FIFO order for eviction. Roots removed mid-queue are left as
-    /// tombstones and skipped during eviction (lazy cleanup).
+    /// FIFO order containing only live roots.
     insertion_order: VecDeque<BlockHash>,
 }
 
@@ -27,6 +26,11 @@ impl ForkCache {
 
     /// Cache a fork block.
     pub fn insert(&mut self, root: BlockHash, fork_hash: BlockHash) {
+        if self.entries.get(&root).is_some_and(|forks| {
+            forks.contains(&fork_hash) || forks.len() >= MAX_FORKS_PER_ROOT
+        }) {
+            return;
+        }
         while self.total_count >= MAX_ENTRIES {
             self.evict_oldest();
         }
@@ -52,14 +56,15 @@ impl ForkCache {
         self.entries.get(root).map(|v| v.as_slice())
     }
 
-    /// Remove a root and all its forks — O(1) via lazy tombstone in queue.
+    /// Remove a root and its eviction entry together.
     pub fn remove(&mut self, root: &BlockHash) {
         if let Some(forks) = self.entries.remove(root) {
             self.total_count = self.total_count.saturating_sub(forks.len());
+            self.insertion_order.retain(|entry| entry != root);
         }
     }
 
-    /// Evict the oldest root, skipping tombstones (roots already removed).
+    /// Evict the oldest live root.
     fn evict_oldest(&mut self) {
         while let Some(oldest) = self.insertion_order.pop_front() {
             if self.entries.contains_key(&oldest) {
@@ -210,7 +215,7 @@ mod tests {
     }
 
     #[test]
-    fn eviction_skips_tombstones() {
+    fn eviction_after_removal_tracks_only_live_roots() {
         let mut cache = ForkCache::new();
         let root_a = hash(1);
         let root_b = hash(2);
@@ -222,9 +227,43 @@ mod tests {
 
         cache.remove(&root_a);
         cache.remove(&root_b);
+        assert_eq!(cache.insertion_order.len(), 1);
 
         cache.evict_oldest();
         assert!(cache.get_forks(&root_c).is_none());
         assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn repeated_removal_does_not_accumulate_eviction_metadata() {
+        let mut cache = ForkCache::new();
+        for _ in 0..MAX_ENTRIES * 2 {
+            cache.insert(hash(1), hash(10));
+            cache.remove(&hash(1));
+            assert!(cache.insertion_order.is_empty());
+            assert!(cache.entries.is_empty());
+            assert_eq!(cache.total_count, 0);
+        }
+        cache.insert(hash(2), hash(20));
+        cache.insert(hash(1), hash(10));
+        cache.evict_oldest();
+        assert!(cache.get_forks(&hash(2)).is_none());
+        assert_eq!(cache.get_forks(&hash(1)), Some([hash(10)].as_slice()));
+    }
+
+    #[test]
+    fn duplicate_at_capacity_does_not_evict_an_unrelated_root() {
+        let mut cache = ForkCache::new();
+        for index in 0..MAX_ENTRIES {
+            let mut bytes = [0; 32];
+            bytes[..8].copy_from_slice(&(index as u64).to_le_bytes());
+            let root = BlockHash::new(bytes);
+            cache.insert(root, root);
+        }
+        cache.insert(BlockHash::ZERO, BlockHash::ZERO);
+        assert_eq!(cache.len(), MAX_ENTRIES);
+        assert_eq!(cache.root_count(), MAX_ENTRIES);
+        assert_eq!(cache.insertion_order.len(), MAX_ENTRIES);
+        assert_eq!(cache.get_forks(&BlockHash::ZERO), Some([BlockHash::ZERO].as_slice()));
     }
 }

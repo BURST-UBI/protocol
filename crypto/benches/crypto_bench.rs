@@ -53,7 +53,7 @@ fn hash_block_bench(c: &mut Criterion) {
 
 fn keypair_generation_bench(c: &mut Criterion) {
     c.bench_function("keypair_generate", |b| {
-        b.iter(|| burst_crypto::generate_keypair())
+        b.iter(burst_crypto::generate_keypair)
     });
 }
 

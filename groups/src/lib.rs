@@ -7,15 +7,17 @@
 //! Design:
 //! - Groups manage membership via their own chosen mechanism (centralized admin, voting, etc.)
 //! - Each group exposes an HTTP endpoint: `GET /verify/{wallet_id}` → { valid: bool, score: f64 }
-//! - Receivers can ping any group to check a sender's status before accepting TRST
+//! - Receivers query trusted groups about TRST originators, not just the immediate sender
 //! - Nothing is on-chain — groups are a purely application-level trust overlay
 
 pub mod client;
 pub mod error;
 pub mod registry;
+pub mod trust_graph;
 pub mod types;
 
 pub use client::GroupClient;
 pub use error::GroupError;
 pub use registry::GroupRegistry;
+pub use trust_graph::MembershipPath;
 pub use types::{GroupInfo, MemberStatus};

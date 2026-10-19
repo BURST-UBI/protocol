@@ -3,6 +3,9 @@
 use burst_types::{Timestamp, TrstState};
 use serde::{Deserialize, Serialize};
 
+mod review;
+pub use review::{reviewed_merge_sources, select_transfer_origin, MergeSelection};
+
 /// A TRST holding in the wallet's portfolio.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TrstHolding {
@@ -54,76 +57,33 @@ impl AutoMergePolicy {
         self.aggressiveness > 0
     }
 
-    /// Compute the maximum expiry difference (in seconds) that tokens
-    /// must be within to be considered merge candidates.
-    ///
-    /// At aggressiveness 0: no merging.
-    /// At aggressiveness 50: merge tokens within 10% expiry difference.
-    /// At aggressiveness 100: merge everything regardless of expiry.
-    pub fn max_expiry_diff_secs(&self, trst_expiry_secs: u64) -> u64 {
-        if self.aggressiveness == 0 {
-            return 0;
+    pub fn config(&self) -> crate::auto_merge::AutoMergeConfig {
+        crate::auto_merge::AutoMergeConfig {
+            similarity_pct: if self.aggressiveness >= 100 { 100 } else { self.aggressiveness / 5 },
+            enabled: self.is_enabled(),
+            ..Default::default()
         }
-        if self.aggressiveness >= 100 {
-            return u64::MAX;
-        }
-        // Scale linearly: at 50 aggressiveness, allow 10% of total expiry
-        // At 100, allow 100% (everything). Formula: (aggressiveness/100) * expiry * 0.2
-        // This means at 50, it's 10% of expiry; at 100, it's 20% of expiry.
-        // But we want 100 to merge everything, so use a different scale:
-        // max_diff = (aggressiveness / 50) * (expiry * 0.1)
-        // So at 50 -> 10%, at 100 -> 20%. For "merge all", aggressiveness=100 returns MAX above.
-        let pct = (self.aggressiveness as u64 * 20) / 100; // 0-20%
-        (trst_expiry_secs * pct) / 100
+    }
+
+    /// Maximum loss relative to the longest remaining lifetime in a group.
+    pub fn max_expiry_diff_secs(&self, longest_remaining_secs: u64) -> u64 {
+        let config = self.config();
+        if config.similarity_pct == 100 { return u64::MAX; }
+        ((longest_remaining_secs as u128 * config.similarity_pct as u128) / 100) as u64
     }
 
     /// Find groups of tokens that should be merged together based on this policy.
     ///
     /// Returns groups of token IDs where each group shares similar expiry dates.
-    /// Each group has at least 2 tokens (since merging a single token is a no-op).
+    /// Uses each holding's remaining lifetime, not its origin timestamp. The
+    /// legacy expiry argument is retained for callers; it cannot override that data.
     pub fn find_merge_candidates(
         &self,
         holdings: &[TrstHolding],
-        trst_expiry_secs: u64,
+        _trst_expiry_secs: u64,
     ) -> Vec<Vec<String>> {
-        if !self.is_enabled() || holdings.len() < 2 {
-            return Vec::new();
-        }
-
-        let max_diff = self.max_expiry_diff_secs(trst_expiry_secs);
-
-        // Sort holdings by origin timestamp (proxy for expiry date)
-        let mut sorted: Vec<&TrstHolding> = holdings
-            .iter()
-            .filter(|h| h.state == TrstState::Active)
-            .collect();
-        sorted.sort_by_key(|h| h.origin_timestamp.as_secs());
-
-        // Group tokens with origin timestamps within max_diff of each other
-        let mut groups: Vec<Vec<String>> = Vec::new();
-        let mut current_group: Vec<String> = Vec::new();
-        let mut group_start_ts: u64 = 0;
-
-        for holding in sorted {
-            let ts = holding.origin_timestamp.as_secs();
-            if current_group.is_empty() {
-                current_group.push(holding.token_id.clone());
-                group_start_ts = ts;
-            } else if ts.saturating_sub(group_start_ts) <= max_diff {
-                current_group.push(holding.token_id.clone());
-            } else {
-                if current_group.len() >= 2 {
-                    groups.push(current_group);
-                }
-                current_group = vec![holding.token_id.clone()];
-                group_start_ts = ts;
-            }
-        }
-        if current_group.len() >= 2 {
-            groups.push(current_group);
-        }
-
-        groups
+        crate::auto_merge::compute_merge_groups(holdings, &self.config())
+            .into_iter().map(|group| group.token_ids).collect()
     }
 }
 
@@ -131,14 +91,14 @@ impl AutoMergePolicy {
 mod tests {
     use super::*;
 
-    fn make_holding(id: &str, origin_ts: u64) -> TrstHolding {
+    fn make_holding(id: &str, remaining_secs: u64) -> TrstHolding {
         TrstHolding {
             token_id: id.to_string(),
             amount: 100,
             origin_wallet: "brst_test".to_string(),
-            origin_timestamp: Timestamp::new(origin_ts),
+            origin_timestamp: Timestamp::new(1000),
             state: TrstState::Active,
-            time_to_expiry_secs: Some(3600),
+            time_to_expiry_secs: Some(remaining_secs),
         }
     }
 

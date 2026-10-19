@@ -64,6 +64,24 @@ impl AccountStore for NullStore {
         Ok(self.accounts.lock().unwrap().contains_key(address.as_str()))
     }
 
+    fn advance_confirmation_height(
+        &self,
+        address: &WalletAddress,
+        height: u64,
+    ) -> Result<(), StoreError> {
+        let mut accounts = self.accounts.lock().unwrap();
+        let account = accounts
+            .get_mut(address.as_str())
+            .ok_or_else(|| StoreError::NotFound(address.to_string()))?;
+        if height > account.block_count {
+            return Err(StoreError::Backend(
+                "confirmation exceeds chain height".into(),
+            ));
+        }
+        account.confirmation_height = account.confirmation_height.max(height);
+        Ok(())
+    }
+
     fn account_count(&self) -> Result<u64, StoreError> {
         Ok(self.accounts.lock().unwrap().len() as u64)
     }

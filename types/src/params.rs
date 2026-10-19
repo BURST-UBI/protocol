@@ -1,6 +1,6 @@
 //! Protocol parameters — the two core parameters plus all governance-tunable values.
 //!
-//! Every field is democratically governable via the 5-phase governance process.
+//! Active parameters are democratically governable via the four-phase process.
 
 use crate::amount::{BRN_UNIT, TRST_UNIT};
 use crate::BlockHash;
@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// The general equation: BURST is defined by `brn_rate` and `trst_expiry_secs`.
 /// Normal money is the special case where `brn_rate = 0` and `trst_expiry_secs = u64::MAX`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtocolParams {
     // ── The General Equation ─────────────────────────────────────────────
     /// BRN accrual rate: raw units per second per verified wallet.
@@ -54,17 +54,17 @@ pub struct ProtocolParams {
     /// Default: 7 days = 604800 seconds.
     pub neither_penalty_cooldown_secs: u64,
 
-    // ── Governance (5-phase: Proposal → Exploration → Cooldown → Promotion → Activation) ──
+    // ── Governance: Proposal → Voting → Cooldown → Activation ──
     /// Duration of the Proposal phase in seconds.
     pub governance_proposal_duration_secs: u64,
 
-    /// Duration of the Exploration vote phase in seconds.
+    /// Duration of the single voting phase in seconds (stored as Exploration).
     pub governance_exploration_duration_secs: u64,
 
     /// Duration of the Cooldown phase in seconds.
     pub governance_cooldown_duration_secs: u64,
 
-    /// Duration of the Promotion vote phase in seconds.
+    /// Legacy serialized field. BURST no longer has a promotion vote.
     pub governance_promotion_duration_secs: u64,
 
     /// Supermajority threshold for parameter governance (basis points).
@@ -76,20 +76,18 @@ pub struct ProtocolParams {
     /// Number of endorsements (BRN burns) needed to advance a proposal past spam filter.
     pub governance_proposal_endorsements: u32,
 
-    /// Exponential moving average of past participation (basis points).
-    /// Used for adaptive quorum biasing. Updated after each vote.
+    /// Legacy serialized participation statistic. It does not alter quorum.
     pub governance_ema_participation_bps: u32,
 
-    /// BRN cost (raw) to submit a governance proposal. Default: 100 BRN
-    /// (IMPLEMENTATION_DECISIONS §20.1).
+    /// BRN burned per governance endorsement. Default: 100 BRN (decision 20.1).
+    /// The stored field name predates the signed endorsement operation.
     pub governance_proposal_cost: u128,
 
-    /// Maximum rounds a proposal can be reset to Proposal phase after failure
-    /// before being terminally rejected. Default: 3.
+    /// Legacy serialized field. Failed proposals now require resubmission.
     pub governance_max_rounds: u32,
 
-    /// Duration (seconds) of the proposal competition window. Multiple proposals
-    /// collect endorsements during this window; only the winner advances. Default: 7 days.
+    /// Legacy competition duration. Proposals now advance independently using
+    /// `governance_proposal_duration_secs`.
     pub governance_proposal_window_secs: u64,
 
     /// Propagation buffer (seconds) between voting end and vote counting.
@@ -107,10 +105,10 @@ pub struct ProtocolParams {
     /// Separate from governance quorum — independently governable.
     pub consti_quorum_bps: u32,
 
-    /// Duration (seconds) of a verification session before it expires.
+    /// Normal-panel voting duration, measured from its certified activation.
     pub verification_timeout_secs: u64,
 
-    /// Duration (seconds) of a challenge review period.
+    /// Challenge-panel voting duration, measured from its certified activation.
     pub challenge_duration_secs: u64,
 
     /// Challenger TRST reward as a fraction of the revoked total
@@ -147,6 +145,24 @@ pub struct ProtocolParams {
     /// Prevents freshly-verified (possibly sybil) wallets from immediately
     /// gaining verification power. Default 30 days.
     pub min_verification_age_secs: u64,
+
+    /// Penalize Neither voting strictly above this fraction of retained assignments.
+    pub neither_penalty_threshold_bps: u32,
+
+    /// Recent completed assignments retained per verifier. Zero disables tracking.
+    pub neither_window_assignments: u32,
+
+    /// Available BRN required at the selection cut, separate from the vote stake.
+    pub min_verifier_brn_balance: u128,
+
+    /// Emergency voting period, fixed when the proposal is submitted.
+    pub emergency_voting_duration_secs: u64,
+
+    /// Required emergency participation as a fraction of verified humans.
+    pub emergency_quorum_bps: u32,
+
+    /// Required emergency approval among non-abstaining votes.
+    pub emergency_supermajority_bps: u32,
 }
 
 impl ProtocolParams {
@@ -210,15 +226,28 @@ impl ProtocolParams {
             new_wallet_limit_duration_secs: 0,
             bootstrap_exit_threshold: 50,
 
-            min_work_difficulty: 0xffff_f000_0000_0000,
+            min_work_difficulty: 0xffff_fff8_0000_0000,
             new_wallet_tx_limit_per_day: 10,
             new_wallet_rate_limit_duration_secs: 30 * 24 * 3600, // 30 days
             min_verification_age_secs: 30 * 24 * 3600,           // 30 days
+            neither_penalty_threshold_bps: 5000,
+            neither_window_assignments: 100,
+            min_verifier_brn_balance: 50 * BRN_UNIT,
+            emergency_voting_duration_secs: 24 * 3600,
+            emergency_quorum_bps: 9500,
+            emergency_supermajority_bps: 9500,
         }
     }
 }
 
 impl ProtocolParams {
+    /// Local development keeps live economic rules with cheaper proof of work.
+    pub fn devnet_defaults() -> Self {
+        let mut p = Self::burst_defaults();
+        p.min_work_difficulty = 0xffff_f000_0000_0000;
+        p
+    }
+
     /// Testnet overrides — fast governance for interactive testing.
     pub fn testnet_defaults() -> Self {
         let mut p = Self::burst_defaults();
@@ -242,5 +271,45 @@ impl ProtocolParams {
 impl Default for ProtocolParams {
     fn default() -> Self {
         Self::burst_defaults()
+    }
+}
+
+#[cfg(test)]
+mod spec_defaults_tests {
+    use super::*;
+
+    #[test]
+    fn live_defaults_match_explicit_launch_decisions() {
+        let params = ProtocolParams::burst_defaults();
+        assert_eq!(params.brn_rate, ProtocolParams::BRN_RATE_1_PER_HOUR);
+        assert_eq!(params.trst_expiry_secs, u64::MAX);
+        assert_eq!(params.min_work_difficulty, 0xffff_fff8_0000_0000);
+        assert_eq!(params.governance_proposal_cost, 100 * BRN_UNIT);
+        assert_eq!(params.endorsement_burn_amount, 336 * BRN_UNIT);
+        assert_eq!(params.verifier_stake_amount, 500 * BRN_UNIT);
+        assert_eq!(params.min_verifier_brn_balance, 50 * BRN_UNIT);
+        assert_eq!(params.emergency_voting_duration_secs, 86400);
+        assert_eq!(params.emergency_quorum_bps, 9500);
+        assert_eq!(params.emergency_supermajority_bps, 9500);
+        assert_eq!(params.challenge_stake_amount, 1000 * BRN_UNIT);
+        assert_eq!(params.challenge_reward_cap, 2000 * TRST_UNIT);
+        assert_eq!(params.bootstrap_exit_threshold, 50);
+    }
+
+    #[test]
+    fn testing_overrides_do_not_change_live_defaults() {
+        let dev = ProtocolParams::devnet_defaults();
+        let test = ProtocolParams::testnet_defaults();
+        assert_eq!(dev.trst_expiry_secs, u64::MAX);
+        assert_eq!(test.trst_expiry_secs, u64::MAX);
+        assert_eq!(dev.min_work_difficulty, 0xffff_f000_0000_0000);
+        assert_eq!(dev.governance_proposal_cost, 100 * BRN_UNIT);
+        assert_eq!(dev.governance_exploration_duration_secs, 14 * 24 * 3600);
+        assert_eq!(test.min_work_difficulty, 0xffff_f000_0000_0000);
+        assert_eq!(test.governance_proposal_cost, 0);
+        assert_ne!(
+            test.params_hash(),
+            ProtocolParams::burst_defaults().params_hash()
+        );
     }
 }

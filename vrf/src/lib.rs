@@ -3,14 +3,14 @@
 //! Phased approach:
 //! - **Phase 1**: drand (external beacon from League of Entropy)
 //! - **Phase 2**: Commit-reveal with representatives
-//! - **Phase 3**: Threshold VRF (DVRF) — gold standard
+//! - **Phase 3**: BURST-operated threshold randomness (not implemented)
 
 pub mod commit_reveal;
 pub mod drand;
 pub mod error;
 pub mod threshold;
 
-pub use drand::{ChainInfo, DrandBeacon, DrandClient, DrandScheme, DrandVerifier};
+pub use drand::{ChainInfo, DrandBeacon, DrandClient, DrandPolicy, DrandScheme, DrandVerifier};
 pub use error::VrfError;
 pub use threshold::{
     filter_eligible_verifiers, is_eligible_verifier, select_verifiers, EligibilityConfig,
@@ -30,7 +30,7 @@ pub trait VrfProvider: Send + Sync {
 }
 
 /// The output of a VRF — a random value with its proof.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RandomOutput {
     /// The random bytes (32 bytes).
     pub value: [u8; 32],

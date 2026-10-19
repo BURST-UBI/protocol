@@ -9,6 +9,7 @@ description = "DAG block-lattice ledger — account chains, state blocks, prunin
 burst-types = { workspace = true }
 burst-store = { workspace = true }
 burst-transactions = { workspace = true }
+burst-governance = { workspace = true }
 burst-crypto = { workspace = true }
 burst-work = { workspace = true }
 serde = { workspace = true }

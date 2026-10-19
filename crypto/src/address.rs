@@ -111,7 +111,7 @@ pub fn derive_address(public_key: &PublicKey) -> WalletAddress {
 ///
 /// Returns `None` if the address is malformed or has an invalid checksum.
 pub fn decode_address(address: &str) -> Option<[u8; 32]> {
-    if !address.starts_with(PREFIX) {
+    if !address.is_ascii() || !address.starts_with(PREFIX) {
         return None;
     }
     let encoded = &address[PREFIX.len()..];
@@ -124,6 +124,12 @@ pub fn decode_address(address: &str) -> Option<[u8; 32]> {
 
     let pubkey_bytes: [u8; 32] = decode_base32_fixed(pubkey_encoded)?;
     let checksum_bytes: [u8; 5] = decode_base32_fixed(checksum_encoded)?;
+
+    // The final public-key character carries one data bit and four zero padding
+    // bits. Reject aliases: roster and vote deduplication use the address string.
+    if BASE32_DECODE[pubkey_encoded.as_bytes()[PUBKEY_CHARS - 1] as usize] & 0x0F != 0 {
+        return None;
+    }
 
     let expected_checksum = &crate::blake2b_256(&pubkey_bytes)[..5];
     if checksum_bytes != *expected_checksum {
@@ -142,6 +148,55 @@ pub fn validate_address(address: &str) -> bool {
 mod tests {
     use super::*;
     use crate::keys::generate_keypair;
+
+    #[test]
+    fn address_decode_matches_canonical_reencoding_for_every_ascii_mutation() {
+        fn reference(address: &str) -> Option<[u8; 32]> {
+            if !address.is_ascii() || !address.starts_with(PREFIX)
+                || address.len() != PREFIX.len() + ENCODED_LEN
+            {
+                return None;
+            }
+            let key = decode_base32_fixed::<32>(
+                &address[PREFIX.len()..PREFIX.len() + PUBKEY_CHARS],
+            )?;
+            (derive_address(&PublicKey(key)).as_str() == address).then_some(key)
+        }
+        for seed in 0u8..16 {
+            let key = PublicKey(std::array::from_fn(|i| seed.wrapping_mul(17).wrapping_add(i as u8)));
+            let address = derive_address(&key);
+            assert_eq!(decode_address(address.as_str()), Some(key.0));
+            for position in 0..address.as_str().len() {
+                for byte in 0..=127 {
+                    let mut bytes = address.as_str().as_bytes().to_vec();
+                    bytes[position] = byte;
+                    let mutated = String::from_utf8(bytes).unwrap();
+                    assert_eq!(decode_address(&mutated), reference(&mutated),
+                        "seed={seed} position={position} byte={byte}");
+                }
+                let mut unicode = address.as_str().to_owned();
+                unicode.replace_range(position..position + 1, "é");
+                assert_eq!(decode_address(&unicode), None);
+            }
+        }
+    }
+
+    #[test]
+    fn nonzero_padding_cannot_alias_a_wallet_identity() {
+        let kp = crate::keys::keypair_from_seed(&[7; 32]);
+        let canonical = derive_address(&kp.public);
+        let last = PREFIX.len() + PUBKEY_CHARS - 1;
+        let canonical_index = BASE32_DECODE[canonical.as_str().as_bytes()[last] as usize];
+        assert_eq!(canonical_index & 15, 0);
+        for padding in 1..16 {
+            let mut alias = canonical.as_str().as_bytes().to_vec();
+            alias[last] = BASE32_ALPHABET[(canonical_index | padding) as usize];
+            let alias = String::from_utf8(alias).unwrap();
+            assert_eq!(decode_address(&alias), None);
+            assert!(!validate_address(&alias));
+        }
+        assert_eq!(decode_address(canonical.as_str()), Some(kp.public.0));
+    }
 
     #[test]
     fn derive_and_validate() {

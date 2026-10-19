@@ -1,0 +1,10 @@
+# Isolated Test-network process to exercise the daemon's real UPnP wiring.
+# Dev mode intentionally never enables UPnP on a user's real router.
+network = "Test"
+data_dir = "/evidence/upnp-native-client"
+port = 7076
+rpc_port = 7077
+rpc_bind = "0.0.0.0"
+enable_upnp = true
+enable_peer_reachout = false
+bootstrap_peers = ["172.30.99.2:7076"]

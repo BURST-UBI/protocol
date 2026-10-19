@@ -2,6 +2,40 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Constant-size reference to a token's composition. Ancestry remains in the
+/// merger graph; a restored split is a pure share of its named burn origin.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TrstBasis {
+    #[default]
+    Entire,
+    Remainder(crate::TxHash),
+    Single(crate::TxHash),
+}
+
+impl TrstBasis {
+    pub fn key(self) -> [u8; 33] {
+        let mut key = [0; 33];
+        match self {
+            Self::Entire => {}
+            Self::Remainder(hash) => {
+                key[0] = 1;
+                key[1..].copy_from_slice(hash.as_bytes());
+            }
+            Self::Single(hash) => {
+                key[0] = 2;
+                key[1..].copy_from_slice(hash.as_bytes());
+            }
+        }
+        key
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrstRevocationChunk {
+    pub amount: u128,
+    pub restored: bool,
+}
+
 /// Why a wallet is being challenged. The same challenge procedure (stake →
 /// re-verification → verifier vote) removes a verified wallet either way; the
 /// reason only decides what happens to the wallet's TRST when the challenge is
@@ -67,6 +101,12 @@ pub enum WalletState {
 }
 
 impl WalletState {
+    /// A pending accusation does not revoke verified-human rights (decisions
+    /// 15.11 and 17.3). Only a resolved outcome may do that.
+    pub fn is_verified(&self) -> bool {
+        matches!(self, Self::Verified | Self::Challenged)
+    }
+
     /// Whether this wallet is allowed to transact (send/receive).
     pub fn can_transact(&self) -> bool {
         matches!(self, Self::Verified | Self::Challenged)
@@ -79,7 +119,7 @@ impl WalletState {
 
     /// Whether this wallet can participate in governance votes.
     pub fn can_vote(&self) -> bool {
-        matches!(self, Self::Verified)
+        self.is_verified()
     }
 }
 
@@ -137,6 +177,14 @@ mod tests {
         assert!(WalletState::Verified.can_transact());
         assert!(WalletState::Verified.accrues_brn());
         assert!(WalletState::Verified.can_vote());
+    }
+
+    #[test]
+    fn accusation_alone_does_not_remove_verified_rights() {
+        assert!(WalletState::Challenged.is_verified());
+        assert!(WalletState::Challenged.can_transact());
+        assert!(WalletState::Challenged.accrues_brn());
+        assert!(WalletState::Challenged.can_vote());
     }
 
     #[test]

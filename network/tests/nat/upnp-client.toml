@@ -1,0 +1,9 @@
+# Isolated lab: no seeds, no reachout, no manually advertised/mapped endpoint.
+network = "Dev"
+enable_representative = false
+data_dir = "/evidence/upnp-client"
+port = 7076
+rpc_port = 7077
+rpc_bind = "0.0.0.0"
+enable_upnp = false
+enable_peer_reachout = false

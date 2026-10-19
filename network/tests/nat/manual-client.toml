@@ -1,0 +1,10 @@
+# Isolated lab only. No seeds/reachout: its first connection must be inbound.
+network = "Dev"
+enable_representative = false
+data_dir = "/evidence/manual-client"
+port = 7076
+rpc_port = 7077
+rpc_bind = "0.0.0.0"
+enable_upnp = false
+enable_peer_reachout = false
+advertise_address = "172.30.99.1:17076"

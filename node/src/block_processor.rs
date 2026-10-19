@@ -14,6 +14,9 @@ use burst_work::{WorkBlockKind, WorkThresholds};
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
+mod authentication;
+pub(crate) use authentication::{signing_key, AuthenticatedBlock, AuthenticationRules};
+
 /// Result of processing a single block through the pipeline.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProcessResult {
@@ -42,6 +45,8 @@ pub enum RollbackResult {
     NotHead,
     /// Account does not exist in the frontier.
     AccountNotFound,
+    /// Persistent state requires a transactional economic rollback.
+    RequiresLedgerRollback,
 }
 
 /// Where an incoming block originated.
@@ -112,33 +117,6 @@ impl ProcessingQueue {
     }
 }
 
-/// Block types that a delegation key is authorized to sign.
-fn is_delegation_allowed(block_type: &BlockType) -> bool {
-    matches!(
-        block_type,
-        BlockType::GovernanceVote | BlockType::ChangeRepresentative
-    )
-}
-
-/// Attempt to extract a 32-byte public key from a signature.
-///
-/// Ed25519 signatures are 64 bytes where the first 32 bytes contain R (a curve
-/// point) and the last 32 bytes contain s. The actual public key is not embedded
-/// in the signature, but the delegation store lookup key is the delegation
-/// public key (not the signature). We brute-force try the signature's first 32
-/// bytes as a lookup key — if the delegation was registered with that key, it
-/// will match. This is a pragmatic approach; in production the signing pubkey
-/// would be communicated out-of-band or in a block field.
-fn extract_signing_pubkey(signature: &Signature, _hash: &[u8; 32]) -> Option<[u8; 32]> {
-    let sig_bytes = &signature.0;
-    if sig_bytes.iter().all(|&b| b == 0) {
-        return None;
-    }
-    let mut pubkey = [0u8; 32];
-    pubkey.copy_from_slice(&sig_bytes[32..64]);
-    Some(pubkey)
-}
-
 /// Maximum number of recently processed hashes to keep in the dedup cache.
 const MAX_RECENTLY_PROCESSED: usize = 65_536;
 
@@ -149,11 +127,13 @@ const MAX_RECENTLY_PROCESSED: usize = 65_536;
 /// Max seconds a fresh block's timestamp may sit ahead of a node's own clock.
 pub const FUTURE_TIMESTAMP_TOLERANCE_SECS: u64 = 60;
 /// Max seconds a fresh block's timestamp may lag a node's own clock.
-/// Generous enough for propagation + queueing under load, tight enough that
-/// backdating cannot meaningfully resurrect expired TRST or shade accrual.
-pub const PAST_TIMESTAMP_TOLERANCE_SECS: u64 = 3600;
+/// Decision 23.7 applies the same 60-second tolerance in both directions.
+pub const PAST_TIMESTAMP_TOLERANCE_SECS: u64 = 60;
 
 pub struct BlockProcessor {
+    network: burst_types::NetworkId,
+    payment_epoch: BlockHash,
+    payment_cutoff: u64,
     /// Blocks waiting for a gap to be filled (previous block unknown).
     unchecked: UncheckedMap,
     /// Minimum proof-of-work difficulty (legacy single-threshold fallback).
@@ -171,14 +151,20 @@ pub struct BlockProcessor {
     /// Whether to validate block timestamps against wall-clock time.
     /// Disabled in tests to avoid flaky time-dependent failures.
     validate_timestamps: bool,
-    /// Optional delegation store for verifying delegation key signatures.
+    pub(crate) historical_admissions:
+        Arc<crate::checkpoint_store::historical::HistoricalAdmissions>,
+    pub(crate) historical_finality: Arc<crate::historical_finality::HistoricalFinality>,
+    #[cfg(test)]
+    pub(crate) test_time: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// Legacy records are retained, but cannot authorize signatures: they do
+    /// not encode the proposal/category scope required by decision 20.8.
     pub delegation_store: Option<Arc<dyn DelegationStore + Send + Sync>>,
     /// Optional persistent block store for dedup fallback after cache eviction.
     pub block_store: Option<Arc<dyn BlockStore + Send + Sync>>,
-    /// Current protocol params hash. Updated after GovernanceActivation blocks.
-    /// When set, blocks with a non-zero params_hash that doesn't match are
-    /// logged as warnings (soft validation during bootstrap grace period).
+    /// Rules for the installed epoch. Certified mode requires an exact match;
+    /// the legacy bootstrap path retains warning-only validation.
     current_params_hash: BlockHash,
+    enforce_params_hash: bool,
 }
 
 /// Map a ledger `BlockType` to the work-crate's `WorkBlockKind`.
@@ -191,21 +177,42 @@ fn block_type_to_work_kind(bt: &BlockType) -> WorkBlockKind {
 }
 
 impl BlockProcessor {
+    pub(crate) fn admission_time(&self) -> Timestamp {
+        #[cfg(test)]
+        if let Some(time) = &self.test_time {
+            return Timestamp::new(time.load(std::sync::atomic::Ordering::SeqCst));
+        }
+        Timestamp::now()
+    }
+
+    pub(crate) fn install_payment_epoch(&mut self, epoch: BlockHash, cutoff: u64) {
+        self.payment_epoch = epoch;
+        self.payment_cutoff = cutoff;
+        self.clear_recently_processed();
+        self.unchecked.clear();
+    }
     /// Create a new block processor.
     ///
     /// * `min_work_difficulty` — minimum PoW threshold blocks must meet.
-    pub fn new(min_work_difficulty: u64) -> Self {
+    pub fn new(min_work_difficulty: u64, payment_epoch: BlockHash) -> Self {
         let kp = burst_crypto::keypair_from_seed(&[0u8; 32]);
         let genesis_addr = burst_crypto::derive_address(&kp.public);
-        Self::with_genesis_account(min_work_difficulty, genesis_addr)
+        Self::with_genesis_account(min_work_difficulty, genesis_addr, payment_epoch)
     }
 
     /// Create a block processor with a specific genesis account.
     ///
     /// Epoch blocks are only accepted when signed by this account.
-    pub fn with_genesis_account(min_work_difficulty: u64, genesis_account: WalletAddress) -> Self {
+    pub fn with_genesis_account(
+        min_work_difficulty: u64,
+        genesis_account: WalletAddress,
+        payment_epoch: BlockHash,
+    ) -> Self {
         let max_unchecked = 65_536;
         Self {
+            network: burst_types::NetworkId::Live,
+            payment_epoch,
+            payment_cutoff: 0,
             unchecked: UncheckedMap::new(max_unchecked),
             min_work_difficulty,
             work_thresholds: WorkThresholds::with_base(min_work_difficulty),
@@ -214,10 +221,21 @@ impl BlockProcessor {
             genesis_account,
             verify_signatures: true,
             validate_timestamps: true,
+            historical_admissions: Arc::default(),
+            historical_finality: Arc::default(),
+            #[cfg(test)]
+            test_time: None,
             delegation_store: None,
             block_store: None,
             current_params_hash: BlockHash::ZERO,
+            enforce_params_hash: false,
         }
+    }
+
+    /// Set once by node construction from its validated network configuration.
+    pub(crate) fn with_network(mut self, network: burst_types::NetworkId) -> Self {
+        self.network = network;
+        self
     }
 
     /// Set the current protocol params hash for validation.
@@ -265,6 +283,51 @@ impl BlockProcessor {
     /// 6. **Open block** — validate first-block-in-chain semantics
     /// 7. **Chain append** — accept if block extends the frontier
     pub fn process(&mut self, block: &StateBlock, frontier: &mut DagFrontier) -> ProcessResult {
+        self.process_inner(block, frontier, false)
+    }
+
+    fn process_inner(
+        &mut self,
+        block: &StateBlock,
+        frontier: &mut DagFrontier,
+        authenticated: bool,
+    ) -> ProcessResult {
+        if !authenticated {
+            if let Err(reason) = block.validate_format() {
+                return ProcessResult::Rejected(reason.into());
+            }
+        }
+        let appeals_enabled = crate::release_policy::appeals(self.network);
+        #[cfg(test)]
+        let appeals_enabled = appeals_enabled || self.test_time.is_some();
+        if block.block_type == BlockType::Challenge
+            && !block.target_head.is_zero()
+            && !appeals_enabled
+        {
+            return ProcessResult::Rejected(
+                "meta-challenge admission requires certified appeal support".into(),
+            );
+        }
+        if block.block_type == BlockType::GovernanceProposal
+            && block.origin.is_zero()
+            && !crate::governance_content::enabled(self.network)
+            && matches!(
+                burst_governance::ProposalContent::decode_compact(block.link.as_bytes()),
+                Ok(burst_governance::ProposalContent::Emergency { .. })
+            )
+        {
+            return ProcessResult::Rejected(
+                "emergency governance is behind the release gate".into(),
+            );
+        }
+        if !authenticated && !block.fits_p2p_message() {
+            return ProcessResult::Rejected("block exceeds P2P message limit".into());
+        }
+        // Signatures and work authenticate the computed contents, not an
+        // arbitrary hash supplied alongside a modified payload.
+        if !authenticated && block.hash != block.compute_hash() {
+            return ProcessResult::Rejected("block hash does not match its contents".into());
+        }
         // Stage 1: Dedup check (in-memory cache + persistent store fallback)
         if self.recently_processed.contains(&block.hash) {
             return ProcessResult::Duplicate;
@@ -275,8 +338,16 @@ impl BlockProcessor {
                 return ProcessResult::Duplicate;
             }
         }
+        if self.payment_epoch.is_zero() || block.payment_epoch != self.payment_epoch {
+            return ProcessResult::Rejected("block payment epoch is not installed".into());
+        }
+        if block.timestamp.as_secs() < self.payment_cutoff {
+            return ProcessResult::Rejected(
+                "block predates its installed checkpoint cutoff".into(),
+            );
+        }
 
-        // Stage 2: PoW validation — threshold varies by block type
+        // Stage 2: every block kind uses the configured work threshold.
         let work_threshold = self
             .work_thresholds
             .threshold_for(block_type_to_work_kind(&block.block_type));
@@ -292,20 +363,19 @@ impl BlockProcessor {
         // timestamp passes every node's own-clock check, the (bounded) claim
         // is what the economic arithmetic uses, so all nodes compute
         // identical expiry/accrual results. The maximum lie is the tolerance
-        // window: +60s forward (can't pre-accrue meaningful BRN), 1h backward
-        // (can't resurrect a token dead longer than an hour — nothing against
-        // multi-year expiries). Disable via set_validate_timestamps(false)
-        // for bootstrap/gap-fill sync of already-confirmed history.
+        // window is 60 seconds in either direction (decision 23.7).
+        // Historical exceptions require a certificate
+        // and semantic replay of the exact prefix, never a peer/source label.
         if self.validate_timestamps {
-            let now_secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
+            let now_secs = self.admission_time().as_secs();
             let block_ts = block.timestamp.as_secs();
-            if block_ts > now_secs + FUTURE_TIMESTAMP_TOLERANCE_SECS {
+            if block_ts > now_secs.saturating_add(FUTURE_TIMESTAMP_TOLERANCE_SECS) {
                 return ProcessResult::Rejected("block timestamp is too far in the future".into());
             }
-            if block_ts + PAST_TIMESTAMP_TOLERANCE_SECS < now_secs {
+            if block_ts.saturating_add(PAST_TIMESTAMP_TOLERANCE_SECS) < now_secs
+                && !self.historical_admissions.contains(&block.hash)
+                && !self.historical_finality.contains(&block.hash)
+            {
                 return ProcessResult::Rejected(
                     "block timestamp is too far in the past (backdating rejected)".into(),
                 );
@@ -313,60 +383,19 @@ impl BlockProcessor {
         }
 
         // Stage 3: Signature verification
-        if block.signature == Signature([0u8; 64]) {
-            return ProcessResult::Rejected("signature is zero (unsigned block)".into());
-        }
-
-        if self.verify_signatures {
-            let signer = if matches!(
-                block.block_type,
-                BlockType::Epoch | BlockType::GovernanceActivation
-            ) {
-                &self.genesis_account
-            } else {
-                &block.account
-            };
-
-            let pubkey_bytes = match decode_address(signer.as_str()) {
-                Some(bytes) => bytes,
-                None => {
-                    return ProcessResult::Rejected(
-                        "unable to decode account address for signature verification".into(),
-                    )
-                }
-            };
-            let public_key = PublicKey(pubkey_bytes);
-            if !verify_signature(block.hash.as_bytes(), &block.signature, &public_key) {
-                // Primary key verification failed — check delegation key fallback
-                if let Some(ref del_store) = self.delegation_store {
-                    let signing_pubkey =
-                        extract_signing_pubkey(&block.signature, block.hash.as_bytes());
-                    if let Some(pubkey) = signing_pubkey {
-                        if let Ok(Some(record)) = del_store.get_delegation_by_pubkey(&pubkey) {
-                            if record.revoked {
-                                return ProcessResult::Rejected(
-                                    "delegation key has been revoked".into(),
-                                );
-                            }
-                            if !is_delegation_allowed(&block.block_type) {
-                                return ProcessResult::Rejected(
-                                    "delegation key cannot sign this block type".into(),
-                                );
-                            }
-                            // Delegation key is valid for this operation — proceed
-                        } else {
-                            return ProcessResult::Rejected("invalid signature".into());
-                        }
-                    } else {
-                        return ProcessResult::Rejected("invalid signature".into());
-                    }
-                } else {
-                    return ProcessResult::Rejected("invalid signature".into());
-                }
+        if !authenticated {
+            if let Err(reason) = self.authentication_rules().check_signature(block) {
+                return ProcessResult::Rejected(reason);
             }
         }
 
-        // Stage 3.5: params_hash validation
+        if self.enforce_params_hash && block.params_hash != self.current_params_hash {
+            return ProcessResult::Rejected(
+                "block parameters do not match the installed payment epoch".into(),
+            );
+        }
+
+        // Stage 3.5: legacy params_hash validation
         // GovernanceActivation blocks carry the *new* params_hash in their
         // `transaction` field; their own `params_hash` stamp is the pre-activation
         // hash, so we skip validation for them. Bootstrap blocks (old blocks
@@ -385,10 +414,38 @@ impl BlockProcessor {
             );
         }
 
-        // Stage 3.6: Epoch / GovernanceActivation block validation
+        if block.is_open() && !block.previous.is_zero() {
+            return ProcessResult::Rejected("open block must have zero previous hash".into());
+        }
         if block.block_type == BlockType::Epoch {
             return self.process_epoch(block, frontier);
         }
+        if !block.is_open()
+            && block.block_type != BlockType::GovernanceActivation
+            && block.previous.is_zero()
+        {
+            return ProcessResult::Rejected("non-open block has zero previous hash".into());
+        }
+
+        // Check the same dependency set used by cementation and history replay.
+        // Address-valued links (send destinations, verification targets) are
+        // deliberately absent from StateBlock::dependencies().
+        if !block.previous.is_zero()
+            && frontier.get_head(&block.account) != Some(&block.previous)
+            && !self.source_known(&block.previous)
+        {
+            self.queue_unchecked(block.previous, block.clone());
+            return ProcessResult::Gap;
+        }
+        if let Some(source) = block
+            .dependencies()
+            .find(|dependency| *dependency != block.previous && !self.source_known(dependency))
+        {
+            self.queue_unchecked_source(source, block.clone());
+            return ProcessResult::GapSource;
+        }
+
+        // Stage 3.6: Epoch / GovernanceActivation block validation
         if block.block_type == BlockType::GovernanceActivation {
             return self.process_governance_activation(block, frontier);
         }
@@ -400,26 +457,13 @@ impl BlockProcessor {
             Some(frontier_head) => {
                 // Account exists in the frontier
 
-                // Stage 6: Open block for existing account → reject (duplicate open)
+                // A different opening hash competes at the zero predecessor.
+                // Exact duplicates were removed before signature validation.
                 if block.is_open() {
-                    return ProcessResult::Rejected(
-                        "open block for account that already exists".into(),
-                    );
+                    return ProcessResult::Fork;
                 }
 
                 if block.previous == frontier_head {
-                    // Stage 4.5: Gap-source — for Receive/RejectReceive/VerificationVote blocks,
-                    // verify the linked source block has been seen. If not, queue as gap-source.
-                    if matches!(
-                        block.block_type,
-                        BlockType::Receive | BlockType::RejectReceive | BlockType::VerificationVote
-                    ) && !block.link.is_zero()
-                        && !self.source_known(&block.link)
-                    {
-                        self.queue_unchecked_source(block.link, block.clone());
-                        return ProcessResult::GapSource;
-                    }
-
                     // Stage 8: Chain append — block extends the frontier
                     frontier.update(block.account.clone(), block.hash);
                     self.mark_processed(block.hash);
@@ -462,16 +506,6 @@ impl BlockProcessor {
                             "open block must have zero previous hash".into(),
                         );
                     }
-                    // Gap-source check for receive-type and verification-vote open blocks
-                    if matches!(
-                        block.block_type,
-                        BlockType::Receive | BlockType::RejectReceive | BlockType::VerificationVote
-                    ) && !block.link.is_zero()
-                        && !self.source_known(&block.link)
-                    {
-                        self.queue_unchecked_source(block.link, block.clone());
-                        return ProcessResult::GapSource;
-                    }
                     frontier.update(block.account.clone(), block.hash);
                     self.mark_processed(block.hash);
                     return ProcessResult::Accepted;
@@ -483,6 +517,86 @@ impl BlockProcessor {
                 ProcessResult::Gap
             }
         }
+    }
+
+    /// Validate a candidate without publishing its frontier or dedup entry.
+    /// The node must call `publish_committed` only after durable persistence.
+    /// Gap handling is retained, but a rejected/failed write can be retried.
+    pub fn validate_candidate(
+        &mut self,
+        block: &StateBlock,
+        frontier: &DagFrontier,
+    ) -> ProcessResult {
+        self.validate_candidate_inner(block, frontier, false)
+    }
+
+    pub(crate) fn authentication_rules(&self) -> AuthenticationRules {
+        AuthenticationRules::new(
+            self.genesis_account.clone(),
+            self.verify_signatures,
+            self.work_thresholds.base,
+        )
+    }
+
+    pub(crate) fn validate_authenticated_candidate(
+        &mut self,
+        candidate: &AuthenticatedBlock,
+        frontier: &DagFrontier,
+    ) -> ProcessResult {
+        self.unchecked.admission_slot = candidate.retention.clone();
+        let result = self.validate_authenticated_inner(candidate, frontier);
+        self.unchecked.admission_slot = None;
+        result
+    }
+
+    fn validate_authenticated_inner(
+        &mut self,
+        candidate: &AuthenticatedBlock,
+        frontier: &DagFrontier,
+    ) -> ProcessResult {
+        // Only immutable authentication is reusable. Work thresholds, clock,
+        // epoch, source availability and frontier checks always run below.
+        if !candidate.matches(&self.authentication_rules()) {
+            return self.validate_candidate(candidate.block(), frontier);
+        }
+        if let Err(reason) = candidate.result() {
+            return ProcessResult::Rejected(reason.clone());
+        }
+        self.validate_candidate_inner(candidate.block(), frontier, true)
+    }
+
+    fn validate_candidate_inner(
+        &mut self,
+        block: &StateBlock,
+        frontier: &DagFrontier,
+        authenticated: bool,
+    ) -> ProcessResult {
+        let mut candidate_frontier = DagFrontier::new();
+        if let Some(head) = frontier.get_head(&block.account) {
+            candidate_frontier.update(block.account.clone(), *head);
+        }
+        let result = self.process_inner(block, &mut candidate_frontier, authenticated);
+        if result == ProcessResult::Accepted {
+            self.recently_processed.remove(&block.hash);
+            // Acceptance just appended this candidate; avoid scanning the
+            // entire bounded dedup history for every block.
+            let removed = self.recently_processed_order.pop_back();
+            debug_assert_eq!(removed, Some(block.hash));
+        }
+        result
+    }
+
+    /// Publish a successfully persisted candidate to the in-memory indexes.
+    pub fn publish_committed(&mut self, block: &StateBlock, frontier: &mut DagFrontier) {
+        frontier.update(block.account.clone(), block.hash);
+        self.mark_processed(block.hash);
+    }
+
+    pub(crate) fn forget_replaced(&mut self, hashes: &HashSet<BlockHash>) {
+        self.recently_processed
+            .retain(|hash| !hashes.contains(hash));
+        self.recently_processed_order
+            .retain(|hash| !hashes.contains(hash));
     }
 
     /// Check if a source/link block is known, first in the in-memory dedup
@@ -522,7 +636,11 @@ impl BlockProcessor {
     ///
     /// Returns the blocks that are now ready for processing.
     pub fn process_unchecked(&mut self, confirmed_hash: &BlockHash) -> Vec<StateBlock> {
-        self.unchecked.get_dependents(confirmed_hash)
+        self.unchecked.take_ready(
+            confirmed_hash,
+            crate::unchecked::GapType::Previous,
+            burst_types::Timestamp::now().as_secs(),
+        )
     }
 
     /// When a block is confirmed, check if any unchecked blocks were waiting for it
@@ -530,10 +648,29 @@ impl BlockProcessor {
     ///
     /// Returns the blocks that are now ready for processing.
     pub fn process_unchecked_source(&mut self, confirmed_hash: &BlockHash) -> Vec<StateBlock> {
-        self.unchecked.get_source_dependents(confirmed_hash)
+        self.unchecked.take_ready(
+            confirmed_hash,
+            crate::unchecked::GapType::Source,
+            burst_types::Timestamp::now().as_secs(),
+        )
     }
 
     /// Number of blocks in the unchecked queue (both gap-previous and gap-source).
+    pub(crate) fn set_retention(&mut self, retention: Arc<crate::block_retention::BlockRetention>) {
+        assert!(self.unchecked.is_empty());
+        self.unchecked = UncheckedMap::with_retention(
+            crate::block_retention::MAX_RETAINED_BLOCKS - crate::block_retention::INGRESS_RESERVE,
+            retention,
+        );
+    }
+
+    pub(crate) fn release_retained(&mut self, hash: &BlockHash) -> Vec<crate::block_retention::RetainedBlock> {
+        let now = Some(burst_types::Timestamp::now().as_secs());
+        let mut ready = self.unchecked.take_retained(hash, crate::unchecked::GapType::Previous, now);
+        ready.extend(self.unchecked.take_retained(hash, crate::unchecked::GapType::Source, now));
+        ready
+    }
+
     pub fn unchecked_count(&self) -> usize {
         self.unchecked.len()
     }
@@ -545,10 +682,12 @@ impl BlockProcessor {
 
     /// Roll back a block from the frontier.
     ///
-    /// Used when a fork is resolved and the losing block must be undone.
-    /// The block must be the current frontier head for its account.
-    /// Also deletes the block from the persistent block store if available.
+    /// In-memory simulation only. Persistent nodes must use a transactional
+    /// ledger rollback that restores economic and cross-account effects.
     pub fn rollback(&mut self, block: &StateBlock, frontier: &mut DagFrontier) -> RollbackResult {
+        if self.block_store.is_some() {
+            return RollbackResult::RequiresLedgerRollback;
+        }
         match frontier.get_head(&block.account) {
             Some(head) if *head == block.hash => {
                 if block.previous.is_zero() {
@@ -557,10 +696,6 @@ impl BlockProcessor {
                     frontier.update(block.account.clone(), block.previous);
                 }
                 self.recently_processed.remove(&block.hash);
-
-                if let Some(ref store) = self.block_store {
-                    let _ = store.delete_block(&block.hash);
-                }
 
                 RollbackResult::Success
             }
@@ -584,6 +719,9 @@ impl BlockProcessor {
         frontier: &mut DagFrontier,
         store: &dyn BlockStore,
     ) -> Result<Vec<BlockHash>, String> {
+        if self.block_store.is_some() {
+            return Err("persistent rollback requires transactional ledger effects".into());
+        }
         let head = frontier
             .get_head(account)
             .copied()
@@ -667,24 +805,7 @@ impl BlockProcessor {
     /// - Epoch blocks don't transfer any value (balances must remain unchanged).
     /// - The epoch block is appended to the target account's chain.
     fn process_epoch(&mut self, block: &StateBlock, frontier: &mut DagFrontier) -> ProcessResult {
-        // Epoch blocks must be signed by the genesis account.
-        // The `link` field carries the target account's head hash for epoch blocks,
-        // while `account` is set to the target account being upgraded.
-        // The signature verification (checking it came from genesis) happens at a
-        // higher layer with full crypto. Here we check that the block's signer
-        // claim (`account`) is actually the genesis account OR that the link
-        // references the correct chain. For epoch blocks in Nano-style protocols,
-        // the account field is the *target* account, and the genesis account signs
-        // it. Since we don't have full signature verification here, we check the
-        // link field equals the genesis account address encoded as a block hash.
-        //
-        // Simplified approach: the block's `link` field encodes the signer identity.
-        // We store the genesis account hash in link for epoch blocks.
-        //
-        // For now, we validate structurally and rely on the signature verification
-        // layer (not yet implemented) to confirm the genesis key signed it.
-
-        // Epoch blocks must not have zero previous (must target an existing chain).
+        // process() already verified the signature against the genesis key.
         if block.previous.is_zero() {
             return ProcessResult::Rejected(
                 "epoch block must reference an existing account chain".into(),
@@ -766,6 +887,14 @@ impl BlockProcessor {
         }
     }
 
+    /// Publish governed admission rules with the installed checkpoint epoch.
+    pub(crate) fn install_params(&mut self, params: &burst_types::ProtocolParams) {
+        self.enforce_params_hash = true;
+        self.set_params_hash(params.params_hash());
+        self.min_work_difficulty = params.min_work_difficulty;
+        self.work_thresholds = WorkThresholds::with_base(params.min_work_difficulty);
+    }
+
     /// Current minimum work difficulty.
     pub fn min_work_difficulty(&self) -> u64 {
         self.min_work_difficulty
@@ -839,7 +968,7 @@ impl BlockProcessor {
                     return Err("merge block cannot change TRST balance".into());
                 }
             }
-            BlockType::Endorse => {
+            BlockType::Endorse | BlockType::GovernanceEndorse => {
                 if block.brn_balance <= prev_brn {
                     return Err("endorse block must burn BRN (spent BRN must increase)".into());
                 }
@@ -857,6 +986,7 @@ impl BlockProcessor {
             }
             BlockType::GovernanceProposal
             | BlockType::GovernanceVote
+            | BlockType::GovernanceWithdraw
             | BlockType::Delegate
             | BlockType::RevokeDelegation
             | BlockType::VerifierOptIn
@@ -874,7 +1004,7 @@ impl BlockProcessor {
                     ));
                 }
             }
-            BlockType::ChangeRepresentative => {
+            BlockType::ChangeRepresentative | BlockType::ChangeSigner => {
                 if block.brn_balance != prev_brn {
                     return Err("change-representative block cannot change BRN balance".into());
                 }
@@ -966,6 +1096,70 @@ mod tests {
     use burst_types::{BlockHash, Signature, Timestamp, TxHash, WalletAddress};
     use burst_work::WorkGenerator;
 
+    #[test]
+    fn unsupported_versions_are_rejected_before_publication() {
+        for version in [0, CURRENT_BLOCK_VERSION + 1, u8::MAX] {
+            let mut processor = BlockProcessor::new(0, burst_types::BlockHash::new([1; 32]));
+            processor.set_verify_signatures(false);
+            processor.set_validate_timestamps(false);
+            let mut frontier = DagFrontier::new();
+            let mut block = make_open_block(0);
+            block.version = version;
+            block.hash = block.compute_hash();
+            assert_eq!(
+                processor.process(&block, &mut frontier),
+                ProcessResult::Rejected("unsupported block version".into())
+            );
+            assert!(frontier.get_head(&block.account).is_none());
+            assert_eq!(processor.unchecked_count(), 0);
+        }
+    }
+
+    #[test]
+    fn oversized_blocks_are_rejected_before_publication() {
+        let mut processor = test_processor(0);
+        let mut frontier = DagFrontier::new();
+        let mut block = make_open_block(0);
+        block.merge_sources = vec![TxHash::ZERO; burst_types::MAX_P2P_MESSAGE_BYTES / 32];
+        block.hash = block.compute_hash();
+        assert_eq!(
+            processor.process(&block, &mut frontier),
+            ProcessResult::Rejected("too many merge inputs".into())
+        );
+        assert!(frontier.get_head(&block.account).is_none());
+        assert_eq!(processor.unchecked_count(), 0);
+    }
+
+    #[test]
+    fn certified_admission_requires_exact_parameters_even_when_hash_is_zero() {
+        let params = burst_types::ProtocolParams {
+            min_work_difficulty: 0,
+            ..Default::default()
+        };
+        let mut processor = test_processor(0);
+        processor.install_params(&params);
+        let mut frontier = DagFrontier::new();
+        for hash in [BlockHash::ZERO, BlockHash::new([7; 32])] {
+            let mut block = make_open_block(0);
+            block.params_hash = hash;
+            block.hash = block.compute_hash();
+            assert_eq!(
+                processor.process(&block, &mut frontier),
+                ProcessResult::Rejected(
+                    "block parameters do not match the installed payment epoch".into()
+                )
+            );
+            assert!(frontier.get_head(&block.account).is_none());
+        }
+        let mut block = make_open_block(0);
+        block.params_hash = params.params_hash();
+        block.hash = block.compute_hash();
+        assert_eq!(
+            processor.process(&block, &mut frontier),
+            ProcessResult::Accepted
+        );
+    }
+
     fn test_account() -> WalletAddress {
         WalletAddress::new(
             "brst_1111111111111111111111111111111111111111111111111111111111111111111",
@@ -981,7 +1175,10 @@ mod tests {
     /// Create a valid open block with proper hash and work.
     fn make_open_block(difficulty: u64) -> StateBlock {
         let mut block = StateBlock {
+            signing_grant: burst_types::BlockHash::ZERO,
+            delegation_payload: Vec::new(),
             version: CURRENT_BLOCK_VERSION,
+            payment_epoch: burst_types::BlockHash::new([1; 32]),
             block_type: BlockType::Open,
             account: test_account(),
             previous: BlockHash::ZERO,
@@ -993,7 +1190,9 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_000),
             params_hash: BlockHash::ZERO,
+            target_head: burst_types::BlockHash::ZERO,
             merge_sources: Vec::new(),
+            release_sources: Vec::new(),
             work: 0,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,
@@ -1003,7 +1202,7 @@ mod tests {
         // Generate valid PoW
         if difficulty > 0 {
             let generator = WorkGenerator;
-            let nonce = generator.generate(&block.hash, difficulty).unwrap();
+            let nonce = generator.generate(&block.work_root(), difficulty).unwrap();
             block.work = nonce.0;
         }
 
@@ -1013,7 +1212,10 @@ mod tests {
     /// Create a valid send block that chains after `previous_hash`.
     fn make_send_block(previous_hash: BlockHash, difficulty: u64) -> StateBlock {
         let mut block = StateBlock {
+            signing_grant: burst_types::BlockHash::ZERO,
+            delegation_payload: Vec::new(),
             version: CURRENT_BLOCK_VERSION,
+            payment_epoch: burst_types::BlockHash::new([1; 32]),
             block_type: BlockType::Send,
             account: test_account(),
             previous: previous_hash,
@@ -1025,7 +1227,9 @@ mod tests {
             transaction: TxHash::new([0xBB; 32]),
             timestamp: Timestamp::new(1_000_001),
             params_hash: BlockHash::ZERO,
+            target_head: burst_types::BlockHash::ZERO,
             merge_sources: Vec::new(),
+            release_sources: Vec::new(),
             work: 0,
             signature: Signature([2u8; 64]),
             hash: BlockHash::ZERO,
@@ -1034,7 +1238,7 @@ mod tests {
 
         if difficulty > 0 {
             let generator = WorkGenerator;
-            let nonce = generator.generate(&block.hash, difficulty).unwrap();
+            let nonce = generator.generate(&block.work_root(), difficulty).unwrap();
             block.work = nonce.0;
         }
 
@@ -1044,7 +1248,10 @@ mod tests {
     /// Create a conflicting (fork) send block for the same account and position.
     fn make_fork_block(previous_hash: BlockHash, difficulty: u64) -> StateBlock {
         let mut block = StateBlock {
+            signing_grant: burst_types::BlockHash::ZERO,
+            delegation_payload: Vec::new(),
             version: CURRENT_BLOCK_VERSION,
+            payment_epoch: burst_types::BlockHash::new([1; 32]),
             block_type: BlockType::Send,
             account: test_account(),
             previous: previous_hash,
@@ -1056,7 +1263,9 @@ mod tests {
             transaction: TxHash::new([0xDD; 32]),
             timestamp: Timestamp::new(1_000_002),
             params_hash: BlockHash::ZERO,
+            target_head: burst_types::BlockHash::ZERO,
             merge_sources: Vec::new(),
+            release_sources: Vec::new(),
             work: 0,
             signature: Signature([3u8; 64]),
             hash: BlockHash::ZERO,
@@ -1065,7 +1274,7 @@ mod tests {
 
         if difficulty > 0 {
             let generator = WorkGenerator;
-            let nonce = generator.generate(&block.hash, difficulty).unwrap();
+            let nonce = generator.generate(&block.work_root(), difficulty).unwrap();
             block.work = nonce.0;
         }
 
@@ -1073,13 +1282,139 @@ mod tests {
     }
 
     fn test_processor(difficulty: u64) -> BlockProcessor {
-        let mut p = BlockProcessor::new(difficulty);
+        let mut p = BlockProcessor::new(difficulty, burst_types::BlockHash::new([1; 32]));
         p.set_verify_signatures(false);
         p.set_validate_timestamps(false);
         p
     }
 
+    #[test]
+    fn fresh_admission_obeys_the_sixty_second_window_in_both_directions() {
+        for (timestamp, accepted) in [
+            (939, false),
+            (940, true),
+            (1000, true),
+            (1060, true),
+            (1061, false),
+        ] {
+            let mut processor = test_processor(0);
+            processor.set_validate_timestamps(true);
+            processor.test_time = Some(Arc::new(std::sync::atomic::AtomicU64::new(1000)));
+            let mut block = make_open_block(0);
+            block.timestamp = Timestamp::new(timestamp);
+            block.hash = block.compute_hash();
+            let mut frontier = DagFrontier::new();
+            let result = processor.process(&block, &mut frontier);
+            if accepted {
+                assert_eq!(result, ProcessResult::Accepted, "timestamp {timestamp}");
+            } else {
+                assert!(
+                    matches!(result, ProcessResult::Rejected(ref reason) if reason.contains("timestamp")),
+                    "{result:?}"
+                );
+                assert!(frontier.get_head(&block.account).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn appeal_admission_is_closed_before_gap_or_final_vote_reservation() {
+        let mut block = make_send_block(BlockHash::new([9; 32]), 0);
+        block.block_type = BlockType::Challenge;
+        block.target_head = BlockHash::new([8; 32]);
+        block.hash = block.compute_hash();
+        let mut processor = test_processor(0);
+        let mut frontier = DagFrontier::new();
+        assert_eq!(
+            processor.process(&block, &mut frontier),
+            ProcessResult::Rejected(
+                "meta-challenge admission requires certified appeal support".into()
+            )
+        );
+    }
+
     // ── Normal block acceptance ──────────────────────────────────────────
+
+    #[test]
+    fn legacy_delegation_record_cannot_bypass_signature_verification() {
+        use burst_store::delegation::DelegationRecord;
+        let owner = burst_crypto::keypair_from_seed(&[31; 32]);
+        let delegate = burst_crypto::keypair_from_seed(&[32; 32]);
+        let account = burst_crypto::derive_address(&owner.public);
+        let store = Arc::new(burst_nullables::NullDelegationStore::new());
+        store
+            .put_delegation(&DelegationRecord {
+                delegator: account.clone(),
+                delegate: burst_crypto::derive_address(&delegate.public),
+                delegation_public_key: delegate.public.0,
+                created_at: Timestamp::new(0),
+                revoked: false,
+            })
+            .unwrap();
+        let mut processor = BlockProcessor::new(0, burst_types::BlockHash::new([1; 32]));
+        processor.set_validate_timestamps(false);
+        processor.delegation_store = Some(store);
+        let mut frontier = DagFrontier::new();
+        let mut block = make_send_block(BlockHash::new([7; 32]), 0);
+        block.account = account.clone();
+        block.block_type = BlockType::ChangeRepresentative;
+        block.hash = block.compute_hash();
+        // The former fallback treated this public key as authorization without
+        // checking a signature or binding the record to the account.
+        block.signature.0[32..].copy_from_slice(&delegate.public.0);
+        assert_eq!(
+            processor.process(&block, &mut frontier),
+            ProcessResult::Rejected("invalid signature".into())
+        );
+        assert!(frontier.get_head(&account).is_none());
+        block.signature = burst_crypto::sign_message(block.hash.as_bytes(), &owner.private);
+        assert_eq!(processor.process(&block, &mut frontier), ProcessResult::Gap);
+    }
+
+    #[test]
+    fn candidate_is_retryable_until_published_after_commit() {
+        let mut processor = test_processor(0);
+        let mut frontier = DagFrontier::new();
+        let open = make_open_block(0);
+        for _ in 0..3 {
+            assert_eq!(
+                processor.validate_candidate(&open, &frontier),
+                ProcessResult::Accepted
+            );
+            assert!(frontier.get_head(&open.account).is_none());
+            assert!(!processor.source_known(&open.hash));
+            assert!(!processor.recently_processed_order.contains(&open.hash));
+        }
+        processor.publish_committed(&open, &mut frontier);
+        assert_eq!(frontier.get_head(&open.account), Some(&open.hash));
+        assert!(processor.source_known(&open.hash));
+        assert_eq!(
+            processor.validate_candidate(&open, &frontier),
+            ProcessResult::Duplicate
+        );
+        let send = make_send_block(open.hash, 0);
+        assert_eq!(
+            processor.validate_candidate(&send, &frontier),
+            ProcessResult::Accepted
+        );
+        assert_eq!(frontier.get_head(&open.account), Some(&open.hash));
+        assert!(!processor.source_known(&send.hash));
+        processor.publish_committed(&send, &mut frontier);
+        assert_eq!(frontier.get_head(&open.account), Some(&send.hash));
+    }
+
+    #[test]
+    fn rejects_contents_changed_without_rehashing() {
+        let mut processor = test_processor(0);
+        let mut frontier = DagFrontier::new();
+        let mut block = make_open_block(0);
+        block.trst_balance = 1;
+        assert_eq!(
+            processor.process(&block, &mut frontier),
+            ProcessResult::Rejected("block hash does not match its contents".into())
+        );
+        assert!(frontier.get_head(&block.account).is_none());
+    }
 
     #[test]
     fn accept_valid_open_block() {
@@ -1106,6 +1441,205 @@ mod tests {
         let send = make_send_block(open.hash, 0);
         let result = processor.process(&send, &mut frontier);
         assert_eq!(result, ProcessResult::Accepted);
+        assert_eq!(frontier.get_head(&test_account()), Some(&send.hash));
+    }
+
+    #[test]
+    fn verification_target_is_not_a_missing_source_block() {
+        let mut processor = test_processor(0);
+        let mut frontier = DagFrontier::new();
+        let open = make_open_block(0);
+        assert_eq!(
+            processor.process(&open, &mut frontier),
+            ProcessResult::Accepted
+        );
+        let mut vote = make_send_block(open.hash, 0);
+        vote.block_type = BlockType::VerificationVote;
+        vote.trst_balance = open.trst_balance;
+        vote.brn_balance = open.brn_balance + 10;
+        let target = keypair_from_seed(&[99; 32]);
+        vote.link = BlockHash::new(target.public.0);
+        vote.hash = vote.compute_hash();
+        assert!(!processor.source_known(&vote.link));
+        assert_eq!(
+            processor.validate_candidate(&vote, &frontier),
+            ProcessResult::Accepted
+        );
+        assert_eq!(processor.unchecked_count(), 0);
+        // A receive really does depend on its linked block and must still wait.
+        vote.block_type = BlockType::Receive;
+        vote.hash = vote.compute_hash();
+        assert_eq!(
+            processor.validate_candidate(&vote, &frontier),
+            ProcessResult::GapSource
+        );
+    }
+
+    #[test]
+    fn endorsement_waits_for_the_signed_target_head_not_the_target_address() {
+        let mut processor = test_processor(0);
+        let mut frontier = DagFrontier::new();
+        let open = make_open_block(0);
+        assert_eq!(
+            processor.process(&open, &mut frontier),
+            ProcessResult::Accepted
+        );
+        let mut block = make_send_block(open.hash, 0);
+        block.block_type = BlockType::Endorse;
+        block.link = BlockHash::new(keypair_from_seed(&[99; 32]).public.0);
+        block.target_head = BlockHash::new([77; 32]);
+        block.hash = block.compute_hash();
+        assert_eq!(
+            processor.validate_candidate(&block, &frontier),
+            ProcessResult::GapSource
+        );
+        assert_eq!(processor.unchecked_count(), 1);
+        assert!(processor.process_unchecked_source(&block.link).is_empty());
+        processor.mark_processed(block.target_head);
+        let released = processor.process_unchecked_source(&block.target_head);
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0].hash, block.hash);
+        assert_eq!(
+            processor.validate_candidate(&block, &frontier),
+            ProcessResult::Accepted
+        );
+    }
+
+    #[test]
+    fn receive_open_and_governance_links_wait_for_the_same_replay_dependencies() {
+        for kind in [
+            BlockType::Open,
+            BlockType::GovernanceEndorse,
+            BlockType::GovernanceWithdraw,
+            BlockType::GovernanceVote,
+            BlockType::GovernanceActivation,
+        ] {
+            let mut processor = test_processor(0);
+            let mut frontier = DagFrontier::new();
+            let mut source = make_open_block(0);
+            source.account = processor.genesis_account().clone();
+            source.hash = source.compute_hash();
+            let source_hash = source.hash;
+            let mut candidate = make_open_block(0);
+            if kind != BlockType::Open {
+                let mut previous = make_open_block(0);
+                if kind == BlockType::GovernanceActivation {
+                    previous.account = processor.genesis_account().clone();
+                    previous.timestamp = Timestamp::new(999_999);
+                    previous.hash = previous.compute_hash();
+                }
+                assert_eq!(
+                    processor.process(&previous, &mut frontier),
+                    ProcessResult::Accepted
+                );
+                candidate.account = previous.account;
+                candidate.previous = previous.hash;
+            }
+            candidate.block_type = kind.clone();
+            candidate.link = source_hash;
+            candidate.hash = candidate.compute_hash();
+            assert_eq!(
+                processor.validate_candidate(&candidate, &frontier),
+                ProcessResult::GapSource,
+                "{kind:?}"
+            );
+            assert_eq!(processor.unchecked_count(), 1);
+            // A committed dependency releases exactly this candidate. It must
+            // still pass ledger economics before its own frontier is published.
+            processor.mark_processed(source_hash);
+            let released = processor.process_unchecked_source(&source_hash);
+            assert_eq!(released.len(), 1);
+            assert_eq!(released[0].hash, candidate.hash);
+            assert_eq!(
+                processor.validate_candidate(&released[0], &frontier),
+                ProcessResult::Accepted
+            );
+            assert_eq!(processor.unchecked_count(), 0);
+        }
+    }
+
+    #[test]
+    fn returned_stake_spending_waits_for_each_signed_panel_source() {
+        let mut processor = test_processor(0);
+        let mut frontier = DagFrontier::new();
+        let previous = make_open_block(0);
+        assert_eq!(
+            processor.process(&previous, &mut frontier),
+            ProcessResult::Accepted
+        );
+        let mut candidate = previous.clone();
+        candidate.block_type = BlockType::ChangeRepresentative;
+        candidate.previous = previous.hash;
+        candidate.release_sources = vec![BlockHash::new([31; 32]), BlockHash::new([32; 32])];
+        candidate.hash = candidate.compute_hash();
+        for source in &candidate.release_sources {
+            assert_eq!(
+                processor.validate_candidate(&candidate, &frontier),
+                ProcessResult::GapSource
+            );
+            assert_eq!(processor.unchecked_count(), 1);
+            processor.mark_processed(*source);
+            let released = processor.process_unchecked_source(source);
+            assert_eq!(released.len(), 1);
+            assert_eq!(released[0].hash, candidate.hash);
+        }
+        assert_eq!(
+            processor.validate_candidate(&candidate, &frontier),
+            ProcessResult::Accepted
+        );
+        assert_eq!(processor.unchecked_count(), 0);
+    }
+
+    #[test]
+    fn unauthenticated_or_malformed_gap_blocks_never_enter_unchecked() {
+        let key = keypair_from_seed(&[42; 32]);
+        let mut processor = BlockProcessor::new(0, burst_types::BlockHash::new([1; 32]));
+        processor.set_validate_timestamps(false);
+        let mut frontier = DagFrontier::new();
+        let mut candidate = make_send_block(BlockHash::new([9; 32]), 0);
+        candidate.account = burst_crypto::derive_address(&key.public);
+        candidate.hash = candidate.compute_hash();
+        assert_eq!(
+            processor.process(&candidate, &mut frontier),
+            ProcessResult::Rejected("invalid signature".into())
+        );
+        assert_eq!(processor.unchecked_count(), 0);
+        candidate.signature = burst_crypto::sign_message(candidate.hash.as_bytes(), &key.private);
+        assert_eq!(
+            processor.process(&candidate, &mut frontier),
+            ProcessResult::Gap
+        );
+        assert_eq!(processor.unchecked_count(), 1);
+    }
+
+    #[test]
+    fn stored_sources_and_fork_ancestors_remain_known_without_a_warm_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = burst_store_lmdb::LmdbStore::open(dir.path(), 32, 16 * 1024 * 1024).unwrap();
+        let open = make_open_block(0);
+        let send = make_send_block(open.hash, 0);
+        for block in [&open, &send] {
+            store
+                .block_store()
+                .put_block(&block.hash, &bincode::serialize(block).unwrap())
+                .unwrap();
+        }
+        let mut processor = test_processor(0);
+        processor.block_store = Some(Arc::new(store.block_store()));
+        let mut frontier = DagFrontier::new();
+        frontier.update(test_account(), send.hash);
+        let fork = make_fork_block(open.hash, 0);
+        assert_eq!(
+            processor.validate_candidate(&fork, &frontier),
+            ProcessResult::Fork
+        );
+        let receive = make_receive_block_bp(send.hash, open.hash, 0);
+        assert_eq!(
+            processor.validate_candidate(&receive, &frontier),
+            ProcessResult::Accepted
+        );
+        assert_eq!(processor.unchecked_count(), 0);
+        assert_eq!(processor.recently_processed_count(), 0);
         assert_eq!(frontier.get_head(&test_account()), Some(&send.hash));
     }
 
@@ -1390,7 +1924,7 @@ mod tests {
     // ── Open block validation ───────────────────────────────────────────
 
     #[test]
-    fn reject_duplicate_open_block() {
+    fn different_opening_blocks_compete_at_the_zero_predecessor() {
         let mut processor = test_processor(0);
         let mut frontier = DagFrontier::new();
 
@@ -1402,7 +1936,10 @@ mod tests {
 
         // Create a different open block for the same account
         let mut open2 = StateBlock {
+            signing_grant: burst_types::BlockHash::ZERO,
+            delegation_payload: Vec::new(),
             version: CURRENT_BLOCK_VERSION,
+            payment_epoch: burst_types::BlockHash::new([1; 32]),
             block_type: BlockType::Open,
             account: test_account(),
             previous: BlockHash::ZERO,
@@ -1414,7 +1951,9 @@ mod tests {
             transaction: TxHash::new([0xFF; 32]),
             timestamp: Timestamp::new(2_000_000),
             params_hash: BlockHash::ZERO,
+            target_head: burst_types::BlockHash::ZERO,
             merge_sources: Vec::new(),
+            release_sources: Vec::new(),
             work: 0,
             signature: Signature([5u8; 64]),
             hash: BlockHash::ZERO,
@@ -1422,10 +1961,7 @@ mod tests {
         open2.hash = open2.compute_hash();
 
         let result = processor.process(&open2, &mut frontier);
-        assert_eq!(
-            result,
-            ProcessResult::Rejected("open block for account that already exists".into())
-        );
+        assert_eq!(result, ProcessResult::Fork);
     }
 
     #[test]
@@ -1434,7 +1970,10 @@ mod tests {
         let mut frontier = DagFrontier::new();
 
         let mut block = StateBlock {
+            signing_grant: burst_types::BlockHash::ZERO,
+            delegation_payload: Vec::new(),
             version: CURRENT_BLOCK_VERSION,
+            payment_epoch: burst_types::BlockHash::new([1; 32]),
             block_type: BlockType::Open,
             account: test_account(),
             previous: BlockHash::new([0x11; 32]), // should be zero for open
@@ -1446,7 +1985,9 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_000),
             params_hash: BlockHash::ZERO,
+            target_head: burst_types::BlockHash::ZERO,
             merge_sources: Vec::new(),
+            release_sources: Vec::new(),
             work: 0,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,
@@ -1474,7 +2015,10 @@ mod tests {
         );
 
         let mut block = StateBlock {
+            signing_grant: burst_types::BlockHash::ZERO,
+            delegation_payload: Vec::new(),
             version: CURRENT_BLOCK_VERSION,
+            payment_epoch: burst_types::BlockHash::new([1; 32]),
             block_type: BlockType::Send,
             account: test_account(),
             previous: BlockHash::ZERO,
@@ -1486,12 +2030,21 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_001),
             params_hash: BlockHash::ZERO,
+            target_head: burst_types::BlockHash::ZERO,
             merge_sources: Vec::new(),
+            release_sources: Vec::new(),
             work: 0,
             signature: Signature([4u8; 64]),
             hash: BlockHash::ZERO,
         };
         block.hash = block.compute_hash();
+
+        let mut empty_frontier = DagFrontier::new();
+        assert_eq!(
+            processor.process(&block, &mut empty_frontier),
+            ProcessResult::Rejected("non-open block has zero previous hash".into())
+        );
+        assert_eq!(processor.unchecked_count(), 0);
 
         let result = processor.process(&block, &mut frontier);
         assert_eq!(
@@ -1587,7 +2140,10 @@ mod tests {
 
     fn make_epoch_block(previous: BlockHash, account: WalletAddress) -> StateBlock {
         let mut block = StateBlock {
+            signing_grant: burst_types::BlockHash::ZERO,
+            delegation_payload: Vec::new(),
             version: CURRENT_BLOCK_VERSION,
+            payment_epoch: burst_types::BlockHash::new([1; 32]),
             block_type: BlockType::Epoch,
             account,
             previous,
@@ -1599,7 +2155,9 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(2_000_000),
             params_hash: BlockHash::ZERO,
+            target_head: burst_types::BlockHash::ZERO,
             merge_sources: Vec::new(),
+            release_sources: Vec::new(),
             work: 0,
             signature: Signature([7u8; 64]),
             hash: BlockHash::ZERO,
@@ -1702,7 +2260,10 @@ mod tests {
         let address = derive_address(&kp.public);
 
         let mut block = StateBlock {
+            signing_grant: burst_types::BlockHash::ZERO,
+            delegation_payload: Vec::new(),
             version: CURRENT_BLOCK_VERSION,
+            payment_epoch: burst_types::BlockHash::new([1; 32]),
             block_type: BlockType::Open,
             account: address,
             previous: BlockHash::ZERO,
@@ -1714,7 +2275,9 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_000),
             params_hash: BlockHash::ZERO,
+            target_head: burst_types::BlockHash::ZERO,
             merge_sources: Vec::new(),
+            release_sources: Vec::new(),
             work: 0,
             signature: Signature([0u8; 64]),
             hash: BlockHash::ZERO,
@@ -1722,7 +2285,7 @@ mod tests {
         block.hash = block.compute_hash();
         block.signature = sign_message(block.hash.as_bytes(), &kp.private);
 
-        let mut processor = BlockProcessor::new(0);
+        let mut processor = BlockProcessor::new(0, burst_types::BlockHash::new([1; 32]));
         processor.set_validate_timestamps(false); // fixtures use epoch-era timestamps
         let mut frontier = DagFrontier::new();
         let result = processor.process(&block, &mut frontier);
@@ -1736,7 +2299,10 @@ mod tests {
         let address = derive_address(&kp.public);
 
         let mut block = StateBlock {
+            signing_grant: burst_types::BlockHash::ZERO,
+            delegation_payload: Vec::new(),
             version: CURRENT_BLOCK_VERSION,
+            payment_epoch: burst_types::BlockHash::new([1; 32]),
             block_type: BlockType::Open,
             account: address,
             previous: BlockHash::ZERO,
@@ -1748,7 +2314,9 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_000),
             params_hash: BlockHash::ZERO,
+            target_head: burst_types::BlockHash::ZERO,
             merge_sources: Vec::new(),
+            release_sources: Vec::new(),
             work: 0,
             signature: Signature([0u8; 64]),
             hash: BlockHash::ZERO,
@@ -1756,7 +2324,7 @@ mod tests {
         block.hash = block.compute_hash();
         block.signature = sign_message(block.hash.as_bytes(), &kp2.private);
 
-        let mut processor = BlockProcessor::new(0);
+        let mut processor = BlockProcessor::new(0, burst_types::BlockHash::new([1; 32]));
         processor.set_validate_timestamps(false); // fixtures use epoch-era timestamps
         let mut frontier = DagFrontier::new();
         let result = processor.process(&block, &mut frontier);
@@ -1771,13 +2339,20 @@ mod tests {
         let account_kp = generate_keypair();
         let account_address = derive_address(&account_kp.public);
 
-        let mut processor = BlockProcessor::with_genesis_account(0, genesis_address.clone());
+        let mut processor = BlockProcessor::with_genesis_account(
+            0,
+            genesis_address.clone(),
+            burst_types::BlockHash::new([1; 32]),
+        );
         processor.set_validate_timestamps(false); // fixtures use epoch-era timestamps
         let mut frontier = DagFrontier::new();
 
         // Open block for the account (signed by account key)
         let mut open = StateBlock {
+            signing_grant: burst_types::BlockHash::ZERO,
+            delegation_payload: Vec::new(),
             version: CURRENT_BLOCK_VERSION,
+            payment_epoch: burst_types::BlockHash::new([1; 32]),
             block_type: BlockType::Open,
             account: account_address.clone(),
             previous: BlockHash::ZERO,
@@ -1789,7 +2364,9 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_000),
             params_hash: BlockHash::ZERO,
+            target_head: burst_types::BlockHash::ZERO,
             merge_sources: Vec::new(),
+            release_sources: Vec::new(),
             work: 0,
             signature: Signature([0u8; 64]),
             hash: BlockHash::ZERO,
@@ -1803,7 +2380,10 @@ mod tests {
 
         // Epoch block targeting the account, signed by genesis key
         let mut epoch = StateBlock {
+            signing_grant: burst_types::BlockHash::ZERO,
+            delegation_payload: Vec::new(),
             version: CURRENT_BLOCK_VERSION,
+            payment_epoch: burst_types::BlockHash::new([1; 32]),
             block_type: BlockType::Epoch,
             account: account_address.clone(),
             previous: open.hash,
@@ -1815,7 +2395,9 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(2_000_000),
             params_hash: BlockHash::ZERO,
+            target_head: burst_types::BlockHash::ZERO,
             merge_sources: Vec::new(),
+            release_sources: Vec::new(),
             work: 0,
             signature: Signature([0u8; 64]),
             hash: BlockHash::ZERO,
@@ -1836,13 +2418,20 @@ mod tests {
         let account_kp = generate_keypair();
         let account_address = derive_address(&account_kp.public);
 
-        let mut processor = BlockProcessor::with_genesis_account(0, genesis_address);
+        let mut processor = BlockProcessor::with_genesis_account(
+            0,
+            genesis_address,
+            burst_types::BlockHash::new([1; 32]),
+        );
         processor.set_validate_timestamps(false); // fixtures use epoch-era timestamps
         let mut frontier = DagFrontier::new();
 
         // Open block for account
         let mut open = StateBlock {
+            signing_grant: burst_types::BlockHash::ZERO,
+            delegation_payload: Vec::new(),
             version: CURRENT_BLOCK_VERSION,
+            payment_epoch: burst_types::BlockHash::new([1; 32]),
             block_type: BlockType::Open,
             account: account_address.clone(),
             previous: BlockHash::ZERO,
@@ -1854,7 +2443,9 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_000),
             params_hash: BlockHash::ZERO,
+            target_head: burst_types::BlockHash::ZERO,
             merge_sources: Vec::new(),
+            release_sources: Vec::new(),
             work: 0,
             signature: Signature([0u8; 64]),
             hash: BlockHash::ZERO,
@@ -1868,7 +2459,10 @@ mod tests {
 
         // Epoch block signed by the ACCOUNT key (wrong — should be genesis)
         let mut epoch = StateBlock {
+            signing_grant: burst_types::BlockHash::ZERO,
+            delegation_payload: Vec::new(),
             version: CURRENT_BLOCK_VERSION,
+            payment_epoch: burst_types::BlockHash::new([1; 32]),
             block_type: BlockType::Epoch,
             account: account_address.clone(),
             previous: open.hash,
@@ -1880,7 +2474,9 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(2_000_000),
             params_hash: BlockHash::ZERO,
+            target_head: burst_types::BlockHash::ZERO,
             merge_sources: Vec::new(),
+            release_sources: Vec::new(),
             work: 0,
             signature: Signature([0u8; 64]),
             hash: BlockHash::ZERO,
@@ -1933,7 +2529,10 @@ mod tests {
     #[test]
     fn balance_validation_receive_valid() {
         let mut block = StateBlock {
+            signing_grant: burst_types::BlockHash::ZERO,
+            delegation_payload: Vec::new(),
             version: CURRENT_BLOCK_VERSION,
+            payment_epoch: burst_types::BlockHash::new([1; 32]),
             block_type: BlockType::Receive,
             account: test_account(),
             previous: BlockHash::new([0x11; 32]),
@@ -1945,7 +2544,9 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_001),
             params_hash: BlockHash::ZERO,
+            target_head: burst_types::BlockHash::ZERO,
             merge_sources: Vec::new(),
+            release_sources: Vec::new(),
             work: 0,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,
@@ -1958,7 +2559,10 @@ mod tests {
     #[test]
     fn balance_validation_receive_rejects_trst_decrease() {
         let mut block = StateBlock {
+            signing_grant: burst_types::BlockHash::ZERO,
+            delegation_payload: Vec::new(),
             version: CURRENT_BLOCK_VERSION,
+            payment_epoch: burst_types::BlockHash::new([1; 32]),
             block_type: BlockType::Receive,
             account: test_account(),
             previous: BlockHash::new([0x11; 32]),
@@ -1970,7 +2574,9 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_001),
             params_hash: BlockHash::ZERO,
+            target_head: burst_types::BlockHash::ZERO,
             merge_sources: Vec::new(),
+            release_sources: Vec::new(),
             work: 0,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,
@@ -1989,7 +2595,10 @@ mod tests {
         // The birthright is computed, never claimed: open blocks must not
         // carry any spent BRN.
         let mut block = StateBlock {
+            signing_grant: burst_types::BlockHash::ZERO,
+            delegation_payload: Vec::new(),
             version: CURRENT_BLOCK_VERSION,
+            payment_epoch: burst_types::BlockHash::new([1; 32]),
             block_type: BlockType::Open,
             account: test_account(),
             previous: BlockHash::ZERO,
@@ -2001,7 +2610,9 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_001),
             params_hash: BlockHash::ZERO,
+            target_head: burst_types::BlockHash::ZERO,
             merge_sources: Vec::new(),
+            release_sources: Vec::new(),
             work: 0,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,
@@ -2019,7 +2630,10 @@ mod tests {
         // TRST only enters a chain from a real pending send: an open block
         // claiming TRST must match a pending entry exactly.
         let mut block = StateBlock {
+            signing_grant: burst_types::BlockHash::ZERO,
+            delegation_payload: Vec::new(),
             version: CURRENT_BLOCK_VERSION,
+            payment_epoch: burst_types::BlockHash::new([1; 32]),
             block_type: BlockType::Open,
             account: test_account(),
             previous: BlockHash::ZERO,
@@ -2031,7 +2645,9 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_001),
             params_hash: BlockHash::ZERO,
+            target_head: burst_types::BlockHash::ZERO,
             merge_sources: Vec::new(),
+            release_sources: Vec::new(),
             work: 0,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,
@@ -2049,7 +2665,10 @@ mod tests {
     #[test]
     fn balance_validation_burn_valid() {
         let mut block = StateBlock {
+            signing_grant: burst_types::BlockHash::ZERO,
+            delegation_payload: Vec::new(),
             version: CURRENT_BLOCK_VERSION,
+            payment_epoch: burst_types::BlockHash::new([1; 32]),
             block_type: BlockType::Burn,
             account: test_account(),
             previous: BlockHash::new([0x11; 32]),
@@ -2062,7 +2681,9 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_001),
             params_hash: BlockHash::ZERO,
+            target_head: burst_types::BlockHash::ZERO,
             merge_sources: Vec::new(),
+            release_sources: Vec::new(),
             work: 0,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,
@@ -2075,7 +2696,10 @@ mod tests {
     #[test]
     fn balance_validation_burn_rejects_spent_brn_decrease() {
         let mut block = StateBlock {
+            signing_grant: burst_types::BlockHash::ZERO,
+            delegation_payload: Vec::new(),
             version: CURRENT_BLOCK_VERSION,
+            payment_epoch: burst_types::BlockHash::new([1; 32]),
             block_type: BlockType::Burn,
             account: test_account(),
             previous: BlockHash::new([0x11; 32]),
@@ -2088,7 +2712,9 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_001),
             params_hash: BlockHash::ZERO,
+            target_head: burst_types::BlockHash::ZERO,
             merge_sources: Vec::new(),
+            release_sources: Vec::new(),
             work: 0,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,
@@ -2102,7 +2728,10 @@ mod tests {
     #[test]
     fn balance_validation_epoch_must_preserve_balances() {
         let mut block = StateBlock {
+            signing_grant: burst_types::BlockHash::ZERO,
+            delegation_payload: Vec::new(),
             version: CURRENT_BLOCK_VERSION,
+            payment_epoch: burst_types::BlockHash::new([1; 32]),
             block_type: BlockType::Epoch,
             account: test_account(),
             previous: BlockHash::new([0x11; 32]),
@@ -2114,7 +2743,9 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_001),
             params_hash: BlockHash::ZERO,
+            target_head: burst_types::BlockHash::ZERO,
             merge_sources: Vec::new(),
+            release_sources: Vec::new(),
             work: 0,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,
@@ -2134,6 +2765,38 @@ mod tests {
     }
 
     // ── Rollback tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn persistent_rollback_cannot_delete_a_block_or_rewrite_the_frontier() {
+        let directory = tempfile::tempdir().unwrap();
+        let store =
+            burst_store_lmdb::LmdbStore::open(directory.path(), 32, 16 * 1024 * 1024).unwrap();
+        let mut processor = test_processor(0);
+        let mut frontier = DagFrontier::new();
+        let open = make_open_block(0);
+        assert_eq!(
+            processor.process(&open, &mut frontier),
+            ProcessResult::Accepted
+        );
+        let blocks = Arc::new(store.block_store());
+        blocks
+            .put_block(&open.hash, &bincode::serialize(&open).unwrap())
+            .unwrap();
+        processor.block_store = Some(blocks.clone());
+        assert_eq!(
+            processor.rollback(&open, &mut frontier),
+            RollbackResult::RequiresLedgerRollback
+        );
+        assert!(processor
+            .rollback_to(&open.account, &open.hash, &mut frontier, &*blocks)
+            .is_err());
+        assert!(processor
+            .cascade_rollback(&open.hash, &open.account, &mut frontier, &*blocks)
+            .is_err());
+        assert_eq!(frontier.get_head(&open.account), Some(&open.hash));
+        assert_eq!(processor.recently_processed_count(), 1);
+        assert!(blocks.get_block(&open.hash).is_ok());
+    }
 
     #[test]
     fn rollback_removes_head_and_restores_previous() {
@@ -2233,7 +2896,10 @@ mod tests {
         difficulty: u64,
     ) -> StateBlock {
         let mut block = StateBlock {
+            signing_grant: burst_types::BlockHash::ZERO,
+            delegation_payload: Vec::new(),
             version: CURRENT_BLOCK_VERSION,
+            payment_epoch: burst_types::BlockHash::new([1; 32]),
             block_type: BlockType::Receive,
             account: test_account(),
             previous,
@@ -2245,7 +2911,9 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_010),
             params_hash: BlockHash::ZERO,
+            target_head: burst_types::BlockHash::ZERO,
             merge_sources: Vec::new(),
+            release_sources: Vec::new(),
             work: 0,
             signature: Signature([6u8; 64]),
             hash: BlockHash::ZERO,
@@ -2254,7 +2922,7 @@ mod tests {
 
         if difficulty > 0 {
             let generator = WorkGenerator;
-            let nonce = generator.generate(&block.hash, difficulty).unwrap();
+            let nonce = generator.generate(&block.work_root(), difficulty).unwrap();
             block.work = nonce.0;
         }
 

@@ -4,8 +4,8 @@
 //! `(parent(32), child(32))` → empty, enabling O(1) put and prefix
 //! range-scan for listing.
 
+use crate::shared_env::SharedEnv;
 use std::ops::Bound;
-use std::sync::Arc;
 
 use heed::types::Bytes;
 use heed::{Database, Env};
@@ -18,7 +18,7 @@ use crate::block::increment_prefix;
 use crate::LmdbError;
 
 pub struct LmdbMergerGraphStore {
-    pub(crate) env: Arc<Env>,
+    pub(crate) env: SharedEnv,
     pub(crate) merger_origins_db: Database<Bytes, Bytes>,
     pub(crate) merger_downstream_db: Database<Bytes, Bytes>,
     pub(crate) merger_nodes_db: Database<Bytes, Bytes>,

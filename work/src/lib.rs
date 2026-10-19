@@ -16,7 +16,7 @@ pub use error::WorkError;
 pub use generator::WorkGenerator;
 pub use precompute::{PriorityBlock, WorkCache, WorkPriorityQueue};
 pub use thresholds::{WorkBlockKind, WorkThresholds};
-pub use validator::validate_work;
+pub use validator::{validate_work, work_value};
 
 /// The result of PoW generation.
 #[derive(Clone, Copy, Debug)]

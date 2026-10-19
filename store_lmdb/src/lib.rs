@@ -5,9 +5,12 @@
 
 pub mod account;
 pub mod block;
+pub mod block_undo;
 pub mod brn;
+mod confirmation_queue;
 pub mod environment;
 pub mod error;
+mod fork_candidate;
 pub mod frontier;
 pub mod governance;
 pub mod integrity;
@@ -17,6 +20,7 @@ pub mod migration;
 pub mod peer;
 pub mod pending;
 pub mod rep_weights;
+mod shared_env;
 pub mod transaction;
 pub mod trst_index;
 pub mod verification;

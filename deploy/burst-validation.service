@@ -1,0 +1,30 @@
+# Disposable private devnet only. The dev genesis key is publicly known.
+[Unit]
+Description=BURST private development validation node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=burst
+Group=burst
+WorkingDirectory=/home/burst
+Environment=RUST_LOG=info
+Environment=BURST_BOOTSTRAP_ARGS=
+EnvironmentFile=-/home/burst/validation-node.env
+ExecStart=/home/burst/burst-daemon --config /home/burst/validation-node.toml --network dev --data-dir /home/burst/validation-data --port 7076 --rpc-port 7077 --disable-upnp $BURST_BOOTSTRAP_ARGS node run
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/burst/validation-data
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -142,6 +142,44 @@ pub fn build_receive_tx(
     })
 }
 
+pub fn build_delegate_tx(
+    delegator: &WalletAddress,
+    delegate: &WalletAddress,
+    now: Timestamp,
+) -> Result<burst_transactions::delegate::DelegateTx, WalletError> {
+    address_to_link(delegate)?;
+    if delegator == delegate {
+        return Err(WalletError::TransactionBuild(
+            "cannot delegate to yourself".into(),
+        ));
+    }
+    Ok(burst_transactions::delegate::DelegateTx {
+        hash: burst_crypto::hash_transaction(
+            format!("delegate:{delegator}:{delegate}:{now}").as_bytes(),
+        ),
+        delegator: delegator.clone(),
+        delegate: delegate.clone(),
+        timestamp: now,
+        work: 0,
+        signature: Signature([0; 64]),
+    })
+}
+
+pub fn build_revoke_delegation_tx(
+    delegator: &WalletAddress,
+    now: Timestamp,
+) -> Result<burst_transactions::delegate::RevokeDelegationTx, WalletError> {
+    Ok(burst_transactions::delegate::RevokeDelegationTx {
+        hash: burst_crypto::hash_transaction(
+            format!("revoke_delegation:{delegator}:{now}").as_bytes(),
+        ),
+        delegator: delegator.clone(),
+        timestamp: now,
+        work: 0,
+        signature: Signature([0; 64]),
+    })
+}
+
 /// Build a change representative transaction for ORV consensus weight delegation.
 pub fn build_change_rep_tx(
     account: &WalletAddress,
@@ -219,10 +257,61 @@ pub fn build_challenge_tx(
         target: target.clone(),
         stake_amount,
         reason,
+        appeal_of: None,
         timestamp: now,
         work: 0,
         signature: Signature([0u8; 64]),
     })
+}
+
+/// Build a meta-challenge bound to a specific outcome, not merely a wallet.
+/// Admission remains subject to the node's release gate and outcome validation.
+pub fn build_appeal_tx(
+    challenger: &WalletAddress,
+    target: &WalletAddress,
+    stake_amount: u128,
+    reason: burst_types::ChallengeReason,
+    outcome: BlockHash,
+    now: Timestamp,
+) -> Result<burst_transactions::challenge::ChallengeTx, WalletError> {
+    if outcome.is_zero() {
+        return Err(WalletError::TransactionBuild(
+            "appeal outcome must be nonzero".into(),
+        ));
+    }
+    let mut tx = build_challenge_tx(challenger, target, stake_amount, reason, now)?;
+    tx.hash = TxHash::new(burst_crypto::blake2b_256_multi(&[
+        b"BURST/meta-challenge/v1\0",
+        tx.hash.as_bytes(),
+        outcome.as_bytes(),
+    ]));
+    tx.appeal_of = Some(outcome);
+    Ok(tx)
+}
+
+fn compact_proposal_link(
+    content: &burst_transactions::governance::ProposalContent,
+) -> Result<BlockHash, WalletError> {
+    let burst_transactions::governance::ProposalContent::ParameterChange {
+        parameter,
+        proposed_value,
+        ..
+    } = content
+    else {
+        return Err(WalletError::TransactionBuild(
+            "constitutional proposals require the full-content proposal builder".into(),
+        ));
+    };
+    let param = burst_governance::GovernableParam::from_name(parameter)
+        .map_err(|error| WalletError::TransactionBuild(error.to_string()))?;
+    let content = burst_governance::ProposalContent::ParameterChange {
+        param,
+        new_value: *proposed_value,
+    };
+    let bytes = content
+        .encode_compact()
+        .map_err(|error| WalletError::TransactionBuild(error.to_string()))?;
+    Ok(BlockHash::new(bytes))
 }
 
 /// Build a governance proposal transaction.
@@ -250,24 +339,31 @@ pub fn build_governance_proposal_tx(
 pub fn build_verification_vote_tx(
     voter: &WalletAddress,
     target_wallet: &WalletAddress,
+    selection_context: BlockHash,
     vote: u8,
     stake_amount: u128,
     now: Timestamp,
 ) -> Result<burst_transactions::verification_vote::VerificationVoteTx, WalletError> {
+    if selection_context.is_zero() {
+        return Err(WalletError::TransactionBuild(
+            "verification requires a certified selection context".into(),
+        ));
+    }
     if !(1..=3).contains(&vote) {
         return Err(WalletError::TransactionBuild(
             "vote must be 1 (Legitimate), 2 (Illegitimate), or 3 (Neither)".to_string(),
         ));
     }
     let hash_data = format!(
-        "verification_vote:{}:{}:{}:{}:{}",
-        voter, target_wallet, vote, stake_amount, now
+        "verification_vote:{}:{}:{}:{}:{}:{}",
+        voter, target_wallet, selection_context, vote, stake_amount, now
     );
     let hash = burst_crypto::hash_transaction(hash_data.as_bytes());
     Ok(burst_transactions::verification_vote::VerificationVoteTx {
         hash,
         voter: voter.clone(),
         target_wallet: target_wallet.clone(),
+        selection_context,
         vote,
         stake_amount,
         timestamp: now,
@@ -298,7 +394,11 @@ pub fn build_reject_receive_tx(
 }
 
 /// Account state snapshot needed to build a StateBlock.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AccountState {
+    pub signing_grant: BlockHash,
+    pub payment_epoch: BlockHash,
+    pub release_sources: Vec<BlockHash>,
     /// Hash of the head (most recent) block in this account's chain.
     /// `BlockHash::ZERO` for accounts with no blocks yet.
     pub head: BlockHash,
@@ -326,13 +426,18 @@ pub fn build_state_block(
     previous_origin: TxHash,
     params_hash: BlockHash,
 ) -> Result<StateBlock, WalletError> {
+    if account_state.payment_epoch.is_zero() {
+        return Err(WalletError::TransactionBuild(
+            "missing payment epoch".into(),
+        ));
+    }
     let (block_type, link, brn_balance, trst_balance, representative) = match transaction {
         // BRN-spending blocks: the odometer increases by the spend amount.
         // Availability is validated by nodes against the computed BRN(w).
         burst_transactions::Transaction::Burn(tx) => (
             BlockType::Burn,
             address_to_link(&tx.receiver)?,
-            account_state.brn_balance.saturating_add(tx.amount),
+            checked_balance_add(account_state.brn_balance, tx.amount)?,
             account_state.trst_balance,
             None,
         ),
@@ -358,20 +463,20 @@ pub fn build_state_block(
         burst_transactions::Transaction::Endorse(tx) => (
             BlockType::Endorse,
             address_to_link(&tx.target)?,
-            account_state.brn_balance.saturating_add(tx.burn_amount),
+            checked_balance_add(account_state.brn_balance, tx.burn_amount)?,
             account_state.trst_balance,
             None,
         ),
         burst_transactions::Transaction::Challenge(tx) => (
             BlockType::Challenge,
             address_to_link(&tx.target)?,
-            account_state.brn_balance.saturating_add(tx.stake_amount),
+            checked_balance_add(account_state.brn_balance, tx.stake_amount)?,
             account_state.trst_balance,
             None,
         ),
         burst_transactions::Transaction::GovernanceProposal(tx) => (
             BlockType::GovernanceProposal,
-            BlockHash::new(*tx.hash.as_bytes()),
+            compact_proposal_link(&tx.proposal)?,
             account_state.brn_balance,
             account_state.trst_balance,
             None,
@@ -401,7 +506,7 @@ pub fn build_state_block(
             BlockType::Receive,
             BlockHash::new(*tx.send_block_hash.as_bytes()),
             account_state.brn_balance,
-            account_state.trst_balance.saturating_add(tx.amount),
+            checked_balance_add(account_state.trst_balance, tx.amount)?,
             None,
         ),
         burst_transactions::Transaction::ChangeRepresentative(tx) => (
@@ -421,7 +526,7 @@ pub fn build_state_block(
         burst_transactions::Transaction::VerificationVote(tx) => (
             BlockType::VerificationVote,
             address_to_link(&tx.target_wallet)?,
-            account_state.brn_balance.saturating_add(tx.stake_amount),
+            checked_balance_add(account_state.brn_balance, tx.stake_amount)?,
             account_state.trst_balance,
             None,
         ),
@@ -430,10 +535,14 @@ pub fn build_state_block(
     let representative = representative.unwrap_or_else(|| account_state.representative.clone());
 
     let origin = match transaction {
+        burst_transactions::Transaction::GovernanceProposal(_) => TxHash::ZERO,
         // A burn's origin IS its own hash (it mints TRST).
         _ if block_type == BlockType::Burn => *transaction.hash(),
         // A challenge encodes its reason (fraud vs benign inactivity) in origin.
         burst_transactions::Transaction::Challenge(tx) => TxHash::new(tx.reason.to_origin()),
+        burst_transactions::Transaction::VerificationVote(tx) => {
+            tx.selection_context.into_tx_hash()
+        }
         _ => previous_origin,
     };
 
@@ -445,7 +554,10 @@ pub fn build_state_block(
     };
 
     let mut block = StateBlock {
+        signing_grant: account_state.signing_grant,
+        delegation_payload: Vec::new(),
         version: CURRENT_BLOCK_VERSION,
+        payment_epoch: account_state.payment_epoch,
         block_type,
         account: transaction.sender().clone(),
         previous: account_state.head,
@@ -457,14 +569,81 @@ pub fn build_state_block(
         transaction: *transaction.hash(),
         timestamp: transaction.timestamp(),
         params_hash,
+        target_head: match transaction {
+            burst_transactions::Transaction::Challenge(tx) => match tx.appeal_of {
+                Some(outcome) if outcome.is_zero() => {
+                    return Err(WalletError::TransactionBuild(
+                        "appeal outcome must be nonzero".into(),
+                    ))
+                }
+                Some(outcome) => outcome,
+                None => BlockHash::ZERO,
+            },
+            _ => BlockHash::ZERO,
+        },
         merge_sources,
+        release_sources: account_state.release_sources.clone(),
         work: 0,
         signature: Signature([0u8; 64]),
         hash: BlockHash::ZERO,
     };
 
+    // These block types carry the vote byte, not a transaction digest, in
+    // `transaction`. The node decodes that byte; signing an arbitrary digest
+    // here would silently lose the intended vote (or cast a different one).
+    match transaction {
+        burst_transactions::Transaction::GovernanceVote(tx) => {
+            let mut encoded = [0u8; 32];
+            encoded[0] = match tx.vote {
+                burst_transactions::governance::GovernanceVote::Yea => 0,
+                burst_transactions::governance::GovernanceVote::Nay => 1,
+                burst_transactions::governance::GovernanceVote::Abstain => 2,
+            };
+            block.transaction = TxHash::new(encoded);
+        }
+        burst_transactions::Transaction::VerificationVote(tx) => {
+            let mut encoded = [0u8; 32];
+            encoded[0] = tx.vote;
+            block.transaction = TxHash::new(encoded);
+        }
+        _ => {}
+    }
     block.hash = block.compute_hash();
 
+    Ok(block)
+}
+
+fn checked_balance_add(balance: u128, amount: u128) -> Result<u128, WalletError> {
+    balance.checked_add(amount).ok_or_else(|| {
+        WalletError::TransactionBuild("balance exceeds u128 protocol precision".into())
+    })
+}
+
+/// Prepare a reviewed device handoff without changing identity or balances.
+/// The caller persists the signed draft before submission and adopts its hash
+/// as the local grant only after confirmation. `nonce` is fresh for each device.
+pub fn build_signing_handoff(
+    state: &AccountState,
+    account: &WalletAddress,
+    nonce: BlockHash,
+    params_hash: BlockHash,
+    now: Timestamp,
+) -> Result<StateBlock, WalletError> {
+    if state.head.is_zero() || state.block_count == 0 || nonce.is_zero() {
+        return Err(WalletError::TransactionBuild("handoff requires an open account and a fresh device nonce".into()));
+    }
+    let transaction = burst_transactions::Transaction::ChangeRepresentative(
+        build_change_rep_tx(account, &state.representative, now)?,
+    );
+    let mut block = build_state_block(state, &transaction, TxHash::ZERO, params_hash)?;
+    block.block_type = BlockType::ChangeSigner;
+    block.link = nonce;
+    block.transaction = TxHash::ZERO;
+    // Stake release is a separate action; takeover must leave the odometer intact.
+    block.release_sources.clear();
+    block.brn_balance = state.brn_balance;
+    block.validate_format().map_err(|error| WalletError::TransactionBuild(error.into()))?;
+    block.hash = block.compute_hash();
     Ok(block)
 }
 
@@ -506,12 +685,105 @@ mod tests {
     }
 
     fn test_account_state() -> AccountState {
-        AccountState {
+        AccountState { signing_grant: burst_types::BlockHash::ZERO,
+            payment_epoch: burst_types::BlockHash::new([1; 32]),
+            release_sources: Vec::new(),
             head: BlockHash::ZERO,
             block_count: 0,
             representative: test_address("rep1"),
             brn_balance: 10_000,
             trst_balance: 5_000,
+        }
+    }
+
+    #[test]
+    fn signing_handoff_preserves_balances_and_successor_binding() {
+        let mut state = test_account_state();
+        state.head = BlockHash::new([2; 32]);
+        state.block_count = 1;
+        state.signing_grant = BlockHash::new([3; 32]);
+        let account = test_address("handoff");
+        let params = BlockHash::new([4; 32]);
+        let handoff = build_signing_handoff(&state, &account, BlockHash::new([5; 32]), params, Timestamp::new(100)).unwrap();
+        assert_eq!(handoff.block_type, BlockType::ChangeSigner);
+        assert_eq!(handoff.signing_grant, state.signing_grant);
+        assert_eq!(handoff.account, account);
+        assert_eq!(handoff.representative, state.representative);
+        assert_eq!((handoff.brn_balance, handoff.trst_balance), (state.brn_balance, state.trst_balance));
+        state.head = handoff.hash;
+        state.signing_grant = handoff.active_signing_grant();
+        let tx = burst_transactions::Transaction::Burn(build_burn_tx(&account, &account, 1, Timestamp::new(101)).unwrap());
+        let next = build_state_block(&state, &tx, TxHash::ZERO, params).unwrap();
+        next.validate_signing_grant(Some(&handoff)).unwrap();
+        assert!(build_signing_handoff(&state, &account, BlockHash::ZERO, params, Timestamp::new(102)).is_err());
+    }
+
+    #[test]
+    fn block_builder_requires_and_preserves_payment_epoch() {
+        let sender = test_address("sender1");
+        let receiver = test_address("receiver1");
+        let tx = burst_transactions::Transaction::Burn(
+            build_burn_tx(&sender, &receiver, 100, Timestamp::new(1000)).unwrap(),
+        );
+        let mut state = test_account_state();
+        let block = build_state_block(&state, &tx, TxHash::ZERO, BlockHash::ZERO).unwrap();
+        assert_eq!(block.payment_epoch, state.payment_epoch);
+        state.payment_epoch = BlockHash::ZERO;
+        assert!(
+            build_state_block(&state, &tx, TxHash::ZERO, BlockHash::ZERO)
+                .unwrap_err()
+                .to_string()
+                .contains("missing payment epoch")
+        );
+    }
+
+    #[test]
+    fn compact_governance_proposal_encodes_content_and_clears_payment_origin() {
+        use burst_transactions::governance::ProposalContent;
+        let content = ProposalContent::ParameterChange {
+            parameter: "brn_rate".into(),
+            current_value: 123,
+            proposed_value: 0,
+        };
+        let tx = burst_transactions::Transaction::GovernanceProposal(
+            build_governance_proposal_tx(&test_address("owner"), content, Timestamp::new(1000))
+                .unwrap(),
+        );
+        let block = build_state_block(
+            &test_account_state(),
+            &tx,
+            TxHash::new([7; 32]),
+            BlockHash::ZERO,
+        )
+        .unwrap();
+        assert_eq!(block.block_type, BlockType::GovernanceProposal);
+        assert_eq!(block.origin, TxHash::ZERO);
+        assert_eq!(
+            burst_governance::ProposalContent::decode_compact(block.link.as_bytes()).unwrap(),
+            burst_governance::ProposalContent::ParameterChange {
+                param: burst_governance::GovernableParam::BrnRate,
+                new_value: 0
+            }
+        );
+        for content in [
+            ProposalContent::ParameterChange {
+                parameter: "unknown".into(),
+                current_value: 0,
+                proposed_value: 1,
+            },
+            ProposalContent::ConstitutionalAmendment {
+                title: "Rights".into(),
+                text: "People vote".into(),
+            },
+        ] {
+            let tx = burst_transactions::Transaction::GovernanceProposal(
+                build_governance_proposal_tx(&test_address("owner"), content, Timestamp::new(1000))
+                    .unwrap(),
+            );
+            assert!(
+                build_state_block(&test_account_state(), &tx, TxHash::ZERO, BlockHash::ZERO)
+                    .is_err()
+            );
         }
     }
 
@@ -593,6 +865,85 @@ mod tests {
     }
 
     #[test]
+    fn appeal_builder_binds_outcome_and_never_downgrades_a_zero_reference() {
+        let key = burst_crypto::keypair_from_seed(&[7; 32]);
+        let challenger = burst_crypto::derive_address(&key.public);
+        let target = test_address("target1");
+        let now = Timestamp::new(6000);
+        let reason = burst_types::ChallengeReason::Fraud;
+        let ordinary = build_challenge_tx(&challenger, &target, 1000, reason, now).unwrap();
+        let mut appeal = build_appeal_tx(
+            &challenger,
+            &target,
+            1000,
+            reason,
+            BlockHash::new([3; 32]),
+            now,
+        )
+        .unwrap();
+        assert_ne!(appeal.hash, ordinary.hash);
+        let other = build_appeal_tx(
+            &challenger,
+            &target,
+            1000,
+            reason,
+            BlockHash::new([4; 32]),
+            now,
+        )
+        .unwrap();
+        assert_ne!(appeal.hash, other.hash);
+        let state = AccountState { signing_grant: burst_types::BlockHash::ZERO,
+            head: BlockHash::new([2; 32]),
+            ..test_account_state()
+        };
+        let mut block = build_and_sign_state_block(
+            &state,
+            &burst_transactions::Transaction::Challenge(appeal.clone()),
+            &key.private,
+            TxHash::ZERO,
+            BlockHash::ZERO,
+        )
+        .unwrap();
+        assert_eq!(block.target_head, appeal.appeal_of.unwrap());
+        assert_eq!(block.brn_balance, state.brn_balance + 1000);
+        assert_eq!(block.trst_balance, state.trst_balance);
+        assert!(burst_crypto::verify_signature(
+            block.compute_hash().as_bytes(),
+            &block.signature,
+            &key.public
+        ));
+        block.target_head = BlockHash::new([4; 32]);
+        assert!(!burst_crypto::verify_signature(
+            block.compute_hash().as_bytes(),
+            &block.signature,
+            &key.public
+        ));
+        appeal.appeal_of = Some(BlockHash::ZERO);
+        assert!(build_state_block(
+            &state,
+            &burst_transactions::Transaction::Challenge(appeal),
+            TxHash::ZERO,
+            BlockHash::ZERO
+        )
+        .is_err());
+        assert!(build_appeal_tx(&challenger, &target, 1000, reason, BlockHash::ZERO, now).is_err());
+        assert!(build_appeal_tx(
+            &challenger,
+            &target,
+            0,
+            reason,
+            BlockHash::new([3; 32]),
+            now
+        )
+        .is_err());
+        let mut legacy = serde_json::to_value(&ordinary).unwrap();
+        legacy.as_object_mut().unwrap().remove("appeal_of");
+        let legacy: burst_transactions::challenge::ChallengeTx =
+            serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.appeal_of, None);
+    }
+
+    #[test]
     fn build_state_block_for_burn() {
         let state = test_account_state();
         let burn = build_burn_tx(
@@ -611,6 +962,124 @@ mod tests {
         assert_eq!(block.trst_balance, 5_000);
         assert_eq!(block.version, CURRENT_BLOCK_VERSION);
         assert!(!block.hash.is_zero());
+    }
+
+    #[test]
+    fn vote_blocks_encode_the_users_choice_not_a_digest() {
+        use burst_transactions::{governance::GovernanceVote, Transaction};
+        let state = test_account_state();
+        for (vote, byte) in [
+            (GovernanceVote::Yea, 0),
+            (GovernanceVote::Nay, 1),
+            (GovernanceVote::Abstain, 2),
+        ] {
+            let tx = build_governance_vote_tx(
+                &test_address("voter"),
+                TxHash::new([7; 32]),
+                vote,
+                Timestamp::new(1000),
+            )
+            .unwrap();
+            let block = build_state_block(
+                &state,
+                &Transaction::GovernanceVote(tx),
+                TxHash::ZERO,
+                BlockHash::ZERO,
+            )
+            .unwrap();
+            assert_eq!(block.transaction.as_bytes()[0], byte);
+            assert!(block.transaction.as_bytes()[1..].iter().all(|b| *b == 0));
+            assert_eq!(block.compute_hash(), block.hash);
+        }
+        for vote in 1..=3 {
+            let tx = build_verification_vote_tx(
+                &test_address("voter"),
+                &test_address("target"),
+                BlockHash::new([8; 32]),
+                vote,
+                10,
+                Timestamp::new(1000),
+            )
+            .unwrap();
+            let block = build_state_block(
+                &state,
+                &Transaction::VerificationVote(tx),
+                TxHash::ZERO,
+                BlockHash::ZERO,
+            )
+            .unwrap();
+            assert_eq!(block.transaction.as_bytes()[0], vote);
+            assert_eq!(block.origin, TxHash::new([8; 32]));
+        }
+    }
+
+    #[test]
+    fn verification_context_is_required_and_covered_by_the_signed_block() {
+        let keys = burst_crypto::keypair_from_seed(&[83; 32]);
+        let voter = burst_crypto::derive_address(&keys.public);
+        let target = test_address("target");
+        assert!(build_verification_vote_tx(
+            &voter,
+            &target,
+            BlockHash::ZERO,
+            1,
+            10,
+            Timestamp::new(1000)
+        )
+        .is_err());
+        let transaction = build_verification_vote_tx(
+            &voter,
+            &target,
+            BlockHash::new([8; 32]),
+            1,
+            10,
+            Timestamp::new(1000),
+        )
+        .unwrap();
+        let block = build_state_block(
+            &test_account_state(),
+            &burst_transactions::Transaction::VerificationVote(transaction),
+            TxHash::new([99; 32]),
+            BlockHash::ZERO,
+        )
+        .unwrap();
+        let mut block = sign_state_block(block, &keys.private);
+        assert_eq!(
+            block.origin,
+            TxHash::new([8; 32]),
+            "the previous TRST origin is not a verification context"
+        );
+        assert!(burst_crypto::verify_signature(
+            block.hash.as_bytes(),
+            &block.signature,
+            &keys.public
+        ));
+        block.origin = TxHash::new([9; 32]);
+        assert!(!burst_crypto::verify_signature(
+            block.compute_hash().as_bytes(),
+            &block.signature,
+            &keys.public
+        ));
+    }
+
+    #[test]
+    fn burn_cannot_silently_saturate_the_spent_odometer() {
+        let mut state = test_account_state();
+        state.brn_balance = u128::MAX;
+        let tx = build_burn_tx(
+            &test_address("sender"),
+            &test_address("receiver"),
+            1,
+            Timestamp::new(1),
+        )
+        .unwrap();
+        assert!(build_state_block(
+            &state,
+            &burst_transactions::Transaction::Burn(tx),
+            TxHash::ZERO,
+            BlockHash::ZERO
+        )
+        .is_err());
     }
 
     #[test]
@@ -641,7 +1110,8 @@ mod tests {
         // the wallet cannot check BRN sufficiency from it (nodes validate
         // the spend against the computed BRN(w)). Building always succeeds
         // and records the spend as the odometer delta.
-        let state = AccountState {
+        let state = AccountState { signing_grant: burst_types::BlockHash::ZERO,
+            payment_epoch: burst_types::BlockHash::new([1; 32]),
             brn_balance: 50,
             ..test_account_state()
         };
@@ -680,7 +1150,9 @@ mod tests {
     fn build_and_sign_produces_valid_signature() {
         let kp = burst_crypto::generate_keypair();
         let address = burst_crypto::derive_address(&kp.public);
-        let state = AccountState {
+        let state = AccountState { signing_grant: burst_types::BlockHash::ZERO,
+            payment_epoch: burst_types::BlockHash::new([1; 32]),
+            release_sources: Vec::new(),
             head: BlockHash::ZERO,
             block_count: 0,
             representative: test_address("rep1"),

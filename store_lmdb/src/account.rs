@@ -3,10 +3,10 @@
 //! Maintains a `verified_count` counter in `meta_db` so that
 //! `verified_account_count()` is O(1) instead of a full table scan.
 
-use std::sync::Arc;
+use crate::shared_env::SharedEnv;
 
 use heed::types::Bytes;
-use heed::{Database, Env};
+use heed::Database;
 
 use burst_store::account::{AccountInfo, AccountStore};
 use burst_store::StoreError;
@@ -17,35 +17,129 @@ use crate::LmdbError;
 const VERIFIED_COUNT_KEY: &[u8] = b"verified_count";
 
 pub struct LmdbAccountStore {
-    pub(crate) env: Arc<Env>,
+    pub(crate) env: SharedEnv,
     pub(crate) accounts_db: Database<Bytes, Bytes>,
     pub(crate) meta_db: Database<Bytes, Bytes>,
 }
 
 impl LmdbAccountStore {
+    /// Stream validated rows from the caller's consistent read snapshot.
+    pub fn account_entries<'a>(
+        &'a self,
+        txn: &'a crate::LmdbReadTransaction<'_>,
+    ) -> Result<impl Iterator<Item = Result<AccountInfo, StoreError>> + 'a, StoreError> {
+        let rows = self.accounts_db.iter(&txn.txn).map_err(LmdbError::from)?;
+        Ok(rows.map(|row| {
+            let (key, bytes) = row.map_err(LmdbError::from)?;
+            decode_account_entry(key, bytes)
+        }))
+    }
+}
+
+pub(crate) fn decode_account_entry(key: &[u8], bytes: &[u8]) -> Result<AccountInfo, StoreError> {
+    let account: AccountInfo = bincode::deserialize(bytes).map_err(LmdbError::from)?;
+    if key != account.address.as_str().as_bytes()
+        || account.confirmation_height > account.block_count
+    {
+        return Err(StoreError::Corruption(
+            "invalid account index or confirmation height".into(),
+        ));
+    }
+    Ok(account)
+}
+
+impl LmdbAccountStore {
+    pub fn iter_accounts_paged_txn(
+        &self,
+        txn: &crate::LmdbReadTransaction<'_>,
+        cursor: Option<&WalletAddress>,
+        limit: usize,
+    ) -> Result<Vec<AccountInfo>, StoreError> {
+        use std::ops::Bound;
+        let lower = cursor.map_or(Bound::Unbounded, |address| {
+            Bound::Excluded(address.as_str().as_bytes())
+        });
+        let bounds = (lower, Bound::<&[u8]>::Unbounded);
+        let mut accounts = Vec::new();
+        for entry in self
+            .accounts_db
+            .range(&txn.txn, &bounds)
+            .map_err(LmdbError::from)?
+            .take(limit)
+        {
+            let (key, bytes) = entry.map_err(LmdbError::from)?;
+            let account: AccountInfo = bincode::deserialize(bytes).map_err(LmdbError::from)?;
+            if key != account.address.as_str().as_bytes() {
+                return Err(StoreError::Corruption(
+                    "account address index mismatch".into(),
+                ));
+            }
+            accounts.push(account);
+        }
+        Ok(accounts)
+    }
+
+    /// Bounded account inventory from the same snapshot as a history reader.
+    /// Account afterimages are not authority; callers may use chain heights and
+    /// then reconstruct state from the referenced signed blocks.
+    pub fn iter_accounts_txn_bounded(
+        &self,
+        txn: &crate::LmdbReadTransaction<'_>,
+        limit: usize,
+    ) -> Result<Vec<AccountInfo>, StoreError> {
+        let mut accounts = Vec::new();
+        for entry in self.accounts_db.iter(&txn.txn).map_err(LmdbError::from)? {
+            let (_, bytes) = entry.map_err(LmdbError::from)?;
+            if accounts.len() == limit {
+                return Err(StoreError::Corruption(
+                    "account inventory exceeds replay limit".into(),
+                ));
+            }
+            accounts.push(bincode::deserialize(bytes).map_err(LmdbError::from)?);
+        }
+        Ok(accounts)
+    }
+
+    pub fn get_account_txn(
+        &self,
+        txn: &crate::LmdbReadTransaction<'_>,
+        address: &WalletAddress,
+    ) -> Result<AccountInfo, StoreError> {
+        let bytes = self
+            .accounts_db
+            .get(&txn.txn, address.as_str().as_bytes())
+            .map_err(LmdbError::from)?
+            .ok_or_else(|| StoreError::NotFound(address.to_string()))?;
+        bincode::deserialize(bytes)
+            .map_err(LmdbError::from)
+            .map_err(Into::into)
+    }
+
     /// Read the current verified-account counter from meta_db.
-    fn read_verified_count(&self, txn: &heed::RoTxn<'_>) -> u64 {
-        self.meta_db
+    fn read_verified_count(&self, txn: &heed::RoTxn<'_>) -> Result<u64, StoreError> {
+        match self
+            .meta_db
             .get(txn, VERIFIED_COUNT_KEY)
-            .ok()
-            .flatten()
-            .and_then(|b| b.try_into().ok().map(u64::from_be_bytes))
-            .unwrap_or(0)
+            .map_err(LmdbError::from)?
+        {
+            Some(bytes) => bytes
+                .try_into()
+                .map(u64::from_be_bytes)
+                .map_err(|_| StoreError::Corruption("invalid verified account count".into())),
+            None => Err(StoreError::Corruption(
+                "verified account count missing".into(),
+            )),
+        }
     }
 
     /// Read the current verified-account counter within a write transaction.
-    fn read_verified_count_rw(&self, txn: &heed::RwTxn<'_>) -> u64 {
-        self.meta_db
-            .get(txn, VERIFIED_COUNT_KEY)
-            .ok()
-            .flatten()
-            .and_then(|b| b.try_into().ok().map(u64::from_be_bytes))
-            .unwrap_or(0)
+    fn read_verified_count_rw(&self, txn: &heed::RwTxn<'_>) -> Result<u64, StoreError> {
+        self.read_verified_count(txn)
     }
 }
 
 fn is_verified(info: &AccountInfo) -> bool {
-    info.state == burst_types::WalletState::Verified
+    info.state.is_verified()
 }
 
 impl AccountStore for LmdbAccountStore {
@@ -61,23 +155,28 @@ impl AccountStore for LmdbAccountStore {
     }
 
     fn put_account(&self, info: &AccountInfo) -> Result<(), StoreError> {
-        let bytes = bincode::serialize(info).map_err(LmdbError::from)?;
         let mut wtxn = self.env.write_txn().map_err(LmdbError::from)?;
-
-        let was_verified = self
+        let old = self
             .accounts_db
             .get(&wtxn, info.address.as_str().as_bytes())
             .map_err(LmdbError::from)?
-            .and_then(|old| bincode::deserialize::<AccountInfo>(old).ok())
-            .is_some_and(|old| is_verified(&old));
+            .map(bincode::deserialize::<AccountInfo>)
+            .transpose()
+            .map_err(LmdbError::from)?;
+        let was_verified = old.as_ref().is_some_and(is_verified);
+        let mut info = info.clone();
+        if let Some(old) = old {
+            info.confirmation_height = info.confirmation_height.max(old.confirmation_height);
+        }
+        let bytes = bincode::serialize(&info).map_err(LmdbError::from)?;
 
         self.accounts_db
             .put(&mut wtxn, info.address.as_str().as_bytes(), &bytes)
             .map_err(LmdbError::from)?;
 
-        let now_verified = is_verified(info);
+        let now_verified = is_verified(&info);
         if was_verified != now_verified {
-            let count = self.read_verified_count_rw(&wtxn);
+            let count = self.read_verified_count_rw(&wtxn)?;
             let new_count = if now_verified {
                 count.saturating_add(1)
             } else {
@@ -89,6 +188,36 @@ impl AccountStore for LmdbAccountStore {
         }
 
         wtxn.commit().map_err(LmdbError::from)?;
+        Ok(())
+    }
+
+    fn advance_confirmation_height(
+        &self,
+        address: &WalletAddress,
+        height: u64,
+    ) -> Result<(), StoreError> {
+        let mut txn = self.env.write_txn().map_err(LmdbError::from)?;
+        let key = address.as_str().as_bytes();
+        let bytes = self
+            .accounts_db
+            .get(&txn, key)
+            .map_err(LmdbError::from)?
+            .ok_or_else(|| StoreError::NotFound(address.to_string()))?;
+        let mut account: AccountInfo = bincode::deserialize(bytes).map_err(LmdbError::from)?;
+        if height > account.block_count {
+            return Err(StoreError::Backend(
+                "confirmation exceeds chain height".into(),
+            ));
+        }
+        account.confirmation_height = account.confirmation_height.max(height);
+        self.accounts_db
+            .put(
+                &mut txn,
+                key,
+                &bincode::serialize(&account).map_err(LmdbError::from)?,
+            )
+            .map_err(LmdbError::from)?;
+        txn.commit().map_err(LmdbError::from)?;
         Ok(())
     }
 
@@ -136,7 +265,7 @@ impl AccountStore for LmdbAccountStore {
 
     fn verified_account_count(&self) -> Result<u64, StoreError> {
         let rtxn = self.env.read_txn().map_err(LmdbError::from)?;
-        Ok(self.read_verified_count(&rtxn))
+        self.read_verified_count(&rtxn)
     }
 
     fn iter_accounts_paged(
@@ -144,40 +273,170 @@ impl AccountStore for LmdbAccountStore {
         cursor: Option<&WalletAddress>,
         limit: usize,
     ) -> Result<Vec<AccountInfo>, StoreError> {
-        let rtxn = self.env.read_txn().map_err(LmdbError::from)?;
-        let mut accounts = Vec::with_capacity(limit);
+        let txn =
+            crate::LmdbReadTransaction::from_ro(self.env.read_txn().map_err(LmdbError::from)?);
+        self.iter_accounts_paged_txn(&txn, cursor, limit)
+    }
+}
 
-        match cursor {
-            Some(addr) => {
-                use std::ops::Bound;
-                let key = addr.as_str().as_bytes();
-                let bounds = (Bound::Excluded(key), Bound::<&[u8]>::Unbounded);
-                let iter = self
-                    .accounts_db
-                    .range(&rtxn, &bounds)
-                    .map_err(LmdbError::from)?;
-                for result in iter {
-                    if accounts.len() >= limit {
-                        break;
-                    }
-                    let (_k, v) = result.map_err(LmdbError::from)?;
-                    let info: AccountInfo = bincode::deserialize(v).map_err(LmdbError::from)?;
-                    accounts.push(info);
-                }
-            }
-            None => {
-                let iter = self.accounts_db.iter(&rtxn).map_err(LmdbError::from)?;
-                for result in iter {
-                    if accounts.len() >= limit {
-                        break;
-                    }
-                    let (_k, v) = result.map_err(LmdbError::from)?;
-                    let info: AccountInfo = bincode::deserialize(v).map_err(LmdbError::from)?;
-                    accounts.push(info);
-                }
-            }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use burst_store::meta::MetaStore;
+    use burst_types::{BlockHash, Timestamp, WalletState};
+
+    fn account() -> AccountInfo {
+        AccountInfo {
+            address: WalletAddress::new("brst_verified_counter_fixture"),
+            state: WalletState::Verified,
+            verified_at: Some(Timestamp::EPOCH),
+            head: BlockHash::ZERO,
+            block_count: 0,
+            confirmation_height: 0,
+            representative: WalletAddress::new("brst_rep"),
+            total_brn_burned: 0,
+            total_brn_staked: 0,
+            trst_balance: 0,
+            expired_trst: 0,
+            revoked_trst: 0,
+            epoch: 0,
+            verifier_opted_in_at: None,
+            orv_evicted: false,
         }
+    }
 
-        Ok(accounts)
+    #[test]
+    fn paged_account_reader_keeps_one_snapshot_and_an_exclusive_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::LmdbStore::open(dir.path(), 32, 16 * 1024 * 1024).unwrap();
+        let accounts = store.account_store();
+        for suffix in ["a", "b", "c"] {
+            let mut value = account();
+            value.address = WalletAddress::new(format!("brst_{suffix}"));
+            accounts.put_account(&value).unwrap();
+        }
+        let snapshot = store.tx_begin_read().unwrap();
+        let first = accounts
+            .iter_accounts_paged_txn(&snapshot, None, 1)
+            .unwrap();
+        assert_eq!(first[0].address.as_str(), "brst_a");
+        let mut inserted = account();
+        inserted.address = WalletAddress::new("brst_ab");
+        accounts.put_account(&inserted).unwrap();
+        let streamed = accounts
+            .account_entries(&snapshot)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            streamed
+                .iter()
+                .map(|row| row.address.as_str())
+                .collect::<Vec<_>>(),
+            vec!["brst_a", "brst_b", "brst_c"]
+        );
+        let rest = accounts
+            .iter_accounts_paged_txn(&snapshot, Some(&first[0].address), 2)
+            .unwrap();
+        assert_eq!(
+            rest.iter().map(|a| a.address.as_str()).collect::<Vec<_>>(),
+            vec!["brst_b", "brst_c"]
+        );
+        assert!(accounts
+            .iter_accounts_paged_txn(&snapshot, Some(&rest[1].address), 1)
+            .unwrap()
+            .is_empty());
+        assert!(accounts
+            .iter_accounts_paged_txn(&snapshot, None, 0)
+            .unwrap()
+            .is_empty());
+        drop(snapshot);
+        assert_eq!(
+            accounts
+                .iter_accounts_paged(Some(&first[0].address), 1)
+                .unwrap()[0]
+                .address,
+            inserted.address
+        );
+    }
+
+    #[test]
+    fn challenge_keeps_human_in_electorate_until_resolved() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::LmdbStore::open(dir.path(), 32, 16 * 1024 * 1024).unwrap();
+        let mut account = account();
+        store.account_store().put_account(&account).unwrap();
+        account.state = WalletState::Challenged;
+        store.account_store().put_account(&account).unwrap();
+        assert_eq!(store.account_store().verified_account_count().unwrap(), 1);
+        assert_eq!(
+            store
+                .account_store()
+                .iter_verified_accounts()
+                .unwrap()
+                .len(),
+            1
+        );
+        account.state = WalletState::Revoked;
+        for commit in [false, true] {
+            let mut batch = store.tx_begin_write().unwrap();
+            batch.put_account_info(&account, true).unwrap();
+            assert_eq!(batch.verified_account_count().unwrap(), 0);
+            if commit {
+                batch.commit().unwrap();
+            } else {
+                drop(batch);
+            }
+            assert_eq!(
+                store.account_store().verified_account_count().unwrap(),
+                u64::from(!commit)
+            );
+        }
+    }
+
+    #[test]
+    fn old_counter_is_rebuilt_but_corrupt_current_counter_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::LmdbStore::open(dir.path(), 32, 16 * 1024 * 1024).unwrap();
+        let mut account = account();
+        account.state = WalletState::Challenged;
+        store.account_store().put_account(&account).unwrap();
+        store
+            .meta_store()
+            .put_meta("verified_count", &0u64.to_be_bytes())
+            .unwrap();
+        store
+            .meta_store()
+            .put_meta("verified_count_version", &[1])
+            .unwrap();
+        drop(store);
+        let store = crate::LmdbStore::open(dir.path(), 32, 16 * 1024 * 1024).unwrap();
+        assert_eq!(store.account_store().verified_account_count().unwrap(), 1);
+        store
+            .meta_store()
+            .put_meta("verified_count", &[99])
+            .unwrap();
+        assert!(store.account_store().verified_account_count().is_err());
+        account.state = WalletState::Revoked;
+        assert!(store.account_store().put_account(&account).is_err());
+        assert_eq!(
+            store
+                .account_store()
+                .get_account(&account.address)
+                .unwrap()
+                .state,
+            WalletState::Challenged
+        );
+        let mut batch = store.tx_begin_write().unwrap();
+        assert!(batch.put_account_info(&account, true).is_err());
+        drop(batch);
+        assert_eq!(
+            store
+                .account_store()
+                .get_account(&account.address)
+                .unwrap()
+                .state,
+            WalletState::Challenged
+        );
     }
 }

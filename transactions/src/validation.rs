@@ -85,13 +85,6 @@ pub fn validate_send(tx: &crate::send::SendTx, _now: Timestamp) -> Result<(), Tr
         return Err(TransactionError::ZeroAmount);
     }
 
-    // Sender must not equal receiver
-    if tx.sender == tx.receiver {
-        return Err(TransactionError::Other(
-            "send transaction sender and receiver must be different".into(),
-        ));
-    }
-
     // Origin hash must not be zero
     if tx.origin.is_zero() {
         return Err(TransactionError::Other(
@@ -295,7 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_send_sender_equals_receiver() {
+    fn test_validate_send_to_self() {
         let sender = dummy_wallet_address();
         let tx = SendTx {
             hash: dummy_tx_hash(),
@@ -310,8 +303,7 @@ mod tests {
         };
 
         let result = validate_send(&tx, Timestamp::new(1000));
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), TransactionError::Other(_)));
+        assert!(result.is_ok(), "decision 6.7 permits TRST self-sends");
     }
 
     #[test]

@@ -9,6 +9,9 @@ description = "JSON-RPC server for wallet and external tool communication"
 burst-types = { workspace = true }
 burst-store = { workspace = true }
 burst-brn = { workspace = true }
+burst-trst = { workspace = true }
+burst-verification = { workspace = true }
+burst-consti = { workspace = true }
 burst-consensus = { workspace = true }
 burst-network = { workspace = true }
 burst-work = { workspace = true }

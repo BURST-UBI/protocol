@@ -17,9 +17,10 @@
 //!   e.g. cloud peers) runs normally but cannot author genesis authority
 //!   blocks — which is exactly the intended restriction.
 //!
-//! Dev and test networks keep a well-known published seed so the test suite
-//! and `dev-cluster.sh` work with zero configuration. Only **live** requires
-//! the creator to supply a real secret seed.
+//! Disposable Dev/Test builds retain published fixture seeds. A
+//! `private-testnet` build pins BURST_TEST_GENESIS_PUBLIC_KEY at compile time
+//! and requires the creator's runtime seed, just like Live. It is a separate
+//! Test ledger, not an upgrade of the published-seed network.
 
 use burst_types::{KeyPair, NetworkId, PublicKey, Signature, WalletAddress};
 use std::sync::OnceLock;
@@ -30,6 +31,15 @@ const DEV_GENESIS_SEED: [u8; 32] = [0u8; 32];
 /// Published test seed — genesis key for the shared test network. Public by design.
 const TEST_GENESIS_SEED: [u8; 32] = [7u8; 32];
 
+#[cfg(feature = "private-testnet")]
+const PRIVATE_TEST_PUBLIC_KEY: [u8; 32] = match decode_hex32(env!(
+    "BURST_TEST_GENESIS_PUBLIC_KEY",
+    "private-testnet requires the creator's 64-character public key at build time"
+)) {
+    Some(key) => key,
+    None => panic!("BURST_TEST_GENESIS_PUBLIC_KEY must be 64 hexadecimal characters"),
+};
+
 /// Baked genesis PUBLIC key for the live network (32-byte Ed25519 verifying
 /// key, hex). Generated once by the creator with `genesis_keygen` and pasted
 /// here before launch. Until then it is all-zeros, and live authority actions
@@ -37,14 +47,22 @@ const TEST_GENESIS_SEED: [u8; 32] = [7u8; 32];
 const LIVE_GENESIS_PUBLIC_KEY_HEX: &str =
     "d481ea12094da14808a783c74cbabc28561c50c0348eaf419718d6080359ca4a";
 
-fn decode_hex32(hex: &str) -> Option<[u8; 32]> {
+const fn decode_hex32(hex: &str) -> Option<[u8; 32]> {
     if hex.len() != 64 {
         return None;
     }
     let mut out = [0u8; 32];
-    for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
-        let s = std::str::from_utf8(chunk).ok()?;
-        out[i] = u8::from_str_radix(s, 16).ok()?;
+    let bytes = hex.as_bytes();
+    let mut i = 0;
+    while i < 64 {
+        let digit = match bytes[i] {
+            b'0'..=b'9' => bytes[i] - b'0',
+            b'a'..=b'f' => bytes[i] - b'a' + 10,
+            b'A'..=b'F' => bytes[i] - b'A' + 10,
+            _ => return None,
+        };
+        out[i / 2] = out[i / 2] * 16 + digit;
+        i += 1;
     }
     Some(out)
 }
@@ -59,11 +77,39 @@ pub fn live_identity_configured() -> bool {
 pub fn genesis_public_key(network: NetworkId) -> PublicKey {
     match network {
         NetworkId::Dev => burst_crypto::keypair_from_seed(&DEV_GENESIS_SEED).public,
-        NetworkId::Test => burst_crypto::keypair_from_seed(&TEST_GENESIS_SEED).public,
+        NetworkId::Test => {
+            #[cfg(feature = "private-testnet")]
+            {
+                PublicKey(PRIVATE_TEST_PUBLIC_KEY)
+            }
+            #[cfg(not(feature = "private-testnet"))]
+            burst_crypto::keypair_from_seed(&TEST_GENESIS_SEED).public
+        }
         NetworkId::Live => {
             PublicKey(decode_hex32(LIVE_GENESIS_PUBLIC_KEY_HEX).unwrap_or([0u8; 32]))
         }
     }
+}
+
+/// Refuse fixture or live identities in a private pilot before opening its DB.
+pub(crate) fn validate_identity(network: NetworkId) -> Result<(), &'static str> {
+    if network == NetworkId::Test && cfg!(feature = "private-testnet") {
+        let public = genesis_public_key(network);
+        validate_private_test_key(public)?;
+    }
+    Ok(())
+}
+
+fn validate_private_test_key(public: PublicKey) -> Result<(), &'static str> {
+    // The existing conversion rejects malformed and weak Ed25519 points.
+    if burst_crypto::ed25519_public_to_x25519(&public.0).is_none()
+        || public == burst_crypto::keypair_from_seed(&DEV_GENESIS_SEED).public
+        || public == burst_crypto::keypair_from_seed(&TEST_GENESIS_SEED).public
+        || public == genesis_public_key(NetworkId::Live)
+    {
+        return Err("private testnet needs a distinct creator-owned genesis identity");
+    }
+    Ok(())
 }
 
 /// The genesis account address for a network.
@@ -90,8 +136,8 @@ static LIVE_SEED: OnceLock<Option<[u8; 32]>> = OnceLock::new();
 
 /// The genesis SIGNING keypair for this node, if it holds the private seed.
 ///
-/// - Dev/Test: derived from the published seed (always available).
-/// - Live: derived from the runtime seed (`BURST_GENESIS_SEED[_FILE]`), and
+/// - Disposable Dev/Test: derived from the published seed (always available).
+/// - Live/private Test: derived from the runtime seed (`BURST_GENESIS_SEED[_FILE]`), and
 ///   only returned if it matches the baked live public key — a mismatched
 ///   seed yields `None` (with a warning) rather than a silently-wrong key.
 ///
@@ -114,7 +160,8 @@ pub fn genesis_signing_key(network: NetworkId) -> Option<KeyPair> {
 fn resolve_seed(network: NetworkId) -> Option<[u8; 32]> {
     let seed = match network {
         NetworkId::Dev => Some(DEV_GENESIS_SEED),
-        NetworkId::Test => Some(TEST_GENESIS_SEED),
+        NetworkId::Test if !cfg!(feature = "private-testnet") => Some(TEST_GENESIS_SEED),
+        NetworkId::Test => seed_from_env(),
         NetworkId::Live => seed_from_env(),
     }?;
     let kp = burst_crypto::keypair_from_seed(&seed);
@@ -170,7 +217,28 @@ mod tests {
     #[test]
     fn dev_and_test_have_signing_keys_without_env() {
         assert!(genesis_signing_key(NetworkId::Dev).is_some());
-        assert!(genesis_signing_key(NetworkId::Test).is_some());
+        assert_eq!(
+            genesis_signing_key(NetworkId::Test).is_some(),
+            !cfg!(feature = "private-testnet")
+        );
+    }
+
+    #[test]
+    fn private_test_identity_excludes_fixture_and_live_authority() {
+        let mut identity = [0; 32];
+        identity[0] = 1;
+        for public in [
+            PublicKey([0; 32]),
+            PublicKey(identity),
+            burst_crypto::keypair_from_seed(&DEV_GENESIS_SEED).public,
+            burst_crypto::keypair_from_seed(&TEST_GENESIS_SEED).public,
+            genesis_public_key(NetworkId::Live),
+        ] {
+            assert!(validate_private_test_key(public).is_err());
+        }
+        assert!(
+            validate_private_test_key(burst_crypto::keypair_from_seed(&[42; 32]).public).is_ok()
+        );
     }
 
     #[test]

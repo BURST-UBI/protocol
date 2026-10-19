@@ -4,6 +4,7 @@ use crate::error::VerificationError;
 use crate::state::{Endorsement, VerificationState};
 use burst_types::{Timestamp, WalletAddress};
 
+#[derive(Clone)]
 pub struct EndorsementEngine;
 
 impl EndorsementEngine {
@@ -76,7 +77,7 @@ mod tests {
     use std::collections::HashSet;
 
     fn addr(s: &str) -> WalletAddress {
-        WalletAddress::new(&format!("brst_{s}"))
+        WalletAddress::new(format!("brst_{s}"))
     }
 
     fn new_state(target: &str) -> VerificationState {

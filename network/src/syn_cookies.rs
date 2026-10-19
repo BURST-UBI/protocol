@@ -10,7 +10,7 @@
 
 use burst_types::{PublicKey, Signature, WalletAddress};
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 /// SYN cookie challenge-response handshake.
 ///
@@ -19,7 +19,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// 2. Peer must sign the cookie with their node key
 /// 3. Node verifies the signature matches the claimed identity
 pub struct SynCookies {
-    /// IP -> (cookie, timestamp, claimed_node_id)
+    /// Connection ID -> cookie. Rate limiting remains per IP, not per port.
     pending: HashMap<String, CookieEntry>,
     /// Maximum pending cookies (prevents memory exhaustion)
     max_pending: usize,
@@ -27,8 +27,10 @@ pub struct SynCookies {
     cookie_ttl_secs: u64,
     /// Rate limit: max cookies per IP per minute
     max_per_ip_per_min: u32,
-    /// IP -> (count, window_start)
+    /// IP -> (count, window_start), bounded by `max_pending` independently of
+    /// challenge consumption. New IPs wait for stale windows when this is full.
     rate_limits: HashMap<String, (u32, u64)>,
+    started_at: Instant,
 }
 
 struct CookieEntry {
@@ -42,7 +44,7 @@ impl SynCookies {
     /// Create a new SYN cookie manager.
     ///
     /// # Arguments
-    /// - `max_pending` — maximum number of outstanding cookie challenges
+    /// - `max_pending` — maximum outstanding challenges and tracked IP windows
     /// - `cookie_ttl_secs` — how long a cookie remains valid
     /// - `max_per_ip_per_min` — rate limit: max cookie generations per IP per 60s window
     pub fn new(max_pending: usize, cookie_ttl_secs: u64, max_per_ip_per_min: u32) -> Self {
@@ -52,17 +54,43 @@ impl SynCookies {
             cookie_ttl_secs,
             max_per_ip_per_min,
             rate_limits: HashMap::new(),
+            started_at: Instant::now(),
         }
     }
 
     /// Generate a cookie for an incoming connection.
     /// Returns `None` if rate limit exceeded for this IP or if at max capacity.
     pub fn generate(&mut self, peer_ip: &str) -> Option<[u8; 32]> {
-        let now = unix_now();
+        self.generate_for_connection(peer_ip, peer_ip)
+    }
+
+    /// Challenge a distinct TCP connection without replacing challenges for
+    /// other peers sharing its IP (localhost or a NAT gateway).
+    pub fn generate_for_connection(
+        &mut self,
+        peer_ip: &str,
+        connection_id: &str,
+    ) -> Option<[u8; 32]> {
+        self.generate_for_connection_at(peer_ip, connection_id, self.started_at.elapsed().as_secs())
+    }
+
+    fn generate_for_connection_at(
+        &mut self,
+        peer_ip: &str,
+        connection_id: &str,
+        now: u64,
+    ) -> Option<[u8; 32]> {
+        self.cleanup_expired_at(now);
+        if self.max_per_ip_per_min == 0
+            || (!self.rate_limits.contains_key(peer_ip)
+                && self.rate_limits.len() >= self.max_pending)
+        {
+            return None;
+        }
 
         // Check rate limit
         if let Some((count, window_start)) = self.rate_limits.get_mut(peer_ip) {
-            if now - *window_start < 60 {
+            if now.saturating_sub(*window_start) < 60 {
                 if *count >= self.max_per_ip_per_min {
                     return None;
                 }
@@ -75,9 +103,6 @@ impl SynCookies {
             self.rate_limits.insert(peer_ip.to_string(), (1, now));
         }
 
-        // Evict expired cookies
-        self.cleanup_expired(now);
-
         if self.pending.len() >= self.max_pending {
             return None;
         }
@@ -87,7 +112,7 @@ impl SynCookies {
         getrandom::getrandom(&mut cookie).ok()?;
 
         self.pending.insert(
-            peer_ip.to_string(),
+            connection_id.to_string(),
             CookieEntry {
                 cookie,
                 created_at: now,
@@ -103,48 +128,48 @@ impl SynCookies {
     /// own the claimed identity.
     pub fn verify(
         &mut self,
-        peer_ip: &str,
+        connection_id: &str,
         claimed_id: &WalletAddress,
         signature: &Signature,
     ) -> bool {
-        let entry = match self.pending.remove(peer_ip) {
-            Some(e) => e,
-            None => return false,
-        };
-
-        let now = unix_now();
-        if now - entry.created_at > self.cookie_ttl_secs {
+        let Some(cookie) = self.take_cookie(connection_id) else {
             return false;
-        }
-
-        // Verify signature of cookie against claimed identity
+        };
         if let Some(pubkey_bytes) = burst_crypto::decode_address(claimed_id.as_str()) {
-            burst_crypto::verify_signature(&entry.cookie, signature, &PublicKey(pubkey_bytes))
+            burst_crypto::verify_signature(&cookie, signature, &PublicKey(pubkey_bytes))
         } else {
             false
         }
     }
 
+    /// Consume an unexpired challenge once, for a context-bound handshake proof.
+    pub fn take_cookie(&mut self, connection_id: &str) -> Option<[u8; 32]> {
+        let entry = self.pending.remove(connection_id)?;
+
+        let now = self.started_at.elapsed().as_secs();
+        if now.saturating_sub(entry.created_at) > self.cookie_ttl_secs {
+            return None;
+        }
+        Some(entry.cookie)
+    }
+
     /// Remove expired cookies and stale rate-limit windows.
-    pub fn cleanup_expired(&mut self, now: u64) {
+    pub fn cleanup_expired(&mut self) {
+        self.cleanup_expired_at(self.started_at.elapsed().as_secs());
+    }
+
+    fn cleanup_expired_at(&mut self, now: u64) {
         self.pending
-            .retain(|_, entry| now - entry.created_at <= self.cookie_ttl_secs);
-        // Also clean up stale rate-limit windows (older than 60s)
+            .retain(|_, entry| now.saturating_sub(entry.created_at) <= self.cookie_ttl_secs);
+        // A completed window no longer constrains its IP and can release its slot.
         self.rate_limits
-            .retain(|_, (_, window_start)| now - *window_start < 120);
+            .retain(|_, (_, window_start)| now.saturating_sub(*window_start) < 60);
     }
 
     /// Number of pending (outstanding) cookies.
     pub fn pending_count(&self) -> usize {
         self.pending.len()
     }
-}
-
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before UNIX epoch")
-        .as_secs()
 }
 
 #[cfg(test)]
@@ -161,6 +186,103 @@ mod tests {
         let cookie = sc.generate("192.168.1.1");
         assert!(cookie.is_some());
         assert_eq!(sc.pending_count(), 1);
+    }
+
+    #[test]
+    fn concurrent_connections_from_same_ip_keep_independent_challenges() {
+        let mut sc = make_cookies();
+        let a = sc
+            .generate_for_connection("127.0.0.1", "127.0.0.1:40001")
+            .unwrap();
+        let b = sc
+            .generate_for_connection("127.0.0.1", "127.0.0.1:40002")
+            .unwrap();
+        assert_eq!(sc.pending_count(), 2);
+        for (id, cookie) in [("127.0.0.1:40001", a), ("127.0.0.1:40002", b)] {
+            let kp = burst_crypto::generate_keypair();
+            let address = burst_crypto::derive_address(&kp.public);
+            let signature = burst_crypto::sign_message(&cookie, &kp.private);
+            assert!(sc.verify(id, &address, &signature));
+            assert!(
+                !sc.verify(id, &address, &signature),
+                "cookie must be single-use"
+            );
+        }
+        assert_eq!(sc.pending_count(), 0);
+    }
+
+    #[test]
+    fn distinct_connections_still_share_the_ip_rate_limit() {
+        let mut sc = SynCookies::new(100, 30, 2);
+        assert!(sc
+            .generate_for_connection("127.0.0.1", "127.0.0.1:40001")
+            .is_some());
+        assert!(sc
+            .generate_for_connection("127.0.0.1", "127.0.0.1:40002")
+            .is_some());
+        assert!(sc
+            .generate_for_connection("127.0.0.1", "127.0.0.1:40003")
+            .is_none());
+        assert!(sc
+            .generate_for_connection("127.0.0.2", "127.0.0.2:40003")
+            .is_some());
+    }
+
+    #[test]
+    fn consumed_challenges_do_not_allow_unbounded_ip_accounting() {
+        let mut sc = SynCookies::new(2, 30, 5);
+        for ip in ["192.0.2.1", "192.0.2.2"] {
+            let cookie = sc.generate_for_connection_at(ip, ip, 0).unwrap();
+            assert_eq!(sc.take_cookie(ip), Some(cookie));
+        }
+        assert_eq!(sc.pending_count(), 0);
+        for number in 0..10_000 {
+            assert!(sc
+                .generate_for_connection_at(&format!("new-{number}"), "connection", 1)
+                .is_none());
+        }
+        assert_eq!(sc.rate_limits.len(), 2);
+        assert_eq!(sc.pending_count(), 0);
+        assert!(sc
+            .generate_for_connection_at("192.0.2.1", "reconnect", 1)
+            .is_some());
+        assert!(sc
+            .generate_for_connection_at("192.0.2.3", "fresh", 60)
+            .is_some());
+        assert_eq!(sc.rate_limits.len(), 1);
+        assert_eq!(sc.pending_count(), 1);
+    }
+
+    #[test]
+    fn rate_window_reopens_without_relaxing_same_ip_limits() {
+        let mut sc = SynCookies::new(8, 30, 2);
+        for connection in ["a", "b"] {
+            assert!(sc
+                .generate_for_connection_at("192.0.2.1", connection, 0)
+                .is_some());
+            assert!(sc.take_cookie(connection).is_some());
+        }
+        assert!(sc
+            .generate_for_connection_at("192.0.2.1", "c", 59)
+            .is_none());
+        assert!(sc
+            .generate_for_connection_at("192.0.2.1", "d", 60)
+            .is_some());
+        assert!(sc
+            .generate_for_connection_at("192.0.2.1", "e", 60)
+            .is_some());
+        assert!(sc
+            .generate_for_connection_at("192.0.2.1", "f", 60)
+            .is_none());
+    }
+
+    #[test]
+    fn zero_capacity_or_rate_stays_closed_without_allocating_windows() {
+        for mut sc in [SynCookies::new(0, 30, 5), SynCookies::new(8, 30, 0)] {
+            assert!(sc.generate("192.0.2.1").is_none());
+            assert!(sc.rate_limits.is_empty());
+            assert_eq!(sc.pending_count(), 0);
+        }
     }
 
     #[test]
@@ -220,8 +342,7 @@ mod tests {
         );
         assert_eq!(sc.pending_count(), 1);
 
-        let now = unix_now();
-        sc.cleanup_expired(now);
+        sc.cleanup_expired_at(31);
         assert_eq!(sc.pending_count(), 0);
     }
 
@@ -236,6 +357,7 @@ mod tests {
     #[test]
     fn verify_expired_cookie_returns_false() {
         let mut sc = make_cookies();
+        sc.started_at = Instant::now() - std::time::Duration::from_secs(31);
         // Insert an already-expired cookie
         sc.pending.insert(
             "10.0.0.1".to_string(),

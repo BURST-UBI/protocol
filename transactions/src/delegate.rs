@@ -1,12 +1,8 @@
 //! Delegation transactions: delegate and revoke voting power.
 //!
-//! BURST uses a plain, revocable, on-chain delegation POINTER rather than the
-//! whitepaper's encrypted-secondary-key handoff. The delegate never needs the
-//! delegator's key: they vote with their OWN key and the governance tally
-//! attributes the delegated weight through the delegation graph
-//! (`count_effective_*`), with a directly-voting delegator overriding its
-//! delegation (no double counting). This is simpler, needs no key escrow, and
-//! is authorized to diverge from the whitepaper.
+//! These legacy transactions carry address pointers. They do not implement
+//! the whitepaper's encrypted secondary-key handoff. Scoped grants and
+//! revocations use the separately authenticated delegation block payload.
 
 use burst_types::{Signature, Timestamp, TxHash, WalletAddress};
 use serde::{Deserialize, Serialize};

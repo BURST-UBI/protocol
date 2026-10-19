@@ -7,7 +7,8 @@ set -euo pipefail
 #   ./dev-cluster.sh              # build + run cluster + smoke test
 #   ./dev-cluster.sh --no-build   # skip build, use existing binary
 #   ./dev-cluster.sh --nodes 5    # run 5 nodes instead of 3
-#   ./dev-cluster.sh --keep       # don't delete data dirs on exit
+#   ./dev-cluster.sh --keep       # compatibility flag; logs/data always kept
+#   ./dev-cluster.sh --smoke-only # exit after checks (nonzero on failure)
 #
 # Requires: cargo, curl, jq
 
@@ -15,12 +16,12 @@ set -euo pipefail
 
 NUM_NODES=3
 SKIP_BUILD=false
-KEEP_DATA=false
 BINARY="./target/release/burst-daemon"
 BASE_P2P_PORT=27076
 BASE_RPC_PORT=17077
 BASE_WS_PORT=17078
-DATA_PREFIX=".dev_cluster"
+DATA_PREFIX=""
+SMOKE_ONLY=false
 LOG_LEVEL="info"
 STARTUP_WAIT=4
 SYNC_WAIT=3
@@ -31,8 +32,9 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --no-build)  SKIP_BUILD=true; shift ;;
         --nodes)     NUM_NODES="$2"; shift 2 ;;
-        --keep)      KEEP_DATA=true; shift ;;
+        --keep)      shift ;;
         --debug)     LOG_LEVEL="debug"; shift ;;
+        --smoke-only) SMOKE_ONLY=true; shift ;;
         --help|-h)
             sed -n '3,10p' "$0"
             exit 0
@@ -40,6 +42,13 @@ while [[ $# -gt 0 ]]; do
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
+
+[[ "$NUM_NODES" =~ ^[1-9][0-9]*$ ]] && [ "$NUM_NODES" -le 20 ] || {
+    echo "--nodes must be between 1 and 20"; exit 1;
+}
+# A fresh run never overwrites a previous test ledger. Keep logs for diagnosis.
+RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/burst-dev-cluster.XXXXXXXX")
+DATA_PREFIX="$RUN_DIR/node"
 
 # ── Colors ───────────────────────────────────────────────────────────
 
@@ -71,23 +80,20 @@ cleanup() {
     for pid in "${PIDS[@]}"; do
         wait "$pid" 2>/dev/null || true
     done
-    if [ "$KEEP_DATA" = false ]; then
-        rm -rf "${DATA_PREFIX}"_node*
-        info "Cleaned up data directories"
-    else
-        info "Data dirs preserved: ${DATA_PREFIX}_node*"
-    fi
+    info "Test data and logs preserved: $RUN_DIR"
     info "Done"
 }
 
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
 rpc() {
     local port="$1"
     local payload="$2"
-    curl -s --max-time 5 -X POST "http://127.0.0.1:${port}" \
+    curl -s --max-time 35 -X POST "http://127.0.0.1:${port}" \
         -H "Content-Type: application/json" \
         -d "$payload" 2>/dev/null
 }
@@ -102,7 +108,8 @@ wait_for_rpc() {
     local port="$1"
     local name="$2"
     local max_attempts=20
-    for i in $(seq 1 $max_attempts); do
+    local attempt
+    for attempt in $(seq 1 $max_attempts); do
         if rpc "$port" '{"action":"node_info"}' | jq -e '.result' >/dev/null 2>&1; then
             return 0
         fi
@@ -138,7 +145,6 @@ for i in $(seq 1 "$NUM_NODES"); do
     data_dir="${DATA_PREFIX}_node${i}"
     log_file="${data_dir}/node.log"
 
-    rm -rf "$data_dir"
     mkdir -p "$data_dir"
 
     if [ "$i" -eq 1 ]; then
@@ -199,13 +205,22 @@ sleep "$SYNC_WAIT"
 
 header "Peer connectivity"
 
+PEERING_FAILURES=0
+
 for i in $(seq 1 "$NUM_NODES"); do
     rpc_port=$((BASE_RPC_PORT + (i - 1) * 10))
-    peer_count=$(rpc "$rpc_port" '{"action":"peers"}' | jq -r '.result.count // 0')
+    peer_count=0
+    for attempt in $(seq 1 30); do
+        peer_count=$(rpc "$rpc_port" '{"action":"peers"}' | jq -r '.result.count // 0')
+        [ "$peer_count" -gt 0 ] && break
+        [ "$NUM_NODES" -eq 1 ] && break
+        sleep 1
+    done
     if [ "$peer_count" -gt 0 ]; then
         ok "Node $i: $peer_count peer(s) connected"
-    else
-        warn "Node $i: 0 peers (may need more time)"
+    elif [ "$NUM_NODES" -gt 1 ]; then
+        fail "Node $i: no peer connection within 30 seconds"
+        PEERING_FAILURES=$((PEERING_FAILURES + 1))
     fi
 done
 
@@ -216,7 +231,8 @@ header "Smoke tests"
 SEED_RPC="$BASE_RPC_PORT"
 NODE2_RPC=$((BASE_RPC_PORT + 10))
 TESTS_PASSED=0
-TESTS_FAILED=0
+TESTS_FAILED=$PEERING_FAILURES
+TESTS_SKIPPED=0
 
 pass() { TESTS_PASSED=$((TESTS_PASSED + 1)); ok "$1"; }
 test_fail() { TESTS_FAILED=$((TESTS_FAILED + 1)); fail "$1"; }
@@ -230,16 +246,23 @@ PRIVKEY=$(echo "$WALLET" | jq -r '.result.private_key // empty')
 if [ -n "$ADDRESS" ] && [ -n "$PRIVKEY" ]; then
     pass "Wallet created: ${ADDRESS:0:15}..."
 else
-    test_fail "wallet_create_full failed: $WALLET"
+    test_fail "wallet_create_full did not return an address and key"
 fi
 
-# Test 2: Faucet — verify and credit the wallet
-info "Test 2: Faucet (verify + credit)"
+# Test 2: Faucet — bootstrap verification and a real pending burn payment
+info "Test 2: Faucet (verify + pending payment)"
 FAUCET=$(rpc "$SEED_RPC" "{\"action\":\"faucet\",\"account\":\"$ADDRESS\"}")
 FAUCET_STATUS=$(echo "$FAUCET" | jq -r '.result.status // empty')
 
-if [ "$FAUCET_STATUS" = "ok" ]; then
-    pass "Faucet credited account"
+FUND_HASH=$(echo "$FAUCET" | jq -r '.result.send_block_hash // empty')
+if [ "$FAUCET_STATUS" = "pending_receive" ] && [ -n "$FUND_HASH" ]; then
+    pass "Faucet payment confirmed and pending recipient acceptance"
+    FUND_RECV=$(rpc "$SEED_RPC" "{\"action\":\"receive_simple\",\"private_key\":\"$PRIVKEY\",\"send_block_hash\":\"$FUND_HASH\"}")
+    if echo "$FUND_RECV" | jq -e '.result.block_hash' >/dev/null; then
+        pass "Recipient signed the initial receive-open"
+    else
+        test_fail "Initial receive failed: $FUND_RECV"
+    fi
 else
     test_fail "Faucet failed: $FAUCET"
 fi
@@ -258,15 +281,14 @@ fi
 
 # Test 4: Burn BRN → TRST
 info "Test 4: burn_simple (BRN → TRST conversion)"
+# Accrual uses whole seconds; wait for the fresh account to earn BRN.
+sleep 1
 BURN=$(rpc "$SEED_RPC" "{\"action\":\"burn_simple\",\"private_key\":\"$PRIVKEY\",\"amount\":\"100\"}")
 BURN_HASH=$(echo "$BURN" | jq -r '.result.block_hash // empty')
 BURN_ERR=$(echo "$BURN" | jq -r '.error // empty')
 
 if [ -n "$BURN_HASH" ]; then
     pass "Burn block: ${BURN_HASH:0:16}..."
-elif echo "$BURN_ERR" | grep -qi "insufficient\|BRN"; then
-    warn "Burn skipped (insufficient BRN — expected on fresh account)"
-    TESTS_PASSED=$((TESTS_PASSED + 1))
 else
     test_fail "Burn failed: $BURN"
 fi
@@ -277,7 +299,7 @@ WALLET2=$(rpc "$SEED_RPC" '{"action":"wallet_create_full"}')
 ADDRESS2=$(echo "$WALLET2" | jq -r '.result.address // empty')
 PRIVKEY2=$(echo "$WALLET2" | jq -r '.result.private_key // empty')
 
-SEND=$(rpc "$SEED_RPC" "{\"action\":\"send_simple\",\"private_key\":\"$PRIVKEY\",\"destination\":\"$ADDRESS2\",\"amount\":\"1000000\"}")
+SEND=$(rpc "$SEED_RPC" "{\"action\":\"send_simple\",\"private_key\":\"$PRIVKEY\",\"destination\":\"$ADDRESS2\",\"amount\":\"1000000\",\"origin\":\"$FUND_HASH\"}")
 SEND_HASH=$(echo "$SEND" | jq -r '.result.block_hash // empty')
 
 if [ -n "$SEND_HASH" ]; then
@@ -291,9 +313,7 @@ fi
 if [ -n "$SEND_HASH" ]; then
     info "Test 6: receive_simple (pocket pending)"
 
-    # Faucet the receiver so they exist
-    rpc "$SEED_RPC" "{\"action\":\"faucet\",\"account\":\"$ADDRESS2\"}" >/dev/null
-
+    # An unverified recipient may receive; receiving does not verify them.
     RECV=$(rpc "$SEED_RPC" "{\"action\":\"receive_simple\",\"private_key\":\"$PRIVKEY2\",\"send_block_hash\":\"$SEND_HASH\"}")
     RECV_HASH=$(echo "$RECV" | jq -r '.result.block_hash // empty')
 
@@ -318,10 +338,7 @@ if [ "$NUM_NODES" -ge 2 ]; then
     if [ "$STATE2" = "verified" ]; then
         pass "Account synced to node 2"
     else
-        # Faucet is local-only (not broadcast), so this is expected to fail
-        # unless block processing propagates the state
-        warn "Account not yet on node 2 (faucet is local-only, sync depends on block broadcast)"
-        TESTS_PASSED=$((TESTS_PASSED + 1))
+        test_fail "Verified account did not replicate to node 2"
     fi
 fi
 
@@ -340,7 +357,7 @@ fi
 # Test 9: Governance proposal (if available)
 info "Test 9: governance_proposals (list)"
 GOV=$(rpc "$SEED_RPC" '{"action":"governance_proposals"}')
-GOV_OK=$(echo "$GOV" | jq -e '.result' 2>/dev/null)
+GOV_OK=$(echo "$GOV" | jq -r 'if .result != null then "ok" else empty end')
 
 if [ -n "$GOV_OK" ]; then
     pass "Governance endpoint responsive"
@@ -351,7 +368,7 @@ fi
 # Test 10: Representatives
 info "Test 10: representatives"
 REPS=$(rpc "$SEED_RPC" '{"action":"representatives"}')
-REPS_OK=$(echo "$REPS" | jq -e '.result' 2>/dev/null)
+REPS_OK=$(echo "$REPS" | jq -r 'if .result != null then "ok" else empty end')
 
 if [ -n "$REPS_OK" ]; then
     pass "Representatives endpoint responsive"
@@ -366,12 +383,18 @@ header "Results"
 echo ""
 printf "  ${GREEN}Passed: %d${NC}\n" "$TESTS_PASSED"
 printf "  ${RED}Failed: %d${NC}\n" "$TESTS_FAILED"
+printf "  ${YELLOW}Skipped: %d${NC}\n" "$TESTS_SKIPPED"
 echo ""
 
 if [ "$TESTS_FAILED" -eq 0 ]; then
-    ok "All smoke tests passed!"
+    ok "All executed smoke tests passed ($TESTS_SKIPPED skipped; not full E2E coverage)"
 else
     fail "$TESTS_FAILED test(s) failed"
+fi
+
+if [ "$SMOKE_ONLY" = true ]; then
+    [ "$TESTS_FAILED" -eq 0 ]
+    exit $?
 fi
 
 # ── Interactive mode ─────────────────────────────────────────────────

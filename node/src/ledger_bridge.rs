@@ -1,5 +1,5 @@
 //! Bridges the block-lattice to the economic engines (TRST, BRN, verification).
-//! Called after a block is accepted and persisted.
+//! Computes candidate effects before the caller commits and publishes them.
 
 use burst_brn::{BrnEngine, Stake, StakeKind};
 use burst_governance::ProposalContent;
@@ -8,7 +8,7 @@ use burst_transactions::governance::GovernanceVote;
 use burst_trst::{TrstEngine, TrstToken};
 use burst_types::{BlockHash, Timestamp, TxHash, WalletAddress};
 
-/// Process a confirmed block through the economic engines.
+/// Process a candidate block against isolated economic engines.
 ///
 /// This is the critical integration point where the block-lattice
 /// meets the token lifecycle engines. Returns an `EconomicResult`
@@ -26,7 +26,29 @@ pub fn process_block_economics(
     trst_expiry_secs: u64,
     prev_brn_balance: u128,
 ) -> EconomicResult {
+    process_with_engines(
+        block,
+        &mut (brn_engine, trst_engine),
+        now,
+        trst_expiry_secs,
+        prev_brn_balance,
+    )
+}
+
+pub(crate) fn process_with_engines(
+    block: &StateBlock,
+    engines: &mut impl crate::economic_candidate::Engines,
+    now: Timestamp,
+    trst_expiry_secs: u64,
+    prev_brn_balance: u128,
+) -> EconomicResult {
     match block.block_type {
+        BlockType::ChangeRepresentative => EconomicResult::RepChange {
+            account: block.account.clone(),
+            old_rep: None,
+            new_rep: block.representative.clone(),
+            balance: block.trst_balance,
+        },
         BlockType::Burn => {
             let burn_amount = block.brn_balance.saturating_sub(prev_brn_balance);
             let receiver = extract_receiver_from_link(&block.link);
@@ -41,7 +63,7 @@ pub fn process_block_economics(
             // Record the BRN burn FIRST — TRST may only ever be minted from
             // successfully burned BRN (1:1). A failed burn rejects the block
             // before anything is minted or persisted.
-            if let Err(e) = record_brn_burn(brn_engine, &block.account, burn_amount, now) {
+            if let Err(e) = record_brn_burn(engines.brn_mut(), &block.account, burn_amount, now) {
                 tracing::error!(
                     error = %e,
                     burn_amount,
@@ -54,7 +76,7 @@ pub fn process_block_economics(
             }
 
             if let Some(receiver_addr) = receiver {
-                match trst_engine.mint(
+                match engines.trst_mut().mint(
                     burn_tx_hash,
                     receiver_addr,
                     burn_amount,
@@ -67,7 +89,7 @@ pub fn process_block_economics(
                     },
                     Err(e) => {
                         // Undo the burn — burn and mint must be atomic.
-                        undo_brn_burn(brn_engine, &block.account, burn_amount);
+                        undo_brn_burn(engines.brn_mut(), &block.account, burn_amount);
                         tracing::error!(
                             error = %e,
                             burn_amount,
@@ -122,7 +144,7 @@ pub fn process_block_economics(
             // TRST merge — multiple tokens combined into one.
             // Expiry: the merged token's effective expiry is the *earliest*
             // origin_timestamp among all merged parents + trst_expiry_secs.
-            // The TrstEngine rejects merges that include expired tokens.
+            // Expired tokens can be consolidated together, never mixed with live tokens.
             // Once the TRST index is populated, old expiry entries should be
             // removed and a new entry created for the merged token.
             if trst_expiry_secs > 0 {
@@ -147,7 +169,7 @@ pub fn process_block_economics(
                     reason: "endorse block requires a BRN burn".into(),
                 };
             }
-            if let Err(e) = record_brn_burn(brn_engine, &block.account, burn_amount, now) {
+            if let Err(e) = record_brn_burn(engines.brn_mut(), &block.account, burn_amount, now) {
                 return EconomicResult::Rejected {
                     reason: format!("endorsement BRN burn failed: {e}"),
                 };
@@ -163,11 +185,11 @@ pub fn process_block_economics(
             // another wallet's verification. The stake is returned if the
             // challenge succeeds, forfeited otherwise.
             let stake_amount = block.brn_balance.saturating_sub(prev_brn_balance);
-            let target = extract_receiver_from_link(&block.link);
-            let target_str = target
-                .as_ref()
-                .map(|w| w.as_str().to_string())
-                .unwrap_or_default();
+            let Some(target) = extract_receiver_from_link(&block.link) else {
+                return EconomicResult::Rejected {
+                    reason: "challenge block requires a target wallet".into(),
+                };
+            };
 
             if stake_amount == 0 {
                 return EconomicResult::Rejected {
@@ -175,11 +197,11 @@ pub fn process_block_economics(
                 };
             }
             let stake = match record_brn_stake(
-                brn_engine,
+                engines.brn_mut(),
                 &block.account,
                 stake_amount,
                 StakeKind::Challenge {
-                    target_wallet: target_str.into(),
+                    target_wallet: target.clone(),
                 },
                 now,
             ) {
@@ -194,21 +216,17 @@ pub fn process_block_economics(
             EconomicResult::Challenge {
                 stake_amount,
                 stake,
-                target,
+                target: Some(target),
             }
         }
         BlockType::RejectReceive => EconomicResult::RejectReceive {
             rejecter: block.account.clone(),
             send_block_hash: block.link,
         },
-        BlockType::ChangeRepresentative => EconomicResult::RepChange {
-            account: block.account.clone(),
-            old_rep: None,
-            new_rep: block.representative.clone(),
-            balance: block.trst_balance,
-        },
         BlockType::GovernanceProposal => {
-            let proposal_hash = block.transaction;
+            // Identity binds content, signer and account position. A caller-
+            // chosen transaction field must not squat on another proposal id.
+            let proposal_hash = block.hash.into_tx_hash();
             let content = decode_proposal_content(&block.link, &block.origin);
             EconomicResult::GovernanceProposal {
                 proposer: block.account.clone(),
@@ -246,7 +264,7 @@ pub fn process_block_economics(
             if stake_amount > 0 {
                 let target_addr = target.clone().unwrap_or_else(|| voter.clone());
                 if let Err(e) = record_brn_stake(
-                    brn_engine,
+                    engines.brn_mut(),
                     &block.account,
                     stake_amount,
                     StakeKind::Verification {
@@ -283,7 +301,7 @@ pub fn process_block_economics(
 ///
 /// Temporarily removes the wallet state from the engine's map to split the
 /// mutable borrow (engine vs. wallet state), then reinserts after the call.
-fn record_brn_burn(
+pub(crate) fn record_brn_burn(
     brn_engine: &mut BrnEngine,
     account: &WalletAddress,
     amount: u128,
@@ -343,9 +361,9 @@ fn decode_governance_vote(byte: u8) -> Option<GovernanceVote> {
 /// Eviction/reinstatement proposals are recognised by the `origin` sentinel;
 /// their `link` holds the target representative's 32-byte pubkey (the on-chain
 /// justification `reason` is not carried — it is a UX/audit field only). All
-/// other proposals bincode-decode a `ProposalContent` directly from `link`
-/// (which fits compact contents like a parameter change). Returns `None` if the
-/// link is all zeros or decoding fails (e.g. content too large for 32 bytes).
+/// other proposals decode canonical zero-padded content from `link`.
+/// A zero link encodes a zero BRN rate; it is not an absent proposal. Full
+/// content transfer is not yet connected to signed block admission.
 fn decode_proposal_content(link: &BlockHash, origin: &TxHash) -> Option<ProposalContent> {
     let obytes = *origin.as_bytes();
     if obytes == burst_governance::ORV_EVICT_MARKER {
@@ -366,11 +384,10 @@ fn decode_proposal_content(link: &BlockHash, origin: &TxHash) -> Option<Proposal
             }
         });
     }
-    let bytes = link.as_bytes();
-    if bytes.iter().all(|&b| b == 0) {
+    if !origin.is_zero() {
         return None;
     }
-    bincode::deserialize::<ProposalContent>(bytes).ok()
+    ProposalContent::decode_compact(link.as_bytes()).ok()
 }
 
 /// Extract a receiver `WalletAddress` from a block's link field.
@@ -388,10 +405,72 @@ pub(crate) fn extract_receiver_from_link(link: &burst_types::BlockHash) -> Optio
     Some(burst_crypto::derive_address(&pubkey))
 }
 
+/// Validate the portions of a single-origin pending payment without flattening
+/// their distinct composition histories.
+pub(crate) fn validate_pending(pending: &burst_store::pending::PendingInfo) -> Result<(), String> {
+    let first = pending
+        .provenance
+        .first()
+        .ok_or("missing pending provenance")?;
+    if pending.amount == 0
+        || pending.provenance.iter().any(|p| {
+            p.amount == 0
+                || p.origin != first.origin
+                || p.origin_wallet != first.origin_wallet
+                || p.origin_timestamp != first.origin_timestamp
+                || p.effective_origin_timestamp != first.effective_origin_timestamp
+                || p.revoked_amounts
+                    .iter()
+                    .any(|(origin, chunk)| *origin == [0; 32] || chunk.amount == 0)
+                || p.revoked_amounts
+                    .values()
+                    .try_fold(0u128, |sum, chunk| sum.checked_add(chunk.amount))
+                    .is_none_or(|sum| sum > p.amount)
+        })
+        || pending
+            .provenance
+            .iter()
+            .try_fold(0u128, |sum, p| sum.checked_add(p.amount))
+            != Some(pending.amount)
+    {
+        return Err("inconsistent pending provenance".into());
+    }
+    Ok(())
+}
+
+/// Deliver each composition separately. The caller owns a disposable candidate
+/// engine, so a later invalid portion cannot leave a partially applied payment.
+pub(crate) fn deliver_pending(
+    trst: &mut TrstEngine,
+    pending: &burst_store::pending::PendingInfo,
+    template: TrstToken,
+    now: Timestamp,
+) -> Result<(), String> {
+    if pending.return_credit {
+        return Err("expiry return credit cannot deliver tokens twice".into());
+    }
+    validate_pending(pending)?;
+    for (index, portion) in pending.provenance.iter().enumerate() {
+        let mut token = template.clone();
+        if pending.provenance.len() > 1 {
+            token.id = burst_types::TxHash::new(burst_crypto::blake2b_256_multi(&[
+                b"BURST/pending-composition/v1\0",
+                template.id.as_bytes(),
+                &(index as u64).to_be_bytes(),
+            ]));
+        }
+        token.basis = portion.basis;
+        token.amount = portion.amount;
+        trst.receive_settled_token(token, &portion.revoked_amounts, now)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// Create a `TrstToken` for a receiver based on the pending entry provenance.
 ///
-/// Send operates on a single token at a time, so the receiver always gets
-/// a clean single-origin token preserving the sender's provenance chain.
+/// This constructs the unsigned delivery shape for one origin. The caller
+/// must apply the pending entry's settled revoked chunks before tracking it.
 /// The token's `link` points at the SEND transaction it derives from
 /// (whitepaper: "hash of the immediately preceding transaction").
 pub fn create_received_token(
@@ -402,10 +481,10 @@ pub fn create_received_token(
     let token_id = burst_types::TxHash::new(*receive_block.hash.as_bytes());
     let send_tx = burst_types::TxHash::new(*receive_block.link.as_bytes());
 
-    // Send operates on a single origin, so provenance has at most one entry.
-    // The receiver gets a clean single-origin token preserving the sender's provenance.
+    // The delivery writer expands this template into distinct composition portions.
     if let Some(p) = pending.provenance.first() {
         TrstToken {
+            basis: p.basis,
             id: token_id,
             amount: pending.amount,
             origin: p.origin,
@@ -429,6 +508,7 @@ pub fn create_received_token(
             "pending entry has no provenance — anchoring received token at the send tx"
         );
         TrstToken {
+            basis: Default::default(),
             id: token_id,
             amount: pending.amount,
             origin: send_tx,
@@ -464,6 +544,7 @@ pub fn create_returned_token(
 
     if let Some(p) = pending.provenance.first() {
         TrstToken {
+            basis: p.basis,
             id: token_id,
             amount: pending.amount,
             origin: p.origin,
@@ -477,6 +558,7 @@ pub fn create_returned_token(
         }
     } else {
         TrstToken {
+            basis: Default::default(),
             id: token_id,
             amount: pending.amount,
             origin: token_id,
@@ -487,111 +569,6 @@ pub fn create_returned_token(
             state: burst_types::TrstState::Active,
             origin_wallet: pending.source.clone(),
             revoked_origin: None,
-        }
-    }
-}
-
-/// Grant a burn-backed TRST reward by creating a pending entry that the
-/// recipient claims with a normal Receive block — so the reward flows through
-/// the same on-chain validation as every other TRST (pending must exist and
-/// amounts must match exactly).
-///
-/// The reward id is deterministic across nodes: every node derives the same
-/// pending entry from the same verification outcome. The provenance anchors
-/// the token at the reward id with the RECIPIENT as origin wallet — if the
-/// recipient is later proven sybil, their reward TRST is revoked with them.
-pub fn create_reward_pending<P: burst_store::pending::PendingStore>(
-    pending_store: &P,
-    recipient: &WalletAddress,
-    context_wallet: &WalletAddress,
-    kind: &'static [u8],
-    amount: u128,
-    ts: Timestamp,
-) -> Result<burst_types::TxHash, String> {
-    let reward_hash = burst_types::TxHash::new(burst_crypto::blake2b_256_multi(&[
-        kind,
-        context_wallet.as_str().as_bytes(),
-        recipient.as_str().as_bytes(),
-    ]));
-    let info = burst_store::pending::PendingInfo {
-        source: context_wallet.clone(),
-        amount,
-        timestamp: ts,
-        provenance: vec![burst_store::pending::PendingProvenance {
-            amount,
-            origin: reward_hash,
-            origin_wallet: recipient.clone(),
-            origin_timestamp: ts,
-            effective_origin_timestamp: ts,
-        }],
-    };
-    pending_store
-        .put_pending(recipient, &reward_hash, &info)
-        .map_err(|e| e.to_string())?;
-    Ok(reward_hash)
-}
-
-/// Resolve verifier stakes and rewards after a verification or challenge vote.
-///
-/// - Correct staked voters: stake unlocked, plus a TRST reward equal to their
-///   share of the forfeited dissenter stakes (decision 33.7d). The reward is
-///   burn-backed: the dissenters' BRN is burned below, and the minted TRST
-///   sums to at most that burn — TRST is only ever created from burned BRN.
-/// - Incorrect voters: stake forfeited (unlocked and burned).
-pub fn resolve_verifier_outcomes<P: burst_store::pending::PendingStore>(
-    brn_engine: &mut BrnEngine,
-    pending_store: &P,
-    verifiers: &[burst_verification::VerifierOutcome],
-    context_wallet: &WalletAddress,
-    ts: Timestamp,
-) {
-    for vo in verifiers {
-        if vo.staked > 0 {
-            if let Some(ws) = brn_engine.get_wallet_mut(&vo.address) {
-                if vo.voted_correctly {
-                    ws.total_staked = ws.total_staked.saturating_sub(vo.staked);
-                    tracing::info!(
-                        verifier = %vo.address,
-                        staked = vo.staked,
-                        "verifier stake returned (correct vote)"
-                    );
-                } else {
-                    ws.total_staked = ws.total_staked.saturating_sub(vo.staked);
-                    ws.total_burned = ws.total_burned.saturating_add(vo.staked);
-                    tracing::info!(
-                        verifier = %vo.address,
-                        penalty = vo.penalty,
-                        "dissenter verifier stake forfeited (burned)"
-                    );
-                }
-            } else {
-                tracing::warn!(
-                    verifier = %vo.address,
-                    "verifier wallet not tracked in BRN engine, cannot resolve stake"
-                );
-            }
-        }
-        if vo.voted_correctly && vo.trst_reward > 0 {
-            match create_reward_pending(
-                pending_store,
-                &vo.address,
-                context_wallet,
-                b"verifier-reward",
-                vo.trst_reward,
-                ts,
-            ) {
-                Ok(reward_hash) => tracing::info!(
-                    verifier = %vo.address,
-                    reward = vo.trst_reward,
-                    %reward_hash,
-                    "verifier TRST reward granted as pending (funded by forfeited stakes)"
-                ),
-                Err(e) => tracing::error!(
-                    verifier = %vo.address,
-                    error = %e,
-                    "failed to create verifier reward pending entry"
-                ),
-            }
         }
     }
 }
@@ -711,7 +688,10 @@ mod tests {
         };
 
         let mut block = StateBlock {
+            signing_grant: burst_types::BlockHash::ZERO,
+            delegation_payload: Vec::new(),
             version: CURRENT_BLOCK_VERSION,
+            payment_epoch: burst_types::BlockHash::new([1; 32]),
             block_type: BlockType::Burn,
             account: test_account(),
             previous: BlockHash::new([0x11; 32]),
@@ -724,7 +704,9 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_000),
             params_hash: BlockHash::ZERO,
+            target_head: burst_types::BlockHash::ZERO,
             merge_sources: Vec::new(),
+            release_sources: Vec::new(),
             work: 0,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,
@@ -735,7 +717,10 @@ mod tests {
 
     fn make_send_block() -> StateBlock {
         let mut block = StateBlock {
+            signing_grant: burst_types::BlockHash::ZERO,
+            delegation_payload: Vec::new(),
             version: CURRENT_BLOCK_VERSION,
+            payment_epoch: burst_types::BlockHash::new([1; 32]),
             block_type: BlockType::Send,
             account: test_account(),
             previous: BlockHash::new([0x11; 32]),
@@ -747,7 +732,9 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_001),
             params_hash: BlockHash::ZERO,
+            target_head: burst_types::BlockHash::ZERO,
             merge_sources: Vec::new(),
+            release_sources: Vec::new(),
             work: 0,
             signature: Signature([2u8; 64]),
             hash: BlockHash::ZERO,
@@ -759,7 +746,10 @@ mod tests {
     fn make_rep_change_block() -> StateBlock {
         let new_rep = real_address_from_seed(&[0x55; 32]);
         let mut block = StateBlock {
+            signing_grant: burst_types::BlockHash::ZERO,
+            delegation_payload: Vec::new(),
             version: CURRENT_BLOCK_VERSION,
+            payment_epoch: burst_types::BlockHash::new([1; 32]),
             block_type: BlockType::ChangeRepresentative,
             account: test_account(),
             previous: BlockHash::new([0x11; 32]),
@@ -771,7 +761,9 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_002),
             params_hash: BlockHash::ZERO,
+            target_head: burst_types::BlockHash::ZERO,
             merge_sources: Vec::new(),
+            release_sources: Vec::new(),
             work: 0,
             signature: Signature([3u8; 64]),
             hash: BlockHash::ZERO,
@@ -787,7 +779,10 @@ mod tests {
         };
 
         let mut block = StateBlock {
+            signing_grant: burst_types::BlockHash::ZERO,
+            delegation_payload: Vec::new(),
             version: CURRENT_BLOCK_VERSION,
+            payment_epoch: burst_types::BlockHash::new([1; 32]),
             block_type: BlockType::Endorse,
             account: test_account(),
             previous: BlockHash::new([0x11; 32]),
@@ -800,7 +795,9 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_003),
             params_hash: BlockHash::ZERO,
+            target_head: burst_types::BlockHash::ZERO,
             merge_sources: Vec::new(),
+            release_sources: Vec::new(),
             work: 0,
             signature: Signature([4u8; 64]),
             hash: BlockHash::ZERO,
@@ -816,7 +813,10 @@ mod tests {
         };
 
         let mut block = StateBlock {
+            signing_grant: burst_types::BlockHash::ZERO,
+            delegation_payload: Vec::new(),
             version: CURRENT_BLOCK_VERSION,
+            payment_epoch: burst_types::BlockHash::new([1; 32]),
             block_type: BlockType::Challenge,
             account: test_account(),
             previous: BlockHash::new([0x11; 32]),
@@ -829,7 +829,9 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_004),
             params_hash: BlockHash::ZERO,
+            target_head: burst_types::BlockHash::ZERO,
             merge_sources: Vec::new(),
+            release_sources: Vec::new(),
             work: 0,
             signature: Signature([5u8; 64]),
             hash: BlockHash::ZERO,
@@ -884,7 +886,10 @@ mod tests {
         brn_engine.track_wallet(test_account(), wallet_state);
 
         let mut block = StateBlock {
+            signing_grant: burst_types::BlockHash::ZERO,
+            delegation_payload: Vec::new(),
             version: CURRENT_BLOCK_VERSION,
+            payment_epoch: burst_types::BlockHash::new([1; 32]),
             block_type: BlockType::Burn,
             account: test_account(),
             previous: BlockHash::new([0x11; 32]),
@@ -897,7 +902,9 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_000),
             params_hash: BlockHash::ZERO,
+            target_head: burst_types::BlockHash::ZERO,
             merge_sources: Vec::new(),
+            release_sources: Vec::new(),
             work: 0,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,
@@ -978,7 +985,10 @@ mod tests {
         let now = Timestamp::new(1_000_000);
 
         let mut block = StateBlock {
+            signing_grant: burst_types::BlockHash::ZERO,
+            delegation_payload: Vec::new(),
             version: CURRENT_BLOCK_VERSION,
+            payment_epoch: burst_types::BlockHash::new([1; 32]),
             block_type: BlockType::Epoch,
             account: test_account(),
             previous: BlockHash::new([0x11; 32]),
@@ -990,7 +1000,9 @@ mod tests {
             transaction: TxHash::ZERO,
             timestamp: Timestamp::new(1_000_000),
             params_hash: BlockHash::ZERO,
+            target_head: burst_types::BlockHash::ZERO,
             merge_sources: Vec::new(),
+            release_sources: Vec::new(),
             work: 0,
             signature: Signature([1u8; 64]),
             hash: BlockHash::ZERO,
@@ -1087,6 +1099,28 @@ mod tests {
         let receiver = extract_receiver_from_link(&link);
         assert!(receiver.is_some());
         assert_eq!(receiver.unwrap().as_str(), expected_addr.as_str());
+    }
+
+    #[test]
+    fn governance_proposal_decoder_preserves_zero_rate_and_rejects_extra_payload() {
+        let content = ProposalContent::ParameterChange {
+            param: burst_governance::GovernableParam::BrnRate,
+            new_value: 0,
+        };
+        let mut link = content.encode_compact().unwrap();
+        assert_eq!(link, [0; 32]);
+        assert_eq!(
+            decode_proposal_content(&BlockHash::new(link), &TxHash::ZERO),
+            Some(content)
+        );
+        assert!(decode_proposal_content(
+            &BlockHash::new(link),
+            &TxHash::new(burst_governance::content::FULL_CONTENT_MARKER)
+        )
+        .is_none());
+        assert!(decode_proposal_content(&BlockHash::new(link), &TxHash::new([7; 32])).is_none());
+        link[31] = 1;
+        assert!(decode_proposal_content(&BlockHash::new(link), &TxHash::ZERO).is_none());
     }
 
     #[test]

@@ -5,7 +5,12 @@ edition.workspace = true
 license.workspace = true
 description = "BURST full node — orchestrates all protocol engines"
 
+[features]
+experimental-testnet = ["burst-verification/experimental-testnet"]
+private-testnet = ["experimental-testnet"]
+
 [dependencies]
+blake2 = { workspace = true }
 burst-types = { workspace = true }
 burst-crypto = { workspace = true }
 burst-brn = { workspace = true }
@@ -23,11 +28,13 @@ burst-governance = { workspace = true }
 burst-consti = { workspace = true }
 burst-messages = { workspace = true }
 burst-network = { workspace = true }
+burst-protocol = { workspace = true }
 burst-rpc = { workspace = true }
 burst-websocket = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 bincode = { workspace = true }
+ciborium = "0.2.2"
 toml = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -35,9 +42,11 @@ tracing-subscriber = { workspace = true }
 prometheus = { workspace = true }
 thiserror = { workspace = true }
 hex = { workspace = true }
+prost = { workspace = true }
+tempfile = { workspace = true }
 
 [dev-dependencies]
-tempfile = { workspace = true }
+heed = { workspace = true }
 bincode = { workspace = true }
 proptest = { workspace = true }
 burst-wallet-core = { workspace = true }

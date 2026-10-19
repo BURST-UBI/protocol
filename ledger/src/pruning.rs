@@ -1,13 +1,9 @@
-//! Ledger pruning — remove expired and revoked TRST history.
+//! Age/status candidate selection for a future dependency-aware ledger compactor.
 //!
-//! Once TRST is non-transferable (expired or revoked), its full transaction
-//! chain can be pruned. The state block model ensures balance info is preserved
-//! in the head block. Pruning reduces storage requirements for full nodes
-//! without losing any information needed for current account state.
-//!
-//! The pruning engine is deliberately stateless with respect to the storage
-//! backend: callers pass in lists of candidate hashes and the engine decides
-//! which to prune. The actual deletion is performed by the storage layer.
+//! These candidates are not deletion authority. Expiry and revocation can be
+//! reversed, and account heads alone do not preserve provenance or recovery
+//! dependencies. A caller must prove that authenticated replacement state and
+//! retained history preserve those rights before removing any physical data.
 
 use burst_types::{Timestamp, TxHash};
 
@@ -44,7 +40,7 @@ pub struct PruneResult {
     pub total_pruned: usize,
 }
 
-/// Pruning engine — decides which TRST entries should be removed.
+/// Selects candidates under an operator policy; it does not prove them disposable.
 pub struct LedgerPruner {
     config: PruningConfig,
 }
@@ -87,7 +83,7 @@ impl LedgerPruner {
         to_prune
     }
 
-    /// Execute pruning — returns a summary of what was pruned.
+    /// Count selected candidates. No storage operation is performed.
     ///
     /// This method identifies pruneable entries and returns the counts.
     /// The actual deletion from the storage backend is the caller's

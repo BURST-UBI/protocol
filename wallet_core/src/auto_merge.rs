@@ -17,7 +17,7 @@ use burst_types::TrstState;
 pub struct AutoMergeConfig {
     /// Similarity threshold for expiry grouping (0..=100).
     /// Tokens are merged if the difference between their expiry times
-    /// is within this percentage of the shorter expiry.
+    /// is within this percentage of the longer remaining lifetime.
     pub similarity_pct: u8,
     /// Maximum number of tokens to merge at once (protocol max is 256).
     pub max_merge_inputs: usize,
@@ -28,7 +28,7 @@ pub struct AutoMergeConfig {
 impl Default for AutoMergeConfig {
     fn default() -> Self {
         Self {
-            similarity_pct: 50,
+            similarity_pct: 10,
             max_merge_inputs: 256,
             enabled: true,
         }
@@ -69,7 +69,6 @@ pub fn compute_merge_groups(holdings: &[TrstHolding], config: &AutoMergeConfig) 
     active.sort_by_key(|h| h.time_to_expiry_secs.unwrap_or(u64::MAX));
 
     let merge_all = config.similarity_pct >= 100;
-    let threshold = config.similarity_pct as f64 / 100.0;
     let mut groups: Vec<MergeGroup> = Vec::new();
     let mut current_group: Vec<&TrstHolding> = vec![active[0]];
     let mut group_anchor_expiry = active[0].time_to_expiry_secs.unwrap_or(0);
@@ -80,7 +79,7 @@ pub fn compute_merge_groups(holdings: &[TrstHolding], config: &AutoMergeConfig) 
         } else {
             let expiry = holding.time_to_expiry_secs.unwrap_or(0);
             let diff = expiry.abs_diff(group_anchor_expiry);
-            let max_diff = (group_anchor_expiry as f64 * threshold) as u64;
+            let max_diff = (expiry as u128 * config.similarity_pct as u128 / 100) as u64;
             diff <= max_diff
         };
 
@@ -145,6 +144,50 @@ mod tests {
     }
 
     #[test]
+    fn default_matches_ten_percent_requirement_and_handles_unlimited_expiry() {
+        let config = AutoMergeConfig::default();
+        assert_eq!(config.similarity_pct, 10);
+        assert_eq!(
+            compute_merge_groups(
+                &[
+                    holding("a", 1, 1000),
+                    holding("b", 1, 1100),
+                    holding("c", 1, 1300)
+                ],
+                &config
+            )[0]
+            .token_ids,
+            vec!["a", "b"]
+        );
+        assert_eq!(
+            compute_merge_groups(
+                &[holding("a", 1, u64::MAX), holding("b", 1, u64::MAX)],
+                &config
+            )
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn decision_31_2_includes_ninety_to_one_hundred_days_without_chaining() {
+        let day = 86_400;
+        let groups = compute_merge_groups(&[
+            holding("latest", 3, 100 * day),
+            holding("earliest", 2, 90 * day),
+            holding("too_late", 5, 100 * day + 1),
+            holding("chained", 7, 110 * day),
+        ], &AutoMergeConfig::default());
+        assert_eq!(groups[0].token_ids, vec!["earliest", "latest"]);
+        assert_eq!(groups[0].earliest_expiry_secs, 90 * day);
+        assert_eq!(groups[0].total_amount, 5);
+        assert_eq!(groups[1].token_ids, vec!["too_late", "chained"]);
+        assert!(compute_merge_groups(&[
+            holding("a", 1, 90 * day - 1), holding("b", 1, 100 * day),
+        ], &AutoMergeConfig::default()).is_empty());
+    }
+
+    #[test]
     fn zero_similarity_returns_empty() {
         let config = AutoMergeConfig {
             similarity_pct: 0,
@@ -167,7 +210,7 @@ mod tests {
             similarity_pct: 50,
             ..Default::default()
         };
-        // 1000 and 1200 differ by 200, which is 20% of 1000 — within 50% threshold
+        // The earliest lifetime retains more than half of the latest.
         let holdings = vec![holding("a", 100, 1000), holding("b", 200, 1200)];
         let groups = compute_merge_groups(&holdings, &config);
         assert_eq!(groups.len(), 1);
@@ -182,7 +225,7 @@ mod tests {
             similarity_pct: 10,
             ..Default::default()
         };
-        // 1000 and 5000 differ by 4000, which is 400% of 1000 — way above 10%
+        // The lifetime loss is 80%, above the 10% threshold.
         let holdings = vec![holding("a", 100, 1000), holding("b", 200, 5000)];
         let groups = compute_merge_groups(&holdings, &config);
         assert!(groups.is_empty()); // neither group has 2+ tokens

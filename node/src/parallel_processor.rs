@@ -16,6 +16,10 @@ pub struct ParallelBlockProcessor {
 
 impl ParallelBlockProcessor {
     pub fn new(max_concurrent: usize) -> Self {
+        assert!(
+            max_concurrent > 0,
+            "parallel block processing requires a nonzero worker limit"
+        );
         Self {
             account_locks: Arc::new(Mutex::new(HashMap::new())),
             max_concurrent,
@@ -39,11 +43,19 @@ impl ParallelBlockProcessor {
         F: FnOnce() -> R + Send + 'static,
         R: Send + 'static,
     {
-        let _global_permit = self.semaphore.acquire().await.unwrap();
+        let global_permit = self.semaphore.clone().acquire_owned().await.unwrap();
         let lock = self.get_account_lock(account).await;
-        let _account_guard = lock.lock().await;
+        let account_guard = lock.lock_owned().await;
 
-        tokio::task::spawn_blocking(f).await.unwrap()
+        // Cancelling the async caller does not cancel an already-running
+        // blocking operation. Its guards must live with that operation.
+        tokio::task::spawn_blocking(move || {
+            let _global_permit = global_permit;
+            let _account_guard = account_guard;
+            f()
+        })
+        .await
+        .unwrap()
     }
 
     /// Returns the maximum concurrency limit.
@@ -69,6 +81,64 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, Instant};
+
+    #[test]
+    #[should_panic(expected = "nonzero worker limit")]
+    fn zero_workers_fail_instead_of_waiting_forever() {
+        ParallelBlockProcessor::new(0);
+    }
+
+    #[tokio::test]
+    async fn cancellation_retains_account_and_capacity_guards_until_blocking_work_finishes() {
+        for same_account in [true, false] {
+            let processor = Arc::new(ParallelBlockProcessor::new(if same_account {
+                2
+            } else {
+                1
+            }));
+            let (entered, started) = tokio::sync::oneshot::channel();
+            let (release, released) = std::sync::mpsc::channel();
+            let first_processor = processor.clone();
+            let first = tokio::spawn(async move {
+                first_processor
+                    .process("a", move || {
+                        entered.send(()).unwrap();
+                        released.recv().unwrap();
+                    })
+                    .await;
+            });
+            started.await.unwrap();
+            first.abort();
+            assert!(first.await.unwrap_err().is_cancelled());
+            processor.cleanup().await;
+            assert_eq!(
+                processor.active_accounts().await,
+                1,
+                "cleanup discarded a lock still owned by blocking work"
+            );
+            let (entered, mut started) = tokio::sync::oneshot::channel();
+            let second = tokio::spawn(async move {
+                processor
+                    .process(if same_account { "a" } else { "b" }, move || {
+                        entered.send(()).unwrap();
+                        42
+                    })
+                    .await
+            });
+            assert!(
+                tokio::time::timeout(Duration::from_millis(25), &mut started)
+                    .await
+                    .is_err(),
+                "cancelled caller released exclusion while its operation was running"
+            );
+            release.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(2), started)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(second.await.unwrap(), 42);
+        }
+    }
 
     #[tokio::test]
     async fn test_basic_processing() {

@@ -31,6 +31,8 @@ pub enum CementResult {
     BlockNotFound,
     /// The account is unknown.
     AccountNotFound,
+    /// Persistence failed; never report undurable finality as cemented.
+    StoreFailed,
 }
 
 /// Walks an account chain and cements blocks up to a confirmed block hash.
@@ -56,7 +58,7 @@ pub trait ChainWalker {
     fn height_of_block(&self, account: &AccountInfo, hash: &BlockHash) -> Option<u64>;
 
     /// Persist the updated confirmation height for an account.
-    fn set_confirmation_height(&mut self, account: &mut AccountInfo, new_height: u64);
+    fn set_confirmation_height(&mut self, account: &mut AccountInfo, new_height: u64) -> bool;
 }
 
 impl ConfirmationProcessor {
@@ -94,7 +96,7 @@ impl ConfirmationProcessor {
         for h in (current_height + 1)..=confirmed_height {
             match walker.block_at_height(&account, h) {
                 Some(hash) => cemented.push_back(hash),
-                None => return (CementResult::BlockNotFound, cemented.into()),
+                None => return (CementResult::BlockNotFound, vec![]),
             }
         }
 
@@ -102,7 +104,9 @@ impl ConfirmationProcessor {
         let new_height = confirmed_height;
 
         // Persist the new confirmation height.
-        walker.set_confirmation_height(&mut account, new_height);
+        if !walker.set_confirmation_height(&mut account, new_height) {
+            return (CementResult::StoreFailed, vec![]);
+        }
 
         (
             CementResult::Cemented {
@@ -153,15 +157,20 @@ impl ChainWalker for LmdbChainWalker {
         self.block_store.height_of_block(hash).ok().flatten()
     }
 
-    fn set_confirmation_height(&mut self, account: &mut AccountInfo, new_height: u64) {
-        account.confirmation_height = new_height;
-        if let Err(e) = self.account_store.put_account(account) {
+    fn set_confirmation_height(&mut self, account: &mut AccountInfo, new_height: u64) -> bool {
+        if let Err(e) = self
+            .account_store
+            .advance_confirmation_height(&account.address, new_height)
+        {
             tracing::error!(
                 address = %account.address,
                 height = new_height,
                 "failed to persist confirmation height: {e}"
             );
+            return false;
         }
+        account.confirmation_height = account.confirmation_height.max(new_height);
+        true
     }
 }
 
@@ -218,11 +227,12 @@ mod tests {
             chain.iter().position(|h| h == hash).map(|i| (i + 1) as u64)
         }
 
-        fn set_confirmation_height(&mut self, account: &mut AccountInfo, new_height: u64) {
+        fn set_confirmation_height(&mut self, account: &mut AccountInfo, new_height: u64) -> bool {
             account.confirmation_height = new_height;
             if let Some(stored) = self.accounts.get_mut(&account.address) {
                 stored.confirmation_height = new_height;
             }
+            true
         }
     }
 

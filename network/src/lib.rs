@@ -13,6 +13,7 @@ pub mod peer_manager;
 pub mod syn_cookies;
 pub mod sync;
 pub mod throttle;
+pub mod trusted_clock;
 pub mod upnp;
 
 pub use auth::PeerAuth;
@@ -27,4 +28,4 @@ pub use sync::{
     BootstrapResult, SyncAccountResult, SyncHandle, SyncProtocol, SyncRequest, SyncResponse,
 };
 pub use throttle::{BandwidthThrottle, DEFAULT_MAX_BYTES_PER_SEC};
-pub use upnp::{PortMapper, UpnpState};
+pub use upnp::{PortMapper, PortMapperConfig, UpnpState};

@@ -52,9 +52,12 @@ pub fn ed25519_private_to_x25519(ed25519_private: &[u8; 32]) -> [u8; 32] {
 /// Convert an Ed25519 public key to its X25519 (Montgomery) equivalent.
 ///
 /// Uses the birational map from Edwards to Montgomery form.
-/// Returns `None` if the public key bytes are invalid.
+/// Returns `None` if the public key bytes are invalid or weak.
 pub fn ed25519_public_to_x25519(ed25519_public: &[u8; 32]) -> Option<[u8; 32]> {
     let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(ed25519_public).ok()?;
+    if verifying_key.is_weak() {
+        return None;
+    }
     Some(verifying_key.to_montgomery().to_bytes())
 }
 
@@ -109,6 +112,14 @@ mod tests {
         let x25519_pub_from_secret = x25519_dalek::PublicKey::from(&static_secret);
 
         assert_eq!(x25519_pub_from_ed, *x25519_pub_from_secret.as_bytes());
+    }
+
+    #[test]
+    fn ed25519_to_x25519_rejects_weak_keys() {
+        let mut identity = [0; 32];
+        identity[0] = 1;
+        assert!(ed25519_public_to_x25519(&identity).is_none());
+        assert!(ed25519_public_to_x25519(&[0; 32]).is_none());
     }
 
     #[test]

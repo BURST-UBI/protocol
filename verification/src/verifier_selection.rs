@@ -26,10 +26,17 @@ impl VerifierSelector {
         }
 
         let seed = match vrf.get_randomness(seed_context) {
-            Ok(output) => output.value,
+            Ok(output) if matches!(vrf.verify(seed_context, &output), Ok(true)) => output.value,
+            Ok(_) => return Vec::new(),
             Err(_) => return Vec::new(),
         };
 
+        let mut eligible_verifiers = eligible_verifiers.to_vec();
+        eligible_verifiers.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        eligible_verifiers.dedup();
+        if eligible_verifiers.len() < count {
+            return Vec::new();
+        }
         let mut scored: Vec<(usize, [u8; 32])> = eligible_verifiers
             .iter()
             .enumerate()
@@ -44,7 +51,7 @@ impl VerifierSelector {
 
         // Use partial sort O(n) instead of full sort O(n log n) —
         // we only need the top `count` lowest hashes, not full ordering.
-        let actual_count = count.min(scored.len());
+        let actual_count = count;
         if actual_count > 0 && actual_count < scored.len() {
             scored.select_nth_unstable_by_key(actual_count - 1, |a| a.1);
             scored.truncate(actual_count);
@@ -67,7 +74,44 @@ mod tests {
     use burst_vrf::{RandomOutput, VrfError, VrfProvider};
 
     fn addr(s: &str) -> WalletAddress {
-        WalletAddress::new(&format!("brst_{s}"))
+        WalletAddress::new(format!("brst_{s}"))
+    }
+
+    #[test]
+    fn duplicate_addresses_cannot_fill_multiple_verifier_slots() {
+        let vrf = FixedVrf { seed: [1; 32] };
+        let unique = [addr("alice"), addr("bob")];
+        let repeated = [addr("bob"), addr("alice"), addr("alice"), addr("bob")];
+        assert_eq!(
+            VerifierSelector.select(&vrf, &unique, b"request", 2),
+            VerifierSelector.select(&vrf, &repeated, b"request", 2)
+        );
+        assert!(VerifierSelector
+            .select(&vrf, &repeated, b"request", 3)
+            .is_empty());
+    }
+
+    #[test]
+    fn unverified_randomness_never_selects_verifiers() {
+        struct InvalidProof;
+        impl VrfProvider for InvalidProof {
+            fn get_randomness(&self, _: &[u8]) -> Result<RandomOutput, VrfError> {
+                Ok(RandomOutput {
+                    value: [9; 32],
+                    proof: vec![],
+                    round: 1,
+                })
+            }
+            fn verify(&self, _: &[u8], _: &RandomOutput) -> Result<bool, VrfError> {
+                Ok(false)
+            }
+            fn name(&self) -> &str {
+                "invalid-proof"
+            }
+        }
+        assert!(VerifierSelector
+            .select(&InvalidProof, &[addr("alice")], b"request", 1)
+            .is_empty());
     }
 
     struct FixedVrf {
@@ -125,13 +169,13 @@ mod tests {
     }
 
     #[test]
-    fn selection_count_larger_than_pool_returns_all() {
+    fn selection_count_larger_than_pool_does_not_shrink_committee() {
         let vrf = FixedVrf { seed: [2u8; 32] };
         let pool = vec![addr("v0"), addr("v1"), addr("v2")];
         let selector = VerifierSelector;
 
         let selected = selector.select(&vrf, &pool, b"ctx", 10);
-        assert_eq!(selected.len(), 3);
+        assert!(selected.is_empty());
     }
 
     #[test]

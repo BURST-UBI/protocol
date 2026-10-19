@@ -767,13 +767,17 @@ c
 ## 12. ORV Consensus & Elections
 
 ### 12.1 Voting weight for ORV
-Nano uses balance-weighted voting. BURST's governance is one-wallet-one-vote. What about consensus (double-spend resolution)?
-- (a) One-wallet-one-vote (consistent with governance)
-- **(b) Balance-weighted** (representatives with more delegated accounts have more weight, like Nano — better for fast consensus)
-- (c) Hybrid — balance-weighted for consensus, one-wallet-one-vote for governance
+**Clarified by the project owner on 2026-10-10: one verified person, one equal
+unit of consensus weight, delegated to their chosen representative.** This
+applies to transaction confirmation and double-spend resolution, not only
+governance. Token balances and expired-TRST reputation confer no extra weight.
+Genesis receives the same unit as any other verified person, with no bonus.
 
-Your answer:
-b
+This supersedes the earlier answer `b`, whose wording conflated
+"balance-weighted" with "more delegated accounts", and the implementation's
+subsequent identity-plus-reputation hybrid. Verification is the Sybil-resistance
+basis; this is not a claim that verification perfectly eliminates Sybil attacks.
+TRST's historical contribution/reputation functionality remains unchanged.
 
 ### 12.2 Confirmation threshold
 - **(a) 67%** of online voting weight (same as Nano)
@@ -916,6 +920,21 @@ During early bootstrap with very few nodes:
 
 Your answer:
 a
+
+Checkpoint implementation revision (2026-10-10, following approval to replace
+the old floor with equal-human checkpoint quorum): each verified human supplies
+one unit, assigned through delegation. A checkpoint needs at least 67% of the
+previous agreed roster's units, rounded up. Offline representatives remain in
+that denominator. A proposed roster cannot certify itself, and a proposed quorum
+change cannot lower the threshold used to approve that change. Checkpoint quorum
+must remain strictly above two thirds. Genesis has one human unit, no bonus.
+
+This replaces the 60-million token-derived floor for the new checkpoint path.
+It does not claim the ordinary payment-election sampler has been migrated.
+The checkpoint implementation and remaining integration work are described in
+[CHECKPOINT_SELECTION.md](CHECKPOINT_SELECTION.md). A partition without quorum
+cannot advance checkpoints; reconnecting does not authorize rollback of a
+certified checkpoint. This is stricter than the older partition wording in 12.15.
 
 ---
 
@@ -1394,11 +1413,17 @@ a
 
 ### 19.1 Phase 1 drand configuration
 - Default relay URL: **`https://api.drand.sh`**
-- Default chain hash: **`8990e7a9aaed2ffed73dbd7092123d6f289930540d7651336225dc172e51b2ce`** (mainnet unchained)
+- Default chain hash: **`8990e7a9aaed2ffed73dbd7092123d6f289930540d7651336225dc172e51b2ce`** (mainnet chained, 30-second rounds)
 - **Good?** Or use quicknet/testnet for dev?
 
 Your answer:
 that's good
+
+Implementation correction (2026-10-10): this approved hash identifies the
+`pedersen-bls-chained` network, not an unchained network. The node pins its
+published public key, period and genesis time and verifies BLS signatures.
+Quicknet remains available as an explicit client, but is not silently substituted
+for this decision. Source: [drand chain metadata](https://api.drand.sh/8990e7a9aaed2ffed73dbd7092123d6f289930540d7651336225dc172e51b2ce/info).
 
 ### 19.2 Verifier selection algorithm
 Given a random seed from VRF and a pool of eligible verifiers, how to select N?
@@ -1426,6 +1451,25 @@ How to map a verification request to a specific drand round?
 
 Your answer:
 a
+
+Owner-authorized recovery amendment, 2026-10-12: use the first pinned-chain
+round after the replayed selection cut that includes the endorsement threshold.
+The original threshold transaction's timestamp is not a perpetual signing
+deadline. If a proposal expires before agreement, a later consensus round may
+propose a new replayed cut, subject to the existing durable lock and valid-proof
+rules. Fresh proposal and prevote signatures must precede the new beacon's
+release under the signer's conservative clock bound. No clock authority means
+no fresh selection signature.
+
+A known prepare certificate takes priority over fresh proposal construction
+and retains its exact checkpoint, request, pool and beacon round. A timeout is
+not evidence that no prepare certificate exists elsewhere. Late evidence is
+authenticated and processed by the same round rules; local votes and locks are
+never cleared to make a retry fit. A certified request continues waiting for
+its exact round under 19.3. Recovery creates neither a new paid endorsement nor
+a verification revote by itself. Current-cut replay still determines eligibility
+for an unagreed proposal. This is a liveness amendment, not a proof that an
+adversarial message scheduler cannot bias which proposal reaches agreement.
 
 ---
 
