@@ -120,6 +120,19 @@ fn replay_cut(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn payments_and_bootstrap_replay_identically_after_wire_delivery_and_fresh_catchup() {
+    payment_replay_journey(false).await;
+}
+
+#[cfg(feature = "experimental-testnet")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn certified_selection_catches_up_after_payment_replay() {
+    assert!(burst_verification::checkpoint_selection_enabled(
+        NetworkId::Dev
+    ));
+    payment_replay_journey(true).await;
+}
+
+async fn payment_replay_journey(certified_catchup: bool) {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
@@ -425,6 +438,13 @@ async fn payments_and_bootstrap_replay_identically_after_wire_delivery_and_fresh
             assert_eq!(status["endorser_count"], 1);
             assert_eq!(status["selection_available"], false);
             assert!(status["selection_context"].is_null());
+        }
+
+        // Default artifacts exercise payment/bootstrap catch-up above. Certified
+        // record catch-up requires the explicit experimental testnet build;
+        // integration tests do not compile the node library with cfg(test).
+        if !certified_catchup {
+            return;
         }
 
         // The creator has sufficient age and BRN and a completed payment with

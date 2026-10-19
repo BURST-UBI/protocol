@@ -27,8 +27,8 @@ desktop.
 
 The inventory has 335 unsigned sections. Some may be stale records, but CI must
 not infer sign-off from test counts. The release conformance gate remains closed.
-The fresh-catch-up and replay failures remain unresolved until their positive
-journeys pass. Browser mocks do not prove native signing, recovery, packaging,
+The repaired fresh-catch-up and replay journeys have targeted passing evidence;
+the consolidated workflow result is recorded below. Browser mocks do not prove native signing, recovery, packaging,
 cross-host networking or real VPS deployment. Those checks retain their own
 evidence and cannot be replaced by a green frontend job.
 
@@ -53,7 +53,7 @@ release attempts on documentation pushes do not add that coverage.
 
 Ignored-test review found a second daemon snapshot CLI test that was never
 scheduled. It now runs beside the existing snapshot export test, using the same
-validation-profile executable. Subprocess helpers are invoked by their parent
+debug daemon executable. Subprocess helpers are invoked by their parent
 tests; they must not be run indiscriminately with `--ignored`. Installed-wallet,
 public NTS/drand, large-state and performance probes still require their named
 validation environments. Routine CI is not a substitute for those release checks.
@@ -75,7 +75,8 @@ The follow-up workflow compiles the node test binary once and distributes the
 same SHA-addressed artifact to all six component/network workers. Downloads
 verify the binary checksum before execution. Local runner contracts prove that
 prebuilt mode preserves the catalog, exact filters, sharding, failure exits and
-CPU limits without invoking Cargo. Hosted artifact execution remains to verify.
+CPU limits without invoking Cargo. The focused hosted runs below verify artifact
+transfer and execution; the full run exercises all six consumers.
 The existing runner is extended; there is no second test selection framework.
 
 Deployment identity, NAT-readiness, NAT-runner and desktop-limit contracts were
