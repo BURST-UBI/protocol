@@ -133,13 +133,7 @@ async fn merge_fork_preserves_a_cemented_consumer_of_the_same_burn_origin() {
         |seed| burst_crypto::derive_address(&burst_crypto::keypair_from_seed(&[seed; 32]).public);
     let creator = address(0);
     let result = tokio::time::timeout(Duration::from_secs(60), async {
-        until(|| {
-            store
-                .meta_store()
-                .get_meta(burst_trst::TrstEngine::meta_key())
-                .is_ok()
-        })
-        .await;
+        until(|| store.meta_store().payment_epoch().is_ok()).await;
         let genesis = store.account_store().get_account(&creator).unwrap().head;
         let epoch = store.meta_store().payment_epoch().unwrap();
         let signed = |seed, kind, previous, link, brn, trst| {
@@ -323,13 +317,7 @@ async fn disjoint_payment_fork(cement_independent: bool) {
         |seed| burst_crypto::derive_address(&burst_crypto::keypair_from_seed(&[seed; 32]).public);
     let creator = address(0);
     let result = tokio::time::timeout(Duration::from_secs(60), async {
-        until(|| {
-            store
-                .meta_store()
-                .get_meta(burst_trst::TrstEngine::meta_key())
-                .is_ok()
-        })
-        .await;
+        until(|| store.meta_store().payment_epoch().is_ok()).await;
         let genesis = store.account_store().get_account(&creator).unwrap().head;
         let epoch = store.meta_store().payment_epoch().unwrap();
         let signed = |seed, kind, previous, link, brn, trst| {
@@ -588,13 +576,7 @@ async fn verifier_preference_forks_replace_descendants_and_survive_restart() {
         });
         let creator = burst_node::genesis_key::genesis_address(NetworkId::Dev);
         let result = tokio::time::timeout(Duration::from_secs(30), async {
-            until(|| {
-                store
-                    .meta_store()
-                    .get_meta(burst_trst::TrstEngine::meta_key())
-                    .is_ok()
-            })
-            .await;
+            until(|| store.meta_store().payment_epoch().is_ok()).await;
             let genesis = store.account_store().get_account(&creator).unwrap().head;
             let epoch = store.meta_store().payment_epoch().unwrap();
             let losing_kind = if winner_kind == BlockType::VerifierOptIn {
@@ -853,11 +835,7 @@ async fn elected_burn_replaces_received_branch_and_restart_can_receive_the_winne
         async {
             until(|| {
                 let batch = store.tx_begin_write().unwrap();
-                batch.ledger_counts().unwrap().0 == 1
-                    && batch
-                        .get_meta(burst_trst::TrstEngine::meta_key())
-                        .unwrap()
-                        .is_some()
+                batch.ledger_counts().unwrap().0 == 1 && batch.payment_epoch().is_ok()
             })
             .await;
             let mut base = store.account_store().get_account(&creator).unwrap().head;

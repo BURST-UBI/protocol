@@ -1,9 +1,34 @@
 //! Startup must retain private outcome causes, not just visible holdings.
 use burst_node::{BurstNode, NodeConfig};
-use burst_store::meta::MetaStore;
-use burst_trst::TrstEngine;
+use burst_trst::{engine::WalletRecord, merger_graph::GraphRecord, TrstEngine};
 use burst_types::{BlockHash, NetworkId, Timestamp, TxHash, WalletAddress};
 use std::time::Duration;
+
+fn stored_engine(node: &BurstNode) -> TrstEngine {
+    let batch = node.store.tx_begin_write().unwrap();
+    let mut engine = TrstEngine::from_wallet_records(
+        batch
+            .checkpoint_metadata_entries(WalletRecord::STORAGE_PREFIX.as_bytes())
+            .unwrap()
+            .map(|row| {
+                let (key, value) = row.map_err(|error| error.to_string())?;
+                WalletRecord::from_storage_entry(std::str::from_utf8(key).unwrap(), value)
+            }),
+        node.config.params.trst_expiry_secs,
+    )
+    .unwrap();
+    engine.merger_graph = burst_trst::MergerGraph::from_records(
+        batch
+            .checkpoint_metadata_entries(GraphRecord::STORAGE_PREFIX.as_bytes())
+            .unwrap()
+            .map(|row| {
+                let (key, value) = row.map_err(|error| error.to_string())?;
+                GraphRecord::from_storage_entry(std::str::from_utf8(key).unwrap(), value)
+            }),
+    )
+    .unwrap();
+    engine
+}
 
 async fn restart(config: &NodeConfig, owner: &WalletAddress, origin: TxHash) -> TrstEngine {
     let mut node = BurstNode::new(config.clone()).await.unwrap();
@@ -127,20 +152,19 @@ async fn repeated_startup_preserves_independent_outcome_and_identity_revocations
         }
         let mut node = BurstNode::new(config).await.unwrap();
         assert_eq!(
-            node.store
-                .meta_store()
-                .get_meta(TrstEngine::meta_key())
-                .unwrap(),
+            stored_engine(&node).save_wallets(),
             wallets,
             "shutdown lost outcome causes"
         );
         let mut inconsistent_graph = burst_trst::MergerGraph::from_bytes(&graph).unwrap();
         inconsistent_graph.apply_unrevocation(&origin);
         let inconsistent_bytes = inconsistent_graph.to_bytes();
-        node.store
-            .meta_store()
-            .put_meta("merger_graph", &inconsistent_bytes)
-            .unwrap();
+        let mut inconsistent = stored_engine(&node);
+        inconsistent.merger_graph = inconsistent_graph;
+        let brn = burst_brn::BrnEngine::load_from_store(&node.store.brn_store()).unwrap();
+        let mut batch = node.store.tx_begin_write().unwrap();
+        burst_node::ledger_updater::persist_economics(&mut batch, &brn, &inconsistent).unwrap();
+        batch.commit().unwrap();
         let error = tokio::time::timeout(Duration::from_secs(5), node.start())
             .await
             .expect("inconsistent snapshot should fail before services start")
@@ -152,15 +176,9 @@ async fn repeated_startup_preserves_independent_outcome_and_identity_revocations
             "{error}"
         );
         assert_eq!(
-            node.store.meta_store().get_meta("merger_graph").unwrap(),
+            stored_engine(&node).merger_graph.to_bytes(),
             inconsistent_bytes
         );
-        assert_eq!(
-            node.store
-                .meta_store()
-                .get_meta(TrstEngine::meta_key())
-                .unwrap(),
-            wallets
-        );
+        assert_eq!(stored_engine(&node).save_wallets(), wallets);
     }
 }
