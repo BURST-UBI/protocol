@@ -6,7 +6,7 @@ use burst_node::{
     confirmed_replay::ConfirmedReplay,
     BurstNode, NodeConfig, ShutdownController,
 };
-use burst_store::{account::AccountStore, block::BlockStore};
+use burst_store::{account::AccountStore, block::BlockStore, meta::MetaStore};
 use burst_store_lmdb::LmdbStore;
 use burst_types::{NetworkId, ProtocolParams, Timestamp, TxHash, WalletAddress, WalletState};
 use burst_wallet_core::{
@@ -496,15 +496,14 @@ async fn payment_replay_journey(certified_catchup: bool) {
         // This is a replay/import fixture, not a live agreement test. Construct
         // its certificate with an isolated durable signer; the running source's
         // round manager may already have advanced while payments were delivered.
-        let signer_node = BurstNode::new(NodeConfig {
-            data_dir: directory.path().join("certificate-signer"),
-            ..configs[0].clone()
-        })
-        .await
-        .unwrap();
-        let signer = &signer_node.store;
+        let signer =
+            LmdbStore::open(&directory.path().join("certificate-signer"), 32, 32 << 20).unwrap();
+        signer
+            .meta_store()
+            .put_meta(burst_store::meta::PAYMENT_EPOCH_KEY, anchor.hash().as_bytes())
+            .unwrap();
         let proposed = checkpoint_agreement::apply(
-            signer,
+            &signer,
             &anchor,
             &creator_keys.private,
             Command::Propose(replay.checkpoint().clone()),
@@ -516,7 +515,7 @@ async fn payment_replay_journey(certified_catchup: bool) {
             panic!("expected checkpoint proposal")
         };
         let votes = checkpoint_agreement::apply(
-            signer,
+            &signer,
             &anchor,
             &creator_keys.private,
             Command::Proposal(proposal),
@@ -532,7 +531,7 @@ async fn payment_replay_journey(certified_catchup: bool) {
             signatures: vec![prevote.signer.clone()],
         };
         let commits = checkpoint_agreement::apply(
-            signer,
+            &signer,
             &anchor,
             &creator_keys.private,
             Command::Prepared(proposal, &proof),
@@ -549,7 +548,7 @@ async fn payment_replay_journey(certified_catchup: bool) {
             signatures: vec![precommit.signer.clone()],
         };
         checkpoint_agreement::apply(
-            signer,
+            &signer,
             &anchor,
             &creator_keys.private,
             Command::Decide(certificate.clone()),
