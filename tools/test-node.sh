@@ -63,7 +63,14 @@ else
 fi
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}"
 export TOKIO_WORKER_THREADS="${TOKIO_WORKER_THREADS:-$cpu_budget}"
-node_tests=(cargo test -p burst-node --lib --locked --profile validation)
+node_tests=(cargo test -p burst-node --lib --locked --profile validation --)
+if [[ -n "${BURST_NODE_TEST_BINARY:-}" ]]; then
+  if [[ "$BURST_NODE_TEST_BINARY" != /* || ! -f "$BURST_NODE_TEST_BINARY" || ! -x "$BURST_NODE_TEST_BINARY" ]]; then
+    echo 'BURST_NODE_TEST_BINARY must name an absolute executable file' >&2
+    exit 2
+  fi
+  node_tests=("$BURST_NODE_TEST_BINARY")
+fi
 
 shard_index="${BURST_TEST_NETWORK_SHARD:-0}"
 shard_count="${BURST_TEST_NETWORK_SHARDS:-1}"
@@ -114,7 +121,7 @@ if [[ "$mode" == network || "$mode" == all ]]; then
 fi
 
 if [[ "$mode" == focused ]]; then
-  inventory=$("${runner[@]}" "${node_tests[@]}" -- "$focused" --exact --list)
+  inventory=$("${runner[@]}" "${node_tests[@]}" "$focused" --exact --list)
   if [[ $'\n'"$inventory"$'\n' != *$'\n'"$focused: test"$'\n'* ]]; then
     echo "No exact node library test named: $focused" >&2
     exit 2
@@ -122,21 +129,21 @@ if [[ "$mode" == focused ]]; then
   if (( ${#listing[@]} )); then
     printf '%s\n' "$inventory"
   else
-    "${runner[@]}" "${node_tests[@]}" -- "$focused" --exact --test-threads=1
+    "${runner[@]}" "${node_tests[@]}" "$focused" --exact --test-threads=1
   fi
 fi
 if [[ "$mode" == fast || "$mode" == all ]]; then
-  "${runner[@]}" "${node_tests[@]}" -- "${skip_expensive[@]}" --test-threads="$cpu_budget" "${listing[@]}"
+  "${runner[@]}" "${node_tests[@]}" "${skip_expensive[@]}" --test-threads="$cpu_budget" "${listing[@]}"
 fi
 if [[ "$mode" == slow || "$mode" == all ]]; then
-  "${runner[@]}" "${node_tests[@]}" -- "${slow_filters[@]}" --test-threads=1 "${listing[@]}"
+  "${runner[@]}" "${node_tests[@]}" "${slow_filters[@]}" --test-threads=1 "${listing[@]}"
 fi
 if [[ "$mode" == network || "$mode" == all ]]; then
   if (( shard_count == 1 )); then
-    "${runner[@]}" "${node_tests[@]}" -- "${network_filters[@]}" \
+    "${runner[@]}" "${node_tests[@]}" "${network_filters[@]}" \
       --test-threads="$network_threads" "${listing[@]}"
   else
-    inventory=$("${runner[@]}" "${node_tests[@]}" -- "${network_filters[@]}" --list)
+    inventory=$("${runner[@]}" "${node_tests[@]}" "${network_filters[@]}" --list)
     selected=()
     position=0
     while IFS= read -r name; do
@@ -151,7 +158,7 @@ if [[ "$mode" == network || "$mode" == all ]]; then
       if (( ${#listing[@]} )); then
         printf '%s: test\n' "$name"
       else
-        "${runner[@]}" "${node_tests[@]}" -- "$name" --exact --test-threads=1
+        "${runner[@]}" "${node_tests[@]}" "$name" --exact --test-threads=1
       fi
     done
   fi

@@ -57,3 +57,38 @@ validation-profile executable. Subprocess helpers are invoked by their parent
 tests; they must not be run indiscriminately with `--ignored`. Installed-wallet,
 public NTS/drand, large-state and performance probes still require their named
 validation environments. Routine CI is not a substitute for those release checks.
+
+## Coverage and reuse follow-up
+
+The hosted dashboard frontend and Linux native-command jobs pass at e6cd90c.
+The deck build and server syntax check pass at 6e40a1c. Wallet's first hosted
+unit job exposed its undocumented sibling-dashboard fixture dependency. The
+workflow now checks out the pinned dashboard beside the wallet; the local 30-test
+contract suite passes. Hosted wallet browser/native results are still pending.
+
+Protocol d5a899a passes hosted format, Clippy, WASM, inventory, workspace tests,
+compile and daemon health checks. Network and full integration results remain
+pending; none of those claims is inferred from the small local checks.
+
+The follow-up workflow compiles the node test binary once and distributes the
+same SHA-addressed artifact to all six component/network workers. Downloads
+verify the binary checksum before execution. Local runner contracts prove that
+prebuilt mode preserves the catalog, exact filters, sharding, failure exits and
+CPU limits without invoking Cargo. Hosted artifact execution remains to verify.
+The existing runner is extended; there is no second test selection framework.
+
+Deployment identity, NAT-readiness, NAT-runner and desktop-limit contracts were
+missing from CI. The inventory job now discovers all `tools/*.test.mjs` files.
+Their focused local run passes 17 tests; the Debian-package fixture is skipped
+because this desktop lacks Debian packaging tools. Ubuntu CI must run it.
+
+The health job now builds the private-testnet configuration with the published
+disposable fixture key, then checks Dev/Test/Live isolation and restart behavior.
+It uses the validation profile. Optimized executable smoke checks stay in the
+manual release workflow. This fixture artifact is never a release candidate.
+
+CI still does not automatically qualify signed/notarized desktop packages,
+external NTS/drand reachability, NAT hardware, large-state resource bounds or
+the owner's production VPS. The release workflow also cannot sign off the 335
+open specification entries. These are explicit coverage limits, not optional
+requirements silently dropped from release readiness.

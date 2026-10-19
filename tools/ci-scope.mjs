@@ -11,6 +11,11 @@ export function needsRuntime(paths) {
   ));
 }
 
+export function selectChecks(runtime, suite = 'all') {
+  if (!['all', 'windows'].includes(suite)) throw Error('Unknown CI suite');
+  return { runtime: suite === 'all' && runtime, windows: suite === 'windows' || runtime };
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const base = process.env.CI_BASE;
   let runtime = true;
@@ -19,5 +24,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       .toString().split('\0').filter(Boolean);
     runtime = needsRuntime(paths);
   }
-  appendFileSync(process.env.GITHUB_OUTPUT, `runtime=${runtime}\n`);
+  const checks = selectChecks(runtime, process.env.CI_SUITE || 'all');
+  appendFileSync(process.env.GITHUB_OUTPUT, `runtime=${checks.runtime}\nwindows=${checks.windows}\n`);
 }

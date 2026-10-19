@@ -63,6 +63,32 @@ try {
     $service = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
     if ($service.ExitCode -eq 0) { throw 'Invalid config did not produce a service failure' }
     Write-Output 'Windows service start, RPC, graceful stop, restart and invalid-config checks passed.'
+} catch {
+    $failure = $_
+    # Diagnose the isolated test service before cleanup hides the SCM result.
+    sc.exe qc $serviceName | Out-Host
+    sc.exe queryex $serviceName | Out-Host
+    Get-CimInstance Win32_Service -Filter "Name='$serviceName'" |
+        Select-Object Name, State, PathName, ExitCode, ServiceSpecificExitCode | Format-List | Out-Host
+    Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Service Control Manager'; StartTime=(Get-Date).AddMinutes(-5)} -ErrorAction SilentlyContinue |
+        Where-Object { $_.Message -match 'BurstNode' } |
+        Select-Object TimeCreated, Id, Message | Format-List | Out-Host
+    # Distinguish an invalid daemon/config from an SCM-only startup failure.
+    # This probe uses only this test's disposable ledger, never an installed node.
+    if ((Get-Service $serviceName -ErrorAction SilentlyContinue).Status -eq 'Stopped') {
+        $stdout = Join-Path $directory 'foreground.stdout'
+        $stderr = Join-Path $directory 'foreground.stderr'
+        $probe = Start-Process -FilePath $binary -ArgumentList @('--config', "`"$config`"", 'node', 'run') `
+            -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+        if (-not $probe.WaitForExit(3000)) {
+            Write-Output 'Foreground diagnostic reached a running process; terminating only this disposable probe.'
+            $probe.Kill()
+            $probe.WaitForExit()
+        }
+        Write-Output "Foreground diagnostic exit: $($probe.ExitCode)"
+        Get-Content $stdout, $stderr -ErrorAction SilentlyContinue | Out-Host
+    }
+    throw $failure
 } finally {
     $service = Get-Service $serviceName -ErrorAction SilentlyContinue
     if ($service) {

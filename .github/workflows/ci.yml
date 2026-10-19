@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [main]
   workflow_call:
+  workflow_dispatch:
+    inputs:
+      suite:
+        type: choice
+        default: all
+        options: [all, windows]
+        description: Full validation or isolated Windows service diagnosis
 
 concurrency:
   group: ${{ github.workflow }}-validation-${{ github.ref }}
@@ -26,6 +33,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       runtime: ${{ steps.scope.outputs.runtime }}
+      windows: ${{ steps.scope.outputs.windows }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -37,6 +45,7 @@ jobs:
         run: node tools/ci-scope.mjs
         env:
           CI_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || '' }}
+          CI_SUITE: ${{ github.event_name == 'workflow_dispatch' && inputs.suite || 'all' }}
 
   windows-installer:
     needs: scope
@@ -58,7 +67,7 @@ jobs:
 
   windows-service:
     needs: scope
-    if: needs.scope.outputs.runtime == 'true'
+    if: needs.scope.outputs.windows == 'true'
     name: Windows service lifecycle
     runs-on: windows-latest
     timeout-minutes: 30
@@ -70,6 +79,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: burst-windows-tests
+          cache-on-failure: true
       - run: cargo test -p burst-daemon --locked
       - run: cargo build -p burst-daemon --locked
       - run: ./tools/windows-service-smoke.ps1 -Daemon ./target/debug/burst-daemon.exe
@@ -84,7 +94,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: node --test tools/ci-scope.test.mjs tools/check-spec-coverage.test.mjs tools/test-node.test.mjs tools/install-download.test.mjs tools/update-node.test.mjs tools/validation-reuse.test.mjs
+      - run: node --test --test-concurrency=1 tools/*.test.mjs
       - run: node tools/check-spec-coverage.mjs
 
   check:
@@ -144,8 +154,44 @@ jobs:
           sudo apt-get install -y protobuf-compiler
           cargo test -p burst-node --test protobuf_schema --locked -- --ignored
 
-  node-components:
+  node-test-build:
+    name: Build node test executable once
     needs: scope
+    if: needs.scope.outputs.runtime == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CARGO_BUILD_JOBS: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-11
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: burst-node-tests
+          cache-on-failure: true
+      - name: Compile and collect the exact test executable
+        run: |
+          cargo test -p burst-node --lib --locked --profile validation --no-run --message-format=json > "$RUNNER_TEMP/node-build.jsonl"
+          node --input-type=module -e '
+            import {readFileSync, mkdirSync, copyFileSync} from "node:fs";
+            const artifacts = readFileSync(process.env.RUNNER_TEMP + "/node-build.jsonl", "utf8")
+              .trim().split("\n").map(line => JSON.parse(line))
+              .filter(item => item.reason === "compiler-artifact" && item.target.name === "burst_node" && item.profile.test && item.executable);
+            if (artifacts.length !== 1) throw Error("Expected one node test executable");
+            mkdirSync("target/ci-node-tests", {recursive:true});
+            copyFileSync(artifacts[0].executable, "target/ci-node-tests/burst-node-tests");'
+          cd target/ci-node-tests
+          sha256sum burst-node-tests > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: node-tests-${{ github.sha }}
+          path: target/ci-node-tests
+          retention-days: 3
+
+  node-components:
+    needs: [scope, node-test-build]
     if: needs.scope.outputs.runtime == 'true'
     name: Node components (${{ matrix.group }})
     runs-on: ubuntu-latest
@@ -162,18 +208,30 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: burst-nightly
+          cache-on-failure: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: node-tests-${{ github.sha }}
+          path: target/ci-node-tests
+      - name: Verify reusable executable
+        run: |
+          cd target/ci-node-tests
+          sha256sum --check SHA256SUMS
+          chmod +x burst-node-tests
       - run: bash tools/test-node.sh "${{ matrix.group }}"
+        env:
+          BURST_NODE_TEST_BINARY: ${{ github.workspace }}/target/ci-node-tests/burst-node-tests
       - if: matrix.group == 'fast'
         run: cargo test -p burst-node --doc --locked
       - name: Exercise snapshot operator commands
         if: matrix.group == 'fast'
         run: |
           cargo build -p burst-daemon --locked
-          BURST_SNAPSHOT_DAEMON="$PWD/target/debug/burst-daemon" cargo test -p burst-node --lib --locked --profile validation confirmed_replay::tests::snapshot_export::daemon_snapshot_attest_export_verify_journey -- --exact --ignored --test-threads=1
-          BURST_SNAPSHOT_DAEMON="$PWD/target/debug/burst-daemon" cargo test -p burst-node --lib --locked --profile validation confirmed_replay::tests::snapshot_export::framed_archive::daemon_verifies_framed_archive_beyond_legacy_header_limit -- --exact --ignored --test-threads=1
+          BURST_SNAPSHOT_DAEMON="$PWD/target/debug/burst-daemon" target/ci-node-tests/burst-node-tests confirmed_replay::tests::snapshot_export::daemon_snapshot_attest_export_verify_journey --exact --ignored --test-threads=1
+          BURST_SNAPSHOT_DAEMON="$PWD/target/debug/burst-daemon" target/ci-node-tests/burst-node-tests confirmed_replay::tests::snapshot_export::framed_archive::daemon_verifies_framed_archive_beyond_legacy_header_limit --exact --ignored --test-threads=1
 
   node-network:
-    needs: scope
+    needs: [scope, node-test-build]
     if: needs.scope.outputs.runtime == 'true'
     name: Node network (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
@@ -185,14 +243,18 @@ jobs:
         shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/download-artifact@v4
         with:
-          toolchain: nightly-2026-10-11
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: burst-nightly
+          name: node-tests-${{ github.sha }}
+          path: target/ci-node-tests
+      - name: Verify reusable executable
+        run: |
+          cd target/ci-node-tests
+          sha256sum --check SHA256SUMS
+          chmod +x burst-node-tests
       - run: bash tools/test-node.sh network
         env:
+          BURST_NODE_TEST_BINARY: ${{ github.workspace }}/target/ci-node-tests/burst-node-tests
           BURST_TEST_NETWORK_SHARDS: '4'
           BURST_TEST_NETWORK_SHARD: ${{ matrix.shard }}
 
@@ -234,6 +296,9 @@ jobs:
     name: Health Check
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      # Public disposable [42; 32] fixture. Never a release founding identity.
+      BURST_TEST_GENESIS_PUBLIC_KEY: 197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -244,12 +309,12 @@ jobs:
           shared-key: burst-nightly
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build daemon
-        run: cargo build --locked --release -p burst-daemon
+        run: cargo build --locked --profile validation -p burst-daemon --features private-testnet
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - name: Verify RPC, graceful shutdown and ledger reopen
-        run: node tools/daemon-smoke.mjs ./target/release/burst-daemon
+        run: node tools/daemon-smoke.mjs ./target/validation/burst-daemon --private-testnet-fixture
 
   integration-test:
     needs: scope

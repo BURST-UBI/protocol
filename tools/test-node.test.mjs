@@ -20,15 +20,22 @@ const names = [
 ];
 const script = fileURLToPath(new URL("./test-node.sh", import.meta.url));
 
-function run(args, overrides = {}, affinity) {
+function run(args, overrides = {}, affinity, prebuilt = false) {
   const dir = mkdtempSync(join(tmpdir(), "burst-test-runner-"));
   try {
     const cargo = join(dir, "cargo"), log = join(dir, "calls.jsonl");
     copyFileSync(new URL("./fixtures/test-node-cargo.mjs", import.meta.url), cargo);
     chmodSync(cargo, 0o700);
     const env = { ...process.env };
+    delete env.BURST_NODE_TEST_BINARY;
     for (const key of ["BURST_TEST_CPUS", "CARGO_BUILD_JOBS", "TOKIO_WORKER_THREADS", "BURST_TEST_NETWORK_CONCURRENCY", "BURST_TEST_NETWORK_SHARD", "BURST_TEST_NETWORK_SHARDS"]) delete env[key];
     Object.assign(env, { PATH: `${dir}:${env.PATH}`, MOCK_CARGO_LOG: log, MOCK_TEST_NAMES: JSON.stringify(names) }, overrides);
+    if (prebuilt) {
+      const binary = join(dir, 'node-tests');
+      copyFileSync(cargo, binary);
+      chmodSync(binary, 0o700);
+      env.BURST_NODE_TEST_BINARY = binary;
+    }
     const command = affinity ? "taskset" : "bash";
     const commandArgs = affinity ? ["-c", affinity, "bash", script, ...args] : [script, ...args];
     const result = spawnSync(command, commandArgs, { env, encoding: "utf8", timeout: 10_000 });
@@ -80,6 +87,31 @@ test("focused mode verifies an exact name before executing only that test", () =
   const listing = run(["focused", names[0], "--list"]);
   assert.equal(listing.status, 0);
   assert.equal(listing.calls.length, 1);
+});
+
+test('prebuilt execution preserves filters, sharding and limits without invoking Cargo', () => {
+  for (const args of [['all', '--list'], ['focused', names[0]], ['network']]) {
+    const env = args[0] === 'network'
+      ? { BURST_TEST_NETWORK_SHARDS: '3', BURST_TEST_NETWORK_SHARD: '1' } : {};
+    const built = run(args, env);
+    const reused = run(args, env, undefined, true);
+    assert.equal(reused.status, 0, reused.stderr);
+    assert.deepEqual(reused.calls.map(c => c.selected), built.calls.map(c => c.selected));
+    for (const call of reused.calls) {
+      assert(!call.args.includes('--locked'));
+      assert(!call.args.includes('--profile'));
+      assert(!call.args.includes('--'));
+      assert(call.priority >= 15);
+    }
+  }
+  const failed = run(['all'], { MOCK_CARGO_FAIL: '1' }, undefined, true);
+  assert.equal(failed.status, 1);
+  assert.equal(failed.calls.length, 1);
+  for (const binary of ['relative', '/missing/burst-node-tests']) {
+    const invalid = run(['fast'], { BURST_NODE_TEST_BINARY: binary });
+    assert.equal(invalid.status, 2);
+    assert.equal(invalid.calls.length, 0);
+  }
 });
 
 test("invalid arguments and budgets never start Cargo", () => {
