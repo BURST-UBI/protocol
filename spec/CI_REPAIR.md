@@ -198,3 +198,37 @@ seven-of-nine quorum (41.89s), and expired-minority recovery (75.10s). The known
 failures have targeted passing evidence. Next: the consolidated full main CI,
 including both ignored snapshot CLI tests and all network shard cases. Until
 that run finishes, the complete protocol workflow is not claimed green.
+
+## Full-run follow-up
+
+Run 39320394988 reproduces the payment integration timeout. Its stage markers
+reach the fresh checkpoint observer; logs repeatedly report `compact transfer
+import is behind the release gate`. Default integration builds do not compile
+the node library with `cfg(test)`. The fixture had mixed ordinary payments with
+experimental certified record import. A prior passing run could receive the
+certificate through the live runtime first, masking the gated catch-up path.
+
+The default payment/bootstrap/fresh-block journey remains a test. A separate
+experimental-testnet test runs the same payment setup and all certificate import
+assertions, including the fresh observer. CI explicitly runs both policies; no
+production gate, quorum or timeout is relaxed. Run 39321940360 passes the default
+journey and exposes its feature-specific availability assertion. Run 39322519559
+then exposes competing access to the live signer's round journal. Certificate
+construction now uses an isolated durable signer explicitly bound to the
+authenticated genesis epoch; observers still import the certificate through
+their running peer services. Runs 39323241412 and 39323909868 rejected the
+uninitialized signer: constructing a node without starting it does not initialize
+its payment epoch. Run 39324476230 reaches signing but rejects a cut chosen in
+the final second before the next beacon. The fixture now waits for at least five
+seconds of signing window before choosing its cut, within its existing timeout.
+The elapsed-time signing guard is unchanged. The complete feature-enabled
+journey is not yet claimed passing.
+
+The full run passes both component jobs, including 1,029 fast cases and both
+snapshot CLI journeys. All four network shards pass. The only failed job in
+39320394988 is the default/experimental integration fixture described above.
+These results establish specific regression evidence, not specification sign-off.
+
+Wallet 6754a5f passes frontend and native-command jobs in run 39320752406. Manual
+filtered browser runs now reject the unsupported all-file combination before
+starting a browser. The original hook-level hang remains unexplained.

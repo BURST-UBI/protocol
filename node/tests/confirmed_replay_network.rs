@@ -478,7 +478,18 @@ async fn payment_replay_journey(certified_catchup: bool) {
                 hash: account.head,
             })
             .collect();
-        let cutoff = Timestamp::now().as_secs();
+        // Do not choose a cut in the last seconds before a beacon boundary:
+        // fresh signatures conservatively include replay/lock elapsed time.
+        let policy = burst_vrf::DrandPolicy::mainnet().unwrap();
+        let cutoff = loop {
+            let now = Timestamp::now().as_secs();
+            let round = policy.chain_info().round_after(now).unwrap();
+            let release = policy.chain_info().time_of_round(round).unwrap();
+            if release - now >= 5 {
+                break now;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
         let replay = CertifiedCheckpoint::prepare(
             &nodes[0].store,
             NetworkId::Dev,
@@ -500,7 +511,10 @@ async fn payment_replay_journey(certified_catchup: bool) {
             LmdbStore::open(&directory.path().join("certificate-signer"), 32, 32 << 20).unwrap();
         signer
             .meta_store()
-            .put_meta(burst_store::meta::PAYMENT_EPOCH_KEY, anchor.hash().as_bytes())
+            .put_meta(
+                burst_store::meta::PAYMENT_EPOCH_KEY,
+                anchor.hash().as_bytes(),
+            )
             .unwrap();
         let proposed = checkpoint_agreement::apply(
             &signer,
