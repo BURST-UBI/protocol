@@ -12,6 +12,7 @@ import time
 
 root = Path(__file__).resolve().parent.parent
 source = root / 'candidate-source'
+desktop = root / 'desktop-source'
 inputs = root / 'validation-inputs'
 evidence = root / 'macos-desktop-evidence'
 manifest = json.loads((inputs / 'desktop-source-manifest.json').read_text())
@@ -39,6 +40,7 @@ def digest(path):
 if sys.argv[1] == 'prepare':
     assert os.environ.get('GITHUB_RUN_ATTEMPT', '1') == '1', 'Audit latest evidence before any retry'
     evidence.mkdir(exist_ok=False)
+    desktop.mkdir(exist_ok=False)
     assert digest(inputs / 'desktop-source.tar.gz') == manifest['archiveSha256']
     with tarfile.open(inputs / 'desktop-source.tar.gz') as archive:
         members = archive.getmembers()
@@ -46,20 +48,20 @@ if sys.argv[1] == 'prepare':
         for member in members:
             assert member.isfile() and member.name in manifest['files']
             assert not Path(member.name).is_absolute() and '..' not in Path(member.name).parts
-            assert not (root / member.name).exists(), 'Refuse to overwrite existing input'
-        archive.extractall(root, filter='data')
+            assert not (desktop / member.name).exists(), 'Refuse to overwrite existing input'
+        archive.extractall(desktop, filter='data')
     for name, expected in manifest['files'].items():
-        assert digest(root / name) == expected, name
-    (root / 'protocol').symlink_to(source, target_is_directory=True)
-    assert (root / 'protocol').resolve() == source
+        assert digest(desktop / name) == expected, name
+    (desktop / 'protocol').symlink_to(source, target_is_directory=True)
+    assert (desktop / 'protocol').resolve() == source
     shutil.copy2(root / 'macos-candidate-evidence/host.json', evidence / 'host.json')
     write(evidence / 'prepare.json', {'outcome':'pass','verifiedFiles':len(manifest['files']),
-        'protocolPath':str((root/'protocol').resolve()), 'scope':'Input identity only; no desktop runtime qualification'})
+        'protocolPath':str((desktop/'protocol').resolve()), 'scope':'Input identity only; no desktop runtime qualification'})
     raise SystemExit(0)
 
 app, mode = sys.argv[1:]
 assert app in ('wallet','node-gui')
-appdir = root / app
+appdir = desktop / app
 assert json.loads((evidence/'prepare.json').read_text())['outcome'] == 'pass'
 assert shutil.disk_usage(cache).free >= 8 * 1024**3, 'Less than8GiB target headroom'
 key = app + '-' + mode
@@ -68,7 +70,7 @@ cargo = query(['rustup','which','cargo'])
 rustc = query(['rustup','which','rustc'])
 os.environ['RUSTC'] = rustc
 rustlib = query([rustc,'--print','target-libdir','--target',target])
-deps = [str(root/name) for name in manifest['files'] if name.startswith(app+'/')]
+deps = [str(desktop/name) for name in manifest['files'] if name.startswith(app+'/')]
 previous = None
 cwd = appdir
 product = None
@@ -131,7 +133,7 @@ try:
             except ProcessLookupError: pass
             code = 124
     if code == 0 and mode == 'frontend':
-        actual = {str(f.relative_to(root)):digest(f) for f in (appdir/'dist').rglob('*') if f.is_file()}
+        actual = {str(f.relative_to(desktop)):digest(f) for f in (appdir/'dist').rglob('*') if f.is_file()}
         expected = {k:v for k,v in manifest['expectedFrontend'].items() if k.startswith(app+'/')}
         comparison = {'actual':actual,'expected':expected,'equal':actual==expected}
         write(p.with_suffix('.comparison.json'),comparison)

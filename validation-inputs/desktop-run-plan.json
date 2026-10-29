@@ -40,5 +40,6 @@
     "Final package installation and Gatekeeper assessment"
   ],
   "publication": "No release publication; encrypted evidence only",
-  "scheduling": "Six independent commands per architecture, each capped at1200s plus10s cleanup. Workflow140min is aggregate allowance, not a longer command cap. Same concurrency group queues after daemon run40845222714, reusing its cache."
+  "scheduling": "Six independent commands per architecture, each capped at1200s plus10s cleanup. Workflow140min is aggregate allowance, not a longer command cap. Same concurrency group queues after daemon run40845222714, reusing its cache.",
+  "preflightCorrection": "First desktop run40847160773 failed before any npm/build receipt at protocol symlink creation: checkout already contains a protocol wire crate. Extract apps into desktop-source/{wallet,node-gui}; map desktop-source/protocol explicitly to stable candidate-source. No protocol source or cache path changes; no successful stage is repeated."
 }
