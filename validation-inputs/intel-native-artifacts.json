@@ -1,0 +1,15 @@
+{
+  "run": 40860046055,
+  "apps": {
+    "wallet": {
+      "binary": "burst-wallet-gui",
+      "productName": "Burst Wallet",
+      "sha256": "7bae1a78873f8d3357898eb9eb1644b614a80b43526066bad3f0d9afea809acf"
+    },
+    "node-gui": {
+      "binary": "burst-node-gui",
+      "productName": "Burst Node",
+      "sha256": "fb92ae97cc14dc8a03db64637f47c1fcad38e8a500a23ed06ac00ace8c944dde"
+    }
+  }
+}

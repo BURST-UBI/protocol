@@ -1,4 +1,4 @@
-name: macOS preserve invalidated Intel failure
+name: macOS Intel package qualified apps
 on:
   workflow_dispatch:
 permissions:
@@ -17,7 +17,7 @@ jobs:
           - runner: macos-15-intel
             target: x86_64-apple-darwin
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
+    timeout-minutes: 50
     env:
       RUSTUP_TOOLCHAIN: nightly-2026-10-11
       CARGO_BUILD_JOBS: 1
@@ -31,6 +31,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /.github/workflows/
+            /tools/
+            /validation-inputs/
       - name: Restore stable target and dependency cache
         id: cache
         uses: actions/cache/restore@v4
@@ -39,7 +44,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             .macos-target
-          key: burst-macos-${{ matrix.target }}-nightly20261011-${{ hashFiles('validation-inputs/source.tar.gz') }}-daemon-v3
+          key: burst-macos-${{ matrix.target }}-nightly20261011-${{ hashFiles('validation-inputs/source.tar.gz') }}-desktop-finish-v1
           fail-on-cache-miss: true
       - uses: actions/setup-node@v4
         with:
@@ -50,31 +55,44 @@ jobs:
           targets: ${{ matrix.target }}
       - name: Verify frozen source and host
         run: python3 tools/macos-candidate-v2.py prepare
-      - name: Retrieve preserved failed stage evidence
+      - name: Verify frozen desktop inputs
+        run: python3 tools/macos-package-intel.py prepare
+      - name: Retrieve qualified native app evidence
         uses: actions/download-artifact@v4
         with:
-          name: macos-candidate-v3-${{ matrix.target }}
+          name: macos-desktop-finish-${{ matrix.target }}
           path: prior-encrypted
-          run-id: 40852824231
+          run-id: 40860046055
           github-token: ${{ github.token }}
-      - name: Restore private receipt chain
+      - name: Restore original native build receipts
         env:
           EVIDENCE_DECRYPT_KEY: ${{ secrets.MACOS_EVIDENCE_DECRYPT_KEY }}
-        run: python3 tools/macos-restore-invalidated.py
-      - name: Preserve latest invalidated failure and audit it
-        timeout-minutes: 5
-        run: node tools/macos-record-invalidated.mjs
+        run: python3 tools/macos-restore-qualified-intel-apps.py
+      - name: Restore installed Tauri tooling
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            desktop-source/wallet/node_modules
+            desktop-source/node-gui/node_modules
+          key: burst-macos-${{ matrix.target }}-desktop-npm-${{ hashFiles('validation-inputs/desktop-source.tar.gz') }}-finish-v1
+          fail-on-cache-miss: true
+      - name: Audit qualified native apps
+        run: python3 tools/macos-package-intel.py audit
+      - name: Package wallet without rebuilding
+        run: python3 tools/macos-package-intel.py wallet
+      - name: Package dashboard without rebuilding
+        run: python3 tools/macos-package-intel.py node-gui
       - name: Encrypt retained evidence for local review
         if: always()
         timeout-minutes: 5
         run: |
-          test -d macos-candidate-v3-evidence
-          tar -czf "$RUNNER_TEMP/macos-evidence.tar.gz" macos-candidate-v3-evidence
+          test -d macos-package-evidence
+          tar -czf "$RUNNER_TEMP/macos-evidence.tar.gz" macos-package-evidence
           openssl cms -encrypt -binary -aes-256-cbc -stream -outform DER -in "$RUNNER_TEMP/macos-evidence.tar.gz" -out macos-evidence.cms validation-inputs/evidence-recipient.pem
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: macos-invalidated-${{ matrix.target }}
+          name: macos-package-${{ matrix.target }}
           path: macos-evidence.cms
           if-no-files-found: error
           retention-days: 30

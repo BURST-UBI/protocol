@@ -1,0 +1,22 @@
+{
+  "requirement": "Package qualified Intel apps without recompilation",
+  "changeImpact": [
+    {
+      "changedDependency": "Application bundle metadata/container only",
+      "affectedCheck": "Correct bundle identifier/executable and unchanged raw binary",
+      "reuse": "ARM native run40852402087 both apps PASS;49 frontend hashes unchanged",
+      "action": "Tauri bundle only, no build",
+      "reason": "Raw binaries have not yet been packaged as Mac .app artifacts"
+    },
+    {
+      "changedDependency": "Intel native artifact from40860046055",
+      "affectedCheck": "Intel app bundling",
+      "existingEvidence": "Both Intel native build receipts and binary hashes in intel-native-artifacts.json",
+      "action": "Audit and reuse both builds; bundle only",
+      "reason": "ARM bundle cannot qualify Intel app package layout"
+    }
+  ],
+  "limits": "Approved ARM3CPU7GiB host in parallel with one existing Intel host; each command1200s+10s cleanup; no Azure",
+  "scope": "Unsigned packages only; final signing/notarization and installation/runtime remain separate",
+  "qualifiedRun": 40860046055
+}
