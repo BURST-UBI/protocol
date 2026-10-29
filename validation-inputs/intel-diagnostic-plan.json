@@ -1,0 +1,20 @@
+{
+  "requirement": "Diagnose Intel daemon timeout before another optimized attempt",
+  "priorRun": 40845222714,
+  "priorResult": "1200s timeout masked by final killpg PermissionError; latest failed receipt retained",
+  "question": "Which Cargo units completed in preserved cache, when did daemon compilation start, and does macOS return EPERM after the process group is already empty?",
+  "command": [
+    "python3",
+    "tools/macos-cache-diagnostic.py"
+  ],
+  "changedInputs": "None to candidate; only read preserved compiler cache and run a100ms disposable sleep timeout",
+  "limits": "Approved Intel4CPU14GiB host; no compilation; isolated child sleep terminated after100ms;10s cleanup; no Azure",
+  "changeImpact": [
+    {
+      "dependency": "Diagnostic script only",
+      "affected": "Timeout reporting and evidence of compiler stage duration",
+      "reuse": "ARM daemon pass and both platform existing receipts unchanged",
+      "next": "Use measured cache timing before deciding any daemon retry"
+    }
+  ]
+}
