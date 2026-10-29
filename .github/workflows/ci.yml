@@ -1,20 +1,37 @@
-name: Sign qualified Intel apps for review
+name: Complete existing Mac notarization submissions
 on:
   workflow_dispatch:
 permissions:
   contents: read
   actions: read
 concurrency:
-  group: burst-macos-signing-intel
+  group: burst-macos-notarization-collection
   cancel-in-progress: false
 jobs:
-  sign:
+  collect:
     if: github.ref == 'refs/heads/validation/macos-candidate-20261029'
     environment: macos-signing
-    runs-on: macos-15-intel
-    env:
-      SIGNING_PLAN: intel-signing-plan.json
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            plan: arm-signing-plan.json
+            prior: 40866759808
+            evidence: 95db090b4e568970d77e9328bb47aad211c216030810cbc31a968db7f62c5f65
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            plan: intel-signing-plan.json
+            prior: 40867048365
+            evidence: 0867e3fc87c334070320e75e4dacd512919311b6580515106752e0de81487f17
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 50
+    env:
+      SIGNING_PLAN: ${{ matrix.plan }}
+      PRIOR_RUN: ${{ matrix.prior }}
+      PRIOR_EVIDENCE_SHA256: ${{ matrix.evidence }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -22,38 +39,37 @@ jobs:
           sparse-checkout-cone-mode: false
           sparse-checkout: |
             /tools/macos-sign-qualified.py
+            /tools/macos-collect-notarization.py
+            /validation-inputs/arm-signing-plan.json
             /validation-inputs/intel-signing-plan.json
             /validation-inputs/evidence-recipient.pem
-      - name: Retrieve exact qualified packages
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: macos-package-x86_64-apple-darwin
-          run-id: 40863899997
+          name: macos-signing-${{ matrix.target }}
+          run-id: ${{ matrix.prior }}
           github-token: ${{ github.token }}
           path: prior-encrypted
-      - name: Verify unsigned package and binary identities
+      - name: Verify retained signed packages and original submission IDs
         timeout-minutes: 5
         env:
           EVIDENCE_DECRYPT_KEY: ${{ secrets.MACOS_EVIDENCE_DECRYPT_KEY }}
-        run: python3 tools/macos-sign-qualified.py prepare
-      - name: Import credentials into disposable keychain
+        run: python3 tools/macos-collect-notarization.py prepare
+      - name: Authenticate notarization only; no private signing key
         timeout-minutes: 5
         env:
-          APPLE_P12_BASE64: ${{ secrets.APPLE_P12_BASE64 }}
-          APPLE_P12_PASSWORD: ${{ secrets.APPLE_P12_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
-        run: python3 tools/macos-sign-qualified.py credentials
-      - name: Sign wallet and submit to Apple
+        run: python3 tools/macos-sign-qualified.py notary-credentials
+      - name: Complete original wallet submission
         timeout-minutes: 20
-        run: python3 tools/macos-sign-qualified.py wallet
-      - name: Sign dashboard and submit to Apple
+        run: python3 tools/macos-collect-notarization.py wallet
+      - name: Complete original dashboard submission
         timeout-minutes: 20
-        run: python3 tools/macos-sign-qualified.py node-gui
-      - name: Remove temporary Apple keychain
+        run: python3 tools/macos-collect-notarization.py node-gui
+      - name: Remove temporary notarization keychain
         if: always()
         run: python3 tools/macos-sign-qualified.py cleanup
-      - name: Encrypt signatures and submission evidence
+      - name: Encrypt completion evidence
         if: always()
         timeout-minutes: 5
         run: |
@@ -63,7 +79,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: macos-signing-x86_64-apple-darwin
+          name: macos-notarization-${{ matrix.target }}
           path: macos-evidence.cms
           if-no-files-found: error
           retention-days: 30

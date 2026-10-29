@@ -116,7 +116,7 @@ def prepare():
         'assertions': 'Both archive hashes, bundle identifiers, raw binary hashes and exact contents'})
 
 
-def credentials():
+def credentials(signing=True):
     assert not KEYCHAIN.exists(), 'Refuse to replace an existing keychain'
     password = secrets.token_urlsafe(32)
     PRIVATE.append(password)
@@ -127,18 +127,19 @@ def credentials():
     write(SEARCH_STATE, original_search)
     SEARCH_STATE.chmod(0o600)
     run('register-keychain', ['security', 'list-keychains', '-d', 'user', '-s', str(KEYCHAIN), *original_search])
-    with tempfile.TemporaryDirectory(dir=os.environ['RUNNER_TEMP']) as name:
-        p12 = Path(name) / 'identity.p12'
-        p12.write_bytes(base64.b64decode(os.environ['APPLE_P12_BASE64'], validate=True))
-        p12.chmod(0o600)
-        run('import-key', ['security', 'import', str(p12), '-k', str(KEYCHAIN), '-P',
-            os.environ['APPLE_P12_PASSWORD'], '-T', '/usr/bin/codesign'])
-    run('key-access', ['security', 'set-key-partition-list', '-S', 'apple-tool:,apple:,codesign:',
-        '-s', '-k', password, str(KEYCHAIN)])
-    identities = run('find-identity', ['security', 'find-identity', '-v', '-p', 'codesigning', str(KEYCHAIN)])
-    write(OUT / 'identity-review.json', {'matchingCertificate': PLAN['certificateSha1'] in identities,
-        'certificateSha1': PLAN['certificateSha1'], 'scope': 'Native code-signing identity lookup'})
-    assert PLAN['certificateSha1'] in identities, 'Expected new certificate unavailable'
+    if signing:
+        with tempfile.TemporaryDirectory(dir=os.environ['RUNNER_TEMP']) as name:
+            p12 = Path(name) / 'identity.p12'
+            p12.write_bytes(base64.b64decode(os.environ['APPLE_P12_BASE64'], validate=True))
+            p12.chmod(0o600)
+            run('import-key', ['security', 'import', str(p12), '-k', str(KEYCHAIN), '-P',
+                os.environ['APPLE_P12_PASSWORD'], '-T', '/usr/bin/codesign'])
+        run('key-access', ['security', 'set-key-partition-list', '-S', 'apple-tool:,apple:,codesign:',
+            '-s', '-k', password, str(KEYCHAIN)])
+        identities = run('find-identity', ['security', 'find-identity', '-v', '-p', 'codesigning', str(KEYCHAIN)])
+        write(OUT / 'identity-review.json', {'matchingCertificate': PLAN['certificateSha1'] in identities,
+            'certificateSha1': PLAN['certificateSha1'], 'scope': 'Native code-signing identity lookup'})
+        assert PLAN['certificateSha1'] in identities, 'Expected new certificate unavailable'
     run('notary-credentials', ['xcrun', 'notarytool', 'store-credentials', PROFILE,
         '--apple-id', os.environ['APPLE_ID'], '--team-id', PLAN['teamId'],
         '--password', os.environ['APPLE_APP_PASSWORD'], '--keychain', str(KEYCHAIN)])
@@ -213,6 +214,8 @@ if __name__ == '__main__':
             prepare()
         elif mode == 'cleanup':
             cleanup()
+        elif mode == 'notary-credentials':
+            credentials(signing=False)
         elif mode == 'credentials':
             credentials()
         elif mode in PLAN['apps']:
