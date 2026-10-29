@@ -1,4 +1,4 @@
-name: macOS frozen candidate qualification
+name: macOS frozen desktop compilation
 on:
   workflow_dispatch:
 permissions:
@@ -19,7 +19,7 @@ jobs:
           - runner: macos-15-intel
             target: x86_64-apple-darwin
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 70
+    timeout-minutes: 140
     env:
       RUSTUP_TOOLCHAIN: nightly-2026-10-11
       CARGO_BUILD_JOBS: 1
@@ -41,8 +41,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             .macos-target
-          key: burst-macos-${{ matrix.target }}-nightly20261011-${{ hashFiles('validation-inputs/source.tar.gz') }}-v2
-          restore-keys: burst-macos-${{ matrix.target }}-nightly20261011-${{ hashFiles('validation-inputs/source.tar.gz') }}-v1
+          key: burst-macos-${{ matrix.target }}-nightly20261011-${{ hashFiles('validation-inputs/source.tar.gz') }}-desktop-v1
+          restore-keys: burst-macos-${{ matrix.target }}-nightly20261011-${{ hashFiles('validation-inputs/source.tar.gz') }}-v2
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -52,23 +52,20 @@ jobs:
           targets: ${{ matrix.target }}
       - name: Verify frozen source and host
         run: python3 tools/macos-candidate-v2.py prepare
-      - name: Retrieve preserved failed stage evidence
-        uses: actions/download-artifact@v4
-        with:
-          name: macos-candidate-${{ matrix.target }}
-          path: prior-encrypted
-          run-id: 40843038196
-          github-token: ${{ github.token }}
-      - name: Restore private receipt chain
-        env:
-          EVIDENCE_DECRYPT_KEY: ${{ secrets.MACOS_EVIDENCE_DECRYPT_KEY }}
-        run: python3 tools/macos-restore-evidence.py
-      - name: Build exact daemon
-        run: python3 tools/macos-candidate-v2.py daemon
-      - name: Build existing epoch helper
-        run: python3 tools/macos-candidate-v2.py helper
-      - name: Validate public identity and durable epoch restarts
-        run: python3 tools/macos-candidate-v2.py runtime
+      - name: Verify frozen desktop inputs
+        run: python3 tools/macos-desktop.py prepare
+      - name: wallet dependencies
+        run: python3 tools/macos-desktop.py wallet dependencies
+      - name: wallet frontend
+        run: python3 tools/macos-desktop.py wallet frontend
+      - name: wallet native
+        run: python3 tools/macos-desktop.py wallet native
+      - name: node-gui dependencies
+        run: python3 tools/macos-desktop.py node-gui dependencies
+      - name: node-gui frontend
+        run: python3 tools/macos-desktop.py node-gui frontend
+      - name: node-gui native
+        run: python3 tools/macos-desktop.py node-gui native
       - uses: actions/cache/save@v4
         if: always() && steps.cache.outputs.cache-hit != 'true'
         with:
@@ -81,13 +78,13 @@ jobs:
         if: always()
         timeout-minutes: 5
         run: |
-          test -d macos-candidate-evidence
-          tar -czf "$RUNNER_TEMP/macos-evidence.tar.gz" macos-candidate-evidence
+          test -d macos-desktop-evidence
+          tar -czf "$RUNNER_TEMP/macos-evidence.tar.gz" macos-desktop-evidence
           openssl cms -encrypt -binary -aes-256-cbc -stream -outform DER -in "$RUNNER_TEMP/macos-evidence.tar.gz" -out macos-evidence.cms validation-inputs/evidence-recipient.pem
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: macos-candidate-${{ matrix.target }}
+          name: macos-desktop-${{ matrix.target }}
           path: macos-evidence.cms
           if-no-files-found: error
           retention-days: 30
