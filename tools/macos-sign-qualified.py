@@ -107,6 +107,8 @@ def credentials():
     run('key-access', ['security', 'set-key-partition-list', '-S', 'apple-tool:,apple:,codesign:',
         '-s', '-k', password, str(KEYCHAIN)])
     identities = run('find-identity', ['security', 'find-identity', '-v', '-p', 'codesigning', str(KEYCHAIN)])
+    write(OUT / 'identity-review.json', {'matchingCertificate': PLAN['certificateSha1'] in identities,
+        'certificateSha1': PLAN['certificateSha1'], 'scope': 'Native code-signing identity lookup'})
     assert PLAN['certificateSha1'] in identities, 'Expected new certificate unavailable'
     run('notary-credentials', ['xcrun', 'notarytool', 'store-credentials', PROFILE,
         '--apple-id', os.environ['APPLE_ID'], '--team-id', PLAN['teamId'],
