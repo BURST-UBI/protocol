@@ -1,31 +1,79 @@
-name: Inspect retained Intel daemon ticket failure
+name: Sign qualified standalone Mac daemon
 on:
   workflow_dispatch:
 permissions:
   contents: read
   actions: read
+concurrency:
+  group: burst-macos-daemon-signing
+  cancel-in-progress: false
 jobs:
-  inspect:
-    runs-on: macos-15-intel
-    timeout-minutes: 5
+  sign:
+    if: github.ref == 'refs/heads/validation/macos-candidate-20261029'
+    environment: macos-signing
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            prior: 40876029916
+            artifact: macos-daemon-signed-x86_64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    env:
+      DAEMON_TARGET: ${{ matrix.target }}
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /LICENSE
+            /tools/macos-sign-qualified.py
+            /tools/macos-sign-daemon.py
+            /tools/validation-reuse.mjs
+            /validation-inputs/daemon-signing-plan.json
+            /validation-inputs/arm-signing-plan.json
+            /validation-inputs/evidence-recipient.pem
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: macos-daemon-signed-x86_64-apple-darwin
-          run-id: 40876029916
+          name: ${{ matrix.artifact }}
+          run-id: ${{ matrix.prior }}
           github-token: ${{ github.token }}
           path: prior-encrypted
-      - name: Read original failure only, no signing or validation retry
+      - name: Verify retained signed daemon and failed receipt
+        timeout-minutes: 5
         env:
           EVIDENCE_DECRYPT_KEY: ${{ secrets.MACOS_EVIDENCE_DECRYPT_KEY }}
+        run: python3 tools/macos-sign-daemon.py prepare-collection
+      - name: Authenticate notarization only; no private signing key
+        timeout-minutes: 5
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: python3 tools/macos-sign-qualified.py notary-credentials
+      - name: Collect original notarization and staple accepted image
+        timeout-minutes: 15
+        run: python3 tools/macos-sign-daemon.py collect
+      - name: Preserve terminal qualification receipt
+        if: always()
+        run: python3 tools/macos-sign-daemon.py finish
+      - name: Remove temporary keychain
+        if: always()
+        run: python3 tools/macos-sign-qualified.py cleanup
+      - name: Encrypt retained distribution and evidence
+        if: always()
+        timeout-minutes: 5
         run: |
-          python3 - <<'PY'
-          import os, subprocess, tempfile, pathlib, tarfile, json
-          with tempfile.TemporaryDirectory() as name:
-            tmp=pathlib.Path(name);key=tmp/'key.pem';key.write_text(os.environ.pop('EVIDENCE_DECRYPT_KEY'));key.chmod(0o600)
-            subprocess.run(['openssl','cms','-decrypt','-binary','-inform','DER','-in','prior-encrypted/macos-evidence.cms','-inkey',str(key),'-out',str(tmp/'evidence.tar.gz')],check=True)
-            with tarfile.open(tmp/'evidence.tar.gz') as tar:
-              print(tar.extractfile('macos-signing-evidence/daemon-ticket.error.log').read().decode())
-              status=json.load(tar.extractfile('macos-signing-evidence/daemon.notary-info.json'))
-              print('Original Apple status:',status['status'])
-          PY
+          test -d macos-signing-evidence
+          tar -czf "$RUNNER_TEMP/macos-evidence.tar.gz" macos-signing-evidence
+          openssl cms -encrypt -binary -aes-256-cbc -stream -outform DER -in "$RUNNER_TEMP/macos-evidence.tar.gz" -out macos-evidence.cms validation-inputs/evidence-recipient.pem
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: macos-daemon-signed-${{ matrix.target }}
+          path: macos-evidence.cms
+          if-no-files-found: error
+          retention-days: 30

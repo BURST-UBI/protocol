@@ -16,13 +16,9 @@ jobs:
       max-parallel: 2
       matrix:
         include:
-          - runner: macos-15
-            target: aarch64-apple-darwin
-            prior: 40875414393
-            artifact: macos-daemon-signed-aarch64-apple-darwin
           - runner: macos-15-intel
             target: x86_64-apple-darwin
-            prior: 40875414393
+            prior: 40876029916
             artifact: macos-daemon-signed-x86_64-apple-darwin
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 35
@@ -51,18 +47,13 @@ jobs:
         timeout-minutes: 5
         env:
           EVIDENCE_DECRYPT_KEY: ${{ secrets.MACOS_EVIDENCE_DECRYPT_KEY }}
-        run: python3 tools/macos-sign-daemon.py prepare
-      - name: Import approved identity into temporary keychain
+        run: python3 tools/macos-sign-daemon.py prepare-collection
+      - name: Authenticate notarization only; no private signing key
         timeout-minutes: 5
         env:
-          APPLE_P12_BASE64: ${{ secrets.APPLE_P12_BASE64 }}
-          APPLE_P12_PASSWORD: ${{ secrets.APPLE_P12_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
-        run: python3 tools/macos-sign-qualified.py credentials
-      - name: Sign daemon and distribution image, submit once
-        timeout-minutes: 20
-        run: python3 tools/macos-sign-daemon.py sign-submit
+        run: python3 tools/macos-sign-qualified.py notary-credentials
       - name: Collect original notarization and staple accepted image
         timeout-minutes: 15
         run: python3 tools/macos-sign-daemon.py collect

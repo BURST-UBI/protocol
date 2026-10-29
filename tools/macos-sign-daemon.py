@@ -6,28 +6,35 @@ run,write,digest=[shared[n] for n in ('run','write','digest')]
 manifest=json.loads((ROOT/'validation-inputs/daemon-signing-plan.json').read_text())
 entry=manifest['targets'][os.environ['DAEMON_TARGET']]
 mode=sys.argv[1]
-if mode=='prepare':
+if mode in ('prepare','prepare-collection'):
  assert os.environ['GITHUB_RUN_ATTEMPT']=='1'
  with tempfile.TemporaryDirectory(dir=os.environ['RUNNER_TEMP']) as name:
   tmp=pathlib.Path(name);key=tmp/'key.pem';key.write_text(os.environ['EVIDENCE_DECRYPT_KEY']);key.chmod(0o600)
   archive=tmp/'source.tar.gz'
   run('decrypt-daemon',['openssl','cms','-decrypt','-binary','-inform','DER','-in',str(ROOT/'prior-encrypted/macos-evidence.cms'),'-inkey',str(key),'-out',str(archive)])
   shared['extract'](archive,ROOT,'macos-signing-evidence')
- assert not list(OUT.glob('*.submission*')), 'Inspect prior submission before retry'
+ if mode=='prepare':
+  assert not list(OUT.glob('*.submission*')), 'Inspect prior submission before retry'
+ else:
+  assert json.loads((OUT/'daemon.notary-info.json').read_text())['status']=='Accepted'
+  assert (OUT/'daemon.submission.json').exists()
  assert json.loads((OUT/'input-review.json').read_text())['source']==entry
  binary=OUT/'payload/burst-daemon'
  run('retained-signature',['codesign','--verify','--strict',str(binary)])
- cert=OUT/'retained-certificate'
+ cert=OUT/('retained-certificate-'+os.environ['GITHUB_RUN_ID'])
  run('retained-cert',['codesign','--display','--extract-certificates='+str(cert),str(binary)])
  import hashlib
  assert hashlib.sha1(pathlib.Path(str(cert)+'0').read_bytes()).hexdigest().upper()==PLAN['certificateSha1']
  old_receipt=ROOT/'prior-daemon-receipt.json'
  shutil.copy2(OUT/'receipt.json',old_receipt)
  receipt_plan={'requirement':manifest['requirement'],'scope':'Exact signed daemon and notarized DMG, no public release','command':['workflow','prepare','credentials','sign-submit','collect'],'inputs':['tools/macos-sign-daemon.py','tools/macos-sign-qualified.py','validation-inputs/daemon-signing-plan.json','validation-inputs/arm-signing-plan.json','prior-encrypted/macos-evidence.cms','LICENSE'],'context':{'toolchain':'Native Apple codesign/notarytool/hdiutil; no compiler','features':'Previously qualified standalone release daemon','network':'Apple notarization only; no ledger','topology':os.environ['DAEMON_TARGET']+' GitHub approved host; no Azure','limits':manifest['limits']},'changeImpact':manifest['changeImpact']}
- write(OUT/'resume-plan.json',receipt_plan)
- run('receipt-prepare',['node','tools/validation-reuse.mjs','prepare',str(OUT/'resume-plan.json'),str(old_receipt),str(OUT/'resume-start.json')])
- (OUT/'receipt.json').rename(OUT/'previous-receipt.json')
- (OUT/'identity-review.json').rename(OUT/'previous-identity-review.json')
+ receipt_plan['rerun']={'reason':'Intel stapler validate failed NSURLErrorDomain -1005 network connection lost, error68; accepted DMG and original submission reused. One collection retry only.','attemptBudget':1}
+ plan_path=OUT/('plan-'+os.environ['GITHUB_RUN_ID']+'.json')
+ write(plan_path,receipt_plan)
+ run('receipt-prepare',['node','tools/validation-reuse.mjs','prepare',str(plan_path),str(old_receipt),str(OUT/('start-'+os.environ['GITHUB_RUN_ID']+'.json'))])
+ previous=OUT/('previous-'+os.environ['GITHUB_RUN_ID']);previous.mkdir()
+ for name in ['receipt.json','identity-review.json','daemon.notary-info.json','daemon.result.json','resume-result.json']:
+  if (OUT/name).exists(): (OUT/name).rename(previous/name)
 elif mode=='sign-submit':
  assert (OUT/'input-review.json').exists()
  assert not (OUT/'daemon.submission-started').exists()
@@ -65,11 +72,11 @@ elif mode=='collect':
  else:
   write(OUT/'daemon.result.json',{'outcome':'incomplete','notaryStatus':status['status'],'next':'Collect original submission later; never rebuild, resign or resubmit'})
 elif mode=='finish':
- if (OUT/'resume-start.json').exists():
+ if (OUT/('start-'+os.environ['GITHUB_RUN_ID']+'.json')).exists():
   result=json.loads((OUT/'daemon.result.json').read_text()) if (OUT/'daemon.result.json').exists() else {'outcome':'fail'}
   passed=result['outcome']=='pass'
   logs=[str(p) for p in OUT.glob('*.json') if p.name not in ('receipt-start.json','receipt-plan.json')]+[str(p) for p in OUT.glob('*.log')]
   terminal={'outcome':result['outcome'],'exitCode':0 if passed else 1,'assertions':6 if passed else 0,'review':result.get('scope',result.get('next','Signing or collection incomplete; inspect retained encrypted evidence; no release pass')),'logs':logs}
   write(OUT/'resume-result.json',terminal)
-  run('receipt-finish',['node','tools/validation-reuse.mjs','finish',str(OUT/'resume-start.json'),str(OUT/'resume-result.json'),str(OUT/'receipt.json')])
+  run('receipt-finish',['node','tools/validation-reuse.mjs','finish',str(OUT/('start-'+os.environ['GITHUB_RUN_ID']+'.json')),str(OUT/'resume-result.json'),str(OUT/'receipt.json')])
 else: raise ValueError('Unknown stage')
