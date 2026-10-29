@@ -1,0 +1,25 @@
+{
+  "requirement": "Distribute previously qualified standalone Mac daemon with Developer ID and notarization",
+  "targets": {
+    "aarch64-apple-darwin": {
+      "run": 40845222714,
+      "root": "macos-candidate-evidence",
+      "sha256": "f18a42bfe4cb054aa7d2044217b1a4ac8b97434c7381181c751aa998589ef950"
+    },
+    "x86_64-apple-darwin": {
+      "run": 40864042513,
+      "root": "macos-candidate-v4-evidence",
+      "sha256": "409c91a7e56922ab722a092dadbca1ea59bedd2f1bc0b4b9ee7d839b76013f38"
+    }
+  },
+  "changeImpact": [
+    {
+      "changedDependency": "Developer ID signature, notarized DMG distribution container",
+      "affectedCheck": "Signature, signed CLI startup, notarization and Gatekeeper",
+      "reusableReceiptArtifact": "ARM daemon40845222714 and Intel40864042513 exact native build/runtime",
+      "reuseOrRerun": "Reuse raw qualified binaries; first signing/container stage",
+      "reason": "GUI application signatures do not cover the separate standalone daemon"
+    }
+  ],
+  "limits": "Approved two GitHub Mac hosts only; no Azure; no compiler; commands120s except upload600s and wait620s, stage20minutes; no publication"
+}

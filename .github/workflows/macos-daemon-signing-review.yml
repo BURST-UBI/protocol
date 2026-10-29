@@ -1,0 +1,88 @@
+name: Sign qualified standalone Mac daemon
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: burst-macos-daemon-signing
+  cancel-in-progress: false
+jobs:
+  sign:
+    if: github.ref == 'refs/heads/validation/macos-candidate-20261029'
+    environment: macos-signing
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            prior: 40845222714
+            artifact: macos-candidate-aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            prior: 40864042513
+            artifact: macos-candidate-v4-x86_64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    env:
+      DAEMON_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /LICENSE
+            /tools/macos-sign-qualified.py
+            /tools/macos-sign-daemon.py
+            /tools/validation-reuse.mjs
+            /validation-inputs/daemon-signing-plan.json
+            /validation-inputs/arm-signing-plan.json
+            /validation-inputs/evidence-recipient.pem
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ matrix.artifact }}
+          run-id: ${{ matrix.prior }}
+          github-token: ${{ github.token }}
+          path: prior-encrypted
+      - name: Verify exact retained native daemon
+        timeout-minutes: 5
+        env:
+          EVIDENCE_DECRYPT_KEY: ${{ secrets.MACOS_EVIDENCE_DECRYPT_KEY }}
+        run: python3 tools/macos-sign-daemon.py prepare
+      - name: Import approved identity into temporary keychain
+        timeout-minutes: 5
+        env:
+          APPLE_P12_BASE64: ${{ secrets.APPLE_P12_BASE64 }}
+          APPLE_P12_PASSWORD: ${{ secrets.APPLE_P12_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: python3 tools/macos-sign-qualified.py credentials
+      - name: Sign daemon and distribution image, submit once
+        timeout-minutes: 20
+        run: python3 tools/macos-sign-daemon.py sign-submit
+      - name: Collect original notarization and staple accepted image
+        timeout-minutes: 15
+        run: python3 tools/macos-sign-daemon.py collect
+      - name: Preserve terminal qualification receipt
+        if: always()
+        run: python3 tools/macos-sign-daemon.py finish
+      - name: Remove temporary keychain
+        if: always()
+        run: python3 tools/macos-sign-qualified.py cleanup
+      - name: Encrypt retained distribution and evidence
+        if: always()
+        timeout-minutes: 5
+        run: |
+          test -d macos-signing-evidence
+          tar -czf "$RUNNER_TEMP/macos-evidence.tar.gz" macos-signing-evidence
+          openssl cms -encrypt -binary -aes-256-cbc -stream -outform DER -in "$RUNNER_TEMP/macos-evidence.tar.gz" -out macos-evidence.cms validation-inputs/evidence-recipient.pem
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: macos-daemon-signed-${{ matrix.target }}
+          path: macos-evidence.cms
+          if-no-files-found: error
+          retention-days: 30
