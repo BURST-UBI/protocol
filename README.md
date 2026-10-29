@@ -8,6 +8,12 @@ BURST is defined by two parameters:
 
 Normal money is BURST with r=0 and e=∞. Every other economic model is a different configuration.
 
+## Downloads and policies
+
+See [Downloads](docs/DOWNLOADS.md), [Code signing policy](docs/CODE_SIGNING.md),
+and [Privacy and network behavior](docs/PRIVACY.md). SignPath Foundation is the
+proposed Windows signing provider; approval and integration are not active.
+
 ## Quick Start
 
 For the current source comparison and tested protocol iterations, see
