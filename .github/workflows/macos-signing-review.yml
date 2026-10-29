@@ -1,0 +1,70 @@
+name: Sign qualified ARM apps for review
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: burst-macos-signing
+  cancel-in-progress: false
+jobs:
+  sign:
+    if: github.ref == 'refs/heads/validation/macos-candidate-20261029'
+    environment: macos-signing
+    runs-on: macos-15
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /tools/macos-sign-qualified.py
+            /validation-inputs/arm-signing-plan.json
+            /validation-inputs/evidence-recipient.pem
+      - name: Retrieve exact qualified packages
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: macos-package-aarch64-apple-darwin
+          run-id: 40857749588
+          github-token: ${{ github.token }}
+          path: prior-encrypted
+      - name: Verify unsigned package and binary identities
+        timeout-minutes: 5
+        env:
+          EVIDENCE_DECRYPT_KEY: ${{ secrets.MACOS_EVIDENCE_DECRYPT_KEY }}
+        run: python3 tools/macos-sign-qualified.py prepare
+      - name: Import credentials into disposable keychain
+        timeout-minutes: 5
+        env:
+          APPLE_P12_BASE64: ${{ secrets.APPLE_P12_BASE64 }}
+          APPLE_P12_PASSWORD: ${{ secrets.APPLE_P12_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: python3 tools/macos-sign-qualified.py credentials
+      - name: Sign wallet and submit to Apple
+        timeout-minutes: 20
+        run: python3 tools/macos-sign-qualified.py wallet
+      - name: Sign dashboard and submit to Apple
+        timeout-minutes: 20
+        run: python3 tools/macos-sign-qualified.py node-gui
+      - name: Remove temporary Apple keychain
+        if: always()
+        run: |
+          if test -f "$RUNNER_TEMP/burst-signing.keychain-db"; then
+            security delete-keychain "$RUNNER_TEMP/burst-signing.keychain-db"
+          fi
+      - name: Encrypt signatures and submission evidence
+        if: always()
+        timeout-minutes: 5
+        run: |
+          test -d macos-signing-evidence
+          tar -czf "$RUNNER_TEMP/macos-evidence.tar.gz" macos-signing-evidence
+          openssl cms -encrypt -binary -aes-256-cbc -stream -outform DER -in "$RUNNER_TEMP/macos-evidence.tar.gz" -out macos-evidence.cms validation-inputs/evidence-recipient.pem
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: macos-signing-aarch64-apple-darwin
+          path: macos-evidence.cms
+          if-no-files-found: error
+          retention-days: 30

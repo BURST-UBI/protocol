@@ -1,0 +1,34 @@
+{
+  "requirement": "Developer ID sign and notarize exact qualified ARM wallet/dashboard app packages",
+  "sourceRun": 40857749588,
+  "sourceArtifact": "macos-package-aarch64-apple-darwin",
+  "teamId": "KF48DP434N",
+  "certificateSha1": "4B8B9053B823EC34EC4FA8C314DC74A1DBA9528D",
+  "apps": {
+    "wallet": {
+      "archiveSha256": "a42ef78ba1a45fdd69d0cc7e52c0cdb9cf5fe0d4a7fd41e9ec2b9d5d1ea01235",
+      "binarySha256": "36a867a0ad449ec86917937a332bac974fbaef12f7c1365fc6d57f73bdb2a727",
+      "bundleIdentifier": "com.burst.wallet",
+      "bundleName": "Burst Wallet.app",
+      "scope": "Unsigned .app from exact qualified release binary; no compilation, Developer ID, notarization or GUI acceptance"
+    },
+    "node-gui": {
+      "archiveSha256": "372ec5cc135d95f8304d31ce686527568e36a0245d7511b6ff631f6cca5c69ac",
+      "binarySha256": "acf0b70fca460e3251f0a7a813080192c907c604ac08fe6208057abf2e1ee288",
+      "bundleIdentifier": "com.burst.node-dashboard",
+      "bundleName": "Burst Node.app",
+      "scope": "Unsigned .app from exact qualified release binary; no compilation, Developer ID, notarization or GUI acceptance"
+    }
+  },
+  "changeImpact": [
+    {
+      "changedDependency": "Developer ID signature and Apple notarization ticket only",
+      "affectedCheck": "Exact signed package identity, strict signature verification, stapling and Gatekeeper",
+      "reusableReceiptArtifact": "ARM native40852402087 and packaging40857749588, exact archive and raw Mach-O hashes below",
+      "reuseOrRerun": "Reuse qualified native packages; no rebuild or protocol rerun",
+      "reason": "Unsigned packaging does not establish trusted public distribution"
+    }
+  ],
+  "limits": "Approved GitHub macos-15 ARM3CPU7GiB; no Azure; no compile; each command capped, each app stage under1200s; temporary signing keychain removed; encrypted evidence only",
+  "publication": "No public release or asset upload. Signed packages submitted to Apple notarization and encrypted GitHub evidence only. GUI acceptance remains separate."
+}
