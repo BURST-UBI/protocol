@@ -1,5 +1,5 @@
 """First native GUI environment diagnostic, not GUI acceptance."""
-import atexit, hashlib, json, os, pathlib, plistlib, signal, subprocess, tarfile, tempfile, time
+import atexit, contextlib, hashlib, json, os, urllib.request, socket, pathlib, plistlib, signal, subprocess, tarfile, tempfile, time
 root = pathlib.Path.cwd()
 out = root / 'macos-gui-environment-evidence'
 out.mkdir()
@@ -23,7 +23,7 @@ def run(args, timeout=120):
 def write(name, obj):
     (out / name).write_text(json.dumps(obj, indent=2) + '\n')
 assert os.environ['GITHUB_RUN_ATTEMPT'] == '1'
-with tempfile.TemporaryDirectory() as name:
+with tempfile.TemporaryDirectory() as name, contextlib.ExitStack() as cleanup:
     tmp = pathlib.Path(name)
     key = tmp / 'key.pem'
     key.write_text(os.environ.pop('EVIDENCE_DECRYPT_KEY'))
@@ -36,6 +36,38 @@ with tempfile.TemporaryDirectory() as name:
             assert not p.is_absolute() and '..' not in p.parts
             assert p.parts[0] == 'macos-signing-evidence' and (member.isfile() or member.isdir())
         tar.extractall(tmp, filter='data')
+    daemon_archive=tmp/'daemon.tar.gz'
+    run(['openssl','cms','-decrypt','-binary','-inform','DER','-in','daemon-encrypted/macos-evidence.cms','-inkey',str(key),'-out',str(daemon_archive)])
+    target=os.environ['DAEMON_TARGET']
+    daemon_entry=json.loads(pathlib.Path('validation-inputs/daemon-signing-plan.json').read_text())['targets'][target]
+    daemon=tmp/'burst-daemon'
+    with tarfile.open(daemon_archive) as tar:
+        daemon.write_bytes(tar.extractfile(daemon_entry['root']+'/burst-daemon').read())
+    assert hashlib.sha256(daemon.read_bytes()).hexdigest()==daemon_entry['sha256']
+    daemon.chmod(0o755)
+    for port in [7077,29075]:
+        with socket.socket() as sock: sock.bind(('127.0.0.1',port))
+    daemon_log=(out/'daemon.log').open('w')
+    daemon_process=subprocess.Popen([str(daemon),'--network','dev','--no-representative','--data-dir',str(tmp/'ledger'),'--rpc=true','--rpc-port','7077','--port','29075','--websocket=false'],stdout=daemon_log,stderr=daemon_log,start_new_session=True)
+    def stop_daemon():
+        if daemon_process.poll() is None:
+            os.killpg(daemon_process.pid,signal.SIGTERM)
+            try: daemon_process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                os.killpg(daemon_process.pid,signal.SIGKILL);daemon_process.wait(timeout=5)
+        daemon_log.close()
+    cleanup.callback(stop_daemon)
+    baseline=None
+    for attempt in range(50):
+        try:
+            request=urllib.request.Request('http://127.0.0.1:7077',data=b'{"action":"node_info"}',headers={'Content-Type':'application/json'})
+            with urllib.request.urlopen(request,timeout=2) as response: baseline=json.load(response)
+            break
+        except OSError:
+            assert daemon_process.poll() is None, 'Dev daemon exited'
+            time.sleep(0.1)
+    assert baseline and baseline['network']=='dev'
+    write('rpc-baseline.json',baseline)
     prior = tmp / 'macos-signing-evidence'
     plan = json.loads((prior/'plan.json').read_text())
     compiler = run(['xcrun','--find','swiftc']).strip()
@@ -76,6 +108,7 @@ with tempfile.TemporaryDirectory() as name:
                     except subprocess.TimeoutExpired:
                         os.killpg(process.pid, signal.SIGKILL)
                         process.wait(timeout=5)
+    stop_daemon()
 
-write('result.json', {'outcome':'pass','exitCode':0,'assertions':8,'review':'Exact notarized dashboard archive verified, fresh installed profile, strict signature/Gatekeeper and native connection dialog assertions. Earlier wallet partial pass retained; wallet not rerun. Live RPC and full wallet lifecycle remain outside scope.','logs':[str(out/'node-gui.json'),str(out/'environment.json'),str(out/'node-gui.launch.log'),str(out/'commands.log')]})
+write('result.json', {'outcome':'pass','exitCode':0,'assertions':8,'review':'Exact notarized dashboard archive verified, fresh installed profile, strict signature/Gatekeeper and native connection dialog assertions. Live disposable Dev RPC bridge rendered isolated-node status and Devnet disclosure. Earlier wallet partial pass retained; wallet not rerun. Live RPC and full wallet lifecycle remain outside scope.','logs':[str(out/'node-gui.json'),str(out/'environment.json'),str(out/'node-gui.launch.log'),str(out/'commands.log'),str(out/'rpc-baseline.json')]})
 run(['node','tools/validation-reuse.mjs','finish',str(out/'start.json'),str(out/'result.json'),str(out/'receipt.json')])

@@ -1,6 +1,6 @@
 {
   "requirement": "Native interaction with installed signed Mac wallet and dashboard",
-  "scope": "Dashboard connection dialog, input label and dismissal using native Accessibility press actions; wallet navigation already passed in40875049539 and is not rerun. No live RPC/full lifecycle claim.",
+  "scope": "Installed dashboard live Dev RPC telemetry and network identity, plus connection dialog. Wallet and previous navigation scopes reused.",
   "command": [
     "python3",
     "tools/macos-gui-environment.py"
@@ -12,12 +12,14 @@
     "prior-encrypted/macos-evidence.cms",
     "tools/macos-gui-prior-receipt.py",
     "validation-inputs/gui-prior-driver.py",
-    "validation-inputs/gui-prior-actions.log"
+    "validation-inputs/gui-prior-actions.log",
+    "daemon-encrypted/macos-evidence.cms",
+    "validation-inputs/daemon-signing-plan.json"
   ],
   "context": {
     "toolchain": "Runner Xcode swiftc -j1, Node runner version",
     "features": "Unchanged signed release apps",
-    "network": "Fresh profile default localhost7077; no daemon or transactions",
+    "network": "Disposable localhost Dev daemon; no signing keys, payments or external peers",
     "topology": "Approved GitHub macos-15 ARM or macos-15-intel desktop session; no Azure",
     "limits": "Two approved hosts maximum; one compiler worker; compiler180s, stage480s; owned app cleanup10s+5s"
   },
@@ -49,6 +51,13 @@
       "reusableReceiptArtifact": "40875049539 wallet partial pass and dashboard failed lookup",
       "reuseOrRerun": "Dashboard only; preserve wallet pass",
       "reason": "Label exists but restrictive native Button role filter cannot locate actionable control; query supported AXPress actions and immediate label children instead. Keep dialog and dismissal assertions unchanged."
+    },
+    {
+      "changedDependency": "Disposable native Dev daemon fixture and UI data assertions",
+      "affectedCheck": "Installed dashboard Rust IPC/RPC connection and rendered network identity",
+      "reusableReceiptArtifact": "Prior GUI40875609741 and daemon raw SHA/native runtime40845222714 or40864042513",
+      "reuseOrRerun": "First live Mac dashboard connection; no product rebuild or wallet repeat",
+      "reason": "Static navigation does not establish RPC bridge functionality"
     }
   ]
 }

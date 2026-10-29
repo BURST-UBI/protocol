@@ -18,13 +18,18 @@ jobs:
           - runner: macos-15
             target: aarch64-apple-darwin
             prior: 40867797950
+            daemonRun: 40845222714
+            daemonArtifact: macos-candidate-aarch64-apple-darwin
           - runner: macos-15-intel
             target: x86_64-apple-darwin
             prior: 40868658486
+            daemonRun: 40864042513
+            daemonArtifact: macos-candidate-v4-x86_64-apple-darwin
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     env:
       PRIOR_RUN: ${{ matrix.prior }}
+      DAEMON_TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -38,6 +43,7 @@ jobs:
             /tools/macos-gui-environment.swift
             /tools/validation-reuse.mjs
             /validation-inputs/gui-environment-plan.json
+            /validation-inputs/daemon-signing-plan.json
             /validation-inputs/evidence-recipient.pem
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
@@ -48,9 +54,15 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: macos-gui-environment-${{ matrix.target }}
-          run-id: 40875049539
+          run-id: 40875609741
           github-token: ${{ github.token }}
           path: prior-gui-encrypted
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ matrix.daemonArtifact }}
+          run-id: ${{ matrix.daemonRun }}
+          github-token: ${{ github.token }}
+          path: daemon-encrypted
       - name: Inspect fresh signed applications and native automation environment
         timeout-minutes: 8
         env:

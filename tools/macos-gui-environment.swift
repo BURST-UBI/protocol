@@ -75,6 +75,8 @@ if CommandLine.arguments.count > 2 {
         require(waitFor("Your Burst wallet") != nil, "Return to onboarding")
         print("GUI_PASS wallet onboarding, mnemonic navigation, empty-input guard and Back")
     } else {
+        require(waitFor("Your node is isolated") != nil, "Live native RPC telemetry rendered")
+        require(waitFor("Devnet — test funds only, no real value. Test faucet disabled.") != nil, "Live Dev network identity rendered")
         require(waitFor("Connection") != nil, "Dashboard connection action")
         press("Connection")
         require(waitFor("Node connection") != nil, "Connection dialog opened")
@@ -82,6 +84,6 @@ if CommandLine.arguments.count > 2 {
         press("Close")
         require(waitFor("Connection") != nil, "Connection dialog close")
         require(!nodes().contains { matches($0,"Node connection") }, "Connection dialog dismissed")
-        print("GUI_PASS dashboard connection dialog, input label and dismissal")
+        print("GUI_PASS dashboard live Dev RPC telemetry/network identity and connection dialog")
     }
 }
