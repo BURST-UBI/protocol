@@ -50,10 +50,7 @@ jobs:
         run: python3 tools/macos-sign-qualified.py node-gui
       - name: Remove temporary Apple keychain
         if: always()
-        run: |
-          if test -f "$RUNNER_TEMP/burst-signing.keychain-db"; then
-            security delete-keychain "$RUNNER_TEMP/burst-signing.keychain-db"
-          fi
+        run: python3 tools/macos-sign-qualified.py cleanup
       - name: Encrypt signatures and submission evidence
         if: always()
         timeout-minutes: 5

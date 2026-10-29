@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import plistlib
 import secrets
+import shlex
 import shutil
 import subprocess
 import sys
@@ -18,6 +19,7 @@ OUT = ROOT / 'macos-signing-evidence'
 PLAN = json.loads((ROOT / 'validation-inputs/arm-signing-plan.json').read_text())
 KEYCHAIN = Path(os.environ['RUNNER_TEMP']) / 'burst-signing.keychain-db'
 PROFILE = 'burst-notarization'
+SEARCH_STATE = Path(os.environ['RUNNER_TEMP']) / 'burst-original-keychain-search.json'
 PRIVATE = [v for k, v in os.environ.items() if k in (
     'APPLE_P12_BASE64', 'APPLE_P12_PASSWORD', 'APPLE_ID', 'APPLE_APP_PASSWORD',
     'EVIDENCE_DECRYPT_KEY') and v]
@@ -98,6 +100,10 @@ def credentials():
     run('create-keychain', ['security', 'create-keychain', '-p', password, str(KEYCHAIN)])
     run('unlock-keychain', ['security', 'unlock-keychain', '-p', password, str(KEYCHAIN)])
     run('keychain-timeout', ['security', 'set-keychain-settings', '-lut', '3600', str(KEYCHAIN)])
+    original_search = shlex.split(run('read-keychain-search', ['security', 'list-keychains', '-d', 'user']))
+    write(SEARCH_STATE, original_search)
+    SEARCH_STATE.chmod(0o600)
+    run('register-keychain', ['security', 'list-keychains', '-d', 'user', '-s', str(KEYCHAIN), *original_search])
     with tempfile.TemporaryDirectory(dir=os.environ['RUNNER_TEMP']) as name:
         p12 = Path(name) / 'identity.p12'
         p12.write_bytes(base64.b64decode(os.environ['APPLE_P12_BASE64'], validate=True))
@@ -113,6 +119,16 @@ def credentials():
     run('notary-credentials', ['xcrun', 'notarytool', 'store-credentials', PROFILE,
         '--apple-id', os.environ['APPLE_ID'], '--team-id', PLAN['teamId'],
         '--password', os.environ['APPLE_APP_PASSWORD'], '--keychain', str(KEYCHAIN)])
+
+
+def cleanup():
+    try:
+        if SEARCH_STATE.exists():
+            run('restore-keychain-search', ['security', 'list-keychains', '-d', 'user', '-s',
+                *json.loads(SEARCH_STATE.read_text())])
+    finally:
+        if KEYCHAIN.exists():
+            run('delete-keychain', ['security', 'delete-keychain', str(KEYCHAIN)])
 
 
 def app_stage(app):
@@ -171,6 +187,8 @@ if __name__ == '__main__':
         mode = sys.argv[1]
         if mode == 'prepare':
             prepare()
+        elif mode == 'cleanup':
+            cleanup()
         elif mode == 'credentials':
             credentials()
         elif mode in PLAN['apps']:
