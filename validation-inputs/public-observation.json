@@ -1,0 +1,7 @@
+{
+  "network": "Test",
+  "reportedAddress": "brst_kk7eoqm7rnzwrqif7n13zefi5ug63ghc41qjo8qabobwkbcjzoz1eai4fnoq",
+  "reportedGenesisHash": "fe74ddc1963650cf3c15f423fc0ba1bd65a4c9a8ee174d956abc8eb2fd5193e3",
+  "paramsHash": "02f211e83569515e260e2b1e82f60fa0e3863dbd42f031efe07f321a9b31fe35",
+  "derivation": "Canonical v7 genesis from unchanged public address and source Test defaults; v6 derivation cross-checked against retained observation 95b9798328ad794badd6767e8b9c10ff5bab18e67109044e6a159148f414bb4b. No secret input."
+}

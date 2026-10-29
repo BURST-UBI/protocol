@@ -1,4 +1,4 @@
-name: macOS candidate qualification preflight
+name: macOS frozen candidate qualification
 on:
   workflow_dispatch:
 permissions:
@@ -7,30 +7,73 @@ concurrency:
   group: burst-macos-candidate-qualification
   cancel-in-progress: false
 jobs:
-  host-preflight:
+  candidate:
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: 2
       matrix:
         include:
           - runner: macos-15
-            arch: arm64
+            target: aarch64-apple-darwin
           - runner: macos-15-intel
-            arch: x86_64
+            target: x86_64-apple-darwin
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 5
+    timeout-minutes: 70
+    env:
+      CARGO_BUILD_JOBS: 1
+      CARGO_INCREMENTAL: 0
+      TOKIO_WORKER_THREADS: 1
+      RAYON_NUM_THREADS: 1
+      BURST_TEST_CPUS: 1
+      BURST_TEST_GENESIS_PUBLIC_KEY: 948acade65c53fcc5e0d2d001fb1b01edc40b9ea102f1a9ae84d53c92551fd7e
+      MACOS_TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Inspect native validation prerequisites
-        env:
-          EXPECTED_ARCH: ${{ matrix.arch }}
-        run: python3 tools/macos-host-preflight.py
+      - name: Restore stable target and dependency cache
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            .macos-target
+          key: burst-macos-${{ matrix.target }}-nightly20261011-${{ hashFiles('validation-inputs/source.tar.gz') }}-v1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-11
+          targets: ${{ matrix.target }}
+      - name: Verify frozen source and host
+        run: python3 tools/macos-candidate.py prepare
+      - name: Build exact daemon
+        run: python3 tools/macos-candidate.py daemon
+      - name: Build existing epoch helper
+        run: python3 tools/macos-candidate.py helper
+      - name: Validate public identity and durable epoch restarts
+        run: python3 tools/macos-candidate.py runtime
+      - uses: actions/cache/save@v4
+        if: always() && steps.cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            .macos-target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+      - name: Encrypt retained evidence for local review
+        if: always()
+        timeout-minutes: 5
+        run: |
+          test -d macos-candidate-evidence
+          tar -czf "$RUNNER_TEMP/macos-evidence.tar.gz" macos-candidate-evidence
+          openssl cms -encrypt -binary -aes-256-cbc -stream -outform DER -in "$RUNNER_TEMP/macos-evidence.tar.gz" -out macos-evidence.cms validation-inputs/evidence-recipient.pem
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: macos-host-preflight-${{ matrix.arch }}
-          path: macos-host-evidence/
+          name: macos-candidate-${{ matrix.target }}
+          path: macos-evidence.cms
           if-no-files-found: error
           retention-days: 30
