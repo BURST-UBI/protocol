@@ -1,4 +1,4 @@
-name: Complete existing Mac notarization submissions
+name: Finish accepted Intel dashboard ticket after network loss
 on:
   workflow_dispatch:
 permissions:
@@ -16,20 +16,17 @@ jobs:
       max-parallel: 2
       matrix:
         include:
-          - runner: macos-15
-            target: aarch64-apple-darwin
-            plan: arm-signing-plan.json
-            prior: 40866759808
-            evidence: 95db090b4e568970d77e9328bb47aad211c216030810cbc31a968db7f62c5f65
           - runner: macos-15-intel
             target: x86_64-apple-darwin
             plan: intel-signing-plan.json
-            prior: 40867048365
-            evidence: 0867e3fc87c334070320e75e4dacd512919311b6580515106752e0de81487f17
+            prior: 40867797950
+            evidence: f782b018a2b5f4b1dea08dac11a558f22912986d50444c132f7f533607e2a254
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 50
     env:
       SIGNING_PLAN: ${{ matrix.plan }}
+      COLLECTION_RETRY_REASON: Apple ticket-delivery connection lost with NSURLErrorDomain -1005; one retry of accepted Intel dashboard ticket only; no resubmission
+      COLLECTION_RETRY_BUDGET: 1
       PRIOR_RUN: ${{ matrix.prior }}
       PRIOR_EVIDENCE_SHA256: ${{ matrix.evidence }}
     steps:
@@ -45,7 +42,7 @@ jobs:
             /validation-inputs/evidence-recipient.pem
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: macos-signing-${{ matrix.target }}
+          name: macos-notarization-${{ matrix.target }}
           run-id: ${{ matrix.prior }}
           github-token: ${{ github.token }}
           path: prior-encrypted
@@ -60,9 +57,6 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: python3 tools/macos-sign-qualified.py notary-credentials
-      - name: Complete original wallet submission
-        timeout-minutes: 20
-        run: python3 tools/macos-collect-notarization.py wallet
       - name: Complete original dashboard submission
         timeout-minutes: 20
         run: python3 tools/macos-collect-notarization.py node-gui

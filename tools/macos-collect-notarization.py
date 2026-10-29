@@ -44,6 +44,8 @@ def prepare():
         'sourceRun': os.environ['PRIOR_RUN'], 'evidenceSha256': os.environ['PRIOR_EVIDENCE_SHA256'],
         'scope': 'Poll original submission IDs; staple accepted exact signed packages; no signing, rebuild or resubmission',
         'limits': 'Each Apple wait600s and command cap620s; no Azure; no compiler',
+        'rerun': {'reason': os.environ.get('COLLECTION_RETRY_REASON', 'First collection'),
+                  'attemptBudget': int(os.environ.get('COLLECTION_RETRY_BUDGET', '1'))},
     })
 
 
