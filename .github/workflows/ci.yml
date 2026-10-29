@@ -1,44 +1,40 @@
-name: Finish accepted Intel dashboard ticket after network loss
+name: Inspect signed Mac GUI environment
 on:
   workflow_dispatch:
 permissions:
   contents: read
   actions: read
 concurrency:
-  group: burst-macos-notarization-collection
+  group: burst-macos-gui-environment
   cancel-in-progress: false
 jobs:
-  collect:
+  inspect:
     if: github.ref == 'refs/heads/validation/macos-candidate-20261029'
-    environment: macos-signing
     strategy:
       fail-fast: false
       max-parallel: 2
       matrix:
         include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            prior: 40867797950
           - runner: macos-15-intel
             target: x86_64-apple-darwin
-            plan: intel-signing-plan.json
-            prior: 40867797950
-            evidence: f782b018a2b5f4b1dea08dac11a558f22912986d50444c132f7f533607e2a254
+            prior: 40868658486
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 50
+    timeout-minutes: 15
     env:
-      SIGNING_PLAN: ${{ matrix.plan }}
-      COLLECTION_RETRY_REASON: Apple ticket-delivery connection lost with NSURLErrorDomain -1005; one retry of accepted Intel dashboard ticket only; no resubmission
-      COLLECTION_RETRY_BUDGET: 1
       PRIOR_RUN: ${{ matrix.prior }}
-      PRIOR_EVIDENCE_SHA256: ${{ matrix.evidence }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
           sparse-checkout-cone-mode: false
           sparse-checkout: |
-            /tools/macos-sign-qualified.py
-            /tools/macos-collect-notarization.py
-            /validation-inputs/arm-signing-plan.json
-            /validation-inputs/intel-signing-plan.json
+            /tools/macos-gui-environment.py
+            /tools/macos-gui-environment.swift
+            /tools/validation-reuse.mjs
+            /validation-inputs/gui-environment-plan.json
             /validation-inputs/evidence-recipient.pem
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
@@ -46,34 +42,22 @@ jobs:
           run-id: ${{ matrix.prior }}
           github-token: ${{ github.token }}
           path: prior-encrypted
-      - name: Verify retained signed packages and original submission IDs
-        timeout-minutes: 5
+      - name: Inspect fresh signed applications and native automation environment
+        timeout-minutes: 8
         env:
           EVIDENCE_DECRYPT_KEY: ${{ secrets.MACOS_EVIDENCE_DECRYPT_KEY }}
-        run: python3 tools/macos-collect-notarization.py prepare
-      - name: Authenticate notarization only; no private signing key
-        timeout-minutes: 5
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
-        run: python3 tools/macos-sign-qualified.py notary-credentials
-      - name: Complete original dashboard submission
-        timeout-minutes: 20
-        run: python3 tools/macos-collect-notarization.py node-gui
-      - name: Remove temporary notarization keychain
+        run: python3 tools/macos-gui-environment.py
+      - name: Encrypt diagnostic evidence
         if: always()
-        run: python3 tools/macos-sign-qualified.py cleanup
-      - name: Encrypt completion evidence
-        if: always()
-        timeout-minutes: 5
+        timeout-minutes: 3
         run: |
-          test -d macos-signing-evidence
-          tar -czf "$RUNNER_TEMP/macos-evidence.tar.gz" macos-signing-evidence
+          test -d macos-gui-environment-evidence
+          tar -czf "$RUNNER_TEMP/macos-evidence.tar.gz" macos-gui-environment-evidence
           openssl cms -encrypt -binary -aes-256-cbc -stream -outform DER -in "$RUNNER_TEMP/macos-evidence.tar.gz" -out macos-evidence.cms validation-inputs/evidence-recipient.pem
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: macos-notarization-${{ matrix.target }}
+          name: macos-gui-environment-${{ matrix.target }}
           path: macos-evidence.cms
           if-no-files-found: error
           retention-days: 30
