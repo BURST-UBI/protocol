@@ -1,0 +1,25 @@
+{
+  "requirement": "Exact frozen daemon compilation and existing public identity/epoch/restart qualification on native macOS",
+  "changeImpact": [
+    {
+      "changedDependency": "Native macOS ARM64/Intel target; 1093 source files exactly match frozen GNU candidate inputs",
+      "affectedRequirement": "Native compilation/linkage and existing identity/epoch/restart smoke",
+      "reusableReceiptArtifact": "GNU/musl/Windows/Linux-ARM scoped results and macOS host preflight40839080904",
+      "reuseOrRerun": "Reuse source and assertion logic; first native macOS build and run per architecture",
+      "reason": "No native macOS candidate proof exists"
+    }
+  ],
+  "limits": "User approved hosted VM boundaries: ARM3CPU7GiB, Intel4CPU14GiB; parallel separate hosts authorized; one Cargo worker per host; each expensive command1200s with10s cleanup. Desktop unchanged. No Azure.",
+  "stages": [
+    "verify exact archived source",
+    "pinned Rust/Node toolchain setup",
+    "build frozen daemon once",
+    "build existing restart helper using same target cache",
+    "existing public identity/Dev epoch/two-restart smoke"
+  ],
+  "scope": "Unsigned/ad-hoc native qualification; not Developer ID signing, notarization, GUI acceptance, Pi4, throughput or physical power-loss",
+  "retry": "No automatic workflow re-run. Preserve failed artifacts/cache; subsequent attempts must audit and prepare latest stage receipts.",
+  "diagnosis": "Intel second attempt completed node unit in620.225s, then daemon started176.836s before cumulative1200s timeout. Node rlib/fingerprint confirmed retained by read-only run40851072554. One warm-cache completion attempt, no ARM rerun. Old cleanup EPERM masked timeout; corrected membership-aware handler passed3local checks and native disposable child.",
+  "priorRun": 40845222714,
+  "attemptBudget": 1
+}
