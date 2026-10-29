@@ -48,7 +48,7 @@ with tempfile.TemporaryDirectory() as name, contextlib.ExitStack() as cleanup:
     for port in [7077,29075]:
         with socket.socket() as sock: sock.bind(('127.0.0.1',port))
     daemon_log=(out/'daemon.log').open('w')
-    daemon_process=subprocess.Popen([str(daemon),'--network','dev','--no-representative','--data-dir',str(tmp/'ledger'),'--rpc=true','--rpc-port','7077','--port','29075','--websocket=false'],stdout=daemon_log,stderr=daemon_log,start_new_session=True)
+    daemon_process=subprocess.Popen([str(daemon),'--network','dev','--no-representative','--data-dir',str(tmp/'ledger'),'--rpc=true','--rpc-port','7077','--port','29075','--websocket=false','--disable-upnp','node','run'],stdout=daemon_log,stderr=daemon_log,start_new_session=True)
     def stop_daemon():
         if daemon_process.poll() is None:
             os.killpg(daemon_process.pid,signal.SIGTERM)
@@ -61,7 +61,8 @@ with tempfile.TemporaryDirectory() as name, contextlib.ExitStack() as cleanup:
     for attempt in range(50):
         try:
             request=urllib.request.Request('http://127.0.0.1:7077',data=b'{"action":"node_info"}',headers={'Content-Type':'application/json'})
-            with urllib.request.urlopen(request,timeout=2) as response: baseline=json.load(response)
+            with urllib.request.urlopen(request,timeout=2) as response:
+                envelope=json.load(response);baseline=envelope.get('result',envelope)
             break
         except OSError:
             assert daemon_process.poll() is None, 'Dev daemon exited'
