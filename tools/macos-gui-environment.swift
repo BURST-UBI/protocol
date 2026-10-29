@@ -49,7 +49,16 @@ func require(_ condition: Bool, _ message: String) {
 }
 func press(_ label: String) {
     let control = nodes().first { node in
-        matches(node, label) && ((attribute(node, kAXRoleAttribute) as? String) == kAXButtonRole)
+        var actions: CFArray?
+        guard AXUIElementCopyActionNames(node, &actions) == .success,
+              (actions as? [String] ?? []).contains(kAXPressAction) else { return false }
+        let children = attribute(node, kAXChildrenAttribute) as? [AXUIElement] ?? []
+        return matches(node, label) || children.contains { matches($0, label) }
+    }
+    if control == nil {
+        for node in nodes() where matches(node, label) {
+            print("Missing action diagnostic role:", attribute(node, kAXRoleAttribute) ?? "unknown" as CFString)
+        }
     }
     require(control != nil, "Missing action: \(label)")
     require(AXUIElementPerformAction(control!, kAXPressAction as CFString) == .success, "Action failed: \(label)")

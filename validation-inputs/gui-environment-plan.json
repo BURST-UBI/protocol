@@ -1,6 +1,6 @@
 {
   "requirement": "Native interaction with installed signed Mac wallet and dashboard",
-  "scope": "Wallet onboarding, mnemonic empty-input guard and Back; dashboard connection dialog and dismissal. No live RPC, funded payment or complete GUI acceptance claim.",
+  "scope": "Dashboard connection dialog, input label and dismissal using native Accessibility press actions; wallet navigation already passed in40875049539 and is not rerun. No live RPC/full lifecycle claim.",
   "command": [
     "python3",
     "tools/macos-gui-environment.py"
@@ -42,6 +42,13 @@
       "reusableReceiptArtifact": "Environment40873905683 both hosts passed; notarization exact ZIPs unchanged",
       "reuseOrRerun": "Reuse environment prerequisite; first native navigation assertions",
       "reason": "Launch and AX availability alone do not establish interactive UI behavior"
+    },
+    {
+      "changedDependency": "Test driver action discovery",
+      "affectedCheck": "Dashboard Connection control activation",
+      "reusableReceiptArtifact": "40875049539 wallet partial pass and dashboard failed lookup",
+      "reuseOrRerun": "Dashboard only; preserve wallet pass",
+      "reason": "Label exists but restrictive native Button role filter cannot locate actionable control; query supported AXPress actions and immediate label children instead. Keep dialog and dismissal assertions unchanged."
     }
   ]
 }
