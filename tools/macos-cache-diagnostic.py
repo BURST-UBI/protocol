@@ -4,12 +4,12 @@ root=pathlib.Path(__file__).resolve().parent.parent
 out=root/'macos-cache-diagnostic';out.mkdir(exist_ok=False)
 cache=root/'.macos-target/x86_64-apple-darwin/release'
 records=[]
-for pat in ['.fingerprint/burst-node-*/*','.fingerprint/burst-daemon-*/*','deps/libburst_node*','deps/burst_daemon*','burst-daemon']:
+for pat in ['build/burst-node/**/*','build/burst-daemon/**/*','burst-daemon']:
  for p in cache.glob(pat):
   if p.is_file():
    s=p.stat();records.append({'path':str(p.relative_to(cache)),'bytes':s.st_size,'modifiedUtc':datetime.datetime.fromtimestamp(s.st_mtime,datetime.timezone.utc).isoformat()})
 (out/'cache-files.json').write_text(json.dumps(records,indent=2)+'\n')
-result={'platform':subprocess.check_output(['sw_vers'],text=True),'buildExecuted':False}
+result={'cargoLayout':'Rust1.101 nightly uses release/build/PACKAGE/HASH/out; old fingerprint layout search was inapplicable', 'platform':subprocess.check_output(['sw_vers'],text=True),'buildExecuted':False}
 child=subprocess.Popen(['/usr/bin/nice','-n','10','/bin/sleep','30'],start_new_session=True)
 started=time.monotonic()
 try:
@@ -30,5 +30,9 @@ finally:
  if child.poll() is None:
   child.kill();child.wait(timeout=10)
 result['elapsedSeconds']=time.monotonic()-started
+from macos_process import stop_group
+child2=subprocess.Popen(['/bin/sleep','30'],start_new_session=True)
+stop_group(child2)
+result['correctedCleanupExitCode']=child2.returncode
 (out/'cleanup.json').write_text(json.dumps(result,indent=2)+'\n')
 print(json.dumps({'cacheRecords':len(records),'cleanup':result}))

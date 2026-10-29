@@ -16,5 +16,6 @@
       "reuse": "ARM daemon pass and both platform existing receipts unchanged",
       "next": "Use measured cache timing before deciding any daemon retry"
     }
-  ]
+  ],
+  "followup": "First diagnostic run40849914622 restored cache but searched obsolete pre1.100 layout. Existing first-failure rustc command proves actual out-dir is release/build/PACKAGE/HASH/out. Updated bounded read-only inspection uses actual layout, no compiler restart. Also exercises corrected empty-group-safe cleanup."
 }
