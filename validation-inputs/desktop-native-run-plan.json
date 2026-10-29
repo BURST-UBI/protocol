@@ -1,0 +1,48 @@
+{
+  "requirement": "Native macOS wallet and dashboard frozen candidate compilation",
+  "question": "Can native applications compile using the exact previously qualified frontend bytes, with no Vite reconstruction on the Mac?",
+  "previousDaemonRun": 40845222714,
+  "limits": "Separate approved macos-15 ARM3CPU7GiB and macos-15-intel4CPU14GiB hosts; one Cargo worker per host; each command1200s plus10s cleanup; no Azure; desktop no builds",
+  "changeImpact": [
+    {
+      "changedDependency": "Native macOS target, SDK and WebKit runtime",
+      "affectedCheck": "Wallet/dashboard native release compilation and application packaging",
+      "existingEvidence": "Linux/Windows package receipts; desktop-source-manifest.json references source receipts",
+      "action": "First native Mac app build; existing platforms unchanged",
+      "reason": "Other platforms cannot establish Mac compatibility"
+    },
+    {
+      "changedDependency": "Fresh host lacks qualified frontend dist",
+      "affectedCheck": "Reproduce49 exact saved output hashes",
+      "existingEvidence": "Frozen frontend source and expectedFrontend hashes in desktop manifest",
+      "action": "Reproduce files and compare exact hashes; no repeat typecheck/browser suite",
+      "reason": "Packaging must not consume stale local dist or silently change assets"
+    },
+    {
+      "changedDependency": "Protocol path mapping via explicit protocol symlink to candidate-source",
+      "affectedCheck": "Cargo path dependencies",
+      "existingEvidence": "1093 frozen daemon source files and stable .macos-target cache",
+      "action": "Resolve symlink explicitly in receipt inputs; verify all archive hashes",
+      "reason": "Retain stable cache/source paths while meeting existing sibling app layout"
+    },
+    {
+      "changedDependency": "None to Linux/Windows protocol or apps",
+      "affectedCheck": "Existing candidate capabilities",
+      "existingEvidence": "Current completion ledger scoped receipts",
+      "action": "Retain existing evidence",
+      "reason": "Mac orchestration only; no product code changes"
+    }
+  ],
+  "separateGates": [
+    "Exact installed GUI runtime",
+    "Developer ID signature",
+    "Apple notarization and stapling",
+    "Final package installation and Gatekeeper assessment"
+  ],
+  "publication": "No release publication; encrypted evidence only",
+  "scheduling": "Six independent commands per architecture, each capped at1200s plus10s cleanup. Workflow140min is aggregate allowance, not a longer command cap. Same concurrency group queues after daemon run40845222714, reusing its cache.",
+  "preflightCorrection": "First desktop run40847160773 failed before any npm/build receipt at protocol symlink creation: checkout already contains a protocol wire crate. Extract apps into desktop-source/{wallet,node-gui}; map desktop-source/protocol explicitly to stable candidate-source. No protocol source or cache path changes; no successful stage is repeated.",
+  "frontendResolution": "Wallet4.452s and dashboard6.383s bounded local reconstruction with original full Tailwind footprint produced all49 expected hashes exactly; frozen-frontend-manifest.json contains those identities. Existing Mac mismatch receipts remain failed; new frontend stage verifies restored bytes using prepare on latest wallet failure.",
+  "dependencyProvisioning": "Prior npm install passed but installed files were not retained on ephemeral hosts. Reinstall pinned lockfiles as provisioning only, chain wallet receipt with prepare; retain installed tooling in separate cache for subsequent packaging. This does not repeat functional tests.",
+  "previousDesktopRun": 40848475451
+}
