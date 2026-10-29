@@ -16,4 +16,12 @@ jobs:
             /tools/macos-gui-environment.swift
       - name: Capture exact probe compiler diagnostic without launching apps
         timeout-minutes: 3
-        run: xcrun swiftc -j 1 tools/macos-gui-environment.swift -o "$RUNNER_TEMP/probe"
+        run: |
+          set +e
+          compiler="$(xcrun --find swiftc)"
+          "$compiler" -j 1 tools/macos-gui-environment.swift -o "$RUNNER_TEMP/direct-probe"
+          direct_status=$?
+          xcrun swiftc -j 1 tools/macos-gui-environment.swift -o "$RUNNER_TEMP/xcrun-probe"
+          xcrun_status=$?
+          echo "Direct compiler status: $direct_status; xcrun status: $xcrun_status"
+          test "$xcrun_status" = 0
