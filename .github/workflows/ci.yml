@@ -1,4 +1,4 @@
-name: macOS Intel daemon final cache completion
+name: macOS Intel wallet cache diagnosis
 on:
   workflow_dispatch:
 permissions:
@@ -17,7 +17,7 @@ jobs:
           - runner: macos-15-intel
             target: x86_64-apple-darwin
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 70
+    timeout-minutes: 10
     env:
       RUSTUP_TOOLCHAIN: nightly-2026-10-11
       CARGO_BUILD_JOBS: 1
@@ -41,51 +41,19 @@ jobs:
             .macos-target
           key: burst-macos-${{ matrix.target }}-nightly20261011-${{ hashFiles('validation-inputs/source.tar.gz') }}-daemon-v3
           restore-keys: burst-macos-${{ matrix.target }}-nightly20261011-${{ hashFiles('validation-inputs/source.tar.gz') }}-desktop-native-v2
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly-2026-10-11
-          targets: ${{ matrix.target }}
-      - name: Verify frozen source and host
-        run: python3 tools/macos-candidate-v3.py prepare
-      - name: Retrieve preserved failed stage evidence
-        uses: actions/download-artifact@v4
-        with:
-          name: macos-candidate-${{ matrix.target }}
-          path: prior-encrypted
-          run-id: 40845222714
-          github-token: ${{ github.token }}
-      - name: Restore private receipt chain
-        env:
-          EVIDENCE_DECRYPT_KEY: ${{ secrets.MACOS_EVIDENCE_DECRYPT_KEY }}
-        run: python3 tools/macos-restore-daemon-v3.py
-      - name: Build exact daemon
-        run: python3 tools/macos-candidate-v3.py daemon
-      - name: Build existing epoch helper
-        run: python3 tools/macos-candidate-v3.py helper
-      - name: Validate public identity and durable epoch restarts
-        run: python3 tools/macos-candidate-v3.py runtime
-      - uses: actions/cache/save@v4
-        if: always() && steps.cache.outputs.cache-hit != 'true'
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            .macos-target
-          key: ${{ steps.cache.outputs.cache-primary-key }}
+      - name: Inspect preserved stage and cleanup behavior
+        run: python3 tools/macos-wallet-cache-diagnostic.py
       - name: Encrypt retained evidence for local review
         if: always()
         timeout-minutes: 5
         run: |
-          test -d macos-candidate-v3-evidence
-          tar -czf "$RUNNER_TEMP/macos-evidence.tar.gz" macos-candidate-v3-evidence
+          test -d macos-wallet-cache-diagnostic
+          tar -czf "$RUNNER_TEMP/macos-evidence.tar.gz" macos-wallet-cache-diagnostic
           openssl cms -encrypt -binary -aes-256-cbc -stream -outform DER -in "$RUNNER_TEMP/macos-evidence.tar.gz" -out macos-evidence.cms validation-inputs/evidence-recipient.pem
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: macos-candidate-v3-${{ matrix.target }}
+          name: macos-wallet-cache-diagnostic-${{ matrix.target }}
           path: macos-evidence.cms
           if-no-files-found: error
           retention-days: 30

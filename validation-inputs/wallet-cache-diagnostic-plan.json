@@ -1,0 +1,19 @@
+{
+  "requirement": "Diagnose native Intel wallet deadline before another build",
+  "priorRun": 40852402087,
+  "failure": "wallet-native exit124 after1201.180s; last logged package burst-wallet-core; dashboard never started",
+  "question": "Which native units completed and how long remained for wallet-core/app compilation?",
+  "command": [
+    "python3",
+    "tools/macos-wallet-cache-diagnostic.py"
+  ],
+  "changeImpact": [
+    {
+      "dependency": "No product/source/profile changes",
+      "affected": "Read-only stage timing diagnosis",
+      "reuse": "Saved native target cache and original failed receipt",
+      "next": "Review timestamps before proposing one bounded warm-cache completion"
+    }
+  ],
+  "limits": "Approved Intel host; no compilation; no timeout changes; no Azure"
+}
