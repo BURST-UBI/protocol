@@ -74,6 +74,26 @@ def prepare():
         run('decrypt-package', ['openssl', 'cms', '-decrypt', '-binary', '-inform', 'DER',
             '-in', str(ROOT / 'prior-encrypted/macos-evidence.cms'), '-inkey', str(key),
             '-out', str(archive)])
+        if PLAN.get('resumeFromRun'):
+            assert digest(ROOT / 'prior-encrypted/macos-evidence.cms') == PLAN['resumeEncryptedSha256']
+            extract(archive, tmp, 'macos-signing-evidence')
+            prior = tmp / 'macos-signing-evidence'
+            old_plan = json.loads((prior / 'plan.json').read_text())
+            assert old_plan['apps'] == PLAN['apps'] and old_plan['certificateSha1'] == PLAN['certificateSha1']
+            assert not list(prior.glob('*.submission*')), 'Review prior submission IDs instead of resubmitting'
+            shutil.copytree(prior, ROOT / 'prior-signing-evidence')
+            for app, expected in PLAN['apps'].items():
+                bundle = prior / expected['bundleName']
+                info = plistlib.loads((bundle / 'Contents/Info.plist').read_bytes())
+                assert info['CFBundleIdentifier'] == expected['bundleIdentifier']
+                executable = info['CFBundleExecutable']
+                assert Path(executable).name == executable
+                expected_hash = PLAN.get('resumeSignedApps', {}).get(app, expected['binarySha256'])
+                assert digest(bundle / 'Contents/MacOS' / executable) == expected_hash
+                shutil.copytree(bundle, OUT / expected['bundleName'])
+            write(OUT / 'input-review.json', {'outcome': 'pass', 'sourceRun': PLAN['resumeFromRun'],
+                'assertions': 'Exact encrypted prior evidence, candidate identities and retained signed/raw binary hashes; no prior submission'})
+            return
         extract(archive, tmp, 'macos-package-evidence')
         for app, expected in PLAN['apps'].items():
             package = tmp / 'macos-package-evidence' / (app + '.app.tar.gz')
@@ -139,12 +159,13 @@ def app_stage(app):
     started = time.monotonic()
     result = {'outcome': 'incomplete', 'scope': 'Signing/notarization only; no GUI acceptance'}
     try:
-        run(app + '-sign', ['codesign', '--force', '--sign', PLAN['certificateSha1'],
-            '--keychain', str(KEYCHAIN), '--options', 'runtime', '--timestamp', str(bundle)])
+        if app not in PLAN.get('resumeSignedApps', {}):
+            run(app + '-sign', ['codesign', '--force', '--sign', PLAN['certificateSha1'],
+                '--keychain', str(KEYCHAIN), '--options', 'runtime', '--timestamp', str(bundle)])
         run(app + '-verify', ['codesign', '--verify', '--deep', '--strict', '--verbose=2', str(bundle)])
         # Export the embedded leaf certificate and bind it to the selected new identity.
         cert = OUT / (app + '-certificate')
-        run(app + '-certificate', ['codesign', '--display', '--extract-certificates', str(cert), str(bundle)])
+        run(app + '-certificate', ['codesign', '--display', '--extract-certificates=' + str(cert), str(bundle)])
         assert hashlib.sha1(Path(str(cert) + '0').read_bytes()).hexdigest().upper() == PLAN['certificateSha1']
         archive = OUT / (app + '.signed.zip')
         run(app + '-zip', ['ditto', '-c', '-k', '--keepParent', str(bundle), str(archive)])

@@ -31,7 +31,12 @@
   ],
   "limits": "Approved GitHub macos-15 ARM3CPU7GiB; no Azure; no compile; each command capped, each app stage under1200s; temporary signing keychain removed; encrypted evidence only",
   "publication": "No public release or asset upload. Signed packages submitted to Apple notarization and encrypted GitHub evidence only. GUI acceptance remains separate.",
-  "priorRun": 40865714619,
+  "priorRun": 40866192333,
   "credentialTransport": "PKCS12 PBE-SHA1-3DES/SHA1 with Apple Developer ID G2 intermediate; same verified leaf certificate/key. Original PBES2 bundle verified locally but native security import reported MAC verification failure.",
-  "retryScope": "Native import and notarization credential authentication PASS. Codesign failed immediately: specified item could not be found in keychain; no signed archive or Apple submission. Register temporary keychain in user search list as documented by GitHub; restore original list in cleanup. Same candidate and certificate."
+  "retryScope": "Wallet codesign and strict verification passed. Certificate extraction failed because optional prefix requires --extract-certificates=PREFIX. Restore exact retained signed wallet, skip re-signing, verify signature/certificate then first submission. Dashboard remains unsigned and has no previous signing/submission.",
+  "resumeFromRun": 40866192333,
+  "resumeEncryptedSha256": "743baf12251ad43c19100922a72b6df97477fa705e79ab3aa67e65ea2dfeb14c",
+  "resumeSignedApps": {
+    "wallet": "403a2ca9fdd99f0804706fcf151e3e6581609056d94b221ce5461476f623bd28"
+  }
 }
