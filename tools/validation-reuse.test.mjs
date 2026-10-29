@@ -67,6 +67,29 @@ test('content changes during a run invalidate the result', async t => {
   await assert.rejects(finish(start, f.result), /Inputs changed/);
 });
 
+test('invalidated failures retain the latest attempt but can never qualify reuse', async t => {
+  const f = await fixture(t), start = await begin(f.plan);
+  const failed = { ...f.result, outcome: 'fail', exitCode: 124, assertions: 0,
+    inputMutationReason: 'Cargo rebuilt a cached unit incorrectly declared immutable.' };
+  await assert.rejects(finish(start, failed, true), /ordinary finish/);
+  await writeFile(join(f.input, 'driver'), 'rebuilt input');
+  await assert.rejects(finish(start, failed), /Inputs changed/);
+  await assert.rejects(finish(start, { ...failed, outcome: 'pass', exitCode: 0, assertions: 1 }, true), /never qualify/);
+  await assert.rejects(finish(start, { ...failed, inputMutationReason: '' }, true), /inputMutationReason/);
+  const receipt = await finish(start, failed, true);
+  assert.deepEqual(receipt.inputs, start.inputs);
+  assert.notDeepEqual(receipt.invalidation.observedInputs, receipt.inputs);
+  await assert.rejects(check(f.plan, receipt), /invalidated attempt/);
+  const next = await prepare(f.plan, receipt);
+  assert.equal(next.previousAttempt.started, start.started);
+  assert.ok(next.previousAttempt.changed.includes('input contents or inventory'));
+  await writeFile(join(f.input, 'driver'), 'assert confirmed balance');
+  await assert.rejects(check(f.plan, receipt), /invalidated attempt/);
+  await assert.rejects(prepare(f.plan, receipt), /invalidated attempt/);
+  await writeFile(f.log, 'altered failure');
+  await assert.rejects(prepare(f.plan, receipt), /Prior evidence changed/);
+});
+
 test('changed, added and deleted input files invalidate reuse', async t => {
   const f = await fixture(t);
   const receipt = await finish(await begin(f.plan), f.result);
