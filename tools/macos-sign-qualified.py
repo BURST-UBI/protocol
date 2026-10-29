@@ -16,7 +16,10 @@ import time
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / 'macos-signing-evidence'
-PLAN = json.loads((ROOT / 'validation-inputs/arm-signing-plan.json').read_text())
+PLAN_NAME = os.environ.get('SIGNING_PLAN', 'arm-signing-plan.json')
+assert PLAN_NAME in ('arm-signing-plan.json', 'intel-signing-plan.json')
+PLAN_PATH = ROOT / 'validation-inputs' / PLAN_NAME
+PLAN = json.loads(PLAN_PATH.read_text())
 KEYCHAIN = Path(os.environ['RUNNER_TEMP']) / 'burst-signing.keychain-db'
 PROFILE = 'burst-notarization'
 SEARCH_STATE = Path(os.environ['RUNNER_TEMP']) / 'burst-original-keychain-search.json'
@@ -64,7 +67,7 @@ def extract(archive, destination, prefix):
 def prepare():
     assert os.environ.get('GITHUB_RUN_ATTEMPT') == '1', 'Do not resubmit unchanged jobs'
     OUT.mkdir(exist_ok=False)
-    shutil.copy2(ROOT / 'validation-inputs/arm-signing-plan.json', OUT / 'plan.json')
+    shutil.copy2(PLAN_PATH, OUT / 'plan.json')
     with tempfile.TemporaryDirectory(dir=os.environ['RUNNER_TEMP']) as name:
         tmp = Path(name)
         key = tmp / 'evidence.pem'

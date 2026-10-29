@@ -25,8 +25,8 @@ jobs:
       - name: Retrieve exact qualified packages
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: macos-package-aarch64-apple-darwin
-          run-id: 40857749588
+          name: macos-signing-aarch64-apple-darwin
+          run-id: 40866192333
           github-token: ${{ github.token }}
           path: prior-encrypted
       - name: Verify unsigned package and binary identities

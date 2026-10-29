@@ -1,0 +1,35 @@
+{
+  "requirement": "Developer ID sign and notarize exact qualified Intel wallet/dashboard packages",
+  "sourceRun": 40863899997,
+  "sourceArtifact": "macos-package-x86_64-apple-darwin",
+  "teamId": "KF48DP434N",
+  "certificateSha1": "4B8B9053B823EC34EC4FA8C314DC74A1DBA9528D",
+  "apps": {
+    "wallet": {
+      "archiveSha256": "ccab21cf1364c0db534fa9b81ef05e14d9781c0f2420c331a165566185ba902c",
+      "binarySha256": "7bae1a78873f8d3357898eb9eb1644b614a80b43526066bad3f0d9afea809acf",
+      "bundleIdentifier": "com.burst.wallet",
+      "bundleName": "Burst Wallet.app",
+      "scope": "Unsigned .app from exact qualified release binary; no compilation, Developer ID, notarization or GUI acceptance"
+    },
+    "node-gui": {
+      "archiveSha256": "a250bc85a496b3702111e90a30b69f392d340bc90158e29105a1f01651cde903",
+      "binarySha256": "fb92ae97cc14dc8a03db64637f47c1fcad38e8a500a23ed06ac00ace8c944dde",
+      "bundleIdentifier": "com.burst.node-dashboard",
+      "bundleName": "Burst Node.app",
+      "scope": "Unsigned .app from exact qualified release binary; no compilation, Developer ID, notarization or GUI acceptance"
+    }
+  },
+  "changeImpact": [
+    {
+      "changedDependency": "Developer ID signature and Apple notarization ticket only",
+      "affectedCheck": "Exact signed package identity, strict signature verification, stapling and Gatekeeper",
+      "reusableReceiptArtifact": "Intel native40860046055 and packaging40863899997; exact archive and raw binary hashes below",
+      "reuseOrRerun": "Reuse qualified native packages; no rebuild or protocol rerun",
+      "reason": "Unsigned packaging does not establish trusted public distribution"
+    }
+  ],
+  "limits": "Approved GitHub macos-15-intel4CPU14GiB; no Azure, no compiler; temporary keychain removed; encrypted evidence only",
+  "publication": "No public release or asset upload. Signed packages submitted to Apple notarization and encrypted GitHub evidence only. GUI acceptance remains separate.",
+  "credentialTransport": "PKCS12 PBE-SHA1-3DES/SHA1 with Apple Developer ID G2 intermediate; same verified leaf certificate/key. Original PBES2 bundle verified locally but native security import reported MAC verification failure."
+}

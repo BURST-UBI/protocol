@@ -1,17 +1,19 @@
-name: Sign qualified ARM apps for review
+name: Sign qualified Intel apps for review
 on:
   workflow_dispatch:
 permissions:
   contents: read
   actions: read
 concurrency:
-  group: burst-macos-signing
+  group: burst-macos-signing-intel
   cancel-in-progress: false
 jobs:
   sign:
     if: github.ref == 'refs/heads/validation/macos-candidate-20261029'
     environment: macos-signing
-    runs-on: macos-15
+    runs-on: macos-15-intel
+    env:
+      SIGNING_PLAN: intel-signing-plan.json
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -20,13 +22,13 @@ jobs:
           sparse-checkout-cone-mode: false
           sparse-checkout: |
             /tools/macos-sign-qualified.py
-            /validation-inputs/arm-signing-plan.json
+            /validation-inputs/intel-signing-plan.json
             /validation-inputs/evidence-recipient.pem
       - name: Retrieve exact qualified packages
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: macos-signing-aarch64-apple-darwin
-          run-id: 40866192333
+          name: macos-package-x86_64-apple-darwin
+          run-id: 40863899997
           github-token: ${{ github.token }}
           path: prior-encrypted
       - name: Verify unsigned package and binary identities
@@ -61,7 +63,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: macos-signing-aarch64-apple-darwin
+          name: macos-signing-x86_64-apple-darwin
           path: macos-evidence.cms
           if-no-files-found: error
           retention-days: 30
