@@ -33,6 +33,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /.github/workflows/
+            /tools/
+            /validation-inputs/
       - name: Restore stable target and dependency cache
         id: cache
         uses: actions/cache/restore@v4
@@ -41,8 +46,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             .macos-target
-          key: burst-macos-${{ matrix.target }}-nightly20261011-${{ hashFiles('validation-inputs/source.tar.gz') }}-desktop-native-v1
-          restore-keys: burst-macos-${{ matrix.target }}-nightly20261011-${{ hashFiles('validation-inputs/source.tar.gz') }}-desktop-v2
+          key: burst-macos-${{ matrix.target }}-nightly20261011-${{ hashFiles('validation-inputs/source.tar.gz') }}-desktop-native-v2
+          restore-keys: burst-macos-${{ matrix.target }}-nightly20261011-${{ hashFiles('validation-inputs/source.tar.gz') }}-desktop-native-v1
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -53,30 +58,34 @@ jobs:
       - name: Verify frozen source and host
         run: python3 tools/macos-candidate-v2.py prepare
       - name: Verify frozen desktop inputs
-        run: python3 tools/macos-desktop-native.py prepare
+        run: python3 tools/macos-desktop-native-retry.py prepare
       - name: Retrieve latest failed frontend evidence
         uses: actions/download-artifact@v4
         with:
-          name: macos-desktop-${{ matrix.target }}
+          name: macos-desktop-native-${{ matrix.target }}
           path: prior-encrypted
-          run-id: 40848475451
+          run-id: 40851484159
           github-token: ${{ github.token }}
       - name: Restore original frontend receipt chain
         env:
           EVIDENCE_DECRYPT_KEY: ${{ secrets.MACOS_EVIDENCE_DECRYPT_KEY }}
-        run: python3 tools/macos-restore-desktop-evidence.py
-      - name: wallet dependencies
-        run: python3 tools/macos-desktop-native.py wallet dependencies
-      - name: wallet frontend
-        run: python3 tools/macos-desktop-native.py wallet frontend
+        run: python3 tools/macos-restore-native-evidence.py
+      - name: Restore installed wallet tooling
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            desktop-source/wallet/node_modules
+            desktop-source/node-gui/node_modules
+          key: burst-macos-${{ matrix.target }}-desktop-npm-${{ hashFiles('validation-inputs/desktop-source.tar.gz') }}-v1
+          fail-on-cache-miss: true
       - name: wallet native
-        run: python3 tools/macos-desktop-native.py wallet native
+        run: python3 tools/macos-desktop-native-retry.py wallet native
       - name: node-gui dependencies
-        run: python3 tools/macos-desktop-native.py node-gui dependencies
+        run: python3 tools/macos-desktop-native-retry.py node-gui dependencies
       - name: node-gui frontend
-        run: python3 tools/macos-desktop-native.py node-gui frontend
+        run: python3 tools/macos-desktop-native-retry.py node-gui frontend
       - name: node-gui native
-        run: python3 tools/macos-desktop-native.py node-gui native
+        run: python3 tools/macos-desktop-native-retry.py node-gui native
       - uses: actions/cache/save@v4
         if: always() && steps.cache.outputs.cache-hit != 'true'
         with:
@@ -92,18 +101,18 @@ jobs:
           path: |
             desktop-source/wallet/node_modules
             desktop-source/node-gui/node_modules
-          key: burst-macos-${{ matrix.target }}-desktop-npm-${{ hashFiles('validation-inputs/desktop-source.tar.gz') }}-v1
+          key: burst-macos-${{ matrix.target }}-desktop-npm-${{ hashFiles('validation-inputs/desktop-source.tar.gz') }}-v2
       - name: Encrypt retained evidence for local review
         if: always()
         timeout-minutes: 5
         run: |
-          test -d macos-desktop-native-evidence
-          tar -czf "$RUNNER_TEMP/macos-evidence.tar.gz" macos-desktop-native-evidence
+          test -d macos-desktop-native-retry-evidence
+          tar -czf "$RUNNER_TEMP/macos-evidence.tar.gz" macos-desktop-native-retry-evidence
           openssl cms -encrypt -binary -aes-256-cbc -stream -outform DER -in "$RUNNER_TEMP/macos-evidence.tar.gz" -out macos-evidence.cms validation-inputs/evidence-recipient.pem
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: macos-desktop-native-${{ matrix.target }}
+          name: macos-desktop-native-retry-${{ matrix.target }}
           path: macos-evidence.cms
           if-no-files-found: error
           retention-days: 30
