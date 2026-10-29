@@ -1,0 +1,14 @@
+{
+  "requirement": "First native ARM .app packaging of qualified wallet/dashboard binaries",
+  "changeImpact": [
+    {
+      "changedDependency": "Application bundle metadata/container only",
+      "affectedCheck": "Correct bundle identifier/executable and unchanged raw binary",
+      "reuse": "ARM native run40852402087 both apps PASS;49 frontend hashes unchanged",
+      "action": "Tauri bundle only, no build",
+      "reason": "Raw binaries have not yet been packaged as Mac .app artifacts"
+    }
+  ],
+  "limits": "Approved ARM3CPU7GiB host in parallel with one existing Intel host; each command1200s+10s cleanup; no Azure",
+  "scope": "Unsigned packages only; final signing/notarization and installation/runtime remain separate"
+}

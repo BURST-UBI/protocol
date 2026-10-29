@@ -1,0 +1,18 @@
+{
+  "run": 40852402087,
+  "scope": "Native ARM application builds only; packaging/runtime/signing separate",
+  "apps": {
+    "wallet": {
+      "binary": "burst-wallet-gui",
+      "productName": "Burst Wallet",
+      "sha256": "36a867a0ad449ec86917937a332bac974fbaef12f7c1365fc6d57f73bdb2a727",
+      "elapsedSeconds": 553.296138167
+    },
+    "node-gui": {
+      "binary": "burst-node-gui",
+      "productName": "Burst Node",
+      "sha256": "acf0b70fca460e3251f0a7a813080192c907c604ac08fe6208057abf2e1ee288",
+      "elapsedSeconds": 460.001610209
+    }
+  }
+}
