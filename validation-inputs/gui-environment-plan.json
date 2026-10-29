@@ -9,7 +9,10 @@
     "tools/macos-gui-environment.py",
     "tools/macos-gui-environment.swift",
     "tools/validation-reuse.mjs",
-    "prior-encrypted/macos-evidence.cms"
+    "prior-encrypted/macos-evidence.cms",
+    "tools/macos-gui-prior-receipt.py",
+    "validation-inputs/gui-prior-driver.py",
+    "validation-inputs/gui-prior-actions.log"
   ],
   "context": {
     "toolchain": "Runner Xcode swiftc -j1, Node runner version",
@@ -25,6 +28,13 @@
       "reusableReceiptArtifact": "Final signing40867797950 ARM+Intelwallet and40868658486 Inteldashboard",
       "reuseOrRerun": "Reuse product builds/signatures/notary; first environment diagnostic",
       "reason": "Existing Linux/Windows embedded WebDriver does not establish macOS automation availability"
+    },
+    {
+      "changedDependency": "Diagnostic compiler launcher and error logging",
+      "affectedCheck": "GUI prerequisite probe build only",
+      "reusableReceiptArtifact": "Failed start40873182316; compiler comparison40873559826",
+      "reuseOrRerun": "Chain failed preflight; use xcrun SDK environment",
+      "reason": "Direct swiftc cannot load target standard library; exact same source compiles through xcrun in same host"
     }
   ]
 }

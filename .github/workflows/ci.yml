@@ -1,27 +1,72 @@
-name: Diagnose Mac GUI probe compiler failure
+name: Inspect signed Mac GUI environment
 on:
   workflow_dispatch:
 permissions:
   contents: read
+  actions: read
+concurrency:
+  group: burst-macos-gui-environment
+  cancel-in-progress: false
 jobs:
-  diagnose:
-    runs-on: macos-15
-    timeout-minutes: 5
+  inspect:
+    if: github.ref == 'refs/heads/validation/macos-candidate-20261029'
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            prior: 40867797950
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            prior: 40868658486
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    env:
+      PRIOR_RUN: ${{ matrix.prior }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
           sparse-checkout-cone-mode: false
           sparse-checkout: |
+            /tools/macos-gui-environment.py
+            /tools/macos-gui-prior-receipt.py
+            /validation-inputs/gui-prior-driver.py
+            /validation-inputs/gui-prior-actions.log
             /tools/macos-gui-environment.swift
-      - name: Capture exact probe compiler diagnostic without launching apps
+            /tools/validation-reuse.mjs
+            /validation-inputs/gui-environment-plan.json
+            /validation-inputs/evidence-recipient.pem
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: macos-notarization-${{ matrix.target }}
+          run-id: ${{ matrix.prior }}
+          github-token: ${{ github.token }}
+          path: prior-encrypted
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: macos-gui-environment-${{ matrix.target }}
+          run-id: 40873182316
+          github-token: ${{ github.token }}
+          path: prior-gui-encrypted
+      - name: Inspect fresh signed applications and native automation environment
+        timeout-minutes: 8
+        env:
+          EVIDENCE_DECRYPT_KEY: ${{ secrets.MACOS_EVIDENCE_DECRYPT_KEY }}
+        run: python3 tools/macos-gui-environment.py
+      - name: Encrypt diagnostic evidence
+        if: always()
         timeout-minutes: 3
         run: |
-          set +e
-          compiler="$(xcrun --find swiftc)"
-          "$compiler" -j 1 tools/macos-gui-environment.swift -o "$RUNNER_TEMP/direct-probe"
-          direct_status=$?
-          xcrun swiftc -j 1 tools/macos-gui-environment.swift -o "$RUNNER_TEMP/xcrun-probe"
-          xcrun_status=$?
-          echo "Direct compiler status: $direct_status; xcrun status: $xcrun_status"
-          test "$xcrun_status" = 0
+          test -d macos-gui-environment-evidence
+          tar -czf "$RUNNER_TEMP/macos-evidence.tar.gz" macos-gui-environment-evidence
+          openssl cms -encrypt -binary -aes-256-cbc -stream -outform DER -in "$RUNNER_TEMP/macos-evidence.tar.gz" -out macos-evidence.cms validation-inputs/evidence-recipient.pem
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: macos-gui-environment-${{ matrix.target }}
+          path: macos-evidence.cms
+          if-no-files-found: error
+          retention-days: 30

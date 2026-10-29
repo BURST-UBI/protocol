@@ -1,12 +1,22 @@
 """First native GUI environment diagnostic, not GUI acceptance."""
-import hashlib, json, os, pathlib, plistlib, signal, subprocess, tarfile, tempfile, time
+import atexit, hashlib, json, os, pathlib, plistlib, signal, subprocess, tarfile, tempfile, time
 root = pathlib.Path.cwd()
 out = root / 'macos-gui-environment-evidence'
 out.mkdir()
 plan = json.loads(pathlib.Path('validation-inputs/gui-environment-plan.json').read_text())
-subprocess.run(['node','tools/validation-reuse.mjs','begin','validation-inputs/gui-environment-plan.json',str(out/'start.json')],check=True)
+subprocess.run(['python3','tools/macos-gui-prior-receipt.py'],check=True)
+subprocess.run(['node','tools/validation-reuse.mjs','prepare','validation-inputs/gui-environment-plan.json','prior-gui/receipt.json',str(out/'start.json')],check=True)
+def preserve_failure():
+    if (out/'start.json').exists() and not (out/'receipt.json').exists():
+        result={'outcome':'fail','exitCode':1,'assertions':0,'review':'Preflight did not reach terminal success; inspect retained command logs. No GUI acceptance claim.','logs':[str(p) for p in out.glob('*.log')] or [str(out/'start.json')]}
+        (out/'failure.json').write_text(json.dumps(result))
+        subprocess.run(['node','tools/validation-reuse.mjs','finish',str(out/'start.json'),str(out/'failure.json'),str(out/'receipt.json')],check=False)
+atexit.register(preserve_failure)
 def run(args, timeout=120):
-    return subprocess.run(args, check=True, capture_output=True, text=True, timeout=timeout).stdout
+    result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    with (out/'commands.log').open('a') as log: log.write(result.stdout + result.stderr)
+    result.check_returncode()
+    return result.stdout
 def write(name, obj):
     (out / name).write_text(json.dumps(obj, indent=2) + '\n')
 assert os.environ['GITHUB_RUN_ATTEMPT'] == '1'
@@ -26,7 +36,7 @@ with tempfile.TemporaryDirectory() as name:
     prior = tmp / 'macos-signing-evidence'
     plan = json.loads((prior/'plan.json').read_text())
     compiler = run(['xcrun','--find','swiftc']).strip()
-    run([compiler,'-j','1','tools/macos-gui-environment.swift','-o',str(out/'probe')], timeout=180)
+    run(['xcrun','swiftc','-j','1','tools/macos-gui-environment.swift','-o',str(out/'probe')], timeout=180)
     write('environment.json', {'runner':os.environ['RUNNER_OS'], 'architecture':os.environ['RUNNER_ARCH'], 'sourceRun':os.environ['PRIOR_RUN'], 'scope':'Desktop session and Accessibility availability only; no GUI acceptance', 'compiler':compiler})
     for app, expected in plan['apps'].items():
         result_run = os.environ['PRIOR_RUN'] if app == 'node-gui' else '40867797950'
