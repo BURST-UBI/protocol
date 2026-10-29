@@ -9,5 +9,11 @@ with tempfile.TemporaryDirectory() as name:
  with tarfile.open(archive) as tar:
   start=json.load(tar.extractfile('macos-gui-environment-evidence/start.json'))
   receipt=json.load(tar.extractfile('macos-gui-environment-evidence/receipt.json'))
+  for path, mode, sha in receipt['evidence']:
+   destination=pathlib.Path(path)
+   assert destination.parent==root/'macos-gui-environment-evidence'
+   member=tar.getmember('macos-gui-environment-evidence/'+destination.name)
+   assert member.isfile()
+   destination.write_bytes(tar.extractfile(member).read());destination.chmod(mode)
  (prior/'receipt.json').write_text(json.dumps(receipt))
  raise SystemExit(0)

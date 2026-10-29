@@ -6,6 +6,9 @@ out.mkdir()
 plan = json.loads(pathlib.Path('validation-inputs/gui-environment-plan.json').read_text())
 subprocess.run(['python3','tools/macos-gui-prior-receipt.py'],check=True)
 subprocess.run(['node','tools/validation-reuse.mjs','prepare','validation-inputs/gui-environment-plan.json','prior-gui/receipt.json',str(out/'start.json')],check=True)
+prior_logs=out/'previous-stage';prior_logs.mkdir()
+for path, *_ in json.loads(pathlib.Path('prior-gui/receipt.json').read_text())['evidence']:
+    old=pathlib.Path(path);old.rename(prior_logs/old.name)
 def preserve_failure():
     if (out/'start.json').exists() and not (out/'receipt.json').exists():
         result={'outcome':'fail','exitCode':1,'assertions':0,'review':'Preflight did not reach terminal success; inspect retained command logs. No GUI acceptance claim.','logs':[str(p) for p in out.glob('*.log')] or [str(out/'start.json')]}
