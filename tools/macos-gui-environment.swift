@@ -49,7 +49,7 @@ func require(_ condition: Bool, _ message: String) {
 }
 func press(_ label: String) {
     let control = nodes().first { node in
-        matches(node, label) && ((attribute(node, kAXRoleAttribute) as? String) == kAXButtonRole || (attribute(node, kAXRoleAttribute) as? String) == kAXLinkRole)
+        matches(node, label) && ((attribute(node, kAXRoleAttribute) as? String) == kAXButtonRole)
     }
     require(control != nil, "Missing action: \(label)")
     require(AXUIElementPerformAction(control!, kAXPressAction as CFString) == .success, "Action failed: \(label)")
