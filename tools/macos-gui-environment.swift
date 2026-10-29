@@ -67,13 +67,15 @@ if CommandLine.arguments.count > 2 {
     require(AXIsProcessTrusted(), "Native accessibility unavailable")
     if CommandLine.arguments[2] == "wallet" {
         require(waitFor("Your Burst wallet") != nil, "Wallet onboarding heading")
-        press("Import Mnemonic")
-        require(waitFor("Import from Mnemonic") != nil, "Mnemonic form navigation")
-        let emptyImport = nodes().first { matches($0, "Import") && (attribute($0,kAXRoleAttribute) as? String) == kAXButtonRole }
-        require(emptyImport != nil && (attribute(emptyImport!, kAXEnabledAttribute) as? Bool) == false, "Empty mnemonic submission must be disabled")
-        press("Back")
-        require(waitFor("Your Burst wallet") != nil, "Return to onboarding")
-        print("GUI_PASS wallet onboarding, mnemonic navigation, empty-input guard and Back")
+        press("Create New Wallet")
+        require(waitFor("Generate Wallet") != nil, "Native wallet generation action")
+        press("Generate Wallet")
+        require(waitFor("Back Up Your Wallet") != nil, "Native wallet keypair and recovery phrase returned")
+        for label in ["Continue without file", "Save & Continue"] {
+            let control = nodes().first { matches($0, label) && (attribute($0,kAXRoleAttribute) as? String) == kAXButtonRole }
+            require(control != nil && (attribute(control!, kAXEnabledAttribute) as? Bool) == false, "Unacknowledged backup must block continuation")
+        }
+        print("GUI_PASS wallet native keypair creation and unacknowledged backup guards; no secrets recorded")
     } else {
         require(waitFor("Your node is isolated") != nil, "Live native RPC telemetry rendered")
         require(waitFor("Devnet — test funds only, no real value. Test faucet disabled.") != nil, "Live Dev network identity rendered")

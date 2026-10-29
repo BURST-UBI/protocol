@@ -1,6 +1,6 @@
 {
   "requirement": "Native interaction with installed signed Mac wallet and dashboard",
-  "scope": "Installed dashboard live Dev RPC telemetry and network identity, plus connection dialog. Wallet and previous navigation scopes reused.",
+  "scope": "Wallet real native IPC keypair creation and unacknowledged-backup guards; no secrets captured. Reuse completed wallet navigation and dashboard live RPC.",
   "command": [
     "python3",
     "tools/macos-gui-environment.py"
@@ -58,6 +58,13 @@
       "reusableReceiptArtifact": "Prior GUI40875609741 and daemon raw SHA/native runtime40845222714 or40864042513",
       "reuseOrRerun": "First live Mac dashboard connection; no product rebuild or wallet repeat",
       "reason": "Static navigation does not establish RPC bridge functionality"
+    },
+    {
+      "changedDependency": "Wallet native generation and backup guard assertions",
+      "affectedCheck": "Installed wallet Rust IPC and cryptographic keypair generation on each Mac architecture",
+      "reusableReceiptArtifact": "Wallet navigation40875049539; dashboard live RPC40877693027",
+      "reuseOrRerun": "First native wallet generation case only; skip dashboard assertions",
+      "reason": "Frontend navigation and empty-input guard do not exercise wallet backend creation"
     }
   ]
 }

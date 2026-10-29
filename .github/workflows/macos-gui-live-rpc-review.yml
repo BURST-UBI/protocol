@@ -1,4 +1,4 @@
-name: Verify installed Mac app native navigation
+name: Verify installed Mac wallet native creation
 on:
   workflow_dispatch:
 permissions:
@@ -54,7 +54,7 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: macos-gui-environment-${{ matrix.target }}
-          run-id: 40876663485
+          run-id: 40877693027
           github-token: ${{ github.token }}
           path: prior-gui-encrypted
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093

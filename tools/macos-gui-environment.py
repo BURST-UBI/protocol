@@ -75,7 +75,7 @@ with tempfile.TemporaryDirectory() as name, contextlib.ExitStack() as cleanup:
     run(['xcrun','swiftc','-j','1','tools/macos-gui-environment.swift','-o',str(out/'probe')], timeout=180)
     write('environment.json', {'runner':os.environ['RUNNER_OS'], 'architecture':os.environ['RUNNER_ARCH'], 'sourceRun':os.environ['PRIOR_RUN'], 'scope':'Desktop session and Accessibility availability only; no GUI acceptance', 'compiler':compiler})
     for app, expected in plan['apps'].items():
-        if app != 'node-gui': continue
+        if app != 'wallet': continue
         result_run = os.environ['PRIOR_RUN'] if app == 'node-gui' else '40867797950'
         result = json.loads((prior/f'{app}.collection-{result_run}.result.json').read_text())
         assert result['outcome'] == 'pass'
@@ -111,5 +111,5 @@ with tempfile.TemporaryDirectory() as name, contextlib.ExitStack() as cleanup:
                         process.wait(timeout=5)
     stop_daemon()
 
-write('result.json', {'outcome':'pass','exitCode':0,'assertions':8,'review':'Exact notarized dashboard archive verified, fresh installed profile, strict signature/Gatekeeper and native connection dialog assertions. Live disposable Dev RPC bridge rendered isolated-node status and Devnet disclosure. Earlier wallet partial pass retained; wallet not rerun. Live RPC and full wallet lifecycle remain outside scope.','logs':[str(out/'node-gui.json'),str(out/'environment.json'),str(out/'node-gui.launch.log'),str(out/'commands.log'),str(out/'rpc-baseline.json')]})
+write('result.json', {'outcome':'pass','exitCode':0,'assertions':8,'review':'Exact installed wallet generated a disposable native keypair through real IPC and enforced unacknowledged-backup guards. No recovery words, keys or screenshots recorded; no funds, signing transactions or funded lifecycle claim. Live RPC and full wallet lifecycle remain outside scope.','logs':[str(out/'wallet.json'),str(out/'environment.json'),str(out/'wallet.launch.log'),str(out/'commands.log'),str(out/'rpc-baseline.json')]})
 run(['node','tools/validation-reuse.mjs','finish',str(out/'start.json'),str(out/'result.json'),str(out/'receipt.json')])
