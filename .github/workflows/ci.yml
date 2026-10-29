@@ -1,11 +1,11 @@
-name: macOS ARM package qualified apps
+name: macOS Intel finish native apps
 on:
   workflow_dispatch:
 permissions:
   contents: read
   actions: read
 concurrency:
-  group: burst-macos-arm-packaging
+  group: burst-macos-candidate-qualification
   cancel-in-progress: false
 jobs:
   candidate:
@@ -14,10 +14,10 @@ jobs:
       max-parallel: 2
       matrix:
         include:
-          - runner: macos-15
-            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 50
+    timeout-minutes: 100
     env:
       RUSTUP_TOOLCHAIN: nightly-2026-10-11
       CARGO_BUILD_JOBS: 1
@@ -44,9 +44,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             .macos-target
-          key: burst-macos-${{ matrix.target }}-nightly20261011-${{ hashFiles('validation-inputs/source.tar.gz') }}-desktop-native-v2
+          key: burst-macos-${{ matrix.target }}-nightly20261011-${{ hashFiles('validation-inputs/source.tar.gz') }}-desktop-finish-v1
+          restore-keys: burst-macos-${{ matrix.target }}-nightly20261011-${{ hashFiles('validation-inputs/source.tar.gz') }}-desktop-native-v2
           fail-on-cache-miss: true
-          restore-keys: burst-macos-${{ matrix.target }}-nightly20261011-${{ hashFiles('validation-inputs/source.tar.gz') }}-desktop-native-v1
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -57,43 +57,72 @@ jobs:
       - name: Verify frozen source and host
         run: python3 tools/macos-candidate-v2.py prepare
       - name: Verify frozen desktop inputs
-        run: python3 tools/macos-package.py prepare
-      - name: Retrieve qualified native app evidence
+        run: python3 tools/macos-desktop-finish.py prepare
+      - name: Retrieve latest failed frontend evidence
         uses: actions/download-artifact@v4
         with:
-          name: macos-desktop-native-retry-${{ matrix.target }}
+          name: macos-desktop-native-${{ matrix.target }}
           path: prior-encrypted
-          run-id: 40852402087
+          run-id: 40851484159
           github-token: ${{ github.token }}
-      - name: Restore original native build receipts
+      - name: Restore original frontend receipt chain
         env:
           EVIDENCE_DECRYPT_KEY: ${{ secrets.MACOS_EVIDENCE_DECRYPT_KEY }}
-        run: python3 tools/macos-restore-qualified-apps.py
-      - name: Restore installed Tauri tooling
+        run: python3 tools/macos-restore-native-evidence.py
+      - name: Restore installed wallet tooling
         uses: actions/cache/restore@v4
         with:
           path: |
             desktop-source/wallet/node_modules
             desktop-source/node-gui/node_modules
-          key: burst-macos-${{ matrix.target }}-desktop-npm-${{ hashFiles('validation-inputs/desktop-source.tar.gz') }}-v2
+          key: burst-macos-${{ matrix.target }}-desktop-npm-${{ hashFiles('validation-inputs/desktop-source.tar.gz') }}-v1
           fail-on-cache-miss: true
-      - name: Audit qualified native apps
-        run: python3 tools/macos-package.py audit
-      - name: Package wallet without rebuilding
-        run: python3 tools/macos-package.py wallet
-      - name: Package dashboard without rebuilding
-        run: python3 tools/macos-package.py node-gui
+      - name: Retrieve latest failed native stage
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-desktop-native-retry-${{ matrix.target }}
+          path: latest-encrypted
+          run-id: 40852402087
+          github-token: ${{ github.token }}
+      - name: Restore latest native receipt
+        env:
+          EVIDENCE_DECRYPT_KEY: ${{ secrets.MACOS_EVIDENCE_DECRYPT_KEY }}
+        run: python3 tools/macos-restore-intel-wallet.py
+      - name: wallet native
+        run: python3 tools/macos-desktop-finish.py wallet native
+      - name: node-gui dependencies
+        run: python3 tools/macos-desktop-finish.py node-gui dependencies
+      - name: node-gui frontend
+        run: python3 tools/macos-desktop-finish.py node-gui frontend
+      - name: node-gui native
+        run: python3 tools/macos-desktop-finish.py node-gui native
+      - uses: actions/cache/save@v4
+        if: always() && steps.cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            .macos-target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+      - name: Preserve installed Tauri tooling for packaging
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            desktop-source/wallet/node_modules
+            desktop-source/node-gui/node_modules
+          key: burst-macos-${{ matrix.target }}-desktop-npm-${{ hashFiles('validation-inputs/desktop-source.tar.gz') }}-finish-v1
       - name: Encrypt retained evidence for local review
         if: always()
         timeout-minutes: 5
         run: |
-          test -d macos-package-evidence
-          tar -czf "$RUNNER_TEMP/macos-evidence.tar.gz" macos-package-evidence
+          test -d macos-desktop-finish-evidence
+          tar -czf "$RUNNER_TEMP/macos-evidence.tar.gz" macos-desktop-finish-evidence
           openssl cms -encrypt -binary -aes-256-cbc -stream -outform DER -in "$RUNNER_TEMP/macos-evidence.tar.gz" -out macos-evidence.cms validation-inputs/evidence-recipient.pem
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: macos-package-${{ matrix.target }}
+          name: macos-desktop-finish-${{ matrix.target }}
           path: macos-evidence.cms
           if-no-files-found: error
           retention-days: 30
