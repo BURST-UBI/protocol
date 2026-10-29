@@ -3,6 +3,7 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+  actions: read
 concurrency:
   group: burst-macos-candidate-qualification
   cancel-in-progress: false
@@ -20,6 +21,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 70
     env:
+      RUSTUP_TOOLCHAIN: nightly-2026-10-11
       CARGO_BUILD_JOBS: 1
       CARGO_INCREMENTAL: 0
       TOKIO_WORKER_THREADS: 1
@@ -39,7 +41,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             .macos-target
-          key: burst-macos-${{ matrix.target }}-nightly20261011-${{ hashFiles('validation-inputs/source.tar.gz') }}-v1
+          key: burst-macos-${{ matrix.target }}-nightly20261011-${{ hashFiles('validation-inputs/source.tar.gz') }}-v2
+          restore-keys: burst-macos-${{ matrix.target }}-nightly20261011-${{ hashFiles('validation-inputs/source.tar.gz') }}-v1
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -48,13 +51,24 @@ jobs:
           toolchain: nightly-2026-10-11
           targets: ${{ matrix.target }}
       - name: Verify frozen source and host
-        run: python3 tools/macos-candidate.py prepare
+        run: python3 tools/macos-candidate-v2.py prepare
+      - name: Retrieve preserved failed stage evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-candidate-${{ matrix.target }}
+          path: prior-encrypted
+          run-id: 40843038196
+          github-token: ${{ github.token }}
+      - name: Restore private receipt chain
+        env:
+          EVIDENCE_DECRYPT_KEY: ${{ secrets.MACOS_EVIDENCE_DECRYPT_KEY }}
+        run: python3 tools/macos-restore-evidence.py
       - name: Build exact daemon
-        run: python3 tools/macos-candidate.py daemon
+        run: python3 tools/macos-candidate-v2.py daemon
       - name: Build existing epoch helper
-        run: python3 tools/macos-candidate.py helper
+        run: python3 tools/macos-candidate-v2.py helper
       - name: Validate public identity and durable epoch restarts
-        run: python3 tools/macos-candidate.py runtime
+        run: python3 tools/macos-candidate-v2.py runtime
       - uses: actions/cache/save@v4
         if: always() && steps.cache.outputs.cache-hit != 'true'
         with:
