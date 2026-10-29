@@ -1,0 +1,33 @@
+{
+  "requirement": "Exact frozen daemon compilation and existing public identity/epoch/restart qualification on native macOS",
+  "changeImpact": [
+    {
+      "changedDependency": "Native macOS ARM64/Intel target; 1093 source files exactly match frozen GNU candidate inputs",
+      "affectedRequirement": "Native compilation/linkage and existing identity/epoch/restart smoke",
+      "reusableReceiptArtifact": "GNU/musl/Windows/Linux-ARM scoped results and macOS host preflight40839080904",
+      "reuseOrRerun": "Reuse source and assertion logic; first native macOS build and run per architecture",
+      "reason": "No native macOS candidate proof exists"
+    },
+    {
+      "changedDependency": "Cache selection/extraction directory metadata/cleanup grace/invalidated-failure recording",
+      "affectedRequirement": "Unfinished Intel daemon compilation",
+      "reusableReceiptArtifact": "Latest40852824231 failure and recovered receipt40861278555; exact daemon-v3 cache",
+      "reuseOrRerun": "One daemon completion attempt after verifying cache node matches recorded post-run hash; no source or optimization changes",
+      "reason": "Run40852824231 rebuilt ring/reqwest/node because desktop cache changed MACOSX_DEPLOYMENT_TARGET and extraction set vendored LMDB directory time to now. Cached node was wrongly declared immutable, so finish correctly rejected its mutation. Recovery preserves original start/result/log and records explicitly invalidated failure; no older receipt branch."
+    }
+  ],
+  "limits": "User approved hosted VM boundaries: ARM3CPU7GiB, Intel4CPU14GiB; parallel separate hosts authorized; one Cargo worker per host; each expensive command1200s with10s cleanup. Desktop unchanged. No Azure.",
+  "stages": [
+    "verify exact archived source",
+    "pinned Rust/Node toolchain setup",
+    "build frozen daemon once",
+    "build existing restart helper using same target cache",
+    "existing public identity/Dev epoch/two-restart smoke"
+  ],
+  "scope": "Unsigned/ad-hoc native qualification; not Developer ID signing, notarization, GUI acceptance, Pi4, throughput or physical power-loss",
+  "retry": "No automatic workflow re-run. Preserve failed artifacts/cache; subsequent attempts must audit and prepare latest stage receipts.",
+  "diagnosis": "Run40852824231 rebuilt ring/reqwest/node because desktop cache changed MACOSX_DEPLOYMENT_TARGET and extraction set vendored LMDB directory time to now. Cached node was wrongly declared immutable, so finish correctly rejected its mutation. Recovery preserves original start/result/log and records explicitly invalidated failure; no older receipt branch.",
+  "priorRun": 40852824231,
+  "attemptBudget": 1,
+  "recoveryRun": 40861278555
+}
