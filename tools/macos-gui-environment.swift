@@ -15,3 +15,64 @@ let result: [String: Any] = [
 ]
 let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
 print(String(data: data, encoding: .utf8)!)
+
+// Inspect only labels and control state on fresh empty profiles, never wallet secrets.
+func attribute(_ element: AXUIElement, _ key: String) -> CFTypeRef? {
+    var value: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(element, key as CFString, &value) == .success else { return nil }
+    return value
+}
+func nodes() -> [AXUIElement] {
+    var all: [AXUIElement] = []
+    func visit(_ node: AXUIElement, _ depth: Int) {
+        guard depth < 40 && all.count < 2000 else { return }
+        all.append(node)
+        for child in attribute(node, kAXChildrenAttribute) as? [AXUIElement] ?? [] { visit(child, depth + 1) }
+    }
+    visit(app, 0)
+    return all
+}
+func matches(_ node: AXUIElement, _ label: String) -> Bool {
+    return [kAXTitleAttribute, kAXDescriptionAttribute, kAXValueAttribute].contains {
+        (attribute(node, $0) as? String) == label
+    }
+}
+func waitFor(_ label: String) -> AXUIElement? {
+    for _ in 0..<50 {
+        if let node = nodes().first(where: { matches($0, label) }) { return node }
+        Thread.sleep(forTimeInterval: 0.1)
+    }
+    return nil
+}
+func require(_ condition: Bool, _ message: String) {
+    if !condition { fputs("FAIL: \(message)\n", stderr); exit(1) }
+}
+func press(_ label: String) {
+    let control = nodes().first { node in
+        matches(node, label) && ((attribute(node, kAXRoleAttribute) as? String) == kAXButtonRole || (attribute(node, kAXRoleAttribute) as? String) == kAXLinkRole)
+    }
+    require(control != nil, "Missing action: \(label)")
+    require(AXUIElementPerformAction(control!, kAXPressAction as CFString) == .success, "Action failed: \(label)")
+}
+if CommandLine.arguments.count > 2 {
+    require(AXIsProcessTrusted(), "Native accessibility unavailable")
+    if CommandLine.arguments[2] == "wallet" {
+        require(waitFor("Your Burst wallet") != nil, "Wallet onboarding heading")
+        press("Import Mnemonic")
+        require(waitFor("Import from Mnemonic") != nil, "Mnemonic form navigation")
+        let emptyImport = nodes().first { matches($0, "Import") && (attribute($0,kAXRoleAttribute) as? String) == kAXButtonRole }
+        require(emptyImport != nil && (attribute(emptyImport!, kAXEnabledAttribute) as? Bool) == false, "Empty mnemonic submission must be disabled")
+        press("Back")
+        require(waitFor("Your Burst wallet") != nil, "Return to onboarding")
+        print("GUI_PASS wallet onboarding, mnemonic navigation, empty-input guard and Back")
+    } else {
+        require(waitFor("Connection") != nil, "Dashboard connection action")
+        press("Connection")
+        require(waitFor("Node connection") != nil, "Connection dialog opened")
+        require(waitFor("Node URL") != nil, "Connection input label")
+        press("Close")
+        require(waitFor("Connection") != nil, "Connection dialog close")
+        require(!nodes().contains { matches($0,"Node connection") }, "Connection dialog dismissed")
+        print("GUI_PASS dashboard connection dialog, input label and dismissal")
+    }
+}

@@ -58,7 +58,10 @@ with tempfile.TemporaryDirectory() as name:
             process = subprocess.Popen([str(binary)], stdout=log, stderr=log, start_new_session=True)
             try:
                 time.sleep(8)
-                state = json.loads(run([str(out/'probe'),str(process.pid)]))
+                probe_output = run([str(out/'probe'),str(process.pid),app])
+                state = json.loads(probe_output.split('GUI_PASS')[0])
+                assert 'GUI_PASS' in probe_output
+                state['guiAssertions'] = probe_output.split('GUI_PASS',1)[1].strip()
                 state.update(archiveSha256=result['sha256'], processExit=process.poll())
                 write(f'{app}.json', state)
                 assert process.poll() is None, 'Application exited during preflight'
@@ -70,5 +73,5 @@ with tempfile.TemporaryDirectory() as name:
                         os.killpg(process.pid, signal.SIGKILL)
                         process.wait(timeout=5)
 
-write('result.json', {'outcome':'pass','exitCode':0,'assertions':8,'review':'Both exact notarized archives verified, fresh installed profiles, strict signatures and Gatekeeper verified, both apps remained running. AX availability is diagnostic only, not GUI acceptance.','logs':[str(out/'wallet.json'),str(out/'node-gui.json'),str(out/'environment.json'),str(out/'wallet.launch.log'),str(out/'node-gui.launch.log')]})
+write('result.json', {'outcome':'pass','exitCode':0,'assertions':8,'review':'Both exact notarized archives verified, fresh installed profiles, strict signatures and Gatekeeper verified, both apps remained running. Native AX navigation assertions passed: wallet onboarding/mnemonic empty guard/Back and dashboard connection dialog. Live RPC and full wallet lifecycle remain outside scope.','logs':[str(out/'wallet.json'),str(out/'node-gui.json'),str(out/'environment.json'),str(out/'wallet.launch.log'),str(out/'node-gui.launch.log')]})
 run(['node','tools/validation-reuse.mjs','finish',str(out/'start.json'),str(out/'result.json'),str(out/'receipt.json')])

@@ -1,6 +1,6 @@
 {
-  "requirement": "Determine native Mac GUI automation prerequisites for exact installed signed apps",
-  "scope": "First environment diagnostic; no UI or protocol acceptance claim",
+  "requirement": "Native interaction with installed signed Mac wallet and dashboard",
+  "scope": "Wallet onboarding, mnemonic empty-input guard and Back; dashboard connection dialog and dismissal. No live RPC, funded payment or complete GUI acceptance claim.",
   "command": [
     "python3",
     "tools/macos-gui-environment.py"
@@ -35,6 +35,13 @@
       "reusableReceiptArtifact": "Failed start40873182316; compiler comparison40873559826",
       "reuseOrRerun": "Chain failed preflight; use xcrun SDK environment",
       "reason": "Direct swiftc cannot load target standard library; exact same source compiles through xcrun in same host"
+    },
+    {
+      "changedDependency": "Native AX navigation assertions added to existing environment probe",
+      "affectedCheck": "Signed installed apps respond to real UI actions",
+      "reusableReceiptArtifact": "Environment40873905683 both hosts passed; notarization exact ZIPs unchanged",
+      "reuseOrRerun": "Reuse environment prerequisite; first native navigation assertions",
+      "reason": "Launch and AX availability alone do not establish interactive UI behavior"
     }
   ]
 }
