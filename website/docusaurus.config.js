@@ -48,7 +48,7 @@ module.exports = {
     navbar: {
       title: 'BURST',
       items: [
-        {to: '/introduction/QUICK_TOUR', label: 'Getting started', position: 'left'},
+        {to: '/introduction/QUICK_TOUR', label: 'Introduction', position: 'left'},
         {to: '/introduction/WHITEPAPER', label: 'Whitepaper', position: 'left'},
         {href: 'https://github.com/BURST-UBI/protocol', label: 'GitHub', position: 'right'},
       ],

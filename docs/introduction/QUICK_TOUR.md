@@ -1,55 +1,50 @@
 # What is BURST?
 
-BURST is a payment protocol in which verified accounts earn a personal spending
-allowance. Each account has its own signed chain of blocks. Nodes validate those
-blocks, and representatives vote to confirm them.
+BURST gives verified people a personal income and lets them use it to pay one
+another. Its name combines **BRN**, from *burn*, and **TRST**, from *trust*.
 
-For an integration, start with [accounts and blocks](../protocol/BLOCKS.md) and
-the [RPC guide](../development/RPC.md). To try the code locally, follow
-[build and test](../development/DEVELOPING.md). Some verification and governance
-paths are currently [experimental only](LIMITATIONS.md#feature-availability).
+## Start with a payment
 
-## Two kinds of balance
+Imagine you have accumulated 50 BRN. You buy something from a shop for 50.
+Your wallet burns those 50 BRN, creating 50 TRST for the shop to receive.
 
-![Burning BRN creates TRST for a recipient to accept.](../assets/conversion.png)
+![Burning 50 BRN creates 50 TRST for a recipient.](../assets/conversion.png)
 
-A verified person accrues **BRN** while eligible. It is a personal allowance:
-you cannot transfer it directly to someone else.
+The shop can spend its TRST with someone else. That person can spend it again.
+The same 50 TRST moves between people; each transfer does not create another 50.
 
-To pay someone, you can burn BRN. That creates **TRST**, which the recipient
-accepts with a signed receive operation. They can then pay another person using
-that TRST. Sending existing TRST does not create more money. Signing a payment
-authorizes a request; the network must accept it before it changes ledger state.
+Meanwhile, your BRN continues to accrue while you are eligible. At the current
+default rate, you gain approximately one BRN per hour, just like other verified
+people.
 
-## Currency with a history
+## Why two kinds of balance?
 
-TRST retains its origin and age as it changes hands. Splitting a holding preserves
-that history. Merging holdings combines their amounts and uses the oldest input's
-origin time. Neither operation resets the clock.
+BRN is personal. You can save it, but spending it burns it. TRST is transferable:
+it is what someone receives when you pay them, and they can pass it on.
 
-A network can set a finite expiry period; the current defaults effectively
-disable expiry. Under a finite period, a holding becomes unspendable when its
-age reaches that limit. Its age-based reference value is a separate calculation,
-not a guaranteed price.
+The community can set a lifetime for TRST. If that lifetime is finite, TRST
+becomes unspendable when it reaches that age, even if it has changed hands.
+Unused BRN does not expire. The current defaults give TRST an effectively
+unlimited lifetime.
 
-If an origin is revoked for fraud, the protocol follows its contributions through
-the merger graph. Clean value is separated from affected value. This can affect
-later recipients, and it cannot undo goods or services already exchanged.
-A later merge of the clean remainder keeps that distinction, even if the revoked
-origin is subsequently restored. See [the worked example](ECONOMICS.md#merging-a-clean-remainder).
+## What keeps it fair?
 
-## People make the judgments
+Verification aims to give each person one eligible account. Existing participants
+endorse applicants, and selected verifiers judge them. Challenges provide a way
+to review fraud or inactivity later.
 
-Endorsements, selected verifier panels and challenges determine account
-eligibility. They provide a process for judgment, not a mathematical proof of
-human identity. Mistakes and collusion remain risks.
+TRST keeps a record of its origin. If an account obtained verification
+fraudulently, revocation can follow the value it created through later transfers
+and merges. That can affect recipients too, which makes the quality of
+verification important.
 
-Verified-account voting governs supported parameters, including accrual and
-expiry. Representatives help the network agree on transactions; owning more
-currency gives no extra representative weight.
+## Who chooses the rules?
 
-The rules define how balances work. People still decide whether to accept TRST
-and what to exchange for it.
+Verified accounts vote on supported settings, including the income rate and TRST
+lifetime. Money does not buy extra voting weight. Separate representatives vote
+to confirm transactions and help nodes agree on ledger state.
 
-Continue with [BRN and TRST](ECONOMICS.md), or read the
-[whitepaper](WHITEPAPER.md) for the wider protocol.
+Read the [whitepaper](WHITEPAPER.md) next. It develops these ideas with the original
+payment, splitting and merging examples. The
+[implementation status](WHITEPAPER.md#implementation-status) identifies features
+that are currently restricted to experimental networks.

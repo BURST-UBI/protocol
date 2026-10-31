@@ -2,9 +2,10 @@
 
 * [Documentation](README.md)
 
-## Getting started
+## Understanding BURST
 
-* [What is BURST?](introduction/QUICK_TOUR.md)
+* [Introduction](introduction/QUICK_TOUR.md)
+* [Whitepaper](introduction/WHITEPAPER.md)
 * [Balances and units](introduction/ECONOMICS.md)
 * [Glossary](introduction/GLOSSARY.md)
 * [Limitations](introduction/LIMITATIONS.md)
@@ -26,9 +27,8 @@
 * [Browser integration](development/BROWSER_WALLET.md)
 * [Group services](node/GROUP_SERVICES.md)
 
-## Protocol
+## Protocol reference
 
-* [Whitepaper](introduction/WHITEPAPER.md)
 * [Accounts and blocks](protocol/BLOCKS.md)
 * [Consensus](protocol/CONSENSUS.md)
 * [Checkpoints](protocol/CHECKPOINTS.md)

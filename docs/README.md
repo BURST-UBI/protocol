@@ -1,26 +1,21 @@
-# BURST documentation
+# BURST
 
-Build wallets, run nodes, and understand the BURST protocol.
+BURST is built around a simple idea: every person should have access to an income,
+and people should be able to earn money by doing things others value.
 
-Each account has its own signed chain of blocks. Verified accounts earn **BRN**,
-a non-transferable spending allowance. Spending BRN creates **TRST**, which can
-be sent to other accounts. Start with [What is BURST?](introduction/QUICK_TOUR.md)
-for the payment flow and the roles of verification and voting.
+It separates personal income, **BRN**, from transferable money, **TRST**. The
+community votes on how quickly BRN accrues and how long TRST remains spendable.
 
-## Start here
+Start with the [introduction](introduction/QUICK_TOUR.md), then read the
+[whitepaper](introduction/WHITEPAPER.md). It follows a payment from its creation
+through transfers, splits and merges, and explains how verification and voting
+fit together.
 
-| Task | Guide |
-| --- | --- |
-| Run a node | [Installation](node/INSTALLATION.md) and [node operation](node/NODES.md) |
-| Build a wallet or payment integration | [RPC](development/RPC.md), [keys and signing](wallet/WALLETS.md), and [payments](wallet/PAYMENTS.md) |
-| Work on the code | [Build and test](development/DEVELOPING.md) and [architecture](development/ARCHITECTURE.md) |
-| Understand the protocol | [Whitepaper](introduction/WHITEPAPER.md) and [parameters](protocol/PARAMETERS.md) |
+## Build with BURST
 
-## Reference
+- [Run a local node](development/DEVELOPING.md).
+- [Integrate a wallet](wallet/WALLETS.md) and [make RPC requests](development/RPC.md).
+- [Find the code](development/ARCHITECTURE.md).
 
-- [Balances and units](introduction/ECONOMICS.md): BRN, TRST and integer amounts.
-- [RPC and networking](node/SERVICES.md): access controls and service limits.
-- [Glossary](introduction/GLOSSARY.md): protocol terms and participant roles.
-
-For deployment, check the [limitations](introduction/LIMITATIONS.md) and
-[release notes and availability](release/DOWNLOADS.md).
+For the features available in current builds, see
+[implementation status](introduction/WHITEPAPER.md#implementation-status).
