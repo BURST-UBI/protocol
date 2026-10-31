@@ -48,39 +48,22 @@ If a request times out, resolve the saved hash before creating a replacement.
 
 ## Acceptance, rejection and expiry
 
-**Accept the payment**
+Suppose Alice has sent Bob 50 TRST. Until Bob acts, it is pending: Bob cannot
+spend it, and Alice cannot spend it again. There are three possible outcomes.
 
-```mermaid
-flowchart TD
-    accTitle: Accepting a pending payment
-    accDescr: An accepted signed receive consumes the pending receipt and delivers its TRST to the recipient.
-    P[Pending TRST payment] -->|Recipient receives| R[Recipient holds TRST]
-```
+If Bob accepts, he signs an `Open` or `Receive`. Once that receive is confirmed,
+the 50 TRST belongs to him.
 
-**Reject the payment**
+If Bob rejects, the money does not immediately become spendable by Alice. A new
+pending payment goes back to her, and she must sign to claim it.
 
-```mermaid
-flowchart TD
-    accTitle: Rejecting a pending payment
-    accDescr: An accepted rejection creates a new pending receipt for the sender. The sender must sign a receive to claim the returned TRST.
-    P[Pending TRST payment] -->|Recipient rejects| S["New pending receipt<br/>for sender"]
-    S -->|Sender receives| H["Sender holds<br/>returned TRST"]
-```
+If the pending payment expires, the agreed expiry transition returns the holdings
+to Alice and records a return credit. Her later receive acknowledges that credit;
+it does not deliver another 50 TRST or make expired money young again.
 
-**Let the payment expire**
-
-```mermaid
-flowchart TD
-    accTitle: Expiry and return acknowledgment
-    accDescr: The agreed expiry transition already returns holdings to the sender and creates a return credit. The sender's later receive acknowledges the credit without delivering the holdings again or renewing their age.
-    P[Pending TRST payment] -->|Agreed expiry| E["Holdings returned to sender<br/>Return credit created"]
-    E -->|Sender receives| A["Credit acknowledged<br/>No second delivery"]
-```
-
-The diagrams show changes the node has accepted, not merely requests a wallet
-has signed or submitted. If Bob does nothing, the payment stays pending, subject
-to expiry and other protocol rules. He has not accepted it, and Alice cannot
-treat his silence as permission to spend it again.
+These are effects of operations the node accepts, not merely buttons pressed in
+a wallet. If Bob does nothing, the payment stays pending, subject to expiry and
+other protocol rules. Silence is not acceptance or rejection.
 
 When Bob rejects it with `RejectReceive`, the node creates a new pending payment
 for Alice, identified by Bob's rejection block. Alice must sign to claim that

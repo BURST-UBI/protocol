@@ -28,16 +28,12 @@ The rules below describe those implemented paths. Bootstrap has separate
 
 ## Ordinary enrollment
 
-```mermaid
-flowchart TD
-    accTitle: Ordinary verification
-    accDescr: Endorsers burn BRN. The network agrees the request and eligible pool, uses a future public random result to draw and activate a panel of verifiers, then certifies and applies the outcome of its assessment and votes.
-    A[Endorsements burn BRN] --> B[Agree request and eligible pool]
-    B --> C[Wait for the agreed public random result]
-    C --> D[Draw verifiers randomly and activate the panel]
-    D --> E[Evidence assessment and votes]
-    E --> F[Certify and apply the outcome]
-```
+1. Existing verified participants endorse the applicant by burning BRN.
+2. The network fixes the application, the eligible volunteers and a future public
+   randomness round before its result is known.
+3. That result selects the verifiers. The network agrees when their review starts.
+4. The selected verifiers examine the evidence and vote.
+5. The network certifies the result and applies the resulting account changes.
 
 An endorsement puts some of an existing participant's own allowance behind an
 application. Endorsers permanently burn BRN; they do not receive a protocol

@@ -18,13 +18,21 @@ Suppose Alice burns BRN to pay Bob, and Bob sends that TRST to you. Bob is the
 Bob. A creator policy checks Alice. If Bob sends a merged holding, the policy
 checks every creator whose contribution remains in it.
 
-| Policy | What the wallet checks |
-| --- | --- |
-| Protocol only | Normal protocol validity without an additional creator or group restriction. |
-| Allowed senders | The immediate sender is on your list. An empty list adds no sender restriction. |
-| Trusted creators only | Every surviving original creator is on your personal list. |
-| Any selected group | Each creator belongs to at least one of your selected groups. |
-| Every selected group | Each creator belongs to all your selected groups. |
+With **Protocol only**, the wallet adds no creator or group restriction to normal
+network checks. With **Trusted creators only**, Alice must be on your personal
+creator list. If the payment also includes value created by Carol, Carol must be
+on it too.
+
+The two group policies differ in how much membership they require. Suppose you
+select a local cooperative and a professional association:
+
+- **Any selected group:** Alice can belong to either group, and Carol can belong
+  to either group. Every creator must belong to at least one.
+- **Every selected group:** Alice and Carol must each belong to both groups.
+
+**Allowed senders** checks Bob separately. If you set this filter, he must be on
+your sender list even when the creators pass your trust policy. An empty sender
+list adds no restriction.
 
 The sender filter can apply in addition to a creator or group policy. A rejected
 policy check is not a signed `RejectReceive`: holding a payment for review does

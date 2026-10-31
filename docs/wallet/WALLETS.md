@@ -36,13 +36,13 @@ The exact seed derivation and address encoding are described in
 
 ## What a phrase does not restore
 
-| State | Restored by the phrase? |
-| --- | --- |
-| Cryptographic account identity | Yes, using the same BURST derivation. |
-| Current balances and eligibility | Retrieved from the network. |
-| Saved signed actions awaiting resolution | No; these are local journal records. |
-| Device signing binding | No; the wallet must establish the appropriate signing role. |
-| Representative signing history or node database | No; these require their own durable state and recovery. |
+The phrase recreates your account's signing key using BURST's derivation. The
+wallet then asks the network for your balances and verification state.
+
+It cannot recreate a lost local record of a signed payment whose outcome is
+unknown. Preserve the pending-action journal for those records. The wallet also
+has to establish its device signing role again. If you run a representative,
+its signing history and node database need their own backups and recovery.
 
 A local wallet object may initially report an unverified state until it reads the
 network. That initialization does not revoke an existing on-chain identity.
@@ -144,15 +144,10 @@ separate steps; a signature alone does not prove that a payment succeeded.
 
 Offline signing separates preparation, signing and submission:
 
-```mermaid
-flowchart TD
-    accTitle: Signing offline and confirming online
-    accDescr: Fetch operation context, review and sign offline, and retain the signed action. Submit that saved action when connected and check its confirmed outcome.
-    A["Fetch account<br/>and operation context"] --> B[Review and sign offline]
-    B --> C[Save the signed action]
-    C --> D["Submit the saved action<br/>when connected"]
-    D --> E[Check its confirmed outcome]
-```
+1. While connected, fetch the account state and the inputs needed for the action.
+2. Review those inputs and sign on the offline device.
+3. Save the exact signed action before attempting submission.
+4. When connected again, submit that saved action and check whether it is confirmed.
 
 Preparation obtains the frontier, parameters, epoch, signing grant, proof of work
 and operation-specific inputs. Those inputs can include holdings, a pending

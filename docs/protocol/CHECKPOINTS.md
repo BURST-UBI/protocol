@@ -44,13 +44,13 @@ Missing dependencies are not permission to use a peer's claimed balances.
 
 The same agreement machinery supports different events:
 
-| Event | What it establishes |
-| --- | --- |
-| Selection | A frozen request, eligible pool and exact future beacon round. |
-| Panel activation or deadline | Agreed timing and completion of the named panel. |
-| Identity outcome | Settlement and any resulting verification, revocation or restoration effects. |
-| Governance boundary | Counted results or scheduled changes under the applicable rules. |
-| Roster update | A changed representative electorate without inventing a verifier selection. |
+For verification, one checkpoint fixes the application, eligible volunteers and
+future randomness round. Later checkpoints agree when the selected panel starts
+or finishes, and apply its outcome, including any revocation or restoration.
+
+For governance, a checkpoint can record counted votes or a scheduled rule change.
+A checkpoint can also update the representatives entitled to vote. That update
+changes the representative electorate; it does not select a verification panel.
 
 These events have distinct commitments and replay rules. An identity outcome or
 roster-only update does not require a new random committee merely because it is
@@ -213,15 +213,10 @@ local byte budget separate from the smaller checkpoint-record and witness limits
 The receiver authenticates the archive and checks its expected epoch and minimum
 height before publishing the downloaded file. Publication does not install state.
 
-```mermaid
-flowchart TD
-    accTitle: From peer data to usable state
-    accDescr: Check transfer framing and digest, authenticate history or snapshot, then replay and reconcile local commitments before installing state and publishing the runtime.
-    A[Peer bytes] --> B["Check transfer framing<br/>and digest"]
-    B --> C[Authenticate history or snapshot]
-    C --> D["Replay and reconcile<br/>local commitments"]
-    D --> E["Install state<br/>and publish runtime"]
-```
+Receiving data from a peer is only the first step. The node checks the transfer's
+format and digest, authenticates the history or snapshot, then reconstructs the
+state and checks it against its own previous commitments. Only after these checks
+can it install that state and make it available to the running node.
 
 During startup recovery, ordinary block and vote traffic remains closed.
 Authenticated peer connections can carry the recovery messages needed to finish

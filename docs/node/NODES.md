@@ -238,15 +238,13 @@ trust anchor. The archive reader authenticates authority transitions from the
 configured base and checks the snapshot certificate before reading the economic
 body. Body validation and installation checks remain separate steps.
 
-```mermaid
-flowchart TD
-    accTitle: Installing a trusted snapshot
-    accDescr: Start with the configured trusted base. Authenticate authority and certificate, validate the snapshot, and reconcile local history and signing commitments before committing installation and recovering runtime state.
-    A[Configured trusted base] --> B["Authenticate authority<br/>and certificate"]
-    B --> C[Validate snapshot body]
-    C --> D["Reconcile local history<br/>and signing commitments"]
-    D --> E["Commit installation<br/>and recover runtime state"]
-```
+The node installs a snapshot only after these checks:
+
+1. Starting from its configured trusted base, authenticate the snapshot's authority
+   and certificate.
+2. Validate the contents of the snapshot.
+3. Check that they agree with the required local history and previous signing decisions.
+4. Commit the installation and restore the running node's state.
 
 A file checksum only checks file identity; it cannot replace authority and state
 validation. Importing an authenticated archive is also not the same as installing
@@ -286,13 +284,15 @@ promise bounded total storage as accounts and retained state grow.
 
 ## Backups
 
-| Backup | What it preserves |
-| --- | --- |
-| Wallet recovery phrase | Cryptographic identity under BURST's derivation. |
-| Encrypted keystore | Password-protected signing key. |
-| Pending-action journal | Exact signed actions whose outcomes may be uncertain. |
-| Node database and journals | Local ledger, recovery state and signing continuity. |
-| Authenticated snapshot | Authorized shared state for a supported bootstrap or recovery path. |
+Back up the state needed for the role you run. A wallet recovery phrase recreates
+the account key; an encrypted keystore stores that key protected by a password.
+Neither contains the pending-action journal, which preserves exact signed actions
+whose outcomes are still uncertain.
+
+A node also needs its database and journals to preserve local history, recovery
+state and previous signing decisions. An authenticated snapshot can supply shared
+state through a supported recovery path, but it does not replace those local
+signing records.
 
 Stop the owned node cleanly before taking a filesystem copy of its database.
 Keep recovery material on a separate device or storage system; a copy on the

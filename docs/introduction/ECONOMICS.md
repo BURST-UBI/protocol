@@ -10,15 +10,15 @@ Suppose Alice earned 5 BRN and uses 3 to pay Bob. She has 2 BRN left from that
 allowance. Bob receives 3 TRST, which he can pass on once he meets the spending
 requirements. His own BRN is calculated separately.
 
-```mermaid
-flowchart TD
-    accTitle: Personal income becomes a payment
-    accDescr: Alice earns BRN over time. Spending it creates a pending TRST payment. Bob signs to accept it, then can pay someone else using the same TRST.
-    A[Alice earns BRN over time] --> B[Alice spends BRN to pay Bob]
-    B --> C[TRST payment waits for Bob]
-    C -->|Bob signs to accept| D[Bob receives TRST]
-    D --> E[Bob can pay someone else with TRST]
-```
+For this payment, the balances change in two steps:
+
+1. Alice signs a payment of 3 BRN to Bob. Her available BRN falls from 5 to 2.
+   The resulting 3 TRST waits for Bob; he cannot spend it yet.
+2. Bob signs to accept. Once that receive is confirmed, the 3 TRST is his.
+   His own BRN balance has not changed.
+
+Bob can later send that TRST to someone else. That transfer creates no new
+TRST; its next recipient must also sign to accept it.
 
 Why keep more information than the total balance? TRST can have an expiry date,
 and fraud revocation follows the person whose BRN created it. Two payments of

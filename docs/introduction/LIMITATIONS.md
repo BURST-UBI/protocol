@@ -9,13 +9,13 @@ the software follows its rules.
 The source includes features that are not enabled on Live. Check these before
 building an integration around a protocol operation:
 
-| Feature | Default build | Dev/Test with `experimental-testnet` | Live |
-| --- | --- | --- | --- |
-| Certified verifier selection and activation | Disabled | Enabled | Disabled |
-| Governance operations requiring certified activation | Disabled | Enabled | Disabled |
-| Full governance content | Disabled | Enabled | Disabled |
-| Ledger-backed governance-key delegation | Disabled | Enabled | Disabled |
-| Appeals of challenge outcomes | Disabled | Enabled | Disabled |
+These features are disabled in the default build and on Live. They are enabled
+only on Dev/Test networks built with `experimental-testnet`:
+
+- Certified verifier selection and activation.
+- Governance operations that require certified activation, and full governance content.
+- Ledger-backed governance-key delegation.
+- Appeals of challenge outcomes.
 
 The experimental flag permits these paths; accounts must still meet each
 operation's eligibility and state requirements. Bootstrap verification has
