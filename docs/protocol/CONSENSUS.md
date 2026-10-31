@@ -65,6 +65,9 @@ of finality.
 
 ## Durable cementation
 
+**Cementation** is the node's process for permanently recording a block and its
+dependencies as confirmed. It is a storage step after voting.
+
 After final-vote confirmation, the node records pending confirmation durably.
 A background worker walks dependencies and advances each account's confirmation
 height without gaps. It commits confirmed authority and applicable governance

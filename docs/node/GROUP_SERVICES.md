@@ -40,7 +40,7 @@ containing only its own endpoint; no central registry or node transaction is
 required. From the protocol repository, validate and export the draft with:
 
 ```sh
-bash tools/limited-run.sh cargo run -p burst-groups --bin burst-group-directory -- draft.json directory.json
+cargo run -p burst-groups --bin burst-group-directory -- draft.json directory.json
 ```
 
 The output path must not exist. The command validates every entry, sorts groups
@@ -97,7 +97,7 @@ rules pause automation until repaired. Manual receiving does not require group
 approval.
 
 A node-reported origin list is not an independent proof or a contribution-weight
-breakdown. See [wallet trust policies](../wallet/WALLETS.md#group-trust) for acceptance
+breakdown. See [wallet trust policies](../wallet/TRUST.md#group-trust) for acceptance
 rules and the boundary between application checks and protocol validity.
 
 ## Group-to-group trust
@@ -151,10 +151,10 @@ follows registered endorsements.
 
 The `directory_publication` integration test exercises exporter output through an
 HTTP server and client. Library tests cover directory validation, response limits,
-redirects and trust traversal. Run from `protocol/` using the resource wrapper:
+redirects and trust traversal. Run from the protocol repository, following any local resource limits:
 
 ```sh
-bash tools/limited-run.sh cargo test -p burst-groups --test directory_publication
+cargo test -p burst-groups --test directory_publication
 ```
 
 A loopback test does not establish public hosting, TLS configuration or IPFS

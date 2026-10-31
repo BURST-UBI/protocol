@@ -2,8 +2,9 @@
 
 ## RPC security boundaries
 
-Keep RPC and WebSocket access private unless a deployment has separately qualified
-its public-service protections. `genesis_endorse` requires an HTTP
+Bind RPC and WebSocket listeners to loopback and use a private tunnel for remote
+access. If you expose a public API, put authentication and traffic controls in
+front of it; the limits below do not make it safe to expose an administration node. `genesis_endorse` requires an HTTP
 `Authorization: Bearer <token>` header. Configure `BURST_RPC_ADMIN_TOKEN` with a
 securely generated 64-character hexadecimal secret (for example, `openssl rand
 -hex 32`). Without that environment variable the HTTP administration action is
@@ -33,60 +34,11 @@ The recipient accepts it with a signed receive. This does not verify the wallet;
 bootstrap verification uses the separate `genesis_endorse` action. The faucet
 is unavailable on Live.
 
-## Requests, pages and events
+## Client integration
 
-RPC accepts POST objects with an `action` and parameters. Responses contain
-`result` or `error`, not JSON-RPC 2.0 request IDs. Batches contain one to 32
-sequential actions; they are not atomic ledger transactions.
-
-Common list parameters default to 100 results and clamp `count` to 1–1,000.
-The node's committed governance reader has a stricter 100-proposal limit and
-rejects larger pages. Use `count` of 100 or less for `governance_proposals`.
-Account-history cursors encode offsets into ascending account heights; governance
-proposal cursors seek after a hash, and pending cursors seek by descending amount
-then ascending hash. Return cursors unchanged with the same endpoint and filters.
-They do not pin one ledger snapshot across requests.
-
-Some RPC names describe historical wire fields rather than their exact meaning:
-
-| Field or action | Meaning |
-| --- | --- |
-| `process.block` | Signed block encoded as a JSON string or hex-encoded bincode bytes. |
-| `process.accepted` | Accepted or queued for processing; not proof of confirmation. |
-| `account_history.history[].amount` | Block's TRST balance, not a transfer amount. |
-| `block_info.brn_balance` | Block's cumulative BRN spend, not available BRN. |
-| `work_generate.multiplier` | Numeric threshold ratio, not expected computational work. |
-| `account_pending.hash` | Point lookup returning at most one entry; the threshold still applies. |
-| `wallet_create` | Generates an address and public key but discards the private key; the optional seed is ignored. Create spendable wallets locally. |
-| `genesis_endorse.verified` | Target verification state after endorsement confirmation; confirmation alone does not guarantee verification. |
-| `verifier_opt_in.opted_in` / `verifier_opt_out.opted_in` | Requested state, not proof of confirmation. |
-
-The node does not currently maintain the RPC online-representative list; an empty
-`representatives_online` response does not establish that no representatives are
-online. The test-only `governance_propose_eviction` helper ignores `reason` and
-submits no proposal content.
-
-History is returned in ascending account-height order. Missing local bodies are
-requested through the node; unavailable history produces an error rather than a
-silently incomplete page. A concurrent change to the account head or block count
-also requires a retry.
-
-WebSocket clients subscribe at `/ws`. The optional `accounts` filter matches only
-`data.account`, not every transaction participant. Block-type and minimum-amount
-filters are not implemented. Resubscribing replaces a topic's prior subscription.
-
-| Topic | Current node behavior |
-| --- | --- |
-| `account_update` | Published after acceptance; provisional, not finality. |
-| `confirmation` | Published during cementation. Its `amount` contains the block's TRST balance, not the payment amount. |
-| `governance` | Publisher exists but has no node lifecycle callers. |
-| `verification` | Publisher exists but has no node lifecycle callers. |
-
-Acknowledgments carry a `type` field. Events contain `topic`, `data` and
-`timestamp` directly. There is no replay cursor or durable event history. Slow
-clients can miss events while connected; the server logs lag without sending a
-gap notification. Reconnecting clients must subscribe again and query RPC to
-reconcile state. Events alone are not a complete record of balances or outcomes.
+For request formats, pagination and signed block submission, see the
+[RPC guide](../development/RPC.md). For subscriptions and reconnect handling, see
+[WebSocket events](../development/WEBSOCKET.md).
 
 ## Peer admission and traffic budgets
 

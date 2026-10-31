@@ -20,12 +20,16 @@
 
 * [Keys and signing](wallet/WALLETS.md)
 * [Sending and receiving](wallet/PAYMENTS.md)
+* [Acceptance policies](wallet/TRUST.md)
+* [RPC](development/RPC.md)
+* [WebSocket events](development/WEBSOCKET.md)
 * [Browser integration](development/BROWSER_WALLET.md)
 * [Group services](node/GROUP_SERVICES.md)
 
 ## Protocol
 
 * [Whitepaper](introduction/WHITEPAPER.md)
+* [Accounts and blocks](protocol/BLOCKS.md)
 * [Consensus](protocol/CONSENSUS.md)
 * [Checkpoints](protocol/CHECKPOINTS.md)
 * [Account verification](protocol/VERIFICATION.md)

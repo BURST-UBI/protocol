@@ -12,7 +12,7 @@ for the payment flow and the roles of verification and voting.
 | Task | Guide |
 | --- | --- |
 | Run a node | [Installation](node/INSTALLATION.md) and [node operation](node/NODES.md) |
-| Build a wallet or payment integration | [Keys and signing](wallet/WALLETS.md), then [sending and receiving](wallet/PAYMENTS.md) |
+| Build a wallet or payment integration | [RPC](development/RPC.md), [keys and signing](wallet/WALLETS.md), and [payments](wallet/PAYMENTS.md) |
 | Work on the code | [Build and test](development/DEVELOPING.md) and [architecture](development/ARCHITECTURE.md) |
 | Understand the protocol | [Whitepaper](introduction/WHITEPAPER.md) and [parameters](protocol/PARAMETERS.md) |
 

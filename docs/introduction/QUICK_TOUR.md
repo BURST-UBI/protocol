@@ -1,7 +1,13 @@
 # What is BURST?
 
-BURST starts with a question: what if access to a spending allowance depended on
-being a person, rather than owning money already?
+BURST is a payment protocol in which verified accounts earn a personal spending
+allowance. Each account has its own signed chain of blocks. Nodes validate those
+blocks, and representatives vote to confirm them.
+
+For an integration, start with [accounts and blocks](../protocol/BLOCKS.md) and
+the [RPC guide](../development/RPC.md). To try the code locally, follow
+[build and test](../development/DEVELOPING.md). Some verification and governance
+paths are currently [experimental only](LIMITATIONS.md#feature-availability).
 
 ## Two kinds of balance
 
@@ -21,8 +27,10 @@ TRST retains its origin and age as it changes hands. Splitting a holding preserv
 that history. Merging holdings combines their amounts and uses the oldest input's
 origin time. Neither operation resets the clock.
 
-Once a holding reaches the governed expiry period, it cannot be spent. Its
-age-based reference value is a separate calculation, not a guaranteed price.
+A network can set a finite expiry period; the current defaults effectively
+disable expiry. Under a finite period, a holding becomes unspendable when its
+age reaches that limit. Its age-based reference value is a separate calculation,
+not a guaranteed price.
 
 If an origin is revoked for fraud, the protocol follows its contributions through
 the merger graph. Clean value is separated from affected value. This can affect

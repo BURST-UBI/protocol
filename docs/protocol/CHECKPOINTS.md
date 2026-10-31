@@ -14,6 +14,10 @@ A node checks a checkpoint in three steps:
 3. **Install the state:** persist the result and update the running node before
    accepting operations under the new rules.
 
+The certified path is currently enabled only for experimental Dev/Test builds.
+See [feature availability](../introduction/LIMITATIONS.md#feature-availability).
+The following sections explain how that path validates and installs shared state.
+
 ## Authority and replay
 
 The previous trusted roster authenticates the next checkpoint. Each verified
@@ -94,7 +98,7 @@ Observations older than 90 seconds are unusable. Wall/monotonic divergence above
 250 milliseconds, excessive uncertainty or too few fresh sources makes signing
 time unavailable. Bounds continue to age during replay and storage work.
 The client does not reset the host clock or fall back to an unauthenticated
-zero-error estimate. Operators can inspect `get_telemetry.signing_clock` and
+zero-error estimate. Operators can inspect the `signing_clock` field of `telemetry` RPC and
 clock-availability transition logs; a diagnostic NTP offset is not signing readiness. Bad host time can also prevent TLS authentication.
 
 The NTS client rejects duplicate hostnames and declared operator labels, but

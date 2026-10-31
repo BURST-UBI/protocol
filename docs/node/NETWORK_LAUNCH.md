@@ -4,6 +4,11 @@ A network launch needs agreed public inputs, securely held signing keys and
 qualified software. Building a daemon or starting a server does not establish
 that a Live network is ready. Test candidates qualify only their recorded scope.
 
+The current source disables ordinary certified verifier selection and governance
+on Live. Creating genesis and enrolling bootstrap accounts does not enable those
+paths. A public launch needs these [availability restrictions](../introduction/LIMITATIONS.md#feature-availability)
+resolved and the resulting release tested. Use Dev/Test for experimental operation.
+
 ## Freeze the public identity
 
 Every participant must agree on the creator public key, configured genesis hash,

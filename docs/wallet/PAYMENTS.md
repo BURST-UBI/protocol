@@ -2,8 +2,8 @@
 
 A payment takes two signed operations: one from the sender and one from the
 recipient. The sender either burns BRN to create TRST or sends TRST they already
-hold. Once accepted by the node, the payment is **pending**: it has left the
-sender but the recipient has not yet received it. The stored pending entry is
+hold. When the node applies the sender's block, the payment is **pending**: its
+TRST is reserved for the recipient, who has not yet received it. The stored pending entry is
 called a **pending receipt**.
 
 The recipient signs a receive operation to claim it. For a new account, that claim
@@ -21,6 +21,23 @@ with the sender and 2 pending for the next recipient, without new issuance.
 An unverified account can receive TRST. Receipt does not grant BRN accrual or the
 verified rights required for ordinary spending. The ledger also cannot establish
 whether goods or services were delivered in exchange for a payment.
+
+## Integrate a payment
+
+1. Choose whether the payer will burn BRN or transfer existing TRST. These use
+   different balance checks and block types.
+2. Prepare and sign the sender's block locally. Save its exact bytes and hash
+   before submitting it with [`process`](../development/RPC.md#submit-a-signed-block).
+3. Check `block_info.confirmed`. A successful submission response alone is not
+   confirmation.
+4. On the recipient, query `account_pending` and review the receipt, including
+   its origin and whether it is a return credit.
+5. Sign an `Open` or `Receive` for that receipt, submit it, and check its confirmation.
+
+The wallet library provides `pay_signed` for BRN, `transfer_signed` for existing
+TRST, and `receive_signed` for a receipt. Use them with the wallet's
+[signing and recovery state](WALLETS.md#building-and-signing-operations).
+If a request times out, resolve the saved hash before creating a replacement.
 
 ## Acceptance, rejection and expiry
 
@@ -72,14 +89,14 @@ holdings. The sender's later receive acknowledges the return credit without
 delivering them a second time. It does not renew their age. The return goes to the
 sender of the pending payment, who may differ from the original BRN burner.
 
-## There is no arbitrary refund timer
+## Expiry timing
 
 A sender cannot treat silence as permission to spend the value again. Expiry is
 based on the holding's effective origin time and the governed expiry period,
 not an arbitrary interval after sending.
 
-In the certified replay path, agreed deadline effects follow replay of signed
-blocks from the old epoch. The certificate closes that epoch against late
+In the certified path, nodes first apply the agreed blocks from the old payment
+epoch, then its deadline effects. The checkpoint closes that epoch against late
 claims. A receive that has already consumed a receipt and an expiry return cannot
 both credit the same payment.
 

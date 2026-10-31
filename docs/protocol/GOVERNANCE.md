@@ -5,6 +5,13 @@ BRN accrual rate and TRST expiry period. Votes cannot install new code; new
 behavior requires a software release. Constitutional text records community
 rules but cannot add behavior the software does not implement.
 
+## Network availability
+
+Current Live gates disable the certified selection path, full governance-content
+operations and ledger-backed delegation. Experimental Test/Dev builds can enable
+these paths; that does not enable them on Live. The node rejects governance
+operations when their required certified path is unavailable.
+
 ## Ordinary proposals
 
 A verified proposer submits a change. Submission is distinct from endorsement:
@@ -12,9 +19,16 @@ supporters burn the configured BRN amount to qualify the proposal for voting.
 Those burns are not refunded when a proposal loses or is withdrawn. Only the
 proposer can withdraw, and only during the proposal phase.
 
-The ordinary lifecycle is proposal and endorsements, one voting window, cooldown,
-then scheduled activation. The code calls its voting phase `Exploration`.
-The stored `Promotion` value is not a second active ballot.
+An ordinary proposal goes through these stages:
+
+1. **Proposal:** supporters burn BRN until the endorsement requirement is met.
+2. **Voting:** eligible accounts vote yea, nay or abstain during one voting window.
+3. **Counting:** the network agrees the result after the propagation buffer.
+4. **Cooldown:** an approved proposal waits for its scheduled activation.
+5. **Activation:** a certified boundary applies the change.
+
+The code calls the voting phase `Exploration`. The stored `Promotion` value is
+not a second ballot.
 
 ## Participation and approval
 
@@ -92,15 +106,6 @@ constitutional requirement as well; the exact combinations are in
 
 An emergency is not a creator-only override. It still needs votes and the
 protocol's agreed outcome. It cannot produce a missing consensus quorum.
-
-## Network availability
-
-Current Live gates disable the certified selection path, full governance-content
-operations and ledger-backed delegation. Experimental Test/Dev builds can enable
-these paths; that does not enable them on Live. The node rejects governance
-operations when their required certified path is unavailable.
-
-These are implemented rules, not a declaration of production availability.
 
 ## Governance delegation
 

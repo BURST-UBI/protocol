@@ -27,25 +27,26 @@ the UI thread. The library works in both page and worker contexts.
 
 ## Build and check
 
-From `protocol/`, install the target if missing. Before compiling, follow the
-[validation workflow](https://github.com/BURST-UBI/protocol/blob/main/spec/VALIDATION_WORKFLOW.md)
-and reuse matching artifacts. Run one focused check at a time on the constrained
-desktop; the commands below show alternatives and separate stages, not a required
-full rerun after every edit.
+From the protocol repository, install the target and check the shared crates:
 
 ```sh
 rustup target add wasm32-unknown-unknown
-bash tools/limited-run.sh cargo check --locked -p burst-wallet-core -p burst-crypto --target wasm32-unknown-unknown
-bash tools/limited-run.sh cargo clippy --locked -p burst-wallet-core -p burst-groups -p burst-web-runtime --target wasm32-unknown-unknown -- -D warnings
+cargo check --locked -p burst-wallet-core -p burst-crypto --target wasm32-unknown-unknown
+cargo clippy --locked -p burst-wallet-core -p burst-groups -p burst-web-runtime --target wasm32-unknown-unknown -- -D warnings
 ```
+
+Use the checkout's resource limits when developing on a constrained machine.
+For release-candidate work, follow the
+[validation workflow](https://github.com/BURST-UBI/protocol/blob/main/spec/VALIDATION_WORKFLOW.md)
+and reuse matching build artifacts.
 
 The real-browser contract test needs `wasm-bindgen-cli` 0.2.126, Playwright and
 Chromium. The CLI version must match the workspace `wasm-bindgen` pin in `Cargo.toml`.
 
 ```sh
-bash tools/limited-run.sh cargo build --locked -p burst-wallet-core --example browser_check --features browser-test --target wasm32-unknown-unknown
-bash tools/limited-run.sh wasm-bindgen --target web --out-dir target/browser-check target/wasm32-unknown-unknown/debug/examples/browser_check.wasm
-bash tools/limited-run.sh node --test wallet_core/tests/browser.cjs
+cargo build --locked -p burst-wallet-core --example browser_check --features browser-test --target wasm32-unknown-unknown
+wasm-bindgen --target web --out-dir target/browser-check target/wasm32-unknown-unknown/debug/examples/browser_check.wasm
+node --test wallet_core/tests/browser.cjs
 ```
 
 If Playwright or Chromium is installed elsewhere, set `PLAYWRIGHT_MODULE` and

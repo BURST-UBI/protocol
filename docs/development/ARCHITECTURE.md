@@ -4,6 +4,23 @@ BURST separates economic rules, persistent state, peer communication and applica
 interfaces. The node connects these layers. Wallets construct and sign operations;
 the node checks those operations against its ledger and protocol rules.
 
+## Follow a payment through the code
+
+A wallet prepares a block from the account's current head, signs it locally, and
+submits it through RPC. The RPC handler hands it to the node's processing path;
+it does not hold the user's keys or decide the outcome itself.
+
+The node checks the block's format, signature, work and dependencies, then checks
+its economic effect against ledger state. Accepted candidates enter representative
+elections. Confirmation is recorded together with the required account-chain and
+cross-account dependencies. The WebSocket layer reports updates; RPC lets a
+client query state again if an event was missed.
+
+A receive follows the same path as a send. It references the pending payment,
+so its account chain depends on the sender's block even though the chains are
+stored separately. See [accounts and blocks](../protocol/BLOCKS.md) for the format
+and [payments](../wallet/PAYMENTS.md) for the client workflow.
+
 ## Find the code you need
 
 Paths below are relative to the protocol repository.

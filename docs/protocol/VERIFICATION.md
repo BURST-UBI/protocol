@@ -15,6 +15,18 @@ make it an available production operation.
 The rules below describe those implemented paths. Bootstrap has separate
 [creator-authority rules](BOOTSTRAP.md).
 
+## Read an account's verification state
+
+```json
+{"action":"verification_status","account":"YOUR_ACCOUNT_ADDRESS"}
+```
+
+Send this to the node's [RPC listener](../development/RPC.md). The result includes
+`status`, `phase`, `verified_at`, endorsers, selected verifiers and votes.
+Check `selection_available` and `selection_unavailable_reason` before showing a
+user a panel workflow. `verifier_opted_in` means the account volunteered; it does
+not mean it was selected or meets all selection requirements.
+
 ## Ordinary enrollment
 
 ```mermaid

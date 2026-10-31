@@ -21,6 +21,12 @@
 | Revoked holding | TRST invalidated because of its origin. Restoration can reverse that invalidation, but expiry and other invalidation reasons still apply. |
 | Signing grant | The protocol record that identifies the account's active signing device. It does not grant governance voting authority. |
 | Checkpoint | An agreed boundary in account history and the shared state calculated from it. Nodes check both the agreement signatures and the resulting state. |
+| Head / frontier | The latest block hash in an account's chain. |
+| Quorum | The voting weight required for agreement. In the certified path, it comes from the installed electorate, not the number of currently reachable peers. |
+| Cementation | Recording confirmed blocks and their dependencies durably, advancing account confirmation heights. |
+| Payment epoch | The agreed economic and authority context named by an ordinary signed block. Initially it is the configured genesis hash. |
+| Ledger cut | The agreed prefixes of account chains used to calculate a checkpoint's shared state. |
+| Return credit | A pending record acknowledging expired payment value already returned to its sender. Receiving it does not deliver the value again. |
 
 For examples, see [sending and receiving](../wallet/PAYMENTS.md),
 [account verification](../protocol/VERIFICATION.md) and

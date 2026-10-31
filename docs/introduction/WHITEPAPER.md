@@ -1,5 +1,10 @@
 # BURST
 
+This document explains the protocol implemented in the repository. Some paths,
+including certified verifier selection and governance, are currently restricted
+to experimental Dev/Test builds. See [feature availability](LIMITATIONS.md#feature-availability)
+before treating a mechanism described here as a Live-network feature.
+
 ## Purpose
 
 BURST explores a monetary system in which verified people accrue an equal spending
@@ -255,7 +260,7 @@ rules.
 Group trust is an optional wallet policy. A receiver chooses trusted groups and
 can query their membership services about payment origins. This supplements the
 protocol's judgment; a group response cannot change consensus validity or make
-revoked currency spendable. See [group membership and payment policies](../wallet/WALLETS.md#group-trust).
+revoked currency spendable. See [group membership and payment policies](../wallet/TRUST.md#group-trust).
 
 ### The first participants
 

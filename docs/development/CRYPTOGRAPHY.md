@@ -66,10 +66,9 @@ The result is an Ed25519 signing seed. BURST retains its own signature and addre
 formats; this does not make its accounts interchangeable with Nano accounts.
 A keystore password protects the saved key file and does not change derivation.
 
-This replaces the earlier path-string HMAC scheme. The same old phrase now derives
-a different account; no automatic legacy fallback is provided. Existing private-key
-and encrypted-keystore imports retain their original account keys. A raw signing
-seed is also distinct from the wallet seed used by this derivation.
+A raw account signing seed is distinct from the wallet seed used by this
+construction. Importing a private key uses that account key directly; importing
+a phrase derives it from the phrase's entropy first.
 See [wallet recovery](../wallet/WALLETS.md) for state a phrase cannot restore.
 
 ## Delegation-key envelopes

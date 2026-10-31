@@ -1,15 +1,40 @@
 # Node installation
 
 The repository's installation scripts register a daemon as a background service.
-They download release artifacts, so their presence does not establish that a
-particular release is suitable for production. Check the exact artifact and its
-[qualification limits](../release/DOWNLOADS.md) first. For local source development,
+They download release artifacts. Check the
+[release notes and platform availability](../release/DOWNLOADS.md) for the version
+you intend to run. For local source development,
 use the [development setup](../development/DEVELOPING.md).
 
 Review `install.sh` or `install.ps1` from the revision you intend to use before
 running it. Linux installation needs root; macOS uses the current user's
 LaunchAgents; Windows installation needs an elevated PowerShell session.
 These scripts install the daemon, not the desktop wallet or dashboard.
+
+## Install the service
+
+From a reviewed checkout of the protocol repository, run:
+
+```bash
+sudo sh ./install.sh       # Linux
+sh ./install.sh            # macOS
+```
+
+On Windows, run `./install.ps1` in an elevated PowerShell session.
+The scripts download the latest daemon release and default to **Test**, whereas
+running the daemon directly without network configuration defaults to **Dev**.
+Set `BURST_NETWORK` explicitly to avoid installing on the wrong network.
+
+For example, on Linux, after choosing a reachable peer on the intended Test network:
+
+```bash
+sudo env BURST_NETWORK=test BURST_SEED=PEER_HOST:17076 sh ./install.sh
+```
+
+Replace `PEER_HOST` with that peer's hostname or address. `BURST_SEED` is a network
+peer, not a wallet seed or private key. The installer preserves an existing
+configuration, so inspect that file when reinstalling. It does not create a new
+Live network; see [launching a network](NETWORK_LAUNCH.md) for that separate process.
 
 ## Files and services
 

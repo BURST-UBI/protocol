@@ -4,6 +4,17 @@ The tables below describe `ProtocolParams::burst_defaults()`, the source default
 for Live. They are not a report of any running network's current state. Governance
 can change values, and Test and Dev override some defaults.
 
+To inspect the connected node's actual values:
+
+```bash
+curl http://127.0.0.1:7077/ \
+  -H 'Content-Type: application/json' \
+  -d '{"action":"protocol_params"}'
+```
+
+Governance changes only supported parameters and is subject to the current
+[feature switches](../introduction/LIMITATIONS.md#feature-availability).
+
 Amounts are stored as integer raw units: one BRN or TRST is `10^18` raw units.
 Durations use whole seconds. A basis point is 0.01%, so `9000` means 90%.
 Parameter RPC values use decimal strings to preserve integer precision.

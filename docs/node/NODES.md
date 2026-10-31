@@ -1,8 +1,61 @@
 # Node operation and recovery
 
 A node validates and stores ledger state, exchanges protocol data with peers and
-serves the interfaces enabled in its configuration. Its ability to connect is
-separate from its readiness to vote or serve authoritative state.
+serves RPC and WebSocket clients. Run a non-voting node to validate and serve
+ledger data; run a representative with a signing key to vote with the weight
+accounts delegate to it. Both need the state required to validate the protocol.
+
+Start with [installation](INSTALLATION.md) for a background service, or
+[build and test](../development/DEVELOPING.md) for a local source build.
+
+## Configuration
+
+Save the following as `node.toml` for a local, non-voting Dev node:
+
+```toml
+network = "Dev"
+data_dir = "./burst_data_dev"
+port = 27076
+bootstrap_peers = []
+enable_representative = false
+enable_rpc = true
+rpc_bind = "127.0.0.1"
+rpc_port = 7077
+enable_websocket = true
+websocket_bind = "127.0.0.1"
+websocket_port = 7078
+enable_upnp = false
+```
+
+Start it with `burst-daemon --config node.toml node run`. TOML network names are
+`"Dev"`, `"Test"` and `"Live"`; the CLI accepts `--network dev`, `test` or `live`.
+Set the P2P port explicitly in TOML: its default is the Dev port, even when the
+file selects another network. Without a config file, the CLI picks the selected
+network's port: 27076 for Dev, 17076 for Test and 7076 for Live.
+
+RPC defaults to port 7077 and is enabled. WebSocket defaults to port 7078 and is
+disabled. Both bind to loopback. Add reachable peers to `bootstrap_peers` when
+joining a network; an empty list does not supply a public discovery service.
+Use a separate `data_dir` for each network identity.
+
+CLI options and supported environment variables override file values. Some
+flags only enable or disable one direction: `--faucet` and `--metrics` enable,
+while `--no-representative` and `--disable-upnp` disable. `--rpc=false` and
+`--websocket=false` explicitly disable those listeners.
+
+For a voting node, enable representative mode and provide
+`representative_key_file`, a file containing the representative's 32-byte seed
+as 64 hex characters. On Unix, restrict it with `chmod 600`. Keep one durable
+data directory per signing key. Voting weight comes from verified accounts
+that select the representative; running the process alone gives it no weight.
+
+The `enable_verification`, `work_threads`, `log_format` and `log_level` fields
+are currently stored preferences, not controls wired into those runtime paths.
+Verifier opt-in is a signed account operation. Use environment-based logging
+as described under [Logging](#logging).
+
+Source: [CLI](https://github.com/BURST-UBI/protocol/blob/main/daemon/src/main.rs)
+and [NodeConfig](https://github.com/BURST-UBI/protocol/blob/main/node/src/config.rs).
 
 ## Joining and synchronizing
 
@@ -123,7 +176,7 @@ synchronization supplies time estimates; it does not itself establish agreement
 on a state transition. Certified boundaries coordinate deadline effects so that
 one node crossing a local deadline cannot independently rewrite shared state.
 
-The `get_telemetry` response reports `signing_clock` separately from the diagnostic
+The `telemetry` RPC response reports `signing_clock` separately from the diagnostic
 `ntp_offset_ms`. Its status is `ready`, `unavailable` (with a reason), or `disabled`.
 A ready reading includes conservative `earliest` and `latest` Unix seconds;
 it does not establish that this node is otherwise eligible to sign. A missing

@@ -5,6 +5,15 @@ created by burning BRN for a payment. Amounts use integer raw units; rates are r
 units per second and timestamps are whole Unix seconds.
 One BRN or TRST is 10^18 raw units; one mBRN or mTRST is 10^15 raw units.
 
+The default rate is approximately **1 BRN per eligible hour**. The default TRST
+lifetime is `u64::MAX`, which effectively disables expiry. The expiry examples
+below show what happens when a network uses a finite lifetime. Read a running
+node's `protocol_params` rather than assuming it still uses these defaults.
+
+For example, 2.5 TRST is `2500000000000000000` raw units. In JavaScript, keep the
+RPC string or convert it with `BigInt('2500000000000000000')`. Do not convert it
+through a floating-point `Number`.
+
 ```mermaid
 flowchart TD
     accTitle: From allowance to payment

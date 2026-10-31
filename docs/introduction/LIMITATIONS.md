@@ -1,5 +1,30 @@
 # Limits and assumptions
 
+## Feature availability
+
+The source includes features that are not enabled on Live. Check these before
+building an integration around a protocol operation:
+
+| Feature | Default build | Dev/Test with `experimental-testnet` | Live |
+| --- | --- | --- | --- |
+| Certified verifier selection and activation | Disabled | Enabled | Disabled |
+| Governance operations requiring certified activation | Disabled | Enabled | Disabled |
+| Full governance content | Disabled | Enabled | Disabled |
+| Ledger-backed governance-key delegation | Disabled | Enabled | Disabled |
+| Appeals of challenge outcomes | Disabled | Enabled | Disabled |
+
+The experimental flag permits these paths; accounts must still meet each
+operation's eligibility and state requirements. Bootstrap verification has
+[separate rules](../protocol/BOOTSTRAP.md).
+
+The switches are in
+[verification](https://github.com/BURST-UBI/protocol/blob/main/verification/src/lib.rs)
+and the [node release policy](https://github.com/BURST-UBI/protocol/blob/main/node/src/release_policy.rs).
+Physical removal of historical block bodies also remains disabled by its release
+gate; see [node storage](../node/NODES.md#pruning-and-retirement).
+
+## Protocol assumptions
+
 Correct accounting does not by itself establish economic usefulness or honest
 human judgments. These risks remain relevant even when software follows its rules.
 
