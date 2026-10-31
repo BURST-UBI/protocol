@@ -2,7 +2,7 @@
   "version": 1,
   "sources": {
     "IMPLEMENTATION_DECISIONS.md": {
-      "sha256": "af812de1c98ebec927ecd68b89546370c15c3a73b00a60a16fcda566dc5d3181"
+      "sha256": "aad2d398d7ffe13b52c0fa8ba4df38e8e823895c875af57595a04213e81ac1fa"
     },
     "docs/README.md": {
       "sha256": "7f679d537df07991ea9f478b1af16651bd636392bda8cb3abd7db263edb0890e"
@@ -995,7 +995,7 @@
       "source": "IMPLEMENTATION_DECISIONS.md",
       "line": 463,
       "title": "12.11 Confirmation height processor",
-      "sha256": "0a4cd33bc1b159e2875a2b1c66f9286f5c0c2a0cb231e41c902f3a3ef06fe632",
+      "sha256": "fdf4426b382972bd87050a7908ec1a600c8b85358c5c13efa54def7f7a36ab07",
       "status": "unverified",
       "evidence": [],
       "note": "Source text changed. Earlier scope and evidence remain in spec/evidence/documentation-baseline/coverage.json; no sign-off transferred."

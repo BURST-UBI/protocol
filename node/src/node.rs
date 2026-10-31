@@ -32,7 +32,6 @@ use burst_store::pending::PendingStore;
 use crate::block_processor::{BlockProcessor, ProcessResult};
 use crate::bounded_backlog::BoundedBacklog;
 use crate::config::NodeConfig;
-use crate::confirming_set::ConfirmingSet;
 use crate::connection_registry::{spawn_peer_read_loop, ConnectionRegistry};
 use crate::error::NodeError;
 use crate::ledger_cache::LedgerCache;
@@ -93,8 +92,6 @@ pub struct BurstNode {
     pub vote_generator: Arc<Mutex<VoteGenerator>>,
     /// Cached representative weights for vote routing.
     pub rep_weights: Arc<RwLock<RepWeightCache>>,
-    /// Cementation counters. Pending work is persisted in LMDB metadata.
-    pub confirming_set: Arc<Mutex<ConfirmingSet>>,
     /// Bounded backlog of unconfirmed blocks for DoS protection.
     pub backlog: Arc<Mutex<BoundedBacklog>>,
     /// Local block re-broadcaster for locally created blocks.
@@ -324,9 +321,6 @@ impl BurstNode {
         // Representative weight cache (rebuilt at startup from the account set)
         let rep_weights = Arc::new(RwLock::new(RepWeightCache::new()));
 
-        // Confirming set for batched cementation of confirmed blocks
-        let confirming_set = Arc::new(Mutex::new(ConfirmingSet::new(5)));
-
         // Bounded backlog for DoS-resistant unconfirmed block tracking
         let backlog = Arc::new(Mutex::new(BoundedBacklog::with_default_size()));
         let local_broadcaster = Arc::new(Mutex::new(LocalBroadcaster::with_default()));
@@ -499,7 +493,6 @@ impl BurstNode {
             recently_confirmed,
             vote_generator,
             rep_weights,
-            confirming_set,
             backlog,
             local_broadcaster,
             fork_cache,
@@ -1946,7 +1939,6 @@ impl BurstNode {
         });
         self.track_task("confirmation", confirmation_handle);
 
-        let confirming_set_cementation = Arc::clone(&self.confirming_set);
         let store_cementation = Arc::clone(&self.store);
         let metrics_cementation = Arc::clone(&self.metrics);
         let rep_weights_cementation = Arc::clone(&self.rep_weights);
@@ -2055,8 +2047,6 @@ impl BurstNode {
                                 if let Err(error) = worker.prune().await {
                                     tracing::error!(%error, "finalized fork payload cleanup failed; cache retained");
                                 }
-                                let cs = confirming_set_cementation.lock().await;
-                                cs.record_cemented(total_cemented);
                                 tracing::debug!(count = total_cemented, "cemented block batch");
                             }
                         }

@@ -470,8 +470,8 @@ cements at most 4096 blocks in a transaction and bounds dependency traversal at
 Predecessors and cross-account dependencies are processed before their dependents.
 An implicit dependency that still needs its own quorum defers the group and aborts
 its staged writes. Failed groups can be isolated using the single-target path.
-The standalone ConfirmationProcessor walks one account chain; the running node
-uses causal_cementation for the shared dependency graph.
+The node uses causal_cementation for the shared dependency graph, with pending
+confirmation work persisted in LMDB.
 
 ### 12.12 Election timeout
 

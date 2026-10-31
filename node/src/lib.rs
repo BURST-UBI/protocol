@@ -19,12 +19,10 @@ mod causal_cementation;
 mod certified_network_tests;
 
 pub mod config;
-pub mod confirmation_processor;
 mod confirmed_authority;
 mod confirmed_governance;
 pub mod confirmed_history;
 pub mod confirmed_replay;
-pub mod confirming_set;
 mod delegation_view;
 mod durable_votes;
 mod economic_candidate;
@@ -45,7 +43,6 @@ mod historical_finality;
 mod historical_lookup;
 pub mod block_economics;
 pub mod ledger_cache;
-pub mod ledger_event;
 pub mod ledger_updater;
 pub mod limits;
 pub mod local_broadcaster;
@@ -85,14 +82,9 @@ pub use block_processor::{
 pub use bootstrap::{BootstrapMessage, BootstrapServer, Bootstrapper};
 pub use bounded_backlog::BoundedBacklog;
 pub use config::NodeConfig;
-pub use confirmation_processor::{
-    CementResult, ChainWalker, ConfirmationProcessor, StoreChainWalker,
-};
-pub use confirming_set::ConfirmingSet;
 pub use connection_registry::ConnectionRegistry;
 pub use error::NodeError;
 pub use block_economics::{process_block_economics, EconomicResult};
-pub use ledger_event::{EventBus, LedgerEvent};
 pub use ledger_updater::{
     create_pending_entry, delete_pending_entry, update_account_on_block, PendingInfo,
 };
