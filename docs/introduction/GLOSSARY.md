@@ -1,33 +1,25 @@
 # Glossary
 
+The main terms used to explain BURST. Technical details are defined in the
+protocol and developer guides where they are needed.
+
 | Term | Meaning |
 | --- | --- |
-| Person | The human behind an account. Verification aims to prevent one person from enrolling more than once; an address alone cannot prove this. |
-| Account | An address and its chain of signed blocks. An account can exist before verification. |
-| Wallet | Software that manages keys, signs operations and reads account state from a node. |
-| Node | Software that validates blocks, stores the ledger and communicates with other nodes. Running more nodes does not give an account more votes. |
-| Representative | An account that votes to confirm blocks. Each verified account can delegate one unit of voting weight to a representative. |
-| Verifier | An eligible volunteer drawn randomly to help judge an account's verification request or a challenge. The group chosen is called a panel; its selection can be checked by other nodes. Verifiers do not confirm payments. |
-| Governance delegate | An account or key authorized to cast governance votes for another account within a defined scope. |
-| BRN | A personal spending allowance earned while an account is eligible. It cannot be transferred. Burns spend it; locked stakes and unacknowledged stake returns reduce what is available. |
-| TRST holding | An amount of transferable currency owned by an account, with a recorded origin and age. Holdings can differ in expiry and exposure to revocation. |
-| Pending receipt | A payment sent but not yet claimed by the recipient, rejected or otherwise settled under the protocol rules. |
-| Provenance | The history of where TRST came from, including the inputs to splits and merges. |
-| Burn origin | The BRN burn that created a contribution of TRST. A merged holding can contain contributions from several burns. |
-| Merger graph | A graph recording the inputs to each merge. It lets the node trace which later holdings contain value from a revoked origin. |
-| Composition basis | The part of an origin represented by a holding: the original mixture, a separated contribution or the remainder after separation. |
-| Composition revision | A record of which contributions were excluded or restored at a particular step. Later merges keep the revision of the inputs they actually consumed. |
-| Expired holding | TRST too old to spend under the current expiry setting. Increasing that setting can make it spendable again. |
-| Revoked holding | TRST invalidated because of its origin. Restoration can reverse that invalidation, but expiry and other invalidation reasons still apply. |
-| Signing grant | The protocol record that identifies the account's active signing device. It does not grant governance voting authority. |
-| Checkpoint | An agreed boundary in account history and the shared state calculated from it. Nodes check both the agreement signatures and the resulting state. |
-| Head / frontier | The latest block hash in an account's chain. |
-| Quorum | The voting weight required for agreement. In the certified path, it comes from the installed electorate, not the number of currently reachable peers. |
-| Cementation | Recording confirmed blocks and their dependencies durably, advancing account confirmation heights. |
-| Payment epoch | The agreed economic and authority context named by an ordinary signed block. Initially it is the configured genesis hash. |
-| Ledger cut | The agreed prefixes of account chains used to calculate a checkpoint's shared state. |
-| Return credit | A pending record acknowledging expired payment value already returned to its sender. Receiving it does not deliver the value again. |
+| BRN | Personal income that grows over time while your account is eligible, at the rate chosen by the community. You can spend it, but cannot transfer it to someone else. |
+| TRST | The currency people receive when someone pays them by burning BRN. They can then pass that TRST on to others. |
+| Burn | Permanently using up BRN. A payment burn creates the same amount of TRST for the recipient; burns for protocol actions, such as endorsements, do not. |
+| Account | Your address and the signed record of its activity on the network. |
+| Wallet | The app that manages your keys, shows your balances and signs your actions. |
+| Node | Software that checks transactions, keeps network records and shares them with other nodes. |
+| Verification | The process for checking that an applicant is a real, unique person, so creating more accounts does not give them more incomes or votes. |
+| Verifier | An eligible volunteer drawn randomly to help assess an application or challenge. The group drawn is called a panel. Its members judge the evidence; other nodes can check how they were chosen. |
+| Representative | An account that votes to confirm blocks. Each verified person can give their equal voting weight to a chosen representative. This role is separate from judging verification applications. |
+| Stake | BRN temporarily locked behind a verification or challenge decision. The rules determine whether it is returned or lost. |
+| Governance | How verified participants propose and vote on changes to the protocol's rules. |
+| Parameter | A setting the protocol can change, such as the BRN income rate or TRST lifetime. |
+| Expiry | The point when TRST becomes too old to spend under the chosen lifetime. Unused BRN does not expire. |
+| Revocation | Making TRST invalid after a successful fraud challenge against the account whose BRN created it. This can affect money that has already changed hands. |
 
-For examples, see [sending and receiving](../wallet/PAYMENTS.md),
-[account verification](../protocol/VERIFICATION.md) and
-[checkpoints](../protocol/CHECKPOINTS.md).
+See the [introduction](QUICK_TOUR.md) for a payment example and the
+[verification guide](../protocol/VERIFICATION.md) for how verifiers are drawn
+randomly and how their decisions are checked.

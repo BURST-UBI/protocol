@@ -35,7 +35,7 @@
       "sha256": "ca1ac5e1314f51e37028d9786f983c4c361eb0c230bf432b167aea733e7e3511"
     },
     "docs/introduction/GLOSSARY.md": {
-      "sha256": "67c1d4870cf05497481b5a235f7f9e1142c3e1295fc3fe72732272685e11734a"
+      "sha256": "56ebdf3567e0689ba333f4177847ff61205892d6d2b55ca58a42a751366cf860"
     },
     "docs/introduction/LIMITATIONS.md": {
       "sha256": "19ba31f243145db0143775695d4cbdd35f13b5c5c8594370dc159747c0b26c31"
@@ -3767,9 +3767,9 @@
       "source": "docs/introduction/GLOSSARY.md",
       "line": 1,
       "title": "Glossary",
-      "sha256": "67c1d4870cf05497481b5a235f7f9e1142c3e1295fc3fe72732272685e11734a",
+      "sha256": "56ebdf3567e0689ba333f4177847ff61205892d6d2b55ca58a42a751366cf860",
       "status": "unverified",
-      "note": "Clarifies random panel selection and its fairness mechanism; no runtime qualification inferred.",
+      "note": "Reader glossary simplified to main concepts; no runtime qualification inferred.",
       "evidence": []
     },
     {
