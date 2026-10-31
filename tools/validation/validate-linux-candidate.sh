@@ -39,8 +39,8 @@ fi
 evidence=$(mktemp -d "$candidate/installation.XXXXXXXX")
 echo "Installation evidence: $evidence"
 exec > >(tee "$evidence/validation.log") 2>&1
-sha256sum "$script_path" "$source_root/wallet/tests/native-session.mjs" \
-  "$node_test_root/tests/native-session.mjs" "$node_test_root/tests/native-rpc.mjs" \
+sha256sum "$script_path" "$source_root/wallet/tests/native-session.mjs" "$source_root/wallet/tests/native-security.mjs" \
+  "$node_test_root/tests/native-session.mjs" "$node_test_root/tests/native-rpc.mjs" "$node_test_root/tests/native-security.mjs" \
   "$node_test_root/tests/native-dashboard.mjs" > "$evidence/drivers.sha256"
 
 require_checksum ./burst-daemon
@@ -141,5 +141,5 @@ for attempt in $(seq 1 60); do
 done
 test "$ready" = true
 NODE_BINARY=/usr/bin/burst-node-gui NODE_RPC_URL=http://127.0.0.1:32077 NODE_SELECTION_ENABLED=1 \
-  timeout -k 10 300 node "$node_test_root/tests/native-session.mjs"
+  timeout -k 10 300 node "$node_test_root/tests/native-session.mjs" --embedded
 echo "PASS installed Linux $phase journeys. Certified Test, cross-installation and other release gates remain separate."

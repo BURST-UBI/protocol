@@ -73,7 +73,7 @@ test('whole artifact preflight accepts matching packages and rejects an invalid 
         await mkdir(join(candidate, app));
         await mkdir(join(source, app, 'tests'), {recursive:true});
         await mkdir(join(source, app, 'src-tauri'));
-        for (const file of ['tests/native-session.mjs', ...(app === 'node-gui' ? ['tests/native-rpc.mjs', 'tests/native-dashboard.mjs'] : []), 'src-tauri/tauri.conf.json']) {
+        for (const file of ['tests/native-session.mjs', 'tests/native-security.mjs', ...(app === 'node-gui' ? ['tests/native-rpc.mjs', 'tests/native-dashboard.mjs'] : []), 'src-tauri/tauri.conf.json']) {
           const value = file.endsWith('.json') ? '{"version":"0.1.0","bundle":{"linux":{"deb":{"depends":["libc6 (>= 2.39)"]}}}}' : '';
           await writeFile(join(source, app, file), value);
           sourceFiles.push(`${createHash('sha256').update(value).digest('hex')}  ./${app}/${file}\n`);

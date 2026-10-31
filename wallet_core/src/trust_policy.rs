@@ -215,7 +215,7 @@ pub async fn evaluate_payment_group_graph(
                 let queries = &queries;
                 let rules = &rules;
                 async move {
-                    check_group_membership(
+                    check_membership(
                         rules.group_ids, rules.require_all, &WalletAddress::new(creator),
                         queries, registry, rules.max_hops,
                     ).await
@@ -367,10 +367,10 @@ pub async fn check_group_membership_with_depth(
     registry: &GroupRegistry,
     max_hops: u8,
 ) -> GroupCheck {
-    check_group_membership(group_ids, require_all, originator, &client.evaluation(), registry, max_hops).await
+    check_membership(group_ids, require_all, originator, &client.evaluation(), registry, max_hops).await
 }
 
-async fn check_group_membership(
+async fn check_membership(
     group_ids: &[String],
     require_all: bool,
     originator: &WalletAddress,

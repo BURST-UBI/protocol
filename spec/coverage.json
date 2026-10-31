@@ -20,7 +20,7 @@
       "sha256": "598fde0fcf45b0608ad24b6881d0deb8927cbc40ab689f1d01000263f552e321"
     },
     "docs/development/DEVELOPING.md": {
-      "sha256": "a1cca3c57d1253683d04b7f1d53cd82e20e01bef8922998326645ca5cb77dc64"
+      "sha256": "f555b4c7ef70e6047c1d6094a11b7d5ad555e0738fde08501bc144d3d30ba566"
     },
     "docs/development/PERFORMANCE.md": {
       "sha256": "31a98317be425051ebdd59f31564b38daf2d4dfd0d91b049ad21b7a519cc4e3e"
@@ -3385,7 +3385,7 @@
       "source": "docs/development/DEVELOPING.md",
       "line": 6,
       "title": "Toolchain and build",
-      "sha256": "5c322f72d325c21a9e4ff48d2cc30d6deab6316fa747acdccd7c485b3394b4d1",
+      "sha256": "365c97873f9f9e2fb61fc48a98c78302b40eba9c8cdc56e0f50e3bfb0676da93",
       "status": "unverified",
       "evidence": [],
       "note": "Current documentation section. Indexing does not establish implementation or release qualification."
@@ -3393,7 +3393,7 @@
     {
       "id": "DOC-development/DEVELOPING-003",
       "source": "docs/development/DEVELOPING.md",
-      "line": 41,
+      "line": 55,
       "title": "Start a disposable node",
       "sha256": "0eeb21f01195de31b72679c755cb118e30f841ee4fe3ae4a5079e464a3b20029",
       "status": "unverified",
@@ -3403,7 +3403,7 @@
     {
       "id": "DOC-development/DEVELOPING-004",
       "source": "docs/development/DEVELOPING.md",
-      "line": 70,
+      "line": 84,
       "title": "Connect the applications",
       "sha256": "b710b5d68253e47971f4d70fa3769a1bebb2a7bf2d8135521931340d89f70481",
       "status": "unverified",
@@ -3413,7 +3413,7 @@
     {
       "id": "DOC-development/DEVELOPING-005",
       "source": "docs/development/DEVELOPING.md",
-      "line": 80,
+      "line": 94,
       "title": "Application CI dependencies",
       "sha256": "54a0d1b63adef364ba91960cbb84250ac41390be8d092d7c18a9f7e3f31e4efc",
       "status": "unverified",
@@ -3423,7 +3423,7 @@
     {
       "id": "DOC-development/DEVELOPING-006",
       "source": "docs/development/DEVELOPING.md",
-      "line": 102,
+      "line": 116,
       "title": "Funding and verification",
       "sha256": "db0bf0615590ade91286d24dda8d8bee20eeb1318011adf5149bf2a12bb6c4cb",
       "status": "unverified",
@@ -3433,7 +3433,7 @@
     {
       "id": "DOC-development/DEVELOPING-007",
       "source": "docs/development/DEVELOPING.md",
-      "line": 132,
+      "line": 146,
       "title": "Choose a test",
       "sha256": "b2d683acd04815062bb6d2e71dd40d673760c38f04e1dbd51f33d56d1f526bdb",
       "status": "unverified",
@@ -3443,7 +3443,7 @@
     {
       "id": "DOC-development/DEVELOPING-008",
       "source": "docs/development/DEVELOPING.md",
-      "line": 192,
+      "line": 206,
       "title": "Test doubles",
       "sha256": "2158bc6c604d52719e95781ce6a275436a66eeb33293f698888671cecfba1571",
       "status": "unverified",
@@ -3453,7 +3453,7 @@
     {
       "id": "DOC-development/DEVELOPING-009",
       "source": "docs/development/DEVELOPING.md",
-      "line": 212,
+      "line": 226,
       "title": "Documentation changes",
       "sha256": "57a25adcf848dfb2b4736c43e14a00c938250971fd6525ce6e121a1634d54d6f",
       "status": "unverified",

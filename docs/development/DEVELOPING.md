@@ -31,12 +31,26 @@ checks. CI runs `tools/*.test.mjs`; the PowerShell checks run on Windows.
 `tools/fixtures/` contains fake Cargo and system commands used to test the runners
 without compiling Rust or starting services. They are not protocol fixtures.
 
-`tools/validation/` contains manual candidate-build, package, snapshot, account-history,
-genesis-key and native-desktop checks. These need the artifacts or prepared ledger
+`tools/validation/` contains manual candidate-build, package, snapshot and
+genesis-key checks. These need the artifacts or prepared ledger
 specified by each script. Linux candidate tools expect sibling `protocol`, `wallet`
 and `node-gui` checkouts and an explicitly selected validation host. They do not
-publish. The Windows archive runner accepts only a new source directory; for an
+publish. Package checks invoke the wallet and dashboard repositories' own native
+sessions; WebDriver setup and UI security assertions belong to those applications.
+Use `--embedded` with each app's `tests/native-session.mjs` for packaged CSP and
+IPC checks. The Windows archive runner accepts only a new source directory; for an
 existing workspace, follow its recorded validation plan instead of overlaying files.
+
+The Rust account-history checker reuses `NodeClient` and the shared RPC contracts:
+
+```bash
+bash tools/limited-run.sh cargo run --locked -p burst-wallet-core \
+  --example verify_account_history -- archive.json http://127.0.0.1:7077
+```
+
+It compares the complete archive against page sizes 1, 2 and 25, rejects repeated
+cursors, and checks that the reads leave balances and authority unchanged. The
+shared client uses its normal 30-second request timeout.
 
 ## Start a disposable node
 
