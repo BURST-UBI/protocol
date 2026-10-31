@@ -5,6 +5,12 @@ import { needsRuntime, selectChecks } from './ci-scope.mjs';
 test('documentation and coverage updates retain inventory but skip Rust', () => {
   assert.equal(needsRuntime(['docs/introduction/QUICK_TOUR.md', 'spec/coverage.json', 'README.md']), false);
 });
+test('website changes use the website build without Rust validation', () => {
+  const paths = ['website/package-lock.json', 'website/docusaurus.config.js',
+    'vercel.json', '.github/workflows/website.yml'];
+  assert.equal(needsRuntime(paths), false);
+  assert.equal(needsRuntime([...paths, 'node/src/node.rs']), true);
+});
 test('code, build inputs, workflows and unknown paths run runtime validation', () => {
   for (const path of ['node/src/node.rs', 'Cargo.lock', '.cargo/config.toml',
     '.github/workflows/ci.yml', 'tools/test-node.sh', 'new-input', 'node/fixture.md',

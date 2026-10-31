@@ -3,10 +3,13 @@ import { appendFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 export function needsRuntime(paths) {
-  // Only these paths are classified as documentation-only. Workflows,
-  // toolchains, fixtures and scripts require runtime-check selection.
+  // Website builds have their own workflow. Other workflows, toolchains,
+  // fixtures and scripts require runtime-check selection.
   return paths.some(path => !(
     path === 'spec/coverage.json' ||
+    path.startsWith('website/') ||
+    path === 'vercel.json' ||
+    path === '.github/workflows/website.yml' ||
     (path.endsWith('.md') && (path.startsWith('docs/') || path.startsWith('spec/') || !path.includes('/')))
   ));
 }

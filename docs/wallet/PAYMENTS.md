@@ -22,14 +22,33 @@ whether goods or services were delivered in exchange for a payment.
 
 ## Acceptance, rejection and expiry
 
+**Accept the payment**
+
 ```mermaid
 flowchart TD
+    accTitle: Accepting a pending payment
+    accDescr: An accepted signed receive consumes the pending receipt and delivers its TRST to the recipient.
     P[Pending TRST payment] -->|Recipient receives| R[Recipient holds TRST]
-    P -->|Recipient rejects| S[New pending receipt for sender]
-    S -->|Sender receives| H[Sender holds returned TRST]
-    P -->|Agreed expiry transition| E[Holdings returned to sender]
-    E --> C[Return credit awaits acknowledgment]
-    C -->|Sender receives| A[Credit acknowledged; no second delivery]
+```
+
+**Reject the payment**
+
+```mermaid
+flowchart TD
+    accTitle: Rejecting a pending payment
+    accDescr: An accepted rejection creates a new pending receipt for the sender. The sender must sign a receive to claim the returned TRST.
+    P[Pending TRST payment] -->|Recipient rejects| S["New pending receipt<br/>for sender"]
+    S -->|Sender receives| H["Sender holds<br/>returned TRST"]
+```
+
+**Let the payment expire**
+
+```mermaid
+flowchart TD
+    accTitle: Expiry and return acknowledgment
+    accDescr: The agreed expiry transition already returns holdings to the sender and creates a return credit. The sender's later receive acknowledges the credit without delivering the holdings again or renewing their age.
+    P[Pending TRST payment] -->|Agreed expiry| E["Holdings returned to sender<br/>Return credit created"]
+    E -->|Sender receives| A["Credit acknowledged<br/>No second delivery"]
 ```
 
 The arrows describe accepted ledger transitions, not merely signed or submitted

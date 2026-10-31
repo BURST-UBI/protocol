@@ -125,9 +125,11 @@ Offline signing separates preparation, signing and submission:
 
 ```mermaid
 flowchart TD
-    A[Fetch account and operation context] --> B[Review and sign offline]
+    accTitle: Signing offline and confirming online
+    accDescr: Fetch operation context, review and sign offline, and retain the signed action. Submit that saved action when connected and check its confirmed outcome.
+    A["Fetch account<br/>and operation context"] --> B[Review and sign offline]
     B --> C[Save the signed action]
-    C --> D[Submit the saved action when connected]
+    C --> D["Submit the saved action<br/>when connected"]
     D --> E[Check its confirmed outcome]
 ```
 

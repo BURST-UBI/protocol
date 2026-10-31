@@ -182,10 +182,12 @@ body. Body validation and installation checks remain separate steps.
 
 ```mermaid
 flowchart TD
-    A[Configured trusted base] --> B[Authenticate authority and certificate]
+    accTitle: Installing a trusted snapshot
+    accDescr: Start with the configured trusted base. Authenticate authority and certificate, validate the snapshot, and reconcile local history and signing commitments before committing installation and recovering runtime state.
+    A[Configured trusted base] --> B["Authenticate authority<br/>and certificate"]
     B --> C[Validate snapshot body]
-    C --> D[Reconcile local history and signing commitments]
-    D --> E[Commit installation and recover runtime state]
+    C --> D["Reconcile local history<br/>and signing commitments"]
+    D --> E["Commit installation<br/>and recover runtime state"]
 ```
 
 A file checksum only checks file identity; it cannot replace authority and state

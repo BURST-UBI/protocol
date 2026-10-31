@@ -192,10 +192,12 @@ height before publishing the downloaded file. Publication does not install state
 
 ```mermaid
 flowchart TD
-    A[Peer bytes] --> B[Check transfer framing and digest]
+    accTitle: From peer data to usable state
+    accDescr: Check transfer framing and digest, authenticate history or snapshot, then replay and reconcile local commitments before installing state and publishing the runtime.
+    A[Peer bytes] --> B["Check transfer framing<br/>and digest"]
     B --> C[Authenticate history or snapshot]
-    C --> D[Replay and reconcile local commitments]
-    D --> E[Install state and publish runtime]
+    C --> D["Replay and reconcile<br/>local commitments"]
+    D --> E["Install state<br/>and publish runtime"]
 ```
 
 During startup recovery, ordinary block and vote traffic remains closed.

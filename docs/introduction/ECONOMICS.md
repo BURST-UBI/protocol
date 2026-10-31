@@ -7,8 +7,10 @@ One BRN or TRST is 10^18 raw units; one mBRN or mTRST is 10^15 raw units.
 
 ```mermaid
 flowchart TD
+    accTitle: From allowance to payment
+    accDescr: Eligible time accrues BRN. An accepted burn creates pending TRST. An accepted receive delivers it. Sending existing TRST creates another pending payment without issuing new value.
     A[Eligible time] --> B[BRN allowance]
-    B -->|Accepted burn| C[Pending TRST payment]
+    B -->|Accepted burn| C["Pending TRST<br/>payment"]
     C -->|Accepted receive| D[Recipient holding]
     D -->|Accepted send| C
 ```
@@ -90,11 +92,13 @@ Consider 100 TRST made from 30 from origin A and 70 from origin B:
 
 ```mermaid
 flowchart TD
+    accTitle: Revocation and a later merge
+    accDescr: Revoking origin A separates its 30 units from 70 clean units of B. Merging B with 20 units of C excludes A. Restoring A makes its separated units valid again without adding them to the newer merge.
     M["Original merge: 30 A + 70 B"] -->|A is revoked| R["30 A becomes revoked"]
     M -->|A is revoked| B["Clean remainder: 70 B"]
     B -->|Merge with 20 C| N["New merge: 70 B + 20 C"]
-    R -->|A is restored| A["Separated 30 A becomes valid again"]
-    N --> U["Still 70 B + 20 C; no A was consumed"]
+    R -->|A is restored| A["Separated 30 A<br/>becomes valid again"]
+    N --> U["Still 70 B + 20 C<br/>No A was consumed"]
 ```
 
 Restoring A does not insert it into the newer merge. That merge consumed the clean

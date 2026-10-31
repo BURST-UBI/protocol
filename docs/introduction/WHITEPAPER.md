@@ -30,6 +30,8 @@ The numbers illustrate the accounting; they are not prices or protocol defaults.
 
 ```mermaid
 flowchart TD
+    accTitle: The payment cycle
+    accDescr: Eligible time accrues personal BRN. An accepted signed burn creates pending TRST. The recipient signs a receive to hold it. Later sends transfer existing TRST through another pending receipt.
     E["Eligible time"] --> B["Personal BRN allowance"]
     B -->|Signed burn accepted| P["TRST pending for recipient"]
     P -->|Signed receive accepted| H["Recipient holds TRST"]
@@ -342,13 +344,15 @@ An ordinary proposal follows this lifecycle:
 
 ```mermaid
 flowchart TD
+    accTitle: From proposal to activation
+    accDescr: Endorsements qualify a proposal for voting. After the voting window and propagation buffer, quorum and approval must both pass. A successful proposal enters cooldown before certified activation. During bootstrap an explicit creator veto can stop it.
     P[Proposal and endorsements] --> V[One voting window]
     V --> B[Propagation buffer]
-    B --> Q{Quorum and approval met?}
+    B --> Q{"Quorum and<br/>approval met?"}
     Q -->|No| R[Rejected]
     Q -->|Yes| C[Cooldown]
-    C -->|No veto| A[Scheduled certified activation]
-    C -->|Explicit creator veto during bootstrap| X[Vetoed]
+    C -->|No veto| A["Scheduled certified<br/>activation"]
+    C -->|Bootstrap creator veto| X[Vetoed]
 ```
 
 Endorsements burn BRN and qualify a proposal for voting. Votes can be **yea**,

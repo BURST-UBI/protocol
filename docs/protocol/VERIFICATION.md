@@ -19,6 +19,8 @@ The rules below describe those implemented paths. Bootstrap has separate
 
 ```mermaid
 flowchart TD
+    accTitle: Ordinary verification
+    accDescr: Endorsers burn BRN. The network agrees the request and eligible pool, uses an agreed beacon round to select and activate a panel, then certifies and applies the outcome of its assessment and votes.
     A[Endorsements burn BRN] --> B[Agree request and eligible pool]
     B --> C[Use the agreed beacon round]
     C --> D[Select and activate the panel]
