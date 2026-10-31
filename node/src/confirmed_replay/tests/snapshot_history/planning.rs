@@ -5,7 +5,7 @@ fn snapshot_tail_plan_discovers_old_sources_and_finishes_only_with_authenticated
     let mut fixture = Fixture::selection();
     let burn = fixture.push(0, BlockType::Burn, 1_595_434_040, |block| {
         block.link = destination(30);
-        block.brn_balance += 1;
+        block.brn_spent += 1;
     });
     fixture.push(0, BlockType::ChangeRepresentative, 1_595_434_041, |_| {});
     let (_dir, source, snapshot) = snapshot(&fixture);

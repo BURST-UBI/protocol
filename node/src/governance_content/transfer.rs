@@ -6,7 +6,6 @@ use crate::{
 use burst_governance::content::{ContentChunk, ContentReceiver, CONTENT_CHUNK_BYTES};
 use burst_store::{block::BlockStore, StoreError};
 use burst_store_lmdb::LmdbStore;
-use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -21,24 +20,14 @@ const TTL: Duration = Duration::from_secs(60);
 const RETRY: Duration = Duration::from_secs(2);
 type TransferActions = (Vec<(String, Packet)>, Vec<StateBlock>);
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum Packet {
-    Request {
-        proposal: BlockHash,
-        offset: u32,
-    },
-    Chunk {
-        proposal: BlockHash,
-        chunk: ContentChunk,
-    },
-}
+pub use burst_messages::governance_content::Packet;
 
 pub(crate) struct Incoming {
     pub peer: String,
     pub packet: Packet,
 }
 
-enum Data {
+enum ContentState {
     Pending {
         receiver: ContentReceiver,
         offset: u32,
@@ -50,13 +39,14 @@ enum Data {
 
 struct Entry {
     block: StateBlock,
-    data: Data,
-    created: Instant,
-    due: Instant,
+    state: ContentState,
+    created_at: Instant,
+    next_attempt_at: Instant,
 }
 
-/// Bounded volatile staging only. Authenticated content enters durable storage
-/// with the admitted block, never from an unsolicited peer announcement.
+/// Volatile pool of at most sixteen proposals, at most two per account.
+/// Entries expire sixty seconds after creation; chunk progress does not extend
+/// their lifetime. Content reaches storage only through block admission.
 #[derive(Default)]
 pub struct Transfers {
     entries: Mutex<HashMap<BlockHash, Entry>>,
@@ -65,6 +55,8 @@ pub struct Transfers {
 impl Transfers {
     /// Recovery uses a separate pool whose ready blocks are never queued for
     /// admission. The caller owns certificate validation and semantic replay.
+    /// A running transfer worker must drive requests and incoming chunks; this
+    /// method only registers demand and polls for completion.
     pub(crate) async fn fetch(&self, block: &StateBlock) -> Result<Arc<Vec<u8>>, String> {
         authenticate(block)?;
         tokio::time::timeout(TTL, async {
@@ -82,12 +74,12 @@ impl Transfers {
         .map_err(|_| "recovery proposal content timed out".to_owned())?
     }
 
-    fn slot(
+    fn ensure_capacity(
         entries: &mut HashMap<BlockHash, Entry>,
         block: &StateBlock,
         now: Instant,
     ) -> Result<(), String> {
-        entries.retain(|_, entry| now.duration_since(entry.created) < TTL);
+        entries.retain(|_, entry| now.duration_since(entry.created_at) < TTL);
         if !entries.contains_key(&block.hash)
             && (entries.len() >= MAX_TRANSFERS
                 || entries
@@ -110,10 +102,10 @@ impl Transfers {
             .entries
             .lock()
             .map_err(|_| "proposal content pool unavailable")?;
-        Self::slot(&mut entries, block, now)?;
+        Self::ensure_capacity(&mut entries, block, now)?;
         if entries
             .get(&block.hash)
-            .is_some_and(|entry| matches!(entry.data, Data::Ready(_)))
+            .is_some_and(|entry| matches!(entry.state, ContentState::Ready(_)))
         {
             return Ok(());
         }
@@ -121,9 +113,9 @@ impl Transfers {
             block.hash,
             Entry {
                 block: block.clone(),
-                data: Data::Ready(Arc::new(bytes.to_vec())),
-                created: now,
-                due: now + Duration::from_secs(1),
+                state: ContentState::Ready(Arc::new(bytes.to_vec())),
+                created_at: now,
+                next_attempt_at: now + Duration::from_secs(1),
             },
         );
         Ok(())
@@ -136,13 +128,13 @@ impl Transfers {
             .entries
             .lock()
             .map_err(|_| "proposal content pool unavailable")?;
-        Self::slot(&mut entries, block, now)?;
+        Self::ensure_capacity(&mut entries, block, now)?;
         if let std::collections::hash_map::Entry::Vacant(slot) = entries.entry(block.hash) {
             slot.insert(Entry {
                 block: block.clone(),
-                created: now,
-                due: now,
-                data: Data::Pending {
+                created_at: now,
+                next_attempt_at: now,
+                state: ContentState::Pending {
                     receiver: ContentReceiver::new(manifest).map_err(|error| error.to_string())?,
                     offset: 0,
                     peer: None,
@@ -158,8 +150,8 @@ impl Transfers {
             .entries
             .lock()
             .map_err(|_| "proposal content pool unavailable")?;
-        Ok(entries.get(&hash).and_then(|entry| match &entry.data {
-            Data::Ready(bytes) if entry.created.elapsed() < TTL => Some(bytes.clone()),
+        Ok(entries.get(&hash).and_then(|entry| match &entry.state {
+            ContentState::Ready(bytes) if entry.created_at.elapsed() < TTL => Some(bytes.clone()),
             _ => None,
         }))
     }
@@ -175,12 +167,12 @@ impl Transfers {
             .entries
             .lock()
             .map_err(|_| "proposal content pool unavailable")?;
-        entries.retain(|_, entry| now.duration_since(entry.created) < TTL);
+        entries.retain(|_, entry| now.duration_since(entry.created_at) < TTL);
         let mut requests = Vec::new();
         let mut ready = Vec::new();
-        for entry in entries.values_mut().filter(|entry| now >= entry.due) {
-            match &mut entry.data {
-                Data::Pending {
+        for entry in entries.values_mut().filter(|entry| now >= entry.next_attempt_at) {
+            match &mut entry.state {
+                ContentState::Pending {
                     offset,
                     peer,
                     attempt,
@@ -189,7 +181,7 @@ impl Transfers {
                     let next = peers[*attempt % peers.len()].clone();
                     *attempt = attempt.wrapping_add(1);
                     *peer = Some(next.clone());
-                    entry.due = now + RETRY;
+                    entry.next_attempt_at = now + RETRY;
                     requests.push((
                         next,
                         Packet::Request {
@@ -198,9 +190,9 @@ impl Transfers {
                         },
                     ));
                 }
-                Data::Ready(_) => {
+                ContentState::Ready(_) => {
                     ready.push(entry.block.clone());
-                    entry.due = now + Duration::from_secs(1);
+                    entry.next_attempt_at = now + Duration::from_secs(1);
                 }
                 _ => (),
             }
@@ -221,15 +213,15 @@ impl Transfers {
         let Some(entry) = entries.get_mut(&proposal) else {
             return Ok(());
         };
-        if entry.created.elapsed() >= TTL {
+        if entry.created_at.elapsed() >= TTL {
             return Ok(());
         }
-        let Data::Pending {
+        let ContentState::Pending {
             receiver,
             offset,
             peer,
             ..
-        } = &mut entry.data
+        } = &mut entry.state
         else {
             return Ok(());
         };
@@ -238,7 +230,7 @@ impl Transfers {
         }
         match receiver.push(chunk) {
             Ok(Some(content)) => {
-                entry.data = Data::Ready(Arc::new(
+                entry.state = ContentState::Ready(Arc::new(
                     content
                         .encode_content()
                         .map_err(|error| error.to_string())?,
@@ -255,11 +247,13 @@ impl Transfers {
                 *peer = None;
             }
         }
-        entry.due = Instant::now();
+        entry.next_attempt_at = Instant::now();
         Ok(())
     }
 }
 
+/// Load and verify the full stored content before returning one chunk.
+/// The request budget limits attempts, not bytes decoded or database work.
 fn response(store: &LmdbStore, proposal: BlockHash, offset: u32) -> Result<Packet, String> {
     use bincode::Options;
     let txn = store.tx_begin_read().map_err(|error| error.to_string())?;
@@ -323,6 +317,9 @@ fn response(store: &LmdbStore, proposal: BlockHash, offset: u32) -> Result<Packe
     })
 }
 
+/// Drive live and recovery pools. Serving allows sixteen request attempts per
+/// peer and sixty-four total per one-second window, including failed attempts.
+/// Only the live pool queues completed blocks for admission.
 pub(crate) async fn run(
     transfers: Arc<Transfers>,
     recovery: Arc<Transfers>,

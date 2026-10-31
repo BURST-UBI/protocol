@@ -1,15 +1,14 @@
 //! Delegation transactions: delegate and revoke voting power.
 //!
-//! These legacy transactions carry address pointers. They do not implement
-//! the whitepaper's encrypted secondary-key handoff. Scoped grants and
-//! revocations use the separately authenticated delegation block payload.
+//! These payloads carry wallet-address pointers. Scoped signing-key grants and
+//! revocations use a separate authenticated delegation block payload.
 
 use burst_types::{Signature, Timestamp, TxHash, WalletAddress};
 use serde::{Deserialize, Serialize};
 
 /// A delegation transaction: `delegator` entrusts its vote to `delegate`.
-/// Authority is proven by the delegator's own signature on this transaction;
-/// no secondary/encrypted key is involved.
+/// The node must authenticate the resulting account block before changing
+/// delegation. Storing a signature here does not establish authority.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DelegateTx {
     pub hash: TxHash,
@@ -22,14 +21,14 @@ pub struct DelegateTx {
     pub signature: Signature,
 }
 
-/// Revoke a previously delegated vote. Signed by the delegator's primary key,
-/// which proves authority to revoke.
+/// Request removal of an address-based delegation. Admission authenticates
+/// the account's authority to revoke it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RevokeDelegationTx {
     pub hash: TxHash,
     pub delegator: WalletAddress,
     pub timestamp: Timestamp,
     pub work: u64,
-    /// Signed by the primary private key (proves authority to revoke).
+    /// Supplied signature; validation belongs to the admission path.
     pub signature: Signature,
 }

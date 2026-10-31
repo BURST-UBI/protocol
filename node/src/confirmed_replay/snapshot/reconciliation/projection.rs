@@ -1,9 +1,8 @@
 use super::*;
 use burst_store_lmdb::write_batch::checkpoint_projection::CompactProjection;
 
-/// Uncommitted sparse ledger rows under the same reconciled writer. Economic
-/// projection is required before either gated installer can commit. Dropping this guard
-/// aborts the complete projection.
+/// Sparse ledger rows in the reconciliation transaction. Project the economic
+/// tables before committing; dropping this guard aborts the transaction.
 pub struct ProjectedSnapshot<'db> {
     boundary: ReconciledSnapshot<'db>,
     projection: CompactProjection,
@@ -26,7 +25,9 @@ impl PreparedSnapshotState<'_> {
         self
     }
 
-    /// The live publisher holds every economic, admission and election lock.
+    /// Commit and force-sync before returning state for runtime publication.
+    /// The caller must hold the runtime installation locks. A sync error occurs
+    /// after commit and does not roll back the database.
     pub(crate) fn commit_runtime(
         self,
         store: &burst_store_lmdb::LmdbStore,
@@ -112,6 +113,17 @@ impl PreparedSnapshotState<'_> {
 
 impl<'db> ProjectedSnapshot<'db> {
     pub fn project_economics(mut self) -> Result<PreparedSnapshotState<'db>, StoreError> {
+        #[cfg(test)]
+        let started = std::time::Instant::now();
+        #[cfg(test)]
+        let report = |stage: &str, batch: &LmdbWriteTransaction<'_>| {
+            if std::env::var_os("BURST_SNAPSHOT_INSTALL_STAGE_LOG").is_some() {
+                eprintln!("snapshot-install stage={stage} elapsed_ms={}", started.elapsed().as_millis());
+                crate::paged_metadata::report_metadata_pages(batch, stage);
+            }
+        };
+        #[cfg(test)]
+        report("validate-retired", &self.boundary.transaction);
         let previous = self.boundary.transaction.payment_epoch()?;
         crate::confirmed_replay::installation::validate_retired(
             &self.boundary.transaction,
@@ -119,17 +131,29 @@ impl<'db> ProjectedSnapshot<'db> {
             &self.projection.retired_blocks,
         )?;
         let snapshot = &self.boundary.snapshot;
+        #[cfg(test)]
+        report("stage-records", &self.boundary.transaction);
         let records = crate::checkpoint_store::stage_snapshot_head(
             &mut self.boundary.transaction,
             snapshot
                 .authority_path()
                 .map(|result| result.map_err(invalid)),
         )?;
+        // Whole records need contiguous LMDB spans before per-account economic
+        // writes fragment them. Every projection still shares this atomic writer.
+        #[cfg(test)]
+        report("archive-records", &self.boundary.transaction);
+        records.archive(&mut self.boundary.transaction, snapshot)?;
+        #[cfg(test)]
+        report("persist-economics", &self.boundary.transaction);
         let governance = snapshot
             .state
             .persist_projection(&mut self.boundary.transaction, snapshot.anchor())?;
+        #[cfg(test)]
+        report("persist-snapshot", &self.boundary.transaction);
         super::super::installed::persist(snapshot, &mut self.boundary.transaction)?;
-        records.archive(&mut self.boundary.transaction, snapshot)?;
+        #[cfg(test)]
+        report("advance-epoch", &self.boundary.transaction);
         let retained = self
             .boundary
             .transaction
@@ -139,6 +163,8 @@ impl<'db> ProjectedSnapshot<'db> {
                 "economic projection changed local signing promises",
             ));
         }
+        #[cfg(test)]
+        report("prepared", &self.boundary.transaction);
         Ok(PreparedSnapshotState {
             projected: self,
             governance,
@@ -188,6 +214,7 @@ impl<'db> ReconciledSnapshot<'db> {
                 epoch,
                 self.witnesses.iter(),
                 &self.snapshot.state.accounts,
+                Some(&self.snapshot.state.brn.wallets),
             )?;
         Ok(ProjectedSnapshot {
             boundary: self,

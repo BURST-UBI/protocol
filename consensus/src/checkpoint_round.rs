@@ -264,8 +264,8 @@ impl RoundState {
         self.valid.as_ref().map(|p| &p.proof)
     }
 
-    /// Payloads needed to recover every choice that can still be re-emitted or
-    /// re-proposed. A prevote can refer to a peer proposal absent from `proposed`.
+    /// Distinct checkpoint hashes whose payloads the caller must retain for
+    /// recovery. A prevote can refer to a peer proposal absent from `proposed`.
     pub fn retained_values(&self) -> Vec<BlockHash> {
         let mut values = Vec::new();
         for value in [
@@ -287,7 +287,8 @@ impl RoundState {
     }
 
     /// Validate a disk snapshot against its configured signer and trusted anchor.
-    /// Deserializing this type is not a validation operation.
+    /// Deserializing this type is not a validation operation. These checks do not
+    /// establish that the snapshot is the latest durable state or replay its ledger.
     pub fn validate(
         &self,
         anchor: &CheckpointAnchor,
@@ -370,12 +371,15 @@ impl RoundState {
         Ok(())
     }
 
+    /// Reuse this round's proposal or a prior prepared value before considering
+    /// `fresh`. The caller validates the ledger contents and persists the updated
+    /// state before signing the returned body.
     pub fn propose(
         &mut self,
         anchor: &CheckpointAnchor,
         fresh: Checkpoint,
     ) -> Result<ProposalBody, RoundError> {
-        self.active()?;
+        self.ensure_active()?;
         if anchor.proposer(self.round) != &self.representative || self.step != Step::Propose {
             return Err(RoundError::InvalidTransition);
         }
@@ -406,7 +410,7 @@ impl RoundState {
         anchor: &CheckpointAnchor,
         proposal: &Proposal,
     ) -> Result<Ballot, RoundError> {
-        self.active()?;
+        self.ensure_active()?;
         proposal.verify(anchor)?;
         if proposal.body.round != self.round || self.step != Step::Propose {
             return Err(RoundError::InvalidTransition);
@@ -434,7 +438,7 @@ impl RoundState {
         proposal: &Proposal,
         proof: &Quorum,
     ) -> Result<Option<Ballot>, RoundError> {
-        self.active()?;
+        self.ensure_active()?;
         proposal.verify(anchor)?;
         proof.verify(anchor)?;
         if proof.ballot.phase != Phase::Prevote
@@ -465,6 +469,9 @@ impl RoundState {
         Ok(Some(ballot))
     }
 
+    /// Record a verified precommit certificate, including one from another round.
+    /// This does not execute or install the checkpoint's ledger state. A certificate
+    /// for a different checkpoint cannot replace an existing decision.
     pub fn decide(
         &mut self,
         anchor: &CheckpointAnchor,
@@ -483,7 +490,8 @@ impl RoundState {
     }
 
     /// Prevote/precommit timeouts require human quorum evidence that peers
-    /// reached that phase. A local timer alone cannot keep racing the rounds.
+    /// reached that phase. The caller decides when the timer has elapsed; this
+    /// method reads no clock. Proposal timeout needs no participation evidence.
     pub fn timeout(
         &mut self,
         anchor: &CheckpointAnchor,
@@ -491,7 +499,7 @@ impl RoundState {
         step: Step,
         evidence: &[SignedBallot],
     ) -> Result<Option<Ballot>, RoundError> {
-        self.active()?;
+        self.ensure_active()?;
         if round != self.round || step != self.step {
             return Ok(None);
         }
@@ -529,13 +537,16 @@ impl RoundState {
         }
     }
 
+    /// Advance to a later round supported by more than the tolerated fault weight.
+    /// Mixed phases and values count for participation. Locks and valid preparation
+    /// evidence survive the round change; this does not decide a checkpoint.
     pub fn catch_up_round(
         &mut self,
         anchor: &CheckpointAnchor,
         round: u64,
         evidence: &[SignedBallot],
     ) -> Result<(), RoundError> {
-        self.active()?;
+        self.ensure_active()?;
         if round <= self.round {
             return Err(RoundError::InvalidTransition);
         }
@@ -551,7 +562,7 @@ impl RoundState {
         Ok(())
     }
 
-    fn active(&self) -> Result<(), RoundError> {
+    fn ensure_active(&self) -> Result<(), RoundError> {
         if self.decision.is_some() {
             return Err(RoundError::InvalidTransition);
         }

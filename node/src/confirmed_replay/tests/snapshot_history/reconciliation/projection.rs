@@ -40,8 +40,8 @@ fn compact_projection_uses_only_authenticated_heads_and_finality_witnesses() {
             assert_eq!(projected.retained_blocks(), projected.ledger_blocks());
         }
         assert!(projected.retired_blocks().is_empty());
-        // Readers and restart see the original ledger until the complete
-        // economics/authority handoff exists. The public guard cannot commit.
+        // Staging leaves the committed ledger unchanged. Dropping the projection
+        // aborts its writes; committing requires the later recovery stages.
         assert_eq!(local.block_store().block_count().unwrap(), before);
         drop(projected);
         assert_eq!(local.block_store().block_count().unwrap(), before);

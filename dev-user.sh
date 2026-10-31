@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# dev-user.sh — Run ONE local node on the default port (7077) so the
-# desktop wallet and node-gui connect to it with zero configuration, giving
-# you an as-close-to-real single-user BURST environment.
+# Run a local Dev faucet node on RPC port 7077 for the desktop apps.
+# The default app connection points to that port.
+# This is a development fixture, not mainnet or release qualification.
 #
-# For multi-node network realism (propagation, sync, consensus) use
-# dev-cluster.sh instead. This script is for driving the *user* journey
-# through the real GUIs.
+# dev-cluster.sh runs several local nodes for propagation and sync checks.
+# This script keeps one ledger for repeated GUI development.
+# Builds use the release profile; follow the host validation policy.
 #
 # Usage:
 #   ./dev-user.sh                 # build + run one faucet node at :7077

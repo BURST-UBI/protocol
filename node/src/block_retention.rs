@@ -1,27 +1,31 @@
-//! One slot follows a queued block through authentication and dependency recovery.
+//! Shared count permits carried through authentication and dependency recovery.
+//! Clones share one permit until the last owner drops it. This bounds retained
+//! slots, not payload bytes; callers must acquire and preserve the permit.
 use burst_ledger::StateBlock;
 use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-pub(crate) const MAX_RETAINED_BLOCKS: usize = 65_536;
-pub(crate) const INGRESS_RESERVE: usize = 4096;
-pub(crate) type Slot = Arc<OwnedSemaphorePermit>;
+pub const MAX_RETAINED_BLOCKS: usize = 65_536;
+pub const INGRESS_RESERVE: usize = 4096;
+pub type Slot = Arc<OwnedSemaphorePermit>;
 
-pub(crate) struct BlockRetention(Arc<Semaphore>);
+pub struct BlockRetention(Arc<Semaphore>);
 
 impl BlockRetention {
-    pub(crate) fn new(capacity: usize) -> Arc<Self> {
+    pub fn new(capacity: usize) -> Arc<Self> {
         Arc::new(Self(Arc::new(Semaphore::new(capacity))))
     }
 
-    pub(crate) fn acquire(&self) -> Option<Slot> {
+    /// Try once without waiting; return None when all permits are held.
+    pub fn acquire(&self) -> Option<Slot> {
         self.0.clone().try_acquire_owned().ok().map(Arc::new)
     }
 }
 
-pub(crate) struct RetainedBlock {
-    pub(crate) block: StateBlock,
-    pub(crate) slot: Option<Slot>,
+pub struct RetainedBlock {
+    pub block: StateBlock,
+    /// Absent before admission or when the caller uses an unbudgeted queue.
+    pub slot: Option<Slot>,
 }
 
 impl std::ops::Deref for RetainedBlock {

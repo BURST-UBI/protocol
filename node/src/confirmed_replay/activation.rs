@@ -6,6 +6,8 @@ use crate::{
 };
 
 impl ConfirmedReplay {
+    /// Check whether this replay state is awaiting the selection. Certificate
+    /// and activation-proof authentication belong to the caller.
     pub(crate) fn can_activate(
         &self,
         selection: &CertifiedCheckpoint,

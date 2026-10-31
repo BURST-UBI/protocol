@@ -4,6 +4,7 @@ members = [
     "types",
     "crypto",
     "utils",
+    "http_client",
     "brn",
     "trst",
     "transactions",
@@ -17,14 +18,14 @@ members = [
     "governance",
     "consti",
     "messages",
-    "protocol",
     "network",
     "node",
     "daemon",
     "rpc",
+    "rpc/messages",
     "websocket",
     "wallet_core",
-    "browser",
+    "web_runtime",
     "groups",
     "nullables",
 ]
@@ -60,18 +61,16 @@ bip39 = "2"
 argon2 = "0.5"
 aes-gcm = "0.10"
 sha2 = "0.10"
-hmac = "0.12"
 blst = "0.3"
 
 # Storage
+imbl = "=7.0.2"
 heed = "0.20"
 bincode = "1"
 
 # Networking
 igd-next = { version = "0.15", features = ["aio_tokio"] }
 axum = { version = "0.7", features = ["ws"] }
-tower = "0.5"
-tower-http = { version = "0.6", features = ["cors"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
@@ -98,7 +97,7 @@ tempfile = "3"
 # Internal crates
 burst-types = { path = "types" }
 burst-crypto = { path = "crypto" }
-burst-utils = { path = "utils" }
+burst-utils = { path = "utils", default-features = false }
 burst-brn = { path = "brn" }
 burst-trst = { path = "trst" }
 burst-transactions = { path = "transactions" }
@@ -112,13 +111,13 @@ burst-work = { path = "work" }
 burst-governance = { path = "governance" }
 burst-consti = { path = "consti" }
 burst-messages = { path = "messages" }
-burst-protocol = { path = "protocol" }
 burst-network = { path = "network" }
 burst-node = { path = "node" }
-burst-rpc = { path = "rpc" }
-burst-websocket = { path = "websocket" }
+burst-rpc-messages = { path = "rpc/messages" }
+burst-rpc = { path = "rpc", default-features = false }
+burst-websocket = { path = "websocket", default-features = false }
 burst-wallet-core = { path = "wallet_core" }
-burst-browser = { path = "browser" }
+burst-web-runtime = { path = "web_runtime" }
 burst-groups = { path = "groups" }
 burst-nullables = { path = "nullables" }
 
@@ -128,6 +127,9 @@ burst-nullables = { path = "nullables" }
 opt-level = 3
 
 [profile.dev.package.blake2]
+opt-level = 3
+
+[profile.dev.package.blake2b_simd]
 opt-level = 3
 
 # Checkpoint replay verifies the same signed prefixes many times. Optimize the
@@ -147,8 +149,15 @@ opt-level = 3
 [profile.test.package.blake2]
 opt-level = 3
 
+[profile.test.package.blake2b_simd]
+opt-level = 3
+
 # Functional validation keeps test assertions without full debug-symbol output.
 # Release performance and packaged-candidate checks still use the release profile.
 [profile.validation]
 inherits = "test"
 debug = 0
+
+[patch.crates-io]
+heed = { path = "vendor/heed" }
+lmdb-master-sys = { path = "vendor/lmdb-master-sys" }

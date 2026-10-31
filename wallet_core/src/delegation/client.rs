@@ -1,11 +1,14 @@
 use super::*;
-use crate::{signed_client::parse_hash, wallet::ProcessResult, NodeClient};
-use burst_governance::key_delegation::{
+use crate::{signed_client::parse_hash, wallet::ProcessResponse, NodeClient};
+use burst_governance::signing_delegation::{
     operation::DelegationOperation, DelegatedBallot, Grant, Revocation,
 };
 use burst_types::KeyPair;
 
 impl NodeClient {
+    /// Read a delegation page and check its shape, grant signatures and query bindings.
+    /// Confirmation flags and grant-block references are supplied by the node,
+    /// not independently established by this response validation.
     pub async fn delegation_keys(&self, query: &view::Query) -> Result<view::Page, WalletError> {
         let page: view::Page = serde_json::from_value(
             self.rpc_call(
@@ -72,7 +75,7 @@ impl NodeClient {
         delegate: Option<&WalletAddress>,
         expected_generation: &str,
         expected_genesis: &str,
-    ) -> Result<ProcessResult, WalletError> {
+    ) -> Result<ProcessResponse, WalletError> {
         let page = self
             .delegation_keys(&view::Query {
                 account: burst_crypto::derive_address(&keys.public).to_string(),
@@ -98,7 +101,7 @@ impl NodeClient {
         entry: &view::Entry,
         proposal: burst_types::TxHash,
         vote: burst_transactions::governance::GovernanceVote,
-    ) -> Result<ProcessResult, WalletError> {
+    ) -> Result<ProcessResponse, WalletError> {
         let page = self
             .delegation_keys(&view::Query {
                 account: entry.owner.clone(),

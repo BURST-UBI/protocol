@@ -82,6 +82,7 @@ pub(super) fn settle_review(
     let new_legitimate = legitimate(current)?;
     let first_fraud_verdict = records.iter().all(|record| legitimate(record) == Ok(true));
     let mut bounty_basis = 0;
+    let mut affected_holders = HashSet::new();
     for record in &records {
         let origins: Vec<_> = record
             .rewards
@@ -95,35 +96,26 @@ pub(super) fn settle_review(
             let restored = trst
                 .restore_outcome_origins(root, &origins, context.timestamp)
                 .map_err(|error| error.to_string())?;
-            for event in restored {
-                let mut holder = batch
-                    .get_account(&event.holder)
-                    .map_err(|error| error.to_string())?;
-                update_token_counters(&mut holder, trst, context.timestamp)?;
-                batch
-                    .put_account(&holder)
-                    .map_err(|error| error.to_string())?;
-            }
+            affected_holders.extend(restored.into_iter().map(|event| event.holder));
         } else {
             let (held, pending) = trst
                 .invalidate_outcome_origins(root, &origins)
                 .map_err(|error| error.to_string())?;
-            for event in held {
-                let mut holder = batch
-                    .get_account(&event.holder)
-                    .map_err(|error| error.to_string())?;
-                update_token_counters(&mut holder, trst, context.timestamp)?;
-                batch
-                    .put_account(&holder)
-                    .map_err(|error| error.to_string())?;
-            }
+            affected_holders.extend(held.into_iter().map(|event| event.holder));
             revoke_pending(batch, &pending, trst)?;
         }
+    }
+    // No receipt or pending transition reads account counters. Publish each
+    // affected holder's final cut once, after all reward-origin changes.
+    for holder in affected_holders {
+        let mut account = batch.get_account(&holder).map_err(|error| error.to_string())?;
+        update_token_counters(&mut account, trst, context.timestamp)?;
+        batch.put_account(&account).map_err(|error| error.to_string())?;
     }
     restore_pending(batch, trst)?;
     if new_legitimate != appeal.previously_legitimate {
         if new_legitimate {
-            verify_wallet(batch, &context.target, context.timestamp, brn, trst)?;
+            mark_wallet_verified(batch, &context.target, context.timestamp, brn, trst)?;
             if !matches!(
                 context.authority,
                 SettlementAuthority::CertifiedDeadline { .. }
@@ -168,14 +160,18 @@ pub(super) fn revoke_wallet(
 ) -> Result<u128, String> {
     let (held, pending) = trst.revoke_with_pending_effects(wallet);
     let mut revoked = 0u128;
-    for event in held {
+    let mut refreshed = HashSet::new();
+    for event in &held {
+        revoked = revoked
+            .checked_add(event.revoked_amount)
+            .ok_or("revocation total overflow")?;
+        if !refreshed.insert(&event.holder) {
+            continue;
+        }
         let mut holder = batch
             .get_account(&event.holder)
             .map_err(|error| error.to_string())?;
         update_token_counters(&mut holder, trst, now)?;
-        revoked = revoked
-            .checked_add(event.revoked_amount)
-            .ok_or("revocation total overflow")?;
         batch
             .put_account(&holder)
             .map_err(|error| error.to_string())?;

@@ -140,8 +140,15 @@ fn framed_archive_journey(daemon: Option<std::ffi::OsString>, transitions: usize
         .write(true)
         .open(&source)
         .unwrap();
+    let mut compact = Vec::new();
+    prepared.write_archive(&base, &authority, &certificate, &mut compact).unwrap();
+    assert_eq!(&compact[..16], b"BURST-SNAPSHOT\0\x04");
+    assert!(compact.len() < 16 * 1024 * 1024, "unchanged electorate proofs stay compact");
+    assert_eq!(AuthenticatedSnapshot::read_in(&base, &mut compact.as_slice(), files.path()).unwrap()
+        .into_state().snapshot_bytes().unwrap(), prepared.bytes());
+    // Keep exercising legacy v3 transfer budgets with the original large archive.
     prepared
-        .write_archive(&base, &authority, &certificate, &mut file)
+        .write_legacy_archive(&base, &authority, &certificate, &[], &mut file)
         .unwrap();
     assert!(file.metadata().unwrap().len() > 16 * 1024 * 1024);
     let archive_bytes = file.metadata().unwrap().len();

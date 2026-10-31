@@ -1,25 +1,28 @@
 //! Delegation management — delegate and revoke voting power.
 //!
-//! Legacy pointer builders remain available. Scoped key operations below bind
-//! an encrypted grant or its revocation to the owner's signed account block.
-//! A recipient carries secondary-signed ballots on their own account chain.
+//! Pointer builders return unsigned transaction drafts. Scoped key operations
+//! produce signed account blocks: the owner carries grants and revocations;
+//! the recipient carries secondary-signed ballots on their own account chain.
 
 use crate::error::WalletError;
-pub use burst_governance::key_delegation::view;
+pub use burst_governance::signing_delegation::view;
 use burst_types::{Signature, WalletAddress};
 
 mod client;
 pub(crate) use client::{build_delegated_ballot, build_scoped_operation, require_review};
 
+/// Build and sign the account-block envelope for a scoped operation.
+/// Work remains zero. Grant history, scope eligibility and network admission
+/// still require node validation.
 pub fn build_key_operation(
     state: &crate::transaction_builder::AccountState,
     keys: &burst_types::KeyPair,
-    operation: &burst_governance::key_delegation::operation::DelegationOperation,
+    operation: &burst_governance::signing_delegation::operation::DelegationOperation,
     params_hash: burst_types::BlockHash,
     now: burst_types::Timestamp,
 ) -> Result<burst_ledger::StateBlock, WalletError> {
     use crate::transaction_builder::*;
-    use burst_governance::key_delegation::operation::DelegationOperation;
+    use burst_governance::signing_delegation::operation::DelegationOperation;
     let owner = burst_crypto::derive_address(&keys.public);
     if operation
         .identity()
@@ -70,9 +73,8 @@ pub fn build_key_operation(
     Ok(sign_state_block(block, &keys.private))
 }
 
-/// Build a delegation transaction pointing `delegator`'s vote at `delegate`.
-/// Must be signed externally by the delegator's primary key (that signature is
-/// the sole authority proof).
+/// Build an unsigned pointer-delegation draft using the local clock.
+/// Rejects self-delegation; it does not validate addresses or ledger eligibility.
 pub fn create_delegation(
     delegator: &WalletAddress,
     delegate: &WalletAddress,
@@ -101,8 +103,7 @@ pub fn create_delegation(
     })
 }
 
-/// Build a revoke-delegation transaction. Must be signed by the delegator's
-/// primary key, which proves authority to revoke.
+/// Build an unsigned pointer-revocation draft using the local clock.
 pub fn revoke_delegation(
     delegator: &WalletAddress,
 ) -> Result<burst_transactions::delegate::RevokeDelegationTx, WalletError> {
@@ -134,11 +135,11 @@ mod tests {
 
     #[test]
     fn delegation_points_delegator_at_delegate() {
-        let d = addr(0xAA);
-        let g = addr(0xBB);
-        let tx = create_delegation(&d, &g).unwrap();
-        assert_eq!(tx.delegator, d);
-        assert_eq!(tx.delegate, g);
+        let delegator = addr(0xAA);
+        let delegate = addr(0xBB);
+        let tx = create_delegation(&delegator, &delegate).unwrap();
+        assert_eq!(tx.delegator, delegator);
+        assert_eq!(tx.delegate, delegate);
         assert!(!tx.hash.is_zero());
     }
 
@@ -149,7 +150,7 @@ mod tests {
     }
 
     #[test]
-    fn revoke_is_signed_by_delegator() {
+    fn revocation_identifies_delegator() {
         let d = addr(0x33);
         let tx = revoke_delegation(&d).unwrap();
         assert_eq!(tx.delegator, d);

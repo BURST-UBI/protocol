@@ -49,7 +49,7 @@ fn settled_epoch_spends_clean_remainder_and_inactivity_preserves_full_value() {
         let (mut fixture, selections) = completed(reason);
         merged_payments(&mut fixture);
         let (_dir, store, heads) = restore_chain(&fixture, &selections);
-        let outcome = install_outcome(&fixture, &store, &heads);
+        let outcome = persist_outcome(&fixture, &store, &heads);
         let events = chain::load(&store, NetworkId::Dev, &fixture.params).unwrap();
         let epoch = outcome.certificate().checkpoint.hash();
         let token = outcome
@@ -148,7 +148,7 @@ fn settled_epoch_spends_clean_remainder_and_inactivity_preserves_full_value() {
 fn epoch_tail_rejects_resigned_stale_context_and_backdating() {
     let (mut fixture, selections) = completed(ChallengeReason::Fraud);
     let (_dir, store, heads) = restore_chain(&fixture, &selections);
-    let outcome = install_outcome(&fixture, &store, &heads);
+    let outcome = persist_outcome(&fixture, &store, &heads);
     let events = chain::load(&store, NetworkId::Dev, &fixture.params).unwrap();
     let epoch = outcome.certificate().checkpoint.hash();
     let prefix_len = fixture.blocks.len();
@@ -213,7 +213,7 @@ fn epoch_tail_survives_next_certificate_restart_and_historical_transfer() {
     merged_payments(&mut fixture);
     pending_successor(&mut fixture);
     let (_dir, store, heads) = restore_chain(&fixture, &selections);
-    let outcome = install_outcome(&fixture, &store, &heads);
+    let outcome = persist_outcome(&fixture, &store, &heads);
     let records = records(&store, &fixture.params);
     let epoch = outcome.certificate().checkpoint.hash();
     let origin = outcome
@@ -301,17 +301,20 @@ fn epoch_tail_survives_next_certificate_restart_and_historical_transfer() {
     );
 }
 
-#[test]
-fn outcome_rewards_and_stake_proofs_are_claimed_once_in_the_new_epoch() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn outcome_rewards_and_stake_proofs_are_claimed_once_in_the_new_epoch() {
     let (mut fixture, selections) = completed(ChallengeReason::Fraud);
     merged_payments(&mut fixture);
+    retirement_history(&mut fixture);
     let (_dir, store, heads) = restore_chain(&fixture, &selections);
-    let outcome = install_outcome(&fixture, &store, &heads);
+    let outcome = persist_outcome(&fixture, &store, &heads);
     let epoch = outcome.certificate().checkpoint.hash();
     let events = chain::load(&store, NetworkId::Dev, &fixture.params).unwrap();
     let wallet = outcome.state().brn.get_wallet(&address(8)).unwrap();
     let sources = wallet.release_sources(1024);
     assert!(!sources.is_empty());
+    assert!(wallet.has_more_releases(&[]));
+    assert!(!wallet.has_more_releases(&sources));
     let source = *wallet.pending_releases.keys().next().unwrap();
     let reward = outcome
         .state()
@@ -339,6 +342,8 @@ fn outcome_rewards_and_stake_proofs_are_claimed_once_in_the_new_epoch() {
         .unwrap()
         .pending_releases
         .is_empty());
+    assert!(!state.brn.get_wallet(&address(8)).unwrap().has_more_releases(&[]));
+    let accepted = fixture.blocks.last().unwrap().clone();
     let prefix_len = fixture.blocks.len();
     fixture.push(8, BlockType::ChangeRepresentative, CUTOFF + 73, |block| {
         block.payment_epoch = epoch;
@@ -351,6 +356,7 @@ fn outcome_rewards_and_stake_proofs_are_claimed_once_in_the_new_epoch() {
         &events
     )
     .is_err());
+    let repeated_release = fixture.blocks.last().unwrap().clone();
     fixture.blocks.truncate(prefix_len);
     fixture.push(8, BlockType::Receive, CUTOFF + 73, |block| {
         block.payment_epoch = epoch;
@@ -364,6 +370,11 @@ fn outcome_rewards_and_stake_proofs_are_claimed_once_in_the_new_epoch() {
         &events
     )
     .is_err());
+    let repeated_reward = fixture.blocks.last().unwrap().clone();
+    crate::confirmed_replay::tests::snapshot_history::installed_recovery::body_retirement::assert_pruned_claims(
+        &fixture, std::sync::Arc::new(store), epoch, &[accepted],
+        &[repeated_release, repeated_reward], &state,
+    ).await;
 }
 
 #[test]
@@ -371,12 +382,12 @@ fn upheld_target_cannot_resume_burning_by_signing_the_new_epoch() {
     for reason in [ChallengeReason::Fraud, ChallengeReason::Inactivity] {
         let (mut fixture, selections) = completed(reason);
         let (_dir, store, heads) = restore_chain(&fixture, &selections);
-        let outcome = install_outcome(&fixture, &store, &heads);
+        let outcome = persist_outcome(&fixture, &store, &heads);
         let events = chain::load(&store, NetworkId::Dev, &fixture.params).unwrap();
         fixture.push(20, BlockType::Burn, CUTOFF + 72, |block| {
             block.payment_epoch = outcome.certificate().checkpoint.hash();
             block.link = destination(2);
-            block.brn_balance += 1;
+            block.brn_spent += 1;
         });
         let error = ConfirmedReplay::replay_with_events(
             &fixture.history(CUTOFF + 74),
@@ -390,16 +401,17 @@ fn upheld_target_cannot_resume_burning_by_signing_the_new_epoch() {
     }
 }
 
-#[test]
-fn in_flight_revocation_survives_receive_rejection_and_restart() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn in_flight_revocation_survives_receive_rejection_and_restart() {
     for reject in [false, true] {
         let (mut fixture, selections) = completed(ChallengeReason::Fraud);
         merged_payments(&mut fixture);
         let receive = fixture.blocks.pop().unwrap();
         assert_eq!(receive.block_type, BlockType::Receive);
         let send = receive.link;
+        retirement_history(&mut fixture);
         let (_dir, store, heads) = restore_chain(&fixture, &selections);
-        let outcome = install_outcome(&fixture, &store, &heads);
+        let outcome = persist_outcome(&fixture, &store, &heads);
         let pending = outcome
             .state()
             .pending(&address(1), send.into_tx_hash())
@@ -415,6 +427,7 @@ fn in_flight_revocation_survives_receive_rejection_and_restart() {
         );
         let epoch = outcome.certificate().checkpoint.hash();
         let records = records(&store, &fixture.params);
+        let claim_start = fixture.blocks.len();
         let (owner, claim) = if reject {
             let rejected = fixture.push(1, BlockType::RejectReceive, CUTOFF + 71, |block| {
                 block.payment_epoch = epoch;
@@ -457,6 +470,10 @@ fn in_flight_revocation_survives_receive_rejection_and_restart() {
         assert!(state
             .pending(&address(owner), claim.into_tx_hash())
             .is_none());
+        crate::confirmed_replay::tests::snapshot_history::installed_recovery::body_retirement::assert_pruned_claims(
+            &fixture, std::sync::Arc::new(store), epoch,
+            &fixture.blocks[claim_start..], &[], &state,
+        ).await;
     }
 }
 
@@ -511,7 +528,7 @@ fn split_panel_resumes_across_epoch_then_requires_the_second_outcome_epoch() {
     vote_choice(&mut fixture, &selections[2], voters[0], CUTOFF + 61, 2);
     merged_payments(&mut fixture);
     let (_dir, store, heads) = restore_chain(&fixture, &selections);
-    let first_outcome = install_outcome(&fixture, &store, &heads);
+    let first_outcome = persist_outcome(&fixture, &store, &heads);
     let epoch = first_outcome.certificate().checkpoint.hash();
     let clean = first_outcome
         .state()
@@ -530,7 +547,7 @@ fn split_panel_resumes_across_epoch_then_requires_the_second_outcome_epoch() {
     let burn = fixture.push(2, BlockType::Burn, CUTOFF + 71, |block| {
         block.payment_epoch = epoch;
         block.link = destination(8);
-        block.brn_balance += 10_000;
+        block.brn_spent += 10_000;
     });
     let received = fixture.push(8, BlockType::Receive, CUTOFF + 72, |block| {
         block.payment_epoch = epoch;
@@ -552,12 +569,12 @@ fn split_panel_resumes_across_epoch_then_requires_the_second_outcome_epoch() {
         &address(0),
     )
     .unwrap();
-    let signature = certify(
+    let certificate = certify(
         &second_outcome.manifest().checkpoint,
         &[0, 1, 2, 3, 4, 5, 6],
     );
     let second_outcome = second_outcome
-        .certify(signature)
+        .certify(certificate)
         .unwrap()
         .persist(&receiver, NetworkId::Dev, &fixture.params)
         .unwrap();
@@ -599,5 +616,12 @@ fn split_panel_resumes_across_epoch_then_requires_the_second_outcome_epoch() {
         } else {
             assert!(result.is_err());
         }
+    }
+}
+
+
+fn retirement_history(fixture: &mut Fixture) {
+    for offset in 0..4 {
+        fixture.push(0, BlockType::ChangeRepresentative, CUTOFF + 66 + offset, |_| {});
     }
 }

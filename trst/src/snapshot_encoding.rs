@@ -1,6 +1,8 @@
 use std::io::{self, Write};
 
 /// Compare an encoded snapshot without retaining a second encoded body.
+/// Encoding continues after a mismatch so encoder errors still propagate. Both
+/// content and length must match; this does not decode or validate the snapshot.
 pub(crate) fn matches(
     bytes: &[u8],
     encode: impl FnOnce(&mut dyn Write) -> Result<(), bincode::Error>,

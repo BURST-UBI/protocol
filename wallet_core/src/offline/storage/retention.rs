@@ -10,7 +10,7 @@ fn failure(error: std::io::Error) -> WalletError {
     WalletError::Other(format!("receipt retention: {error}"))
 }
 
-// Callers serialize signing and recovery for the private journal directory.
+// Callers must serialize signing and recovery for the private journal directory.
 // Legacy flat receipts remain untouched: their names alone do not distinguish
 // them from active drafts accepted by the public storage API.
 pub(super) fn directory(path: &Path, account: &WalletAddress) -> Result<PathBuf, WalletError> {
@@ -40,6 +40,9 @@ pub(super) fn directory(path: &Path, account: &WalletAddress) -> Result<PathBuf,
     Ok(directory)
 }
 
+/// Keep this receipt plus the newest other receipts by filesystem modification
+/// time, up to the per-account limit. Scans the directory; the limit bounds the
+/// retained set, not the number of files examined or work after interrupted cleanup.
 pub(super) fn maintain(
     path: &Path,
     newest: &Path,

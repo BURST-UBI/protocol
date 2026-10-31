@@ -14,6 +14,7 @@ const MAGIC: &[u8; 4] = b"BDK\x01";
 pub const DELEGATION_ENVELOPE_LEN: usize = 4 + 32 + 24 + 48;
 const MAX_CONTEXT: usize = 4096;
 
+/// Check only the envelope version and length. Does not authenticate ciphertext.
 pub fn validate_delegation_envelope(envelope: &[u8]) -> Result<(), &'static str> {
     if envelope.len() != DELEGATION_ENVELOPE_LEN || &envelope[..4] != MAGIC {
         return Err("invalid delegation envelope version or length");
@@ -83,8 +84,9 @@ pub fn encrypt_delegation_key(
     Ok(envelope)
 }
 
-/// Reject legacy deterministic-nonce ciphertexts and noncanonical lengths.
-/// The returned secret is zeroized on drop and cannot be formatted with Debug.
+/// Authenticate and decrypt a version-1 envelope using the grant's context.
+/// Reject unsupported formats, wrong recipients and altered ciphertext or context.
+/// The returned secret is zeroized on drop and has no Debug implementation.
 pub fn decrypt_delegation_key(
     envelope: &[u8],
     recipient_x25519_secret: &[u8; 32],

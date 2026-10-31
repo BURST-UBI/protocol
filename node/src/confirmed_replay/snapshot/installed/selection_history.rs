@@ -17,13 +17,60 @@ struct Row {
     beacon: Option<burst_vrf::RandomOutput>,
 }
 
+#[derive(Serialize, Deserialize)]
+struct RefreshHint {
+    height: u64,
+    hash: BlockHash,
+    has_beacon: bool,
+}
+
+impl Row {
+    fn refresh_hint(&self) -> RefreshHint {
+        RefreshHint {
+            height: self.certificate.checkpoint.height,
+            hash: self.certificate.checkpoint.hash(),
+            has_beacon: self.beacon.is_some(),
+        }
+    }
+}
+
 /// Private replay history, not durable authority or a signing inventory.
 /// Certificates are reconstructed against the retained authority proof stream.
 pub struct SelectionHistory {
     pub(super) authority: AuthorityHistory,
     rows: ScratchRecords<Row>,
+    hints: ScratchRecords<RefreshHint>,
     count: usize,
     last_height: u64,
+}
+
+/// A private scheduling cursor. These rows cannot authorize imports or signing.
+pub(crate) struct SelectionRefresh {
+    rows: ScratchRecords<RefreshHint>,
+    count: usize,
+    position: usize,
+}
+
+impl SelectionRefresh {
+    pub(crate) fn at_cycle_start(&self) -> bool {
+        self.position == 0
+    }
+
+    /// Advance one row, returning its height only if its beacon is missing.
+    /// `None` can also mean a skipped row; use `at_cycle_start` to detect wraparound.
+    pub(crate) fn next(&mut self, store: &burst_store_lmdb::LmdbStore) -> Result<Option<u64>, StoreError> {
+        if self.position == self.count {
+            self.position = 0;
+            return Ok(None);
+        }
+        let row = self.rows.get(&key(self.position))?
+            .ok_or_else(|| invalid("missing selection refresh row"))?;
+        self.position += 1;
+        let txn = store.tx_begin_read()?;
+        let stored = store.meta_store().get_meta_txn(&txn,
+            &crate::checkpoint_store::archive_selection::beacon_key(row.hash))?;
+        Ok((!row.has_beacon && stored.is_none()).then_some(row.height))
+    }
 }
 
 fn key(position: usize) -> [u8; 32] {
@@ -33,9 +80,13 @@ fn key(position: usize) -> [u8; 32] {
 }
 
 impl SelectionHistory {
+    pub(crate) fn refresh_cursor(&self) -> Result<SelectionRefresh, StoreError> {
+        Ok(SelectionRefresh { rows: self.hints.fork()?, count: self.count, position: 0 })
+    }
+
     #[cfg(test)]
     pub(in crate::confirmed_replay) fn bytes_for_test(&self) -> u64 {
-        self.rows.bytes_for_test()
+        self.rows.bytes_for_test() + self.hints.bytes_for_test()
     }
 
     #[cfg(test)]
@@ -47,15 +98,17 @@ impl SelectionHistory {
         Ok(Self {
             authority,
             rows: ScratchRecords::new(directory)?,
+            hints: ScratchRecords::new(directory)?,
             count: 0,
             last_height: 0,
         })
     }
 
-    pub(super) fn fork(&self, directory: &Path) -> Result<Self, StoreError> {
+    pub(super) fn fork(&self, _directory: &Path) -> Result<Self, StoreError> {
         Ok(Self {
-            authority: self.authority.fork(directory)?,
+            authority: self.authority.fork()?,
             rows: self.rows.fork()?,
+            hints: self.hints.fork()?,
             count: self.count,
             last_height: self.last_height,
         })
@@ -75,9 +128,13 @@ impl SelectionHistory {
             receipt: selection.replayed().receipt(),
             beacon: selection.beacon().cloned(),
         };
-        if self.rows.put(key(self.count), &row)? {
+        let mut rows = self.rows.fork()?;
+        let mut hints = self.hints.fork()?;
+        if rows.put(key(self.count), &row)? || hints.put(key(self.count), &row.refresh_hint())? {
             return Err(invalid("duplicate selection history position"));
         }
+        self.rows = rows;
+        self.hints = hints;
         self.count = count;
         self.last_height = height;
         Ok(())
@@ -98,7 +155,7 @@ impl SelectionHistory {
         beacon: burst_vrf::RandomOutput,
     ) -> Result<(), StoreError> {
         let mut found = None;
-        for (position, selection) in self.read_all().enumerate() {
+        for (position, selection) in self.iter_selections().enumerate() {
             let mut selection = selection.map_err(invalid)?.into_owned();
             if selection.certificate().checkpoint.hash() == hash {
                 selection.attach_compact_beacon(beacon.clone())?;
@@ -112,9 +169,13 @@ impl SelectionHistory {
             return Ok(());
         }
         row.beacon = beacon;
-        if !self.rows.put(key(position), &row)? {
+        let mut rows = self.rows.fork()?;
+        let mut hints = self.hints.fork()?;
+        if !rows.put(key(position), &row)? || !hints.put(key(position), &row.refresh_hint())? {
             return Err(invalid("updated selection history row was absent"));
         }
+        self.rows = rows;
+        self.hints = hints;
         Ok(())
     }
 
@@ -148,8 +209,9 @@ impl SelectionHistory {
             return Ok(());
         }
         let mut updated = self.rows.fork()?;
+        let mut hints = self.hints.fork()?;
         let mut found = 0usize;
-        for (position, selection) in self.read_all().enumerate() {
+        for (position, selection) in self.iter_selections().enumerate() {
             let mut selection = selection.map_err(invalid)?.into_owned();
             let hash = selection.certificate().checkpoint.hash();
             if let Some(beacon) = pending.get(hash.as_bytes())? {
@@ -157,7 +219,8 @@ impl SelectionHistory {
                 let mut row = self.row(position)?;
                 if row.beacon.is_none() {
                     row.beacon = selection.beacon().cloned();
-                    if !updated.put(key(position), &row)? {
+                    if !updated.put(key(position), &row)?
+                        || !hints.put(key(position), &row.refresh_hint())? {
                         return Err(invalid("updated selection history row was absent"));
                     }
                 }
@@ -168,6 +231,7 @@ impl SelectionHistory {
             return Err(invalid("beacon has no recovered selection"));
         }
         self.rows = updated;
+        self.hints = hints;
         Ok(())
     }
 }
@@ -179,7 +243,7 @@ impl SelectionSource for SelectionHistory {
 
     fn read_selection(&self, position: usize) -> Result<Cow<'_, CertifiedCheckpoint>, ReplayError> {
         let mut found = None;
-        for (index, selection) in self.read_all().enumerate() {
+        for (index, selection) in self.iter_selections().enumerate() {
             let selection = selection?;
             if position == index {
                 found = Some(selection);
@@ -188,7 +252,7 @@ impl SelectionSource for SelectionHistory {
         found.ok_or_else(|| super::super::super::invalid("missing authenticated selection"))
     }
 
-    fn read_all(&self) -> impl Iterator<Item = Result<Cow<'_, CertifiedCheckpoint>, ReplayError>> {
+    fn iter_selections(&self) -> impl Iterator<Item = Result<Cow<'_, CertifiedCheckpoint>, ReplayError>> {
         let mut anchors = self.authority.iter();
         let mut current: Option<CheckpointAnchor> = None;
         let mut position = 0;

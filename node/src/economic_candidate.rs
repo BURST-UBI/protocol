@@ -3,23 +3,25 @@
 use burst_brn::BrnEngine;
 use burst_ledger::{BlockType, StateBlock};
 use burst_store::{account::AccountInfo, pending::PendingInfo};
-use burst_trst::{TrstEngine, TrstToken, WalletPortfolio};
-use burst_types::{ProtocolParams, Timestamp, TrstState};
+use burst_trst::TrstEngine;
+use burst_types::ProtocolParams;
 
-use crate::ledger_bridge::EconomicResult;
+use crate::block_economics::EconomicResult;
 use crate::ledger_updater::{PendingWrite, TrstIndexWrite};
 
+pub(crate) mod inputs;
+pub(crate) mod prepared;
 mod staging;
 pub(crate) use staging::{Engines, StagedEngines};
 
 pub(crate) struct EconomicContext<'a> {
     pub account: Option<&'a AccountInfo>,
-    pub previous_brn: u128,
+    pub previous_brn_spent: u128,
     pub pending: Option<&'a PendingInfo>,
     pub params: &'a ProtocolParams,
 }
 
-pub(crate) struct CandidateEconomics {
+pub(crate) struct StagedBlockEffects {
     pub effect: EconomicResult,
     pub pending: Option<PendingWrite>,
     pub indices: Option<TrstIndexWrite>,
@@ -32,72 +34,19 @@ pub(crate) fn stage(
     block: &StateBlock,
     params: &ProtocolParams,
     engines: &mut impl Engines,
-) -> Result<CandidateEconomics, String> {
-    use crate::{block_processor::BlockProcessor, ledger_updater};
-    use bincode::Options;
-
-    let account = ledger_updater::predecessor_account(batch, block)?;
-    let previous: Option<StateBlock> = if block.previous.is_zero() {
-        None
-    } else {
-        let bytes = batch
-            .get_block(&block.previous)
-            .map_err(|e| e.to_string())?;
-        Some(
-            bincode::DefaultOptions::new()
-                .with_fixint_encoding()
-                .with_limit(burst_types::MAX_P2P_MESSAGE_BYTES as u64)
-                .reject_trailing_bytes()
-                .deserialize(&bytes)
-                .map_err(|e| e.to_string())?,
-        )
-    };
-    if previous.as_ref().is_some_and(|p| {
-        p.account != block.account || p.hash != block.previous || p.hash != p.compute_hash()
-    }) {
-        return Err("candidate predecessor account mismatch".into());
+) -> Result<StagedBlockEffects, String> {
+    if block.block_type == BlockType::Epoch {
+        let phase = crate::bootstrap_phase::read(batch)?;
+        let count = batch.verified_account_count().map_err(|error| error.to_string())?;
+        if !phase.permits_creator(count, params.bootstrap_exit_threshold) {
+            return Err("creator epoch authority has ended".into());
+        }
     }
-    if (block.block_type == BlockType::Open) != block.previous.is_zero() {
-        return Err("invalid opening position".into());
-    }
-    block
-        .validate_signing_grant(previous.as_ref())
-        .map_err(str::to_owned)?;
-    let previous_brn = previous.as_ref().map_or(0, |p| p.brn_balance);
-    if let Some(previous) = &previous {
-        BlockProcessor::validate_balance_transition(block, previous_brn, previous.trst_balance)?;
-    }
-    let claims = matches!(
-        block.block_type,
-        BlockType::Receive | BlockType::RejectReceive
-    ) || (block.block_type == BlockType::Open && !block.link.is_zero());
-    let pending = if claims {
-        Some(
-            batch
-                .get_pending(&block.account, &block.link.into_tx_hash())
-                .map_err(|e| e.to_string())?,
-        )
-    } else {
-        None
-    };
-    BlockProcessor::validate_open_block(block, pending.as_ref().map(|p| p.amount))?;
-    let economics = apply_with_engines(
-        block,
-        EconomicContext {
-            account: account.as_ref(),
-            previous_brn,
-            pending: pending.as_ref(),
-            params,
-        },
-        engines,
-    )?;
-    ledger_updater::stage_block(
-        batch,
-        block,
-        account.as_ref(),
-        previous_brn,
-        economics.pending.as_ref(),
-        economics.indices.as_ref(),
+    let inputs = inputs::LedgerInputs::capture(batch, block, params)?;
+    let economics = apply_with_engines(block, inputs.context(params), engines)?;
+    crate::ledger_updater::stage_block(
+        batch, block, inputs.account.as_ref(), inputs.previous_brn_spent,
+        economics.pending.as_ref(), economics.indices.as_ref(),
     )?;
     Ok(economics)
 }
@@ -120,7 +69,7 @@ pub(crate) fn apply(
     context: EconomicContext<'_>,
     brn: &mut BrnEngine,
     trst: &mut TrstEngine,
-) -> Result<CandidateEconomics, String> {
+) -> Result<StagedBlockEffects, String> {
     apply_with_engines(block, context, &mut (brn, trst))
 }
 
@@ -128,9 +77,9 @@ fn apply_with_engines(
     block: &StateBlock,
     context: EconomicContext<'_>,
     engines: &mut impl Engines,
-) -> Result<CandidateEconomics, String> {
+) -> Result<StagedBlockEffects, String> {
     if let Some(pending) = context.pending {
-        crate::ledger_bridge::validate_pending(pending)?;
+        crate::block_economics::validate_pending(pending)?;
         if pending.return_credit {
             if block.block_type != BlockType::Receive || pending.source != block.account {
                 return Err("expiry return credit must be received by its owner".into());
@@ -166,11 +115,11 @@ fn apply_with_engines(
                 amount
             } else {
                 block
-                    .brn_balance
-                    .checked_sub(context.previous_brn)
+                    .brn_spent
+                    .checked_sub(context.previous_brn_spent)
                     .ok_or("BRN spend decreased")?
             };
-            crate::limits::check_wallet_limits(account, amount, block.timestamp, context.params)?;
+            crate::limits::check_wallet_spending_limit(account, amount, block.timestamp, context.params)?;
         }
     }
     if let Some(amount) = send_amount {
@@ -186,12 +135,12 @@ fn apply_with_engines(
             .transferable_balance(&block.account, block.timestamp);
     }
 
-    let effect = crate::ledger_bridge::process_with_engines(
+    let effect = crate::block_economics::process_with_engines(
         block,
         engines,
         block.timestamp,
         context.params.trst_expiry_secs,
-        context.previous_brn,
+        context.previous_brn_spent,
     );
     let mut pending = None;
     let mut indices = None;
@@ -221,7 +170,7 @@ fn apply_with_engines(
         }
         EconomicResult::Send { .. } => {
             let amount = send_amount.ok_or("missing send amount")?;
-            let destination = crate::ledger_bridge::extract_receiver_from_link(&block.link)
+            let destination = crate::block_economics::wallet_from_link(&block.link)
                 .ok_or("invalid send destination")?;
             let consumed = engines.trst_mut().debit_wallet_with_provenance(
                 &block.account,
@@ -242,16 +191,16 @@ fn apply_with_engines(
             if source.return_credit {
                 // The certified return already delivered these tokens. Only
                 // the signed balance and receipt consumption change here.
-                return Ok(CandidateEconomics {
+                return Ok(StagedBlockEffects {
                     effect,
                     pending: None,
                     indices: None,
                 });
             }
-            crate::ledger_bridge::deliver_pending(
+            crate::block_economics::deliver_pending(
                 engines.trst_mut(),
                 source,
-                crate::ledger_bridge::create_received_token(
+                crate::block_economics::create_received_token(
                     block,
                     source,
                     context.params.trst_expiry_secs,
@@ -265,20 +214,9 @@ fn apply_with_engines(
                 .get_portfolio(account)
                 .ok_or("missing merge portfolio")?;
             let selected = if block.merge_sources.is_empty() {
-                select_expiry_merge_group(portfolio, block.timestamp, trst.expiry_secs)
+                portfolio.select_expiry_merge_group(block.timestamp, trst.expiry_secs)
             } else {
-                block
-                    .merge_sources
-                    .iter()
-                    .map(|id| {
-                        portfolio
-                            .tokens
-                            .iter()
-                            .find(|token| token.id == *id)
-                            .cloned()
-                            .ok_or_else(|| format!("merge input {id} is not held by this wallet"))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
+                portfolio.select_merge_inputs(&block.merge_sources)?
             };
             let trst = engines.trst_mut();
             let merged = trst
@@ -295,40 +233,9 @@ fn apply_with_engines(
         }
         _ => {}
     }
-    Ok(CandidateEconomics {
+    Ok(StagedBlockEffects {
         effect,
         pending,
         indices,
     })
-}
-
-// Preserve the existing automatic grouping for blocks without explicit inputs.
-// Explicit inputs also permit expired-only consolidation (decision 6.8b).
-fn select_expiry_merge_group(
-    portfolio: &WalletPortfolio,
-    now: Timestamp,
-    expiry_secs: u64,
-) -> Vec<TrstToken> {
-    let mut live: Vec<_> = portfolio
-        .tokens
-        .iter()
-        .filter(|token| {
-            token.state == TrstState::Active
-                && token.revoked_origin.is_none()
-                && !token.is_expired(now, expiry_secs)
-        })
-        .collect();
-    live.sort_by_key(|token| (token.effective_origin_timestamp, *token.id.as_bytes()));
-    let Some(oldest) = live.first() else {
-        return Vec::new();
-    };
-    let cutoff = oldest
-        .effective_origin_timestamp
-        .as_secs()
-        .saturating_add(expiry_secs / 10);
-    live.into_iter()
-        .take_while(|token| token.effective_origin_timestamp.as_secs() <= cutoff)
-        .take(burst_trst::MAX_MERGE_SOURCES)
-        .cloned()
-        .collect()
 }

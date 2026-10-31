@@ -9,14 +9,13 @@ description = "Cryptographic primitives for the BURST protocol (Ed25519, Blake2b
 burst-types = { workspace = true }
 ed25519-dalek = { workspace = true }
 blake2 = { workspace = true }
+blake2b_simd = "=1.0.5"
 rand = { workspace = true }
 x25519-dalek = { workspace = true }
 chacha20poly1305 = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 bip39 = { workspace = true }
-sha2 = { workspace = true }
-hmac = { workspace = true }
 zeroize = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

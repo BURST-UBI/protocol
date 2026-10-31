@@ -1,6 +1,7 @@
 //! Transactional fork installation by the block-processing task.
 use crate::{
     block_processor::BlockProcessor, bounded_backlog::BoundedBacklog, ledger_cache::LedgerCache,
+    economic_candidate::{Engines, StagedEngines},
     local_broadcaster::LocalBroadcaster, payment_transition, rollback_plan,
 };
 use bincode::Options;
@@ -160,7 +161,8 @@ fn apply_candidate(
     if let Some(now) = admission_time {
         payment_transition::require_admission_time(block, now)?;
     }
-    let mut payment = payment_transition::restore(batch, params)?;
+    let payment = payment_transition::restore(batch, params)?;
+    let mut staged = StagedEngines::new(&payment.brn, &payment.trst);
     let mut verification =
         crate::endorsement_commit::restore(batch).map_err(StoreError::Corruption)?;
     let mut governance = governance_input
@@ -178,7 +180,7 @@ fn apply_candidate(
         batch,
         block,
         params,
-        &mut (&mut payment.brn, &mut payment.trst),
+        &mut staged,
     )
     .map_err(StoreError::Corruption)?;
     if crate::governance_content::is_full(block) {
@@ -188,14 +190,14 @@ fn apply_candidate(
         crate::governance_content::stage(batch, block, content).map_err(StoreError::Corruption)?;
     }
     if crate::verification_transition::supports(&block.block_type) {
-        crate::verification_transition::apply(
+        crate::verification_transition::apply_staged(
             batch,
             block,
             &effects.effect,
             params,
             network,
             &mut verification,
-            (&mut payment.brn, &mut payment.trst),
+            &mut staged,
         )
         .map_err(StoreError::Corruption)?;
     }
@@ -203,12 +205,11 @@ fn apply_candidate(
         governance
             .as_mut()
             .ok_or_else(|| invalid("governance fork execution is unavailable"))?
-            .apply(
+            .apply_staged(
                 batch,
                 block,
                 &effects.effect,
-                &mut payment.brn,
-                &mut payment.trst,
+                &mut staged,
             )
             .map_err(StoreError::Corruption)?;
     }
@@ -216,12 +217,16 @@ fn apply_candidate(
     crate::ledger_updater::refresh_token_counters(
         batch,
         &block.account,
-        &payment.trst,
+        staged.trst(),
         block.timestamp,
     )
     .map_err(StoreError::Corruption)?;
-    crate::ledger_updater::persist_economics(batch, &payment.brn, &payment.trst)
-        .map_err(StoreError::Corruption)?;
+    staged.persist(batch).map_err(StoreError::Corruption)?;
+    let (brn, trst) = staged.into_staged();
+    let payment = payment_transition::PaymentState {
+        brn: brn.unwrap_or(payment.brn),
+        trst: trst.unwrap_or(payment.trst),
+    };
     Ok(CandidateState {
         payment,
         verification: Some(verification),
@@ -231,6 +236,7 @@ fn apply_candidate(
 
 /// All candidate writes, including undo, are discarded. Cache only after this
 /// succeeds. The caller serializes with the live economic engines.
+#[cfg(test)]
 pub(crate) fn evaluate(
     store: &LmdbStore,
     block: &StateBlock,
@@ -240,28 +246,53 @@ pub(crate) fn evaluate(
     verification: bool,
     governance_input: Option<GovernanceInput<'_>>,
 ) -> Result<Option<BlockHash>, StoreError> {
-    let mut batch = store.tx_begin_write()?;
-    let Some(target) = competitor(&batch, block)? else {
-        return Ok(None);
-    };
-    let (candidate, _) = rollback_plan::stage_with(&mut batch, target, block, |batch, block| {
-        apply_candidate(
-            batch,
-            block,
-            params,
-            network,
+    evaluate_retry(store, block, params, now, network, verification, governance_input)
+        .map_err(|failure| failure.error)
+}
+
+pub(crate) fn evaluate_retry(
+    store: &LmdbStore,
+    block: &StateBlock,
+    params: &ProtocolParams,
+    now: Timestamp,
+    network: NetworkId,
+    verification: bool,
+    governance_input: Option<GovernanceInput<'_>>,
+) -> Result<Option<BlockHash>, burst_store_lmdb::ForkCandidateWriteError> {
+    let mut outcome = None;
+    let mut retry = None;
+    let result = (|| -> Result<Option<BlockHash>, StoreError> {
+        let mut batch = store.tx_begin_write()?;
+        outcome = batch.growth_outcome();
+        retry = batch.reserve_growth_retry()?;
+        let Some(target) = competitor(&batch, block)? else {
+            return Ok(None);
+        };
+        let (candidate, _) = rollback_plan::stage_with(&mut batch, target, block, |batch, block| {
+            apply_candidate(
+                batch,
+                block,
+                params,
+                network,
+                verification,
+                Some(now),
+                governance_input,
+            )
+        })?;
+        require_supported_branch(
+            &candidate.removed,
             verification,
-            Some(now),
-            governance_input,
-        )
-    })?;
-    require_supported_branch(
-        &candidate.removed,
-        verification,
-        governance_input.is_some(),
-        network,
-    )?;
-    Ok(Some(target))
+            governance_input.is_some(),
+            network,
+        )?;
+        Ok(Some(target))
+    })();
+    result.map_err(|error| {
+        let pressure = outcome.filter(|outcome| outcome.was_rejected()).map(|outcome| {
+            (outcome.watch(), retry.expect("guarded fork evaluation reserved retry before staging"))
+        });
+        burst_store_lmdb::ForkCandidateWriteError { error, pressure }
+    })
 }
 
 #[derive(Clone)]

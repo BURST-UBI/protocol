@@ -29,12 +29,12 @@ fn restore<V: Clone>(current: &mut HashMap<TxHash, V>, before: &HashMap<TxHash, 
 
 impl ConstiEngine {
     fn amendment_ids(&self) -> impl Iterator<Item = TxHash> + '_ {
-        let Self {
+        let ConstiState {
             amendments,
             votes,
             document: _,
             conflicts,
-        } = self;
+        } = self.0.as_ref();
         amendments
             .keys()
             .chain(votes.keys())
@@ -48,8 +48,10 @@ impl ConstiEngine {
             && self.conflicts.get(&id) == other.conflicts.get(&id)
     }
 
-    /// Restore independent amendment scopes without erasing later votes or
-    /// conflicts. A document change requires its entire dependent after-state.
+    /// Reconcile before/after snapshots against current state. Changed amendment
+    /// entries must still equal their recorded after-state; unrelated entries
+    /// survive. If the document changed, the entire current engine must equal
+    /// after. Each encoded input and the output is limited to 64 MiB.
     /// This is local reconciliation, not authority to reverse an activation.
     pub fn rewind_snapshot(before: &[u8], after: &[u8], current: &[u8]) -> Result<Vec<u8>, String> {
         let before = decode(before)?;

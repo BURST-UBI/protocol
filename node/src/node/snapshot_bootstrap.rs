@@ -53,7 +53,7 @@ impl BurstNode {
                     && base.certificate().manifest.state_hash
                         == snapshot.certificate().manifest.state_hash
                 {
-                    // The ordinary installed-state recovery below still checks
+                    // The caller's ordinary installed-state recovery still checks
                     // the exact epoch, retained history, journals and economics.
                     return Ok(None);
                 }

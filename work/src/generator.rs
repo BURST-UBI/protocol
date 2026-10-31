@@ -1,4 +1,4 @@
-//! Native multi-threaded and browser-worker proof-of-work generation.
+//! Parallel native and synchronous WebAssembly proof-of-work generation.
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -33,14 +33,44 @@ impl WorkGenerator {
 
     /// Generate a work nonce that meets the minimum difficulty.
     ///
-    /// Splits the nonce space across all available CPU cores via rayon.
-    /// The first thread to find a valid nonce signals the others to stop.
+    /// Workers stride through nonces using the current Rayon pool. A valid result
+    /// signals other workers to stop at their next batch boundary.
+    /// This entry point has no deadline; use generate_until for bounded work.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn generate(
         &self,
         block_hash: &BlockHash,
         min_difficulty: u64,
     ) -> Result<WorkNonce, WorkError> {
+        self.generate_while(block_hash, min_difficulty, || true)
+    }
+
+    /// Check the supplied cancellation flag and deadline between batches.
+    /// The caller must set the flag when abandoning the request; dropping its
+    /// own future does not by itself signal this generator.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn generate_until(
+        &self,
+        block_hash: &BlockHash,
+        min_difficulty: u64,
+        cancelled: &std::sync::atomic::AtomicBool,
+        deadline: std::time::Instant,
+    ) -> Result<WorkNonce, WorkError> {
+        self.generate_while(block_hash, min_difficulty, || {
+            !cancelled.load(Ordering::Relaxed) && std::time::Instant::now() < deadline
+        })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn generate_while(
+        &self,
+        block_hash: &BlockHash,
+        min_difficulty: u64,
+        running: impl Fn() -> bool + Sync,
+    ) -> Result<WorkNonce, WorkError> {
+        if !running() {
+            return Err(WorkError::Cancelled);
+        }
         if min_difficulty == 0 {
             return Ok(WorkNonce(0));
         }
@@ -53,12 +83,11 @@ impl WorkGenerator {
             let stride = num_threads as u64;
 
             loop {
-                if found.load(Ordering::Relaxed) != u64::MAX {
+                if found.load(Ordering::Relaxed) != u64::MAX || !running() {
                     return;
                 }
 
-                let end = nonce.saturating_add(BATCH_SIZE * stride);
-                while nonce < end {
+                for _ in 0..BATCH_SIZE {
                     if work_value(block_hash, nonce) >= min_difficulty {
                         found.store(nonce, Ordering::Relaxed);
                         return;
@@ -77,16 +106,33 @@ impl WorkGenerator {
     }
 }
 
-/// Validation helper used by tests (single-shot, not hot loop).
-#[cfg(test)]
-fn validate_work_inner(block_hash: &[u8; 32], nonce: u64, min_difficulty: u64) -> bool {
-    work_value(&BlockHash::new(*block_hash), nonce) >= min_difficulty
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use burst_types::BlockHash;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn cancelled_and_expired_work_stops_without_searching() {
+        use std::sync::atomic::AtomicBool;
+        use std::time::{Duration, Instant};
+        let hash = BlockHash::new([19; 32]);
+        let generator = WorkGenerator;
+        assert!(generator.generate_until(&hash, u64::MAX, &AtomicBool::new(true), Instant::now() + Duration::from_secs(1)).is_err());
+        assert!(generator.generate_until(&hash, u64::MAX, &AtomicBool::new(false), Instant::now()).is_err());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn active_search_observes_deadline() {
+        use std::sync::atomic::AtomicBool;
+        use std::time::{Duration, Instant};
+        let start = Instant::now();
+        let result = WorkGenerator.generate_until(&BlockHash::new([19; 32]), u64::MAX,
+            &AtomicBool::new(false), start + Duration::from_millis(10));
+        assert!(result.is_err());
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
 
     #[test]
     fn test_generate_work() {
@@ -96,8 +142,8 @@ mod tests {
 
         let nonce = generator.generate(&block_hash, min_difficulty).unwrap();
 
-        assert!(super::validate_work_inner(
-            block_hash.as_bytes(),
+        assert!(crate::validate_work(
+            &block_hash,
             nonce.0,
             min_difficulty
         ));
@@ -109,8 +155,8 @@ mod tests {
         let block_hash = BlockHash::new([0u8; 32]);
         let min_difficulty = 0;
 
-        assert!(super::validate_work_inner(
-            block_hash.as_bytes(),
+        assert!(crate::validate_work(
+            &block_hash,
             0,
             min_difficulty
         ));
@@ -124,31 +170,27 @@ mod tests {
         let block_hash = BlockHash::new([0xAA; 32]);
 
         let nonce = 12345;
-        let work_value = compute_work_value(block_hash.as_bytes(), nonce);
+        let work_value = crate::work_value(&block_hash, nonce);
 
-        assert!(super::validate_work_inner(
-            block_hash.as_bytes(),
+        assert!(crate::validate_work(
+            &block_hash,
             nonce,
             work_value
         ));
 
         if work_value > 0 {
-            assert!(super::validate_work_inner(
-                block_hash.as_bytes(),
+            assert!(crate::validate_work(
+                &block_hash,
                 nonce,
                 work_value - 1
             ));
         }
 
-        assert!(!super::validate_work_inner(
-            block_hash.as_bytes(),
+        assert!(!crate::validate_work(
+            &block_hash,
             nonce,
             work_value + 1
         ));
     }
 
-    /// Helper to compute work value for testing
-    fn compute_work_value(block_hash: &[u8; 32], nonce: u64) -> u64 {
-        work_value(&BlockHash::new(*block_hash), nonce)
-    }
 }

@@ -1,45 +1,21 @@
 //! Local confirmed authority projection. This is not an agreed checkpoint roster.
 //! Promotion uses the block's committed journal, never its later live account state.
 
-use std::collections::BTreeMap;
-
-use bincode::Options;
 use burst_store::{account::AccountInfo, StoreError};
 use burst_store_lmdb::{block_undo::UndoTable, LmdbStore, LmdbWriteTransaction};
-use burst_types::{BlockHash, Timestamp, WalletAddress, WalletState};
+use burst_types::BlockHash;
+#[cfg(test)]
+use burst_types::{WalletAddress, WalletState};
 use serde::{Deserialize, Serialize};
-
-const KEY: &str = "confirmed_authority/v1";
-const MAX_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_ACCOUNTS: usize = 1_000_000;
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Authority {
-    pub address: WalletAddress,
-    pub state: WalletState,
-    pub representative: WalletAddress,
-    pub verified_at: Option<Timestamp>,
-    pub opted_in_at: Option<Timestamp>,
-    pub evicted: bool,
-}
-
-impl From<&AccountInfo> for Authority {
-    fn from(account: &AccountInfo) -> Self {
-        Self {
-            address: account.address.clone(),
-            state: account.state,
-            representative: account.representative.clone(),
-            verified_at: account.verified_at,
-            opted_in_at: account.verifier_opted_in_at,
-            evicted: account.orv_evicted,
-        }
-    }
-}
+use burst_utils::SharedMap;
+pub(crate) use burst_store_lmdb::confirmed_authority::Authority;
+#[cfg(test)]
+const KEY: &str = burst_store_lmdb::confirmed_authority::KEY;
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ConfirmedAuthority {
     genesis: BlockHash,
-    pub accounts: BTreeMap<String, Authority>,
+    pub accounts: SharedMap<String, Authority>,
 }
 
 fn invalid(message: &str) -> StoreError {
@@ -47,6 +23,7 @@ fn invalid(message: &str) -> StoreError {
 }
 
 impl ConfirmedAuthority {
+    /// Build from caller-validated checkpoint accounts; does not verify a certificate.
     pub(crate) fn from_checkpoint(genesis: BlockHash, accounts: &[AccountInfo]) -> Self {
         Self {
             genesis,
@@ -76,52 +53,30 @@ impl ConfirmedAuthority {
         batch: &mut LmdbWriteTransaction<'_>,
         genesis: &AccountInfo,
     ) -> Result<(), StoreError> {
-        if batch.get_meta(KEY)?.is_some() || genesis.block_count != 1 || genesis.head.is_zero() {
+        if batch.has_confirmed_authority_storage()?
+            || genesis.block_count != 1 || genesis.head.is_zero() {
             return Err(invalid("authority initialization requires a fresh genesis"));
         }
         Self {
             genesis: genesis.head,
-            accounts: BTreeMap::from([(genesis.address.to_string(), Authority::from(genesis))]),
+            accounts: [(genesis.address.to_string(), Authority::from(genesis))].into_iter().collect(),
         }
         .persist(batch)
     }
 
-    fn decode(bytes: &[u8]) -> Result<Self, StoreError> {
-        if bytes.len() as u64 > MAX_BYTES {
-            return Err(invalid("confirmed authority exceeds byte limit"));
-        }
-        let state: Self = bincode::DefaultOptions::new()
-            .with_fixint_encoding()
-            .with_limit(MAX_BYTES)
-            .reject_trailing_bytes()
-            .deserialize(bytes)
-            .map_err(|e| StoreError::Serialization(e.to_string()))?;
-        if state.genesis.is_zero()
-            || state.accounts.is_empty()
-            || state.accounts.len() > MAX_ACCOUNTS
-            || state
-                .accounts
-                .iter()
-                .any(|(key, account)| key != account.address.as_str())
-        {
-            return Err(invalid("invalid confirmed authority projection"));
-        }
-        Ok(state)
-    }
-
     pub fn read(store: &LmdbStore) -> Result<Self, StoreError> {
-        use burst_store::meta::MetaStore;
-        Self::decode(&store.meta_store().get_meta(KEY)?)
+        let snapshot = store.read_confirmed_authority_snapshot()?;
+        Ok(Self { genesis: snapshot.genesis, accounts: snapshot.accounts })
     }
 
     pub fn load(batch: &LmdbWriteTransaction<'_>) -> Result<Self, StoreError> {
-        Self::decode(&batch.get_meta(KEY)?.ok_or_else(|| {
-            invalid(
-                "ledger lacks confirmed authority history; use a separate fresh development ledger",
-            )
-        })?)
+        let snapshot = batch.read_confirmed_authority()?;
+        Ok(Self { genesis: snapshot.genesis, accounts: snapshot.accounts })
     }
 
+    /// Apply account authority changes from one committed journal in memory.
+    /// Validate all prerequisites before mutating; the caller establishes finality
+    /// and persists this projection in the cementation transaction.
     pub fn promote(
         &mut self,
         batch: &LmdbWriteTransaction<'_>,
@@ -151,31 +106,31 @@ impl ConfirmedAuthority {
             let before = decode(change.before.as_deref())?;
             let after = decode(change.after.as_deref())?
                 .ok_or_else(|| invalid("authority account deletion is unsupported"))?;
-            let key = after.address.as_str();
+            let key = after.address.to_string();
             if change.key != key.as_bytes()
                 || before.as_ref().is_some_and(|a| a.address != after.address)
-                || self.accounts.get(key) != before.as_ref()
+                || self.accounts.get(&key) != before.as_ref()
             {
                 return Err(invalid(
                     "authority transition has an unconfirmed or conflicting prerequisite",
                 ));
             }
-            staged.push((key.to_owned(), after));
+            staged.push((key, after));
         }
         if !staged.iter().any(|(_, a)| a.address == journal.account) {
             return Err(invalid("authority journal omits the block account"));
         }
         for (key, authority) in staged {
-            self.accounts.insert(key, authority);
+            if self.accounts.get(&key) != Some(&authority) { self.accounts.insert(key, authority); }
         }
         Ok(())
     }
 
+    /// Stage the projection in the supplied transaction; the caller commits it.
     pub fn persist(&self, batch: &mut LmdbWriteTransaction<'_>) -> Result<(), StoreError> {
-        let bytes =
-            bincode::serialize(self).map_err(|e| StoreError::Serialization(e.to_string()))?;
-        Self::decode(&bytes)?;
-        batch.put_meta(KEY, &bytes)
+        batch.write_confirmed_authority(burst_store_lmdb::confirmed_authority::Snapshot {
+            genesis: self.genesis, accounts: self.accounts.clone(),
+        })
     }
 }
 
@@ -224,19 +179,19 @@ mod tests {
         account.head = BlockHash::new([3; 32]);
         let second = journal(&store, &account, 3);
         assert_eq!(
-            ConfirmedAuthority::read(&store).unwrap().accounts[account.address.as_str()],
+            ConfirmedAuthority::read(&store).unwrap().accounts[&account.address.to_string()],
             original
         );
 
         let mut batch = store.tx_begin_write().unwrap();
         let mut confirmed = ConfirmedAuthority::load(&batch).unwrap();
         assert!(confirmed.promote(&batch, second).is_err());
-        assert_eq!(confirmed.accounts[account.address.as_str()], original);
+        assert_eq!(confirmed.accounts[&account.address.to_string()], original);
         confirmed.promote(&batch, first).unwrap();
         confirmed.persist(&mut batch).unwrap();
         batch.commit().unwrap();
         assert_eq!(
-            ConfirmedAuthority::read(&store).unwrap().accounts[account.address.as_str()],
+            ConfirmedAuthority::read(&store).unwrap().accounts[&account.address.to_string()],
             first_authority
         );
         assert_eq!(
@@ -250,7 +205,7 @@ mod tests {
         drop(store);
         let store = LmdbStore::open(dir.path(), 32, 16 * 1024 * 1024).unwrap();
         assert_eq!(
-            ConfirmedAuthority::read(&store).unwrap().accounts[account.address.as_str()],
+            ConfirmedAuthority::read(&store).unwrap().accounts[&account.address.to_string()],
             first_authority
         );
         let mut batch = store.tx_begin_write().unwrap();
@@ -259,7 +214,7 @@ mod tests {
         confirmed.persist(&mut batch).unwrap();
         drop(batch);
         assert_eq!(
-            ConfirmedAuthority::read(&store).unwrap().accounts[account.address.as_str()],
+            ConfirmedAuthority::read(&store).unwrap().accounts[&account.address.to_string()],
             first_authority
         );
     }
@@ -290,4 +245,23 @@ mod tests {
         assert!(batch.commit().is_err());
         assert!(ConfirmedAuthority::read(&store).is_ok());
     }
+    #[test]
+    fn payment_only_journal_preserves_shared_authority_projection() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LmdbStore::open(dir.path(), 32, 16 << 20).unwrap();
+        let mut account = fixture(&store);
+        account.block_count = 2;
+        account.head = BlockHash::new([2; 32]);
+        let hash = journal(&store, &account, 2);
+        let mut batch = store.tx_begin_write().unwrap();
+        let mut confirmed = ConfirmedAuthority::load(&batch).unwrap();
+        let before = confirmed.accounts.clone();
+        confirmed.promote(&batch, hash).unwrap();
+        assert!(confirmed.accounts.shares_storage_with(&before));
+        confirmed.persist(&mut batch).unwrap();
+        batch.commit().unwrap();
+        let batch = store.tx_begin_write().unwrap();
+        assert!(ConfirmedAuthority::load(&batch).unwrap().accounts.shares_storage_with(&before));
+    }
+
 }

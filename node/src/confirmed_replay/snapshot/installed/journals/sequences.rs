@@ -1,15 +1,15 @@
 use super::*;
 use crate::confirmed_replay::scratch_records::ScratchRecords;
 
-// Retransmitted votes advance counters without changing economic replay inputs.
-// Keep every captured high-water mark; removal or rollback still fails closed.
+/// Captured minimum signing sequences. Existing counters may increase and new
+/// signers may appear, but captured counters must not disappear or decrease.
 pub(super) struct SequenceGuard {
     rows: ScratchRecords<u64>,
     count: u64,
 }
 
-pub(super) fn visit(
-    batch: &LmdbWriteTransaction<'_>,
+pub(super) fn visit_view(
+    batch: &burst_store_lmdb::read_view::LedgerReadView<'_>,
     mut visitor: impl FnMut(&[u8], u64) -> Result<(), StoreError>,
 ) -> Result<(), StoreError> {
     for row in batch.checkpoint_metadata_entries(b"consensus_sequence/")? {
@@ -33,12 +33,23 @@ pub(super) fn visit(
 }
 
 impl SequenceGuard {
+    #[cfg(test)]
     pub(super) fn capture(batch: &LmdbWriteTransaction<'_>) -> Result<Self, StoreError> {
+        Self::capture_view(&batch.read_view())
+    }
+
+    #[cfg(test)]
+    pub(super) fn capture_view(batch: &burst_store_lmdb::read_view::LedgerReadView<'_>) -> Result<Self, StoreError> {
+        Self::capture_view_with_poll(batch, &|_| Ok(()))
+    }
+
+    pub(super) fn capture_view_with_poll(batch: &burst_store_lmdb::read_view::LedgerReadView<'_>, poll: &dyn Fn(&'static str) -> Result<(), StoreError>) -> Result<Self, StoreError> {
         let mut guard = Self {
             rows: ScratchRecords::new(batch.storage_directory())?,
             count: 0,
         };
-        visit(batch, |key, sequence| {
+        visit_view(batch, |key, sequence| {
+            poll("journal:sequence-capture")?;
             if guard.rows.put(burst_crypto::blake2b_256(key), &sequence)? {
                 return Err(invalid("duplicate signing sequence observation"));
             }
@@ -51,9 +62,20 @@ impl SequenceGuard {
         Ok(guard)
     }
 
+    #[cfg(test)]
     pub(super) fn verify(&self, batch: &LmdbWriteTransaction<'_>) -> Result<(), StoreError> {
+        self.verify_view(&batch.read_view())
+    }
+
+    #[cfg(test)]
+    pub(super) fn verify_view(&self, batch: &burst_store_lmdb::read_view::LedgerReadView<'_>) -> Result<(), StoreError> {
+        self.verify_view_with_poll(batch, &|_| Ok(()))
+    }
+
+    pub(super) fn verify_view_with_poll(&self, batch: &burst_store_lmdb::read_view::LedgerReadView<'_>, poll: &dyn Fn(&'static str) -> Result<(), StoreError>) -> Result<(), StoreError> {
         let mut retained = 0u64;
-        visit(batch, |key, current| {
+        visit_view(batch, |key, current| {
+            poll("metadata:signing-sequence")?;
             if let Some(previous) = self.rows.get(&burst_crypto::blake2b_256(key))? {
                 if current < previous {
                     return Err(invalid("signing sequence decreased during recovery"));
@@ -86,7 +108,22 @@ mod tests {
         let other = format!("consensus_sequence/v1/{}", signer(2));
         let mut batch = store.tx_begin_write().unwrap();
         batch.put_meta(&key, &12u64.to_be_bytes()).unwrap();
+        let capture_reached = std::cell::Cell::new(false);
+        let interrupted = SequenceGuard::capture_view_with_poll(&batch.read_view(), &|stage| {
+            assert_eq!(stage, "journal:sequence-capture");
+            capture_reached.set(true);
+            Err(StoreError::Backend("sequence capture sentinel".into()))
+        });
+        assert!(matches!(interrupted, Err(ref error) if error.to_string().contains("sequence capture sentinel")));
+        assert!(capture_reached.get());
         let guard = SequenceGuard::capture(&batch).unwrap();
+        let reached = std::cell::Cell::new(false);
+        assert!(guard.verify_view_with_poll(&batch.read_view(), &|stage| {
+            assert_eq!(stage, "metadata:signing-sequence");
+            reached.set(true);
+            Err(StoreError::Backend("sequence checkpoint sentinel".into()))
+        }).unwrap_err().to_string().contains("sequence checkpoint sentinel"));
+        assert!(reached.get());
         for sequence in [12u64, 13, u64::MAX] {
             batch.put_meta(&key, &sequence.to_be_bytes()).unwrap();
             guard.verify(&batch).unwrap();

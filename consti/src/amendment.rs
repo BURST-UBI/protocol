@@ -1,4 +1,4 @@
-//! Constitutional amendments with diff-based operations.
+//! Stored amendment metadata and explicit article operations.
 
 use burst_governance::proposal::GovernancePhase;
 use burst_types::{Timestamp, TxHash, WalletAddress};
@@ -18,7 +18,7 @@ pub struct Amendment {
     pub votes_nay: u32,
     pub votes_abstain: u32,
     pub created_at: Timestamp,
-    /// Diff-based operations to apply to the constitution.
-    /// If empty, falls back to legacy behavior (add article from title/text).
+    /// Ordered article operations. An empty list adds one article using this
+    /// amendment's title and text.
     pub operations: Vec<AmendmentOp>,
 }

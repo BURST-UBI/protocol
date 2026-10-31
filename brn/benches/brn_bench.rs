@@ -1,3 +1,8 @@
+//! In-memory BRN microbenchmarks. Balance queries use one continuously active
+//! wallet without burns, stakes, pauses or pending releases. Rate histories are
+//! built outside the measured queries. These do not measure node admission,
+//! persistence, shared-candidate updates or end-to-end payment throughput.
+
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 
 use burst_brn::{BrnEngine, BrnWalletState, RateHistory};
@@ -78,6 +83,7 @@ fn bench_brn_total_accrued(c: &mut Criterion) {
     group.finish();
 }
 
+// Each sample burns from a fresh wallet with sufficient BRN and one rate segment.
 fn bench_brn_engine_burn(c: &mut Criterion) {
     let engine = BrnEngine::with_rate(1_000_000, Timestamp::new(0));
 
@@ -95,6 +101,7 @@ fn bench_brn_engine_burn(c: &mut Criterion) {
     });
 }
 
+// One measured iteration appends ten rate changes to a fresh, unshared engine.
 fn bench_brn_rate_change(c: &mut Criterion) {
     c.bench_function("engine_apply_rate_change", |b| {
         b.iter_batched(

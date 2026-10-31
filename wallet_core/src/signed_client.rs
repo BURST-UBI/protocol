@@ -1,6 +1,8 @@
-//! Real wallet submission path. Keys remain on the client; the node only sees
-//! signed blocks and a hash for work generation. No faucet/convenience RPCs.
-use crate::{transaction_builder::*, wallet::ProcessResult, NodeClient, WalletError};
+//! Locally signed account operations and submission recovery.
+//! Private keys remain on the client. Account state, confirmation and signing
+//! readiness come from the configured node; these RPC replies are not independently
+//! verified ledger proofs. Local checks bind responses to the requested operation.
+use crate::{transaction_builder::*, wallet::ProcessResponse, NodeClient, WalletError};
 use burst_ledger::{BlockType, StateBlock};
 use burst_transactions::Transaction;
 use burst_types::{BlockHash, KeyPair, Timestamp, TxHash, WalletAddress};
@@ -29,7 +31,12 @@ impl PreparedWork {
     }
 }
 
-fn work_parameters(params: &Value) -> Result<u64, WalletError> {
+fn proposal_review(info: &Value) -> Result<burst_governance::proposal::ProposalReview, WalletError> {
+    serde_json::from_value(info.clone())
+        .map_err(|error| WalletError::Node(format!("invalid proposal review: {error}")))
+}
+
+fn signing_work_threshold(params: &Value) -> Result<u64, WalletError> {
     match params["online_signing"].as_str() {
         Some("local" | "peer_matches") => {},
         Some("catching_up" | "peer_differs" | "unknown") => return Err(WalletError::Node(
@@ -75,15 +82,7 @@ fn require_payment_epoch(params: &Value, expected: BlockHash) -> Result<(), Wall
 }
 
 pub fn parse_hash(value: &str) -> Result<BlockHash, WalletError> {
-    if value.len() != 64 || !value.is_ascii() {
-        return Err(WalletError::Node("expected a 32-byte hash".into()));
-    }
-    let mut bytes = [0; 32];
-    for (i, out) in bytes.iter_mut().enumerate() {
-        *out = u8::from_str_radix(&value[i * 2..i * 2 + 2], 16)
-            .map_err(|_| WalletError::Node("invalid hash".into()))?;
-    }
-    Ok(BlockHash::new(bytes))
+    value.parse().map_err(|error: burst_types::transaction_hash::ParseHashError| WalletError::Node(error.to_string()))
 }
 
 pub fn parse_address(value: &str) -> Result<WalletAddress, WalletError> {
@@ -93,7 +92,7 @@ pub fn parse_address(value: &str) -> Result<WalletAddress, WalletError> {
     Ok(WalletAddress::new(value))
 }
 
-fn raw(value: &Value, field: &str) -> Result<u128, WalletError> {
+fn parse_u128_field(value: &Value, field: &str) -> Result<u128, WalletError> {
     value[field]
         .as_str()
         .and_then(|v| v.parse().ok())
@@ -101,8 +100,9 @@ fn raw(value: &Value, field: &str) -> Result<u128, WalletError> {
 }
 
 impl NodeClient {
-    /// A trusted node may prove exclusion from a permanently closed epoch while
-    /// the account still ends at the signed predecessor, or remains unopened.
+    /// Ask the trusted node whether the payment's epoch is permanently closed
+    /// while its account still ends at the signed predecessor or remains unopened.
+    /// This checks response context but does not verify a certificate locally.
     /// Never infer this from an absent block, an advanced head, or an RPC error.
     pub async fn excluded_offline_payment(
         &self,
@@ -141,6 +141,8 @@ impl NodeClient {
         Ok(review.excluded.then_some(installed))
     }
 
+    /// Reconstruct the displayed payment amount from trusted-node receipt or
+    /// predecessor data. This does not submit the draft or certify its acceptance.
     pub async fn review_offline_payment(
         &self,
         block: &StateBlock,
@@ -190,8 +192,8 @@ impl NodeClient {
             ));
         }
         let amount = block
-            .brn_balance
-            .checked_sub(raw(&previous, "brn_balance")?)
+            .brn_spent
+            .checked_sub(parse_u128_field(&previous, "brn_balance")?)
             .filter(|amount| *amount > 0)
             .ok_or_else(|| WalletError::TransactionBuild("invalid saved payment amount".into()))?;
         Ok(crate::offline::OfflinePaymentReview {
@@ -211,7 +213,7 @@ impl NodeClient {
         block: &StateBlock,
     ) -> Result<Option<BlockHash>, WalletError> {
         crate::offline::validate_signed_action(block)?;
-        self.confirmed_account_slot(block).await
+        self.confirmed_indexed_slot(block).await
     }
 
     /// Resolve the draft or a confirmed conflict in its saved predecessor chain.
@@ -342,7 +344,7 @@ impl NodeClient {
         &self,
         path: &std::path::Path,
         expected_account: &WalletAddress,
-    ) -> Result<ProcessResult, WalletError> {
+    ) -> Result<ProcessResponse, WalletError> {
         let block = crate::offline::load_payment(path)?;
         if &block.account != expected_account {
             return Err(WalletError::Signing(
@@ -355,7 +357,7 @@ impl NodeClient {
         let mut resumed = self.clone();
         resumed.payment_journal = None;
         resumed
-            .submit_offline_payment_before(block, || crate::offline::record_submission(path, &hash))
+            .submit_offline_payment_before(block, || crate::offline::record_submission_attempt(path, &hash))
             .await
     }
 
@@ -366,7 +368,7 @@ impl NodeClient {
         &self,
         path: &std::path::Path,
         expected_account: &WalletAddress,
-    ) -> Result<ProcessResult, WalletError> {
+    ) -> Result<ProcessResponse, WalletError> {
         let (block, content) = crate::offline::load_action_with_content(path)?;
         if &block.account != expected_account {
             return Err(WalletError::Signing(
@@ -378,7 +380,7 @@ impl NodeClient {
         resumed.payment_journal = None;
         resumed
             .submit_offline_action_before(block, content.as_deref(), || {
-                crate::offline::record_submission(path, &hash)
+                crate::offline::record_submission_attempt(path, &hash)
             })
             .await
     }
@@ -390,15 +392,15 @@ impl NodeClient {
         account: &WalletAddress,
     ) -> Result<crate::offline::OfflinePaymentContext, WalletError> {
         parse_address(account.as_str())?;
-        let (state, more) = self.signing_state_with_releases(account).await?;
-        if more {
+        let (state, has_more_releases) = self.signing_state_with_releases(account).await?;
+        if has_more_releases {
             return Err(WalletError::TransactionBuild(
                 "finish pending stake-release batches online before preparing offline payments"
                     .into(),
             ));
         }
         let params = self.rpc_call("params_hash", json!({})).await?;
-        let threshold = work_parameters(&params)?;
+        let threshold = signing_work_threshold(&params)?;
         require_payment_epoch(&params, state.payment_epoch)?;
         let params_hash = parse_hash(
             params["params_hash"]
@@ -476,6 +478,9 @@ impl NodeClient {
     }
 
     /// Capture public action review and signing inputs without signing or submitting.
+    /// Checks action-specific RPC data and rechecks epoch/parameter consistency.
+    /// These separate requests are not an atomic ledger snapshot; admission may
+    /// still reject an action whose state changes after review.
     pub async fn prepare_offline_action(
         &self,
         account: &WalletAddress,
@@ -484,7 +489,7 @@ impl NodeClient {
         use crate::offline::OfflineAction;
         parse_address(account.as_str())?;
         let capabilities = self.rpc_call("params_hash", json!({})).await?;
-        work_parameters(&capabilities)?;
+        signing_work_threshold(&capabilities)?;
         let mut target_head = None;
         let review = match &action {
             OfflineAction::Transfer { to, amount, origin } => {
@@ -616,6 +621,9 @@ impl NodeClient {
                     .map_err(|error| WalletError::TransactionBuild(error.to_string()))?;
                 self.rpc_call("consti", json!({})).await?
             }
+            OfflineAction::GovernanceVeto { proposal } => {
+                self.review_governance_veto(&account, *proposal).await?
+            }
             OfflineAction::GovernanceVote { proposal, .. }
             | OfflineAction::GovernanceEndorse { proposal, .. }
             | OfflineAction::GovernanceWithdraw { proposal } => {
@@ -628,17 +636,18 @@ impl NodeClient {
                         json!({"hash":proposal.to_string()}),
                     )
                     .await?;
+                let review = proposal_review(&info)?;
                 let phase = if matches!(&action, OfflineAction::GovernanceVote { .. }) {
                     "Exploration"
                 } else {
                     "Proposal"
                 };
-                if info["hash"].as_str() != Some(proposal.to_string().as_str())
-                    || !info["phase_deadline"].as_u64().is_some_and(|deadline| Timestamp::now().as_secs() < deadline)
-                    || info["phase"].as_str() != Some(phase) || info["phase_projected"].as_bool().is_none()
+                if review.hash != proposal.to_string()
+                    || Timestamp::now().as_secs() >= review.phase_deadline
+                    || review.phase != phase
                     // Opening Exploration is a read-only projection; ballots are
                     // admitted in that window before its result is certified.
-                    || !matches!(&action, OfflineAction::GovernanceVote { .. }) && info["phase_projected"] != false
+                    || !matches!(&action, OfflineAction::GovernanceVote { .. }) && review.phase_projected
                     || matches!(&action, OfflineAction::GovernanceWithdraw { .. })
                         && info["proposer"].as_str() != Some(account.as_str())
                 {
@@ -712,12 +721,10 @@ impl NodeClient {
                         json!({"hash":proposal.to_string()}),
                     )
                     .await?;
-                if info["hash"].as_str() != Some(proposal.to_string().as_str())
-                    || !info["phase_deadline"]
-                        .as_u64()
-                        .is_some_and(|deadline| Timestamp::now().as_secs() < deadline)
-                    || info["phase"].as_str() != Some("Exploration")
-                    || info["phase_projected"].as_bool().is_none()
+                let review = proposal_review(&info)?;
+                if review.hash != proposal.to_string()
+                    || Timestamp::now().as_secs() >= review.phase_deadline
+                    || review.phase != "Exploration"
                 {
                     return Err(WalletError::TransactionBuild(
                         "proposal is not available for voting".into(),
@@ -762,11 +769,14 @@ impl NodeClient {
         Ok(crate::offline::OfflineReceiveContext { signing, receipt })
     }
 
-    /// Submit exact offline-signed bytes. Never rebase, sign or generate work.
+    /// Submit the saved signed block without rebasing, signing or generating work.
+    /// Returns success only after the trusted node reports this hash confirmed.
+    /// A timeout or lost response leaves the outcome unresolved; retain recovery
+    /// state instead of preparing a conflicting replacement.
     pub async fn submit_offline_payment(
         &self,
         block: StateBlock,
-    ) -> Result<ProcessResult, WalletError> {
+    ) -> Result<ProcessResponse, WalletError> {
         self.submit_offline_payment_before(block, || Ok(())).await
     }
 
@@ -774,7 +784,7 @@ impl NodeClient {
         &self,
         block: StateBlock,
         before_submit: impl FnOnce() -> Result<(), WalletError>,
-    ) -> Result<ProcessResult, WalletError> {
+    ) -> Result<ProcessResponse, WalletError> {
         crate::offline::validate_signed_payment(&block)?;
         self.submit_offline_action_before(block, None, before_submit)
             .await
@@ -785,7 +795,7 @@ impl NodeClient {
         block: StateBlock,
         content: Option<&[u8]>,
         before_submit: impl FnOnce() -> Result<(), WalletError>,
-    ) -> Result<ProcessResult, WalletError> {
+    ) -> Result<ProcessResponse, WalletError> {
         crate::offline::validate_signed_action(&block)?;
         // A previous response may have been lost. Check the exact hash before
         // rejecting an advanced frontier, including one advanced by this block.
@@ -794,7 +804,7 @@ impl NodeClient {
             .await
         {
             if info["confirmed"] == true {
-                return Ok(ProcessResult {
+                return Ok(ProcessResponse {
                     hash: block.hash.to_string(),
                     accepted: true,
                     detail: None,
@@ -803,7 +813,7 @@ impl NodeClient {
         }
         let state = self.signing_state(&block.account).await?;
         let params = self.rpc_call("params_hash", json!({})).await?;
-        let threshold = work_parameters(&params)?;
+        let threshold = signing_work_threshold(&params)?;
         require_payment_epoch(&params, block.payment_epoch)?;
         if state.payment_epoch != block.payment_epoch
             || state.head != block.previous
@@ -827,14 +837,15 @@ impl NodeClient {
         self.submit_ready_block_with_content(block, content).await
     }
 
-    /// Submit account operations without sending private keys to the node.
+    /// Prepare and submit an account operation without transmitting private keys.
+    /// Preparation may first sign and submit outstanding stake-release batches.
     async fn account_operation_signed(
         &self,
         keys: &KeyPair,
         kind: BlockType,
         link: BlockHash,
         burn: u128,
-    ) -> Result<ProcessResult, WalletError> {
+    ) -> Result<ProcessResponse, WalletError> {
         self.account_operation_reviewed(keys, kind, link, burn, None)
             .await
     }
@@ -846,11 +857,11 @@ impl NodeClient {
         link: BlockHash,
         burn: u128,
         expected_params: Option<&str>,
-    ) -> Result<ProcessResult, WalletError> {
+    ) -> Result<ProcessResponse, WalletError> {
         let address = burst_crypto::derive_address(&keys.public);
         let timestamp = Timestamp::now();
         let state = self
-            .prepare_release_batches(keys, timestamp)
+            .acknowledge_release_batches(keys, timestamp)
             .await
             .map_err(|error| WalletError::Preparation(Box::new(error)))?;
         if state.head.is_zero() {
@@ -859,7 +870,7 @@ impl NodeClient {
             ));
         }
         let params = self.rpc_call("params_hash", json!({})).await?;
-        work_parameters(&params)?;
+        signing_work_threshold(&params)?;
         let params_hash = parse_hash(
             params["params_hash"]
                 .as_str()
@@ -884,8 +895,8 @@ impl NodeClient {
             account: address,
             previous: state.head,
             representative: state.representative,
-            brn_balance: state
-                .brn_balance
+            brn_spent: state
+                .brn_spent
                 .checked_add(burn)
                 .ok_or_else(|| WalletError::TransactionBuild("BRN spend overflow".into()))?,
             trst_balance: state.trst_balance,
@@ -911,7 +922,7 @@ impl NodeClient {
         keys: &KeyPair,
         param: burst_governance::GovernableParam,
         new_value: u128,
-    ) -> Result<ProcessResult, WalletError> {
+    ) -> Result<ProcessResponse, WalletError> {
         let link = burst_governance::ProposalContent::ParameterChange { param, new_value }
             .encode_compact()
             .map_err(|e| WalletError::TransactionBuild(e.to_string()))?;
@@ -924,7 +935,7 @@ impl NodeClient {
         keys: &KeyPair,
         proposal: TxHash,
         burn: u128,
-    ) -> Result<ProcessResult, WalletError> {
+    ) -> Result<ProcessResponse, WalletError> {
         if burn == 0 {
             return Err(WalletError::TransactionBuild(
                 "endorsement burn must be positive".into(),
@@ -945,7 +956,7 @@ impl NodeClient {
         param: burst_governance::GovernableParam,
         new_value: u128,
         params_hash: &str,
-    ) -> Result<ProcessResult, WalletError> {
+    ) -> Result<ProcessResponse, WalletError> {
         let link = burst_governance::ProposalContent::ParameterChange { param, new_value }
             .encode_compact()
             .map_err(|e| WalletError::TransactionBuild(e.to_string()))?;
@@ -963,7 +974,7 @@ impl NodeClient {
         &self,
         keys: &KeyPair,
         content: &burst_governance::ProposalContent,
-    ) -> Result<ProcessResult, WalletError> {
+    ) -> Result<ProcessResponse, WalletError> {
         self.propose_content_checked(keys, content, None).await
     }
 
@@ -972,7 +983,7 @@ impl NodeClient {
         keys: &KeyPair,
         content: &burst_governance::ProposalContent,
         params_hash: &str,
-    ) -> Result<ProcessResult, WalletError> {
+    ) -> Result<ProcessResponse, WalletError> {
         self.propose_content_checked(keys, content, Some(params_hash))
             .await
     }
@@ -982,7 +993,7 @@ impl NodeClient {
         keys: &KeyPair,
         content: &burst_governance::ProposalContent,
         expected_params: Option<&str>,
-    ) -> Result<ProcessResult, WalletError> {
+    ) -> Result<ProcessResponse, WalletError> {
         content
             .validate_content()
             .map_err(|error| WalletError::TransactionBuild(error.to_string()))?;
@@ -993,9 +1004,9 @@ impl NodeClient {
             ));
         }
         let now = Timestamp::now();
-        let state = self.prepare_release_batches(keys, now).await?;
+        let state = self.acknowledge_release_batches(keys, now).await?;
         let params = self.rpc_call("params_hash", json!({})).await?;
-        let threshold = work_parameters(&params)?;
+        let threshold = signing_work_threshold(&params)?;
         require_payment_epoch(&params, state.payment_epoch)?;
         let params_hash = parse_hash(
             params["params_hash"]
@@ -1029,8 +1040,8 @@ impl NodeClient {
     pub async fn submit_delegation_key_operation_signed(
         &self,
         keys: &KeyPair,
-        operation: &burst_governance::key_delegation::operation::DelegationOperation,
-    ) -> Result<ProcessResult, WalletError> {
+        operation: &burst_governance::signing_delegation::operation::DelegationOperation,
+    ) -> Result<ProcessResponse, WalletError> {
         let capability = self.rpc_call("params_hash", json!({})).await?;
         if capability["delegation_key_journal"] != true {
             return Err(WalletError::TransactionBuild(
@@ -1038,9 +1049,9 @@ impl NodeClient {
             ));
         }
         let now = Timestamp::now();
-        let state = self.prepare_release_batches(keys, now).await?;
+        let state = self.acknowledge_release_batches(keys, now).await?;
         let params = self.rpc_call("params_hash", json!({})).await?;
-        let threshold = work_parameters(&params)?;
+        let threshold = signing_work_threshold(&params)?;
         require_payment_epoch(&params, state.payment_epoch)?;
         let params_hash = parse_hash(
             params["params_hash"]
@@ -1060,11 +1071,37 @@ impl NodeClient {
         self.submit_ready_block(block).await
     }
 
+    pub async fn review_governance_veto(&self, account: &WalletAddress, proposal: TxHash)
+        -> Result<serde_json::Value, WalletError>
+    {
+        let info = self.rpc_call("governance_proposal_info", json!({"hash": proposal.to_string()})).await?;
+        let bootstrap = self.rpc_call("bootstrap_status", json!({})).await?;
+        let review = proposal_review(&info)?;
+        if proposal.is_zero() || review.hash != proposal.to_string()
+            || !matches!(review.phase.as_str(), "Cooldown" | "Activation")
+            || review.phase_projected
+            || Timestamp::now().as_secs() >= review.phase_deadline
+            || bootstrap["creator"].as_str() != Some(account.as_str())
+            || bootstrap["veto_available"] != true
+        {
+            return Err(WalletError::TransactionBuild("creator veto is unavailable; review the proposal and bootstrap status again".into()));
+        }
+        Ok(json!({"phase_deadline": info["phase_deadline"], "proposal": info, "bootstrap": bootstrap}))
+    }
+
+    pub async fn veto_proposal_signed(&self, keys: &KeyPair, proposal: TxHash)
+        -> Result<ProcessResponse, WalletError>
+    {
+        self.review_governance_veto(&burst_crypto::derive_address(&keys.public), proposal).await?;
+        self.account_operation_signed(keys, BlockType::GovernanceVeto,
+            BlockHash::new(*proposal.as_bytes()), 0).await
+    }
+
     pub async fn withdraw_proposal_signed(
         &self,
         keys: &KeyPair,
         proposal: TxHash,
-    ) -> Result<ProcessResult, WalletError> {
+    ) -> Result<ProcessResponse, WalletError> {
         self.account_operation_signed(
             keys,
             BlockType::GovernanceWithdraw,
@@ -1080,7 +1117,7 @@ impl NodeClient {
         &self,
         keys: &KeyPair,
         opted_in: bool,
-    ) -> Result<ProcessResult, WalletError> {
+    ) -> Result<ProcessResponse, WalletError> {
         let kind = if opted_in {
             BlockType::VerifierOptIn
         } else {
@@ -1090,6 +1127,9 @@ impl NodeClient {
             .await
     }
 
+    /// Fetch account inputs and require the node's active signing grant to match
+    /// this client's expected grant. This does not acquire a signing reservation
+    /// or check the node's overall signing readiness.
     pub async fn signing_state(
         &self,
         account: &WalletAddress,
@@ -1123,7 +1163,9 @@ impl NodeClient {
     }
 
     /// Submit exactly the reviewed authority transition. Confirmation and local
-    /// role activation are separate: an RPC acceptance is not a completed takeover.
+    /// role activation are separate. This waits for node-reported confirmation;
+    /// the caller must still adopt the new local grant. For an unopened account,
+    /// it first creates and confirms an empty opening block.
     pub async fn handoff_signing_device(
         &self,
         keys: &KeyPair,
@@ -1131,7 +1173,7 @@ impl NodeClient {
         reviewed_grant: BlockHash,
         reviewed_params: BlockHash,
         nonce: BlockHash,
-    ) -> Result<ProcessResult, WalletError> {
+    ) -> Result<ProcessResponse, WalletError> {
         let account = burst_crypto::derive_address(&keys.public);
         let mut state = self.inspect_signing_state(&account).await?;
         if state.head != reviewed_head || state.signing_grant != reviewed_grant {
@@ -1140,7 +1182,7 @@ impl NodeClient {
             ));
         }
         let params = self.rpc_call("params_hash", json!({})).await?;
-        work_parameters(&params)?;
+        signing_work_threshold(&params)?;
         require_payment_epoch(&params, state.payment_epoch)?;
         if params["params_hash"].as_str() != Some(reviewed_params.to_string().as_str()) {
             return Err(WalletError::Signing(
@@ -1157,7 +1199,7 @@ impl NodeClient {
             if state.head.is_zero()
                 || state.block_count != 1
                 || !state.signing_grant.is_zero()
-                || state.brn_balance != 0
+                || state.brn_spent != 0
                 || state.trst_balance != 0
             {
                 return Err(WalletError::Signing(
@@ -1190,7 +1232,7 @@ impl NodeClient {
                 if message.starts_with("node error: account not found:") =>
             {
                 let params = self.rpc_call("params_hash", json!({})).await?;
-                work_parameters(&params)?;
+                signing_work_threshold(&params)?;
                 return Ok((
                     AccountState {
                         signing_grant: burst_types::BlockHash::ZERO,
@@ -1198,7 +1240,7 @@ impl NodeClient {
                         head: BlockHash::ZERO,
                         block_count: 0,
                         representative: account.clone(),
-                        brn_balance: 0,
+                        brn_spent: 0,
                         trst_balance: 0,
                         release_sources: Vec::new(),
                     },
@@ -1213,7 +1255,7 @@ impl NodeClient {
                 .ok_or_else(|| WalletError::Node("missing head".into()))?,
         )?;
         // Account RPC balance is spendable BRN, NOT the signed block odometer.
-        let (spent, signing_grant) =
+        let (brn_spent, signing_grant) =
             if head.is_zero() {
                 (0, BlockHash::ZERO)
             } else {
@@ -1221,7 +1263,7 @@ impl NodeClient {
                     .rpc_call("block_info", json!({"hash":head.to_string()}))
                     .await?;
                 (
-                    raw(&block, "brn_balance")?,
+                    parse_u128_field(&block, "brn_balance")?,
                     parse_hash(block["active_signing_grant"].as_str().ok_or_else(|| {
                         WalletError::Node("missing signing-device grant".into())
                     })?)?,
@@ -1261,14 +1303,15 @@ impl NodeClient {
                 representative: WalletAddress::new(
                     info["representative"].as_str().unwrap_or(account.as_str()),
                 ),
-                brn_balance: spent,
-                trst_balance: raw(&info, "trst_balance")?,
+                brn_spent,
+                trst_balance: parse_u128_field(&info, "trst_balance")?,
             },
             has_more_releases,
         ))
     }
 
-    async fn prepare_release_batches(
+    /// Confirm excess stake-release batches, leaving the final batch for the requested action.
+    async fn acknowledge_release_batches(
         &self,
         keys: &KeyPair,
         at: Timestamp,
@@ -1276,13 +1319,13 @@ impl NodeClient {
         let account = burst_crypto::derive_address(&keys.public);
         let mut previous_count = None;
         loop {
-            let (state, more) = self.signing_state_with_releases(&account).await?;
+            let (state, has_more_releases) = self.signing_state_with_releases(&account).await?;
             if previous_count.is_some_and(|count| state.block_count <= count) {
                 return Err(WalletError::Node(
                     "stake-release acknowledgement is confirmed but account state is stale".into(),
                 ));
             }
-            if !more {
+            if !has_more_releases {
                 return Ok(state);
             }
             if state.head.is_zero() || state.release_sources.is_empty() {
@@ -1291,14 +1334,14 @@ impl NodeClient {
                 ));
             }
             let params = self.rpc_call("params_hash", json!({})).await?;
-            work_parameters(&params)?;
+            signing_work_threshold(&params)?;
             let params_hash = parse_hash(
                 params["params_hash"]
                     .as_str()
                     .ok_or_else(|| WalletError::Node("missing params_hash".into()))?,
             )?;
-            // A no-op representative block acknowledges a full proof batch
-            // without changing funds or delegation before the requested action.
+            // Keep the representative unchanged while acknowledging this release
+            // batch. This advances the account chain before the requested action.
             let tx = Transaction::ChangeRepresentative(build_change_rep_tx(
                 &account,
                 &state.representative,
@@ -1317,16 +1360,18 @@ impl NodeClient {
         keys: &KeyPair,
         transaction: &Transaction,
         origin: TxHash,
-    ) -> Result<ProcessResult, WalletError> {
+    ) -> Result<ProcessResponse, WalletError> {
         self.submit_signed_with_prepared_work(keys, transaction, origin, None)
             .await
     }
 
+    /// Obtain and locally verify work for the current account position. No block
+    /// is signed or submitted; a changed frontier or difficulty can make it stale.
     pub async fn prepare_work(&self, account: &WalletAddress) -> Result<PreparedWork, WalletError> {
         parse_address(account.as_str())?;
         let state = self.signing_state(account).await?;
         let params = self.rpc_call("params_hash", json!({})).await?;
-        let threshold = work_parameters(&params)?;
+        let threshold = signing_work_threshold(&params)?;
         let root = StateBlock::work_root_for(account, state.head);
         require_payment_epoch(&params, state.payment_epoch)?;
         let work = self.work_generate(&root.to_string()).await?;
@@ -1340,13 +1385,16 @@ impl NodeClient {
         Ok(PreparedWork { root, nonce })
     }
 
+    /// Build and sign against fresh account inputs, then wait for confirmation.
+    /// Stale or insufficient prepared work falls back to a new node work request.
+    /// Pending stake-release batches may advance the account before this action.
     pub async fn submit_signed_with_prepared_work(
         &self,
         keys: &KeyPair,
         transaction: &Transaction,
         origin: TxHash,
         prepared: Option<&PreparedWork>,
-    ) -> Result<ProcessResult, WalletError> {
+    ) -> Result<ProcessResponse, WalletError> {
         let address = burst_crypto::derive_address(&keys.public);
         if transaction.sender() != &address {
             return Err(WalletError::Signing(
@@ -1354,11 +1402,11 @@ impl NodeClient {
             ));
         }
         let state = self
-            .prepare_release_batches(keys, transaction.timestamp())
+            .acknowledge_release_batches(keys, transaction.timestamp())
             .await
             .map_err(|error| WalletError::Preparation(Box::new(error)))?;
         let params = self.rpc_call("params_hash", json!({})).await?;
-        let threshold = work_parameters(&params)?;
+        let threshold = signing_work_threshold(&params)?;
         let params_hash = parse_hash(
             params["params_hash"]
                 .as_str()
@@ -1383,7 +1431,7 @@ impl NodeClient {
         self.submit_with_work(block).await
     }
 
-    async fn submit_with_work(&self, mut block: StateBlock) -> Result<ProcessResult, WalletError> {
+    async fn submit_with_work(&self, mut block: StateBlock) -> Result<ProcessResponse, WalletError> {
         let work = self
             .rpc_call(
                 "work_generate",
@@ -1398,15 +1446,19 @@ impl NodeClient {
         self.submit_ready_block(block).await
     }
 
-    async fn submit_ready_block(&self, block: StateBlock) -> Result<ProcessResult, WalletError> {
+    async fn submit_ready_block(&self, block: StateBlock) -> Result<ProcessResponse, WalletError> {
         self.submit_ready_block_with_content(block, None).await
     }
 
+    /// On native clients with a configured journal, save the signed action and
+    /// recovery ancestry before sending. An accepted response must match the hash
+    /// and is followed by a confirmation poll. ChangeSigner journals remain for
+    /// local role activation; other successful actions are archived.
     async fn submit_ready_block_with_content(
         &self,
         block: StateBlock,
         content: Option<&[u8]>,
-    ) -> Result<ProcessResult, WalletError> {
+    ) -> Result<ProcessResponse, WalletError> {
         let payload =
             serde_json::to_string(&block).map_err(|e| WalletError::Other(e.to_string()))?;
         #[cfg(not(target_arch = "wasm32"))]
@@ -1415,7 +1467,7 @@ impl NodeClient {
                 .recovery_ancestry(&block.account, block.previous)
                 .await?;
             crate::offline::save_signed_action(path, &block, &ancestry, content)?;
-            crate::offline::record_submission(path, &block.hash)?;
+            crate::offline::record_submission_attempt(path, &block.hash)?;
         }
         // A lost/malformed process response cannot prove rejection. Preserve the
         // locally signed hash so callers can reconcile instead of sending twice.
@@ -1426,7 +1478,7 @@ impl NodeClient {
             )
             .await
             .and_then(|value| {
-                serde_json::from_value::<ProcessResult>(value)
+                serde_json::from_value::<ProcessResponse>(value)
                     .map_err(|error| WalletError::Node(error.to_string()))
             })
         } else {
@@ -1456,6 +1508,8 @@ impl NodeClient {
         Ok(result)
     }
 
+    /// Poll the trusted node for confirmation, retrying transient RPC failures
+    /// until the supplied deadline. Timeout does not establish rejection.
     pub async fn wait_confirmed(&self, hash: &str, timeout: Duration) -> Result<(), WalletError> {
         let confirmed = crate::runtime::timeout(timeout, async {
             loop {
@@ -1480,7 +1534,7 @@ impl NodeClient {
         keys: &KeyPair,
         provider: &WalletAddress,
         amount: u128,
-    ) -> Result<ProcessResult, WalletError> {
+    ) -> Result<ProcessResponse, WalletError> {
         if amount == 0 {
             return Err(WalletError::TransactionBuild(
                 "amount must be positive".into(),
@@ -1496,7 +1550,7 @@ impl NodeClient {
         &self,
         keys: &KeyPair,
         hash: &str,
-    ) -> Result<ProcessResult, WalletError> {
+    ) -> Result<ProcessResponse, WalletError> {
         let address = burst_crypto::derive_address(&keys.public);
         let (receipt, _) = self.pending_receipt(&address, hash).await?;
         self.submit_signed(
@@ -1543,12 +1597,14 @@ impl NodeClient {
         ))
     }
 
-    /// Decline without receiving first, including a wallet with no account chain.
+    /// Decline without receiving first. An unopened wallet first creates and
+    /// confirms an empty account block; that step can succeed even if rejection
+    /// later fails. Return credits must be received rather than rejected.
     pub async fn reject_signed(
         &self,
         keys: &KeyPair,
         hash: &str,
-    ) -> Result<ProcessResult, WalletError> {
+    ) -> Result<ProcessResponse, WalletError> {
         let source = parse_hash(hash)?;
         let address = burst_crypto::derive_address(&keys.public);
         let entry = self
@@ -1579,7 +1635,7 @@ impl NodeClient {
             return Ok(());
         }
         if state.block_count != 0
-            || state.brn_balance != 0
+            || state.brn_spent != 0
             || state.trst_balance != 0
             || !state.release_sources.is_empty()
         {
@@ -1588,7 +1644,7 @@ impl NodeClient {
             ));
         }
         let params = self.rpc_call("params_hash", json!({})).await?;
-        work_parameters(&params)?;
+        signing_work_threshold(&params)?;
         let params_hash = parse_hash(
             params["params_hash"]
                 .as_str()
@@ -1603,7 +1659,7 @@ impl NodeClient {
             account,
             previous: BlockHash::ZERO,
             representative: state.representative,
-            brn_balance: 0,
+            brn_spent: 0,
             trst_balance: 0,
             link: BlockHash::ZERO,
             origin: TxHash::ZERO,
@@ -1630,7 +1686,7 @@ impl NodeClient {
         receiver: &WalletAddress,
         amount: u128,
         origin: TxHash,
-    ) -> Result<ProcessResult, WalletError> {
+    ) -> Result<ProcessResponse, WalletError> {
         if amount == 0 {
             return Err(WalletError::TransactionBuild(
                 "amount must be positive".into(),
@@ -1653,6 +1709,8 @@ impl NodeClient {
 
 #[cfg(test)]
 mod submission_tests {
+    // Scripted RPC peers exercise client validation, signing and journal recovery.
+    // Confirmation and epoch exclusion are fixture assertions, not node consensus.
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -1667,7 +1725,7 @@ mod submission_tests {
             head: BlockHash::new([2; 32]),
             block_count: 1,
             representative: account.clone(),
-            brn_balance: 0,
+            brn_spent: 0,
             trst_balance: 0,
             release_sources: vec![],
         };
@@ -1761,7 +1819,7 @@ mod submission_tests {
                             serde_json::to_string(&expected).unwrap()
                         );
                         assert!(
-                            crate::offline::payment_was_submitted(&inspect_path, &saved.hash)
+                            crate::offline::payment_may_have_been_submitted(&inspect_path, &saved.hash)
                                 .unwrap()
                         );
                     }
@@ -1810,7 +1868,7 @@ mod submission_tests {
                         crate::offline::load_payment(&path).unwrap().hash,
                         block.hash
                     );
-                    assert!(crate::offline::payment_was_submitted(&path, &block.hash).unwrap());
+                    assert!(crate::offline::payment_may_have_been_submitted(&path, &block.hash).unwrap());
                 }
             }
         }
@@ -1826,7 +1884,7 @@ mod submission_tests {
             head: BlockHash::ZERO,
             block_count: 0,
             representative: account.clone(),
-            brn_balance: 0,
+            brn_spent: 0,
             trst_balance: 0,
             release_sources: vec![],
         };
@@ -1858,6 +1916,19 @@ mod submission_tests {
         script: Vec<(&'static str, Value)>,
     ) -> (NodeClient, std::thread::JoinHandle<Vec<Value>>) {
         offline_rpc_script_check(script, |_| {})
+    }
+
+    fn offline_legacy_slot_script(
+        mut script: Vec<(&'static str, Value)>,
+    ) -> (NodeClient, std::thread::JoinHandle<Vec<Value>>) {
+        script.insert(
+            0,
+            (
+                "confirmed_account_slot",
+                json!({"error":"invalid request: unknown action: confirmed_account_slot"}),
+            ),
+        );
+        offline_rpc_script(script)
     }
 
     #[tokio::test]
@@ -1918,7 +1989,7 @@ mod submission_tests {
                 .all(|request| request["action"] != "process"));
             drop(client);
             let signed = context.sign(&keys, Timestamp::now()).unwrap();
-            assert_eq!(signed.block().brn_balance, 7);
+            assert_eq!(signed.block().brn_spent, 7);
             assert_eq!(
                 signed.block().transaction.as_bytes()[0],
                 if neither { 3 } else { 0 }
@@ -1958,7 +2029,7 @@ mod submission_tests {
             head: BlockHash::new([2; 32]),
             block_count: 1,
             representative: account.clone(),
-            brn_balance: 11,
+            brn_spent: 11,
             trst_balance: 20,
             release_sources: vec![],
         };
@@ -2049,7 +2120,7 @@ mod submission_tests {
                             expected_content.as_deref()
                         );
                         assert!(
-                            crate::offline::payment_was_submitted(&inspect_path, &saved_hash)
+                            crate::offline::payment_may_have_been_submitted(&inspect_path, &saved_hash)
                                 .unwrap()
                         );
                     }
@@ -2105,7 +2176,7 @@ mod submission_tests {
                     .await
                     .is_err());
                 assert_eq!(server.join().unwrap().len(), 4);
-                assert!(!crate::offline::payment_was_submitted(&path, &block.hash).unwrap());
+                assert!(!crate::offline::payment_may_have_been_submitted(&path, &block.hash).unwrap());
             }
         }
     }
@@ -2160,7 +2231,7 @@ mod submission_tests {
             head: anchor,
             block_count: 1,
             representative: account.clone(),
-            brn_balance: u64::MAX as u128 + 1,
+            brn_spent: u64::MAX as u128 + 1,
             trst_balance: 0,
         };
         let tx =
@@ -2171,7 +2242,7 @@ mod submission_tests {
         let tip_state = AccountState {
             head: ancestor.hash,
             block_count: 2,
-            brn_balance: ancestor.brn_balance,
+            brn_spent: ancestor.brn_spent,
             ..state.clone()
         };
         let tip =
@@ -2186,7 +2257,7 @@ mod submission_tests {
             ("account_info", info),
             (
                 "block_info",
-                json!({"active_signing_grant":BlockHash::ZERO.to_string(), "brn_balance":tip.brn_balance.to_string()}),
+                json!({"active_signing_grant":BlockHash::ZERO.to_string(), "brn_balance":tip.brn_spent.to_string()}),
             ),
             ("params_hash", params),
             (
@@ -2220,9 +2291,9 @@ mod submission_tests {
         assert_eq!(ancestry.len(), 2);
         assert_eq!(ancestry[0].hash, tip.hash);
         assert_eq!(ancestry[1].hash, ancestor.hash);
-        assert_eq!(ancestry[0].brn_balance, tip.brn_balance);
-        assert_eq!(ancestry[1].brn_balance, ancestor.brn_balance);
-        assert!(ancestry[1].brn_balance > u64::MAX as u128);
+        assert_eq!(ancestry[0].brn_spent, tip.brn_spent);
+        assert_eq!(ancestry[1].brn_spent, ancestor.brn_spent);
+        assert!(ancestry[1].brn_spent > u64::MAX as u128);
         let original = std::fs::read(&path).unwrap();
         let winner = BlockHash::new([10; 32]);
         let slot = |previous: BlockHash, successor: Option<BlockHash>| {
@@ -2335,7 +2406,7 @@ mod submission_tests {
             head: previous,
             block_count: 1,
             representative: account.clone(),
-            brn_balance: burned,
+            brn_spent: burned,
             trst_balance: 0,
         };
         let tx = Transaction::Burn(
@@ -2388,7 +2459,7 @@ mod submission_tests {
         for (field, value) in [
             ("account", json!(provider.as_str())),
             ("confirmed", json!(false)),
-            ("brn_balance", json!(block.brn_balance.to_string())),
+            ("brn_balance", json!(block.brn_spent.to_string())),
             ("brn_balance", json!(u128::MAX.to_string())),
             ("brn_balance", json!(burned)),
             ("brn_balance", Value::Null),
@@ -2416,7 +2487,7 @@ mod submission_tests {
                 head: BlockHash::ZERO,
                 block_count: 0,
                 representative: account.clone(),
-                brn_balance: 0,
+                brn_spent: 0,
                 trst_balance: 0,
             },
             params_hash: BlockHash::new([9; 32]),
@@ -2455,10 +2526,40 @@ mod submission_tests {
             assert!(client.review_offline_payment(&block).await.is_err());
             server.join().unwrap();
         }
+        let (client, server) = offline_rpc_script(vec![(
+            "confirmed_account_slot",
+            json!({"error":"confirmed slot history is unavailable"}),
+        )]);
+        assert!(client.confirmed_offline_successor(&block).await.is_err());
+        assert_eq!(server.join().unwrap().len(), 1);
+        let (client, server) = offline_rpc_script(vec![(
+            "confirmed_account_slot",
+            json!({"account":account.as_str(),"previous":block.previous.to_string(),"successor":null}),
+        )]);
+        assert_eq!(
+            client.confirmed_offline_successor(&block).await.unwrap(),
+            None
+        );
+        server.join().unwrap();
         for successor in [block.hash, BlockHash::new([10; 32])] {
+            // The indexed slot response resolves the account position directly;
+            // the compatibility path below requires separate block-info checks.
+            let (client, server) = offline_rpc_script(vec![(
+                "confirmed_account_slot",
+                json!({"account":account.as_str(),"previous":block.previous.to_string(),
+                    "successor":successor.to_string()}),
+            )]);
+            assert_eq!(
+                client.confirmed_offline_successor(&block).await.unwrap(),
+                Some(successor)
+            );
+            let requests = server.join().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0]["account"], account.as_str());
+            assert_eq!(requests[0]["previous"], block.previous.to_string());
             let info = json!({"address":account.as_str(), "confirmation_height":1, "confirmed_open":successor.to_string()});
             let candidate = json!({"account":account.as_str(), "confirmed":true, "previous":BlockHash::ZERO.to_string()});
-            let (client, server) = offline_rpc_script(vec![
+            let (client, server) = offline_legacy_slot_script(vec![
                 ("account_info", info.clone()),
                 ("block_info", candidate.clone()),
             ]);
@@ -2467,8 +2568,8 @@ mod submission_tests {
                 Some(successor)
             );
             let requests = server.join().unwrap();
-            assert_eq!(requests[0]["account"], account.as_str());
-            assert_eq!(requests[1]["hash"], successor.to_string());
+            assert_eq!(requests[1]["account"], account.as_str());
+            assert_eq!(requests[2]["hash"], successor.to_string());
             for (field, value) in [
                 ("confirmed", json!(false)),
                 ("account", json!("unrelated")),
@@ -2476,7 +2577,7 @@ mod submission_tests {
             ] {
                 let mut invalid = candidate.clone();
                 invalid[field] = value;
-                let (client, server) = offline_rpc_script(vec![
+                let (client, server) = offline_legacy_slot_script(vec![
                     ("account_info", info.clone()),
                     ("block_info", invalid),
                 ]);
@@ -2485,7 +2586,7 @@ mod submission_tests {
             }
             let mut unconfirmed = info.clone();
             unconfirmed["confirmation_height"] = json!(0);
-            let (client, server) = offline_rpc_script(vec![("account_info", unconfirmed)]);
+            let (client, server) = offline_legacy_slot_script(vec![("account_info", unconfirmed)]);
             assert_eq!(
                 client.confirmed_offline_successor(&block).await.unwrap(),
                 None
@@ -2493,7 +2594,7 @@ mod submission_tests {
             server.join().unwrap();
             let mut old_node = info;
             old_node.as_object_mut().unwrap().remove("confirmed_open");
-            let (client, server) = offline_rpc_script(vec![("account_info", old_node)]);
+            let (client, server) = offline_legacy_slot_script(vec![("account_info", old_node)]);
             assert_eq!(
                 client.confirmed_offline_successor(&block).await.unwrap(),
                 None
@@ -2527,7 +2628,7 @@ mod submission_tests {
             head: previous,
             block_count: 1,
             representative: account.clone(),
-            brn_balance: 0,
+            brn_spent: 0,
             trst_balance: 0,
         };
         let tx =
@@ -2540,10 +2641,40 @@ mod submission_tests {
             BlockHash::new([9; 32]),
         )
         .unwrap();
+        let (client, server) = offline_rpc_script(vec![(
+            "confirmed_account_slot",
+            json!({"error":"confirmed slot history is unavailable"}),
+        )]);
+        assert!(client.confirmed_offline_successor(&block).await.is_err());
+        assert_eq!(server.join().unwrap().len(), 1);
+        let (client, server) = offline_rpc_script(vec![(
+            "confirmed_account_slot",
+            json!({"account":account.as_str(),"previous":block.previous.to_string(),"successor":null}),
+        )]);
+        assert_eq!(
+            client.confirmed_offline_successor(&block).await.unwrap(),
+            None
+        );
+        server.join().unwrap();
         for successor in [block.hash, BlockHash::new([10; 32])] {
+            // The indexed slot response resolves the account position directly;
+            // the compatibility path below requires separate block-info checks.
+            let (client, server) = offline_rpc_script(vec![(
+                "confirmed_account_slot",
+                json!({"account":account.as_str(),"previous":block.previous.to_string(),
+                    "successor":successor.to_string()}),
+            )]);
+            assert_eq!(
+                client.confirmed_offline_successor(&block).await.unwrap(),
+                Some(successor)
+            );
+            let requests = server.join().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0]["account"], account.as_str());
+            assert_eq!(requests[0]["previous"], block.previous.to_string());
             let anchor = json!({"account":account.as_str(),"confirmed":true,"confirmed_successor":successor.to_string()});
             let candidate = json!({"account":account.as_str(),"confirmed":true,"previous":previous.to_string()});
-            let (client, server) = offline_rpc_script(vec![
+            let (client, server) = offline_legacy_slot_script(vec![
                 ("block_info", anchor.clone()),
                 ("block_info", candidate.clone()),
             ]);
@@ -2552,8 +2683,8 @@ mod submission_tests {
                 Some(successor)
             );
             let requests = server.join().unwrap();
-            assert_eq!(requests[0]["hash"], previous.to_string());
-            assert_eq!(requests[1]["hash"], successor.to_string());
+            assert_eq!(requests[1]["hash"], previous.to_string());
+            assert_eq!(requests[2]["hash"], successor.to_string());
             for field in ["confirmed", "account", "previous"] {
                 let mut invalid = candidate.clone();
                 invalid[field] = if field == "confirmed" {
@@ -2561,7 +2692,7 @@ mod submission_tests {
                 } else {
                     json!("unrelated")
                 };
-                let (client, server) = offline_rpc_script(vec![
+                let (client, server) = offline_legacy_slot_script(vec![
                     ("block_info", anchor.clone()),
                     ("block_info", invalid),
                 ]);
@@ -2573,7 +2704,7 @@ mod submission_tests {
             json!({"account":account.as_str(),"confirmed":true}),
             json!({"account":account.as_str(),"confirmed":true,"confirmed_successor":null}),
         ] {
-            let (client, server) = offline_rpc_script(vec![("block_info", anchor)]);
+            let (client, server) = offline_legacy_slot_script(vec![("block_info", anchor)]);
             assert_eq!(
                 client.confirmed_offline_successor(&block).await.unwrap(),
                 None
@@ -2584,7 +2715,7 @@ mod submission_tests {
             json!({"account":account.as_str(),"confirmed":false}),
             json!({"account":"unrelated","confirmed":true}),
         ] {
-            let (client, server) = offline_rpc_script(vec![("block_info", anchor)]);
+            let (client, server) = offline_legacy_slot_script(vec![("block_info", anchor)]);
             assert!(client.confirmed_offline_successor(&block).await.is_err());
             server.join().unwrap();
         }
@@ -2655,7 +2786,7 @@ mod submission_tests {
         let drafts = tempfile::tempdir().unwrap();
         let draft_path = drafts.path().join("payment.json");
         context.save_payment(&draft_path, &block).unwrap();
-        assert!(!crate::offline::payment_was_submitted(&draft_path, &block.hash).unwrap());
+        assert!(!crate::offline::payment_may_have_been_submitted(&draft_path, &block.hash).unwrap());
         drop(context);
         drop(keys);
         let expected = serde_json::to_string(&block).unwrap();
@@ -2678,7 +2809,7 @@ mod submission_tests {
             ],
             move |request| {
                 if request["action"] == "process" {
-                    assert!(crate::offline::payment_was_submitted(
+                    assert!(crate::offline::payment_may_have_been_submitted(
                         &inspected_path,
                         &inspected_hash
                     )
@@ -2737,7 +2868,7 @@ mod submission_tests {
             .unwrap_err()
             .to_string()
             .contains("stale"));
-        assert!(!crate::offline::payment_was_submitted(&stale_path, &block.hash).unwrap());
+        assert!(!crate::offline::payment_may_have_been_submitted(&stale_path, &block.hash).unwrap());
         assert!(stale_server
             .join()
             .unwrap()
@@ -2827,7 +2958,7 @@ mod submission_tests {
 
     async fn release_batch_attempt(
         drop_preparation_response: bool,
-    ) -> (Result<ProcessResult, WalletError>, Vec<StateBlock>) {
+    ) -> (Result<ProcessResponse, WalletError>, Vec<StateBlock>) {
         let keys = burst_crypto::keypair_from_seed(&[55; 32]);
         let address = burst_crypto::derive_address(&keys.public);
         let public = keys.public.clone();
@@ -2875,7 +3006,7 @@ mod submission_tests {
                             "has_more_releases":blocks.is_empty()})
                     }
                     "block_info" => {
-                        json!({"active_signing_grant":BlockHash::ZERO.to_string(), "brn_balance":blocks.last().map_or(0, |block| block.brn_balance).to_string(), "confirmed":true})
+                        json!({"active_signing_grant":BlockHash::ZERO.to_string(), "brn_balance":blocks.last().map_or(0, |block| block.brn_spent).to_string(), "confirmed":true})
                     }
                     "params_hash" => {
                         json!({"online_signing":"peer_matches", "payment_epoch":BlockHash::new([1;32]).to_string(), "block_version":burst_ledger::CURRENT_BLOCK_VERSION,
@@ -2898,12 +3029,12 @@ mod submission_tests {
                         ));
                         if blocks.is_empty() {
                             assert_eq!(block.block_type, BlockType::ChangeRepresentative);
-                            assert_eq!(block.brn_balance, 0);
+                            assert_eq!(block.brn_spent, 0);
                             assert_eq!(block.release_sources, sources[..600]);
                         } else {
                             assert_eq!(blocks.len(), 1);
                             assert_eq!(block.block_type, BlockType::Burn);
-                            assert_eq!(block.brn_balance, 7);
+                            assert_eq!(block.brn_spent, 7);
                             assert_eq!(block.release_sources, sources[600..]);
                         }
                         head = block.hash;
@@ -2963,7 +3094,7 @@ mod submission_tests {
             head: BlockHash::new([8; 32]),
             block_count: 1,
             representative: account.clone(),
-            brn_balance: 0,
+            brn_spent: 0,
             trst_balance: 0,
             release_sources: Vec::new(),
         };
@@ -2995,7 +3126,7 @@ mod submission_tests {
         opened: bool,
         pending: bool,
         lose_open_response: bool,
-    ) -> (Result<ProcessResult, WalletError>, Vec<StateBlock>) {
+    ) -> (Result<ProcessResponse, WalletError>, Vec<StateBlock>) {
         account_control_attempt(opened, pending, lose_open_response, false).await
     }
 
@@ -3004,7 +3135,7 @@ mod submission_tests {
         pending: bool,
         lose_open_response: bool,
         handoff: bool,
-    ) -> (Result<ProcessResult, WalletError>, Vec<StateBlock>) {
+    ) -> (Result<ProcessResponse, WalletError>, Vec<StateBlock>) {
         let keys = burst_crypto::keypair_from_seed(&[57; 32]);
         let account = burst_crypto::derive_address(&keys.public);
         let public = keys.public.clone();
@@ -3066,7 +3197,7 @@ mod submission_tests {
                         assert_eq!(block.account, account);
                         assert_eq!(block.representative, account);
                         assert_eq!(block.previous, head);
-                        assert_eq!(block.brn_balance, 0);
+                        assert_eq!(block.brn_spent, 0);
                         assert_eq!(block.trst_balance, if opened { 5 } else { 0 });
                         assert_eq!(block.hash, block.compute_hash());
                         assert!(block.validate_format().is_ok());
@@ -3159,7 +3290,7 @@ mod submission_tests {
                     BlockType::ChangeSigner
                 }
             );
-            assert!(crate::offline::payment_was_submitted(&path, &saved.hash).unwrap());
+            assert!(crate::offline::payment_may_have_been_submitted(&path, &saved.hash).unwrap());
         }
         (result, server.join().unwrap())
     }
@@ -3220,12 +3351,12 @@ mod submission_tests {
 
     #[test]
     fn old_or_missing_node_work_rules_fail_explicitly() {
-        assert!(work_parameters(&json!({})).is_err());
-        assert!(work_parameters(
+        assert!(signing_work_threshold(&json!({})).is_err());
+        assert!(signing_work_threshold(
             &json!({"online_signing":"peer_matches", "block_version":1,"min_work_difficulty":"0"})
         )
         .is_err());
-        assert_eq!(work_parameters(&json!({"online_signing":"peer_matches", "payment_epoch":BlockHash::new([1;32]).to_string(), "block_version":burst_ledger::CURRENT_BLOCK_VERSION,"min_work_difficulty":"ff"})).unwrap(), 255);
+        assert_eq!(signing_work_threshold(&json!({"online_signing":"peer_matches", "payment_epoch":BlockHash::new([1;32]).to_string(), "block_version":burst_ledger::CURRENT_BLOCK_VERSION,"min_work_difficulty":"ff"})).unwrap(), 255);
     }
 
     #[tokio::test]
@@ -3244,7 +3375,7 @@ mod submission_tests {
                 json!("peer_matches"),
                 "payment epoch",
             ),
-            (json!("malformed"), json!("peer_matches"), "32-byte hash"),
+            (json!("malformed"), json!("peer_matches"), "expected exactly 64 hexadecimal characters"),
             (
                 json!(BlockHash::new([1; 32]).to_string()),
                 json!("catching_up"),
@@ -3332,7 +3463,7 @@ mod submission_tests {
             head: BlockHash::ZERO,
             block_count: 0,
             representative: sender.clone(),
-            brn_balance: 0,
+            brn_spent: 0,
             trst_balance: 0,
             release_sources: Vec::new(),
         };

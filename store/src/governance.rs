@@ -11,8 +11,21 @@ pub trait GovernanceStore {
     /// Get a proposal by hash.
     fn get_proposal(&self, hash: &TxHash) -> Result<Vec<u8>, StoreError>;
 
-    /// List all active proposals.
-    fn list_active_proposals(&self) -> Result<Vec<TxHash>, StoreError>;
+    /// Hashes of all stored proposals, regardless of voting status.
+    fn all_proposal_hashes(&self) -> Result<Vec<TxHash>, StoreError>;
+
+    /// Proposal keys in ascending order, strictly after `after` when supplied.
+    /// `offset` skips matching keys; keyset callers use zero. The default loads
+    /// and sorts every proposal hash before selecting the requested page.
+    fn proposal_hash_page(
+        &self, after: Option<&TxHash>, offset: u64, limit: usize,
+    ) -> Result<Vec<TxHash>, StoreError> {
+        if limit == 0 { return Ok(Vec::new()); }
+        let mut hashes = self.all_proposal_hashes()?;
+        hashes.sort_unstable();
+        Ok(hashes.into_iter().filter(|hash| after.is_none_or(|key| hash > key))
+            .skip(usize::try_from(offset).unwrap_or(usize::MAX)).take(limit).collect())
+    }
 
     /// Store a vote on a proposal.
     fn put_vote(

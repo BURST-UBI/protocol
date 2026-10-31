@@ -1,5 +1,6 @@
-//! Vote rebroadcaster — relays important votes from other representatives.
-//! Ensures votes reach all nodes even without direct connections.
+//! Standalone relay filter using a caller-supplied weight threshold and
+//! bounded hash deduplication. This helper is not wired into the node and does
+//! not authenticate votes or send network messages.
 
 use std::collections::HashSet;
 
@@ -11,7 +12,7 @@ pub struct VoteRebroadcaster {
     recent: HashSet<[u8; 32]>,
     /// FIFO order for eviction.
     recent_order: Vec<[u8; 32]>,
-    /// Minimum weight for rebroadcast (only rebroadcast principal rep votes).
+    /// Absolute minimum weight supplied by the caller.
     min_weight: u128,
     /// Maximum recent entries.
     max_recent: usize,
@@ -29,7 +30,9 @@ impl VoteRebroadcaster {
 
     /// Check if a vote should be rebroadcast.
     /// Returns true if the vote is from a sufficiently weighted rep
-    /// and hasn't been seen recently.
+    /// and has not been retained already. A true result records the hash before
+    /// any send succeeds. Retention is capacity-based, with no time expiry;
+    /// evicting from the FIFO vector shifts all remaining entries.
     pub fn should_rebroadcast(&mut self, vote_hash: &[u8; 32], voter_weight: u128) -> bool {
         if voter_weight < self.min_weight {
             return false;
@@ -86,7 +89,7 @@ mod tests {
     }
 
     #[test]
-    fn reject_exact_threshold() {
+    fn accept_exact_threshold() {
         let mut rb = VoteRebroadcaster::new(100);
         // Exact threshold should pass (not strictly less)
         assert!(rb.should_rebroadcast(&vote_hash(1), 100));

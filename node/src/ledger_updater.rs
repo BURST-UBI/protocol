@@ -1,13 +1,7 @@
-//! Ledger state updater — maintains per-account state on block insertion.
+//! Account, pending-transfer and economic writes for block insertion.
 //!
-//! Inspired by rsnano's BlockInserter: atomically updates AccountInfo,
-//! pending entries, and tracks BRN burns when a block is inserted.
-//!
-//! It does NOT touch consensus (rep) weight. Weight is a pure function of
-//! verified humans and their delegation, never token balances or reputation.
-//! The node rebuilds it from the durable confirmed authority projection.
-//! Agreement on roster epochs remains separate unfinished work. Patching weight per-block here would be
-//! a consensus-corruption hazard and is unnecessary.
+//! Writes share the caller's transaction; errors require aborting it. Consensus
+//! weight is maintained separately from confirmed identity and delegation state.
 
 use burst_ledger::{BlockType, StateBlock};
 use burst_store::account::AccountInfo;
@@ -21,22 +15,7 @@ pub(crate) fn update_token_counters(
     trst: &TrstEngine,
     now: Timestamp,
 ) -> Result<(), String> {
-    let portfolio = trst
-        .get_portfolio(&account.address)
-        .ok_or("affected holder portfolio missing")?;
-    let mut expired = 0u128;
-    let mut revoked = 0u128;
-    for token in &portfolio.tokens {
-        if token.state == burst_types::TrstState::Revoked {
-            revoked = revoked
-                .checked_add(token.amount)
-                .ok_or("revoked balance overflow")?;
-        } else if token.is_expired(now, trst.expiry_secs) {
-            expired = expired
-                .checked_add(token.amount)
-                .ok_or("expired balance overflow")?;
-        }
-    }
+    let (expired, revoked) = trst.token_counters(&account.address, now)?;
     // Signed balances only change with account blocks. Spending checks the
     // portfolio; expired pending returns need not have been received on-chain.
     account.expired_trst = expired;
@@ -54,7 +33,11 @@ pub(crate) fn refresh_token_counters(
         return Ok(());
     }
     let mut account = batch.get_account(holder).map_err(|e| e.to_string())?;
+    let previous = (account.expired_trst, account.revoked_trst);
     update_token_counters(&mut account, trst, now)?;
+    if previous == (account.expired_trst, account.revoked_trst) {
+        return Ok(());
+    }
     batch
         .put_account_info(&account, false)
         .map_err(|e| e.to_string())
@@ -64,10 +47,10 @@ pub fn blocks_compete(a: &StateBlock, b: &StateBlock) -> bool {
     a.account == b.account && a.previous == b.previous && a.hash != b.hash
 }
 
-/// Read after acquiring the economic locks and writer. An earlier admission
-/// read may predate expiry or lifecycle metadata updates on the same account.
+/// Check the installed epoch, cutoff and account predecessor in this view.
+/// Speculative readers must recheck in the writer before staging changes.
 pub(crate) fn predecessor_account(
-    batch: &LmdbWriteTransaction<'_>,
+    batch: &impl crate::verification_commit::dependencies::view::DependencyView,
     block: &StateBlock,
 ) -> Result<Option<AccountInfo>, String> {
     crate::payment_epoch::require_block(batch, block).map_err(|error| error.to_string())?;
@@ -91,7 +74,8 @@ pub(crate) fn predecessor_account(
 }
 
 /// One election per account position, including competing open blocks.
-/// Domain separation keeps an open position distinct from its first successor.
+/// The account and predecessor identify the position; open blocks use zero.
+/// The hash prefix separates election roots from other protocol hashes.
 pub fn election_root(block: &StateBlock) -> burst_types::BlockHash {
     let mut bytes = b"BURST/election-root/v1\0".to_vec();
     bytes.extend_from_slice(block.previous.as_bytes());
@@ -99,21 +83,17 @@ pub fn election_root(block: &StateBlock) -> burst_types::BlockHash {
     burst_crypto::hash_block(&bytes)
 }
 
-/// Update ledger state after a block is accepted.
-///
-/// Called within the write batch so all updates are atomic. Updates the
-/// account's `AccountInfo` and tracks BRN burns.
-///
-/// `prev_brn_balance` is the BRN balance from the previous StateBlock in
-/// the account chain (needed for burn tracking since `AccountInfo` does not
-/// store raw BRN balance).
+/// Stage account metadata for a validated block. `previous_brn_spent` is the
+/// predecessor block's cumulative spend counter, not an available balance.
+/// Storage preserves any newer confirmation height; the returned value is the
+/// proposed account metadata before that storage-side adjustment.
 pub fn update_account_on_block(
     batch: &mut LmdbWriteTransaction<'_>,
     block: &StateBlock,
     prev_account: Option<&AccountInfo>,
-    prev_brn_balance: u128,
+    previous_brn_spent: u128,
 ) -> Result<AccountInfo, String> {
-    let info = account_after_block(block, prev_account, prev_brn_balance)?;
+    let info = account_after_block(block, prev_account, previous_brn_spent)?;
     // Preserve concurrently advanced confirmation height and the verified-count
     // index using the account currently visible in this write transaction.
     batch
@@ -125,7 +105,7 @@ pub fn update_account_on_block(
 pub(crate) fn account_after_block(
     block: &StateBlock,
     prev_account: Option<&AccountInfo>,
-    prev_brn_balance: u128,
+    previous_brn_spent: u128,
 ) -> Result<AccountInfo, String> {
     let is_open = block.previous.is_zero();
 
@@ -154,28 +134,23 @@ pub(crate) fn account_after_block(
         info.trst_balance = block.trst_balance;
         info.representative = block.representative.clone();
 
-        // Track PERMANENT BRN burns. `brn_balance` is an ascending odometer of
-        // cumulative spent BRN, so the delta is the amount spent by this block.
-        // Burn and Endorse are permanent burns (endorsers permanently burn their
-        // BRN, whitepaper §356), so both accumulate into `total_brn_burned`.
-        // Challenge / VerificationVote deltas are *temporary stakes* (returned or
-        // forfeited later) — those are tracked authoritatively by the BRN engine
-        // (`total_staked`), not folded into the permanent-burn counter here.
+        // Count permanent burns, including both endorsement types. Challenge and
+        // verification stakes are tracked separately by the BRN engine.
         if matches!(
             block.block_type,
             BlockType::Burn | BlockType::Endorse | BlockType::GovernanceEndorse
         ) {
-            let burned = block.brn_balance.saturating_sub(prev_brn_balance);
+            let burned = block.brn_spent.saturating_sub(previous_brn_spent);
             info.total_brn_burned = info.total_brn_burned.saturating_add(burned);
         }
 
-        // Epoch blocks upgrade the account version
+        // Record the block version on an explicit Epoch operation.
         if block.block_type == BlockType::Epoch {
             info.epoch = block.version;
         }
 
-        // These are provisional effects until confirmed replay establishes the
-        // eligible pool. The timestamp also gates the minimum opt-in age.
+        // Confirmed replay uses this opt-in state when deriving the eligible
+        // pool. Its age requirement is measured from verified_at.
         match block.block_type {
             BlockType::VerifierOptIn => info.verifier_opted_in_at = Some(block.timestamp),
             BlockType::VerifierOptOut => info.verifier_opted_in_at = None,
@@ -188,12 +163,12 @@ pub(crate) fn account_after_block(
     Ok(info)
 }
 
-/// Create a pending entry for a send block's receiver.
+/// Stage a pending send or minted TRST from a burn.
 ///
 /// Uses binary composite key `destination_bytes ++ send_block_hash_bytes`.
 ///
 /// `destination` must be the wallet address of the receiver.
-/// `provenance` carries origin info from the consumed tokens so receivers
+/// `consumed` carries origin info from the consumed tokens so receivers
 /// get properly tracked TRST with lineage for expiry and revocation.
 pub fn create_pending_entry(
     batch: &mut LmdbWriteTransaction<'_>,
@@ -202,9 +177,7 @@ pub fn create_pending_entry(
     destination: &WalletAddress,
     consumed: Vec<burst_trst::ConsumedProvenance>,
 ) -> Result<(), String> {
-    // Send blocks AND Burn blocks create pending entries: burns are
-    // two-phase (8.4a) — the minted TRST is pending until the provider
-    // publishes a Receive block.
+    // Minted TRST remains pending until the recipient claims it.
     if !matches!(block.block_type, BlockType::Send | BlockType::Burn) || block.link.is_zero() {
         return Ok(());
     }
@@ -245,10 +218,9 @@ pub(crate) fn pending_from_provenance(
 /// Delete a pending entry when a receive, receive-open, or reject-receive
 /// block is processed.
 ///
-/// Handles `Receive`, `Open` with a non-zero link (receive-open — the
-/// account's first block pockets a pending send), and `RejectReceive`
-/// (returning pending TRST to sender). Uses binary composite key
-/// `account_bytes ++ link_bytes` matching `create_pending_entry`.
+/// Claims `Receive`, `RejectReceive`, or an `Open` with a positive balance.
+/// Each requires a nonzero link to an existing pending entry. Rejection creates
+/// a new pending entry for the sender; it does not credit their signed balance.
 pub fn delete_pending_entry(
     batch: &mut LmdbWriteTransaction<'_>,
     block: &StateBlock,
@@ -263,9 +235,8 @@ pub fn delete_pending_entry(
     if block.link.is_zero() {
         return Err("pending claim has no source".into());
     }
-    // Recheck inside the writer transaction. The expiry task may have returned
-    // this transfer after admission checked it but before block processing took
-    // the TRST lock. A missing pending entry must not mint an unbacked receive.
+    // Recheck in the writer: expiry or another claim may have consumed the
+    // pending entry since admission.
     let pending = batch
         .get_pending(&block.account, &block.link.into_tx_hash())
         .map_err(|e| e.to_string())?;
@@ -310,7 +281,6 @@ pub(crate) fn validate_receive_amount(
     Ok(())
 }
 
-/// Re-export the canonical PendingInfo from the store crate.
 pub use burst_store::pending::{PendingInfo, PendingProvenance};
 
 pub type PendingWrite = (u128, WalletAddress, Vec<burst_trst::ConsumedProvenance>);
@@ -328,7 +298,7 @@ pub fn persist_block(
     store: &burst_store_lmdb::LmdbEnvironment,
     block: &StateBlock,
     prev_account: Option<&AccountInfo>,
-    prev_brn_balance: u128,
+    previous_brn_spent: u128,
     pending: Option<&PendingWrite>,
     indices: Option<&TrstIndexWrite>,
     engines: (&burst_brn::BrnEngine, &burst_trst::TrstEngine),
@@ -338,7 +308,7 @@ pub fn persist_block(
         &mut batch,
         block,
         prev_account,
-        prev_brn_balance,
+        previous_brn_spent,
         pending,
         indices,
     )?;
@@ -347,12 +317,13 @@ pub fn persist_block(
     batch.commit().map_err(|e| e.to_string())
 }
 
-/// Stage ledger writes without committing, so lifecycle effects can join them.
+/// Stage ledger writes for a validated block without committing. The caller
+/// adds lifecycle and economic effects, and must abort on any error.
 pub(crate) fn stage_block(
     batch: &mut LmdbWriteTransaction<'_>,
     block: &StateBlock,
     prev_account: Option<&AccountInfo>,
-    prev_brn_balance: u128,
+    previous_brn_spent: u128,
     pending: Option<&PendingWrite>,
     indices: Option<&TrstIndexWrite>,
 ) -> Result<(), String> {
@@ -373,7 +344,7 @@ pub(crate) fn stage_block(
     batch
         .put_frontier(&block.account, &block.hash)
         .map_err(|e| e.to_string())?;
-    update_account_on_block(batch, block, prev_account, prev_brn_balance)?;
+    update_account_on_block(batch, block, prev_account, previous_brn_spent)?;
     delete_pending_entry(batch, block)?;
     if let Some((amount, destination, provenance)) = pending {
         create_pending_entry(batch, block, *amount, destination, provenance.clone())?;
@@ -405,14 +376,12 @@ pub(crate) fn persist_brn(
     brn: &burst_brn::BrnEngine,
 ) -> Result<(), String> {
     for (address, wallet) in &brn.wallets {
-        let bytes = bincode::serialize(wallet).map_err(|e| e.to_string())?;
         batch
-            .put_brn_wallet(address, &bytes)
+            .put_brn_wallet_state(address, wallet)
             .map_err(|e| e.to_string())?;
     }
-    let rates = bincode::serialize(&brn.rate_history).map_err(|e| e.to_string())?;
     batch
-        .put_brn_meta(b"rate_history", &rates)
+        .persist_brn_rate_history(&brn.rate_history)
         .map_err(|e| e.to_string())?;
     batch
         .put_brn_meta(b"next_stake_id", &brn.next_stake_id().to_be_bytes())
@@ -420,32 +389,28 @@ pub(crate) fn persist_brn(
     Ok(())
 }
 
-/// Persist a candidate relative to its still-installed engine. Full replay and
-/// startup continue to use `persist_brn`; their baseline is not a live snapshot.
+/// Write BRN changes relative to `before`, which must match this transaction.
+/// Unlike full persistence, this also deletes wallets removed from the engine.
 pub(crate) fn persist_brn_delta(
     batch: &mut LmdbWriteTransaction<'_>,
     before: &burst_brn::BrnEngine,
     after: &burst_brn::BrnEngine,
 ) -> Result<(), String> {
-    for (address, wallet) in &after.wallets {
-        if before.wallets.get(address) != Some(wallet) {
-            let bytes = bincode::serialize(wallet).map_err(|error| error.to_string())?;
-            batch
-                .put_brn_wallet(address, &bytes)
-                .map_err(|error| error.to_string())?;
-        }
-    }
-    for address in before.wallets.keys() {
-        if !after.wallets.contains_key(address) {
-            batch
+    after
+        .wallets
+        .visit_changes(&before.wallets, |address, _before, after| match after {
+            Some(wallet) => {
+                batch
+                    .put_brn_wallet_state(address, wallet)
+                    .map_err(|error| error.to_string())
+            }
+            None => batch
                 .delete_brn_wallet(address)
-                .map_err(|error| error.to_string())?;
-        }
-    }
+                .map_err(|error| error.to_string()),
+        })?;
     if before.rate_history != after.rate_history {
-        let bytes = bincode::serialize(&after.rate_history).map_err(|error| error.to_string())?;
         batch
-            .put_brn_meta(b"rate_history", &bytes)
+            .persist_brn_rate_history(&after.rate_history)
             .map_err(|error| error.to_string())?;
     }
     if before.next_stake_id() != after.next_stake_id() {
@@ -496,7 +461,7 @@ mod tests {
             account: account.clone(),
             previous: BlockHash::ZERO,
             representative: rep.clone(),
-            brn_balance: 0,
+            brn_spent: 0,
             trst_balance: trst,
             link: BlockHash::ZERO,
             origin: TxHash::ZERO,
@@ -530,7 +495,7 @@ mod tests {
             account: account.clone(),
             previous,
             representative: rep.clone(),
-            brn_balance: 0,
+            brn_spent: 0,
             trst_balance: trst,
             link,
             origin: TxHash::ZERO,
@@ -564,7 +529,7 @@ mod tests {
             account: account.clone(),
             previous,
             representative: rep.clone(),
-            brn_balance: brn,
+            brn_spent: brn,
             trst_balance: trst,
             link: BlockHash::ZERO,
             origin: TxHash::ZERO,
@@ -607,8 +572,6 @@ mod tests {
             orv_evicted: false,
         }
     }
-
-    // --- PendingInfo tests ---
 
     #[test]
     fn confirming_ancestor_does_not_make_descendants_fork_losers() {
@@ -717,7 +680,7 @@ mod tests {
             store.block_store().height_of_block(&block.hash).unwrap(),
             None
         );
-        assert!(store.brn_store().iter_wallet_states().unwrap().is_empty());
+        assert!(store.brn_store().all_wallet_states().unwrap().is_empty());
         assert!(store
             .tx_begin_write()
             .unwrap()
@@ -927,137 +890,4 @@ mod tests {
         assert!(store.account_store().get_account(&receiver).is_err());
     }
 
-    // Rep-weight behaviour now lives in `burst_consensus::rep_weights` (the
-    // cache is rebuilt from account state, not patched per block), so the
-    // per-block weight tests moved there.
-
-    // --- AccountInfo construction tests ---
-
-    #[test]
-    fn account_info_created_for_open_block() {
-        let account = test_account();
-        let rep = test_rep();
-        let block = make_open_block(&account, &rep, 500);
-
-        let info = AccountInfo {
-            address: block.account.clone(),
-            state: WalletState::Unverified,
-            verified_at: None,
-            head: block.hash,
-            block_count: 1,
-            confirmation_height: 0,
-            representative: block.representative.clone(),
-            total_brn_burned: 0,
-            trst_balance: block.trst_balance,
-            total_brn_staked: 0,
-            expired_trst: 0,
-            revoked_trst: 0,
-            epoch: 0,
-            verifier_opted_in_at: None,
-            orv_evicted: false,
-        };
-
-        assert_eq!(info.block_count, 1);
-        assert_eq!(info.trst_balance, 500);
-        assert_eq!(info.head, block.hash);
-        assert_eq!(info.representative, rep);
-    }
-
-    #[test]
-    fn account_info_updated_for_subsequent_block() {
-        let account = test_account();
-        let rep = test_rep();
-        let open = make_open_block(&account, &rep, 1000);
-        let send = make_send_block(&account, &rep, open.hash, 700, BlockHash::new([0xAA; 32]));
-
-        let mut info = make_account_info(&account, &rep, open.hash, 1000, 1);
-        info.head = send.hash;
-        info.block_count += 1;
-        info.trst_balance = send.trst_balance;
-
-        assert_eq!(info.block_count, 2);
-        assert_eq!(info.trst_balance, 700);
-        assert_eq!(info.head, send.hash);
-    }
-
-    // --- BRN burn tracking tests ---
-
-    #[test]
-    fn brn_burn_tracked_correctly() {
-        let prev_brn: u128 = 500;
-        let new_brn: u128 = 300;
-        let burned = prev_brn.saturating_sub(new_brn);
-        assert_eq!(burned, 200);
-
-        let mut total_burned: u128 = 100;
-        total_burned = total_burned.saturating_add(burned);
-        assert_eq!(total_burned, 300);
-    }
-
-    #[test]
-    fn brn_burn_saturates_on_underflow() {
-        let prev_brn: u128 = 100;
-        let new_brn: u128 = 500; // shouldn't happen, but test saturation
-        let burned = prev_brn.saturating_sub(new_brn);
-        assert_eq!(burned, 0);
-    }
-
-    // --- Pending entry logic tests ---
-
-    #[test]
-    fn create_pending_skips_non_send_blocks() {
-        let block = make_open_block(&test_account(), &test_rep(), 100);
-        assert_ne!(block.block_type, BlockType::Send);
-        // create_pending_entry returns Ok(()) immediately for non-Send
-    }
-
-    #[test]
-    fn create_pending_skips_zero_link() {
-        let block = make_send_block(
-            &test_account(),
-            &test_rep(),
-            BlockHash::new([1u8; 32]),
-            500,
-            BlockHash::ZERO,
-        );
-        assert!(block.link.is_zero());
-        // create_pending_entry returns Ok(()) for zero link
-    }
-
-    #[test]
-    fn delete_pending_skips_non_receive_blocks() {
-        let block = make_open_block(&test_account(), &test_rep(), 100);
-        assert_ne!(block.block_type, BlockType::Receive);
-    }
-
-    #[test]
-    fn pending_key_format_for_send() {
-        let link = BlockHash::new([0xBB; 32]);
-        let hash = BlockHash::new([0xCC; 32]);
-        let key = format!("{}:{}", link, hash);
-        assert!(key.contains(':'));
-        assert!(key.starts_with(&format!("{}", link)));
-    }
-
-    #[test]
-    fn pending_key_format_for_receive() {
-        let account = test_account();
-        let link = BlockHash::new([0xDD; 32]);
-        let key = format!("{}:{}", account, link);
-        assert!(key.contains(':'));
-    }
-
-    #[test]
-    fn burn_block_tracks_brn_decrease() {
-        let account = test_account();
-        let rep = test_rep();
-        let open = make_open_block(&account, &rep, 0);
-        let burn = make_burn_block(&account, &rep, open.hash, 300, 0);
-
-        // Previous BRN was 500, new BRN is 300 → burned 200
-        let prev_brn: u128 = 500;
-        let burned = prev_brn.saturating_sub(burn.brn_balance);
-        assert_eq!(burned, 200);
-        assert_eq!(burn.block_type, BlockType::Burn);
-    }
 }

@@ -16,9 +16,9 @@ pub use storage::load_action_with_content;
 #[cfg(not(target_arch = "wasm32"))]
 pub use storage::migrate_account_named_journal;
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) use storage::record_submission;
+pub(crate) use storage::record_submission_attempt;
 #[cfg(not(target_arch = "wasm32"))]
-pub use storage::{archive_payment, load_payment, payment_was_submitted, save_payment};
+pub use storage::{archive_payment, load_payment, payment_may_have_been_submitted, save_payment};
 #[cfg(not(target_arch = "wasm32"))]
 pub use storage::{load_payment_with_ancestry, save_payment_with_ancestry, save_signed_action};
 
@@ -133,8 +133,9 @@ impl OfflinePaymentContext {
         }
         storage::save_payment_with_ancestry(path, block, &self.ancestry)
     }
-    /// Uses no node client or clock. The caller chooses and reviews the payment,
-    /// including its timestamp, after taking the signing device offline.
+    /// Sign using the supplied context, without a node client or clock.
+    /// The caller reviews the payment and chooses its timestamp. Work is checked
+    /// against the context's threshold, not an independently verified network value.
     pub fn sign(
         &self,
         keys: &KeyPair,
@@ -203,6 +204,8 @@ pub(crate) fn validate_signed_action(block: &StateBlock) -> Result<(), WalletErr
     validate_signed_block(block)
 }
 
+/// Check version, format, stored hash and account-key signature. Does not check
+/// proof of work, ledger eligibility or confirmation.
 pub(crate) fn validate_signed_block(block: &StateBlock) -> Result<(), WalletError> {
     let public = burst_crypto::decode_address(block.account.as_str())
         .ok_or_else(|| WalletError::Signing("invalid offline payment account".into()))?;
@@ -222,6 +225,9 @@ pub(crate) fn validate_signed_block(block: &StateBlock) -> Result<(), WalletErro
     Ok(())
 }
 
+/// Check a bounded chain segment, newest first, beginning at `previous`.
+/// Empty or partial ancestry is allowed; this is not a proof of confirmation
+/// or a requirement to reach the account's opening block.
 pub(crate) fn validate_ancestry(
     account: &WalletAddress,
     mut previous: BlockHash,
@@ -267,7 +273,7 @@ mod tests {
                 head,
                 block_count: 1,
                 representative: account.clone(),
-                brn_balance: 11,
+                brn_spent: 11,
                 trst_balance: 20,
             },
             params_hash: BlockHash::new([9; 32]),
@@ -287,14 +293,19 @@ mod tests {
         let restored: OfflinePaymentContext = serde_json::from_slice(&encoded).unwrap();
         let recipient =
             burst_crypto::derive_address(&burst_crypto::keypair_from_seed(&[2; 32]).public);
-        // The transaction is chosen after the context is exported. No runtime,
-        // client, connected node or private key is needed to prepare the context.
+        // Choose the transaction after exporting the context; signing needs no node.
         let tx = Transaction::Burn(
             build_burn_tx(&prepared.account, &recipient, 7, Timestamp::new(42)).unwrap(),
         );
         let block = restored.sign(&keys, &tx, TxHash::ZERO).unwrap();
         assert_eq!(block.previous, prepared.state.head);
-        assert_eq!(block.brn_balance, 18);
+        assert_eq!(block.brn_spent, 18);
+        let signed_json = serde_json::to_value(&block).unwrap();
+        assert_eq!(signed_json["brn_balance"], 18);
+        assert!(signed_json.get("brn_spent").is_none());
+        let context_json = serde_json::to_value(&prepared).unwrap();
+        assert_eq!(context_json["state"]["brn_balance"], 11);
+        assert!(context_json["state"].get("brn_spent").is_none());
         assert_eq!(block.trst_balance, 20);
         assert_eq!(block.timestamp, Timestamp::new(42));
         assert_eq!(
@@ -303,7 +314,7 @@ mod tests {
         );
         validate_signed_payment(&block).unwrap();
         let mut tampered = block;
-        tampered.brn_balance += 1;
+        tampered.brn_spent += 1;
         assert!(validate_signed_payment(&tampered).is_err());
     }
 
@@ -353,7 +364,7 @@ mod tests {
 
         prepared.state.head = BlockHash::ZERO;
         prepared.state.block_count = 0;
-        prepared.state.brn_balance = 0;
+        prepared.state.brn_spent = 0;
         prepared.state.trst_balance = 0;
         prepared.work.root = StateBlock::work_root_for(&prepared.account, BlockHash::ZERO);
         let tx = Transaction::Receive(
@@ -372,7 +383,7 @@ mod tests {
     fn offline_draft_preserves_maximum_payment_and_refuses_overwrite() {
         let keys = burst_crypto::keypair_from_seed(&[1; 32]);
         let mut prepared = context(&keys);
-        prepared.state.brn_balance = u128::MAX;
+        prepared.state.brn_spent = u128::MAX;
         prepared.state.trst_balance = u128::MAX;
         prepared.state.release_sources = (1..=burst_ledger::state_block::MAX_RELEASE_SOURCES)
             .map(|index| {
@@ -399,7 +410,7 @@ mod tests {
             serde_json::to_vec(&restored).unwrap(),
             serde_json::to_vec(&block).unwrap()
         );
-        assert_eq!(restored.brn_balance, u128::MAX);
+        assert_eq!(restored.brn_spent, u128::MAX);
         assert_eq!(restored.trst_balance, u128::MAX);
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
         #[cfg(unix)]
@@ -437,11 +448,11 @@ mod tests {
         draft["version"] = serde_json::json!(1);
         std::fs::write(&path, serde_json::to_vec(&draft).unwrap()).unwrap();
         assert!(
-            payment_was_submitted(&path, &block.hash).unwrap(),
+            payment_may_have_been_submitted(&path, &block.hash).unwrap(),
             "legacy drafts have unknown submission history"
         );
-        record_submission(&path, &block.hash).unwrap();
-        assert!(payment_was_submitted(&path, &block.hash).unwrap());
+        record_submission_attempt(&path, &block.hash).unwrap();
+        assert!(payment_may_have_been_submitted(&path, &block.hash).unwrap());
         draft["block"]["brn_balance"] = serde_json::json!(19);
         std::fs::write(&path, serde_json::to_vec(&draft).unwrap()).unwrap();
         assert!(load_payment(&path).is_err());

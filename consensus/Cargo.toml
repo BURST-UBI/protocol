@@ -9,7 +9,6 @@ description = "Consensus — double-spend resolution via Open Representative Vot
 burst-types = { workspace = true }
 burst-crypto = { workspace = true }
 burst-transactions = { workspace = true }
-burst-messages = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 

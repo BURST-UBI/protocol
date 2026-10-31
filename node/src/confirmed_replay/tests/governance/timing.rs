@@ -44,7 +44,7 @@ fn shortening_voting_does_not_move_an_existing_count_behind_activation() {
     });
     fixture.push(0, BlockType::GovernanceEndorse, 140, |block| {
         block.link = later;
-        block.brn_balance += 1;
+        block.brn_spent += 1;
     });
     let (_dir, store, _) = fixture.store();
     install(&store, &fixture.params, CUT, &[0]);
@@ -112,7 +112,7 @@ fn active_proposal_windows_survive_duration_and_buffer_changes() {
         });
         fixture.push(0, BlockType::GovernanceEndorse, 146, |block| {
             block.link = later;
-            block.brn_balance += 1;
+            block.brn_spent += 1;
         });
         fixture.append_confirmed_prefix(&store, 151);
         install(&store, &fixture.params, 152, &[0, 1, 2]);

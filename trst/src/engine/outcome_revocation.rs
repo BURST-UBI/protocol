@@ -31,7 +31,9 @@ impl TrstEngine {
 
     /// Invalidate only the named issuance origins. The caller must authenticate
     /// the overturning outcome and derive these origins from its reward receipt.
-    /// This engine method does not confer appeal authority.
+    /// This engine method does not confer appeal authority. It checks a nonzero
+    /// cause, registered owner/origin pairs and duplicate origins before mutation.
+    /// Returned pending effects still need to be applied to in-flight payments.
     pub fn invalidate_outcome_origins(
         &mut self,
         cause: BlockHash,
@@ -55,16 +57,19 @@ impl TrstEngine {
     /// Remove one overturned decision's invalidation. Other decisions and an
     /// independently revoked originator still keep the same funds revoked.
     /// Returned restoration effects exclude origins with any remaining cause.
+    /// Changes are staged: an error leaves this engine unchanged. The caller
+    /// authenticates the reversal; a missing recorded cause makes no change.
     pub fn restore_outcome_origins(
         &mut self,
         cause: BlockHash,
         origins: &[(WalletAddress, TxHash)],
         now: Timestamp,
-    ) -> Result<Vec<UnRevocationResult>, TrstError> {
-        let ordered = self.outcome_origins(cause, origins)?;
+    ) -> Result<Vec<RestorationEvent>, TrstError> {
+        let mut staged = self.clone();
+        let ordered = staged.outcome_origins(cause, origins)?;
         let mut restored = Vec::new();
         for origin in ordered {
-            let Some(invalidation) = self.outcome_invalidations.get_mut(&origin) else {
+            let Some(invalidation) = staged.outcome_invalidations.get_mut(&origin) else {
                 continue;
             };
             if !invalidation.causes.remove(&cause) || !invalidation.causes.is_empty() {
@@ -73,9 +78,11 @@ impl TrstEngine {
             if !invalidation.wallet_revoked {
                 restored.push(origin);
             }
-            self.outcome_invalidations.remove(&origin);
+            staged.outcome_invalidations.remove(&origin);
         }
-        Ok(self.restore_origins(restored, now))
+        let results = staged.restore_origins(restored, now)?;
+        *self = staged;
+        Ok(results)
     }
 }
 

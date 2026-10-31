@@ -30,6 +30,15 @@ async fn until(mut ready: impl FnMut() -> bool) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn verification_fork_worker_replaces_endorsements_and_recovers() {
+    verification_fork_workload(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fork_admission_retries_capture_pressure_before_replacement_and_recovery() {
+    verification_fork_workload(true).await;
+}
+
+async fn verification_fork_workload(pressure: bool) {
     for endorsement_wins in [false, true] {
         let directory = tempfile::tempdir().unwrap();
         let mut config = crate::NodeConfig {
@@ -64,13 +73,13 @@ async fn verification_fork_worker_replaces_endorsements_and_recovers() {
         endorse.previous = genesis;
         endorse.payment_epoch = store.meta_store().payment_epoch().unwrap();
         endorse.timestamp = Timestamp::now();
-        endorse.brn_balance = 1;
+        endorse.brn_spent = 1;
         endorse.link = BlockHash::new(target_key.public.0);
         sign(&mut endorse, 0);
         let mut preference = endorse.clone();
         preference.block_type = BlockType::ChangeRepresentative;
         preference.link = BlockHash::ZERO;
-        preference.brn_balance = 0;
+        preference.brn_spent = 0;
         sign(&mut preference, 0);
         let (losing, winner) = if endorsement_wins {
             (preference, endorse)
@@ -78,7 +87,7 @@ async fn verification_fork_worker_replaces_endorsements_and_recovers() {
             (endorse, preference)
         };
         let task = tokio::spawn(async move {
-            node.start().await.unwrap();
+            node.start_with_services(burst_daemon::start_public_services).await.unwrap();
             node.stop().await.unwrap();
         });
         let result = tokio::time::timeout(Duration::from_secs(60), async {
@@ -98,7 +107,45 @@ async fn verification_fork_worker_replaces_endorsements_and_recovers() {
                 None
             };
             let before = verification.lock().await.snapshot().encode().unwrap();
+            let capture = if pressure {
+                let capture_store = store.clone();
+                let (ready, received) = std::sync::mpsc::channel();
+                let (release, released) = std::sync::mpsc::channel();
+                let owner = std::thread::spawn(move || {
+                    let reader = capture_store.tx_begin_read().unwrap();
+                    // Consume pre-existing reusable pages while this reader pins
+                    // subsequent frees, so the fork needs new file pages.
+                    for n in 0..8 {
+                        capture_store.meta_store().put_meta("test/fork-pressure", &vec![n; 128 << 10]).unwrap();
+                    }
+                    let mut writer = capture_store.tx_begin_write().unwrap();
+                    let limit = writer.limit_file_extent(capture_store.env().real_disk_size().unwrap() as usize).unwrap();
+                    drop(writer);
+                    ready.send(limit.watch()).unwrap();
+                    released.recv_timeout(Duration::from_secs(5)).unwrap();
+                    drop(reader);
+                    drop(limit);
+                });
+                Some((release, owner, received.recv_timeout(Duration::from_secs(2)).unwrap()))
+            } else { None };
             assert!(queue.push(winner.clone()).await);
+            if let Some((release, owner, watch)) = capture {
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while !watch.was_exceeded() { tokio::task::yield_now().await; }
+                }).await.unwrap();
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    loop {
+                        if verification.try_lock().is_ok() { break; }
+                        tokio::task::yield_now().await;
+                    }
+                }).await.unwrap();
+                assert!(store.meta_store().fork_candidate(&winner.hash).unwrap().is_none());
+                assert!(store.block_store().exists(&losing.hash).unwrap());
+                assert!(!watch.wait_released(Duration::ZERO));
+                release.send(()).unwrap();
+                owner.join().unwrap();
+                assert!(watch.wait_released(Duration::ZERO));
+            }
             until(|| {
                 store
                     .meta_store()
@@ -147,10 +194,8 @@ async fn verification_fork_worker_replaces_endorsements_and_recovers() {
             assert_eq!(live.get_state(&target).is_some(), endorsement_wins);
             assert_eq!(
                 live.snapshot().encode().unwrap(),
-                store
-                    .meta_store()
-                    .get_meta(crate::endorsement_commit::SNAPSHOT_KEY)
-                    .unwrap()
+                crate::verification_storage::load(&store.tx_begin_write().unwrap())
+                        .unwrap().snapshot().encode().unwrap()
             );
             assert_eq!(
                 store.account_store().get_account(&target).is_ok(),
@@ -171,7 +216,7 @@ async fn verification_fork_worker_replaces_endorsements_and_recovers() {
         let verification = restarted.verification_orchestrator.clone();
         let shutdown = restarted.shutdown.clone();
         let task = tokio::spawn(async move {
-            restarted.start().await.unwrap();
+            restarted.start_with_services(burst_daemon::start_public_services).await.unwrap();
             restarted.stop().await.unwrap();
         });
         let result = tokio::time::timeout(Duration::from_secs(30), async {
@@ -188,7 +233,7 @@ async fn verification_fork_worker_replaces_endorsements_and_recovers() {
             } else {
                 BlockHash::new(target_key.public.0)
             };
-            followup.brn_balance = 1;
+            followup.brn_spent = 1;
             sign(&mut followup, 0);
             assert!(queue.push(followup.clone()).await);
             until(|| store.account_store().get_account(&creator).unwrap().head == followup.hash)

@@ -1,42 +1,41 @@
-//! Governance proposals and their four-phase BURST lifecycle.
+//! Governance proposal records, including retained legacy phase fields.
 
 use burst_types::{Timestamp, TxHash, WalletAddress};
 use serde::{Deserialize, Serialize};
 
-/// Origin-field sentinel marking a `GovernanceProposal` block as an ORV
-/// *eviction* proposal. The 32-byte block `link` only fits one pubkey, so it
-/// carries the TARGET representative's pubkey while the (also hashed/signed)
-/// `origin` field carries this discriminant. A fixed 32-byte sentinel — no real
-/// `TxHash` collides in practice. Shared by the proposal builder (RPC) and the
-/// block decoder (node) so both agree.
+/// Operation marker in a representative-eviction proposal's signed `origin`
+/// field. The signed `link` field carries the target representative's public key.
+/// Builders and decoders share this marker to distinguish the proposal kind.
 pub const ORV_EVICT_MARKER: [u8; 32] = *b"BURST_ORV_EVICT_MARKER__________";
-/// As [`ORV_EVICT_MARKER`], but for a *reinstatement* proposal.
+/// Signed operation marker for representative reinstatement.
 pub const ORV_REINSTATE_MARKER: [u8; 32] = *b"BURST_ORV_REINSTATE_MARKER______";
 
 /// The phases of a governance proposal.
 ///
-/// Normal flow: Proposal → Exploration (Voting) → Cooldown → Activation.
-/// Emergency flow: Exploration (Voting) → Activation.
+/// Ordinary flow: endorsements, one voting window, cooldown, scheduled activation.
+/// Emergency flow: one voting window followed by scheduled activation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GovernancePhase {
-    /// Phase 1: Collecting endorsements (BRN burns) to advance past spam filter.
+    /// Collect endorsements backed by BRN burns.
     Proposal,
-    /// Phase 2: The single voting window. Stored as Exploration for compatibility.
+    /// The single voting window, stored under its original name.
     Exploration,
-    /// Phase 3: No voting. Community discusses and prepares.
+    /// Waiting period after a successful ordinary vote. No second vote occurs.
     Cooldown,
     /// Legacy snapshot value. New proposals cannot enter or vote in this phase.
     Promotion,
-    /// Phase 4: At a deterministic timestamp, all nodes apply the change.
+    /// Approved and scheduled, awaiting application through the node's agreed transition.
     Activation,
-    /// The proposal was rejected (did not meet supermajority/quorum at any voting stage).
+    /// Endorsements or the voting thresholds were insufficient.
     Rejected,
-    /// The proposal was activated and is now in effect.
+    /// Activation was applied. Later proposals may change the same setting again.
     Activated,
     /// The proposal was withdrawn by the proposer before leaving the Proposal phase.
     Withdrawn,
     /// Approved, but an earlier activation removed an article this amendment needs.
     Conflicted,
+    /// Explicit bootstrap veto, finalized before the scheduled activation.
+    Vetoed,
 }
 
 /// A governance proposal.
@@ -52,39 +51,37 @@ pub struct Proposal {
     pub content: ProposalContent,
     /// Endorsements received (BRN burns to advance past spam filter).
     pub endorsement_count: u32,
-    /// Total verified wallets at the time of voting (for quorum calculation).
+    /// Eligibility denominator: a provisional snapshot before counting, replaced
+    /// by the supplied electorate's size when the effective tally is computed.
     pub total_eligible_voters: u32,
 
-    // ── Exploration vote (Phase 2) ──────────────────────────────────────
-    /// When exploration voting started.
+    // Raw direct-vote counts while voting; effective counts after tallying.
+    /// When the voting window started.
     pub exploration_started_at: Option<Timestamp>,
-    /// Exploration votes: yea.
+    /// Votes: yea.
     pub exploration_votes_yea: u32,
-    /// Exploration votes: nay.
+    /// Votes: nay.
     pub exploration_votes_nay: u32,
-    /// Exploration votes: abstain.
+    /// Votes: abstain.
     pub exploration_votes_abstain: u32,
 
-    // ── Cooldown (Phase 3) ──────────────────────────────────────────────
     /// When cooldown started.
     pub cooldown_started_at: Option<Timestamp>,
 
-    // ── Promotion vote (Phase 4) ────────────────────────────────────────
-    /// When promotion voting started.
+    // Legacy second-ballot fields; current proposals do not use them.
+    /// Legacy promotion start time.
     pub promotion_started_at: Option<Timestamp>,
-    /// Promotion votes: yea.
+    /// Legacy promotion votes: yea.
     pub promotion_votes_yea: u32,
-    /// Promotion votes: nay.
+    /// Legacy promotion votes: nay.
     pub promotion_votes_nay: u32,
-    /// Promotion votes: abstain.
+    /// Legacy promotion votes: abstain.
     pub promotion_votes_abstain: u32,
 
-    // ── Retry tracking ──────────────────────────────────────────────────
-    /// Current round (0-indexed). Incremented each time a proposal fails
-    /// and is reset to the Proposal phase for another attempt.
+    /// Retained round field. Current vote failure rejects the proposal;
+    /// it does not increment this field or restart the proposal.
     pub round: u32,
 
-    // ── Timestamps ──────────────────────────────────────────────────────
     /// When the proposal was created.
     pub created_at: Timestamp,
     /// Deterministic activation timestamp derived from phase deadlines.
@@ -101,22 +98,19 @@ pub enum ProposalContent {
     },
     /// Legacy single-article addition. Diff proposals use `ConstitutionalDiff`.
     ConstitutionalAmendment { title: String, text: String },
-    /// Emergency parameter change — fast-tracked lifecycle with higher thresholds.
-    /// Skips support and cooldown; governed defaults are 24 hours and 95% quorum/approval.
+    /// Emergency parameter change using the governed emergency voting rules.
+    /// Skips endorsements and cooldown; counting and activation delays still apply.
     Emergency {
         description: String,
         param: super::params::GovernableParam,
         new_value: u128,
     },
-    /// Evict a representative from the ORV consensus set — or reinstate one.
+    /// Evict a representative from transaction consensus, or reinstate one.
     ///
-    /// This is the bad-actor backstop for consensus. It is decided by the same
-    /// one-verified-human-one-vote governance process as everything else, and
-    /// deliberately NOT by ORV (expired-TRST / delegation) weight — so a rep that
-    /// has amassed consensus weight cannot vote down its own eviction. On
-    /// activation the target account's `orv_evicted` flag is set (`evict = true`)
-    /// or cleared (`evict = false`); an evicted rep then contributes zero weight,
-    /// and its delegators regain their voice by re-delegating to an honest rep.
+    /// Governance ballots decide eviction independently of the target's
+    /// representative weight. Activation updates the account's `orv_evicted`
+    /// flag; an evicted representative contributes no consensus weight.
+    /// Its delegators can choose another representative.
     RepresentativeEviction {
         /// The representative to evict or reinstate.
         target: WalletAddress,
@@ -147,4 +141,14 @@ pub enum AmendmentOp {
     RepealArticle {
         article_number: u64,
     },
+}
+
+/// Required proposal fields shared by RPC responses and signing review.
+/// Missing fields must fail deserialization, never acquire permissive defaults.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ProposalReview {
+    pub hash: String,
+    pub phase: String,
+    pub phase_projected: bool,
+    pub phase_deadline: u64,
 }

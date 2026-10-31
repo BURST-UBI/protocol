@@ -23,6 +23,7 @@ use burst_store_lmdb::LmdbStore;
 use burst_types::{BlockHash, WalletAddress};
 
 mod activation;
+mod committed;
 mod coverage;
 mod governance;
 pub use activation::CompactActivationCoverage;
@@ -49,7 +50,7 @@ pub(super) struct Base<'a> {
 pub struct SnapshotContinuation {
     anchor: CheckpointAnchor,
     context: HistoryContext,
-    state: ConfirmedReplay,
+    state: burst_utils::Shared<ConfirmedReplay>,
 }
 
 /// Membership coverage derived from a replayed selection and its authenticated
@@ -107,7 +108,7 @@ impl AuthenticatedSnapshot {
         SnapshotContinuation {
             anchor: self.anchor().clone(),
             context: self.history_context(),
-            state: self.into_state(),
+            state: self.into_state().into(),
         }
     }
 }
@@ -145,7 +146,7 @@ impl SnapshotContinuation {
                 state_hash: manifest.state_hash,
             },
             anchor,
-            state,
+            state: state.into(),
         })
     }
 
@@ -171,6 +172,37 @@ impl SnapshotContinuation {
         store: &LmdbStore,
     ) -> Result<super::tail::cemented::CementedTailPlan, ReplayError> {
         super::tail::cemented::plan(self.base(), store)
+    }
+
+    /// Capture both local cuts from one read view, authenticating their shared
+    /// snapshot prefix once. Each tail retains its own suffix and read checks.
+    pub(crate) fn plan_installed_tails(
+        &self,
+        store: &LmdbStore,
+    ) -> Result<
+        (
+            super::tail::cemented::CementedTailPlan,
+            super::tail::cemented::AppliedTailPlan,
+            Vec<super::history::HistoricalBlock>,
+        ),
+        ReplayError,
+    > {
+        super::tail::cemented::plan_pair(self.base(), store)
+    }
+
+    pub(crate) fn plan_installed_tails_view(
+        &self,
+        store: &LmdbStore,
+        txn: &burst_store_lmdb::LmdbReadTransaction<'_>,
+    ) -> Result<
+        (
+            super::tail::cemented::CementedTailPlan,
+            super::tail::cemented::AppliedTailPlan,
+            Vec<super::history::HistoricalBlock>,
+        ),
+        ReplayError,
+    > {
+        super::tail::cemented::plan_pair_view(self.base(), store, txn)
     }
 
     /// Includes provisional heads without granting them confirmation or
@@ -199,15 +231,60 @@ impl SnapshotContinuation {
         batch: &burst_store_lmdb::LmdbWriteTransaction<'_>,
         cemented: &super::tail::cemented::CementedTail,
     ) -> Result<(), burst_store::StoreError> {
-        use crate::confirmed_replay::installation::{authority_bytes, CUTOFF_KEY, INSTALLED_KEY};
+        self.verify_installed_metadata_read(&batch.read_view(), cemented,
+            |schedule| schedule.verify_compact_tail(batch, cemented.tail()),
+            || cemented.verify_view(&batch.read_view()))
+    }
+
+    pub(crate) fn verify_installed_metadata_view_with_poll(
+        &self,
+        batch: &burst_store_lmdb::read_view::LedgerReadView<'_>,
+        cemented: &super::tail::cemented::CementedTail,
+        poll: &dyn Fn(&'static str) -> Result<(), burst_store::StoreError>,
+    ) -> Result<(), burst_store::StoreError> {
+        self.verify_installed_metadata_read(batch, cemented,
+            |schedule| schedule.verify_compact_tail_view_with_poll(batch, cemented.tail(), poll),
+            || cemented.verify_view_with_poll(batch, poll))
+    }
+
+    /// Candidate discovery tolerates provisional extensions only. Confirmed
+    /// heads, retained bodies, installed authority and governance remain checked.
+    pub(crate) fn verify_discovery_metadata_in(
+        &self,
+        batch: &burst_store_lmdb::LmdbWriteTransaction<'_>,
+        cemented: &super::tail::cemented::CementedTail,
+    ) -> Result<(), burst_store::StoreError> {
+        self.verify_installed_metadata_read(&batch.read_view(), cemented,
+            |schedule| schedule.verify_compact_tail(batch, cemented.tail()),
+            || cemented.verify_confirmed_view(&batch.read_view()))
+    }
+
+    fn verify_installed_metadata_read(
+        &self, batch: &burst_store_lmdb::read_view::LedgerReadView<'_>,
+        cemented: &super::tail::cemented::CementedTail,
+        verify_schedule: impl FnOnce(crate::confirmed_governance::ConfirmedGovernance) -> Result<(), burst_store::StoreError>,
+        verify_cut: impl FnOnce() -> Result<(), burst_store::StoreError>,
+    ) -> Result<(), burst_store::StoreError> {
         let invalid = |message: &str| burst_store::StoreError::Corruption(message.into());
         if cemented.tail().context() != self.context {
             return Err(invalid(
                 "cemented tail belongs to a different authenticated state",
             ));
         }
-        cemented.verify_unchanged(batch)?;
-        if batch.get_meta(INSTALLED_KEY)?
+        verify_cut()?;
+        self.verify_installed_authority_view(batch)?;
+        verify_schedule(self.state.confirmed_governance_schedule()?)
+    }
+
+    pub(crate) fn verify_installed_authority_view(
+        &self, batch: &burst_store_lmdb::read_view::LedgerReadView<'_>,
+    ) -> Result<(), burst_store::StoreError> {
+        use crate::confirmed_replay::installation::{authority_bytes, CUTOFF_KEY};
+        let invalid = |message: &str| burst_store::StoreError::Corruption(message.into());
+        if batch.payment_epoch()? != self.anchor.hash() {
+            return Err(burst_store::StoreError::StaleRead("installed authority epoch changed".into()));
+        }
+        if crate::payment_authority::storage::read_at(|key| batch.get_meta(key))?
             != Some(authority_bytes(&self.anchor, self.anchor.cutoff())?)
             || batch.get_meta(CUTOFF_KEY)?.as_deref()
                 != Some(self.anchor.cutoff().to_be_bytes().as_slice())
@@ -223,12 +300,10 @@ impl SnapshotContinuation {
                 "installed metadata differs from authenticated snapshot continuation",
             ));
         }
-        self.state
-            .confirmed_governance_schedule()?
-            .verify_compact_tail(batch, cemented.tail())
+        Ok(())
     }
     pub fn into_state(self) -> ConfirmedReplay {
-        self.state
+        self.state.into_inner()
     }
 
     pub fn history_cursor(
@@ -241,6 +316,18 @@ impl SnapshotContinuation {
             account,
             self.state.account(account),
         )
+    }
+
+    /// Materialize account roots in authenticated private scratch without a
+    /// second in-memory copy of every account cursor.
+    pub(crate) fn stored_history_roots(
+        &self, directory: &std::path::Path,
+    ) -> Result<super::history::StoredHistoryRoots, ReplayError> {
+        let mut roots = super::history::StoredHistoryRoots::new(directory, self.context, self.anchor.cutoff())?;
+        for account in self.state.accounts.keys() {
+            if let Some(cursor) = self.history_cursor(account)? { roots.insert(cursor)?; }
+        }
+        Ok(roots)
     }
 
     pub fn ordering_dependencies(&self) -> Vec<BlockHash> {
@@ -309,27 +396,52 @@ impl SnapshotContinuation {
             let Some(head) = committed.remove(hash) else {
                 continue;
             };
-            let mut account = state
-                .account(&head.account)
-                .cloned()
-                .ok_or_else(|| super::invalid("committed history account is absent"))?;
-            if head.height == 0
-                || head.height > account.block_count
-                || (head.height == account.block_count && head.hash != account.head)
-            {
-                return Err(super::invalid(
-                    "committed history exceeds authenticated account",
-                ));
-            }
-            account.head = head.hash;
-            account.block_count = head.height;
-            account.confirmation_height = head.height;
-            let cursor =
-                HistoryCursor::new(anchor, context.state_hash, &head.account, Some(&account))?
-                    .ok_or_else(|| super::invalid("committed history has no account cursor"))?;
-            cursors.push(cursor);
+            cursors.push(Self::cursor_for_committed_head(anchor, context, state, &head)?);
         }
         Ok(cursors)
+    }
+
+    fn cursor_for_committed_head(
+        anchor: &CheckpointAnchor, context: HistoryContext, state: &ConfirmedReplay, head: &HistoryHead,
+    ) -> Result<HistoryCursor, ReplayError> {
+        let mut account = state
+            .account(&head.account)
+            .cloned()
+            .ok_or_else(|| super::invalid("committed history account is absent"))?;
+        if head.height == 0
+            || head.height > account.block_count
+            || (head.height == account.block_count && head.hash != account.head)
+        {
+            return Err(super::invalid(
+                "committed history exceeds authenticated account",
+            ));
+        }
+        account.head = head.hash;
+        account.block_count = head.height;
+        account.confirmation_height = head.height;
+        let cursor =
+            HistoryCursor::new(anchor, context.state_hash, &head.account, Some(&account))?
+                .ok_or_else(|| super::invalid("committed history has no account cursor"))?;
+        Ok(cursor)
+    }
+
+    /// Visit selected committed heads without collecting a cursor per body.
+    /// Repeated receipts may emit the same hash more than once. The consumer
+    /// must bind each emitted account/height to its exact observed position;
+    /// conflicting heads must never be silently deduplicated.
+    #[cfg(test)]
+    pub(in crate::confirmed_replay) fn visit_committed_history(
+        &self,
+        mut wanted: impl FnMut(BlockHash) -> Result<bool, ReplayError>,
+        mut visit: impl FnMut(HistoryCursor) -> Result<(), ReplayError>,
+    ) -> Result<(), ReplayError> {
+        let mut walk = self.committed_history_walk();
+        while !walk.advance(128, &mut wanted, &mut visit)? {}
+        Ok(())
+    }
+
+    pub(in crate::confirmed_replay) fn committed_history_walk(&self) -> committed::CommittedHistoryWalk<'_> {
+        committed::CommittedHistoryWalk::new(self)
     }
 
     pub fn read_tail(
@@ -387,18 +499,11 @@ impl SnapshotContinuation {
         )
     }
 
-    pub(in crate::confirmed_replay::snapshot) fn replay_applied(
-        &self,
-        tail: &super::tail::cemented::AppliedTail,
-        certificates: &(impl SelectionSource + ?Sized),
-    ) -> Result<ConfirmedReplay, ReplayError> {
-        self.replay_applied_observed(tail, certificates, &mut |_, _| Ok(()))
-    }
-
     /// Stream the starting state and each successfully executed block. The
     /// observer must keep results private until this method succeeds: later
     /// blocks or the final head check can still invalidate the entire tail.
     /// No per-block state clone is retained by replay.
+    #[cfg(test)]
     pub(in crate::confirmed_replay) fn replay_applied_observed(
         &self,
         tail: &super::tail::cemented::AppliedTail,
@@ -421,20 +526,45 @@ impl SnapshotContinuation {
             &ConfirmedReplay,
         ) -> Result<(), ReplayError>,
     ) -> Result<ConfirmedReplay, ReplayError> {
-        self.replay_applied_with_recording(tail, certificates, ordering, false, observe)
+        self.replay_applied_with_recording(tail, certificates, ordering, false, false, observe)
     }
 
-    pub(in crate::confirmed_replay) fn replay_applied_recorded(
+    /// Observe state before and after each transition. Consumers may skip delta
+    /// capture for confirmed blocks, but replay still checks every block and the
+    /// final heads. Keep all observations private until the method succeeds.
+    pub(in crate::confirmed_replay) fn replay_applied_recorded_transitions(
         &self,
         tail: &super::tail::cemented::AppliedTail,
         certificates: &(impl SelectionSource + ?Sized),
         ordering: &[(BlockHash, BlockHash)],
+        record_wallets: bool,
         observe: &mut impl FnMut(
+            bool,
             Option<&burst_ledger::StateBlock>,
             &ConfirmedReplay,
         ) -> Result<(), ReplayError>,
     ) -> Result<ConfirmedReplay, ReplayError> {
-        self.replay_applied_with_recording(tail, certificates, ordering, true, observe)
+        let mut candidate = Self {
+            anchor: self.anchor.clone(),
+            context: self.context,
+            state: self.state.clone(),
+        };
+        candidate.state.mutations = Some(Default::default());
+        candidate
+            .state
+            .brn
+            .wallets
+            .record_transition(record_wallets);
+        candidate.execute_input_transitions(
+            tail.tail(),
+            certificates,
+            InputMode::Applied,
+            ordering,
+            observe,
+        )?;
+        candidate.state.mutations = None;
+        candidate.state.brn.wallets.record_transition(false);
+        Ok(candidate.state.into_inner())
     }
 
     fn replay_applied_with_recording(
@@ -443,6 +573,7 @@ impl SnapshotContinuation {
         certificates: &(impl SelectionSource + ?Sized),
         ordering: &[(BlockHash, BlockHash)],
         recording: bool,
+        record_wallets: bool,
         observe: &mut impl FnMut(
             Option<&burst_ledger::StateBlock>,
             &ConfirmedReplay,
@@ -454,7 +585,11 @@ impl SnapshotContinuation {
             state: self.state.clone(),
         };
         candidate.state.mutations = recording.then(Default::default);
-        candidate.state.brn.wallets.record_transition(recording);
+        candidate
+            .state
+            .brn
+            .wallets
+            .record_transition(recording && record_wallets);
         candidate.execute_input_observed(
             tail.tail(),
             certificates,
@@ -464,7 +599,7 @@ impl SnapshotContinuation {
         )?;
         candidate.state.mutations = None;
         candidate.state.brn.wallets.record_transition(false);
-        Ok(candidate.state)
+        Ok(candidate.state.into_inner())
     }
 
     fn execute_input(
@@ -487,24 +622,41 @@ impl SnapshotContinuation {
             &ConfirmedReplay,
         ) -> Result<(), ReplayError>,
     ) -> Result<Source<'static>, ReplayError> {
+        self.execute_input_transitions(
+            tail,
+            certificates,
+            mode,
+            ordering,
+            &mut |before, block, state| {
+                if before {
+                    Ok(())
+                } else {
+                    observe(block, state)
+                }
+            },
+        )
+    }
+
+    fn execute_input_transitions(
+        &mut self,
+        tail: &SnapshotTail,
+        certificates: &(impl SelectionSource + ?Sized),
+        mode: InputMode,
+        ordering: &[(BlockHash, BlockHash)],
+        observe: &mut impl FnMut(
+            bool,
+            Option<&burst_ledger::StateBlock>,
+            &ConfirmedReplay,
+        ) -> Result<(), ReplayError>,
+    ) -> Result<Source<'static>, ReplayError> {
         if tail.context() != self.context {
             return Err(super::invalid(
                 "tail belongs to a different authenticated base",
             ));
         }
-        let old = tail.retained().hashes().collect();
-        let blocks = Source::stage(
-            tail.retained()
-                .iter()
-                .map(|witness| witness.map(|proof| std::borrow::Cow::Owned(proof.into_block())))
-                .chain(
-                    tail.blocks()
-                        .map(|block| block.map(std::borrow::Cow::Owned)),
-                ),
-            &tail.directory,
-        )
-        .map_err(|error| super::invalid(error.to_string()))?;
-        self.state.append_input_observed(
+        let retained_blocks = tail.retained().hashes().collect();
+        let blocks = Source::from_tail(tail);
+        self.state.append_input_transitions(
             EpochInput {
                 directory: Some(&tail.directory),
                 network: self.context.network,
@@ -512,7 +664,7 @@ impl SnapshotContinuation {
                 heads: tail.heads(),
                 blocks: &blocks,
                 contents: tail.contents(),
-                old,
+                retained_blocks,
             },
             self.context.epoch,
             certificates,
@@ -531,12 +683,12 @@ impl SnapshotContinuation {
         self.execute(&tail, certificates, false)?;
         self.state
             .require_closed_governance(burst_types::Timestamp::new(tail.cutoff()))?;
-        Ok(self.state)
+        Ok(self.state.into_inner())
     }
 
-    /// Replay a proposed selection without requiring a decision certificate.
-    /// The authenticated base remains unchanged. The returned compact candidate
-    /// still lacks the durable inventory required by the current signing API.
+    /// Replay a proposed selection without requiring its decision certificate.
+    /// The base remains unchanged. Use selection_vote_coverage to derive the
+    /// membership coverage needed for subsequent signing checks.
     pub fn replay_selection_candidate(
         &self,
         tail: SnapshotTail,
@@ -632,7 +784,7 @@ impl SnapshotContinuation {
             .state
             .selection_receipts
             .iter()
-            .zip(selections.read_all())
+            .zip(selections.iter_selections())
         {
             let receipt = receipt?;
             let selection = selection?;
@@ -860,10 +1012,9 @@ impl SnapshotContinuation {
         self.advance(anchor)
     }
 
-    /// Apply one exact authenticated successor. `event` is already certified;
-    /// its present constructor still reconstructs full history. Compact replay
-    /// independently checks its cut and all economic effects against this base.
-    /// Missing witnesses or any mismatch consume the candidate without writes.
+    /// Replay a certified successor against this base, checking its cut and
+    /// economic effects. Missing witnesses or mismatches consume the candidate
+    /// without installing ledger state; replay may write private scratch files.
     pub fn replay_checkpoint(
         mut self,
         tail: SnapshotTail,
@@ -937,7 +1088,8 @@ impl LifecycleHistory for CompactCut<'_> {
     }
 }
 
-/// Constructed only after execution has validated the complete boundary.
+/// Applied input exposed after the full tail has replayed successfully.
+/// Checkpoint boundary effects are applied separately.
 struct CompletedInput<'a>(&'a Source<'a>);
 
 impl AppliedBlocks for CompletedInput<'_> {
@@ -951,5 +1103,33 @@ impl AppliedBlocks for CompletedInput<'_> {
             Err(burst_store::StoreError::NotFound(_)) => Ok(None),
             Err(error) => Err(error),
         }
+    }
+}
+
+
+#[cfg(test)]
+mod sharing_tests {
+    use super::*;
+
+    #[test]
+    fn continuation_forks_share_state_until_mutation_and_preserve_parent() {
+        let original = SnapshotContinuation::from_genesis(
+            burst_types::NetworkId::Dev, &burst_types::ProtocolParams::default(),
+        ).unwrap();
+        let mut changed = original.clone();
+        let untouched = original.clone();
+        assert!(std::ptr::eq(original.state(), changed.state()));
+        assert!(std::ptr::eq(original.state(), untouched.state()));
+        let address = original.state.accounts.keys().next().unwrap().clone();
+        let account = original.state.accounts[&address].clone();
+        changed.state.accounts.get_mut(&address).unwrap().block_count += 1;
+        assert!(!std::ptr::eq(original.state(), changed.state()));
+        assert!(std::ptr::eq(original.state(), untouched.state()));
+        assert_eq!(original.state.accounts[&address], account);
+        assert_eq!(untouched.state.accounts[&address], account);
+        assert_eq!(changed.state.accounts[&address].block_count, account.block_count + 1);
+        assert_eq!(changed.anchor.hash(), original.anchor.hash());
+        let unique = changed.state.into_inner();
+        assert_eq!(unique.accounts[&address].block_count, account.block_count + 1);
     }
 }

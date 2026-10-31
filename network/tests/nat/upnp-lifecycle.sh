@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Requires the running IGD emulator, lab namespaces and manual-forward setup.
+# First checks mapper state and emulator rules under renewals, conflicts and
+# crashes. The final case separately exercises inbound P2P and signed payments
+# through an alternate mapped port, then rejects a new connection after cleanup.
 set -euo pipefail
 source /lab/common.sh
 test "${BURST_ISOLATED_NAT_LAB:-}" = yes
@@ -48,7 +52,7 @@ wait "$first"; wait "$second"
 wait_mappings 0
 echo 'PASS two LAN nodes map the same local port without replacing each other'
 
-# An abrupt process death cannot leave an infinite router rule.
+# Verify the emulator expires the finite lease after an abrupt probe death.
 ip netns exec client1 env BURST_PROBE_LEASE_SECS=4 BURST_PROBE_HOLD_SECS=30 /bin/upnp_probe > /evidence/upnp-crash.log 2>&1 &
 probe=$!
 wait_mappings 1

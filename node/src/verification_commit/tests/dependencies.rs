@@ -5,12 +5,15 @@ fn verification_fork_candidates_validate_votes_and_challenges_without_publicatio
     for challenge in [false, true] {
         let mut fixture = Fixture::new();
         if challenge {
-            fixture.verified_target();
+            fixture.verify_target();
         }
         {
             let mut batch = fixture.store.tx_begin_write().unwrap();
             crate::bootstrap_phase::initialize(&mut batch, &fixture.params).unwrap();
-            persist(&mut batch, &fixture.orchestrator).unwrap();
+            batch.put_meta(
+            crate::endorsement_commit::SNAPSHOT_KEY,
+            &fixture.orchestrator.snapshot().encode().unwrap(),
+        ).unwrap();
             let genesis = batch.get_account(&address(0)).unwrap();
             crate::confirmed_authority::ConfirmedAuthority::initialize(&mut batch, &genesis)
                 .unwrap();
@@ -35,7 +38,7 @@ fn verification_fork_candidates_validate_votes_and_challenges_without_publicatio
                 .unwrap(),
         )
         .unwrap();
-        incumbent.brn_balance = previous.brn_balance;
+        incumbent.brn_spent = previous.brn_spent;
         sign(&mut incumbent, seed);
         {
             let mut batch = fixture.store.tx_begin_write().unwrap();
@@ -95,7 +98,10 @@ fn independent_endorsement_replacement_preserves_other_progress_after_reopen() {
     {
         let mut batch = fixture.store.tx_begin_write().unwrap();
         crate::bootstrap_phase::initialize(&mut batch, &fixture.params).unwrap();
-        persist(&mut batch, &fixture.orchestrator).unwrap();
+        batch.put_meta(
+            crate::endorsement_commit::SNAPSHOT_KEY,
+            &fixture.orchestrator.snapshot().encode().unwrap(),
+        ).unwrap();
         let genesis = batch.get_account(&address(0)).unwrap();
         crate::confirmed_authority::ConfirmedAuthority::initialize(&mut batch, &genesis).unwrap();
         batch.commit().unwrap();
@@ -112,7 +118,7 @@ fn independent_endorsement_replacement_preserves_other_progress_after_reopen() {
             link: BlockHash::new(
                 burst_crypto::decode_address(address(seed + 10).as_str()).unwrap(),
             ),
-            brn_balance: previous.brn_balance + fixture.params.endorsement_burn_amount,
+            brn_spent: previous.brn_spent + fixture.params.endorsement_burn_amount,
             timestamp: test_time(1000),
             ..previous
         };
@@ -127,21 +133,24 @@ fn independent_endorsement_replacement_preserves_other_progress_after_reopen() {
             panic!("expected endorsement");
         };
         let mut verification = crate::endorsement_commit::restore(&batch).unwrap();
-        crate::endorsement_commit::apply(
+        crate::endorsement_commit::apply_staged(
             &mut batch,
             &block,
             burn_amount,
             burst_types::NetworkId::Dev,
             &fixture.params,
             &mut verification,
-            engines.mutable(),
+            &mut engines,
         )
         .unwrap();
         engines.persist(&mut batch).unwrap();
         batch.commit().unwrap();
         let (brn, trst) = engines.into_staged();
         fixture.brn = brn.unwrap();
-        fixture.trst = trst.unwrap();
+        assert!(
+            trst.is_none(),
+            "incomplete endorsement must not prepare TRST"
+        );
         fixture.orchestrator = verification;
         endorsements.push(block);
     }
@@ -151,7 +160,7 @@ fn independent_endorsement_replacement_preserves_other_progress_after_reopen() {
         let mut winner = losing.clone();
         winner.block_type = BlockType::ChangeRepresentative;
         winner.link = BlockHash::ZERO;
-        winner.brn_balance = 0;
+        winner.brn_spent = 0;
         sign(&mut winner, seed);
         assert!(crate::fork_resolution::evaluate(
             &fixture.store,
@@ -242,7 +251,7 @@ fn verifier_spending_returned_stake_waits_for_the_complete_outcome() {
     let genesis = batch.get_account(&address(0)).unwrap();
     crate::confirmed_authority::ConfirmedAuthority::initialize(&mut batch, &genesis).unwrap();
     let mut authority = crate::confirmed_authority::ConfirmedAuthority::load(&batch).unwrap();
-    for account in fixture.store.account_store().iter_accounts().unwrap() {
+    for account in fixture.store.account_store().all_accounts().unwrap() {
         batch
             .advance_confirmation_height(&account.address, 1)
             .unwrap();
@@ -326,7 +335,7 @@ fn ordinary_unlocked_spending_does_not_wait_for_or_confirm_a_stake_outcome() {
     let genesis = batch.get_account(&address(0)).unwrap();
     crate::confirmed_authority::ConfirmedAuthority::initialize(&mut batch, &genesis).unwrap();
     let mut authority = crate::confirmed_authority::ConfirmedAuthority::load(&batch).unwrap();
-    for account in fixture.store.account_store().iter_accounts().unwrap() {
+    for account in fixture.store.account_store().all_accounts().unwrap() {
         batch
             .advance_confirmation_height(&account.address, 1)
             .unwrap();
@@ -357,7 +366,7 @@ fn ordinary_unlocked_spending_does_not_wait_for_or_confirm_a_stake_outcome() {
     let mut payment = StateBlock {
         block_type: BlockType::Burn,
         previous: votes[0].hash,
-        brn_balance: votes[0].brn_balance + 1,
+        brn_spent: votes[0].brn_spent + 1,
         link: BlockHash::new(burst_crypto::decode_address(address(6).as_str()).unwrap()),
         origin: TxHash::ZERO,
         transaction: TxHash::ZERO,
@@ -432,7 +441,7 @@ fn verification_outcome_waits_for_a_targets_interleaved_representative_change() 
     let genesis = batch.get_account(&address(0)).unwrap();
     crate::confirmed_authority::ConfirmedAuthority::initialize(&mut batch, &genesis).unwrap();
     let mut authority = crate::confirmed_authority::ConfirmedAuthority::load(&batch).unwrap();
-    for account in fixture.store.account_store().iter_accounts().unwrap() {
+    for account in fixture.store.account_store().all_accounts().unwrap() {
         batch
             .advance_confirmation_height(&account.address, 1)
             .unwrap();
@@ -513,11 +522,11 @@ fn verification_outcome_waits_for_a_targets_interleaved_representative_change() 
     );
     let authority = crate::confirmed_authority::ConfirmedAuthority::read(&fixture.store).unwrap();
     assert_eq!(
-        authority.accounts[fixture.target.as_str()].representative,
+        authority.accounts[&fixture.target.to_string()].representative,
         address(6)
     );
     assert_eq!(
-        authority.accounts[fixture.target.as_str()].state,
+        authority.accounts[&fixture.target.to_string()].state,
         WalletState::Verified
     );
 }
@@ -539,7 +548,7 @@ fn identity_binding_aborts_with_its_block_and_rollback_restores_the_binding_poin
     open.link = BlockHash::ZERO;
     open.origin = TxHash::ZERO;
     open.transaction = TxHash::ZERO;
-    open.brn_balance = 0;
+    open.brn_spent = 0;
     open.timestamp = test_time(1010);
     sign(&mut open, 10);
     let mut expected: Vec<_> = votes.iter().map(|vote| vote.hash).collect();
@@ -635,7 +644,7 @@ fn first_account_block_after_verification_confirms_its_complete_identity_outcome
         let genesis = batch.get_account(&address(0)).unwrap();
         crate::confirmed_authority::ConfirmedAuthority::initialize(&mut batch, &genesis).unwrap();
         let mut authority = crate::confirmed_authority::ConfirmedAuthority::load(&batch).unwrap();
-        for account in fixture.store.account_store().iter_accounts().unwrap() {
+        for account in fixture.store.account_store().all_accounts().unwrap() {
             batch
                 .advance_confirmation_height(&account.address, 1)
                 .unwrap();
@@ -666,16 +675,16 @@ fn first_account_block_after_verification_confirms_its_complete_identity_outcome
             )
             .unwrap();
         fixture = fixture.reopen();
-        let mut cached: StateBlock =
+        let mut candidate: StateBlock =
             bincode::deserialize(&fixture.store.block_store().get_block(&first).unwrap()).unwrap();
-        cached.representative = address(6);
-        sign(&mut cached, 10);
+        candidate.representative = address(6);
+        sign(&mut candidate, 10);
         let batch = fixture.store.tx_begin_write().unwrap();
-        assert!(!crate::causal_cementation::dependencies_confirmed(&batch, &cached).unwrap());
+        assert!(!crate::causal_cementation::dependencies_confirmed(&batch, &candidate).unwrap());
         let mut expected: Vec<_> = votes.iter().map(|vote| vote.hash).collect();
         expected.sort_by_key(|hash| *hash.as_bytes());
         let mut candidate_sources =
-            crate::verification_commit::dependencies::voting_sources(&batch, &cached).unwrap();
+            crate::verification_commit::dependencies::voting_sources(&batch, &candidate).unwrap();
         candidate_sources.sort_by_key(|hash| *hash.as_bytes());
         assert_eq!(candidate_sources, expected);
         drop(batch);
@@ -711,7 +720,7 @@ fn first_account_block_after_verification_confirms_its_complete_identity_outcome
         }
         let authority =
             crate::confirmed_authority::ConfirmedAuthority::read(&fixture.store).unwrap();
-        assert!(authority.accounts[fixture.target.as_str()]
+        assert!(authority.accounts[&fixture.target.to_string()]
             .state
             .is_verified());
     }

@@ -12,6 +12,8 @@ use burst_store::{meta::MetaStore, StoreError};
 use burst_store_lmdb::LmdbStore;
 use burst_types::{BlockHash, NetworkId, ProtocolParams};
 
+pub(crate) mod storage;
+
 pub(crate) struct PaymentAuthority {
     pub epoch: BlockHash,
     pub roster: HumanRoster,
@@ -35,23 +37,26 @@ impl PaymentAuthority {
         weights
     }
 
-    /// Read one atomic installed descriptor. Startup separately reauthenticates
-    /// it from configured genesis and the full certified history.
+    /// Read the authority and related epoch/cutoff/limit records in one snapshot.
+    /// Checks local consistency, not checkpoint signatures or replay validity;
+    /// initialize performs startup authentication against certified history.
     pub fn read(store: &LmdbStore) -> Result<Option<Self>, StoreError> {
         let txn = store.tx_begin_read()?;
         let meta = store.meta_store();
         Self::read_at(|key| meta.get_meta_txn(&txn, key))
     }
 
-    /// Read the same descriptor inside an existing transaction.
+    /// The caller must read every key from the same pinned transaction.
+    /// Decodes the entire roster; the 64 MiB encoded limit is not a heap budget.
     pub(crate) fn read_at(
         mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StoreError>,
     ) -> Result<Option<Self>, StoreError> {
-        let Some(bytes) = get(INSTALLED_KEY)? else {
+        let Some(bytes) = storage::read_at(&mut get)? else {
             if get(CUTOFF_KEY)?.is_some()
                 || get(burst_store::meta::PAYMENT_VOTE_LIMIT_KEY)?.is_some()
                 || get(burst_store::meta::GOVERNANCE_COUNTING_LIMIT_KEY)?.is_some()
                 || get(crate::confirmed_governance::KEY)?.is_some()
+                || get(crate::confirmed_governance::HEADER)?.is_some()
             {
                 return Err(invalid(
                     "payment cutoff or vote limit has no installed authority",
@@ -150,7 +155,7 @@ pub(crate) fn initialize(
             if batch.payment_epoch()? != epoch {
                 return Err(invalid("payment authority changed during startup"));
             }
-            match batch.get_meta(INSTALLED_KEY)? {
+            match storage::read_at(|key| batch.get_meta(key))? {
                 Some(bytes) if bytes != expected => {
                     return Err(invalid("genesis payment authority changed"))
                 }
@@ -167,13 +172,13 @@ pub(crate) fn initialize(
                         || batch
                             .get_meta(burst_store::meta::GOVERNANCE_COUNTING_LIMIT_KEY)?
                             .is_some()
-                        || batch.get_meta(crate::confirmed_governance::KEY)?.is_some()
+                        || batch.has_confirmed_governance_storage()?
                     {
                         return Err(invalid(
                             "genesis cutoff or vote limit has no installed authority",
                         ));
                     }
-                    batch.put_meta(INSTALLED_KEY, &expected)?;
+                    storage::write(&mut batch, &expected)?;
                     batch.put_meta(CUTOFF_KEY, &cutoff.to_be_bytes())?;
                     batch.put_meta(burst_store::meta::PAYMENT_VOTE_LIMIT_KEY, &limit)?;
                     crate::confirmed_governance::ConfirmedGovernance::initial(
@@ -199,8 +204,8 @@ pub(crate) fn initialize(
             .parent()
             .advance(event.certificate(), event.next_roster().clone())
             .map_err(invalid)?;
-        if store.meta_store().get_meta(INSTALLED_KEY)?
-            != authority_bytes(&anchor, event.certificate().checkpoint.cutoff)?
+        if storage::read(store)?
+            != Some(authority_bytes(&anchor, event.certificate().checkpoint.cutoff)?)
         {
             return Err(invalid(
                 "installed payment authority differs from certified history",
@@ -251,6 +256,7 @@ mod tests {
             PAYMENT_VOTE_LIMIT_KEY,
             burst_store::meta::GOVERNANCE_COUNTING_LIMIT_KEY,
             crate::confirmed_governance::KEY,
+            crate::confirmed_governance::HEADER,
         ] {
             let dir = tempfile::tempdir().unwrap();
             let params = ProtocolParams::burst_defaults();

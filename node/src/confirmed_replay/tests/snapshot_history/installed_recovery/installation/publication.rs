@@ -32,6 +32,10 @@ fn full_installation_rejects_a_compact_base_added_after_preparation() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn compact_installation_publishes_live_engines_and_preserves_old_promises() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_ansi(false)
+        .try_init();
     let (fixture, _source_dir, source, manifest, certificate) = selection::setup();
     let bytes = archive(&source, &fixture, manifest.checkpoint.parent);
     let old =
@@ -39,7 +43,7 @@ async fn compact_installation_publishes_live_engines_and_preserves_old_promises(
     let expected =
         authenticate(&source, &fixture.params, certificate.checkpoint.hash()).into_continuation();
     let (dir, local) = cemented::sparse(&old, &source);
-    records(&local, &source, &fixture, &bytes);
+    copy_installed_records(&local, &source, &fixture, &bytes);
     // A runnable sparse node retains its pinned network genesis even when the
     // genesis account has advanced. The head-only replay fixture omits it.
     let genesis = &fixture.blocks[0];
@@ -90,7 +94,7 @@ async fn compact_installation_publishes_live_engines_and_preserves_old_promises(
     })
     .await
     .unwrap();
-    let service = Service::start(Arc::new(source), node.store.clone(), 0).await;
+    let service = WitnessService::start(Arc::new(source), node.store.clone(), 0).await;
     node.ledger_cache.reset((999, 99, 9));
     node.frontier.write().await.update(address(99), promised);
     node.priority_scheduler

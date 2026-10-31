@@ -18,7 +18,7 @@ pub enum Action {
         #[arg(long)]
         output: PathBuf,
     },
-    /// Replay the epoch, collect matching human-quorum attestations and write an archive.
+    /// Replay the epoch, verify supplied attestation files and write a human-quorum archive.
     Export {
         #[arg(long, value_parser = parse_epoch)]
         epoch: burst_types::BlockHash,
@@ -31,7 +31,8 @@ pub enum Action {
         output: PathBuf,
     },
     /// Verify genesis-to-epoch authority, human quorum and the entire state body.
-    /// Does not install state, prune history, open a database or start networking.
+    /// Uses temporary scratch files without opening the node ledger or starting networking.
+    /// Does not install state or prune history.
     Verify {
         #[arg(long)]
         input: PathBuf,
@@ -48,15 +49,7 @@ pub enum Action {
 }
 
 fn parse_epoch(value: &str) -> Result<burst_types::BlockHash, String> {
-    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("expected a 64-character hexadecimal checkpoint hash".into());
-    }
-    let mut bytes = [0; 32];
-    for (index, byte) in bytes.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
-            .map_err(|_| "invalid checkpoint hash")?;
-    }
-    Ok(burst_types::BlockHash::new(bytes))
+    value.parse().map_err(|error: burst_types::transaction_hash::ParseHashError| error.to_string())
 }
 
 pub fn run(config: &NodeConfig, action: Action) -> anyhow::Result<()> {

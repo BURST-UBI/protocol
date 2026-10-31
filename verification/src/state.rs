@@ -1,11 +1,12 @@
 //! Verification process state tracking.
 
+use crate::shared::Shared;
 use burst_types::{Timestamp, WalletAddress};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-/// Preserve the existing map wire shape while making embedded snapshot bytes
-/// independent of HashMap insertion order and randomized hashing.
+/// Serialize wallet-keyed maps in address order, independent of insertion
+/// order and randomized hashing.
 pub(crate) fn ordered_wallet_map<T: Serialize, S: serde::Serializer>(
     values: &std::collections::HashMap<WalletAddress, T>,
     serializer: S,
@@ -26,20 +27,20 @@ pub struct VerificationState {
     pub phase: VerificationPhase,
     /// Endorsements received so far.
     #[serde(serialize_with = "ordered_endorsements")]
-    pub endorsements: Vec<Endorsement>,
-    /// O(1) lookup set for endorser duplicate detection.
+    pub endorsements: Shared<Vec<Endorsement>>,
+    /// Duplicate-detection index; must remain consistent with `endorsements`.
     #[serde(default, serialize_with = "ordered_wallets")]
-    pub endorser_set: HashSet<WalletAddress>,
+    pub endorser_set: Shared<HashSet<WalletAddress>>,
     /// Verifiers selected for this round.
-    pub selected_verifiers: Vec<WalletAddress>,
+    pub selected_verifiers: crate::committee::Committee,
     /// Votes cast so far.
-    #[serde(serialize_with = "ordered_votes")]
-    pub votes: Vec<VerifierVote>,
+    #[serde(serialize_with = "ordered_current_votes")]
+    pub votes: crate::votes::Votes,
     /// Number of re-votes that have occurred.
     pub revote_count: u32,
     /// Verifiers excluded from future revote rounds (previous round participants).
     #[serde(serialize_with = "ordered_wallets")]
-    pub excluded_verifiers: HashSet<WalletAddress>,
+    pub excluded_verifiers: Shared<HashSet<WalletAddress>>,
     /// When this verification process started.
     pub started_at: Timestamp,
 }
@@ -53,8 +54,8 @@ fn ordered_wallets<S: serde::Serializer>(
     wallets.serialize(serializer)
 }
 
-fn sorted_votes(votes: &[VerifierVote]) -> Vec<&VerifierVote> {
-    let mut sorted: Vec<_> = votes.iter().collect();
+fn sorted_votes<'a>(votes: impl IntoIterator<Item = &'a VerifierVote>) -> Vec<&'a VerifierVote> {
+    let mut sorted: Vec<_> = votes.into_iter().collect();
     sorted.sort_by_key(|vote| {
         (
             vote.verifier.as_str(),
@@ -64,6 +65,10 @@ fn sorted_votes(votes: &[VerifierVote]) -> Vec<&VerifierVote> {
         )
     });
     sorted
+}
+
+fn ordered_current_votes<S: serde::Serializer>(votes: &crate::votes::Votes, serializer: S) -> Result<S::Ok, S::Error> {
+    sorted_votes(votes).serialize(serializer)
 }
 
 pub(crate) fn ordered_votes<S: serde::Serializer>(
@@ -113,9 +118,8 @@ pub enum VerificationPhase {
     Challenged,
     /// Previously verified but fraud confirmed via challenge.
     Unverified,
-    /// Previously verified but deactivated via a benign (inactivity) challenge —
-    /// distinct from `Unverified`: the holder was real and their TRST is NOT
-    /// revoked (whitepaper §Unverification Without Revocation).
+    /// Deactivated after an upheld inactivity challenge. This outcome stops
+    /// BRN accrual without revoking the wallet's TRST origin.
     Deactivated,
 }
 
@@ -133,7 +137,7 @@ pub struct Endorsement {
     pub timestamp: Timestamp,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerifierVote {
     pub verifier: WalletAddress,
     pub vote: super::voting::Vote,

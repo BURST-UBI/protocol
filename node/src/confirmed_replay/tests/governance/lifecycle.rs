@@ -44,7 +44,7 @@ fn compact_checkpoint_counts_governance_then_activates_the_governed_rate() {
     });
     fixture.push(0, BlockType::GovernanceEndorse, 111, |block| {
         block.link = proposal;
-        block.brn_balance += 1;
+        block.brn_spent += 1;
     });
     for seed in [0, 2] {
         fixture.push(seed, BlockType::GovernanceVote, 122, |block| {
@@ -175,6 +175,7 @@ fn legacy_confirmed_governance_cannot_partially_initialize_certified_authority()
         burst_store::meta::PAYMENT_VOTE_LIMIT_KEY,
         burst_store::meta::GOVERNANCE_COUNTING_LIMIT_KEY,
         crate::confirmed_governance::KEY,
+        crate::confirmed_governance::HEADER,
     ] {
         assert!(
             matches!(
@@ -211,7 +212,7 @@ fn certified_activation_fences_later_votes_and_reauthenticates_its_limit_on_rest
     .unwrap();
     assert_eq!(limit, CUT + 11);
     let late = fixture.push(0, BlockType::Burn, limit + 1, |block| {
-        block.brn_balance += 1;
+        block.brn_spent += 1;
         block.link = destination(1);
         block.payment_epoch = epoch;
     });
@@ -261,7 +262,7 @@ fn certified_activation_fences_later_votes_and_reauthenticates_its_limit_on_rest
         .put_meta(PAYMENT_VOTE_LIMIT_KEY, &saved)
         .unwrap();
     let before = fixture.push(0, BlockType::Burn, limit - 1, |block| {
-        block.brn_balance += 1;
+        block.brn_spent += 1;
         block.link = destination(1);
         block.payment_epoch = epoch;
     });
@@ -290,8 +291,8 @@ fn certified_activation_fences_later_votes_and_reauthenticates_its_limit_on_rest
     crate::payment_authority::initialize(&store, NetworkId::Dev, &fixture.params).unwrap();
 }
 
-#[test]
-fn governance_expiry_boundaries_preserve_pending_ownership_and_retroactive_period_changes() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn governance_expiry_boundaries_preserve_pending_ownership_and_retroactive_period_changes() {
     // Expiry at activation uses the resulting period. A return at an earlier
     // certified cut remains owned by its sender even when an extension revives it.
     for (old_period, new_period, minted, stays_pending, sender_active, sender_expired) in [
@@ -311,8 +312,11 @@ fn governance_expiry_boundaries_preserve_pending_ownership_and_retroactive_perio
                 new_value: new_period,
             }],
         );
+        for offset in 0..4 {
+            fixture.push(0, BlockType::ChangeRepresentative, 124 + offset, |_| {});
+        }
         let burn = fixture.push(0, BlockType::Burn, minted, |block| {
-            block.brn_balance += 40;
+            block.brn_spent += 40;
             block.link = destination(1);
         });
         let (_dir, store, _) = fixture.store();
@@ -357,6 +361,7 @@ fn governance_expiry_boundaries_preserve_pending_ownership_and_retroactive_perio
             ReplayManifest::Governance(activation.manifest().clone()),
             &[0, 1, 2],
         );
+        let claim_start = fixture.blocks.len();
         let events = chain::load(&store, NetworkId::Dev, &fixture.params).unwrap();
         let state = ConfirmedReplay::replay_with_events(
             &fixture.history(CUT + 2),
@@ -423,11 +428,8 @@ fn governance_expiry_boundaries_preserve_pending_ownership_and_retroactive_perio
                 .unwrap();
         }
         let sender = fresh.account_store().get_account(&address(0)).unwrap();
-        let wallets = fresh
-            .meta_store()
-            .get_meta(burst_trst::TrstEngine::meta_key())
-            .unwrap();
-        let restored = burst_trst::TrstEngine::load_wallets(&wallets, new_period as u64).unwrap();
+        let restored = crate::trst_storage::load(
+            &fresh.tx_begin_write().unwrap(), new_period as u64).unwrap();
         assert_eq!(
             (
                 restored
@@ -571,7 +573,41 @@ fn governance_expiry_boundaries_preserve_pending_ownership_and_retroactive_perio
                         .cached_transferable,
                     40
                 );
+                crate::confirmed_replay::tests::snapshot_history::installed_recovery::body_retirement::assert_governed_restoration(
+                    &fixture, std::sync::Arc::new(store),
+                    ballot.manifest().checkpoint.hash(),
+                    activation.manifest().checkpoint.hash(),
+                    &fixture.blocks[claim_start..], &delivered,
+                ).await;
             }
         }
     }
+}
+
+#[test]
+fn certified_bootstrap_veto_survives_replay_while_other_approval_activates() {
+    let (mut fixture, proposals) = fixture_with_cooldown(10);
+    let (_dir, store, _) = fixture.store();
+    let ballot = PreparedGovernance::prepare_next(&store, NetworkId::Dev, &fixture.params, CUT)
+        .unwrap().unwrap();
+    let epoch = ballot.manifest().checkpoint.hash();
+    install(&store, &fixture.params, ReplayManifest::Governance(ballot.manifest().clone()), &[0]);
+    fixture.push(0, BlockType::GovernanceVeto, CUT + 1, |block| {
+        block.payment_epoch = epoch;
+        block.link = BlockHash::new(*proposals[0].as_bytes());
+        block.transaction = TxHash::ZERO;
+    });
+    fixture.append_confirmed_prefix(&store, CUT + 2);
+    let activation = PreparedGovernance::prepare_next(&store, NetworkId::Dev, &fixture.params, CUT + 11)
+        .unwrap().unwrap();
+    assert_eq!(activation.manifest().proposals, vec![proposals[1]]);
+    install(&store, &fixture.params, ReplayManifest::Governance(activation.manifest().clone()), &[0, 1, 2]);
+    let events = chain::load(&store, NetworkId::Dev, &fixture.params).unwrap();
+    let restored = ConfirmedReplay::replay_with_events(&fixture.history(CUT + 11),
+        NetworkId::Dev, &fixture.params, &events).unwrap();
+    let governance = &restored.governance.as_ref().unwrap().governance;
+    assert_eq!(governance.get_proposal(&proposals[0]).unwrap().phase, GovernancePhase::Vetoed);
+    assert_eq!(governance.get_proposal(&proposals[1]).unwrap().phase, GovernancePhase::Activated);
+    assert_eq!(restored.params().brn_rate, 3);
+    crate::confirmed_replay::tests::snapshot_history::boundaries::assert_chain(&fixture, &store);
 }

@@ -1,0 +1,116 @@
+# Bounded migration of historical checkpoint records
+
+Status: production migration remains disabled.461–466provide functional staging,
+worker, publication, restart/cancellation and cleanup evidence.465/466diagnostics
+on the500IOPS disk found long durable-write waits.468reused the same466binary and
+original workload on a temporary P20disk: head writer median8ms,p9546ms,max79ms,
+versus105/158/2363ms; total79s versus488s. This supports storage-environment dominance,
+not release/sustained-service qualification. Resulting fixture preserved and the
+temporary disk deleted. 471completed all supported archive records: all18exact after reopen, live bytes
+55,422,976B (26.60%below original legacy), extent/peak102,006,784B unchanged during
+this resumed run. File extent remains above original legacy. 475additionally passed4096head scheduled migration with2575competing metadata
+commits in267.21s, exact bytes and1s shutdown. Writer median2.856ms,p955.130ms,
+max1250.186ms. This is synthetic storage contention, not signed traffic or whole-node
+qualification. Write amplification, latency tails and production qualification remain open. Keep economic semantics, durability and resource caps unchanged.
+
+## Existing mechanisms and original extension requirements
+
+| Mechanism | Source | Supported behavior | Original extension requirement |
+| --- | --- | --- | --- |
+| Bounded metadata cursor | store_lmdb/src/meta.rs visit_prefix_page_txn | Indexed seek, row/byte budgets and explicit completion | Durable migration cursor/record ownership |
+| Ordered tree builder | node/src/ordered_radix.rs | One emission per leaf/branch, at most256unfinished branches | Durable continuation and pin transfer across commits |
+| Scratch compaction | node/src/confirmed_replay/scratch_index.rs FixedScratchCompaction | Budgeted cursor, poisoned errors, immutable-root identity check | Its private scratch roots do not own shared LMDB nodes |
+| Shared ownership | store_lmdb/src/write_batch/checkpoint_heads.rs | Atomic root/edge references, queued bounded reclamation | Durable migration-owned frontier |
+| Paged bytes | node/src/paged_metadata.rs | Exact stream commitment and fixed page format | Writer borrows one transaction; finish deletes all obsolete pages |
+| Record observations | node/src/checkpoint_store/compact.rs RecordObservation | Exact logical identity verification | Verification reads complete logical bytes; not bounded writer publication |
+| Periodic maintenance | node/src/checkpoint_store/record_storage/maintenance.rs | Single-flight tick, shutdown, bounded queue cleanup | Migration phases and cursor |
+
+The last column records the original design gaps, not the current implementation
+status. Staging, publication and migration now extend these mechanisms as described
+below. Keep reusing them; no second tree algorithm, metadata scan API, daemon task,
+hash codec or receipt framework is needed.
+
+## Required phases and ownership
+
+1. Select one eligible archive key through the existing indexed metadata cursor.
+   Persist progress only with the work it describes. Bound examined rows and
+   copied bytes, including skipped inline/unsupported records. Do not repeatedly
+   restart at the beginning or skip an oversized supported record forever.
+2. Validate the original logical bytes and canonical head span under a pinned
+   read view, with bounded continuation/cancellation. Original descriptor and
+   pages remain authoritative throughout preparation. Limit retained input RAM
+   and pinned-reader lifetime explicitly; a16MiB record limit alone does not
+   bound worker time or copy-on-write growth.
+3. Build nodes in bounded writer batches using ordered_radix. A committed
+   unfinished forest must have durable ownership. In the same transaction,
+   transfer temporary ownership from consumed child roots to each new parent
+   and save the new frontier. The frontier has at most257roots. A live in-memory
+   builder alone is insufficient:457cleanup can reclaim every zero-owner node.
+4. Stage envelope pages using the existing byte format in a migration-specific
+   namespace, with a bounded page/byte budget. Persist count/commitment state
+   with pages; never expose incomplete envelope bytes through a live descriptor.
+   Large certificate/proposal suffixes must work; tests already include these.
+5. Verify the complete staged reconstruction, then atomically publish the final
+   descriptor and root/envelope ownership only if its source identity is still
+   current. A raw descriptor comparison alone has not been proven sufficient:
+   existing RecordObservation verifies full logical bytes, and a mutable paged
+   value has multiple dependencies. Establish a mutation-complete source token
+   or immutable ownership before replacing that verification with a cheap check.
+   Do not use unrelated global ledger generations as an automatic restart rule.
+6. Retire old pages and staging ownership through bounded persistent cleanup.
+   Existing paged_metadata::delete_at and Writer::finish loop through all old
+   pages; calling either for a whole large record inside final publication would
+   reintroduce the long transaction this migration is intended to avoid.
+
+Every phase must survive abort and reopen. Cancellation cannot publish a partial
+record, drop original ownership, leak staging pins permanently or discard the
+only cleanup cursor. Stale source inputs abort the migration without replacing
+newer bytes. Errors must retain enough durable state for bounded reclamation.
+
+## Checks required before scheduling migration
+
+- Progress across writer boundaries and process restart, including a partially
+  completed tree frontier and large envelopes.
+- Existing cleanup running between every staging batch cannot reclaim owned
+  staging nodes. Abandoned staging eventually releases its pins.
+- Abort/cancellation at each publication boundary preserves exact original bytes.
+- Replacement/deletion of the source during preparation cannot be overwritten.
+- Corrupt descriptors, nodes, pages and continuation state fail closed.
+- Every phase enforces explicit node/page/byte budgets, including skip, finish,
+  stale cleanup and error paths; no final unbounded scan or deletion loop.
+- Pinned readers retain original bytes across publication and cleanup.
+- Retained450fixtures provide physical live/extent and write-stage comparisons;
+  preserve baseline hashes and reuse456/457functional evidence within scope.
+- Measure writer occupancy and sustained progress separately from functional
+  count bounds. Debug/validation timing is not release acceptance.
+
+## Next implementation boundary
+
+Source identity now has VerifiedSource: bounded existing observation covers final
+read verification through publication, rejects relevant intermediate/ABA mutations
+and fails closed on overflow/unknown commits. Acquire only after staging; observer
+contention defers and restart requires fresh verification.459tests this in isolation.
+
+Durable staging-root ownership passed460. Builder continuation, atomic frontier
+transfer and a read-only restart cursor are now implemented with regressions, and
+verified by461. Bounded private page copying/discard and replacement-safe
+old-page retirement also passed461. Atomic publication and durable worker scheduling are implemented.463/464/466
+provide scoped publication, worker restart, cancellation and scheduling evidence.
+The worker advances staged construction rather than calling normalize(one record).
+Production scheduling remains disabled pending capacity and sustained mixed-load
+qualification; another integration build is not needed for unchanged source. No expensive check is justified by
+this document alone. Page-count overhead and production capacity remain separate
+requirements even when migration preserves every logical byte.
+
+Publication implementation uses the existing final envelope namespace while the
+source stays legacy. Worker ownership must prevent duplicate jobs, and abandoned
+cleanup must preserve that namespace if a newer shared replacement owns it.
+Final verification protects envelope pages/descriptor and its staging cursor via
+the same source observer; full staged reconstruction precedes writer acquisition.
+
+469compiled the existing probe's full-archive mode;471passed using that binary
+on a disposable copy of468partial fixture. It skips
+already-shared records, requires every selected supported record to publish,
+compares all18original bytes after reopen, asserts final live bytes below450legacy
+baseline, and records peak extent per batch. Reuse468partial fixture; no largest-
+record regeneration. This remains resumed migration evidence, not fresh onboarding.

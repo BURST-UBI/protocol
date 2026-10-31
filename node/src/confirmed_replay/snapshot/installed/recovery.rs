@@ -1,4 +1,5 @@
 use super::*;
+use super::metadata::RecoveryControl;
 use crate::confirmed_replay::snapshot::SelectionSource;
 use crate::{
     checkpoint_agreement::ReplayManifest,
@@ -23,6 +24,11 @@ pub struct RecoveredSnapshot {
     observations: compact::RecordObservations,
     last_decision: Option<(CheckpointAnchor, CheckpointCertificate, ReplayManifest)>,
     from_archive: bool,
+}
+
+pub(crate) enum CandidateDiscovery {
+    Ready(Option<crate::checkpoint_agreement::CompactReplayCandidate>),
+    Advanced,
 }
 
 pub(crate) struct ReplayCache {
@@ -148,8 +154,9 @@ impl AuthenticatedSnapshot {
     }
 
     /// Recover retained checkpoint records without replaying the pre-base ledger.
-    /// The provider supplies only cursor-authenticated membership witnesses. A
-    /// missing dependency or beacon fails closed; no storage is changed.
+    /// The provider supplies cursor-authenticated membership witnesses. Missing
+    /// dependencies or beacons required by replay cause an error. Scratch files
+    /// may be written; the ledger database is unchanged.
     pub fn recover_stored_successors(
         self,
         store: &LmdbStore,
@@ -223,13 +230,25 @@ impl AuthenticatedSnapshot {
         registry: Arc<RwLock<crate::connection_registry::ConnectionRegistry>>,
         target: Option<BlockHash>,
     ) -> Result<RecoveredSnapshot, StoreError> {
+        self.recover_from_peers_until(store, registry, target, RecoveryControl::default()).await?
+            .ok_or_else(|| invalid("uncancelled tip recovery stopped"))
+    }
+
+    pub(super) async fn recover_from_peers_until(
+        self,
+        store: Arc<LmdbStore>,
+        registry: Arc<RwLock<crate::connection_registry::ConnectionRegistry>>,
+        target: Option<BlockHash>,
+        control: RecoveryControl,
+    ) -> Result<Option<RecoveredSnapshot>, StoreError> {
+        if control.checkpoint("tip-recovery:before-plan") { return Ok(None); }
         let source = Arc::clone(&store);
         let (recovered, records) =
             tokio::task::spawn_blocking(move || self.begin_recovery(&source, target))
                 .await
                 .map_err(invalid)??;
         recovered
-            .recover_records_from_peers(records, store, registry)
+            .recover_records_from_peers_until(records, store, registry, control)
             .await
     }
 
@@ -315,6 +334,19 @@ impl RecoveredSnapshot {
         registry: Arc<RwLock<crate::connection_registry::ConnectionRegistry>>,
         target: Option<BlockHash>,
     ) -> Result<Self, StoreError> {
+        Self::recover_genesis_from_peers_until(store, network, params, registry, target, RecoveryControl::default()).await?
+            .ok_or_else(|| invalid("uncancelled tip recovery stopped"))
+    }
+
+    pub(super) async fn recover_genesis_from_peers_until(
+        store: Arc<LmdbStore>,
+        network: NetworkId,
+        params: ProtocolParams,
+        registry: Arc<RwLock<crate::connection_registry::ConnectionRegistry>>,
+        target: Option<BlockHash>,
+        control: RecoveryControl,
+    ) -> Result<Option<Self>, StoreError> {
+        if control.checkpoint("tip-recovery:before-plan") { return Ok(None); }
         let source = store.clone();
         let (recovered, records) = tokio::task::spawn_blocking(move || {
             let mut recovered = Self::genesis(&source, network, &params)?;
@@ -330,7 +362,7 @@ impl RecoveredSnapshot {
         .await
         .map_err(invalid)??;
         recovered
-            .recover_records_from_peers(records, store, registry)
+            .recover_records_from_peers_until(records, store, registry, control)
             .await
     }
 
@@ -350,13 +382,25 @@ impl RecoveredSnapshot {
         registry: Arc<RwLock<crate::connection_registry::ConnectionRegistry>>,
         target: Option<BlockHash>,
     ) -> Result<Self, StoreError> {
+        self.advance_target_from_peers_until(store, registry, target, RecoveryControl::default()).await?
+            .ok_or_else(|| invalid("uncancelled tip recovery stopped"))
+    }
+
+    pub(super) async fn advance_target_from_peers_until(
+        self,
+        store: Arc<LmdbStore>,
+        registry: Arc<RwLock<crate::connection_registry::ConnectionRegistry>>,
+        target: Option<BlockHash>,
+        control: RecoveryControl,
+    ) -> Result<Option<Self>, StoreError> {
+        if control.checkpoint("tip-recovery:before-plan") { return Ok(None); }
         let source = store.clone();
         let (recovered, records) =
             tokio::task::spawn_blocking(move || self.begin_advance(&source, target))
                 .await
                 .map_err(invalid)??;
         recovered
-            .recover_records_from_peers(records, store, registry)
+            .recover_records_from_peers_until(records, store, registry, control)
             .await
     }
 
@@ -408,17 +452,20 @@ impl RecoveredSnapshot {
         Ok(recovered)
     }
 
-    fn recover_records_from_peers(
+    fn recover_records_from_peers_until(
         mut self,
         records: compact::RecoveryReferences,
         store: Arc<LmdbStore>,
         registry: Arc<RwLock<crate::connection_registry::ConnectionRegistry>>,
-    ) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<Self, StoreError>> + Send>>
+        control: RecoveryControl,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<Self>, StoreError>> + Send>>
     {
         // Startup, cached recovery and tip refresh nest this replay loop. Keep
         // its suspension state out of each caller's async frame.
         Box::pin(async move {
+            if control.checkpoint("tip-recovery:planned") { return Ok(None); }
             for record in records.into_cursor()? {
+                if control.checkpoint("tip-recovery:record") { return Ok(None); }
                 let record = record?;
                 let source = store.clone();
                 let (state, record, plan) = tokio::task::spawn_blocking(move || {
@@ -428,17 +475,20 @@ impl RecoveredSnapshot {
                 })
                 .await
                 .map_err(invalid)??;
-                let retained = crate::checkpoint_sync::witness::fetch_plan(
+                if control.checkpoint("tip-recovery:record-planned") { return Ok(None); }
+                let retained = control.peer_wait(crate::checkpoint_sync::witness::fetch_plan(
                     &registry,
                     &state.continuation,
                     &plan,
-                )
-                .await?;
+                )).await?;
+                let Some(retained) = retained else { return Ok(None); };
+                if control.checkpoint("tip-recovery:before-apply") { return Ok(None); }
                 self = tokio::task::spawn_blocking(move || state.apply(record, plan, retained))
                     .await
                     .map_err(invalid)??;
             }
-            Ok(self)
+            if control.checkpoint("tip-recovery:records-complete") { return Ok(None); }
+            Ok(Some(self))
         })
     }
 
@@ -489,7 +539,8 @@ impl RecoveredSnapshot {
     }
 
     /// Validate a transferred selection beacon before storing either new record.
-    /// A delayed beacon updates the existing certificate without replacing it.
+    /// A delayed beacon is attached to the stored selection record; its original
+    /// certificate is preserved.
     pub async fn accept_decision_with_beacon_from_peers(
         self: Arc<Self>,
         store: Arc<LmdbStore>,
@@ -551,8 +602,23 @@ impl RecoveredSnapshot {
         registry: Arc<RwLock<crate::connection_registry::ConnectionRegistry>>,
         clock: crate::checkpoint_replay::SigningClock,
     ) -> Result<Option<crate::checkpoint_agreement::CompactReplayCandidate>, StoreError> {
+        match self.discover_cemented_candidate_attempt(store, registry, clock, |_, _| Ok(())).await? {
+            CandidateDiscovery::Ready(candidate) => Ok(candidate),
+            CandidateDiscovery::Advanced => Err(StoreError::StaleRead("confirmed cut advanced during compact discovery".into())),
+        }
+    }
+
+    pub(crate) async fn discover_cemented_candidate_attempt(
+        self: Arc<Self>,
+        store: Arc<LmdbStore>,
+        registry: Arc<RwLock<crate::connection_registry::ConnectionRegistry>>,
+        clock: crate::checkpoint_replay::SigningClock,
+        before_validation: impl FnOnce(&LmdbStore, &CheckpointAnchor) -> Result<(), StoreError> + Send + 'static,
+    ) -> Result<CandidateDiscovery, StoreError> {
         let source = Arc::clone(&store);
         let (base, plan) = tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            let _timing = DiscoveryTiming::new("plan", source.clone());
             let plan = self
                 .continuation
                 .plan_cemented_tail(&source)
@@ -561,32 +627,101 @@ impl RecoveredSnapshot {
         })
         .await
         .map_err(invalid)??;
+        #[cfg(test)]
+        let timing = DiscoveryTiming::new("witness", store.clone());
         let retained = crate::checkpoint_sync::witness::fetch_plan(
             &registry,
             &base.continuation,
             plan.witness_plan(),
         )
         .await?;
+        #[cfg(test)]
+        drop(timing);
         tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            let timing = DiscoveryTiming::new("replay", store.clone());
             let cemented = plan.finish(retained).map_err(invalid)?;
             let candidate = base
                 .continuation
                 .prepare_next_cemented_candidate(&store, &cemented, &base.selections, clock)
                 .map_err(invalid)?;
+            #[cfg(test)]
+            drop(timing);
+            #[cfg(test)]
+            let timing = DiscoveryTiming::new("writer-wait", store.clone());
+            if candidate.is_some() {
+                before_validation(&store, base.continuation.anchor())?;
+            }
             let batch = store.tx_begin_write()?;
+            #[cfg(test)]
+            drop(timing);
+            #[cfg(test)]
+            let _timing = DiscoveryTiming::new("validation", store.clone());
             base.verify_records_unchanged(&batch)?;
-            base.continuation
-                .verify_installed_metadata_in(&batch, &cemented)?;
+            match base.continuation.verify_discovery_metadata_in(&batch, &cemented) {
+                Err(StoreError::StaleRead(_)) => return Ok(CandidateDiscovery::Advanced),
+                result => result?,
+            }
             if let Some(candidate) = &candidate {
-                candidate
-                    .input()
-                    .check_signing_parent(&batch, base.continuation.anchor())?;
+                match candidate.input().check_signing_parent(&batch, base.continuation.anchor()) {
+                    Err(StoreError::StaleRead(_)) => return Ok(CandidateDiscovery::Advanced),
+                    result => result?,
+                }
             }
             drop(batch);
-            Ok(candidate)
+            Ok(CandidateDiscovery::Ready(candidate))
         })
         .await
         .map_err(invalid)?
+    }
+
+    /// Replay the applied suffix to cover local final promises whose blocks are
+    /// not yet cemented. Capture confirmed and applied tails together, and check
+    /// local metadata against the confirmed tail before returning a candidate.
+    pub(crate) async fn discover_promised_candidate_from_peers(
+        self: Arc<Self>, store: Arc<LmdbStore>,
+        registry: Arc<RwLock<crate::connection_registry::ConnectionRegistry>>,
+        clock: crate::checkpoint_replay::SigningClock,
+        representative: burst_types::WalletAddress,
+    ) -> Result<CandidateDiscovery, StoreError> {
+        let source = store.clone();
+        let (base, confirmed_plan, applied_plan, authenticated) = tokio::task::spawn_blocking(move || {
+            let (confirmed, applied, proofs) = self.continuation.plan_installed_tails(&source).map_err(invalid)?;
+            Ok::<_, StoreError>((self, confirmed, applied, proofs))
+        }).await.map_err(invalid)??;
+        let retained = crate::checkpoint_sync::witness::fetch_plan_reusing(
+            &registry, &base.continuation, confirmed_plan.witness_plan(), &authenticated,
+        ).await?;
+        let applied_retained = if confirmed_plan.witness_plan().witness_hashes()
+            == applied_plan.witness_plan().witness_hashes() {
+            retained.clone()
+        } else {
+            crate::checkpoint_sync::witness::fetch_plan_reusing(
+                &registry, &base.continuation, applied_plan.witness_plan(), retained.clone(),
+            ).await?
+        };
+        tokio::task::spawn_blocking(move || {
+            let confirmed = confirmed_plan.finish(retained).map_err(invalid)?;
+            let applied = applied_plan.finish(applied_retained).map_err(invalid)?;
+            let candidate = base.continuation.prepare_next_replayed_candidate(
+                &store, applied.tail(), &base.selections, clock,
+            ).map_err(invalid)?;
+            let batch = store.tx_begin_write()?;
+            base.verify_records_unchanged(&batch)?;
+            match base.continuation.verify_discovery_metadata_in(&batch, &confirmed) {
+                Err(StoreError::StaleRead(_)) => return Ok(CandidateDiscovery::Advanced),
+                result => result?,
+            }
+            applied.verify_unchanged(&batch)?;
+            if let Some(candidate) = &candidate {
+                candidate.input().check_signing_parent(&batch, base.continuation.anchor())?;
+                if !candidate.input().covers_local_promises(&batch, &representative)? {
+                    return Err(StoreError::Backend("replayed cut cannot yet cover local final promises".into()));
+                }
+            }
+            tracing::debug!("replayed applied extension for checkpoint final promises");
+            Ok(CandidateDiscovery::Ready(candidate))
+        }).await.map_err(invalid)?
     }
 
     /// Derive a confirmed cut from the installed compact ledger, then replay
@@ -630,7 +765,7 @@ impl RecoveredSnapshot {
             let batch = store.tx_begin_write()?;
             base.verify_records_unchanged(&batch)?;
             base.continuation
-                .verify_installed_metadata_in(&batch, &cemented)?;
+                .verify_discovery_metadata_in(&batch, &cemented)?;
             if let Some(candidate) = &candidate {
                 candidate.check_signing_parent(&batch, base.continuation.anchor())?;
             }
@@ -918,15 +1053,30 @@ impl RecoveredSnapshot {
             .transpose()
     }
 
-    pub(super) fn into_record_observations(self) -> compact::RecordObservations {
-        self.observations
+    pub(super) fn into_journal_history(self) -> (super::SelectionHistory, compact::RecordObservations) {
+        (self.selections, self.observations)
     }
 
     pub(crate) fn verify_records_unchanged(
         &self,
         batch: &LmdbWriteTransaction<'_>,
     ) -> Result<(), StoreError> {
-        self.observations.verify(batch)
+        self.verify_records_view(&batch.read_view())
+    }
+
+    pub(crate) fn verify_records_view(
+        &self,
+        batch: &burst_store_lmdb::read_view::LedgerReadView<'_>,
+    ) -> Result<(), StoreError> {
+        self.verify_records_view_with_poll(batch, &|_| Ok(()))
+    }
+
+    pub(crate) fn verify_records_view_with_poll(
+        &self,
+        batch: &burst_store_lmdb::read_view::LedgerReadView<'_>,
+        poll: &dyn Fn(&'static str) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        self.observations.verify_view_with_poll(batch, poll)
     }
 
     pub(crate) fn verify_replayed_decision(
@@ -995,15 +1145,27 @@ impl RecoveredSnapshot {
         record: compact::RecoveryRecord,
         observations: &compact::RecordObservations,
         tail: SnapshotTail,
-    ) -> Result<(Self, super::super::continuation::CompactCutCoverage), StoreError> {
+        accepted: Option<&Self>,
+    ) -> Result<(Self, super::super::continuation::CompactCutCoverage, bool), StoreError> {
         let cut = self.continuation.cut_coverage(&tail).map_err(invalid)?;
+        if let Some(accepted) = accepted.filter(|accepted|
+            accepted.continuation.anchor().hash() == record.certificate.checkpoint.hash()) {
+            // Journal recovery already executed this exact certified successor.
+            // Its observations include beacon bytes; neither a later accepted tip
+            // nor changed records can replace this immediate installation input.
+            let reader = store.tx_begin_read()?;
+            accepted.verify_records_view(&store.read_view(&reader)?)?;
+            accepted.verify_replayed_decision(&record.certificate, &record.manifest)?;
+            drop(reader);
+            return Ok((accepted.fork(store.env().path())?, cut, true));
+        }
         let mut next = self.fork(store.env().path())?;
         let mut observed = observations.fork()?;
         observed.retain_through(record.certificate.checkpoint.height)?;
         observed.retain_retired_from(&self.observations, self.continuation.anchor())?;
         next.observations = observed;
         next.attach_activation_beacon(&record)?;
-        Ok((next.apply_tail(record, tail)?, cut))
+        Ok((next.apply_tail(record, tail)?, cut, false))
     }
 
     fn apply_tail(
@@ -1037,5 +1199,39 @@ impl RecoveredSnapshot {
             .append(&record.certificate, self.continuation.anchor())?;
         self.last_decision = Some((parent, record.certificate, record.manifest));
         Ok(self)
+    }
+}
+
+/// Optional diagnostics for the sustained-traffic fixture; absent from production.
+#[cfg(test)]
+struct DiscoveryTiming {
+    stage: &'static str,
+    store: Arc<LmdbStore>,
+    started: std::time::Instant,
+    revision: usize,
+    enabled: bool,
+}
+
+#[cfg(test)]
+impl DiscoveryTiming {
+    fn new(stage: &'static str, store: Arc<LmdbStore>) -> Self {
+        Self {
+            stage,
+            revision: store.env().info().last_txn_id,
+            store,
+            started: std::time::Instant::now(),
+            enabled: std::env::var_os("BURST_TRACE_COMPACT_DISCOVERY").is_some(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for DiscoveryTiming {
+    fn drop(&mut self) {
+        if self.enabled {
+            eprintln!("compact discovery timing: store={} stage={} elapsed_us={} revision_before={} revision_after={}",
+                self.store.env().path().display(), self.stage, self.started.elapsed().as_micros(),
+                self.revision, self.store.env().info().last_txn_id);
+        }
     }
 }

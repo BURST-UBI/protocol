@@ -1,13 +1,11 @@
-//! Nullable network — record messages without sending them.
-//!
-//! Thread-safe: uses Mutex so it can be shared across async tasks.
+//! In-memory sent-message recorder and independently populated inbox.
 
 use std::sync::Mutex;
 
-/// A test network that records messages instead of sending them.
-/// Thread-safe for use with tokio's multi-threaded runtime.
+/// Mutex-protected message lists for tests. Sending does not populate an inbox
+/// or simulate sockets, delivery failures, backpressure or peer authentication.
 pub struct NullNetwork {
-    /// All messages "sent" by the node.
+    /// Messages passed to send.
     sent_messages: Mutex<Vec<Vec<u8>>>,
     /// Messages to deliver on the next "receive" call.
     inbox: Mutex<Vec<Vec<u8>>>,
@@ -31,7 +29,7 @@ impl NullNetwork {
         self.inbox.lock().unwrap().push(message);
     }
 
-    /// Receive the next message from the inbox.
+    /// Remove the oldest inbox message. Vec removal shifts the remaining entries.
     pub fn receive(&self) -> Option<Vec<u8>> {
         let mut inbox = self.inbox.lock().unwrap();
         if inbox.is_empty() {
@@ -41,7 +39,7 @@ impl NullNetwork {
         }
     }
 
-    /// Get all sent messages (for assertions).
+    /// Clone the complete sent-message history for assertions.
     pub fn sent(&self) -> Vec<Vec<u8>> {
         self.sent_messages.lock().unwrap().clone()
     }
@@ -51,7 +49,7 @@ impl NullNetwork {
         self.sent_messages.lock().unwrap().len()
     }
 
-    /// Clear all state.
+    /// Clear each list under its own lock; this is not an atomic reset across both.
     pub fn reset(&self) {
         self.sent_messages.lock().unwrap().clear();
         self.inbox.lock().unwrap().clear();

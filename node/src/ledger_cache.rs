@@ -1,12 +1,13 @@
-//! In-memory atomic counters for frequently-queried ledger statistics.
+//! Cached ledger counters for RPC queries.
 //!
-//! Avoids repeated LMDB reads for values like block count, account count, and
-//! pending count that are requested on every `node_info` RPC call.
+//! Relaxed atomic reads are independent: the three values do not form one ledger
+//! snapshot. The node seeds and updates them; they are not recovery authority.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Atomic cache of ledger counters. Initialized from LMDB at node startup
-/// and kept in sync by incrementing/decrementing during block processing.
+/// Caller-maintained counters initialized from storage. Block count tracks
+/// retained bodies and decreases on retirement. Arithmetic is unchecked; callers
+/// must prevent underflow and serialize replacement with additive updates.
 pub struct LedgerCache {
     block_count: AtomicU64,
     account_count: AtomicU64,
@@ -28,17 +29,17 @@ impl LedgerCache {
         }
     }
 
-    /// Current block count.
+    /// Cached retained-block count.
     pub fn block_count(&self) -> u64 {
         self.block_count.load(Ordering::Relaxed)
     }
 
-    /// Current account count.
+    /// Cached account count.
     pub fn account_count(&self) -> u64 {
         self.account_count.load(Ordering::Relaxed)
     }
 
-    /// Current pending count.
+    /// Cached pending-entry count.
     pub fn pending_count(&self) -> u64 {
         self.pending_count.load(Ordering::Relaxed)
     }
@@ -51,6 +52,13 @@ impl LedgerCache {
     /// Decrement block count by 1 (called on rollback).
     pub fn dec_block_count(&self) {
         self.block_count.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    /// Publish a committed physical-body retirement without overwriting unrelated
+    /// account/pending counts or concurrent additive block publications. The
+    /// coordinator must serialize this with full cache replacement.
+    pub(crate) fn retire_blocks(&self, count: u64) {
+        self.block_count.fetch_sub(count, Ordering::Relaxed);
     }
 
     /// Increment account count by 1 (new account opened).

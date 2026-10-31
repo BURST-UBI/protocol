@@ -6,10 +6,7 @@ use crate::state::{BrnWalletState, RateHistory};
 use burst_types::{Timestamp, WalletAddress};
 use std::collections::HashMap;
 
-/// The BRN engine — computes balances, records burns, manages stakes.
-///
-/// Rate segments are stored ONCE in the global `rate_history`, not per-wallet.
-/// A governance rate change is O(1) — just appends one segment to the global list.
+/// BRN balances, burns and stakes backed by a shared rate history.
 #[derive(Clone)]
 pub struct BrnEngine {
     next_stake_id: StakeId,
@@ -19,10 +16,25 @@ pub struct BrnEngine {
     pub rate_history: RateHistory,
 }
 
+mod prepared;
+
 impl BrnEngine {
     /// Included in the node's atomic economic checkpoint.
     pub fn next_stake_id(&self) -> StakeId {
         self.next_stake_id
+    }
+
+    /// Replace the allocator from a nonzero big-endian u64. Callers validate the
+    /// snapshot and retained stake IDs; this only checks encoding and nonzero.
+    /// A coordinated rewind may lower the value.
+    pub fn restore_stake_sequence(&mut self, bytes: &[u8]) -> Result<(), BrnError> {
+        let next = u64::from_be_bytes(bytes.try_into()
+            .map_err(|_| BrnError::Other("invalid persisted stake sequence".into()))?);
+        if next == 0 {
+            return Err(BrnError::Other("invalid persisted stake sequence".into()));
+        }
+        self.next_stake_id = next;
+        Ok(())
     }
 
     pub fn new() -> Self {
@@ -44,7 +56,11 @@ impl BrnEngine {
 
     /// Compute the available BRN balance for a wallet at a given time.
     ///
-    /// `BRN(w) = Σ(rate_i × duration_i) − total_burned − total_staked`
+    /// `available = Σ(rate × eligible duration) − burned − active stakes`
+    ///
+    /// This includes unacknowledged stake returns. Use the wallet state's
+    /// `spendable_balance_checked` for spending admission. Arithmetic failure
+    /// produces zero in this convenience method.
     ///
     /// All values are deterministic integers: rates are `u128` raw units per
     /// second, timestamps are `u64` whole seconds, and all arithmetic is
@@ -53,7 +69,8 @@ impl BrnEngine {
         state.available_balance(&self.rate_history, now)
     }
 
-    /// Compute the available BRN balance with checked arithmetic.
+    /// Compute available BRN, reporting overflow or an overdrawn state as an error.
+    /// This does not subtract unacknowledged stake returns.
     pub fn compute_balance_checked(
         &self,
         state: &BrnWalletState,
@@ -64,7 +81,7 @@ impl BrnEngine {
             .ok_or(BrnError::Overflow)
     }
 
-    /// Record a BRN burn (consuming BRN to mint TRST for a provider).
+    /// Consume spendable BRN. The caller applies any corresponding TRST payment.
     pub fn record_burn(
         &self,
         state: &mut BrnWalletState,
@@ -90,7 +107,9 @@ impl BrnEngine {
         Ok(())
     }
 
-    /// Lock BRN as a temporary stake (for verification or challenge).
+    /// Lock spendable BRN and allocate a stake ID. The caller supplies the correct
+    /// wallet state and checks verification or challenge eligibility. This does
+    /// not insert the returned stake into a store.
     pub fn stake(
         &mut self,
         staker: &WalletAddress,
@@ -131,7 +150,8 @@ impl BrnEngine {
         Ok(stake)
     }
 
-    /// Return a stake (successful outcome — BRN is unlocked).
+    /// Remove the stake from the locked total and mark it resolved.
+    /// The caller validates the outcome and records any pending release evidence.
     pub fn return_stake(
         &self,
         staker: &WalletAddress,
@@ -155,7 +175,8 @@ impl BrnEngine {
         Ok(())
     }
 
-    /// Forfeit a stake (staker voted against the outcome — BRN is lost).
+    /// Move the stake from the locked total to cumulative burns and mark it resolved.
+    /// The caller decides whether the protocol outcome requires forfeiture.
     pub fn forfeit_stake(
         &self,
         staker: &WalletAddress,
@@ -171,22 +192,22 @@ impl BrnEngine {
                 stake.id, stake.staker, staker
             )));
         }
-        state.total_staked = state
+        let total_staked = state
             .total_staked
             .checked_sub(stake.amount)
             .ok_or(BrnError::Overflow)?;
-        state.total_burned = state
+        let total_burned = state
             .total_burned
             .checked_add(stake.amount)
             .ok_or(BrnError::Overflow)?;
+        state.total_staked = total_staked;
+        state.total_burned = total_burned;
         stake.resolved = true;
         Ok(())
     }
 
-    /// Apply a rate change at a specific timestamp — O(1).
-    ///
-    /// This is the key optimization: rate changes append to a single global
-    /// history instead of iterating every wallet.
+    /// Append a rate change without visiting wallets. Persistent tree updates
+    /// take O(log k) work for k rate segments, including shared snapshots.
     pub fn apply_rate_change(
         &mut self,
         new_rate: u128,
@@ -195,7 +216,7 @@ impl BrnEngine {
         self.rate_history.apply_rate_change(new_rate, change_at)
     }
 
-    /// Register a wallet state for tracking.
+    /// Insert or replace a tracked wallet without validating its accounting state.
     pub fn track_wallet(&mut self, address: WalletAddress, state: BrnWalletState) {
         self.wallets.insert(address, state);
     }
@@ -224,7 +245,8 @@ impl BrnEngine {
         Ok(())
     }
 
-    /// Resume BRN accrual for a wallet (e.g. on re-verification).
+    /// Resume accrual using the shared historical rates. The `_rate` argument
+    /// is ignored. Eligibility and transition timing are caller responsibilities.
     pub fn reactivate_wallet(
         &mut self,
         address: &WalletAddress,
@@ -239,14 +261,16 @@ impl BrnEngine {
         Ok(())
     }
 
-    /// Get the current active rate from the global history.
+    /// Return the last stored rate; no query-time selection is performed.
     pub fn current_rate(&self) -> u128 {
         self.rate_history.current_rate()
     }
 }
 
 impl BrnEngine {
-    /// Persist all engine state to a BRN store.
+    /// Write allocator, Bincode rate history and each tracked wallet separately.
+    /// This does not delete obsolete wallets or replace normalized-format rows.
+    /// It is not an atomic node checkpoint; an error can follow earlier writes.
     pub fn save_to_store(&self, store: &dyn burst_store::BrnStore) -> Result<(), BrnError> {
         let id_bytes = self.next_stake_id.to_be_bytes();
         store
@@ -273,18 +297,47 @@ impl BrnEngine {
         let snapshot = store
             .read_snapshot()
             .map_err(|e| BrnError::Other(e.to_string()))?;
+        Self::load_from_snapshot(snapshot.as_ref())
+    }
+
+    /// Restore from the supplied storage view, using normalized wallet rows when
+    /// available. The backend provides snapshot consistency. Layout and rate
+    /// checks do not establish wallet eligibility or economic validity.
+    pub fn load_from_snapshot(snapshot: &dyn burst_store::brn::BrnSnapshot) -> Result<Self, BrnError> {
         let id_bytes = snapshot
             .get_meta(b"next_stake_id")
             .map_err(|e| BrnError::Other(e.to_string()))?;
-        let rate_bytes = snapshot
-            .get_meta(b"rate_history")
-            .map_err(|e| BrnError::Other(e.to_string()))?;
+        let rates = crate::rate_storage::read_snapshot(snapshot)?;
+        if let Some(headers) = snapshot.wallet_record_headers().map_err(|error| BrnError::Other(error.to_string()))? {
+            let mut engine = Self::from_decoded_entries(id_bytes, rates,
+                std::iter::empty::<Result<(WalletAddress, &[u8]), BrnError>>())?;
+            for row in headers {
+                let (address, header) = row.map_err(|error| BrnError::Other(error.to_string()))?;
+                if id_bytes.is_none() { return Err(BrnError::Other("incomplete persisted BRN metadata".into())); }
+                let prefix = crate::wallet_storage::row_prefix(&address)?;
+                let children = snapshot.meta_entries(&prefix)
+                    .map_err(|error| BrnError::Other(error.to_string()))?;
+                let records = std::iter::once(Ok((crate::wallet_storage::HEADER, header)))
+                    .chain(children.map(|row| {
+                        let (key, value) = row.map_err(|error| BrnError::Other(error.to_string()))?;
+                        let key = key.strip_prefix(prefix.as_slice())
+                            .ok_or_else(|| BrnError::Other("foreign BRN wallet record".into()))?;
+                        Ok((key, value))
+                    }));
+                let wallet = crate::wallet_storage::decode(records)?
+                    .ok_or_else(|| BrnError::Other("missing BRN wallet header".into()))?;
+                if engine.wallets.insert(address, wallet).is_some() {
+                    return Err(BrnError::Other("duplicate persisted BRN wallet".into()));
+                }
+            }
+            return Ok(engine);
+        }
         let entries = snapshot
             .wallet_entries()
             .map_err(|e| BrnError::Other(e.to_string()))?;
-        Self::from_persisted_entries(
+        Self::from_decoded_entries(
             id_bytes,
-            rate_bytes,
+            rates,
             entries.map(|row| row.map_err(|e| BrnError::Other(e.to_string()))),
         )
     }
@@ -298,29 +351,33 @@ impl BrnEngine {
         Self::from_persisted_entries(id_bytes, rate_bytes, entries.into_iter().map(Ok))
     }
 
-    /// Decode wallet rows incrementally from one caller-owned storage view.
+    /// Decode wallet entries incrementally and retain the resulting map in memory.
+    /// Require complete metadata when wallets exist and reject duplicate addresses.
     pub fn from_persisted_entries<B: AsRef<[u8]>>(
         id_bytes: Option<&[u8]>,
         rate_bytes: Option<&[u8]>,
         entries: impl IntoIterator<Item = Result<(WalletAddress, B), BrnError>>,
     ) -> Result<Self, BrnError> {
-        let next_stake_id = match &id_bytes {
-            Some(bytes) => u64::from_be_bytes(
-                (*bytes)
-                    .try_into()
-                    .map_err(|_| BrnError::Other("invalid persisted stake sequence".into()))?,
-            ),
+        let rates = rate_bytes.map(|bytes| bincode::deserialize(bytes)
+            .map_err(|e| BrnError::Other(e.to_string()))).transpose()?;
+        Self::from_decoded_entries(id_bytes, rates, entries)
+    }
+
+    /// Restore either local rate encoding without serializing a decoded history.
+    pub fn from_decoded_entries<B: AsRef<[u8]>>(
+        id_bytes: Option<&[u8]>,
+        rates: Option<RateHistory>,
+        entries: impl IntoIterator<Item = Result<(WalletAddress, B), BrnError>>,
+    ) -> Result<Self, BrnError> {
+        let next_stake_id = match id_bytes {
+            Some(bytes) => u64::from_be_bytes(bytes.try_into()
+                .map_err(|_| BrnError::Other("invalid persisted stake sequence".into()))?),
             None => 1,
         };
-        let rate_history: RateHistory = match &rate_bytes {
-            Some(bytes) => {
-                bincode::deserialize(bytes).map_err(|e| BrnError::Other(e.to_string()))?
-            }
-            None => RateHistory::default(),
-        };
-        if id_bytes.is_some() != rate_bytes.is_some() {
+        if id_bytes.is_some() != rates.is_some() {
             return Err(BrnError::Other("incomplete persisted BRN metadata".into()));
         }
+        let rate_history = rates.unwrap_or_default();
         let mut engine = Self::from_state(next_stake_id, rate_history, HashMap::new())?;
         for entry in entries {
             let (addr, bytes) = entry?;
@@ -336,7 +393,9 @@ impl BrnEngine {
         Ok(engine)
     }
 
-    /// Restore already decoded state without an intermediate serialized copy.
+    /// Build from decoded state after checking the nonzero allocator and rate
+    /// segment boundaries. Wallet balances, pause histories, stake identities
+    /// and release evidence are not validated here.
     pub fn from_state(
         next_stake_id: StakeId,
         rate_history: RateHistory,
@@ -345,20 +404,18 @@ impl BrnEngine {
         if next_stake_id == 0 {
             return Err(BrnError::Other("invalid persisted stake sequence".into()));
         }
-        if rate_history.segments.is_empty()
-            || rate_history
-                .segments
-                .iter()
-                .enumerate()
-                .any(|(i, segment)| match rate_history.segments.get(i + 1) {
-                    Some(next) => {
-                        segment.end != Some(next.start)
-                            || next.start.as_secs() < segment.start.as_secs()
-                    }
-                    None => segment.end.is_some(),
-                })
-        {
+        let mut segments = rate_history.segments().iter().peekable();
+        if segments.peek().is_none() {
             return Err(BrnError::Other("invalid persisted BRN rate history".into()));
+        }
+        while let Some(segment) = segments.next() {
+            let invalid = match segments.peek() {
+                Some(next) => segment.end != Some(next.start) || next.start < segment.start,
+                None => segment.end.is_some(),
+            };
+            if invalid {
+                return Err(BrnError::Other("invalid persisted BRN rate history".into()));
+            }
         }
         Ok(Self {
             next_stake_id,
@@ -449,16 +506,11 @@ mod tests {
         );
         for (id, rates) in [
             (0, rates.clone()),
-            (
-                9,
-                RateHistory {
-                    segments: Vec::new(),
-                },
-            ),
+            (9, RateHistory::from_segments(Vec::new())),
             (9, {
-                let mut invalid = rates.clone();
-                invalid.segments[0].end = None;
-                invalid
+                let mut invalid = rates.segments().iter().cloned().collect::<Vec<_>>();
+                invalid[0].end = None;
+                RateHistory::from_segments(invalid)
             }),
         ] {
             assert!(BrnEngine::from_state(id, rates.clone(), wallets.clone()).is_err());
@@ -608,6 +660,28 @@ mod tests {
     }
 
     #[test]
+    fn forfeit_overflow_leaves_wallet_and_stake_unchanged() {
+        let mut engine = make_engine(10);
+        let staker = test_address(1);
+        let mut state = BrnWalletState::new(test_timestamp(1000));
+        let mut stake = engine.stake(&staker, &mut state, 1,
+            StakeKind::Challenge { target_wallet: test_address(99) },
+            test_timestamp(1100)).unwrap();
+        state.total_burned = u128::MAX;
+        let before = state.clone();
+        let stake_before = bincode::serialize(&stake).unwrap();
+        assert!(matches!(engine.forfeit_stake(&staker, &mut state, &mut stake),
+            Err(BrnError::Overflow)));
+        assert_eq!(state, before);
+        assert_eq!(bincode::serialize(&stake).unwrap(), stake_before);
+        state.total_burned = u128::MAX - 1;
+        engine.forfeit_stake(&staker, &mut state, &mut stake).unwrap();
+        assert_eq!(state.total_burned, u128::MAX);
+        assert_eq!(state.total_staked, 0);
+        assert!(stake.resolved);
+    }
+
+    #[test]
     fn test_forfeit_stake_converts_to_burned() {
         let mut engine = make_engine(10);
         let verified_at = test_timestamp(1000);
@@ -645,32 +719,28 @@ mod tests {
 
         assert_eq!(engine.compute_balance(&state, test_timestamp(1100)), 1000);
 
-        // Global rate change to 20 at time 1100
         engine.apply_rate_change(20, test_timestamp(1100)).unwrap();
 
         // Old accrual: 100s * 10 = 1000, New accrual: 50s * 20 = 1000 → total 2000
         assert_eq!(engine.compute_balance(&state, test_timestamp(1150)), 2000);
 
-        assert_eq!(engine.rate_history.segments.len(), 2);
-        assert_eq!(engine.rate_history.segments[0].rate, 10);
-        assert_eq!(engine.rate_history.segments[1].rate, 20);
+        assert_eq!(engine.rate_history.segments().len(), 2);
+        assert_eq!(engine.rate_history.segments()[0].rate, 10);
+        assert_eq!(engine.rate_history.segments()[1].rate, 20);
     }
 
     #[test]
-    fn test_global_rate_change_is_o1() {
+    fn rate_change_updates_tracked_wallet_balances() {
         let mut engine = make_engine(10);
 
-        // Track 1000 wallets
         for i in 0u32..1000 {
             let addr = WalletAddress::new(format!("brst_{:0>60}", i));
             let state = BrnWalletState::new(test_timestamp(1000));
             engine.track_wallet(addr, state);
         }
 
-        // Rate change should be O(1) — no wallet iteration
         engine.apply_rate_change(20, test_timestamp(2000)).unwrap();
 
-        // Verify it works correctly for any wallet
         let addr = WalletAddress::new(format!("brst_{:0>60}", 42));
         let state = engine.get_wallet(&addr).unwrap();
         // 1000s at rate 10 + 500s at rate 20 = 10000 + 10000 = 20000
@@ -734,7 +804,7 @@ mod tests {
             .deactivate_wallet(&addr, test_timestamp(1500))
             .unwrap();
 
-        // After deactivation, balance stays frozen at 5000
+        // With no further burns or stakes, stopping accrual preserves this balance.
         let bal_after =
             engine.compute_balance(engine.get_wallet(&addr).unwrap(), test_timestamp(2000));
         assert_eq!(bal_after, 5000);

@@ -183,6 +183,29 @@ fn snapshot_history_rejects_forged_reordered_and_oversized_chunks_atomically() {
 }
 
 #[test]
+fn snapshot_history_rejects_oversized_primary_and_archival_rows_before_decode() {
+    let fixture = Fixture::selection();
+    let (_dir, source, authenticated) = snapshot(&fixture);
+    let head = authenticated.history_cursor(&address(0)).unwrap().unwrap().next().unwrap();
+    let valid = read_chunk(&source, head.hash, 1).unwrap().remove(0);
+    let directory = tempfile::tempdir().unwrap();
+    let store = LmdbStore::open(directory.path(), 32, 16 << 20).unwrap();
+    let key = format!("checkpoint_history/v1/{}", head.hash);
+    let oversized = vec![0; burst_types::MAX_P2P_MESSAGE_BYTES + 1];
+    store.meta_store().put_meta(&key, &oversized).unwrap();
+    assert!(read_chunk(&store, head.hash, 1).unwrap_err().to_string().contains("metadata exceeds pinned read byte budget"));
+    store.meta_store().put_meta(&key, &valid).unwrap();
+    assert_eq!(read_chunk(&store, head.hash, 1).unwrap(), vec![valid.clone()]);
+    store.block_store().put_block(&head.hash, &oversized).unwrap();
+    assert!(read_chunk(&store, head.hash, 1).unwrap_err().to_string().contains("block exceeds pinned read byte budget"),
+        "corrupt primary data must not fall back to an archival copy");
+    store.block_store().put_block(&head.hash, &[]).unwrap();
+    assert!(read_chunk(&store, head.hash, 1).unwrap_err().to_string().contains("wire limit"));
+    store.block_store().put_block(&head.hash, &valid).unwrap();
+    assert_eq!(read_chunk(&store, head.hash, 1).unwrap(), vec![valid]);
+}
+
+#[test]
 fn snapshot_history_continues_across_partial_archival_sources() {
     let fixture = Fixture::selection();
     let (_dir, store, snapshot) = snapshot(&fixture);
@@ -253,7 +276,7 @@ fn snapshot_history_tail_reads_only_suffix_and_matches_full_history_commitment()
     let burn = fixture.push(0, BlockType::Burn, cutoff, |block| {
         block.payment_epoch = snapshot.anchor().hash();
         block.link = destination(30);
-        block.brn_balance += 1;
+        block.brn_spent += 1;
     });
     fixture.push(30, BlockType::Open, cutoff, |block| {
         block.payment_epoch = snapshot.anchor().hash();
@@ -399,7 +422,7 @@ fn snapshot_history_tail_requires_snapshot_bound_witness_for_old_cross_account_s
     let mut fixture = Fixture::selection();
     let burn = fixture.push(0, BlockType::Burn, 1_595_434_040, |block| {
         block.link = destination(30);
-        block.brn_balance += 1;
+        block.brn_spent += 1;
     });
     fixture.push(0, BlockType::ChangeRepresentative, 1_595_434_041, |_| {});
     let (_dir, store, snapshot) = snapshot(&fixture);
@@ -448,4 +471,241 @@ fn snapshot_history_tail_requires_snapshot_bound_witness_for_old_cross_account_s
     assert!(snapshot
         .read_tail(&tail_store, cutoff, full.heads(), wrong)
         .is_err());
+}
+
+#[test]
+fn durable_history_inputs_reauthenticate_reopened_progress_under_combined_budget() {
+    use crate::confirmed_replay::snapshot::history::DurableHistoryInputs;
+    use crate::confirmed_replay::scratch_file::{ScratchFile, ScratchLimit};
+    use std::io::Write;
+    let fixture = Fixture::selection();
+    let (_dir, store, snapshot) = snapshot(&fixture);
+    let initial = snapshot.history_cursor(&address(0)).unwrap().unwrap();
+    let head = initial.next().unwrap();
+    assert!(head.height >= 2);
+    let floor = head.height - 2;
+    let cache = tempfile::tempdir().unwrap();
+    let reservation = DurableHistoryInputs::reservation(1 << 20).unwrap();
+    let owner = ScratchLimit::acquire_reserved(cache.path(), 4 << 20, reservation).unwrap();
+    let foreign = tempfile::tempdir().unwrap();
+    assert!(DurableHistoryInputs::open_with_limit(foreign.path(), initial.clone(), floor, 1 << 20, owner.clone()).is_err());
+    assert!(DurableHistoryInputs::open_with_limit(cache.path(), initial.clone(), floor, 2 << 20, owner.clone()).is_err());
+    assert!(!cache.path().join("recovery-inputs-v2").exists());
+    let mut durable = DurableHistoryInputs::open_with_limit(cache.path(), initial.clone(), floor, 1 << 20, owner.clone()).unwrap();
+    drop(owner);
+    assert!(ScratchLimit::acquire(cache.path(), 4 << 20).is_err());
+    let first = read_chunk(&store, head.hash, 1).unwrap();
+    let proof = durable.append(&first).unwrap();
+    assert_eq!(proof[0].block().hash, head.hash);
+    assert!(durable.seal().is_err());
+    let mut scratch = ScratchFile::new_in(cache.path()).unwrap();
+    let remaining = (4 << 20) - (1 << 20) - (64 << 10);
+    scratch.write_all(&vec![0;remaining]).unwrap();
+    assert!(scratch.write_all(&[0]).is_err());
+    drop(scratch);
+    drop(durable);
+    // Even without an active cache handle, its retained files count against
+    // ordinary scratch policy. The data environment alone exceeds one byte.
+    assert!(ScratchLimit::acquire(cache.path(), 1).is_err());
+    let mut durable = DurableHistoryInputs::open(cache.path(), initial.clone(), floor, 4 << 20, 1 << 20).unwrap();
+    assert_eq!(durable.cursor().next().unwrap().hash, head.hash);
+    assert!(durable.append(&first).is_err(), "saved bytes must be reauthenticated first");
+    let replayed = durable.replay_page().unwrap();
+    assert_eq!(replayed.len(), 1);
+    assert_eq!(replayed[0].context(), initial.context());
+    assert_eq!(replayed[0].block().hash, head.hash);
+    assert!(durable.replay_page().unwrap().is_empty());
+    let second_hash = durable.cursor().next().unwrap().hash;
+    durable.append(&read_chunk(&store, second_hash, 1).unwrap()).unwrap();
+    durable.seal().unwrap();
+    drop(durable);
+    let mut durable = DurableHistoryInputs::open(cache.path(), initial, floor, 4 << 20, 1 << 20).unwrap();
+    assert!(durable.seal().is_err(), "a saved completion marker is not authenticated progress");
+    let proofs = durable.replay_page().unwrap();
+    assert_eq!(proofs.iter().map(|proof| proof.block().hash).collect::<Vec<_>>(), vec![head.hash, second_hash]);
+    durable.seal().unwrap();
+}
+
+#[test]
+fn durable_history_rejects_validly_hashed_raw_forgery_without_advancing_cursor() {
+    use crate::confirmed_replay::snapshot::history::DurableHistoryInputs;
+    use crate::confirmed_replay::scratch_file::PERSISTENT_INPUTS_DIRECTORY;
+    use burst_store_lmdb::recovery_inputs::{RecoveryInputs, Limits};
+    let fixture = Fixture::selection();
+    let (_dir, store, snapshot) = snapshot(&fixture);
+    let initial = snapshot.history_cursor(&address(0)).unwrap().unwrap();
+    let head = initial.next().unwrap();
+    assert!(head.height > 1);
+    let floor = head.height - 1;
+    let bytes = read_chunk(&store, head.hash, 1).unwrap();
+    let mut forged: StateBlock = bincode::deserialize(&bytes[0]).unwrap();
+    forged.signature = burst_types::Signature([0;64]);
+    let forged = bincode::serialize(&forged).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let context = DurableHistoryInputs::input_context(&initial, floor).unwrap();
+    let raw = RecoveryInputs::open(&directory.path().join(PERSISTENT_INPUTS_DIRECTORY), context,
+        Limits { chunks: 131_072, bytes: 1 << 20, map_bytes: 1 << 20 }).unwrap();
+    raw.append(0, &forged).unwrap();
+    raw.seal(1).unwrap();
+    drop(raw);
+    let mut durable = DurableHistoryInputs::open(directory.path(), initial, floor, 4 << 20, 1 << 20).unwrap();
+    assert!(durable.replay_page().is_err());
+    assert_eq!(durable.cursor().next().unwrap().hash, head.hash);
+    assert!(durable.seal().is_err());
+}
+
+#[test]
+fn durable_history_streams_reopen_independent_accounts_under_one_budget() {
+    use crate::confirmed_replay::snapshot::history::DurableHistoryInputs;
+    use crate::confirmed_replay::scratch_file::{ScratchFile, ScratchLimit};
+    use std::io::Write;
+    let fixture = Fixture::selection();
+    let (_dir, store, authenticated) = snapshot(&fixture);
+    let first = authenticated.history_cursor(&address(0)).unwrap().unwrap();
+    let second = authenticated.history_cursor(&address(1)).unwrap().unwrap();
+    let first_head = first.next().unwrap();
+    let second_head = second.next().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let mut root = DurableHistoryInputs::open(cache.path(), first.clone(), first_head.height - 1, 4 << 20, 1 << 20).unwrap();
+    let mut other = root.select_stream(second.clone(), second_head.height - 1).unwrap();
+    root.append(&read_chunk(&store, first_head.hash, 1).unwrap()).unwrap();
+    root.seal().unwrap();
+    other.append(&read_chunk(&store, second_head.hash, 1).unwrap()).unwrap();
+    other.seal().unwrap();
+    drop(root);
+    assert!(ScratchLimit::acquire(cache.path(), 4 << 20).is_err());
+    let mut scratch = ScratchFile::new_in(cache.path()).unwrap();
+    scratch.write_all(&vec![0; (4 << 20) - (1 << 20) - (64 << 10)]).unwrap();
+    assert!(scratch.write_all(&[0]).is_err());
+    drop(scratch); drop(other);
+    let mut root = DurableHistoryInputs::open(cache.path(), first.clone(), first_head.height - 1, 4 << 20, 1 << 20).unwrap();
+    let mut other = root.select_stream(second, second_head.height - 1).unwrap();
+    assert!(root.seal().is_err());
+    assert!(other.seal().is_err());
+    assert_eq!(root.replay_page().unwrap()[0].block().hash, first_head.hash);
+    assert_eq!(other.replay_page().unwrap()[0].block().hash, second_head.hash);
+    root.seal().unwrap(); other.seal().unwrap();
+    let mut changed = Fixture::selection();
+    changed.push(0, BlockType::ChangeRepresentative, 1_595_434_041, |_| {});
+    let (_changed_dir, _changed_store, changed_snapshot) = snapshot(&changed);
+    let foreign = changed_snapshot.history_cursor(&address(0)).unwrap().unwrap();
+    let floor = foreign.next().unwrap().height - 1;
+    assert!(root.select_stream(foreign, floor).is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn durable_history_session_uses_epoch_identity_and_resets_obsolete_inputs() {
+    use crate::confirmed_replay::snapshot::history::{DurableHistoryInputs, DurableHistorySession};
+    use crate::confirmed_replay::scratch_file::{ScratchLimit, PERSISTENT_INPUTS_DIRECTORY};
+    use burst_store_lmdb::recovery_inputs::{Limits, RecoveryInputs};
+    let fixture = Fixture::selection();
+    let (_dir, store, authenticated) = snapshot(&fixture);
+    let first = authenticated.history_cursor(&address(0)).unwrap().unwrap();
+    let context = first.context();
+    let cache = tempfile::tempdir().unwrap();
+    let limit = ScratchLimit::acquire_reserved(cache.path(), 4 << 20, DurableHistoryInputs::reservation(1 << 20).unwrap()).unwrap();
+    let shutdown = crate::shutdown::ShutdownController::new();
+    let session = DurableHistorySession::open(cache.path().to_path_buf(), context, 1 << 20, limit.clone(), &shutdown).await.unwrap().unwrap();
+    let mut stream = session.select(first.clone()).unwrap();
+    stream.append(&read_chunk(&store, first.next().unwrap().hash, 1).unwrap()).unwrap();
+    drop(stream); drop(session);
+    // A different first account still selects the same epoch-bound session.
+    let second = authenticated.history_cursor(&address(1)).unwrap().unwrap();
+    let session = DurableHistorySession::open(cache.path().to_path_buf(), second.context(), 1 << 20, limit.clone(), &shutdown).await.unwrap().unwrap();
+    let mut stream = session.select(first.clone()).unwrap();
+    assert_eq!(stream.replay_page().unwrap().len(), 1);
+    drop(stream); drop(session);
+    let raw = RecoveryInputs::open_retained(&cache.path().join(PERSISTENT_INPUTS_DIRECTORY), [0;32],
+        Limits { chunks: 131_072, bytes: 1 << 20, map_bytes: 1 << 20 }).unwrap();
+    raw.begin_reset([7;32]).unwrap();
+    drop(raw);
+    // Finish a previously recorded reset target, then establish the currently
+    // authenticated context; the recorded target supplies no authority.
+    let session = DurableHistorySession::open(cache.path().to_path_buf(), context, 1 << 20, limit.clone(), &shutdown).await.unwrap().unwrap();
+    assert!(session.select(first.clone()).unwrap().replay_page().unwrap().is_empty());
+    drop(session);
+    let mut changed = Fixture::selection();
+    changed.push(0, BlockType::ChangeRepresentative, 1_595_434_041, |_| {});
+    let (_changed_dir, _changed_store, changed_snapshot) = snapshot(&changed);
+    let foreign = changed_snapshot.history_cursor(&address(0)).unwrap().unwrap();
+    let session = DurableHistorySession::open(cache.path().to_path_buf(), foreign.context(), 1 << 20, limit.clone(), &shutdown).await.unwrap().unwrap();
+    assert!(session.select(first).is_err());
+    assert!(session.select(foreign).unwrap().replay_page().unwrap().is_empty());
+    drop(session);
+    shutdown.shutdown();
+    assert!(DurableHistorySession::open(cache.path().to_path_buf(), context, 1 << 20, limit, &shutdown).await.unwrap().is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn signed_history_capacity_reclaims_inventory_and_preserves_other_accounts() {
+    use crate::confirmed_replay::snapshot::history::{DurableHistoryInputs, DurableHistorySession};
+    use crate::confirmed_replay::scratch_file::ScratchLimit;
+    use burst_store_lmdb::recovery_inputs::InputWriteError;
+    let mut fixture = Fixture::selection();
+    for _ in 0..64 {
+        fixture.push(0, BlockType::ChangeRepresentative, 1_595_434_041, |_| {});
+    }
+    let (_dir, store, authenticated) = snapshot(&fixture);
+    let first = authenticated.history_cursor(&address(0)).unwrap().unwrap();
+    let second = authenticated.history_cursor(&address(1)).unwrap().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let limit = ScratchLimit::acquire_reserved(cache.path(), 4 << 20,
+        DurableHistoryInputs::reservation(1 << 20).unwrap()).unwrap();
+    let shutdown = crate::shutdown::ShutdownController::new();
+    let session = DurableHistorySession::open(cache.path().to_path_buf(), first.context(),
+        1 << 20, limit.clone(), &shutdown).await.unwrap().unwrap();
+    let mut history = session.select(first.clone()).unwrap();
+    let mut other = session.select(second.clone()).unwrap();
+    let other_bytes = read_chunk(&store, second.next().unwrap().hash, 1).unwrap();
+    other.append(&other_bytes).unwrap();
+    drop(other);
+    let inventory = session.select_inventory().unwrap();
+    let mut positions = 0u64;
+    loop {
+        let mut page = vec![4; 16 << 10];
+        page[..8].copy_from_slice(&positions.to_be_bytes());
+        match inventory.raw.append_checked(positions, &page) {
+            Ok(_) => positions += 1,
+            Err(InputWriteError::Capacity) => break,
+            Err(error) => panic!("unexpected cache fill error: {error}"),
+        }
+        assert!(positions < 128);
+    }
+    assert!(positions > 0);
+    let chunks = read_chunk(&store, first.next().unwrap().hash, 64).unwrap();
+    assert_eq!(chunks.len(), 64);
+    assert!(history.append(&chunks).is_err(), "fixture did not reach history pressure");
+    assert_eq!(history.cursor().next(), first.next());
+    let (mut history, proofs) = history.append_with_capacity(chunks.clone(), &shutdown).await.unwrap();
+    let proofs = proofs.unwrap();
+    assert_eq!(proofs.len(), 64);
+    for (proof, bytes) in proofs.iter().zip(&chunks) {
+        assert_eq!(bincode::serialize(proof.block()).unwrap(), *bytes);
+        assert_eq!(proof.context(), first.context());
+    }
+    assert!(inventory.raw.progress().is_err(), "reclaimed inventory owner remained live");
+    assert_eq!(session.select_inventory().unwrap().raw.progress().unwrap().positions, 0);
+    let mut other = session.select(second).unwrap();
+    let replayed = other.replay_page().unwrap();
+    assert_eq!(replayed.len(), 1);
+    assert_eq!(bincode::serialize(replayed[0].block()).unwrap(), other_bytes[0]);
+    while let Some(head) = history.cursor().next() {
+        let chunks = read_chunk(&store, head.hash, 128).unwrap();
+        let (next, proofs) = history.append_with_capacity(chunks, &shutdown).await.unwrap();
+        history = next;
+        assert!(!proofs.unwrap().is_empty());
+    }
+    history.seal().unwrap();
+    drop(history); drop(other); drop(inventory); drop(session); drop(limit);
+    let limit = ScratchLimit::acquire_reserved(cache.path(), 4 << 20,
+        DurableHistoryInputs::reservation(1 << 20).unwrap()).unwrap();
+    let session = DurableHistorySession::open(cache.path().to_path_buf(), first.context(),
+        1 << 20, limit, &shutdown).await.unwrap().unwrap();
+    let mut history = session.select(first.clone()).unwrap();
+    assert_eq!(history.cursor().next(), first.next());
+    assert!(history.seal().is_err(), "saved completion is not authentication");
+    let mut count = 0;
+    while history.cursor().next().is_some() { count += history.replay_page().unwrap().len(); }
+    assert_eq!(count as u64, first.next().unwrap().height);
+    history.seal().unwrap();
 }

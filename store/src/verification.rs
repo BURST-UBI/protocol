@@ -5,8 +5,8 @@ use burst_types::WalletAddress;
 
 /// Trait for storing verification state (endorsements, votes, challenges).
 ///
-/// Endorsements and votes are keyed by `(target, actor)` composite key,
-/// enabling O(1) put/get and prefix range-scan for all actors per target.
+/// Endorsements and votes use `(target, actor)` keys. LMDB reads each target
+/// with a prefix scan; collecting the result costs at least one step per row.
 pub trait VerificationStore {
     /// Store endorsement data for a target wallet from a specific endorser.
     fn put_endorsement(

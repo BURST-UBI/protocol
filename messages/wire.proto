@@ -1,0 +1,290 @@
+syntax = "proto3";
+package burst.wire.v33;
+
+// TCP frames: four-byte big-endian body length, then Envelope (at most 65536 bytes).
+// Network: 1=Live, 2=Test, 3=Dev; zero/unknown are invalid.
+// Hash/cookie fields are 32 bytes. Vote and handshake signatures are 64 bytes;
+// the logged-only VerificationVote signature remains an arbitrary byte field.
+// Integer narrowing is checked by the Rust decoder. Transfer bounds, signatures
+// and operation eligibility are checked by the receiving services.
+// Block and bootstrap block bytes use the signed Bincode state-block encoding.
+// Field numbers must never be reused. The package name is a schema namespace;
+// accepted wire versions come from burst_types::PROTOCOL_VERSION.
+
+message BytesPayload {
+  bytes data = 1;
+}
+
+message Vote {
+  string voter = 1;
+  repeated bytes block_hashes = 2;
+  bool is_final = 3;
+  uint64 timestamp = 4;
+  uint64 sequence = 5;
+  bytes signature = 6;
+}
+
+message ConfirmRequest {
+  repeated bytes block_hashes = 1;
+  uint32 remaining_hops = 2;
+}
+
+message Keepalive {
+  repeated string peers = 1;
+}
+
+message Handshake {
+  string node_id = 1;
+  optional bytes cookie = 2;
+  optional bytes cookie_signature = 3;
+  bytes params_hash = 4;
+  uint32 network = 5;
+  uint32 peering_port = 6;
+  uint32 block_version = 7;
+  uint32 wire_version = 8;
+}
+
+// Legacy envelope: the node logs receipt without admitting an operation.
+message VerificationRequest {
+  string target = 1;
+  string endorser = 2;
+}
+
+// Legacy envelope: the node logs receipt without admitting an operation.
+message VerificationVote {
+  string target = 1;
+  string voter = 2;
+  uint32 vote = 3;
+  bytes signature = 4;
+}
+
+// Legacy envelope: the node logs receipt without admitting an operation.
+message GovernanceProposal {
+  bytes proposal_hash = 1;
+  string proposer = 2;
+  bytes content = 3;
+}
+
+// Legacy envelope: the node logs receipt without admitting an operation.
+message GovernanceVote {
+  bytes proposal_hash = 1;
+  string voter = 2;
+  uint32 vote = 3;
+}
+
+message Empty {
+}
+
+message Telemetry {
+  uint64 block_count = 1;
+  uint64 cemented_count = 2;
+  uint64 unchecked_count = 3;
+  uint64 account_count = 4;
+  uint64 bandwidth_cap = 5;
+  uint32 peer_count = 6;
+  uint32 protocol_version = 7;
+  uint64 uptime = 8;
+  bytes genesis_hash = 9;
+  uint32 major_version = 10;
+  uint32 minor_version = 11;
+  uint32 patch_version = 12;
+  uint64 timestamp = 13;
+  bytes params_hash = 14;
+}
+
+message BlocksRequest {
+  string account = 1;
+  bytes start = 2;
+  uint32 count = 3;
+}
+
+message AccountRequest {
+  string account = 1;
+}
+
+message FrontiersRequest {
+  string start_account = 1;
+  uint32 count = 2;
+}
+
+message BlocksResponse {
+  repeated bytes blocks = 1;
+}
+
+message AccountResponse {
+  string account = 1;
+  bytes head = 2;
+  uint64 block_count = 3;
+}
+
+message Frontier {
+  string account = 1;
+  bytes head = 2;
+}
+
+message FrontiersResponse {
+  repeated Frontier entries = 1;
+}
+
+message SyncRequest {
+  uint64 height = 1;
+  uint32 offset = 2;
+  optional bytes digest = 3;
+  bool record_only = 4;
+}
+
+message SyncChunk {
+  uint64 height = 1;
+  uint32 offset = 2;
+  uint32 total = 3;
+  bytes digest = 4;
+  bytes data = 5;
+}
+
+message SnapshotRequest {
+  bytes epoch = 1;
+  uint64 offset = 2;
+  optional bytes digest = 3;
+}
+
+message SnapshotChunk {
+  bytes epoch = 1;
+  uint64 offset = 2;
+  uint64 total = 3;
+  bytes digest = 4;
+  bytes data = 5;
+}
+
+message SnapshotQuery { uint64 minimum_height = 1; }
+message SnapshotOffer {
+  bytes epoch = 1;
+  uint64 height = 2;
+  uint64 total = 3;
+  bytes digest = 4;
+}
+
+message AgreementContext {
+  uint32 network = 1;
+  bytes genesis = 2;
+  bytes parent = 3;
+  uint64 height = 4;
+}
+
+message Offer {
+  bytes digest = 1;
+  uint32 total = 2;
+}
+
+message ChunkRequest {
+  bytes digest = 1;
+  uint32 offset = 2;
+}
+
+message Chunk {
+  bytes digest = 1;
+  uint32 total = 2;
+  uint32 offset = 3;
+  bytes data = 4;
+}
+
+message ContentRequest {
+  bytes proposal = 1;
+  uint32 offset = 2;
+}
+
+message ContentChunk {
+  bytes proposal = 1;
+  bytes hash = 2;
+  uint32 length = 3;
+  uint32 offset = 4;
+  bytes data = 5;
+}
+
+message Envelope {
+  uint32 wire_version = 1;
+  oneof body {
+    BytesPayload block = 10;
+    Vote vote = 11;
+    ConfirmRequest confirm_req = 12;
+    Vote confirm_ack = 13;
+    Keepalive keepalive = 14;
+    Bootstrap bootstrap = 15;
+    Handshake handshake = 16;
+    VerificationRequest verification_request = 17;
+    VerificationVote verification_vote = 18;
+    GovernanceProposal governance_proposal = 19;
+    GovernanceVote governance_vote = 20;
+    Empty telemetry_req = 21;
+    Telemetry telemetry_ack = 22;
+    CheckpointSync checkpoint_sync = 23;
+    Agreement checkpoint_agreement = 24;
+    Content governance_content = 25;
+  }
+}
+
+message Bootstrap {
+  uint64 id = 1;
+  oneof body {
+    BlocksRequest blocks_request = 10;
+    AccountRequest account_request = 11;
+    FrontiersRequest frontiers_request = 12;
+    BlocksResponse blocks_response = 13;
+    AccountResponse account_response = 14;
+    FrontiersResponse frontiers_response = 15;
+  }
+}
+
+message CheckpointSync {
+  oneof body {
+    SyncRequest request = 1;
+    SyncChunk chunk = 2;
+    SnapshotRequest snapshot_request = 3;
+    SnapshotChunk snapshot_chunk = 4;
+    SnapshotQuery snapshot_query = 5;
+    SnapshotOffer snapshot_offer = 6;
+    WitnessRequest witness_request = 7;
+    WitnessChunk witness_chunk = 8;
+    WitnessHeadsRequest witness_heads_request = 9;
+    TipRequest tip_request = 10;
+    TipObservation tip_observation = 11;
+  }
+}
+
+message TipRequest { uint64 nonce = 1; }
+message TipObservation { uint64 nonce = 1; uint64 height = 2; bytes epoch = 3; }
+
+message WitnessRequest {
+  bytes start = 1;
+  uint32 offset = 2;
+  optional bytes digest = 3;
+}
+
+message WitnessHeadsRequest {
+  repeated bytes starts = 1;
+  uint32 offset = 2;
+  optional bytes digest = 3;
+}
+
+message WitnessChunk {
+  bytes start = 1;
+  uint32 offset = 2;
+  uint32 total = 3;
+  bytes digest = 4;
+  bytes data = 5;
+}
+
+message Agreement {
+  optional AgreementContext context = 1;
+  oneof body {
+    Offer offer = 10;
+    ChunkRequest request = 11;
+    Chunk chunk = 12;
+  }
+}
+
+message Content {
+  oneof body {
+    ContentRequest request = 1;
+    ContentChunk chunk = 2;
+  }
+}

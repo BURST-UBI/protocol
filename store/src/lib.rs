@@ -1,7 +1,8 @@
 //! Abstract storage traits for the BURST protocol.
 //!
-//! Every storage backend (LMDB, RocksDB, in-memory for testing) implements
-//! these traits. The rest of the codebase depends only on the traits.
+//! Backend-independent record interfaces. Atomic production operations use
+//! caller-owned transactions in burst-store-lmdb; these traits do not replace
+//! that concrete transactional boundary.
 
 pub mod account;
 pub mod block;
@@ -29,8 +30,7 @@ pub use pending::{PendingInfo, PendingStore};
 pub use rep_weights::RepWeightStore;
 pub use trst_index::TrstIndexStore;
 
-/// Opaque transaction handle for atomic multi-store operations.
-/// Implementations can downcast to their specific transaction type.
+/// Marker for a backend read transaction; concrete backends own its operations.
 pub trait ReadTxn {}
-/// Writable transaction handle (extends ReadTxn).
+/// Marker for writable transactions; this marker alone provides no atomicity.
 pub trait WriteTxn: ReadTxn {}

@@ -25,7 +25,7 @@ fn snapshot_evidence_is_order_independent_but_panel_ranking_is_preserved() {
         .map(|vote| vote.verifier.clone())
         .collect::<Vec<_>>();
     let current = state.states.get_mut(&target).unwrap();
-    current.votes = votes.clone();
+    current.votes = votes.clone().into();
     current.endorsements = votes
         .iter()
         .map(|vote| crate::state::Endorsement {
@@ -34,7 +34,7 @@ fn snapshot_evidence_is_order_independent_but_panel_ranking_is_preserved() {
             timestamp: Timestamp::new(90),
         })
         .collect();
-    current.selected_verifiers = panel.clone();
+    current.selected_verifiers = panel.clone().into();
     state.prior_votes.insert(target.clone(), votes);
     let original = state.snapshot().encode().unwrap();
     super::records::assert_record_roundtrip(&state);
@@ -46,7 +46,7 @@ fn snapshot_evidence_is_order_independent_but_panel_ranking_is_preserved() {
     let restored =
         VerificationOrchestrator::restore(OrchestratorSnapshot::decode(&original).unwrap());
     assert_eq!(
-        restored.get_state(&target).unwrap().selected_verifiers,
+        *restored.get_state(&target).unwrap().selected_verifiers,
         panel
     );
     state.states.get_mut(&target).unwrap().votes[0].stake_amount += 1;
@@ -67,6 +67,21 @@ pub(crate) fn assert_legacy_selection_migration(
 ) {
     super::records::assert_record_roundtrip(state);
     let snapshot = state.snapshot();
+    for selection in snapshot.selections.values() {
+        let expected = selection.vote_context().expect("installed certified selection");
+        assert_eq!(bincode::serialize(selection).unwrap(),
+            bincode::serialize(&(&selection.request, &selection.certified)).unwrap(),
+            "context cache must not change the legacy round wire shape");
+        let mut changed = selection.clone();
+        let pool = changed.replace_storage_pool(Vec::new());
+        assert_eq!(changed.vote_context(), None, "pool removal must invalidate warm identity");
+        let encoded = bincode::serialize(&changed).unwrap();
+        let restored: super::SelectionRound = bincode::deserialize(&encoded).unwrap();
+        assert_eq!(restored.vote_context(), None, "decoded malformed pool must not inherit authority");
+        changed.replace_storage_pool(pool);
+        assert_eq!(changed.vote_context(), Some(expected));
+        assert_eq!(selection.vote_context(), Some(expected), "baseline remains isolated");
+    }
     let selections: HashMap<_, _> = snapshot
         .selections
         .iter()
@@ -140,4 +155,80 @@ pub(crate) fn assert_legacy_selection_migration(
         bytes.push(0);
         assert!(OrchestratorSnapshot::decode(&bytes).is_err());
     }
+}
+
+#[test]
+fn candidate_roots_are_shared_and_mutations_preserve_snapshot_and_attempt_isolation() {
+    let address =
+        |seed| burst_crypto::derive_address(&burst_crypto::keypair_from_seed(&[seed; 32]).public);
+    let mut original = VerificationOrchestrator::new();
+    for seed in 1..=32 {
+        let target = address(seed);
+        original.initialize_genesis(&target);
+        original
+            .attempts
+            .bind_vote(&target, &target, BlockHash::new([seed; 32]))
+            .unwrap();
+        original
+            .attempts
+            .bind_challenge(&target, BlockHash::new([seed; 32]));
+        original.neither_tracker.record_vote(&target, Vote::Neither);
+        original.penalized_verifiers.insert(target, 100);
+    }
+    let bytes = original.snapshot().encode().unwrap();
+    let mut candidate = original.clone();
+    assert!(original.states.ptr_eq(&candidate.states));
+    assert!(original
+        .active_challenges
+        .ptr_eq(&candidate.active_challenges));
+    assert!(original.active_appeals.ptr_eq(&candidate.active_appeals));
+    assert!(original.prior_votes.ptr_eq(&candidate.prior_votes));
+    assert!(original.selections.ptr_eq(&candidate.selections));
+    assert!(original
+        .penalized_verifiers
+        .ptr_eq(&candidate.penalized_verifiers));
+    assert!(original.attempts.votes.ptr_eq(&candidate.attempts.votes));
+    assert!(original
+        .attempts
+        .challenges
+        .ptr_eq(&candidate.attempts.challenges));
+    assert!(original
+        .neither_tracker
+        .history
+        .ptr_eq(&candidate.neither_tracker.history));
+    let target = address(1);
+    candidate.states.get_mut(&target).unwrap().started_at = Timestamp::new(99);
+    candidate.attempts.clear(&target);
+    candidate
+        .neither_tracker
+        .record_vote(&target, Vote::Legitimate);
+    candidate.penalized_verifiers.remove(&target);
+    assert_eq!(original.snapshot().encode().unwrap(), bytes);
+    assert_ne!(candidate.snapshot().encode().unwrap(), bytes);
+    assert_eq!(
+        original.attempts.vote_context(&target, &target),
+        Some(BlockHash::new([1; 32]))
+    );
+    assert_eq!(candidate.attempts.vote_context(&target, &target), None);
+    assert_eq!(original.neither_tracker.neither_ratio_bps(&target), 10_000);
+    assert_eq!(candidate.neither_tracker.neither_ratio_bps(&target), 5_000);
+    super::records::assert_record_roundtrip(&original);
+    super::records::assert_record_roundtrip(&candidate);
+    let restored = VerificationOrchestrator::restore(OrchestratorSnapshot::decode(&bytes).unwrap());
+    assert_eq!(restored.snapshot().encode().unwrap(), bytes);
+    // Persistent containers retain the existing serialized map/struct shapes.
+    let (history, threshold, window): (
+        std::collections::BTreeMap<String, crate::voting::VoteWindow>,
+        u32,
+        u32,
+    ) = bincode::deserialize(&bincode::serialize(&original.neither_tracker).unwrap()).unwrap();
+    assert_eq!(history.len(), 32);
+    assert_eq!(threshold, original.neither_tracker.penalty_threshold_bps);
+    assert_eq!(window, original.neither_tracker.window_assignments);
+    let (votes, challenges): (
+        HashMap<WalletAddress, HashMap<WalletAddress, BlockHash>>,
+        HashMap<WalletAddress, BlockHash>,
+    ) = bincode::deserialize(&bincode::serialize(&original.attempts).unwrap()).unwrap();
+    assert_eq!(votes.len(), 32);
+    assert_eq!(challenges.len(), 32);
 }

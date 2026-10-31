@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 /// An endorsement transaction.
 ///
 /// The endorser permanently burns their own BRN to vouch for a new wallet's humanity.
-/// Once the endorsement threshold is met, the target wallet enters verification.
+/// Meeting the endorsement threshold permits the next verification step; it
+/// does not itself select a panel or certify the target as verified.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EndorseTx {
     pub hash: TxHash,

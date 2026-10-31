@@ -141,7 +141,7 @@ async fn mixed_historical_transfer_syncs_over_tcp_and_serves_again_after_restart
     pending_successor(&mut fixture);
     let (_source_dir, source, heads) =
         super::super::super::installation::installed_chain(&fixture, &selections);
-    let outcome = install_outcome(&fixture, &source, &heads);
+    let outcome = persist_outcome(&fixture, &source, &heads);
     let expected = bincode::serialize(outcome.state().account(&address(20)).unwrap()).unwrap();
     let next = CertifiedCheckpoint::prepare(
         &source,

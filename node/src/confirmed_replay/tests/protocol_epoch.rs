@@ -59,7 +59,7 @@ fn protocol_epoch_rejects_owner_signature_and_creator_account_actions() {
         let block = fixture.blocks.last_mut().unwrap();
         match case {
             0 => block.representative = address(2),
-            1 => block.brn_balance = 1,
+            1 => block.brn_spent = 1,
             2 => block.link = BlockHash::new([88; 32]),
             3 => block.release_sources.push(BlockHash::new([89; 32])),
             4 => block.signing_grant = BlockHash::ZERO,

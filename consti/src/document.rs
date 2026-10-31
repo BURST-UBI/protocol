@@ -1,9 +1,10 @@
-//! The current state of the on-chain constitution.
+//! Constitutional articles, version history and derived lookup caches.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// The Consti document — the current constitution state.
+/// Constitutional document with cached indexes and counts. Public article
+/// mutation and deserialization do not automatically rebuild those caches.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConstiDocument {
     /// Ordered list of adopted articles.
@@ -12,7 +13,7 @@ pub struct ConstiDocument {
     pub version: u64,
     /// History of version changes: (version, description).
     pub version_history: Vec<VersionEntry>,
-    /// Index: article number → position in `articles` Vec for O(1) lookup.
+    /// Article number to vector position for expected constant-time lookup.
     #[serde(default)]
     pub(crate) article_index: HashMap<u64, usize>,
     /// Cached count of active (non-repealed) articles.
@@ -21,6 +22,17 @@ pub struct ConstiDocument {
     /// Next available article number (tracked incrementally).
     #[serde(default = "default_next_number")]
     next_number: u64,
+}
+
+/// Read-only stored representation; cached indexes and counters are not rebuilt.
+#[derive(Serialize)]
+pub struct DocumentView<'a> {
+    pub articles: &'a [Article],
+    pub version: u64,
+    pub version_history: &'a [VersionEntry],
+    pub article_index: &'a HashMap<u64, usize>,
+    pub active_count: usize,
+    pub next_number: u64,
 }
 
 fn default_next_number() -> u64 {
@@ -45,13 +57,19 @@ pub struct Article {
     pub title: String,
     /// Full text.
     pub text: String,
-    /// The amendment version that introduced or last modified this article.
+    /// Document version that introduced, last modified or repealed this article.
     pub introduced_by_amendment: u64,
     /// Whether this article has been repealed.
     pub repealed: bool,
 }
 
 impl ConstiDocument {
+    pub fn snapshot_view(&self) -> DocumentView<'_> {
+        DocumentView { articles: &self.articles, version: self.version,
+            version_history: &self.version_history, article_index: &self.article_index,
+            active_count: self.active_count, next_number: self.next_number }
+    }
+
     /// Create the genesis constitution (empty, version 0).
     pub fn genesis() -> Self {
         Self {
@@ -64,10 +82,8 @@ impl ConstiDocument {
         }
     }
 
-    /// The minimal launch constitution (IMPLEMENTATION_DECISIONS §21.2): a
-    /// bootstrap document defining fraud, acceptable verification evidence, and
-    /// basic participant rights. The community amends it from here via the
-    /// standard governance process. Still version 0 (the seed).
+    /// Seed the three launch articles on fraud, evidence and participant rights
+    /// at version zero. Their text is stored content, not executable validation.
     pub fn bootstrap() -> Self {
         let seed = [
             (
@@ -112,8 +128,8 @@ impl ConstiDocument {
         doc
     }
 
-    /// Rebuild internal indexes from the articles Vec.
-    /// Call this after deserialization if indexes are empty.
+    /// Recompute indexes and counters from articles. Does not validate duplicate
+    /// numbers or amendment history; callers must validate restored content.
     pub fn rebuild_index(&mut self) {
         self.article_index.clear();
         self.active_count = 0;
@@ -173,7 +189,8 @@ impl ConstiDocument {
         self.get_article(number).is_some()
     }
 
-    /// Add a new article and update indexes. Returns the assigned article number.
+    /// Append an active article, replacing its supplied number with the next one.
+    /// Callers must provide a non-repealed article and valid document counters.
     pub fn push_article(&mut self, mut article: Article) -> u64 {
         let number = self.next_number;
         article.number = number;

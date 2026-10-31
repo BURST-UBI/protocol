@@ -1,18 +1,8 @@
-//! Verification outcome processor — distributes rewards and penalties.
+//! Stake settlement and rewards for verification and challenge outcomes.
 //!
-//! After a verification round completes, this module computes:
-//! - Endorser outcomes (burn recorded; NO protocol reward — decision 33.8a,
-//!   endorsement is a social obligation)
-//! - Correct verifier outcomes: stake returned + a TRST reward funded exactly
-//!   by the forfeited dissenter stakes (decision 33.7d) — TRST is only ever
-//!   created from burned BRN, and the forfeited stakes are that burn
-//! - Incorrect verifier penalties (stake forfeited/burned)
-//!
-//! For challenges:
-//! - Successful challenger: stake returned; the TRST reward
-//!   (min(1% of revoked, cap)) is computed by the node after revocation
-//! - Failed challenger: stake forfeited
-//! - Expired challenge: half the stake returned, half forfeited
+//! Endorsement burns are permanent and earn no reward. Winning staked verifiers
+//! share forfeited dissenting stakes using integer division. The node applies
+//! these results and computes any revocation-backed challenger reward.
 
 use burst_types::{BlockHash, WalletAddress};
 
@@ -32,16 +22,15 @@ pub struct VerificationOutcomeEvent {
 /// The result of a verification round.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VerificationResult {
-    /// The wallet was successfully verified as a unique human.
+    /// The settled vote passed the verification threshold.
     Verified,
-    /// Verification failed — the wallet was not confirmed as a unique human.
+    /// The settled vote did not establish verification.
     Failed,
 }
 
 /// Outcome for a single endorser in a verification round.
 ///
-/// Endorsers receive NO protocol reward (decision 33.8a) — endorsement is a
-/// social obligation and the burned BRN is gone regardless of outcome.
+/// The burn is permanent regardless of the outcome; there is no endorser reward.
 #[derive(Clone, Debug)]
 pub struct EndorserOutcome {
     /// The endorser's wallet address.
@@ -53,17 +42,17 @@ pub struct EndorserOutcome {
 /// Outcome for a single verifier in a verification round.
 #[derive(Clone, Debug)]
 pub struct VerifierOutcome {
-    /// Certified selection that locked this stake; absent for legacy state.
+    /// Selection context attached by the orchestrator after calculation.
+    /// Absent for synthetic timeout votes and legacy unbound state.
     pub selection_context: Option<BlockHash>,
     /// The verifier's wallet address.
     pub address: WalletAddress,
     /// Amount of BRN staked for this verification.
     pub staked: u128,
-    /// Whether this verifier voted with the majority outcome.
+    /// Whether the caller classified this vote as agreeing with the settled result.
+    /// This is not necessarily a simple majority or proof of factual correctness.
     pub voted_correctly: bool,
-    /// TRST reward for correct staked voters: an equal share of the forfeited
-    /// dissenter stakes (decision 33.7d). Burn-backed — the dissenters' BRN
-    /// was burned, and this TRST is minted against exactly that burn.
+    /// Integer share of forfeited dissenting stakes for a winning staked voter.
     pub trst_reward: u128,
     /// Penalty: stake forfeited/burned (incorrect voters only).
     pub penalty: u128,
@@ -71,9 +60,8 @@ pub struct VerifierOutcome {
 
 /// Process a completed verification and compute rewards/penalties.
 ///
-/// Endorsers get no protocol reward (33.8a). Correct staked verifiers get
-/// their stake back plus an equal TRST share of all forfeited dissenter
-/// stakes (33.7d). Incorrect verifiers lose their entire stake.
+/// Endorsers receive no reward. Winning staked verifiers share forfeited stakes;
+/// dissenting verifiers lose their stake. The caller supplies the settled judgment.
 pub fn compute_verification_outcomes(
     wallet: &WalletAddress,
     result: VerificationResult,
@@ -153,23 +141,23 @@ pub struct ChallengeOutcomeEvent {
 /// The result of a challenge.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChallengeResult {
-    /// Fraud was confirmed — the challenged wallet is de-verified.
+    /// The challenge was upheld. Also used for inactivity; the challenge reason
+    /// determines revocation versus deactivation, and appeals settle separately.
     FraudConfirmed,
-    /// The challenge was rejected — the challenged wallet remains verified.
+    /// The panel judged the target legitimate. An appeal compares this with
+    /// the earlier judgment before deciding its effect.
     ChallengeRejected,
-    /// Challenge expired without enough votes — resolved in favor of the challenged wallet.
-    /// Challenger's stake is returned minus a penalty for wasting network time.
+    /// Legacy admission-window expiry. Certified panel deadlines instead fill
+    /// missing votes with Neither before tallying.
     Expired,
 }
 
 /// Compute the outcome of a challenge.
 ///
-/// If fraud is confirmed, the challenger's stake is returned and the node
-/// grants a TRST reward of min(1% of revoked TRST, cap) after revocation
-/// (parameter table in IMPLEMENTATION_DECISIONS). If the challenge is
-/// rejected, the challenger's stake is forfeited. If it expires, half the
-/// stake is returned. Verifier outcomes follow the same reward/penalty
-/// logic as regular verification.
+/// Records the supplied judgment and challenger stake, and computes verifier
+/// rewards and penalties. The node separately applies challenger settlement and
+/// any revocation-backed reward. This function does not check challenge eligibility,
+/// debit balances or decide whether an appeal reverses its earlier judgment.
 pub fn compute_challenge_outcome(
     challenged: &WalletAddress,
     challenger: &WalletAddress,
@@ -223,7 +211,6 @@ mod tests {
         WalletAddress::new(format!("brst_{:0>60}", n))
     }
 
-    // ── Verification outcome tests ──────────────────────────────────────
 
     #[test]
     fn verified_endorsers_receive_no_protocol_reward() {
@@ -244,8 +231,7 @@ mod tests {
 
         assert_eq!(outcome.result, VerificationResult::Verified);
         assert_eq!(outcome.endorsers.len(), 2);
-        // 33.8(a): endorsement is a social obligation — no protocol reward,
-        // and the burned BRN is permanently gone.
+        // Outcomes retain each burn amount without adding an endorser reward.
         assert_eq!(outcome.endorsers[0].brn_burned, 1000);
         assert_eq!(outcome.endorsers[1].brn_burned, 2000);
     }
@@ -287,10 +273,8 @@ mod tests {
         )
         .unwrap();
 
-        // Total dissenter stakes: 600 + 400 = 1000 (BRN, burned)
-        // 2 correct verifiers: each gets a 500 TRST share — burn-backed
-        // by the forfeited stakes (33.7d). The stake itself is unlocked
-        // separately by the node.
+        // Split 1,000 forfeited units between two staked winning voters.
+        // Actual burns, reward minting and stake release belong to the node.
         assert_eq!(outcome.verifiers[0].trst_reward, 500);
         assert_eq!(outcome.verifiers[0].penalty, 0);
         assert_eq!(outcome.verifiers[1].trst_reward, 500);
@@ -400,10 +384,9 @@ mod tests {
         assert_eq!(outcome.wallet, wallet);
     }
 
-    // ── Challenge outcome tests ─────────────────────────────────────────
 
     #[test]
-    fn fraud_confirmed_returns_stake_and_rewards_correct_verifiers() {
+    fn fraud_outcome_records_challenger_stake_and_verifier_rewards() {
         let challenged = test_address(1);
         let challenger = test_address(2);
         let stake = 1000u128;
@@ -434,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    fn challenge_rejected_forfeits_stake() {
+    fn rejected_challenge_outcome_records_stake_without_verifiers() {
         let challenged = test_address(1);
         let challenger = test_address(2);
         let stake = 1000u128;

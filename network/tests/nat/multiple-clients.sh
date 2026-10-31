@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Requires the live lab after reconnect.sh and its saved success marker.
+# Starts client2 behind the same router, logs peer state and runs the transport
+# journey against all three RPC endpoints. The marker alone is not new evidence.
 set -euo pipefail
 test "${BURST_ISOLATED_NAT_LAB:-}" = yes
 test -f /evidence/reconnect-passed

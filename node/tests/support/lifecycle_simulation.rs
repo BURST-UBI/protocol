@@ -5,15 +5,10 @@
 use burst_brn::BrnEngine;
 use burst_types::{Timestamp, WalletAddress};
 
-/// Grant a burn-backed TRST reward by creating a pending entry that the
-/// recipient claims with a normal Receive block — so the reward flows through
-/// the same on-chain validation as every other TRST (pending must exist and
-/// amounts must match exactly).
-///
-/// The reward id is deterministic across nodes: every node derives the same
-/// pending entry from the same verification outcome. The provenance anchors
-/// the token at the reward id with the RECIPIENT as origin wallet — if the
-/// recipient is later proven sybil, their reward TRST is revoked with them.
+/// Insert a fixture reward pending receipt, with the recipient as its originator.
+/// The ID hashes only the kind, context wallet and recipient; callers must avoid
+/// reusing that tuple for distinct outcomes. This helper checks neither burn
+/// backing nor consensus. The fixture exercises receipt validation separately.
 pub fn create_reward_pending<P: burst_store::pending::PendingStore>(
     pending_store: &P,
     recipient: &WalletAddress,
@@ -48,13 +43,10 @@ pub fn create_reward_pending<P: burst_store::pending::PendingStore>(
     Ok(reward_hash)
 }
 
-/// Resolve verifier stakes and rewards after a verification or challenge vote.
-///
-/// - Correct staked voters: stake unlocked, plus a TRST reward equal to their
-///   share of the forfeited dissenter stakes (decision 33.7d). The reward is
-///   burn-backed: the dissenters' BRN is burned below, and the minted TRST
-///   sums to at most that burn — TRST is only ever created from burned BRN.
-/// - Incorrect voters: stake forfeited (unlocked and burned).
+/// Apply supplied outcomes directly to the component fixture's balances.
+/// Matching voters get stake refunds and any caller-supplied reward; dissenters'
+/// stakes are burned. This helper does not verify the reward total or settle
+/// atomically, and missing wallets and storage failures are only logged.
 pub fn resolve_verifier_outcomes<P: burst_store::pending::PendingStore>(
     brn_engine: &mut BrnEngine,
     pending_store: &P,

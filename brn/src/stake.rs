@@ -3,7 +3,7 @@
 use burst_types::{Timestamp, WalletAddress};
 use serde::{Deserialize, Serialize};
 
-/// Unique identifier for an active stake.
+/// Stake identifier allocated within a BRN engine.
 pub type StakeId = u64;
 
 /// What kind of action this BRN is staked for.
@@ -15,7 +15,7 @@ pub enum StakeKind {
     Challenge { target_wallet: WalletAddress },
 }
 
-/// An active BRN stake.
+/// A BRN stake and its settlement flag. Resolved records may still be retained.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Stake {
     pub id: StakeId,

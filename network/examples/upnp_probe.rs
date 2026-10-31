@@ -1,4 +1,12 @@
-//! Diagnostic probe for the isolated UPnP gateway lab; never enables RPC.
+//! UPnP mapping probe intended for the isolated gateway lab. Requests a TCP
+//! mapping for local port 7076; it does not start a listener or RPC service.
+//! The program itself does not enforce network isolation.
+//!
+//! BURST_PROBE_LEASE_SECS defaults to 3600. BURST_PROBE_HOLD_SECS defaults to
+//! zero, which returns on the first active or terminal failure state. A nonzero
+//! hold observes until its deadline and succeeds if a mapping was ever active,
+//! even if it later failed. Shutdown requests cleanup, not proof of deletion
+//! or external reachability.
 use burst_network::{PortMapper, PortMapperConfig, UpnpState};
 use std::time::Duration;
 

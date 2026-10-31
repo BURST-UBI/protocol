@@ -2,9 +2,9 @@ use super::*;
 use burst_consensus::checkpoint::CheckpointAnchor;
 use burst_types::{BlockHash, Timestamp, WalletAddress};
 
-/// Replay-derived engines paired with an uncommitted recovery transaction.
-/// These values must not be published before durable commit and synchronized
-/// replacement of the runtime's authority, engines and admission state.
+/// Engines reconstructed by replay and checked against the staged database.
+/// Publish them only after commit and force-sync, while holding the locks for
+/// runtime authority, engines and admission state.
 pub struct RecoveredRuntime {
     pub brn: burst_brn::BrnEngine,
     pub trst: burst_trst::TrstEngine,
@@ -26,7 +26,7 @@ impl super::economics::AppliedEconomics {
         anchor: CheckpointAnchor,
         cache_at: Timestamp,
     ) -> Result<RecoveredRuntime, StoreError> {
-        self.verify_unchanged(transaction)?;
+        let staged_trst = self.verify_runtime_state(transaction)?;
         if self.state.payment_epoch != anchor.hash() || cache_at.as_secs() < anchor.cutoff() {
             return Err(invalid(
                 "recovery runtime has a different epoch or stale clock",
@@ -34,13 +34,13 @@ impl super::economics::AppliedEconomics {
         }
         self.state
             .trst
-            .set_expiry_period(self.state.params.trst_expiry_secs, cache_at);
-        let staged = crate::payment_transition::restore(transaction, &self.state.params)?;
-        if !staged.trst.wallet_snapshot_eq(&self.state.trst)
-            || staged.trst.merger_graph != self.state.trst.merger_graph
+            .set_expiry_period(self.state.params.trst_expiry_secs, cache_at).map_err(invalid)?;
+        if !staged_trst.wallet_snapshot_eq(&self.state.trst)
+            || staged_trst.merger_graph != self.state.trst.merger_graph
         {
             return Err(invalid("recovery runtime differs from staged TRST caches"));
         }
+        drop(staged_trst);
         let mut frontiers = Vec::new();
         for actual in transaction.account_entries()? {
             let actual = actual?;
@@ -62,9 +62,7 @@ impl super::economics::AppliedEconomics {
                 expected.expired_trst = 0;
                 expected.revoked_trst = 0;
             }
-            if crate::confirmed_replay::snapshot::canonical::encode(&actual).map_err(invalid)?
-                != crate::confirmed_replay::snapshot::canonical::encode(&expected)
-                    .map_err(invalid)?
+            if actual != expected
             {
                 return Err(invalid(
                     "recovery runtime differs from staged account caches",

@@ -16,6 +16,8 @@ pub struct SnapshotAttestation {
 }
 
 impl SnapshotAttestation {
+    /// Decode one size-limited attestation. Signature and quorum checks occur
+    /// when the attestations are assembled into an export certificate.
     pub fn read(reader: &mut impl Read) -> Result<Self, ReplayError> {
         let mut bytes = Vec::new();
         reader
@@ -65,7 +67,7 @@ impl SnapshotExport {
         let store = LmdbStore::open(
             &config.data_dir,
             crate::node::MAX_DBS,
-            crate::node::DEFAULT_MAP_SIZE,
+            config.database_map_size().map_err(invalid)?,
         )
         .map_err(|e| invalid(e.to_string()))?;
         let meta = store.meta_store();
@@ -146,7 +148,7 @@ impl SnapshotExport {
             .prepare_snapshot_in(&anchor, store.env().path())?;
         let beacons = recovered
             .selections
-            .read_all()
+            .iter_selections()
             .filter_map(|selection| match selection {
                 Err(error) => Some(Err(error)),
                 Ok(selection) => selection
@@ -190,7 +192,7 @@ impl SnapshotExport {
             .prepare_snapshot_in(&anchor, store.env().path())?;
         let beacons = recovered
             .selections
-            .read_all()
+            .iter_selections()
             .filter_map(|selection| match selection {
                 Err(error) => Some(Err(error)),
                 Ok(selection) => selection
@@ -226,8 +228,9 @@ impl SnapshotExport {
         &self.initial_params
     }
 
-    /// Commit the signer's exact choice and force it to disk before returning a
-    /// signature. Repeat export is idempotent; conflicting state fails closed.
+    /// Return a signature only after committing and syncing this signer's choice
+    /// for the epoch. Repeating the same choice is allowed; a conflict is rejected.
+    /// Sync failure leaves the choice committed but returns no attestation.
     pub fn attest(
         &self,
         store: &LmdbStore,

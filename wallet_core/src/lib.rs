@@ -1,6 +1,9 @@
 //! Wallet core library for BURST.
 //!
-//! Provides everything a wallet application needs:
+//! Shared wallet operations. Applications supply the interface and storage policy.
+//! File-backed journals and signing-device bindings are native-only.
+//!
+//! Modules include:
 //! - Key generation and management (primary + delegation key pairs)
 //! - BRN balance display (computed from time)
 //! - TRST portfolio (transferable, expired, revoked)

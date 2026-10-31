@@ -38,6 +38,10 @@ impl HistoricalFinality {
             .map(|entry| entry.weight)
     }
 
+    /// Start a 120-second collection window under caller-supplied authority.
+    /// Checks epoch/cutoff but does not authenticate the block or authority here.
+    /// Duplicate hashes do not refresh the deadline. The 8 MiB budget estimates
+    /// encoded block plus twice the roster size, not total allocated memory.
     pub(crate) fn request(&self, block: &StateBlock, authority: PaymentAuthority) -> bool {
         if block.payment_epoch != authority.epoch || block.timestamp.as_secs() < authority.cutoff {
             return false;
@@ -84,7 +88,9 @@ impl HistoricalFinality {
         true
     }
 
-    pub(crate) fn contains(&self, hash: &BlockHash) -> bool {
+    /// Check quorum acceptance before the original request expires. This neither
+    /// refreshes the deadline nor checks the node's currently installed epoch.
+    pub(crate) fn has_age_exception(&self, hash: &BlockHash) -> bool {
         self.pending.lock().is_ok_and(|pending| {
             pending
                 .get(hash)
@@ -103,6 +109,8 @@ impl HistoricalFinality {
             .collect()
     }
 
+    /// Queue blocks reaching quorum. On admission failure, keep collected votes
+    /// but clear acceptance so a later eligible vote can trigger another attempt.
     pub(crate) async fn receive_and_enqueue(
         &self,
         vote: &WireVote,
@@ -120,6 +128,8 @@ impl HistoricalFinality {
         }
     }
 
+    /// Count each signed final voter once per requested hash using its captured
+    /// roster. Quorum rounds upward; success grants only the local age exception.
     pub(crate) fn receive(&self, vote: &WireVote) -> Vec<StateBlock> {
         if !vote.is_final
             || self
@@ -229,12 +239,12 @@ mod tests {
             .is_empty());
         for seed in [0, 0, 1, 1] {
             assert!(cache.receive(&vote(seed, block.hash, true)).is_empty());
-            assert!(!cache.contains(&block.hash));
+            assert!(!cache.has_age_exception(&block.hash));
         }
         let ready = cache.receive(&vote(2, block.hash, true));
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].hash, block.hash);
-        assert!(cache.contains(&block.hash));
+        assert!(cache.has_age_exception(&block.hash));
         assert!(cache.receive(&vote(2, block.hash, true)).is_empty());
         let mut processor = crate::block_processor::BlockProcessor::new(0, block.payment_epoch);
         processor.historical_finality = cache.clone();
@@ -255,9 +265,9 @@ mod tests {
             .get_mut(&block.hash)
             .unwrap()
             .created = Instant::now() - RETENTION;
-        assert!(!cache.contains(&block.hash));
+        assert!(!cache.has_age_exception(&block.hash));
         assert!(cache.request(&block, authority()));
-        assert!(!cache.contains(&block.hash));
+        assert!(!cache.has_age_exception(&block.hash));
     }
 
     #[test]
@@ -268,11 +278,11 @@ mod tests {
             block.work = index as u64;
             block.hash = BlockHash::new(burst_crypto::blake2b_256(&index.to_be_bytes()));
             assert!(cache.request(&block, authority()));
-            assert!(!cache.contains(&block.hash));
+            assert!(!cache.has_age_exception(&block.hash));
         }
         block.hash = BlockHash::new([99; 32]);
         assert!(!cache.request(&block, authority()));
-        assert!(!cache.contains(&block.hash));
+        assert!(!cache.has_age_exception(&block.hash));
     }
 
     #[tokio::test]
@@ -280,23 +290,42 @@ mod tests {
         let cache = HistoricalFinality::default();
         let block = block();
         let queue = crate::priority_queue::BlockPriorityQueue::new(1);
-        assert!(queue.push(block.clone()).await);
+        let occupied = crate::genesis_state::block(NetworkId::Dev, &ProtocolParams::default());
+        assert_ne!(occupied.hash, block.hash);
+        assert!(queue.push(occupied.clone()).await);
         assert!(cache.request(&block, authority()));
         for seed in 0..3 {
             cache
                 .receive_and_enqueue(&vote(seed, block.hash, true), &queue)
                 .await;
         }
-        assert!(!cache.contains(&block.hash));
+        assert!(!cache.has_age_exception(&block.hash));
         assert_eq!(cache.awaiting_votes(), vec![block.hash]);
         assert_eq!(cache.collected_weight(&block.hash), Some(3));
-        queue.pop().await;
+        assert_eq!(queue.pop().await.hash, occupied.hash);
         cache
             .receive_and_enqueue(&vote(0, block.hash, true), &queue)
             .await;
-        assert!(cache.contains(&block.hash));
+        assert!(cache.has_age_exception(&block.hash));
         assert!(cache.awaiting_votes().is_empty());
         assert_eq!(cache.collected_weight(&block.hash), Some(3));
         assert_eq!(queue.pop().await.hash, block.hash);
     }
+    #[tokio::test]
+    async fn already_queued_history_keeps_quorum_accepted() {
+        let cache = HistoricalFinality::default();
+        let block = block();
+        let queue = crate::priority_queue::BlockPriorityQueue::new(1);
+        assert!(queue.push(block.clone()).await);
+        assert!(cache.request(&block, authority()));
+        for seed in 0..3 {
+            cache.receive_and_enqueue(&vote(seed, block.hash, true), &queue).await;
+        }
+        assert!(cache.has_age_exception(&block.hash));
+        assert!(cache.awaiting_votes().is_empty());
+        assert_eq!(cache.collected_weight(&block.hash), Some(3));
+        assert_eq!(queue.len().await, 1);
+        assert_eq!(queue.pop().await.hash, block.hash);
+    }
+
 }

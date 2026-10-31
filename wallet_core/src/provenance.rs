@@ -11,7 +11,8 @@ use std::{collections::HashSet, time::Duration};
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PaymentOrigins {
     pub payment: String,
-    /// Every source/return block, the root and all burns are node-confirmed.
+    /// The RPC node reports confirmation for every inspected source/return block,
+    /// the provenance root and all listed burns. This is not independent proof.
     pub confirmed: bool,
     pub provenance: OriginReport,
 }
@@ -43,6 +44,7 @@ pub struct BurnOrigin {
 
 impl NodeClient {
     /// Inspect a Burn, Send or returned payment without accepting or signing it.
+    /// Follows at most 64 source/return blocks under a 30-second overall timeout.
     /// This does not establish that the payment is pending for a particular wallet.
     pub async fn payment_origins(&self, payment: &str) -> Result<PaymentOrigins, WalletError> {
         crate::runtime::timeout(
@@ -106,6 +108,10 @@ impl NodeClient {
         ))
     }
 
+    /// Read a node-reported origin list, checking the requested root, completeness
+    /// flag, 1–8192 entries, canonical identities and strict burn-hash ordering.
+    /// Unconfirmed reports are returned with their flags intact. Contribution
+    /// amounts and confirmation proofs are not supplied by this response.
     pub async fn trst_origins(&self, origin: &str) -> Result<OriginReport, WalletError> {
         let origin = parse_hash(origin)?.to_string();
         let report: OriginReport = serde_json::from_value(

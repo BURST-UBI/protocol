@@ -1,9 +1,9 @@
 use super::{invalid, CertifiedCheckpoint, ReplayError};
 use std::borrow::Cow;
 
-/// Ordered, authenticated selections. Implementations must restore historical
-/// parent authority before returning a certificate; scratch integrity alone
-/// cannot authorize one. A missing row inside `len` is an error.
+/// Ordered, authenticated selections with stable positions for the source borrow.
+/// Stored selections must restore historical parent authority; in-memory sources
+/// reuse already authenticated certificates. A missing row inside `len` is an error.
 pub trait SelectionSource {
     fn len(&self) -> usize;
     fn is_empty(&self) -> bool {
@@ -11,7 +11,7 @@ pub trait SelectionSource {
     }
     fn read_selection(&self, position: usize) -> Result<Cow<'_, CertifiedCheckpoint>, ReplayError>;
 
-    fn read_all(&self) -> impl Iterator<Item = Result<Cow<'_, CertifiedCheckpoint>, ReplayError>> {
+    fn iter_selections(&self) -> impl Iterator<Item = Result<Cow<'_, CertifiedCheckpoint>, ReplayError>> {
         (0..self.len()).map(|position| self.read_selection(position))
     }
 
@@ -19,7 +19,7 @@ pub trait SelectionSource {
         &self,
         mut matches: impl FnMut(&CertifiedCheckpoint) -> bool,
     ) -> Result<Option<Cow<'_, CertifiedCheckpoint>>, ReplayError> {
-        for certificate in self.read_all() {
+        for certificate in self.iter_selections() {
             let certificate = certificate?;
             if matches(&certificate) {
                 return Ok(Some(certificate));

@@ -67,6 +67,7 @@ fn independent_graph_journals_survive_non_tail_undo_reopen_and_new_consumer() {
     let mut batch = store.tx_begin_write().unwrap();
     let b_journal = batch.block_undo(&block_b).unwrap().unwrap();
     batch.rewind_block(&block_a).unwrap();
+    assert_eq!(batch.next_graph_edge_position(&tx(20), true).unwrap(), 3);
     let mut expected = base.clone();
     merge(&mut expected, 40, &[(20, 30)]);
     assert_eq!(load(&batch).unwrap().to_bytes(), expected.to_bytes());
@@ -76,6 +77,7 @@ fn independent_graph_journals_survive_non_tail_undo_reopen_and_new_consumer() {
     let batch = store.tx_begin_write().unwrap();
     assert_eq!(load(&batch).unwrap().to_bytes(), expected.to_bytes());
     assert_eq!(batch.block_undo(&block_b).unwrap().unwrap(), b_journal);
+    assert_eq!(batch.next_graph_edge_position(&tx(20), true).unwrap(), 3);
     drop(batch);
     merge(&mut expected, 50, &[(20, 20)]);
     let block_c = journal(&store, 50, &expected);
@@ -93,12 +95,14 @@ fn independent_graph_journals_survive_non_tail_undo_reopen_and_new_consumer() {
     }
     assert_eq!(batch.block_undo(&block_b).unwrap().unwrap(), b_journal);
     batch.rewind_block(&block_b).unwrap();
+    assert_eq!(batch.next_graph_edge_position(&tx(20), true).unwrap(), 4);
     let mut c = base.clone();
     merge(&mut c, 50, &[(20, 20)]);
     assert_eq!(load(&batch).unwrap().to_bytes(), c.to_bytes());
     batch.commit().unwrap();
     let mut batch = store.tx_begin_write().unwrap();
     batch.rewind_block(&block_c).unwrap();
+    assert_eq!(batch.next_graph_edge_position(&tx(20), true).unwrap(), 0);
     assert_eq!(load(&batch).unwrap().to_bytes(), base.to_bytes());
     batch.commit().unwrap();
 }
@@ -116,7 +120,7 @@ fn graph_rows_preserve_revocation_restore_and_aborted_conversion() {
     stage_rows_for_test(&mut batch, &graph).unwrap();
     drop(batch);
     let mut batch = store.tx_begin_write().unwrap();
-    assert!(!row_format(&batch).unwrap());
+    assert!(!batch.uses_graph_records().unwrap());
     stage_rows_for_test(&mut batch, &graph).unwrap();
     batch.commit().unwrap();
     graph.apply_revocation(tx(1));
@@ -127,7 +131,7 @@ fn graph_rows_preserve_revocation_restore_and_aborted_conversion() {
     let batch = store.tx_begin_write().unwrap();
     let mut graph = load(&batch).unwrap();
     drop(batch);
-    assert_eq!(graph.apply_unrevocation(&tx(1)).len(), 1);
+    assert_eq!(graph.apply_restoration(&tx(1)).len(), 1);
     let mut batch = store.tx_begin_write().unwrap();
     persist(&mut batch, &graph).unwrap();
     assert_eq!(load(&batch).unwrap().to_bytes(), graph.to_bytes());
@@ -200,7 +204,7 @@ fn startup_migration_converts_historical_journals_after_independent_rollback() {
     drop(store);
     let store = LmdbStore::open(directory.path(), 32, 16 << 20).unwrap();
     let batch = store.tx_begin_write().unwrap();
-    assert!(row_format(&batch).unwrap());
+    assert!(batch.uses_graph_records().unwrap());
     assert!(batch.get_meta(LEGACY_KEY).unwrap().is_none());
     let mut bc = load(&batch).unwrap();
     let before_c = bc.to_bytes();
@@ -275,7 +279,7 @@ fn migration_missing_journal_aborts_rows_and_marker() {
     batch.commit().unwrap();
     assert!(migrate(&store).is_err());
     let batch = store.tx_begin_write().unwrap();
-    assert!(!row_format(&batch).unwrap());
+    assert!(!batch.uses_graph_records().unwrap());
     assert_eq!(load(&batch).unwrap().to_bytes(), graph.to_bytes());
 }
 

@@ -1,9 +1,7 @@
-//! Backlog scanner — tracks unconfirmed blocks for periodic re-checking.
+//! Standalone bounded FIFO of block hashes for retrying election admission.
 //!
-//! Blocks that arrive but don't immediately enter an election (e.g. because the
-//! election container is at capacity, or a dependency is missing) are placed in
-//! the backlog. A background task periodically drains batches from the backlog
-//! and re-evaluates election eligibility.
+//! The node uses its ledger-backed `backlog_scan::BacklogScan` instead. This
+//! queue does not inspect the ledger, deduplicate hashes or enforce minimum age.
 
 use burst_types::BlockHash;
 use std::collections::VecDeque;
@@ -16,7 +14,7 @@ pub struct BacklogScanner {
     /// Maximum backlog size. New entries are dropped when at capacity.
     capacity: usize,
     /// Minimum age (seconds) before a block is eligible for re-scan.
-    /// Used by the caller to filter, not enforced internally.
+    /// Exposed for caller policy; this queue stores no arrival timestamps.
     min_age_secs: u64,
 }
 
@@ -30,7 +28,7 @@ impl BacklogScanner {
         }
     }
 
-    /// Add a block to the backlog. Silently dropped if at capacity.
+    /// Append a block hash, including duplicates. Silently dropped at capacity.
     pub fn add(&mut self, hash: BlockHash) {
         if self.backlog.len() < self.capacity {
             self.backlog.push_back(hash);
@@ -39,8 +37,7 @@ impl BacklogScanner {
 
     /// Remove a specific block from the backlog (e.g., it was confirmed).
     ///
-    /// O(n) scan; acceptable because confirmations are relatively infrequent
-    /// compared to the backlog size, and the backlog is bounded.
+    /// Scans the entire queue and removes every matching occurrence: O(n).
     pub fn remove(&mut self, hash: &BlockHash) {
         self.backlog.retain(|h| h != hash);
     }

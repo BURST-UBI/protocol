@@ -88,9 +88,7 @@ fn proposal_votes_timing_and_secondary_ballots_share_one_conflict_scope() {
 fn global_rule_effects_require_complete_after_state_and_bad_encodings_are_rejected() {
     let before = GovernanceEngine::new();
     let mut after = before.clone();
-    after
-        .pending_changes
-        .push((crate::GovernableParam::BrnRate, 2));
+    Arc::make_mut(&mut after.pending_changes).push((crate::GovernableParam::BrnRate, 2));
     assert_eq!(rewind(&before, &after, &after).unwrap(), before);
     let mut current = after.clone();
     add(&mut current, 1);

@@ -1,0 +1,541 @@
+# Implementation simplicity review — 2026-10-30
+
+Implementation follow-up: [current fix tracker](SIMPLICITY_FIX_TRACKER_20261030.md).
+The findings below preserve the pre-fix review; consult the tracker for current status.
+
+Read-only source review; no product changes, builds, benchmarks or new runtime
+passes. Reference: clean local rsnano checkout at
+`414dd884c162f78f151b9d912a029bbc9a340866`. This is a pinned comparison, not a
+claim about latest upstream. BURST's current working tree includes uncommitted
+work; findings refer to the inspected source, not the frozen release packages.
+
+The review sampled verification ownership, governance parameter plumbing, RPC
+error handling and signing preparation, transaction ownership, shared economic
+transitions, and collection/HTTP reuse. It is not an exhaustive security audit or
+proof of a performance regression. Authorship cannot be determined from style.
+
+## Findings
+
+Companion review: [rsnano divergence justification](RSNANO_DIVERGENCE_JUSTIFICATION_20261030.md)
+examines dependency and architecture choices, including the additional live
+mnemonic-recovery contract finding D01. Its stopping-point section closes this
+broad source-review pass at diminishing returns; it does not mark the fixes or
+release gates complete.
+
+### S01 — Remove the obsolete verification processor and local pool
+
+Priority: next cleanup batch; misleading alternate policy, not demonstrated
+production consensus execution.
+
+`node/src/node.rs:528` constructs VerificationProcessor with a hard-coded 0.67
+participation fraction and an in-memory VerifierPool. The old processor decides
+by simple majority after participation, unlike the current certified engine.
+Production-source reference searches found initialization, exported fields and
+an unused `_verification_processor_bp` clone, but no runtime decision consumer.
+The real node also owns VerificationOrchestrator; eligibility comes from the
+certified account view, including persisted opt-in, age, activity and BRN.
+
+`node/src/verification_processor.rs:1` claims to coordinate end-to-end selection,
+drand and verification, but implements only counters, a majority function and
+an in-memory opt-in set. `node/tests/integration_tests.rs:1186`, named
+verification_full_flow, exercises that toy path rather than the actual signed
+lifecycle. It must not be counted as production enrollment evidence.
+
+Small fix: remove unused node ownership/clone and obsolete API after checking
+supported external consumers; migrate meaningful test assertions into existing
+orchestrator/certified fixtures. Do not delete coverage merely to obtain a pass.
+Rsnano has no humanity verification analogue; the comparison supports clear
+ownership of real execution paths, not replacing BURST rules with Nano rules.
+
+### S02 — Propagate verification-status storage errors
+
+Priority: next correctness batch; misleading RPC output on read failure.
+
+`rpc/src/handlers.rs:2456` converts get_endorsements errors to an empty vector;
+get_challenge errors become None through `.ok().flatten()`. Both storage APIs
+return Result, so database failures can become ordinary-looking zero counts or
+no challenge. A present in-memory process overrides these fields, which limits
+the affected cases but does not make swallowing the read error correct.
+
+Small fix: propagate errors with `?`; retain legitimate empty/None results.
+Reuse RpcError conversion and the existing storage/test seam. Add focused
+error-injection assertions that distinguish absence from failure.
+
+Rsnano's account-info handler also defaults optional confirmation data. That is
+not evidence for swallowing BURST's Result errors: distinguish an absent value
+from failed I/O rather than applying a blanket ban on defaults.
+
+### S03 — Load and validate the signing predecessor once
+
+Priority: localized simplification/hardening, not a demonstrated accepted spend.
+
+`rpc/src/handlers.rs:3200` prev_spent_brn returns zero on a missing/corrupt nonzero
+head. Nearby prev_signing_grant correctly propagates missing data and validates
+the decoded predecessor hash. Authoring paths, including genesis_endorse, use
+both helpers, repeating the read/decode with different error semantics. The later
+strict helper and processor validation constrain the risk; this review does not
+claim an attacker can reset spent BRN in the ledger.
+
+Small fix: one checked predecessor loader returning the block or derived signing
+fields; zero is valid only for the explicitly absent predecessor. Reuse existing
+StateBlock/hash checks, not a new signing framework. Keep remote wallet ancestry
+validation separate: it protects a different trust boundary.
+
+Rsnano's BlockValidator carries the fetched previous block and produces insertion
+instructions; its ledger process_batch separately rechecks insertion against the
+writer. Reuse loaded context within a boundary without removing writer checks.
+
+### S04 — Remove the unused alternate parameter application API
+
+Priority: small deletion after public API review.
+
+`governance/src/params.rs:270` defines GovernableParamTrait and two implementations
+with no in-repository consumers found. TrstExpiryParam applies `value as u64`,
+while the active engine path uses checked `u64::try_from`. An unused API retains
+a second, weaker interpretation of the same rule.
+
+Small fix: remove it if not a supported external API, or route it to the same
+checked application method. No generic parameter plugin framework is needed.
+Rsnano has no equivalent governable parameter system; this is internal duplication.
+
+### S05 — Consolidate parameter metadata and setters incrementally
+
+Priority: maintainability, not a present mapping defect.
+
+The enum, ALL list, name parsing/rendering in `governance/src/params.rs`, field
+mapping in `params/view.rs`, and assignment match in `engine.rs:858` repeat the
+same registry. The view already uses a small macro and has a completeness test.
+
+Small fix: extend that local declaration approach to own names, widths, units,
+legacy markers and checked setters, preserving serialized variant order and
+public response shapes. Retain independent golden encoding/overflow assertions;
+tests generated solely from the same declaration cannot establish correctness.
+Do not remove the four serialized legacy fields just because they are inactive.
+This is a modest local refactor, not a schema/code-generation platform.
+
+### S06 — Use typed RPC data at signing-review boundaries
+
+Priority: incremental maintenance improvement; no demonstrated veto bypass.
+
+The wallet repeatedly interprets `serde_json::Value` fields such as phase,
+phase_deadline and params_hash (`wallet_core/src/signed_client.rs`, especially
+review_governance_veto at 1065). The server already defines response structures
+such as GovernanceProposalInfoResponse in handlers.rs, but the wallet does not
+share that typed contract. The inspected veto checks fail closed, so this is
+not a claim that missing fields grant authority.
+
+Rsnano separates RPC message types and uses a generic typed client request method
+(`rpc/client/src/lib.rs:698`). Adopt that pattern for changed endpoints: put
+relevant wire DTOs in an existing appropriate dependency layer and deserialize
+once. Keep business authorization and freshness rechecks. Do not make wallet-core
+depend on the RPC server implementation or rewrite every endpoint at once.
+
+## Complexity that has a reason to remain
+
+* `store_lmdb/src/write_batch.rs` wraps heed transactions and provides actual
+  caller-owned atomic writes/read snapshots. Rsnano also wraps LMDB, using its
+  nullable LMDB crate. An older port plan's assertion that there is no transaction
+  seam is stale for this source. Empty ReadTxn/WriteTxn marker traits are a minor
+  cleanup candidate, not evidence that atomicity is absent.
+* `node/src/economic_candidate.rs` already shares the transition between live
+  admission and branch replacement. Reuse it rather than add parallel fixes.
+* `trst/src/shared_map.rs` wraps imbl::OrdMap and shared values; it is not a
+  handwritten tree. It provides cheap snapshots, changed-key traversal and wire
+  serialization behavior. Replacing it with full HashMap clones could regress
+  the very complexity this work addressed.
+* Native wallet HTTP reads already reuse burst_http_client's bounded reader;
+  browser fetch has a separate WASM transport. Different platforms are a real
+  reason for different transport adapters.
+* Checkpoint replay, provenance, expiry and revocation have BURST-specific duties
+  that Nano's single-asset ledger does not have. File/module counts alone do not
+  establish overengineering. Removing those mechanisms requires evidence that
+  their guarantees are duplicated elsewhere.
+* Independent network input, writer state, replay and offline-signing checks
+  protect distinct boundaries. Rsnano itself validates before insertion and
+  handles insertion conflicts; validation appearing twice is not automatically
+  redundant.
+
+## Execution order and validation impact
+
+| Change | Affected check | Existing code/evidence to reuse | Why run anything new |
+| --- | --- | --- | --- |
+| This review only | Source/reference inspection | Existing pinned checkout and audit dispositions | No build or runtime test needed |
+| S01/S04 removal | Consumer/API check; relevant crate checks | Existing actual verification fixtures and parameter overflow tests | Removed wiring/APIs must compile; migrated assertions must exercise real paths |
+| S02/S03 RPC fixes | Storage-failure and predecessor tests | Existing RpcError conversion, signing guards and test stores | Current failures are swallowed/re-read; need focused boundary assertions |
+| S05 metadata consolidation | Registry coverage, wire golden values, overflow | Existing params/view and engine tests | Macro refactor must preserve ABI and checked widths |
+| S06 typed responses | Serialization compatibility and wallet signing review | Existing response structs and offline review fixtures | Types must preserve missing-field rejection and response compatibility |
+
+No automatic broad-suite or release rebuild is scheduled. Reconcile receipts and
+follow VALIDATION_WORKFLOW.md before implementation validation. These findings do
+not resolve the separate proposed free-bootstrap-admission change or Live gates.
+
+## Continued review: networking, work, fixtures and policy ownership
+
+The owner requested continued review with rsnano as the reference. The reference
+commit above remains unchanged. Findings below distinguish code used by the node
+from exported helpers with no production caller found. No runtime or timing
+claims are inferred from test counts. Product source remains unchanged.
+
+### S07 — The node pays for a difficulty calculator whose output it never uses
+
+Priority: remove unused runtime work; do not enable the calculator as a fix.
+
+`node/src/node.rs:1814` locks difficulty_adjuster and records a timestamp for each
+accepted block. Searches found no production caller of current_difficulty or
+set_base_difficulty. It keeps a bounded history, so this is needless locking and
+bookkeeping, not an unbounded-memory finding. No throughput impact was measured.
+
+`work/src/difficulty.rs:57` also scales the raw threshold with saturating_mul.
+With the production threshold 0xffff_fff8_0000_0000, a multiplier of two already
+saturates to u64::MAX. That is not twice the expected work: it leaves only the
+maximum hash value acceptable. Existing calculator tests use tiny thresholds
+such as 1000 and do not distinguish this semantic error.
+
+Rsnano `types/src/difficulty.rs::DifficultyV1::{to_multiplier,from_multiplier}`
+converts using the remaining hash range. Its math is the relevant reference;
+it does not authorize adding local adaptive consensus thresholds to BURST.
+BURST's active WorkThresholds uses the governed uniform threshold, as required
+by decision 14.6. Remove the unused node recorder and obsolete calculator/API
+unless a separately defined purpose exists. If adaptive work is ever desired,
+first define whether it affects local priority, generation or consensus validity.
+
+### S08 — General gossip selects a recurring highest-score subset and sorts every time
+
+Priority: active propagation design improvement; no eclipse exploit established.
+
+`network/src/broadcast.rs:87` collects eligible peers, fully sorts by score and
+sends to ceil(sqrt(P)) peers (minimum four at current call sites). The active
+node calls this for accepted blocks, forks and votes. Several callers first
+clone all connected PeerState values, adding another linear pass. Sender-side
+selection is O(P log P), not O(sqrt(P)); the latter describes recipient count
+only. Peer limits bound this cost; it is not a ledger-size complexity blowup.
+
+With a stable peer set/scores, selection repeatedly favors the same subset.
+The score is local reputation, not independent evidence of diversity or delivery.
+Thus the comment claiming reliable propagation through high-reputation nodes
+overstates what selecting by score establishes. Other repair/rebroadcast paths
+exist, so this alone does not prove a message cannot propagate.
+
+Rsnano `node/src/transport/message_flooder.rs:130` serializes once and calls
+random_fanout, which shuffles channels and truncates; its fanout formula is not
+BURST's square-root formula. Decision 23.9 explicitly asks to follow Nano where
+appropriate. BURST already has broadcast_to_subset and peer sampling utilities.
+Reuse random selection for general fanout, preserving ban/capacity filters and
+delivery budgets; do not invent a new reputation-routing layer. Any special
+representative routing should remain explicit. Use deterministic injected RNG
+or seeded sampling tests for selection behavior, not flaky statistical assertions.
+
+### S09 — Exported networking/work prototypes do not implement the running services
+
+Priority: remove or clearly quarantine obsolete public surfaces after API review.
+
+Source searches found no production consumers for:
+
+* `network/src/sync.rs::SyncProtocol`: channel requests followed by whole-vector
+  responses; bootstrap returns frontier/block counts without integrating blocks.
+  Its channel-driven tests are not evidence for real peer synchronization.
+* `network/src/throttle.rs::BandwidthThrottle`: a second token-bucket helper.
+  Its millisecond refill truncates time and resets last_refill on every call;
+  repeated sub-millisecond calls can discard replenishment time. Not an active
+  network starvation claim because production callers were not found.
+* `work/src/precompute.rs::{WorkCache,WorkPriorityQueue}`: unused caching/queue
+  alternatives. WorkCache's comment says full entries are dropped, while code
+  evicts an arbitrary entry. A zero-capacity instance still accepts one entry.
+* `utils/src/stats.rs::StatsCounter`: unused string-key counters, while the real
+  node uses prometheus-backed NodeMetrics. A missing name silently returns zero.
+
+Rsnano's bootstrapper connects actual ledger events, channels, tracked queries
+and response processing (`node/src/bootstrap/bootstrapper/mod.rs`). Its token
+bucket (`network/src/token_bucket.rs:182`) retains elapsed time when no whole
+token can be credited. BURST already has actual bootstrap/checkpoint services,
+BlockPriorityQueue with retained-byte accounting, SharedBandwidth with fractional
+credit, and NodeMetrics. Prefer those existing owners. Do not port rsnano's whole
+stats/nullable stack just to replace an unused counter class.
+
+### S10 — A public cascade_rollback helper does not cascade dependencies
+
+Priority: clarify/remove simulation APIs, not rewrite actual rollback.
+
+`node/src/block_processor.rs:789` simply delegates cascade_rollback to
+rollback_to, which walks one account chain and edits the in-memory frontier.
+The method's first sentence promises cross-account cascading; its following
+paragraph admits that this is not implemented. Production-store-backed rollback
+already returns RequiresLedgerRollback, and found call sites are tests. That
+guard is important evidence against claiming live ledger rollback is missing.
+
+Rsnano `ledger/src/block_rollback/rollback_performer.rs` actually walks dependency
+rollback steps inside a write transaction. BURST has its separate transactional
+fork/economic machinery; route real callers there. Restrict the old simulation
+helper to tests or rename it to its true behavior if an external simulation API
+is supported. Remove the false cross-account promise, not the production guard.
+
+### S11 — The wallet retains an unused, materially different BRN equation
+
+Priority: small cleanup with monetary-policy relevance.
+
+`wallet/src/lib/utils.ts:70` formatBrnAccrual uses floating-point rate × elapsed
+minus burned BRN. It omits staked balances, rate history and accrual pauses. The
+active use-wallet hook instead uses `lib/brn.ts::computeBrn`, with BigInt raw
+units and rate/pause history. Only the old amount-format test was found importing
+formatBrnAccrual. That test checks a zero-rate case and cannot prove the actual
+BRN rules. This is not evidence that the current displayed balance uses floats.
+
+The old helper conflicts with whitepaper equal accrual and non-retroactive rate
+changes if reused. Delete it and keep meaningful display assertions on the real
+path. Rsnano has no BRN accrual equivalent; it uses a fixed-width Amount for its
+own ledger. Do not copy its single-asset arithmetic as a replacement for BRN.
+
+### S12 — Several exported verifier selectors encode different rules
+
+Priority: clarify one authoritative selection path before further enrollment work.
+
+`vrf/src/threshold.rs::select_verifiers` hashes with SHA-256, allows a smaller
+panel than requested and does not deduplicate candidates. The same module's
+EligibilityConfig defaults to 100 BRN, unlike the current governed 50 BRN
+selection requirement. `verification/src/verifier_selection.rs::VerifierSelector`
+uses BLAKE2b, deduplicates, rejects an undersized pool and converts unavailable
+or invalid randomness into an empty vector. Searches found these interfaces
+in exports and component tests, not the active certified node selection path.
+
+The real path fixes eligible state and request context at a certified cut, with
+selection_request/orchestrator and checkpoint validation. The local orchestrator
+selection helper also remains for its explicitly checked local/development path.
+Do not collapse these trust-boundary checks by blindly substituting one helper.
+
+Small fix: identify and retire unused public selectors/eligibility defaults;
+preserve one deterministic ranking primitive where the input/domain contracts
+actually match, and keep certified context validation around it. Preserve fixed
+selection vectors and undersized/duplicate/unavailable-randomness regressions.
+Nano has no humanity-panel equivalent: rsnano is a reference for ownership and
+typed boundaries, not the choice of BURST selection hash or eligibility policy.
+The Phase-3 ThresholdVrf placeholder explicitly returns Unavailable; it is not
+silently supplying fake randomness and is not classified as a live crypto flaw.
+
+### S13 — Multiple genesis builders disagree about the network identity
+
+Priority: launch prerequisite; carried finding, not newly discovered here.
+
+`ledger/src/genesis.rs` publicly exports create_genesis_block/genesis_hash with
+placeholder creator addresses, network dates and a parameter-derived link.
+`node/src/genesis_state.rs::block` instead uses the configured creator, epoch-zero
+timestamp, zero link and full params_hash. `daemon/examples/genesis_keygen.rs:94`
+manually constructs the node-style block again. Several tests use the older
+ledger helper; tests in network_identity explicitly exercise legacy handling.
+Therefore removal must distinguish intentional legacy fixtures from canonical
+launch construction. It must not rewrite an existing ledger's identity.
+
+Rsnano `ledger/src/ledger_constants.rs` centralizes network genesis data and
+derives the corresponding account/block values. BURST needs an equivalent single
+owner of the canonical construction, with explicit inputs for public creator,
+initial parameters and agreed launch timestamp. Node, generator and manifests
+should consume it; legacy fixtures should say they are legacy. This supports the
+existing MAINNET_BOOTSTRAP_REVIEW rather than replacing its unresolved economic
+decision. Different constructors must not be presented as interchangeable.
+
+### S14 — Inactive adaptive quorum survives as an ordinary-looking public method
+
+Priority: policy clarity, small API cleanup.
+
+`governance/src/engine.rs:606` exposes adaptive_quorum(base, ema), with comments
+claiming protection against turnout gaming. Only component tests call it in the
+inspected tree; current quorum selection uses the governed fixed thresholds.
+The parameter view correctly marks EMA as legacy, but the method itself looks
+like supported current policy. Remove or explicitly isolate this unused method
+after consumer review. Preserve serialized historical fields and legitimate
+snapshot readers; deleting an unused function does not justify changing encoding.
+Rsnano has no matching on-chain governance process. Borrowing another protocol's
+quorum policy without an owner decision would contradict BURST's stated rules.
+
+## Coverage and next implementation boundaries
+
+| Area | Review result | Scope limit |
+| --- | --- | --- |
+| Node verification and parameter governance | S01, S04–S06, S12, S14 | No new runtime proof; retained active/certified paths must remain authoritative |
+| RPC and signing preparation | S02–S03, S06 | Error-path source findings; no accepted invalid transaction demonstrated |
+| Work and general propagation | S07–S09 | Live bookkeeping and fanout traced; no benchmark or eclipse exploit claimed |
+| Storage and fork handling | Real heed transaction seam retained; S10 simulation API | Full persistence/recovery state space not re-audited |
+| Wallet BRN and native adapters | S11; typed-response opportunity from S06 | No comprehensive browser/IPC review this pass |
+| Genesis and launch | S13 | Existing launch-policy decisions and production gates remain outstanding |
+| HTTP/groups/browser transport | Bounded reqwest/browser paths already exist; differing limits/redirect policies can be intentional | No reason found to replace with a new generic transport framework |
+| Crypto/VRF and WebSocket surfaces | Existing crypto libraries and bounded Tokio channels are reused; threshold placeholder fails unavailable | This was not a cryptographic or network-security certification |
+
+No product edits were made. Proposed next batches:
+
+1. Remove unused runtime objects and obsolete policy helpers, reviewing external
+   exports and moving real assertions to existing active-path tests. No change to
+   wire encoding, selected committees or consensus policy is intended.
+2. Correct RPC error propagation/predecessor reuse and general peer sampling,
+   each with focused existing-driver assertions. These are behavior changes and
+   need validation before release; sampling changes need topology coverage review.
+3. Consolidate canonical genesis together with the already proposed launch rule,
+   not as cosmetic cleanup. This affects identity-bound fixtures and candidate
+   qualification; never silently reuse prior genesis evidence.
+
+The checklist is deliberately not a license to remove every wrapper or replace
+the architecture. Additional whole-system safety or performance claims require
+their own evidence; this report records concrete inspected simplifications.
+
+## Further review: wallet automation, subscriptions and reusable primitives
+
+Same pinned rsnano reference; source inspection only. No expensive jobs, deployed
+changes or new passing runtime claims. These findings concern currently used
+wallet/RPC/WebSocket paths unless explicitly marked as test/legacy machinery.
+
+### S15 — Automatic merge calculates an unchecked total that its caller never uses
+
+Priority: localized wallet correctness hardening, not a ledger inflation finding.
+
+`wallet_core/src/auto_merge.rs:107` sums u128 holding amounts with `.sum()`.
+The desktop automation in `wallet/src-tauri/src/commands.rs:1125` builds those
+holdings from remote trst_portfolio JSON. Each amount parses as u128, but their
+combined sum need not fit. With overflow checking this can panic; without it the
+total wraps. The function also computes groups for the whole input although
+this automation pass only takes the first group.
+
+The automation caller uses token_ids, not total_amount; the other production
+wrapper find_merge_candidates also takes only token IDs. Thus the unchecked
+summary is an unnecessary arithmetic hazard in the inspected production path.
+The manual review in portfolio/review.rs uses checked_add already. The merge
+transaction builder preserves account balances; normal ledger merge validation
+remains authoritative. No signed amount-inflation bypass is established here.
+
+Small fix: omit the unused total after public API review, or return Result and
+use the existing checked-sum approach if that summary is an intended API. For
+automation, consider an iterator/first-group helper over the same grouping logic
+rather than calculating every output group. Do not alter the expiry similarity
+policy or trust a remote total. Test overflow, zero/duplicate input policy and
+existing merge expiry behavior at the actual automation/review boundary.
+
+Rsnano has no token-provenance merge equivalent. Its receive validation compares
+the received amount with authoritative pending data
+(`ledger/src/block_insertion/validation/receive_block_rules.rs`); that supports
+keeping ledger checks distinct from optional wallet summaries, not copying its
+single-asset transaction construction.
+
+### S16 — WebSocket events are serialized, cloned and reparsed per subscriber
+
+Priority: simplify event representation and remove a fail-open fallback.
+
+`websocket/src/server.rs::WsState` publishes JSON Strings into Tokio broadcast
+channels. Each forward_events task then parses the same JSON into
+SubscriptionEvent to apply its account filter and forwards the original String.
+With S subscribed receivers and B-byte events, this repeats JSON parsing across
+receivers and clones strings. Delivery itself still necessarily scales with
+recipients; no measured speedup is claimed.
+
+At line 384 a parse error explicitly means `true` (send anyway), bypassing the
+requested account filter on malformed internal events. Current publisher helpers
+produce valid JSON, so no untrusted producer or private-data disclosure is proven.
+Nevertheless a serialization/schema bug should not disable filtering silently.
+
+Rsnano's websocket_session.rs filters a typed MessageEnvelope and queues that
+envelope; serialization occurs at the socket writer. BURST can reuse its existing
+SubscriptionEvent type internally. Share typed events (and optionally one cached
+encoded representation) rather than round-trip through strings. If a string
+boundary remains, reject/log a malformed event instead of forwarding it.
+Retain connection limits, shutdown cancellation and bounded queues. This does
+not require replacing Tokio or adding an event-bus framework.
+
+### S17 — Manual merge review repeatedly scans the portfolio
+
+Priority: straightforward bounded-factor efficiency improvement.
+
+`wallet_core/src/portfolio/review.rs:37` filters and collects the entire batches
+array separately for each selected input. For N portfolio rows and K selections,
+it costs O(N*K) plus K temporary result vectors. K is limited to 256, so it is
+incorrect to describe this as unbounded quadratic behavior in ordinary N.
+It is still up to 256 repeated scans of exactly the same response.
+
+Build a single local lookup for the selected IDs while scanning batches once,
+retaining duplicate counts so a duplicate cannot be hidden by map overwrite.
+Then reuse the existing exact amount/status/expiry comparisons and checked sum.
+Expected O(N+K) with a HashMap or O(N log K + K log K) with a BTreeMap is sufficient;
+no new persistent index is necessary for a one-response review.
+
+Rsnano's BlockValidator owns already-loaded predecessor/account/pending context
+and then produces instructions, rather than refetching that context per rule.
+This is the relevant reuse pattern, not evidence of an equivalent merge API.
+
+### S18 — Hash parsing is repeatedly reinvented outside the hash types
+
+Priority: small shared primitive, preserving exact input contracts.
+
+BlockHash/TxHash implement construction and display but no shared textual parser.
+Equivalent hex-to-32-byte logic appears in rpc handlers (two copies),
+wallet_core/signed_client.rs:76, daemon/snapshot.rs:50,
+node/payment_exclusion.rs:11 and historical_lookup.rs:115. Some allocate an
+arbitrary-length decoded Vec before checking length; others reject length first
+and fill a fixed array. This is duplicated maintenance, not proof that current
+request-size limits can be bypassed.
+
+Rsnano's u256_struct macro provides decode_hex on its hash types, backed by one
+decoder. BURST can add a small FromStr/parse method backed by its existing hex
+dependency and a fixed buffer, then map errors at each RPC/CLI boundary. Preserve
+BURST's exact 64-hex-character acceptance and case behavior; do not inherit any
+different padding rules from rsnano. Do not change Serde/bincode wire encoding
+as part of a text-parser cleanup, or conflate TxHash and BlockHash semantically.
+
+### S19 — Desktop RPC helpers discard HTTP connection pools on every call
+
+Priority: active but unmeasured client-side overhead; no consensus impact.
+
+`wallet/src-tauri/src/commands.rs:423` and
+`node-gui/src-tauri/src/commands.rs:4` each construct reqwest::Client::new inside
+rpc_call. These helpers serve repeated UI reads; the dashboard useRpc hook polls.
+The dashboard reuses the client within its bounded retry loop, but the next RPC
+invocation creates another pool. This prevents cross-call connection reuse and
+adds connection/TLS setup work when applicable.
+
+Rsnano's NanoRpcClient retains a reqwest Client field across requests. BURST's
+wallet_core NodeClient already does the same within its own lifetime. Reuse a
+client in Tauri application state or an existing transport owner, with request-
+specific URLs and deadlines. Keep endpoint credentials/profile state isolated;
+do not build a global cache of secrets. Preserve bounded response reading and
+the dashboard's read-only, rate-limit-specific retry policy. Those retry guards
+are intentional; they should not be copied onto signed-action retries.
+
+### S20 — Generic codec tests are not tests of the actual P2P encoding
+
+Priority: test naming/scope and obsolete public surface review.
+
+The generic `protocol/src/codec.rs` frames bincode and its module is described as
+wire encoding. The actual connection registry decodes through WireMessage, whose
+implementation in `node/src/wire_message/protobuf.rs` uses typed Protobuf with
+separately encoded signed records. Searches found generic codec use in tests and
+the generic codec fuzz target, not the production connection path. A checkpoint
+agreement test at line 1198 round-trips Outgoing::Proposal through the generic
+codec; that establishes state-machine serialization behavior, not actual peer
+transport compatibility.
+
+There IS a separate fuzz_message_parse target calling the real WireMessage
+decoder, plus real protobuf tests. Do not report wire fuzzing as absent or remove
+those protections. Rename/restrict the old codec if it is only fixture support,
+or document its supported independent use. Transport assertions should use the
+existing real wire fixtures; pure agreement tests need not simulate transport
+with an unrelated serializer.
+
+Rsnano separates its actual message types and network serialization. The useful
+lesson is to exercise the path peers execute, not to switch BURST back from its
+chosen Protobuf format or change signed record bytes for stylistic consistency.
+
+## Dispositions from the same pass that do not justify new machinery
+
+* The backlog recovery scanner already pages 256 items and re-registers pending
+  work. LocalBroadcaster retry exhaustion is therefore not, by itself, proof
+  that an accepted transaction is permanently abandoned. A source-only observation
+  that retry count advances before send success is insufficient for that claim.
+* RPC ReadExecutor holds its semaphore permit inside the blocking worker, even
+  if the HTTP request is cancelled. This is real resource ownership, not a
+  pointless wrapper around spawn_blocking.
+* Wallet automation has a native signing/session guard in addition to the UI
+  non-overlap flag. Removing it because the UI already has a boolean would remove
+  a separate authority/cancellation boundary.
+* WebSocket lag handling, delivery guarantees and slow-client behavior deserve
+  separate protocol decisions. Rsnano's queued writer is an implementation
+  reference, not proof that every subscriber must receive a durable event log.
+
+Next validation should target the actual change: wallet overflow/index behavior,
+typed event filtering and wire compatibility, exact hash parsing, and reuse of a
+client without changing retry semantics. No daemon rebuild is needed solely for
+desktop transport changes; shared protocol changes require impact review under
+VALIDATION_WORKFLOW.md. This pass does not close earlier audit or release gates.

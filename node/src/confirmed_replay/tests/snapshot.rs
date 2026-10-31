@@ -209,29 +209,45 @@ fn authenticated_economic_snapshot_matches_independent_replays_and_restores_all_
         restored.account(&address(0)).unwrap().epoch,
         burst_ledger::CURRENT_BLOCK_VERSION
     );
-    let legacy = restored.legacy_snapshot_bytes().unwrap();
-    let mut manifest = burst_consensus::snapshot::SnapshotManifest::new(&anchor, &legacy).unwrap();
-    manifest.state_format = burst_consensus::snapshot::LEGACY_STATE_FORMAT;
-    let signatures = (0..7)
-        .map(|seed| burst_consensus::checkpoint::CheckpointSignature {
+    for format in [burst_consensus::snapshot::LEGACY_STATE_FORMAT,
+        burst_consensus::snapshot::PREVIOUS_STATE_FORMAT] {
+        let legacy = restored.legacy_snapshot_bytes(format).unwrap();
+        let mut manifest = burst_consensus::snapshot::SnapshotManifest::new(&anchor, &legacy).unwrap();
+        manifest.state_format = format;
+        let signatures = (0..7)
+            .map(|seed| burst_consensus::checkpoint::CheckpointSignature {
+                representative: address(seed),
+                signature: burst_crypto::sign_message(
+                    &manifest.signing_payload(),
+                    &burst_crypto::keypair_from_seed(&[seed; 32]).private,
+                ),
+            })
+            .collect();
+        let legacy_certificate = SnapshotCertificate {
+            manifest,
+            signatures,
+        };
+        let legacy_restored =
+            ConfirmedReplay::from_authenticated_snapshot(&anchor, &legacy_certificate, &legacy)
+                .unwrap();
+        assert_eq!(
+            legacy_restored.snapshot_bytes().unwrap(),
+            restored.snapshot_bytes().unwrap()
+        );
+        let preserved = legacy_restored.prepare_snapshot_format_in(&anchor, staging.path(), format).unwrap();
+        assert_eq!(preserved.manifest(), &legacy_certificate.manifest);
+        // A valid signature on the wrong body-version/format pair is still invalid.
+        let mut wrong_format = legacy_certificate.manifest.clone();
+        wrong_format.state_format = burst_consensus::snapshot::STATE_FORMAT;
+        let signatures = (0..7).map(|seed| burst_consensus::checkpoint::CheckpointSignature {
             representative: address(seed),
-            signature: burst_crypto::sign_message(
-                &manifest.signing_payload(),
-                &burst_crypto::keypair_from_seed(&[seed; 32]).private,
-            ),
-        })
-        .collect();
-    let legacy_certificate = SnapshotCertificate {
-        manifest,
-        signatures,
-    };
-    let legacy_restored =
-        ConfirmedReplay::from_authenticated_snapshot(&anchor, &legacy_certificate, &legacy)
-            .unwrap();
-    assert_eq!(
-        legacy_restored.snapshot_bytes().unwrap(),
-        restored.snapshot_bytes().unwrap()
-    );
+            signature: burst_crypto::sign_message(&wrong_format.signing_payload(),
+                &burst_crypto::keypair_from_seed(&[seed; 32]).private),
+        }).collect();
+        assert!(ConfirmedReplay::from_authenticated_snapshot(&anchor,
+            &SnapshotCertificate { manifest: wrong_format, signatures }, &legacy).is_err());
+    }
+    let legacy_verification = ciborium::value::Value::serialized(&restored.verification.snapshot()).unwrap();
     restored.assert_snapshot_encoding_compatibility();
     let disk = restored
         .prepare_snapshot_in(&anchor, staging.path())
@@ -275,7 +291,7 @@ fn authenticated_economic_snapshot_matches_independent_replays_and_restores_all_
     fixture.push(0, BlockType::Burn, cutoff + 31, |block| {
         block.payment_epoch = anchor.hash();
         block.link = destination(21);
-        block.brn_balance += 1;
+        block.brn_spent += 1;
     });
     assert_eq!(fixture.blocks.last().unwrap().signing_grant, grant);
     let tail = fixture.history(cutoff + 31);
@@ -343,7 +359,7 @@ fn authenticated_economic_snapshot_matches_independent_replays_and_restores_all_
     let index = bytes.len() / 2;
     bytes[index] ^= 1;
     assert!(ConfirmedReplay::from_authenticated_snapshot(&anchor, &certificate, &bytes).is_err());
-    for version in [0u8, 1, 2, 3, 4, 5, 6, 255] {
+    for version in [0u8, 1, 2, 3, 4, 5, 6, 7, 255] {
         use ciborium::value::Value;
         let mut body: Value = ciborium::from_reader(snapshot.bytes()).unwrap();
         let Value::Map(fields) = &mut body else {
@@ -377,6 +393,95 @@ fn authenticated_economic_snapshot_matches_independent_replays_and_restores_all_
                 .unwrap()
                 .to_string()
                 .contains("unsupported")
+        );
+    }
+    // A valid certificate does not permit noncanonical encoding or duplicate
+    // entries that collapse when the decoded state is reconstructed.
+    for case in 0..8 {
+        use ciborium::value::Value;
+        let mut body: Value = ciborium::from_reader(snapshot.bytes()).unwrap();
+        let Value::Map(fields) = &mut body else {
+            panic!("snapshot map");
+        };
+        match case {
+            0 => fields.reverse(),
+            1 => {
+                let Value::Map(accounts) = &mut fields
+                    .iter_mut()
+                    .find(|(key, _)| key.as_text() == Some("accounts"))
+                    .unwrap()
+                    .1
+                else {
+                    panic!("account map");
+                };
+                accounts.push(accounts.first().expect("populated accounts").clone());
+            }
+            2 => {
+                let Value::Array(dependencies) = &mut fields
+                    .iter_mut()
+                    .find(|(key, _)| key.as_text() == Some("replay_dependencies"))
+                    .unwrap()
+                    .1
+                else {
+                    panic!("dependency sequence");
+                };
+                let mut encoded = Vec::new();
+                ciborium::into_writer(&anchor.hash(), &mut encoded).unwrap();
+                let hash: Value = ciborium::from_reader(encoded.as_slice()).unwrap();
+                dependencies.extend([hash.clone(), hash]);
+            }
+            5 => {
+                fields.iter_mut().find(|(key, _)| key.as_text() == Some("verification"))
+                    .unwrap().1 = legacy_verification.clone();
+            }
+            6 | 7 => {
+                let Value::Map(accounts) = &mut fields.iter_mut()
+                    .find(|(key, _)| key.as_text() == Some("accounts")).unwrap().1
+                else { panic!("account map"); };
+                let (key, value) = accounts.first_mut().unwrap();
+                if case == 6 {
+                    let Value::Bytes(bytes) = value else { panic!("compact account record"); };
+                    bytes.push(0);
+                } else {
+                    let Value::Bytes(bytes) = key else { panic!("compact account key"); };
+                    *key = Value::Text(burst_crypto::derive_address(
+                        &burst_types::PublicKey(bytes.as_slice().try_into().unwrap())).to_string());
+                }
+            }
+            _ => (),
+        }
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&body, &mut bytes).unwrap();
+        if case == 3 {
+            bytes.push(0);
+        }
+        if case == 4 {
+            let key = b"\x67version\x08";
+            let offset = bytes
+                .windows(key.len())
+                .position(|part| part == key)
+                .unwrap()
+                + key.len()
+                - 1;
+            bytes.splice(offset..=offset, [0x18, 0x08]);
+        }
+        let manifest = burst_consensus::snapshot::SnapshotManifest::new(&anchor, &bytes).unwrap();
+        let signed = SnapshotCertificate {
+            signatures: (0..7)
+                .map(|seed| burst_consensus::checkpoint::CheckpointSignature {
+                    representative: address(seed),
+                    signature: burst_crypto::sign_message(
+                        &manifest.signing_payload(),
+                        &burst_crypto::keypair_from_seed(&[seed; 32]).private,
+                    ),
+                })
+                .collect(),
+            manifest,
+        };
+        signed.verify_state(&anchor, &bytes).unwrap();
+        assert!(
+            ConfirmedReplay::from_authenticated_snapshot(&anchor, &signed, &bytes).is_err(),
+            "malformed signed snapshot case {case}"
         );
     }
     assert!(snapshot

@@ -1,7 +1,7 @@
+use crate::confirmed_replay::scratch_file::ScratchFile as File;
 use super::*;
 use bincode::Options;
 use std::{
-    fs::File,
     io::{Read, Seek, SeekFrom, Write},
     sync::Mutex,
 };
@@ -16,6 +16,8 @@ struct Entry {
 /// Private scratch, never a ledger or proof of finality. The caller distinguishes
 /// authenticated input from applied history. Per-block bytes are bounded; the
 /// lookup and insertion order are stored in authenticated scratch records.
+/// `contains` checks the index only; `encoded` verifies stored bytes; `get` also
+/// decodes the block and checks its hash. None verifies its signature.
 pub(in crate::confirmed_replay) struct StagedBlocks {
     directory: std::path::PathBuf,
     file: Mutex<File>,
@@ -36,13 +38,78 @@ impl StagedBlocks {
     ) -> Result<Self, StoreError> {
         Ok(Self {
             directory: directory.to_owned(),
-            file: Mutex::new(tempfile::tempfile_in(directory).map_err(invalid)?),
+            file: Mutex::new(File::new_in(directory).map_err(invalid)?),
             index: crate::confirmed_replay::scratch_records::ScratchRecords::new(directory)?,
             order: crate::confirmed_replay::scratch_records::ScratchRecords::new(directory)?,
             count: 0,
             length: 0,
             failed: false,
         })
+    }
+
+    #[cfg(test)]
+    pub(in crate::confirmed_replay) fn from_blocks(
+        directory: &std::path::Path,
+        blocks: impl IntoIterator<Item = StateBlock>,
+        max_blocks: usize,
+        max_bytes: u64,
+    ) -> Result<Self, StoreError> {
+        let mut result = Self::new(directory)?;
+        let mut entries = Vec::new();
+        let mut order = Vec::new();
+        for block in blocks {
+            if entries.len() >= max_blocks || block.hash != block.compute_hash() {
+                return Err(invalid(
+                    "bulk staged blocks exceed budget or have a changed hash",
+                ));
+            }
+            if bincode::serialized_size(&block).map_err(invalid)?
+                > burst_types::MAX_P2P_MESSAGE_BYTES as u64
+            {
+                return Err(invalid("applied replay block exceeds wire size"));
+            }
+            let bytes = bincode::serialize(&block).map_err(invalid)?;
+            let end = result
+                .length
+                .checked_add(bytes.len() as u64)
+                .filter(|end| *end <= max_bytes)
+                .ok_or_else(|| invalid("bulk staged blocks exceed byte budget"))?;
+            result.ready()?;
+            result
+                .file
+                .get_mut()
+                .map_err(invalid)?
+                .write_all(&bytes)
+                .map_err(invalid)?;
+            entries.push((
+                *block.hash.as_bytes(),
+                Entry {
+                    offset: result.length,
+                    length: bytes.len(),
+                    digest: burst_crypto::blake2b_256(&bytes),
+                },
+            ));
+            order.push((Self::position_key(result.count)?, block.hash));
+            result.length = end;
+            result.count += 1;
+        }
+        let descriptor_bytes = u64::try_from(max_blocks)
+            .map_err(invalid)?
+            .checked_mul(48)
+            .ok_or_else(|| invalid("bulk staged descriptor budget overflow"))?;
+        result.index = crate::confirmed_replay::scratch_records::ScratchRecords::from_rows(
+            directory,
+            entries,
+            max_blocks,
+            descriptor_bytes,
+        )?;
+        result.order = crate::confirmed_replay::scratch_records::ScratchRecords::from_rows(
+            directory,
+            order,
+            max_blocks,
+            descriptor_bytes,
+        )?;
+        Ok(result)
     }
 
     pub(in crate::confirmed_replay) fn len(&self) -> usize {
@@ -109,7 +176,8 @@ impl StagedBlocks {
     }
 
     /// Pin exact local bytes, including fields not covered by the block hash.
-    /// This establishes scratch integrity only; callers still authenticate them.
+    /// The bytes need not decode as a block or match `hash`. Callers authenticate
+    /// them before use. A failure after writing begins disables further access.
     pub(in crate::confirmed_replay) fn insert_encoded(
         &mut self,
         hash: BlockHash,
@@ -161,6 +229,20 @@ impl StagedBlocks {
         let Some(entry) = self.index.get(hash.as_bytes())? else {
             return Ok(None);
         };
+        self.read_entry(entry).map(Some)
+    }
+
+    fn read_entry(&self, entry: Entry) -> Result<Vec<u8>, StoreError> {
+        self.ready()?;
+        if entry.length == 0
+            || entry.length > burst_types::MAX_P2P_MESSAGE_BYTES
+            || entry
+                .offset
+                .checked_add(entry.length as u64)
+                .is_none_or(|end| end > self.length)
+        {
+            return Err(invalid("invalid staged block location"));
+        }
         let mut file = self.file.lock().map_err(invalid)?;
         if file.metadata().map_err(invalid)?.len() != self.length {
             return Err(invalid("staged replay file length changed"));
@@ -171,7 +253,48 @@ impl StagedBlocks {
         if burst_crypto::blake2b_256(&bytes) != entry.digest {
             return Err(invalid("staged replay block changed"));
         }
-        Ok(Some(bytes))
+        Ok(bytes)
+    }
+
+    #[cfg(test)]
+    pub(in crate::confirmed_replay) fn visit(
+        &self,
+        visit: impl FnMut(StateBlock) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        self.visit_with(visit)
+    }
+
+    pub(in crate::confirmed_replay) fn visit_with<E: From<StoreError>>(
+        &self,
+        mut visit: impl FnMut(StateBlock) -> Result<(), E>,
+    ) -> Result<(), E> {
+        self.ready()?;
+        let mut count = 0usize;
+        self.index.visit_with(|hash, entry| {
+            let block = Self::decode(&BlockHash::new(hash), &self.read_entry(entry)?)?;
+            count += 1;
+            if count > self.count {
+                return Err(invalid("extra staged block index row").into());
+            }
+            visit(block)
+        })?;
+        if count != self.count {
+            return Err(invalid("missing staged block index row").into());
+        }
+        Ok(())
+    }
+
+    fn decode(hash: &BlockHash, bytes: &[u8]) -> Result<StateBlock, StoreError> {
+        let block: StateBlock = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .reject_trailing_bytes()
+            .with_limit(bytes.len() as u64)
+            .deserialize(bytes)
+            .map_err(invalid)?;
+        if block.hash != *hash || block.compute_hash() != *hash {
+            return Err(invalid("staged replay block identity changed"));
+        }
+        Ok(block)
     }
 }
 
@@ -180,15 +303,7 @@ impl AppliedBlocks for StagedBlocks {
         let Some(bytes) = self.read(hash)? else {
             return Ok(None);
         };
-        let block: StateBlock = bincode::DefaultOptions::new()
-            .with_fixint_encoding()
-            .reject_trailing_bytes()
-            .with_limit(bytes.len() as u64)
-            .deserialize(&bytes)
-            .map_err(invalid)?;
-        if block.hash != *hash || block.compute_hash() != *hash {
-            return Err(invalid("staged replay block identity changed"));
-        }
+        let block = Self::decode(hash, &bytes)?;
         Ok(Some(Cow::Owned(block)))
     }
 
@@ -237,6 +352,7 @@ mod tests {
         let source = super::super::source::Source::File {
             blocks: Box::new(blocks),
         };
+        assert!(source.visit_unordered(|_| Ok::<_, StoreError>(())).is_err());
         assert!(source.get(&genesis.hash).is_err());
         assert!(source.iter().next().unwrap().is_err());
         assert!(crate::confirmed_replay::governance::streamed_dependencies(&source).is_err());
@@ -317,5 +433,77 @@ mod tests {
         drop(blocks);
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
         assert!(StagedBlocks::new(&directory.path().join("missing")).is_err());
+    }
+}
+
+#[cfg(test)]
+mod bulk_tests {
+    use super::*;
+
+    #[test]
+    fn bulk_blocks_match_incremental_order_bytes_and_reject_limits_duplicates_and_damage() {
+        let directory = tempfile::tempdir().unwrap();
+        let blocks: Vec<_> = (0u32..128)
+            .rev()
+            .map(|i| {
+                let mut block = crate::genesis_state::block(
+                    burst_types::NetworkId::Dev,
+                    &burst_types::ProtocolParams::default(),
+                );
+                block.previous = BlockHash::new(burst_crypto::blake2b_256(&i.to_be_bytes()));
+                block.hash = block.compute_hash();
+                block
+            })
+            .collect();
+        let mut incremental = StagedBlocks::new(directory.path()).unwrap();
+        for block in &blocks {
+            incremental.insert(block).unwrap();
+        }
+        let bulk =
+            StagedBlocks::from_blocks(directory.path(), blocks.clone(), 128, 1 << 20).unwrap();
+        assert_eq!(
+            bulk.hashes().collect::<Result<Vec<_>, _>>().unwrap(),
+            incremental.hashes().collect::<Result<Vec<_>, _>>().unwrap()
+        );
+        for block in &blocks {
+            assert_eq!(
+                bulk.encoded(&block.hash).unwrap(),
+                incremental.encoded(&block.hash).unwrap()
+            );
+            assert_eq!(bulk.get(&block.hash).unwrap().unwrap().hash, block.hash);
+        }
+        let mut scanned = std::collections::BTreeMap::new();
+        bulk.visit(|block| {
+            assert!(scanned
+                .insert(block.hash, bincode::serialize(&block).unwrap())
+                .is_none());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            scanned,
+            blocks
+                .iter()
+                .map(|block| (block.hash, bincode::serialize(block).unwrap()))
+                .collect()
+        );
+        assert!(bulk.visit(|_| Err(invalid("stop"))).is_err());
+        assert!(!bulk.contains(&BlockHash::ZERO).unwrap());
+        assert!(StagedBlocks::from_blocks(directory.path(), blocks.clone(), 127, 1 << 20).is_err());
+        assert!(StagedBlocks::from_blocks(directory.path(), blocks.clone(), 128, 1).is_err());
+        assert!(StagedBlocks::from_blocks(
+            directory.path(),
+            [blocks[0].clone(), blocks[0].clone()],
+            2,
+            1 << 20
+        )
+        .is_err());
+        let mut bad = blocks[0].clone();
+        bad.hash = BlockHash::ZERO;
+        assert!(StagedBlocks::from_blocks(directory.path(), [bad], 1, 1 << 20).is_err());
+        bulk.truncate_for_test();
+        assert!(bulk.get(&blocks[0].hash).is_err());
+        assert!(bulk.hashes().next().unwrap().is_err());
+        assert!(bulk.visit(|_| Ok(())).is_err());
     }
 }

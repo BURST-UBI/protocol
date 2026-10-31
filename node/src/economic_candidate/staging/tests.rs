@@ -1,5 +1,5 @@
 use super::*;
-use crate::{economic_candidate, genesis_state, ledger_bridge::EconomicResult, ledger_updater};
+use crate::{economic_candidate, genesis_state, block_economics::EconomicResult, ledger_updater};
 use burst_brn::BrnWalletState;
 use burst_ledger::BlockType;
 use burst_store::{account::AccountInfo, meta::MetaStore, pending::PendingInfo};
@@ -43,7 +43,7 @@ fn fixture(wallets: usize) -> (BrnEngine, TrstEngine, StateBlock, AccountInfo) {
 fn context<'a>(account: &'a AccountInfo, params: &'a ProtocolParams) -> EconomicContext<'a> {
     EconomicContext {
         account: Some(account),
-        previous_brn: 0,
+        previous_brn_spent: 0,
         pending: None,
         params,
     }
@@ -154,7 +154,7 @@ fn burn_matches_full_evaluation_and_explicit_later_mutation_is_staged() {
     let (brn, trst, mut block, account) = fixture(2);
     let params = ProtocolParams::default();
     block.block_type = BlockType::Burn;
-    block.brn_balance = 10;
+    block.brn_spent = 10;
     block.link = BlockHash::new(burst_crypto::decode_address(block.account.as_str()).unwrap());
     block.hash = block.compute_hash();
     let before = snapshot(&brn, &trst);
@@ -235,7 +235,7 @@ fn account_only_persistence_preserves_snapshots_and_mutation_failure_is_atomic()
 
     let before = snapshot(&brn, &trst);
     block.block_type = BlockType::Burn;
-    block.brn_balance = 10;
+    block.brn_spent = 10;
     block.link = BlockHash::new(burst_crypto::decode_address(block.account.as_str()).unwrap());
     block.hash = block.compute_hash();
     let mut staged = StagedEngines::new(&brn, &trst);
@@ -263,50 +263,145 @@ fn account_only_preparation_cost() {
     for count in [100, 1_000, 10_000] {
         let (brn, trst, mut block, account) = fixture(count);
         block.block_type = BlockType::ChangeRepresentative;
-        let directory = tempfile::tempdir().unwrap();
-        let store = LmdbStore::open(directory.path(), 32, 128 * 1024 * 1024).unwrap();
-        let mut batch = store.tx_begin_write().unwrap();
-        ledger_updater::persist_economics(&mut batch, &brn, &trst).unwrap();
-        batch.commit().unwrap();
-        for lazy in [false, true] {
-            let start = Instant::now();
-            for iteration in 1..=5u8 {
-                let mut batch = store.tx_begin_write().unwrap();
-                batch
-                    .begin_block_undo(
-                        BlockHash::new([iteration + if lazy { 10 } else { 0 }; 32]),
-                        block.account.clone(),
-                        1,
-                    )
+        for rows in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let store = LmdbStore::open(directory.path(), 32, 128 * 1024 * 1024).unwrap();
+            let mut batch = store.tx_begin_write().unwrap();
+            ledger_updater::persist_economics(&mut batch, &brn, &trst).unwrap();
+            if rows {
+                crate::trst_storage::stage_rows_for_test(&mut batch, &trst).unwrap();
+                crate::graph_storage::stage_rows_for_test(&mut batch, &trst.merger_graph)
                     .unwrap();
-                if lazy {
-                    let mut staged = StagedEngines::new(&brn, &trst);
-                    std::hint::black_box(staged.apply(&block, context(&account, &params)).unwrap());
-                    staged.persist(&mut batch).unwrap();
-                    let (staged_brn, staged_trst) = staged.into_staged();
-                    assert!(staged_brn.is_none() && staged_trst.is_none());
-                } else {
-                    let mut brn = brn.clone();
-                    let mut trst = trst.clone();
-                    std::hint::black_box(
-                        economic_candidate::apply(
-                            &block,
-                            context(&account, &params),
-                            &mut brn,
-                            &mut trst,
-                        )
-                        .unwrap(),
-                    );
-                    ledger_updater::persist_economics(&mut batch, &brn, &trst).unwrap();
+            }
+            batch.commit().unwrap();
+            for (mode, label) in ["full publication", "borrowed", "restored + borrowed"]
+                .into_iter()
+                .enumerate()
+            {
+                let mut restore_time = std::time::Duration::ZERO;
+                let mut first_restore = std::time::Duration::ZERO;
+                let mut prepare_time = std::time::Duration::ZERO;
+                let mut persist_time = std::time::Duration::ZERO;
+                let mut commit_time = std::time::Duration::ZERO;
+                for iteration in 1..=5u8 {
+                    let mut batch = store.tx_begin_write().unwrap();
+                    let hash = BlockHash::new([iteration + mode as u8 * 10; 32]);
+                    batch
+                        .begin_block_undo(hash, block.account.clone(), 1)
+                        .unwrap();
+                    let restored = if mode == 2 {
+                        let start = Instant::now();
+                        let state = crate::payment_transition::restore(&batch, &params).unwrap();
+                        let elapsed = start.elapsed();
+                        restore_time += elapsed;
+                        if iteration == 1 { first_restore = elapsed; }
+                        assert_eq!(state.brn.wallets.len(), brn.wallets.len());
+                        assert!(state.trst.wallet_snapshot_eq(&trst));
+                        Some(state)
+                    } else {
+                        None
+                    };
+                    let (before_brn, before_trst) = restored
+                        .as_ref()
+                        .map_or((&brn, &trst), |state| (&state.brn, &state.trst));
+                    let start = Instant::now();
+                    if mode == 0 {
+                        let mut brn = before_brn.clone();
+                        let mut trst = before_trst.clone();
+                        std::hint::black_box(
+                            economic_candidate::apply(
+                                &block,
+                                context(&account, &params),
+                                &mut brn,
+                                &mut trst,
+                            )
+                            .unwrap(),
+                        );
+                        prepare_time += start.elapsed();
+                        let start = Instant::now();
+                        ledger_updater::persist_economics(&mut batch, &brn, &trst).unwrap();
+                        persist_time += start.elapsed();
+                    } else {
+                        let mut staged = StagedEngines::new(before_brn, before_trst);
+                        std::hint::black_box(
+                            staged.apply(&block, context(&account, &params)).unwrap(),
+                        );
+                        prepare_time += start.elapsed();
+                        let start = Instant::now();
+                        staged.persist(&mut batch).unwrap();
+                        persist_time += start.elapsed();
+                        let (staged_brn, staged_trst) = staged.into_staged();
+                        assert!(staged_brn.is_none() && staged_trst.is_none());
+                    }
+                    batch.put_meta("cost-probe", &[iteration]).unwrap();
+                    let start = Instant::now();
+                    batch.commit().unwrap();
+                    commit_time += start.elapsed();
+                    let batch = store.tx_begin_write().unwrap();
+                    assert_eq!(batch.block_undo(&hash).unwrap().unwrap().changes.len(), 1);
                 }
+                eprintln!(
+                    "{count} unrelated portfolios, rows={rows}, {label}: restore={:?}, prepare={:?}, persist={:?}, commit={:?} (mean of 5; engine diagnostic only)",
+                    restore_time / 5,
+                    prepare_time / 5,
+                    persist_time / 5,
+                    commit_time / 5,
+                );
+                if mode == 2 {
+                    eprintln!("{count} portfolios, rows={rows}: first restore={first_restore:?}, subsequent restore mean={:?}", (restore_time - first_restore) / 4);
+                }
+            }
+            // Storage-only portfolio refresh, not an authenticated payment.
+            let owner = trst.wallets.keys().next().unwrap().clone();
+            let mut previous = trst.clone();
+            let mut writes = std::time::Duration::ZERO;
+            let mut reads = std::time::Duration::ZERO;
+            for iteration in 1..=5u8 {
+                let mut next = previous.clone();
+                let portfolio = next.wallets.get_mut(&owner).unwrap();
+                portfolio.tokens[0].amount += 1;
+                portfolio.cached_transferable += 1;
+                let mut batch = store.tx_begin_write().unwrap();
+                let hash = BlockHash::new([100 + iteration; 32]);
+                batch.begin_block_undo(hash, block.account.clone(), 1).unwrap();
+                let start = Instant::now();
+                crate::trst_storage::persist_delta(&mut batch, &previous, &next).unwrap();
+                writes += start.elapsed();
+                let start = Instant::now();
+                let restored = crate::payment_transition::restore(&batch, &params).unwrap();
+                reads += start.elapsed();
+                assert!(restored.trst.wallet_snapshot_eq(&next));
                 batch.put_meta("cost-probe", &[iteration]).unwrap();
                 batch.commit().unwrap();
+                assert_eq!(store.tx_begin_write().unwrap().block_undo(&hash).unwrap().unwrap().changes.len(), if rows { 3 } else { 2 });
+                previous = next;
             }
-            eprintln!(
-                "{count} portfolios, {}: {:?} per preparation/persistence",
-                if lazy { "borrowed" } else { "full copies" },
-                start.elapsed() / 5
-            );
+            eprintln!("{count} portfolios, rows={rows}, one portfolio refresh: writes={:?}, restore={:?} (mean of 5; storage diagnostic only)", writes / 5, reads / 5);
+            if rows {
+                let mut writes = std::time::Duration::ZERO;
+                let mut reads = std::time::Duration::ZERO;
+                for iteration in 1..=5u8 {
+                    let mut next = previous.clone();
+                    let owner = burst_types::WalletAddress::new(format!("brst_registry_probe_{iteration}"));
+                    let token = next.mint(TxHash::new([200 + iteration; 32]), owner.clone(), 1, owner, Timestamp::new(100)).unwrap();
+                    next.track_token(token);
+                    let mut batch = store.tx_begin_write().unwrap();
+                    let hash = BlockHash::new([150 + iteration; 32]);
+                    batch.begin_block_undo(hash, block.account.clone(), 1).unwrap();
+                    let start = Instant::now();
+                    crate::trst_storage::persist_delta(&mut batch, &previous, &next).unwrap();
+                    writes += start.elapsed();
+                    let start = Instant::now();
+                    let restored = crate::payment_transition::restore(&batch, &params).unwrap();
+                    reads += start.elapsed();
+                    assert!(restored.trst.wallet_snapshot_eq(&next));
+                    batch.put_meta("cost-probe", &[iteration]).unwrap();
+                    batch.commit().unwrap();
+                    assert_eq!(store.tx_begin_write().unwrap().block_undo(&hash).unwrap().unwrap().changes.len(), 5);
+                    previous = next;
+                }
+                eprintln!("{count} portfolios, rows=true, origin registration refresh: writes={:?}, restore={:?} (mean of 5; storage diagnostic only)", writes / 5, reads / 5);
+            }
         }
     }
 }

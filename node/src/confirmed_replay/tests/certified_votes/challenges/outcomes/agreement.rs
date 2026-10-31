@@ -206,7 +206,7 @@ fn outcome_and_selection_share_one_signer_record_and_cannot_double_prevote() {
     for seed in [1, 2] {
         fixture.push(seed, BlockType::Endorse, CUTOFF + 61, |block| {
             block.link = destination(21);
-            block.brn_balance += 1;
+            block.brn_spent += 1;
         });
     }
     let (_dir, store, heads) = restore_chain(&fixture, &chain);

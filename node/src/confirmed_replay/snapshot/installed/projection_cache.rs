@@ -72,6 +72,30 @@ pub(crate) struct ProjectionCache(
 );
 
 impl ProjectionCache {
+    /// Reuse only selection rows for download hints; no replay or authority is handed out.
+    pub(crate) fn selection_refresh(
+        &self,
+        store: &Arc<LmdbStore>,
+        network: NetworkId,
+        initial: BlockHash,
+        previous: Option<BlockHash>,
+    ) -> Result<Option<(BlockHash, super::SelectionRefresh)>, StoreError> {
+        let replay = {
+            // Hints are optional. Full projection validation may hold this lock;
+            // leave the current cursor intact and retry on a later scheduling turn.
+            let cached = match self.0.try_lock() {
+                Ok(cached) => cached,
+                Err(std::sync::TryLockError::WouldBlock) => return Ok(None),
+                Err(error) => return Err(invalid(error)),
+            };
+            cached.as_ref()
+                .filter(|entry| entry.matches(store, network, initial, entry.epoch)
+                    && Some(entry.epoch) != previous)
+                .and_then(|entry| entry.replay.as_ref().map(|replay| (entry.epoch, replay.clone())))
+        };
+        replay.map(|(epoch, replay)| Ok((epoch, replay.recovered.selections.refresh_cursor()?))).transpose()
+    }
+
     #[cfg(test)]
     pub(crate) fn replay_handoffs(&self) -> usize {
         self.1.load(std::sync::atomic::Ordering::Relaxed)
@@ -104,14 +128,23 @@ impl ProjectionCache {
         Ok(replay)
     }
 
-    pub(super) fn get(
-        &self,
-        store: &Arc<LmdbStore>,
-        network: NetworkId,
-        initial: BlockHash,
-        epoch: BlockHash,
+    pub(super) fn get_view(
+        &self, store: &Arc<LmdbStore>, network: NetworkId, initial: BlockHash, epoch: BlockHash,
         continuation: &super::super::SnapshotContinuation,
-        batch: &LmdbWriteTransaction<'_>,
+        view: &burst_store_lmdb::read_view::LedgerReadView<'_>,
+    ) -> Result<Option<Projection>, StoreError> {
+        self.get_checked(store, network, initial, epoch, false, |projection| {
+            Ok(projection.cemented.verify_view(view).is_ok()
+                && projection.applied.verify_view(view).is_ok()
+                && projection.inventory.verify_view(view).is_ok()
+                && projection.economics.verify_view(view).is_ok()
+                && super::order::read_view(view, &projection.applied, continuation)? == projection.economics.ordering)
+        })
+    }
+
+    fn get_checked(
+        &self, store: &Arc<LmdbStore>, network: NetworkId, initial: BlockHash, epoch: BlockHash,
+        invalidate: bool, check: impl FnOnce(&Projection) -> Result<bool, StoreError>,
     ) -> Result<Option<Projection>, StoreError> {
         let mut cached = self.0.lock().map_err(invalid)?;
         let Some(entry) = cached.as_ref() else {
@@ -120,17 +153,10 @@ impl ProjectionCache {
         if !entry.matches(store, network, initial, epoch) {
             return Ok(None);
         }
-        // A changed projection takes the full replay path. That path must still
-        // reject corruption; a cache miss is never permission to publish it.
         let projection = &entry.projection;
-        if projection.cemented.verify_unchanged(batch).is_err()
-            || projection.applied.verify_unchanged(batch).is_err()
-            || projection.inventory.verify_unchanged(batch).is_err()
-            || projection.economics.verify_unchanged(batch).is_err()
-            || super::order::read(batch, &projection.applied, continuation)?
-                != projection.economics.ordering
-        {
-            *cached = None;
+        // A miss still requires full replay and never authorizes corrupt state.
+        if !check(projection)? {
+            if invalidate { *cached = None; }
             return Ok(None);
         }
         Ok(Some(projection.clone()))
@@ -172,5 +198,33 @@ impl ProjectionCache {
             replay,
         });
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selection_hints_defer_while_projection_validation_holds_cache() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(LmdbStore::open(directory.path(), 32, 16 << 20).unwrap());
+        let cache = ProjectionCache::default();
+        let guard = cache.0.lock().unwrap();
+        std::thread::scope(|scope| {
+            let (send, receive) = std::sync::mpsc::channel();
+            let cache = &cache;
+            let store = &store;
+            let worker = scope.spawn(move || {
+                send.send(cache.selection_refresh(
+                    store, NetworkId::Dev, ProtocolParams::default().params_hash(), None,
+                ).map(|hint| hint.is_none())).unwrap();
+            });
+            let result = receive.recv_timeout(std::time::Duration::from_secs(1));
+            // Release before asserting, so a regression cannot strand the worker.
+            drop(guard);
+            worker.join().unwrap();
+            assert!(result.expect("scheduling hint waited on projection validation").unwrap());
+        });
     }
 }

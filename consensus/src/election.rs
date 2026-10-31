@@ -1,9 +1,4 @@
-//! Election state machine — manages the lifecycle of a consensus election.
-//!
-//! Inspired by rsnano-node's election lifecycle. An election is created when a
-//! fork is detected (two blocks sharing the same previous). Representatives
-//! vote on which block to confirm. A block is confirmed when it accumulates
-//! ≥ 67% of the total online voting weight.
+//! Election voting and final-vote confirmation for competing blocks at one root.
 
 use crate::vote_info::{VoteInfo, VoteResult};
 use burst_types::{BlockHash, Timestamp, WalletAddress};
@@ -24,7 +19,7 @@ pub enum ElectionState {
     Passive,
     /// Actively soliciting votes from representatives.
     Active,
-    /// Reached quorum (≥ 67% of online weight). Terminal state.
+    /// Reached the final-vote confirmation threshold. Terminal state.
     Confirmed,
     /// Timed out without reaching confirmation. Terminal state.
     Expired,
@@ -37,7 +32,7 @@ pub struct ElectionStatus {
     pub winner: BlockHash,
     /// The weight tally of the winning block at confirmation time.
     pub tally: u128,
-    /// The final tally after all votes are counted.
+    /// The weight of final votes for the winning block at confirmation.
     pub final_tally: u128,
     /// How long the election took, in milliseconds.
     pub election_duration_ms: u64,
@@ -46,37 +41,35 @@ pub struct ElectionStatus {
 /// A single consensus election for a root block.
 ///
 /// Tracks votes from representatives and determines when a block reaches the
-/// confirmation threshold (≥ 67% of total online voting weight).
+/// configured final-vote confirmation threshold. The caller authenticates votes,
+/// supplies electorate weights, and ensures candidates belong to this root.
 #[derive(Clone, Debug)]
 pub struct Election {
-    /// The root block hash that triggered this election (e.g., the `previous` of forking blocks).
+    /// Caller-supplied conflict root. The node derives it from account and previous hash.
     pub id: BlockHash,
     /// Current lifecycle state.
     pub state: ElectionState,
     /// Latest vote per representative (keyed by voter address).
     pub last_votes: HashMap<WalletAddress, VoteInfo>,
-    /// Per-block weight tally over ALL votes (final and non-final). Used for the
-    /// `has_quorum` margin signal (which tells the node it may start emitting
-    /// FINAL votes) — NOT for confirmation.
+    /// Combined soft and final vote weight per block. The lead over the next
+    /// candidate determines whether final voting can begin.
     pub tally: HashMap<BlockHash, u128>,
-    /// Per-block weight tally over FINAL votes only. Confirmation is gated on
-    /// this (rsnano parity): a block is cemented only when a supermajority of
-    /// *final* (irrevocable) weight backs it. Confirming on the combined
-    /// `tally` would let a block be cemented on soft, still-changeable votes.
+    /// Final vote weight per block. Only this tally can confirm the election;
+    /// durable cementation is handled by the node.
     pub final_tally: HashMap<BlockHash, u128>,
     /// When the election was created.
     pub created_at: Timestamp,
     /// When the state last changed.
     pub state_changed_at: Timestamp,
-    /// Weight needed to confirm (67% of online weight).
+    /// Final-vote weight needed to confirm.
     confirmation_threshold: u128,
 }
 
 impl Election {
     /// Create a new election in the Passive state.
     ///
-    /// `online_weight` is the total voting weight of all online representatives.
-    /// The confirmation threshold is set to 67% of that value.
+    /// Sets the threshold to 67% of the supplied electorate weight, rounded up.
+    /// This helper does not discover online peers or authenticate the electorate.
     pub fn new(root: BlockHash, online_weight: u128, now: Timestamp) -> Self {
         Self::with_quorum(root, online_weight, now, QUORUM_BPS as u16)
     }
@@ -136,8 +129,10 @@ impl Election {
         )
     }
 
-    /// Signature verification belongs to the caller. Order soft votes by the
-    /// signed sequence, not the receiving node's clock or arrival order.
+    /// The caller verifies signatures, assigns weight from the frozen electorate,
+    /// and validates candidate membership. Soft votes are ordered by their signed
+    /// sequence. A final vote supersedes a soft vote regardless of sequence, but
+    /// no vote can replace an existing final vote.
     pub fn vote_signed(&mut self, vote: VoteInfo, received_at: Timestamp) -> VoteResult {
         let voter = &vote.voter;
         let block = vote.block_hash;
@@ -220,10 +215,10 @@ impl Election {
     /// Check if any block has reached the confirmation threshold.
     ///
     /// If so, transitions the election to Confirmed and returns the status.
-    /// Returns `None` if no block has reached quorum yet.
+    /// Returns `None` if no block has reached quorum or the election is terminal.
+    /// This method does not check elapsed time; the caller schedules expiration.
     pub fn try_confirm(&mut self, now: Timestamp) -> Option<ElectionStatus> {
-        // No eligible electorate is not a free quorum. In particular, removal
-        // of the genesis bonus must never let a zero-weight vote confirm.
+        // An empty electorate cannot confirm a block.
         if self.confirmation_threshold == 0 {
             return None;
         }
@@ -234,12 +229,7 @@ impl Election {
             return None;
         }
 
-        // Confirmation is gated on FINAL votes only (rsnano parity). A block
-        // is cemented only when a supermajority of irrevocable weight backs it;
-        // the combined `tally` (which includes soft, still-changeable votes)
-        // must never cement a block. Because a representative casts at most one
-        // final vote, two competing blocks can't each reach a final
-        // supermajority, so a final-tally threshold is fork-safe on its own.
+        // Soft votes remain replaceable and cannot establish confirmation.
         let (winner, winner_final_tally) = self.leading_final_block()?;
 
         if winner_final_tally >= self.confirmation_threshold {
@@ -269,26 +259,29 @@ impl Election {
         }
     }
 
-    /// Whether the election has a soft quorum: the leading block leads the
-    /// nearest competitor by at least the confirmation threshold across ALL
-    /// (final + non-final) votes. This is a *margin* test — it guarantees no
-    /// competing fork can simultaneously reach quorum — and it is the signal
-    /// the node uses to decide it may begin emitting FINAL votes (rsnano's
-    /// `has_quorum`). It does NOT by itself confirm the election.
+    /// Whether the leading combined tally exceeds the runner-up by at least the
+    /// confirmation threshold. The node uses this margin to consider final voting;
+    /// it does not confirm the election or check its lifecycle state.
     pub fn has_quorum(&self) -> bool {
         if self.confirmation_threshold == 0 {
             return false;
         }
-        let mut tallies: Vec<u128> = self.tally.values().copied().collect();
-        tallies.sort_unstable_by(|a, b| b.cmp(a));
-        let first = tallies.first().copied().unwrap_or(0);
-        let second = tallies.get(1).copied().unwrap_or(0);
+        let (mut first, mut second) = (0, 0);
+        for &weight in self.tally.values() {
+            if weight >= first {
+                second = first;
+                first = weight;
+            } else if weight > second {
+                second = weight;
+            }
+        }
         first.saturating_sub(second) >= self.confirmation_threshold
     }
 
     /// Check if the election has timed out.
     ///
-    /// If `now - created_at >= timeout_ms`, transitions to Expired and returns true.
+    /// Converts elapsed whole seconds to milliseconds and expires the election
+    /// when that duration reaches `timeout_ms`. Terminal elections are unchanged.
     pub fn check_timeout(&mut self, timeout_ms: u64, now: Timestamp) -> bool {
         if self.state == ElectionState::Confirmed || self.state == ElectionState::Expired {
             return false;
@@ -319,7 +312,7 @@ impl Election {
     }
 
     /// Returns the block with the most voting weight (all votes), along with
-    /// its combined tally. Used for the `has_quorum` margin signal and reads.
+    /// its combined tally. Equal weights have no deterministic hash tie-break.
     pub fn leading_block(&self) -> Option<(BlockHash, u128)> {
         self.tally
             .iter()
@@ -327,8 +320,8 @@ impl Election {
             .map(|(hash, w)| (*hash, *w))
     }
 
-    /// Returns the block with the most FINAL voting weight, along with its
-    /// final tally. Confirmation is derived from this.
+    /// Returns the block with the most final voting weight. Equal weights have
+    /// no deterministic hash tie-break. Confirmation uses this final tally.
     pub fn leading_final_block(&self) -> Option<(BlockHash, u128)> {
         self.final_tally
             .iter()
@@ -702,7 +695,7 @@ mod tests {
         assert_eq!(status.winner, make_hash(2));
     }
 
-    // --- Replay protection (election age) tests ---
+    // Vote admission age limit.
 
     #[test]
     fn vote_rejected_after_max_election_age() {
@@ -782,7 +775,7 @@ mod tests {
         let mut e = Election::new(make_hash(1), 1000, ts(100));
         e.vote(&make_voter("alice"), make_hash(2), 700, false, ts(101));
         assert!(e.try_confirm(ts(102)).is_none()); // soft only
-                                                   // Upgrade to final
+        // Upgrade to final
         e.vote(&make_voter("alice"), make_hash(2), 700, true, ts(103));
         assert_eq!(e.final_tally.get(&make_hash(2)), Some(&700));
         assert!(e.try_confirm(ts(104)).is_some());
@@ -808,5 +801,37 @@ mod tests {
         assert!(!e.has_quorum());
         // And of course nothing confirms.
         assert!(e.try_confirm(ts(103)).is_none());
+    }
+
+    #[test]
+    fn has_quorum_matches_sorted_margin_at_ties_and_integer_boundaries() {
+        let weights = [0, 1, 669, 670, 671, u128::MAX];
+        for a in weights {
+            for b in weights {
+                for c in weights {
+                    for d in weights {
+                        let mut e = Election::new(make_hash(1), 1000, ts(100));
+                        for (index, weight) in [a, b, c, d].into_iter().enumerate() {
+                            e.tally.insert(make_hash(index as u8 + 2), weight);
+                        }
+                        let mut sorted = [a, b, c, d];
+                        sorted.sort_unstable_by(|a, b| b.cmp(a));
+                        assert_eq!(e.has_quorum(), sorted[0].saturating_sub(sorted[1]) >= 670);
+                        // A soft margin never supplies final-vote authority.
+                        assert!(e.try_confirm(ts(101)).is_none());
+                    }
+                }
+            }
+        }
+        let mut e = Election::new(make_hash(1), 1000, ts(100));
+        assert!(!e.has_quorum());
+        e.tally.insert(make_hash(2), 670);
+        assert!(e.has_quorum());
+        e.tally.insert(make_hash(3), 1);
+        assert!(!e.has_quorum());
+        e.tally.insert(make_hash(3), 0);
+        assert!(e.has_quorum());
+        e.confirmation_threshold = 0;
+        assert!(!e.has_quorum());
     }
 }

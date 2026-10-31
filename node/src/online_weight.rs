@@ -1,9 +1,5 @@
-//! Tracks the online voting weight of the network for consensus quorum calculation.
-//!
-//! Uses a sampling approach: periodically records the online weight and computes
-//! a trended weight using the median of recent samples. This complements the
-//! consensus crate's [`OnlineWeightSampler`] (EMA-based, per-representative) with
-//! an aggregate historical view used for quorum stability.
+//! Recent online-weight samples for telemetry. This tracker does not set the
+//! node's consensus quorum. Samples are retained by count, not timestamp or age.
 
 use burst_types::Timestamp;
 use std::collections::VecDeque;
@@ -16,12 +12,12 @@ pub struct OnlineWeightTracker {
     max_samples: usize,
     /// Current live online weight (sum of online representatives' weight).
     current_weight: u128,
-    /// Minimum weight floor (prevents quorum from dropping to zero).
+    /// Floor for the displayed trend and quorum estimate; zero is allowed.
     minimum_weight: u128,
 }
 
 impl OnlineWeightTracker {
-    /// Two weeks of samples at 30-minute intervals.
+    /// 672 samples; about 3 hours 44 minutes at the worker's 20-second cadence.
     const DEFAULT_MAX_SAMPLES: usize = 672;
 
     pub fn new(initial_weight: u128, minimum_weight: u128) -> Self {
@@ -42,12 +38,13 @@ impl OnlineWeightTracker {
         self.current_weight = weight;
     }
 
-    /// Set the current live weight (called when reps go online/offline).
+    /// Replace the current value without recording a sample.
     pub fn set_current_weight(&mut self, weight: u128) {
         self.current_weight = weight;
     }
 
-    /// Get the trended weight (median of samples).
+    /// Sort a copy of retained weights and return the upper median with the floor.
+    /// With no samples, use max(current, minimum). Timestamps do not affect it.
     pub fn trended_weight(&self) -> u128 {
         if self.samples.is_empty() {
             return self.current_weight.max(self.minimum_weight);
@@ -59,7 +56,8 @@ impl OnlineWeightTracker {
         median.max(self.minimum_weight)
     }
 
-    /// Get the quorum delta (67% of max(current, trended, minimum)).
+    /// Telemetry estimate: 67% of max(current, trended, minimum), rounded down.
+    /// This is not the election threshold. Multiplication is unchecked.
     pub fn quorum_delta(&self) -> u128 {
         let base = self
             .current_weight

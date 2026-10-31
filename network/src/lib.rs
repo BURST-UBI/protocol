@@ -1,9 +1,13 @@
-//! P2P networking layer for the BURST protocol.
+//! Peer, connection, traffic-budget, clock and port-mapping components.
 //!
-//! Handles peer discovery, TCP connection management, message routing,
-//! block/transaction propagation, sync, and clock synchronization.
+//! The node integrates transport, authenticated handshakes, routing and recovery.
+//! A helper exported here does not by itself enforce the running node's policy.
 
 pub mod auth;
+pub mod admission;
+pub mod bandwidth;
+pub mod egress;
+pub mod fair_queue;
 pub mod broadcast;
 pub mod clock_sync;
 pub mod connection;
@@ -11,8 +15,6 @@ pub mod dedup;
 pub mod error;
 pub mod peer_manager;
 pub mod syn_cookies;
-pub mod sync;
-pub mod throttle;
 pub mod trusted_clock;
 pub mod upnp;
 
@@ -24,8 +26,6 @@ pub use dedup::{MessageDedup, DEFAULT_DEDUP_CAPACITY};
 pub use error::NetworkError;
 pub use peer_manager::{PeerManager, PeerState, PeerTelemetry, PenaltyReason};
 pub use syn_cookies::SynCookies;
-pub use sync::{
-    BootstrapResult, SyncAccountResult, SyncHandle, SyncProtocol, SyncRequest, SyncResponse,
-};
-pub use throttle::{BandwidthThrottle, DEFAULT_MAX_BYTES_PER_SEC};
 pub use upnp::{PortMapper, PortMapperConfig, UpnpState};
+
+pub use bandwidth::DEFAULT_MAX_BYTES_PER_SEC;

@@ -1,6 +1,7 @@
-//! Protocol parameters — the two core parameters plus all governance-tunable values.
+//! Shared protocol parameters and network defaults.
 //!
-//! Active parameters are democratically governable via the four-phase process.
+//! Governance exposes these fields through its parameter registry. Some fields
+//! remain serialized but no longer affect the protocol; their comments identify them.
 
 use crate::amount::{BRN_UNIT, TRST_UNIT};
 use crate::BlockHash;
@@ -8,22 +9,20 @@ use blake2::digest::consts::U32;
 use blake2::{Blake2b, Digest};
 use serde::{Deserialize, Serialize};
 
-/// All protocol parameters stored by every node.
-///
-/// The general equation: BURST is defined by `brn_rate` and `trst_expiry_secs`.
-/// Normal money is the special case where `brn_rate = 0` and `trst_expiry_secs = u64::MAX`.
+/// Parameters whose values contribute to the network parameter hash.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtocolParams {
-    // ── The General Equation ─────────────────────────────────────────────
+    // Accrual and expiry
     /// BRN accrual rate: raw units per second per verified wallet.
     /// Default: ~1 BRN/hour = 277_777_777_777_778 raw/second.
     pub brn_rate: u128,
 
-    /// TRST expiry period in seconds from the origin burn timestamp.
-    /// Set to `u64::MAX` for "never expires" (normal money mode).
+    /// TRST expiry period in seconds from the holding's effective origin time.
+    /// Merges use the oldest input's effective origin time.
+    /// `u64::MAX` represents an unlimited lifetime for ordinary timestamps.
     pub trst_expiry_secs: u64,
 
-    // ── Verification ─────────────────────────────────────────────────────
+    // Verification
     /// Number of endorsers required before verification begins.
     pub endorsement_threshold: u32,
 
@@ -37,14 +36,15 @@ pub struct ProtocolParams {
     /// Fraction (as basis points, e.g., 9000 = 90%) of legitimate votes needed to pass.
     pub verification_threshold_bps: u32,
 
-    /// BRN amount (raw) each verifier must temporarily stake.
+    /// BRN amount (raw) staked for a Legitimate or Illegitimate vote.
+    /// Neither votes require no stake.
     /// Default: 500 BRN (~3 weeks' accrual).
     pub verifier_stake_amount: u128,
 
     /// Maximum number of re-votes before verification fails.
     pub max_revotes: u32,
 
-    // ── Challenges ───────────────────────────────────────────────────────
+    // Challenges
     /// BRN amount (raw) a challenger must stake to initiate a challenge.
     /// Default: 1000 BRN (~6 weeks' accrual).
     pub challenge_stake_amount: u128,
@@ -54,7 +54,7 @@ pub struct ProtocolParams {
     /// Default: 7 days = 604800 seconds.
     pub neither_penalty_cooldown_secs: u64,
 
-    // ── Governance: Proposal → Voting → Cooldown → Activation ──
+    // Governance: Proposal → Voting → Cooldown → Activation
     /// Duration of the Proposal phase in seconds.
     pub governance_proposal_duration_secs: u64,
 
@@ -79,8 +79,8 @@ pub struct ProtocolParams {
     /// Legacy serialized participation statistic. It does not alter quorum.
     pub governance_ema_participation_bps: u32,
 
-    /// BRN burned per governance endorsement. Default: 100 BRN (decision 20.1).
-    /// The stored field name predates the signed endorsement operation.
+    /// BRN burned per governance endorsement, not per proposal submission.
+    /// Default: 100 BRN.
     pub governance_proposal_cost: u128,
 
     /// Legacy serialized field. Failed proposals now require resubmission.
@@ -95,7 +95,7 @@ pub struct ProtocolParams {
     /// Default: 3600 (1 hour).
     pub governance_propagation_buffer_secs: u64,
 
-    // ── Consti ────────────────────────────────────────────────────────────
+    // Consti
     /// Supermajority threshold for constitutional amendments (basis points).
     /// Separate from parameter governance — can be higher or lower.
     /// Self-referential: changing this value requires hitting this same threshold.
@@ -113,37 +113,35 @@ pub struct ProtocolParams {
 
     /// Challenger TRST reward as a fraction of the revoked total
     /// (basis points, 100 = 1%). The reward is min(revoked × bps / 10_000,
-    /// `challenge_reward_cap`) — parameter table in IMPLEMENTATION_DECISIONS.
+    /// `challenge_reward_cap`).
     /// Backed by the destroyed revoked TRST, so it is never net-inflationary.
     pub challenge_reward_bps: u32,
 
     /// Absolute cap on the challenger TRST reward (raw units).
     pub challenge_reward_cap: u128,
 
-    // ── Economic ─────────────────────────────────────────────────────────
-    /// Spending limit for newly verified wallets (TRST raw units; 0 = no limit).
+    // Economic
+    /// Per-operation cap on Send or Burn amounts during the verification age window.
+    /// Raw units; zero disables the cap. It is not a cumulative allowance.
     pub new_wallet_spending_limit: u128,
 
-    /// Duration (seconds) that new-wallet spending limit applies.
+    /// Stored spending-window value. Current node admission instead uses
+    /// `new_wallet_rate_limit_duration_secs` for the spending-cap age check.
     pub new_wallet_limit_duration_secs: u64,
 
-    /// Number of verified wallets required to exit bootstrap phase.
+    /// Verified-account threshold for permanent bootstrap exit, including the creator.
+    /// Enforcement caps this threshold at 50.
     pub bootstrap_exit_threshold: u32,
 
-    // ── Anti-Spam ────────────────────────────────────────────────────────
+    // Anti-Spam
     /// Minimum proof-of-work difficulty for transaction submission.
     pub min_work_difficulty: u64,
 
-    /// Maximum transactions per day for new wallets (rate limiting).
-    pub new_wallet_tx_limit_per_day: u32,
-
-    /// Duration (seconds) that new-wallet rate limit applies.
+    /// Age window currently used by new-wallet spending admission.
     pub new_wallet_rate_limit_duration_secs: u64,
 
     /// Minimum time (seconds) a wallet must have been verified before it is
-    /// eligible to be selected as a verifier (IMPLEMENTATION_DECISIONS §15.5).
-    /// Prevents freshly-verified (possibly sybil) wallets from immediately
-    /// gaining verification power. Default 30 days.
+    /// eligible to be selected as a verifier. Default: 30 days.
     pub min_verification_age_secs: u64,
 
     /// Penalize Neither voting strictly above this fraction of retained assignments.
@@ -169,9 +167,8 @@ impl ProtocolParams {
     /// 1 BRN per hour expressed as raw units per second (rounded up).
     pub const BRN_RATE_1_PER_HOUR: u128 = BRN_UNIT / 3600 + 1; // 277_777_777_777_778
 
-    /// Compute a deterministic blake2b-256 hash of these params.
-    /// Equivalent to Tezos's protocol hash — used in block headers,
-    /// handshakes, and telemetry for cross-node verification.
+    /// Hash the bincode-encoded parameters with BLAKE2b-256.
+    /// Peers use this hash to identify the parameter set, not executable code.
     pub fn params_hash(&self) -> BlockHash {
         let bytes = bincode::serialize(self).expect("ProtocolParams serialization is infallible");
         let mut hasher = Blake2b::<U32>::new();
@@ -186,10 +183,7 @@ impl ProtocolParams {
     pub fn burst_defaults() -> Self {
         Self {
             brn_rate: Self::BRN_RATE_1_PER_HOUR,
-            // Launch as "normal money": TRST never expires. BRN/UBI still accrues
-            // and mints TRST 1:1; governance can enable a finite expiry later
-            // (whitepaper §720 bootstrapping path, decision §6.2). `has_expired`
-            // saturates, so u64::MAX means nothing ever expires (no overflow).
+            // Accrual is enabled; governance may later choose a finite expiry.
             trst_expiry_secs: u64::MAX,
 
             endorsement_threshold: 3,
@@ -227,7 +221,6 @@ impl ProtocolParams {
             bootstrap_exit_threshold: 50,
 
             min_work_difficulty: 0xffff_fff8_0000_0000,
-            new_wallet_tx_limit_per_day: 10,
             new_wallet_rate_limit_duration_secs: 30 * 24 * 3600, // 30 days
             min_verification_age_secs: 30 * 24 * 3600,           // 30 days
             neither_penalty_threshold_bps: 5000,
@@ -257,7 +250,7 @@ impl ProtocolParams {
         p.governance_promotion_duration_secs = 60;
         p.governance_proposal_endorsements = 0;
         p.governance_proposal_cost = 0;
-        p.governance_quorum_bps = 1; // 0.01% — effectively any vote counts
+        p.governance_quorum_bps = 1; // 0.01% of the eligible electorate
         p.governance_supermajority_bps = 5100; // 51%
         p.governance_propagation_buffer_secs = 5;
         p.governance_proposal_window_secs = 30;

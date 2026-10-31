@@ -381,7 +381,10 @@ fn live_selection_rejects_changed_endorsements_without_overwriting_state() {
             1 => state.endorsements[0].burn_amount += 1,
             2 => state.endorsements[0].timestamp = Timestamp::new(CUTOFF + 1),
             3 => state.endorsements[0].endorser = address(3),
-            _ => state.endorsements.push(state.endorsements[0].clone()),
+            _ => {
+                let duplicate = state.endorsements[0].clone();
+                state.endorsements.push(duplicate);
+            }
         }
         let changed = VerificationOrchestrator::restore(snapshot);
         let mut batch = store.tx_begin_write().unwrap();
@@ -589,3 +592,6 @@ fn live_selection_checks_a_restored_committee_even_when_its_context_matches() {
     drop(batch);
     assert_eq!(saved(&store), before);
 }
+
+#[cfg(test)]
+mod payment_exclusion_cache;

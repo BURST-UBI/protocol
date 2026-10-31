@@ -1,3 +1,7 @@
+//! NTS key exchange, authenticated UDP sampling and signing-time observations.
+//! ntpd-rs validates packets; this client applies the additional uncertainty and
+//! clock-continuity checks required by TrustedClock. It does not discipline time.
+
 use ntp_proto::{
     KeyExchangeClient, NtpDuration, NtpInstant, NtpLeapIndicator, NtpSource, NtpSourceAction,
     NtsClientConfig, SourceConfig, System,
@@ -25,8 +29,9 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_secs(64);
 const SESSION_LIFETIME: Duration = Duration::from_secs(3600);
 
-/// One independently operated, certificate-authenticated NTS endpoint. Multiple
-/// hostnames run by the same operator must use the same `operator` identity.
+/// An NTS endpoint and its declared operator. Configuration rejects repeated
+/// operator labels and hostnames, but cannot prove operational independence.
+/// Choose independently administered sources; aliases do not add fault tolerance.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NtsSource {
@@ -41,8 +46,8 @@ pub struct NtsClock {
 }
 
 impl NtsClock {
-    /// Four separate operators, not four aliases of one time service. Operators
-    /// may replace these with independently administered NTS endpoints.
+    /// Default endpoint names and declared operator labels. Availability and
+    /// operational independence must be assessed for the deployment.
     pub fn public_sources() -> Vec<NtsSource> {
         [
             ("cloudflare", "time.cloudflare.com"),
@@ -92,8 +97,11 @@ impl NtsClock {
         self.clock.clone()
     }
 
-    /// Cancellation drops in-flight DNS/TLS/UDP work and joins every owned task.
-    /// Failure never falls back to peer offsets or unauthenticated NTP.
+    /// Run one worker per configured source. Shutdown aborts and joins them.
+    /// Failed queries discard their session but leave the last accepted sample
+    /// to age under TrustedClock's freshness rule. There is no unauthenticated
+    /// fallback. Exchange/query deadlines are ten/five seconds; polling waits
+    /// at least 64 seconds between attempts.
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) {
         if *shutdown.borrow() {
             return;
@@ -127,8 +135,23 @@ impl NtsClock {
                 }
             });
         }
+        let mut health = tokio::time::interval(Duration::from_secs(5));
+        let mut was_ready = None;
         loop {
             tokio::select! {
+                _ = health.tick() => {
+                    let reading = self.clock.reading();
+                    let ready = reading.is_ok();
+                    if was_ready != Some(ready) {
+                        match reading {
+                            Ok(time) => tracing::info!(error_bound_secs = time.error_bound,
+                                "authenticated signing time available"),
+                            Err(error) => tracing::warn!(%error,
+                                "authenticated signing time unavailable; time-dependent signing is paused"),
+                        }
+                        was_ready = Some(ready);
+                    }
+                }
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() { break; }
                 }
@@ -153,6 +176,8 @@ struct Session {
 }
 
 impl Session {
+    /// Authenticate key exchange, then use the first resolved address of the
+    /// negotiated UDP endpoint. The worker supplies the outer timeout.
     async fn connect(endpoint: &NtsSource, config: &NtsClientConfig) -> io::Result<Self> {
         let tcp = TcpStream::connect((endpoint.server_name.as_str(), endpoint.port)).await?;
         let client = KeyExchangeClient::new(config).map_err(io::Error::other)?;
@@ -193,6 +218,8 @@ impl Session {
         })
     }
 
+    /// Accept at most sixteen datagrams while waiting for a validated sample.
+    /// Full-buffer packets are discarded; the worker bounds the overall wait.
     async fn query(&mut self) -> io::Result<AuthenticatedObservation> {
         let packet = self
             .source

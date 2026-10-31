@@ -3,7 +3,10 @@
 //! Encrypts a 32-byte Ed25519 secret key with a user-chosen password:
 //! 1. Argon2id derives a 32-byte encryption key from the password + random salt
 //! 2. AES-256-GCM encrypts the secret key with a random nonce
-//! 3. The result is stored as a JSON file with all parameters for future decryption
+//! 3. The result can be serialized to JSON with the salt, nonce and fixed profile.
+//!
+//! A keystore contains only the secret key, not signing journals or device state.
+//! Version 1 decryption accepts only the fixed profile declared below.
 
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
@@ -15,11 +18,11 @@ use std::path::Path;
 
 use crate::error::WalletError;
 
-/// Argon2id parameters: 64 MB memory, 3 iterations, 1 lane of parallelism.
-const ARGON2_MEMORY_KIB: u32 = 65536; // 64 MB
-const ARGON2_ITERATIONS: u32 = 3;
-const ARGON2_PARALLELISM: u32 = 1;
-const ARGON2_OUTPUT_LEN: usize = 32;
+/// Version 1 uses 64 MiB of memory, three iterations and one lane.
+const V1_ARGON2_MEMORY_KIB: u32 = 65536; // 64 MiB
+const V1_ARGON2_ITERATIONS: u32 = 3;
+const V1_ARGON2_PARALLELISM: u32 = 1;
+const V1_ARGON2_OUTPUT_LEN: usize = 32;
 
 /// Salt length in bytes.
 const SALT_LEN: usize = 32;
@@ -50,7 +53,8 @@ pub struct KeystoreCrypto {
 /// KDF parameters for Argon2id.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct KdfParams {
-    pub memory: u32,
+    #[serde(rename = "memory")]
+    pub memory_kib: u32,
     pub iterations: u32,
     pub parallelism: u32,
 }
@@ -62,17 +66,14 @@ pub fn encrypt_keystore(
 ) -> Result<KeystoreFile, WalletError> {
     let mut rng = rand::thread_rng();
 
-    // Generate random salt and nonce
     let mut salt = [0u8; SALT_LEN];
     rng.fill_bytes(&mut salt);
 
     let mut nonce_bytes = [0u8; NONCE_LEN];
     rng.fill_bytes(&mut nonce_bytes);
 
-    // Derive encryption key via Argon2id
     let derived_key = derive_key(password, &salt)?;
 
-    // Encrypt with AES-256-GCM
     let cipher = Aes256Gcm::new_from_slice(&derived_key)
         .map_err(|e| WalletError::Key(format!("AES key init failed: {}", e)))?;
 
@@ -87,9 +88,9 @@ pub fn encrypt_keystore(
             cipher: "aes-256-gcm".to_string(),
             kdf: "argon2id".to_string(),
             kdf_params: KdfParams {
-                memory: ARGON2_MEMORY_KIB,
-                iterations: ARGON2_ITERATIONS,
-                parallelism: ARGON2_PARALLELISM,
+                memory_kib: V1_ARGON2_MEMORY_KIB,
+                iterations: V1_ARGON2_ITERATIONS,
+                parallelism: V1_ARGON2_PARALLELISM,
             },
             salt: hex_encode(&salt),
             nonce: hex_encode(&nonce_bytes),
@@ -98,13 +99,23 @@ pub fn encrypt_keystore(
     })
 }
 
-/// Decrypt a keystore file with the given password, returning the 32-byte secret key.
+/// Validate the version-1 profile and authenticate/decrypt the encrypted key.
+/// Returns raw secret bytes; the caller controls their lifetime and disposal.
 pub fn decrypt_keystore(keystore: &KeystoreFile, password: &str) -> Result<[u8; 32], WalletError> {
     if keystore.version != 1 {
         return Err(WalletError::Key(format!(
             "unsupported keystore version: {}",
             keystore.version
         )));
+    }
+
+    let crypto = &keystore.crypto;
+    if crypto.cipher != "aes-256-gcm" || crypto.kdf != "argon2id"
+        || crypto.kdf_params.memory_kib != V1_ARGON2_MEMORY_KIB
+        || crypto.kdf_params.iterations != V1_ARGON2_ITERATIONS
+        || crypto.kdf_params.parallelism != V1_ARGON2_PARALLELISM
+    {
+        return Err(WalletError::Key("unsupported version 1 keystore profile".into()));
     }
 
     let salt = hex_decode(&keystore.crypto.salt)
@@ -122,10 +133,8 @@ pub fn decrypt_keystore(keystore: &KeystoreFile, password: &str) -> Result<[u8; 
         )));
     }
 
-    // Derive the same encryption key from password + salt
     let derived_key = derive_key(password, &salt)?;
 
-    // Decrypt with AES-256-GCM
     let cipher = Aes256Gcm::new_from_slice(&derived_key)
         .map_err(|e| WalletError::Key(format!("AES key init failed: {}", e)))?;
 
@@ -146,7 +155,9 @@ pub fn decrypt_keystore(keystore: &KeystoreFile, password: &str) -> Result<[u8; 
     Ok(key)
 }
 
-/// Save a keystore to a JSON file.
+/// Create a new JSON file, refusing to overwrite an existing path. On Unix the
+/// file is created with owner-only permissions. Syncs the file, not its parent
+/// directory; a write failure can leave a partial file at the requested path.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn save_keystore(keystore: &KeystoreFile, path: &Path) -> Result<(), WalletError> {
     use std::io::Write;
@@ -170,7 +181,9 @@ pub fn save_keystore(keystore: &KeystoreFile, path: &Path) -> Result<(), WalletE
     Ok(())
 }
 
-/// Load a keystore from a JSON file.
+/// Read and parse the entire JSON file. This does not validate its encryption
+/// profile or authenticate its ciphertext; call `decrypt_keystore` for those checks.
+/// The caller must bound input size before loading untrusted backups.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_keystore(path: &Path) -> Result<KeystoreFile, WalletError> {
     let json = std::fs::read_to_string(path)
@@ -183,10 +196,10 @@ pub fn load_keystore(path: &Path) -> Result<KeystoreFile, WalletError> {
 /// Derive a 32-byte key from a password and salt using Argon2id.
 fn derive_key(password: &str, salt: &[u8]) -> Result<[u8; 32], WalletError> {
     let params = Params::new(
-        ARGON2_MEMORY_KIB,
-        ARGON2_ITERATIONS,
-        ARGON2_PARALLELISM,
-        Some(ARGON2_OUTPUT_LEN),
+        V1_ARGON2_MEMORY_KIB,
+        V1_ARGON2_ITERATIONS,
+        V1_ARGON2_PARALLELISM,
+        Some(V1_ARGON2_OUTPUT_LEN),
     )
     .map_err(|e| WalletError::Key(format!("Argon2 params error: {}", e)))?;
 
@@ -222,6 +235,47 @@ mod tests {
     use super::*;
     use std::fs;
 
+    /// Characterizes unbounded JSON input without invoking the password KDF.
+    #[test]
+    fn audit_backup_import_accepts_large_ignored_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("untrusted-backup.json");
+        let document = serde_json::json!({
+            "version": 1,
+            "crypto": {
+                "cipher": "aes-256-gcm", "kdf": "argon2id",
+                "kdf_params": {"memory": 65536, "iterations": 3, "parallelism": 1},
+                "salt": "00".repeat(32), "nonce": "00".repeat(12),
+                "ciphertext": "00".repeat(48)
+            },
+            "untrusted_padding": "x".repeat(1024 * 1024)
+        });
+        std::fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
+        assert!(std::fs::metadata(&path).unwrap().len() > 1024 * 1024);
+        assert_eq!(load_keystore(&path).unwrap().version, 1);
+        println!("FA01 reproduced: >1 MiB ignored metadata accepted by backup import; no KDF run");
+    }
+
+    #[test]
+    fn unsupported_profiles_are_rejected_before_decoding_or_derivation() {
+        let base = KeystoreFile { version: 1, crypto: KeystoreCrypto {
+            cipher: "aes-256-gcm".into(), kdf: "argon2id".into(),
+            kdf_params: KdfParams { memory_kib: V1_ARGON2_MEMORY_KIB, iterations: V1_ARGON2_ITERATIONS, parallelism: V1_ARGON2_PARALLELISM },
+            salt: "invalid".into(), nonce: "invalid".into(), ciphertext: "invalid".into(),
+        }};
+        for field in 0..5 {
+            let mut invalid = base.clone();
+            match field {
+                0 => invalid.crypto.cipher = "aes-128-gcm".into(),
+                1 => invalid.crypto.kdf = "argon2i".into(),
+                2 => invalid.crypto.kdf_params.memory_kib = u32::MAX,
+                3 => invalid.crypto.kdf_params.iterations = 1,
+                _ => invalid.crypto.kdf_params.parallelism = 2,
+            }
+            assert!(decrypt_keystore(&invalid, "test").unwrap_err().to_string().contains("unsupported version 1 keystore profile"));
+        }
+    }
+
     #[test]
     fn encrypt_decrypt_roundtrip() {
         let secret_key = [42u8; 32];
@@ -252,7 +306,7 @@ mod tests {
         let keystore = encrypt_keystore(&[0u8; 32], "pass").unwrap();
         assert_eq!(keystore.crypto.cipher, "aes-256-gcm");
         assert_eq!(keystore.crypto.kdf, "argon2id");
-        assert_eq!(keystore.crypto.kdf_params.memory, 65536);
+        assert_eq!(keystore.crypto.kdf_params.memory_kib, 65536);
         assert_eq!(keystore.crypto.kdf_params.iterations, 3);
         assert_eq!(keystore.crypto.kdf_params.parallelism, 1);
     }

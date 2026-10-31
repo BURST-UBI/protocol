@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { needsRuntime, selectChecks } from './ci-scope.mjs';
 
 test('documentation and coverage updates retain inventory but skip Rust', () => {
-  assert.equal(needsRuntime(['docs/BURST_FULL_GUIDE.md', 'spec/coverage.json', 'README.md']), false);
+  assert.equal(needsRuntime(['docs/introduction/QUICK_TOUR.md', 'spec/coverage.json', 'README.md']), false);
 });
 test('code, build inputs, workflows and unknown paths run runtime validation', () => {
   for (const path of ['node/src/node.rs', 'Cargo.lock', '.cargo/config.toml',

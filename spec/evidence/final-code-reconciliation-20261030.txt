@@ -1,0 +1,273 @@
+# Final code reconciliation before Azure end-to-end testing
+
+Date: 2026-10-30. User instruction: do not publish. Azure end-to-end testing is
+requested after this audit; no VM, remote job, push, release or CI dispatch was
+started during the audit. Existing local review refs remain local.
+
+Source baseline: protocol review 76d408384a31d2bcc4f0bc1d0f970cab28951a43,
+with subsequent audit documentation only at the time of review. Its production
+receipt was verified then; the later fixes have separate evidence below. Reference: clean local rsnano checkout
+414dd884c162f78f151b9d912a029bbc9a340866, not a claim about latest upstream.
+
+## Fix status — 2026-10-31
+
+Correction from node test compilation: `recover_metadata_until_shutdown` has
+three unit-test callers. Its appropriate disposition is `cfg(test)`, not deletion;
+the restored wrapper and reexport preserve those cancellation checks.
+
+A1–A5 are implemented; see [fixes and current validation](FINAL_CODE_FIXES_20261031.md).
+The original findings below describe the reviewed baseline. Strict production
+and node-test compilation plus 85 focused tests pass. Node qualification ran on
+the capped Azure host. No public release or end-to-end pass is implied.
+
+## Assessment
+
+No new conflicting live consensus implementation was established. There are real
+cleanup items and a build-policy mismatch. A normal compilation pass is not a
+warnings-as-errors CI pass. Resolve the confirmed items below before treating
+Azure end-to-end results as the final qualification of this source.
+
+The previous structural fixes stand: shared RPC contracts have a real client,
+listeners are daemon-owned, wire/schema ownership is in messages, and node's RPC
+adapter and online-weight worker have named private owners. This audit does not
+reopen S2–S6 as unimplemented or propose another general reorganization.
+
+## Confirmed findings
+
+### A1 — Saved compiler diagnostics conflict with CI policy
+
+Priority: high for build qualification, not evidence of a critical runtime bug.
+.github/workflows/ci.yml:35 sets RUSTFLAGS=-Dwarnings. The current matching
+boundary-check4.log contains Rust unused imports/dead-code/private-interface
+warnings, plus a future-incompatible recursion-depth diagnostic involving
+recover_metadata_from_peers. Applicable Rust warnings become errors under that
+policy. Cargo's own manifest notices are a separate category; do not count every
+Cargo notice as a Rust compiler error.
+
+The recovery warning points to
+node/src/confirmed_replay/snapshot/installed/metadata.rs:598: a function returns
+an opaque Send future constructed with Box::pin of another recovery future.
+Boxing the value does not necessarily erase its concrete future type. Trace the
+reported Send/opaque-type cycle before changing the boundary. Boxing itself is
+intentional: RETIREMENT_CAPTURE_DESIGN.md:15181 records a live-restart stack
+overflow and the subsequent boxed-recovery restart/cancellation passes. Retain
+that allocation boundary; the warning is not grounds to unbox recovery. Do not raise
+recursion limits or blanket-allow warnings just to produce a green job. This pass
+did not reproduce a runtime failure or run another compiler with changed flags.
+
+Action: classify existing diagnostics into test-only helpers, genuinely unused
+code, API visibility and actual type-boundary issues; fix the relevant source,
+then run the smallest matching strict build before expensive end-to-end work.
+Keep the normal-build receipts for their actual scope. No unused-code deletion
+should be inferred solely from a production-profile warning.
+
+### A2 — Retirement catalogue exposes types at inconsistent visibility
+
+Priority: medium API/compile hygiene; high confidence.
+node/src/confirmed_replay/retirement/catalogue.rs:48 and:150 expose crate-visible
+enums whose Observed variants contain ObservedCatalogue/ObservedRows. Their
+implementations in catalogue/observed.rs:7 and:53 are only pub(super). The compiler
+reports both as private_interfaces. This remains after the earlier extraction.
+
+Action: align the intended interface visibility or hide the variant representation
+behind a private wrapper. Keep observed page fields and checked proof authority
+private. This is not evidence that unauthenticated callers can retire data.
+Rsnano's private implementation modules and exposed typed interfaces, for example
+store_lmdb/src/block_store.rs, illustrate the useful boundary; matching its module
+count is irrelevant.
+
+### A3 — Small graph-record encoding helpers have two active owners
+
+Priority: medium drift risk; high confidence, no current byte disagreement found.
+The edge function is identical in node/src/graph_storage.rs:31 and
+store_lmdb/src/write_batch/auxiliary_cache/trst/graph_delta.rs:6. Both hardcode the
+GraphRecord storage prefixes for origin/downstream edges and read their position.
+The adjacent set_position match is also duplicated.
+
+Both paths are real. Ordinary economic delta publication delegates to the backend
+CAS writer; full graph persistence, legacy handling and replay installation use
+other node paths. Do not merge those operations: preserving surviving journal
+positions and rebuilding certified replay rows are different contracts.
+
+Action: give the shared record-group/position operations one owner beside
+GraphRecord (or an equally narrow existing owner). Preserve exact storage keys
+and position semantics. Retain both full and incremental algorithms. Rsnano keeps
+block values/serialization with their type owners and database mutations with the
+store; it has no equivalent BURST merger graph algorithm to copy wholesale.
+
+### A4 — Confirmed dead forwarding paths and test-only conveniences remain mixed
+
+Priority: low-to-medium cleanup; scope below is concrete, not a blanket deletion.
+
+| Code | Caller evidence | Appropriate disposition |
+|---|---|---|
+| LmdbWriteTransaction::economic_row_format, auxiliary_cache/trst.rs:178 | Private wrapper; compiler unused; source search finds the live read-view implementation/callers, not this forwarding method | Remove forwarding method; retain the read-view guard |
+| LmdbWriteTransaction::read_stable_trst_holdings, same file:404 | Private wrapper; compiler unused; the read-view method at:707 is used by reconstruction | Remove wrapper; preserve checked/polled restoration |
+| recover_metadata_until_shutdown, installed/metadata.rs:673 | Only definition and installed.rs reexport found; live startup calls recover_metadata_with_durable_inputs | Remove unused wrapper/reexport, retain durable-input cancellation path |
+| TrackedMap::is_empty, verification/src/tracked_map.rs:37 | Compiler unused; map implementation/tests have no call to this convenience method | Removal candidate; verify feature/test callers before deletion |
+| RevisionIndex::new | Used in revision-index/removal/undo tests; production uses new_checked | Keep test coverage; gate convenience wrapper for tests |
+| MergerGraph::validate_structure and revocation_counts | Tests call unpolled convenience wrappers; production uses checked/polled variants | Keep checked implementations; scope wrappers to tests |
+| records.rs RevocationUndo reexport | Type is live inside revocation_undo.rs; no consumer of this reexport found | Remove redundant reexport, not the rewind implementation |
+| Workspace tower/tower-http declarations | Compiler manifest notices; no member declaration or source consumer found | Remove unused workspace declarations; transitive packages are independent |
+
+The many remaining recovery/scratch warnings are not all classified as dead code.
+Several APIs exist for private proof tests. Do not remove proof validation or
+fixtures to suppress the production warning inventory. Rsnano likewise keeps
+unit-only helpers/tests under cfg(test), and shares integration setup through
+its existing test_helpers rather than pretending tests are production callers.
+
+### A5 — Two public descriptions still obscure intentionally different APIs
+
+Priority: low documentation/API clarity, not an observed live conflict.
+
+ledger/src/genesis.rs:33 exposes create_genesis_block as a normal genesis builder,
+but delegates to legacy_genesis_fixture. The running node and key generator call
+configured_genesis_block. The old constructor/hash helper remain exported at the
+ledger root and used by historical fixtures. Preserve their bytes and callers,
+but label/deprecate the historical entry points so new consumers do not mistake
+them for launch configuration. Existing node launch code is already on the right
+constructor. Rsnano similarly centralizes network genesis identity in its ledger
+constants; it does not justify rewriting BURST's saved fixture hashes.
+
+rpc/src/state.rs:71 still describes its ProcessResult as mirroring node's result.
+The internal result, RPC queued/submission state and wallet wire receipt are
+intentionally different. Update that description to match the actual semantics;
+do not unify their types or equate submission with finality.
+
+## Apparent duplication that should stay
+
+* Full graph publication, incremental CAS writes and certified replay staging
+  have different undo/ordering contracts. Only their small record helpers are
+  the duplication finding above.
+* Backend governance hydration uses a caller-owned pinned reader and a cache
+  tagged by transaction generation. Rsnano puts more application work in ledger,
+  but a move that loses those guarantees is not simplification.
+* Native wallet, dashboard and wallet_core RPC clients share bounded response
+  reading. Dashboard retries only read-side admission rejection; wallet does not
+  silently retry writes. Their deadlines and signing/journal responsibilities
+  differ. Do not combine them into one automatic-retry client.
+* Historical genesis fixtures and configured launch identity are intentionally
+  distinct. Only their discoverability needs improvement.
+* Legacy Bincode handshake/codec and candidate-only LedgerPruner are explicitly
+  isolated. No live node/daemon/RPC/network/message consumer was found in the
+  searched call sites. Compatibility retention is not an alternate live protocol.
+* Commit-reveal is explicitly an experimental transcript with missing membership,
+  deadline and recovery guarantees. ThresholdVrf returns Unavailable for both
+  generation and verification. No production constructor/caller was found for
+  either; do not wire them in as drand fallbacks. Their documented future scope
+  is not a demonstrated missing production randomness path.
+* Wire version has one source value in types (protocol reexports it); StateBlock,
+  ProtocolParams and ShutdownController each have one implementation owner in
+  the inspected workspace. Different ProcessResult meanings are not duplicates.
+
+## Inventory and limits
+
+A bounded lexical duplicate scan inspected 947 Rust source files across the
+workspace and both native apps. With a 12-line minimum it found 3 cross-file exact
+function-body groups: one production edge helper and two test fixtures. The
+shorter set_position duplicate was confirmed manually. This is candidate discovery,
+not proof that no semantic duplication exists: changed names/control flow, macros,
+shorter bodies and frontend code need separate reasoning.
+
+A separate module-declaration walk, including inline test modules and Cargo binary,
+example and integration roots, reached every inspected Rust source file with no
+unresolved declarations. It considers cfg branches together; this does not mean
+every function is used or every feature combination compiles. An initial naive
+walk missed inline modules; those false positives were reconciled rather than
+reported as dead files. Conflict-marker and todo!/unimplemented! source searches
+found no new production merge debris or panic stubs in the searched areas.
+
+Manual review covered crate/dependency direction, source ownership, live caller
+paths for the findings, persistence/replay distinctions, RPC/client contracts,
+genesis construction, prototype providers, native application composition and
+current compiler diagnostics. Frontend/native boundary consumers were sampled;
+this is not an exhaustive TypeScript dead-export proof or formal protocol audit.
+No claim that the protocol is free of all bugs follows from these checks.
+
+Evidence: ~/.local/state/burst/audits/final-code-20261030, containing duplicate and
+module candidate inventories and the scan scripts. Current compiler evidence is
+in the existing structure-20261030 archive; its production receipt was verified,
+not rerun. No expensive validation was repeated for this audit.
+
+## Next execution boundary
+
+Publication is explicitly forbidden by the current user instruction. Azure testing
+can use private source archives or Git bundles for protocol, wallet and dashboard,
+with exact source hashes and local dependency pins verified on the host. Public
+GitHub availability is not a prerequisite for that private run. Keep the selected
+source stable, preserve existing stage receipts and use VALIDATION_WORKFLOW.md
+before any host/build/scenario scheduling. Address the confirmed source/build
+findings first; then qualify affected integration behavior and the requested
+end-to-end journey on Azure. A fresh start remains required where the scenario
+claims fresh onboarding; a resumed fixture is not equivalent evidence.
+
+
+## Intent cross-check — disposition of A1–A5
+
+Follow-up review traced implementation callers and recorded rationale rather than
+assuming every difference from rsnano or compiler warning is accidental. No source
+changes or new tests were made. Historical test results below establish recorded
+motivation; they were not rerun or promoted to current release evidence.
+
+| Finding | Intentional portion | Remaining justified change |
+|---|---|---|
+| A1 recovery future / warnings | Boxing recovery has a measured stack-overflow rationale. RETIREMENT_CAPTURE_DESIGN.md:15181 records failed live restart followed by boxed restart/cancellation passes; metadata.rs explicitly keeps the state machine out of caller frames. Test helpers also explain many production dead-code warnings. | Investigate the compiler's opaque/Send type boundary while preserving boxing and cancellation. Classify warnings before enforcing strict CI; do not delete tested algorithms or blanket-suppress diagnostics. |
+| A2 catalogue privacy | Observed page/flag implementation fields should remain private. Outer consumers need classify/scan and iterator results, not access to proof internals. | Align exposed type visibility/representation without exposing private fields. The intent is encapsulation; the compiler-visible mismatch is not needed for it. |
+| A3 graph duplication | Full publication preserves existing durable edge slots; delta writes compare old persisted images before mutation; certified replay replaces the graph and provisional journals together. Comments and live callers distinguish all three. | Only edge-group/position helpers are identical. No independent semantic reason was found to maintain their storage-prefix literals twice. Share those helpers, not the algorithms. |
+| A4 unused conveniences | RevisionIndex::new, validate_structure and revocation_counts intentionally supply no-op polling for tests. Production callers use the checked/polled methods. RevocationUndo itself is live in retained_graph_rewind. | Keep tests and checked implementations. Gate test conveniences, remove only the redundant reexport and proven unused forwarding paths/declarations. TrackedMap::is_empty remains a removal candidate pending feature/test verification. |
+| A5 genesis / result descriptions | SIMPLICITY_FIX_TRACKER_20261030 explicitly retains historical fixture bytes. Running node/key generator already share configured_genesis_block. Internal processing, RPC submission and wallet response outcomes have different meanings. | Clarify/deprecate historical API labels where compatible, and correct the stale mirroring comment. Preserve genesis bytes, fixture hashes and separate result semantics. |
+
+The unused recover_metadata_until_shutdown wrapper contributes only None for the
+optional durable-input argument. Live startup calls recover_metadata_with_durable_inputs,
+which still carries shutdown control and distinguishes cancellation from absent
+metadata. Removing the wrapper must not remove that live shutdown behavior.
+Likewise the unused write-transaction forwarding methods must not be confused with
+the read-view implementations that are used by reconstruction.
+
+Rsnano remains an ownership reference, not a reason to remove BURST-specific
+recovery/journal semantics. These checks narrow the cleanup; they do not establish
+an additional conflicting live protocol implementation. Publication remains forbidden,
+and private Azure testing has not started.
+
+
+## Retrospective removal review — 2026-10-31
+
+Scope: recent simplicity removals and the structural changes through local review
+snapshot 76d408384a31d2bcc4f0bc1d0f970cab28951a43. Historical HEAD callers, current
+replacement paths and implementation decisions were checked. The full dirty diff
+also contains older work; this review does not attribute every change to cleanup.
+This is source review, not newly executed runtime or release qualification.
+
+| Removal/change | Intent check and disposition |
+|---|---|
+| VerificationProcessor / VerifierPool wiring | The discarded node processor used a separate hardcoded participation model; its cloned processor was unused by processing. The live VerificationOrchestrator and certified selection remain authoritative. Do not restore a second verifier policy merely because its prototype had tests. |
+| Adaptive work difficulty | Decision 14.2 selected the Nano-style threshold, not the adaptive option. The removed adjuster's output was not used by production validation. Governed work validation remains. |
+| WorkCache / WorkPriorityQueue | Historical callers of WorkCache were its own tests and export. Precomputation is intentional (decision 14.4) and still implemented by wallet_core/src/signed_client.rs: PreparedWork, prepare_work and submit_signed_with_prepared_work. Applying prepared work checks block version, account-position root and current threshold. Automatic wallet background precomputation remains a separate coverage item in spec/README.md; deleting this unused cache is not evidence that it was implemented and then lost. |
+| BandwidthThrottle | Correction to any broad “never used” description: the historical connection writer did use this limiter. Its responsibility was replaced by network::egress and SharedBandwidth; current connection_registry delegates to that path. Removal of the old module did not remove bandwidth limiting. |
+| adaptive_quorum | Historical references were the method and its component tests. Current quorum_for uses governed ordinary/constitutional/emergency thresholds. Decision 20.1 specifies the governed quorum; the existing regression explicitly permits 30% turnout regardless of historical EMA. The EMA field and update implementation remain, so removing this inactive formula does not remove historical state encoding. |
+| cascade_rollback simulation wrapper | It only forwarded to rollback_to. The underlying simulation operation and separate durable rollback planning remain. No justification to restore the misleading wrapper was found. |
+| Mnemonic terminology / genesis construction | The mnemonic HMAC domain bytes are unchanged; only the inaccurate BIP44 description was corrected. Configured genesis is shared while historical fixture bytes are retained. These compatibility details are intentional and must survive subsequent cleanup. |
+| Wire, RPC, checkpoint and worker extraction | Primarily ownership changes with retained compatibility exports where implemented. Treat these as moves, not proof that their behavior was removed. Existing focused compilation/test evidence has bounded scope; the full end-to-end journey is still pending. |
+
+### Real compatibility qualifications
+
+`BurstNode::start()` now rejects enabled public listeners; NodeConfig defaults
+include RPC. Existing external embedders using the former convenience behavior
+must migrate to `start_with_services(burst_daemon::start_public_services)` or
+explicitly disable listeners for core-only operation. Repository applications were
+migrated and docs/ARCHITECTURE.md documents the new entry point. This is an
+intentional ownership decision, but it is a Rust API behavior change, not a fully
+transparent move. No evidence about unknown external consumers is available.
+
+Removed public prototype exports can likewise break external Rust imports even
+when no repository runtime caller exists. The shared verification-status response
+also changed selection_unavailable_reason from Option<&'static str> to
+Option<String>: its JSON shape is preserved, but direct Rust constructors may
+need adjustment. Document these changes when preparing release migration notes.
+
+No concrete lost live signing, recovery or governance validation check was
+established by this removal review. That conclusion is bounded to the inspected
+changes. A1–A5 above still require their recorded dispositions; in particular,
+preserve measured recovery boxing, private retirement proof internals and distinct
+full/delta/replay persistence semantics. No production source was changed, no new
+build was run, nothing was published and no Azure job was started for this review.

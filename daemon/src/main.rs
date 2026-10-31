@@ -7,6 +7,7 @@ use clap::Parser;
 use std::path::PathBuf;
 
 mod snapshot;
+mod genesis_keygen;
 
 #[cfg(windows)]
 mod service;
@@ -103,6 +104,8 @@ struct Cli {
 
 #[derive(clap::Subcommand)]
 enum Command {
+    /// Generate a network creator identity without starting a node.
+    GenesisKeygen(genesis_keygen::Options),
     /// Attest, export or verify an authenticated economic snapshot.
     Snapshot {
         #[command(subcommand)]
@@ -216,7 +219,7 @@ fn resolve_config(cli: Cli) -> anyhow::Result<(NodeConfig, Command)> {
     }
     if config.network == NetworkId::Live && !burst_node::genesis_key::live_identity_configured() {
         tracing::error!(
-            "live network selected but the genesis public identity is not configured              (still the all-zeros placeholder). Generate one with `genesis_keygen` and bake              the public key into node/src/genesis_key.rs before launching a real network."
+            "live network selected but the genesis public identity is not configured              (still the all-zeros placeholder). Generate one with `burst-daemon genesis-keygen live --seed-file PATH` and bake              the public key into node/src/genesis_key.rs before launching a real network."
         );
     }
 
@@ -247,9 +250,14 @@ async fn run(
     stop: Option<tokio::sync::watch::Receiver<bool>>,
     ready: Option<tokio::sync::oneshot::Sender<()>>,
 ) -> anyhow::Result<()> {
+    // Key generation needs no existing configuration, ledger or network identity.
+    if let Command::GenesisKeygen(options) = &cli.command {
+        return genesis_keygen::run(options);
+    }
     let (config, command) = resolve_config(cli)?;
 
     match command {
+        Command::GenesisKeygen(_) => unreachable!("key generation returned before configuration"),
         Command::Snapshot { action } => snapshot::run(&config, action)?,
         Command::Node { action } => match action {
             NodeAction::Run => {
@@ -288,7 +296,7 @@ async fn run(
                 }
                 let started = if let Some(mut stop) = stop {
                     let shutdown = node.shutdown.clone();
-                    let mut start = Box::pin(node.start());
+                    let mut start = Box::pin(node.start_with_services(burst_daemon::start_public_services));
                     tokio::select! {
                         result = &mut start => result,
                         _ = wait_for_stop(&mut stop) => {
@@ -297,7 +305,7 @@ async fn run(
                         }
                     }
                 } else {
-                    Box::pin(node.start()).await
+                    Box::pin(node.start_with_services(burst_daemon::start_public_services)).await
                 };
 
                 tracing::info!("Node run ended; stopping subsystems");
@@ -316,6 +324,40 @@ async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn genesis_keygen_needs_no_node_config_or_data_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing_config = directory.path().join("missing.toml");
+        let data = directory.path().join("unused-ledger");
+        let seed = directory.path().join("genesis.seed");
+        let cli = Cli::try_parse_from([
+            "burst-daemon", "--config", missing_config.to_str().unwrap(),
+            "--data-dir", data.to_str().unwrap(), "genesis-keygen", "test",
+            "--seed-file", seed.to_str().unwrap(),
+        ]).unwrap();
+        run(cli, None, None).await.unwrap();
+        assert!(seed.is_file());
+        assert!(!missing_config.exists());
+        assert!(!data.exists());
+    }
+
+    #[test]
+    fn genesis_keygen_cli_requires_network_and_one_output_mode() {
+        for args in [
+            vec!["burst-daemon", "genesis-keygen"],
+            vec!["burst-daemon", "genesis-keygen", "test"],
+            vec!["burst-daemon", "genesis-keygen", "typo", "--show-secret"],
+            vec!["burst-daemon", "genesis-keygen", "test", "--show-secret", "--seed-file", "seed"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+        assert!(Cli::try_parse_from([
+            "burst-daemon", "genesis-keygen", "live", "--show-secret",
+        ]).is_ok());
+    }
+
 
     #[test]
     fn node_supervisor_future_does_not_embed_startup_state() {

@@ -1,4 +1,4 @@
-//! Challenge engine — any verified wallet can contest another's legitimacy.
+//! Challenge records and the admission-time timeout helper.
 
 pub use burst_types::ChallengeReason;
 use burst_types::{BlockHash, Timestamp, WalletAddress};
@@ -33,7 +33,8 @@ pub struct ChallengeEngine;
 impl ChallengeEngine {
     /// Initiate a challenge against a target wallet.
     ///
-    /// The challenger stakes BRN (handled by BRN engine externally).
+    /// This only constructs the record. The caller checks eligibility, target
+    /// phase and required stake, and applies the BRN debit separately.
     pub fn initiate(
         &self,
         challenger: WalletAddress,

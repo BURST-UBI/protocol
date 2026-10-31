@@ -1,17 +1,10 @@
-//! Vote spacing — prevents rapid vote flip-flopping during fork resolution.
+//! Rate-limit changes of candidate at one election root.
 //!
-//! When the leading candidate changes in an election, a node should not
-//! immediately flip its vote. Vote spacing enforces a minimum time gap
-//! between vote changes for the same *election root*, preventing vote
-//! oscillation attacks where an adversary rapidly alternates the winner.
-//!
-//! The root is the frontier position being voted on (a block's `previous`),
-//! NOT the account. Fork candidates at the same position share a `previous`
-//! and so contend for the same spacing slot — that is exactly the flip-flop
-//! we want to rate-limit. Sequential (non-forking) blocks on one account each
-//! extend a distinct `previous`, so they get distinct roots and are voted on
-//! back-to-back without artificial suppression. (Keying by account instead
-//! throttled honest high-throughput accounts, which is not the point.)
+//! A different candidate must wait 1.5 seconds after the last recorded vote;
+//! repeating the same candidate is always allowed. The node supplies a root
+//! derived from the account and previous block, so forks share a slot while
+//! successive account positions have independent slots. The caller must check
+//! `votable` before `record`; recording alone does not enforce the interval.
 
 use burst_types::BlockHash;
 use std::collections::HashMap;
@@ -194,10 +187,8 @@ mod tests {
 
     #[test]
     fn sequential_chain_all_votable_back_to_back() {
-        // A single account extending its chain rapidly: each block's root is
-        // the previous block's hash, so every step is a DISTINCT root and must
-        // be votable immediately — no 1500ms throttle. This is the per-election
-        // -root fix: keying by account previously suppressed these.
+        // Distinct synthetic roots stand for successive account positions.
+        // Spacing on one position must not delay a vote on another.
         let mut spacing = VoteSpacing::new();
         let b1 = make_hash(1);
         let b2 = make_hash(2);

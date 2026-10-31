@@ -7,6 +7,7 @@
 //! balances, verification status, delegation or parameter state into a root.
 
 use bincode::Options;
+use blake2::{digest::consts::U32, Blake2b, Digest};
 use burst_ledger::StateBlock;
 use burst_store::StoreError;
 use burst_store_lmdb::LmdbStore;
@@ -42,6 +43,20 @@ fn invalid(message: &str) -> StoreError {
     StoreError::Corruption(message.into())
 }
 
+fn history_digest(network: NetworkId, genesis: BlockHash, cutoff: u64, heads: usize) -> Blake2b<U32> {
+    let mut digest = Blake2b::<U32>::new();
+    digest.update(b"BURST/confirmed-history/v1\0");
+    digest.update([match network {
+        NetworkId::Live => 0,
+        NetworkId::Test => 1,
+        NetworkId::Dev => 2,
+    }]);
+    digest.update(genesis.as_bytes());
+    digest.update(cutoff.to_be_bytes());
+    digest.update((heads as u64).to_be_bytes());
+    digest
+}
+
 /// Commit canonical head metadata without reading blocks. This authenticates
 /// nothing by itself; a certificate or snapshot must bind the result.
 pub(crate) fn head_commitment(
@@ -59,26 +74,18 @@ pub(crate) fn head_commitment(
     {
         return Err(invalid("invalid or noncanonical history heads"));
     }
-    let mut bytes = b"BURST/confirmed-history/v1\0".to_vec();
-    bytes.push(match network {
-        NetworkId::Live => 0,
-        NetworkId::Test => 1,
-        NetworkId::Dev => 2,
-    });
-    bytes.extend_from_slice(genesis.as_bytes());
-    bytes.extend_from_slice(&cutoff.to_be_bytes());
-    bytes.extend_from_slice(&(heads.len() as u64).to_be_bytes());
+    let mut digest = history_digest(network, genesis, cutoff, heads.len());
     for head in heads {
         let key = burst_crypto::decode_address(head.account.as_str())
             .ok_or_else(|| invalid("invalid history account"))?;
         if head.height == 0 || head.hash.is_zero() {
             return Err(invalid("invalid history head"));
         }
-        bytes.extend_from_slice(&key);
-        bytes.extend_from_slice(&head.height.to_be_bytes());
-        bytes.extend_from_slice(head.hash.as_bytes());
+        digest.update(key);
+        digest.update(head.height.to_be_bytes());
+        digest.update(head.hash.as_bytes());
     }
-    Ok(BlockHash::new(burst_crypto::blake2b_256(&bytes)))
+    Ok(BlockHash::new(digest.finalize().into()))
 }
 
 impl ConfirmedHistory {
@@ -238,15 +245,7 @@ impl ConfirmedHistory {
         }
         let mut heads = requested.to_vec();
         heads.sort_by(|a, b| a.account.as_str().cmp(b.account.as_str()));
-        let mut encoding = b"BURST/confirmed-history/v1\0".to_vec();
-        encoding.push(match network {
-            NetworkId::Live => 0,
-            NetworkId::Test => 1,
-            NetworkId::Dev => 2,
-        });
-        encoding.extend_from_slice(genesis.as_bytes());
-        encoding.extend_from_slice(&cutoff.to_be_bytes());
-        encoding.extend_from_slice(&(heads.len() as u64).to_be_bytes());
+        let mut digest = history_digest(network, genesis, cutoff, heads.len());
         let mut accounts = HashSet::new();
         let mut total = 0u64;
         for head in &heads {
@@ -261,9 +260,9 @@ impl ConfirmedHistory {
             if total > MAX_BLOCKS {
                 return Err(invalid("history requires incremental replay"));
             }
-            encoding.extend_from_slice(&key);
-            encoding.extend_from_slice(&head.height.to_be_bytes());
-            encoding.extend_from_slice(head.hash.as_bytes());
+            digest.update(key);
+            digest.update(head.height.to_be_bytes());
+            digest.update(head.hash.as_bytes());
         }
         if total != supplied.len() as u64 {
             return Err(invalid("history block count differs from manifest"));
@@ -320,7 +319,7 @@ impl ConfirmedHistory {
             heads,
             blocks: replay,
             contents,
-            commitment: BlockHash::new(burst_crypto::blake2b_256(&encoding)),
+            commitment: BlockHash::new(digest.finalize().into()),
         };
         history.validate_extension(parent)?;
         Ok(history)
@@ -333,7 +332,7 @@ impl ConfirmedHistory {
         let txn = store.tx_begin_read()?;
         let accounts = store
             .account_store()
-            .iter_accounts_txn_bounded(&txn, MAX_BLOCKS as usize)?;
+            .all_accounts_bounded_txn(&txn, MAX_BLOCKS as usize)?;
         let block_store = store.block_store();
         let mut blocks = HashMap::new();
         let mut heads = Vec::new();
@@ -418,8 +417,8 @@ impl ConfirmedHistory {
     /// The caller supplies the trusted network/genesis anchor and previous
     /// checkpoint heads. Peer data cannot supply its own trust anchor.
     ///
-    /// This bounded v1 reader walks complete prefixes. Incremental replay past
-    /// these limits is not implemented; limits never produce a partial success.
+    /// This reader walks complete prefixes and rejects histories beyond its
+    /// bounds. Larger histories require the incremental replay path.
     pub fn read(
         store: &LmdbStore,
         network: NetworkId,
@@ -439,15 +438,7 @@ impl ConfirmedHistory {
         heads.sort_by(|a, b| a.account.as_str().cmp(b.account.as_str()));
         let mut prefixes = HashMap::new();
         let mut total = 0u64;
-        let mut encoding = b"BURST/confirmed-history/v1\0".to_vec();
-        encoding.push(match network {
-            NetworkId::Live => 0,
-            NetworkId::Test => 1,
-            NetworkId::Dev => 2,
-        });
-        encoding.extend_from_slice(genesis.as_bytes());
-        encoding.extend_from_slice(&cutoff.to_be_bytes());
-        encoding.extend_from_slice(&(heads.len() as u64).to_be_bytes());
+        let mut digest = history_digest(network, genesis, cutoff, heads.len());
         for head in &heads {
             let key = burst_crypto::decode_address(head.account.as_str())
                 .ok_or_else(|| invalid("non-canonical history account"))?;
@@ -463,9 +454,9 @@ impl ConfirmedHistory {
             if total > MAX_BLOCKS {
                 return Err(invalid("history requires incremental replay"));
             }
-            encoding.extend_from_slice(&key);
-            encoding.extend_from_slice(&head.height.to_be_bytes());
-            encoding.extend_from_slice(head.hash.as_bytes());
+            digest.update(key);
+            digest.update(head.height.to_be_bytes());
+            digest.update(head.hash.as_bytes());
         }
         let txn = store.tx_begin_read()?;
         let account_store = store.account_store();
@@ -561,7 +552,7 @@ impl ConfirmedHistory {
             heads,
             blocks: replay,
             contents,
-            commitment: BlockHash::new(burst_crypto::blake2b_256(&encoding)),
+            commitment: BlockHash::new(digest.finalize().into()),
         })
     }
 
@@ -692,36 +683,35 @@ pub(crate) fn causal_fallible_hash_order_after(
     applied: &HashSet<BlockHash>,
     mut dependencies: impl FnMut(&BlockHash) -> Result<Vec<BlockHash>, StoreError>,
 ) -> Result<Vec<BlockHash>, StoreError> {
-    let hashes: std::collections::BTreeSet<_> = hashes
-        .into_iter()
-        .map(|hash| hash.map(|hash| *hash.as_bytes()))
-        .collect::<Result<_, _>>()?;
+    #[derive(Clone, Copy)]
+    enum Visit { New, Active, Complete }
+    let mut states = HashMap::new();
+    for hash in hashes { states.insert(*hash?.as_bytes(), Visit::New); }
+    // Deduplicate before allocating root order, including repeated untrusted input.
+    // Root order is consensus-visible; membership and traversal colors are not.
+    let mut hashes: Vec<_> = states.keys().copied().collect();
+    hashes.sort_unstable();
     let mut replay = Vec::with_capacity(hashes.len());
-    let mut visited = HashSet::new();
-    let mut visiting = HashSet::new();
     for root in &hashes {
         let mut stack = vec![(*root, false)];
         while let Some((hash, complete)) = stack.pop() {
             if applied.contains(&BlockHash::new(hash)) {
-                if hashes.contains(&hash) {
+                if states.contains_key(&hash) {
                     return Err(invalid("history replays an already applied block"));
                 }
                 continue;
             }
-            if visited.contains(&hash) {
-                continue;
-            }
-            if !hashes.contains(&hash) {
-                return Err(invalid("history omits a replay prerequisite"));
-            }
+            let state = states.get_mut(&hash)
+                .ok_or_else(|| invalid("history omits a replay prerequisite"))?;
+            if matches!(state, Visit::Complete) { continue; }
             if complete {
-                visiting.remove(&hash);
-                visited.insert(hash);
+                *state = Visit::Complete;
                 replay.push(BlockHash::new(hash));
             } else {
-                if !visiting.insert(hash) {
+                if matches!(state, Visit::Active) {
                     return Err(invalid("cyclic history dependency"));
                 }
+                *state = Visit::Active;
                 stack.push((hash, true));
                 let dependencies = dependencies(&BlockHash::new(hash))?;
                 for dependency in dependencies.into_iter().rev() {
@@ -739,6 +729,55 @@ mod tests {
     use burst_ledger::BlockType;
     use burst_store::{account::AccountStore, block::BlockStore};
     use burst_types::{Signature, Timestamp, TxHash, WalletState};
+
+    #[test]
+    fn streamed_head_commitment_matches_legacy_bytes_through_the_head_limit() {
+        let genesis = BlockHash::new([91; 32]);
+        let mut heads: Vec<_> = (0..MAX_BLOCKS).map(|n| {
+            let mut public = [0; 32];
+            public[..8].copy_from_slice(&n.to_be_bytes());
+            HistoryHead {
+                account: burst_crypto::derive_address(&burst_types::PublicKey(public)),
+                height: n + 1,
+                hash: BlockHash::new([17; 32]),
+            }
+        }).collect();
+        heads.sort_by(|a, b| a.account.as_str().cmp(b.account.as_str()));
+        for size in [1, 17, MAX_BLOCKS as usize] {
+            for (network, tag) in [(NetworkId::Live, 0), (NetworkId::Test, 1), (NetworkId::Dev, 2)] {
+                // Independent oracle preserves the previous concatenated encoding.
+                let mut bytes = b"BURST/confirmed-history/v1\0".to_vec();
+                bytes.push(tag);
+                bytes.extend_from_slice(genesis.as_bytes());
+                bytes.extend_from_slice(&u64::MAX.to_be_bytes());
+                bytes.extend_from_slice(&(size as u64).to_be_bytes());
+                for head in &heads[..size] {
+                    bytes.extend_from_slice(&burst_crypto::decode_address(head.account.as_str()).unwrap());
+                    bytes.extend_from_slice(&head.height.to_be_bytes());
+                    bytes.extend_from_slice(head.hash.as_bytes());
+                }
+                assert_eq!(head_commitment(network, genesis, u64::MAX, &heads[..size]).unwrap(),
+                    BlockHash::new(burst_crypto::blake2b_256(&bytes)));
+            }
+        }
+        assert!(head_commitment(NetworkId::Dev, genesis, 0, &[]).is_err());
+        assert!(head_commitment(NetworkId::Dev, BlockHash::ZERO, 0, &heads[..1]).is_err());
+        let mut invalid = heads[..2].to_vec();
+        invalid.swap(0, 1);
+        assert!(head_commitment(NetworkId::Dev, genesis, 0, &invalid).is_err());
+        invalid[1] = invalid[0].clone();
+        assert!(head_commitment(NetworkId::Dev, genesis, 0, &invalid).is_err());
+        for (account, height, hash) in [
+            (WalletAddress::new("brst_invalid"), 1, genesis),
+            (heads[0].account.clone(), 0, genesis),
+            (heads[0].account.clone(), 1, BlockHash::ZERO),
+        ] {
+            assert!(head_commitment(NetworkId::Dev, genesis, 0,
+                &[HistoryHead { account, height, hash }]).is_err());
+        }
+        heads.push(heads[0].clone());
+        assert!(head_commitment(NetworkId::Dev, genesis, 0, &heads).is_err());
+    }
 
     #[test]
     fn hash_order_preserves_dependency_order_and_propagates_source_failures() {
@@ -796,6 +835,45 @@ mod tests {
             .contains("injected dependency read failure"));
     }
 
+    #[test]
+    fn hash_order_handles_deep_chains_and_dense_shared_dependencies_once() {
+        fn hash(n: usize) -> BlockHash {
+            let mut bytes = [0; 32];
+            bytes[24..].copy_from_slice(&(n as u64 + 1).to_be_bytes());
+            BlockHash::new(bytes)
+        }
+        for (count, dense) in [(4096, false), (256, true)] {
+            let roots: Vec<_> = (0..count).map(hash).collect();
+            let positions: HashMap<_, _> = roots.iter().enumerate().map(|(n, h)| (*h, n)).collect();
+            for reverse in [false, true] {
+                let mut input = roots.clone();
+                if reverse { input.reverse(); }
+                input.extend_from_slice(&roots[..3]);
+                let mut reads = vec![0; count];
+                let order = causal_hash_order_after(input, &HashSet::new(), |h| {
+                    let n = positions[h];
+                    reads[n] += 1;
+                    let mut edges = if dense { roots[n + 1..].to_vec() }
+                        else { roots.get(n + 1).copied().into_iter().collect() };
+                    // Repeated edges must not repeat resolution or invent a cycle.
+                    if let Some(first) = edges.first().copied() { edges.push(first); }
+                    Ok(edges)
+                }).unwrap();
+                assert_eq!(order, roots.iter().copied().rev().collect::<Vec<_>>());
+                assert!(reads.into_iter().all(|n| n == 1));
+            }
+        }
+    }
+
+    #[test]
+    fn fallible_hash_inventory_fails_before_loading_dependencies() {
+        let hash = BlockHash::new([7; 32]);
+        let error = causal_fallible_hash_order_after([
+            Ok(hash), Err(StoreError::Backend("inventory read failed".into())), Ok(hash),
+        ], &HashSet::new(), |_| panic!("partial inventory must never resolve dependencies")).unwrap_err();
+        assert!(error.to_string().contains("inventory read failed"));
+    }
+
     fn block(
         seed: u8,
         kind: BlockType,
@@ -814,7 +892,7 @@ mod tests {
             account: account.clone(),
             representative: account,
             previous,
-            brn_balance: 0,
+            brn_spent: 0,
             trst_balance: 0,
             link,
             origin: TxHash::ZERO,
@@ -1027,7 +1105,7 @@ mod tests {
         let mut oversized = requested.clone();
         oversized.height = MAX_BLOCKS + 1;
         assert!(read(&[oversized]).is_err());
-        send.brn_balance += 1;
+        send.brn_spent += 1;
         store
             .block_store()
             .put_block(&send.hash, &bincode::serialize(&send).unwrap())
@@ -1045,6 +1123,9 @@ mod tests {
             ConfirmedHistory::read(&store, NetworkId::Dev, genesis.hash, 20, &heads, &[])
                 .unwrap()
                 .commitment();
+        let mut canonical = heads.to_vec();
+        canonical.sort_by(|a, b| a.account.as_str().cmp(b.account.as_str()));
+        assert_eq!(original, head_commitment(NetworkId::Dev, genesis.hash, 20, &canonical).unwrap());
         assert_ne!(
             original,
             ConfirmedHistory::read(&store, NetworkId::Dev, genesis.hash, 21, &heads, &[])

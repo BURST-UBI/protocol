@@ -2,7 +2,7 @@ use super::*;
 use crate::payment_authority::PaymentAuthority;
 use burst_store::{account::AccountStore, pending::PendingStore};
 
-async fn returned(
+async fn wait_for_return(
     stores: &[Arc<burst_store_lmdb::LmdbStore>],
     sender: &WalletAddress,
 ) -> BlockHash {
@@ -76,7 +76,7 @@ async fn assert_pending_ownership(
     }
 }
 
-async fn received(
+async fn wait_for_receipt(
     stores: &[Arc<burst_store_lmdb::LmdbStore>],
     sender: &WalletAddress,
     receiver: &WalletAddress,
@@ -145,7 +145,6 @@ async fn desktop_expired_merge_preserves_reputation_across_node_restart() {
         min_work_difficulty: 0,
         trst_expiry_secs: 5,
         new_wallet_spending_limit: 0,
-        new_wallet_tx_limit_per_day: 0,
         ..ProtocolParams::burst_defaults()
     };
     let ports = [port(), port()];
@@ -171,7 +170,7 @@ async fn desktop_expired_merge_preserves_reputation_across_node_restart() {
         workers.push((
             node.shutdown.clone(),
             tokio::spawn(async move {
-                node.start().await.unwrap();
+                node.start_with_services(burst_daemon::start_public_services).await.unwrap();
                 node.stop().await.unwrap();
             }),
         ));
@@ -260,7 +259,7 @@ async fn desktop_expired_merge_preserves_reputation_across_node_restart() {
         workers.push((
             node.shutdown.clone(),
             tokio::spawn(async move {
-                node.start().await.unwrap();
+                node.start_with_services(burst_daemon::start_public_services).await.unwrap();
                 node.stop().await.unwrap();
             }),
         ));
@@ -313,7 +312,6 @@ async fn pending_journey(accept: bool) {
         min_work_difficulty: 0,
         trst_expiry_secs: if accept { u64::MAX } else { 5 },
         new_wallet_spending_limit: 0,
-        new_wallet_tx_limit_per_day: 0,
         ..ProtocolParams::burst_defaults()
     };
     let ports = [port(), port()];
@@ -341,7 +339,7 @@ async fn pending_journey(accept: bool) {
         workers.push((
             node.shutdown.clone(),
             tokio::spawn(async move {
-                node.start().await.unwrap();
+                node.start_with_services(burst_daemon::start_public_services).await.unwrap();
                 node.stop().await.unwrap();
             }),
         ));
@@ -407,7 +405,7 @@ async fn pending_journey(accept: bool) {
         if accept {
             observed_clock.store(time(14).as_secs(), Ordering::SeqCst);
             submit(&clients, &late_receive).await;
-            let epoch = received(&observed_stores, &sender, &receiver, late_receive.hash).await;
+            let epoch = wait_for_receipt(&observed_stores, &sender, &receiver, late_receive.hash).await;
             assert_eq!(epoch, burn.payment_epoch);
             assert_pending_ownership(&clients, &sender, &receiver, 0, 0, BRN_UNIT).await;
             let duplicate_claim = signed_block(
@@ -434,7 +432,7 @@ async fn pending_journey(accept: bool) {
             return (sender, receiver, late_receive.hash, epoch);
         }
         observed_clock.store(time(20).as_secs(), Ordering::SeqCst);
-        let epoch = returned(&observed_stores, &sender).await;
+        let epoch = wait_for_return(&observed_stores, &sender).await;
         assert_pending_ownership(&clients, &sender, &receiver, 0, BRN_UNIT, 0).await;
         assert_ne!(epoch, burn.payment_epoch);
         for client in &clients {
@@ -482,7 +480,7 @@ async fn pending_journey(accept: bool) {
         workers.push((
             node.shutdown.clone(),
             tokio::spawn(async move {
-                node.start().await.unwrap();
+                node.start_with_services(burst_daemon::start_public_services).await.unwrap();
                 node.stop().await.unwrap();
             }),
         ));
@@ -490,12 +488,12 @@ async fn pending_journey(accept: bool) {
     let result = tokio::time::timeout(Duration::from_secs(90), async {
         if accept {
             assert_eq!(
-                received(&stores, &sender, &receiver, final_block).await,
+                wait_for_receipt(&stores, &sender, &receiver, final_block).await,
                 epoch
             );
             assert_pending_ownership(&clients, &sender, &receiver, 0, 0, BRN_UNIT).await;
         } else {
-            assert_eq!(returned(&stores, &sender).await, epoch);
+            assert_eq!(wait_for_return(&stores, &sender).await, epoch);
             assert_pending_ownership(&clients, &sender, &receiver, 0, BRN_UNIT, 0).await;
         }
         for client in clients {

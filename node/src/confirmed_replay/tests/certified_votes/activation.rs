@@ -104,8 +104,8 @@ fn compact_activation_persists_its_selection_beacon_atomically() {
         selection
             .require_persisted(&store.tx_begin_write().unwrap())
             .unwrap();
-        // Reaccepting an already certified activation repairs the old missing-proof
-        // layout without another committee selection or vote.
+        // Reaccepting the certified activation restores its missing beacon
+        // without another committee selection or vote.
         store.meta_store().delete_meta(&beacon_key).unwrap();
         assert!(selection
             .require_persisted(&store.tx_begin_write().unwrap())

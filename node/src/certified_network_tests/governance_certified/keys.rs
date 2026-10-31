@@ -1,6 +1,6 @@
 use super::*;
 use burst_governance::{
-    key_delegation::{operation::DelegationOperation, scoped, Grant, KeyScope, Revocation},
+    signing_delegation::{operation::DelegationOperation, scoped, Grant, KeyScope, Revocation},
     GovernableParam,
 };
 

@@ -10,9 +10,10 @@ mod key_ballots;
 mod keys;
 mod native_return;
 mod partitioned_expiry;
+mod query_resources;
 mod verification_fork;
 
-pub(super) async fn installed(
+pub(super) async fn wait_for_installation(
     stores: &[Arc<burst_store_lmdb::LmdbStore>],
     height: usize,
     params: &ProtocolParams,
@@ -121,8 +122,19 @@ async fn unvoted_proposals_release_promised_limits_and_recover_across_three_huma
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "explicit capped-host signed governance resource diagnostic"]
+async fn signed_governance_query_resources() {
+    if let Some(source) = std::env::var_os("BURST_GOVERNANCE_QUERY_SNAPSHOT") {
+        queries_from_snapshot(std::path::Path::new(&source)).await;
+    } else {
+        governance_journey(false, false, Scenario::QueryResources).await;
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Scenario {
+    QueryResources,
     VerificationFork,
     Idle,
     DelayedRecovery,
@@ -193,6 +205,14 @@ async fn supported_rate_proposal(
     );
     let proposal = signed_block(&clients[0], proposer, tx, params).await;
     submit(clients, &proposal).await;
+    support_rate_proposal(clients, supporter, params, at, &proposal).await;
+    proposal
+}
+
+async fn support_rate_proposal(
+    clients: &[NodeClient], supporter: &KeyPair, params: &ProtocolParams,
+    at: u64, proposal: &StateBlock,
+) {
     let owner = burst_crypto::derive_address(&supporter.public);
     let tx = Transaction::ChangeRepresentative(
         build_change_rep_tx(&owner, &owner, Timestamp::new(at)).unwrap(),
@@ -200,14 +220,26 @@ async fn supported_rate_proposal(
     let mut support = signed_block(&clients[0], supporter, tx, params).await;
     support.block_type = BlockType::GovernanceEndorse;
     support.link = proposal.hash;
-    support.brn_balance += params.governance_proposal_cost;
+    support.brn_spent += params.governance_proposal_cost;
     support.hash = support.compute_hash();
     submit(clients, &sign_state_block(support, &supporter.private)).await;
-    proposal
 }
 
-async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: Scenario) {
-    let terminal = matches!(traffic, Scenario::Rejected | Scenario::Withdrawn);
+async fn governance_journey(extend_expiry: bool, reclaim_return: bool, scenario: Scenario) {
+    governance_journey_from(extend_expiry, reclaim_return, scenario, None).await;
+}
+
+pub(super) async fn queries_from_snapshot(baseline: &std::path::Path) {
+    governance_journey_from(false, false, Scenario::QueryResources, Some(baseline)).await;
+}
+
+async fn governance_journey_from(
+    extend_expiry: bool,
+    reclaim_return: bool,
+    scenario: Scenario,
+    snapshot: Option<&std::path::Path>,
+) {
+    let terminal = matches!(scenario, Scenario::Rejected | Scenario::Withdrawn);
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_test_writer()
@@ -217,34 +249,49 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
         .await
         .unwrap();
     let directory = tempfile::tempdir().unwrap();
-    let base = if extend_expiry {
+    let imported = snapshot.map(|source| query_resources::copy_snapshot(source, directory.path()))
+        .or_else(|| (scenario == Scenario::QueryResources)
+            .then(|| query_resources::copy_retained(directory.path())).flatten());
+    let humans = if let Some(saved) = &imported {
+        saved.population as usize
+    } else if scenario == Scenario::QueryResources {
+        let count = std::env::var("BURST_GOVERNANCE_QUERY_HUMANS")
+            .unwrap_or_else(|_| "3".into())
+            .parse::<usize>()
+            .expect("human count");
+        assert!(
+            (3..=128).contains(&count),
+            "bounded fresh signed electorate fixture; larger populations use snapshots"
+        );
+        count
+    } else {
+        3
+    };
+    let resumed = imported.is_some();
+    let base = if let Some(saved) = &imported {
+        saved.base
+    } else if extend_expiry {
         Timestamp::now().as_secs()
     } else {
         time(10).as_secs()
     };
-    let clock = Arc::new(AtomicU64::new(base + 10));
-    let params = ProtocolParams {
-        brn_rate: BRN_UNIT,
-        min_work_difficulty: 0,
-        bootstrap_exit_threshold: if traffic == Scenario::VerificationFork {
-            3
-        } else {
-            4
-        },
-        endorsement_burn_amount: 1,
-        new_wallet_spending_limit: 0,
-        new_wallet_tx_limit_per_day: 0,
-        trst_expiry_secs: if extend_expiry { 31 } else { u64::MAX },
-        governance_proposal_cost: 1,
-        governance_proposal_duration_secs: 10,
-        governance_exploration_duration_secs: 20,
-        governance_cooldown_duration_secs: 10,
-        governance_propagation_buffer_secs: 1,
-        governance_proposal_endorsements: if traffic == Scenario::Rejected { 2 } else { 1 },
-        governance_supermajority_bps: 6000,
-        governance_quorum_bps: 10000,
-        ..ProtocolParams::burst_defaults()
-    };
+    let clock = Arc::new(AtomicU64::new(imported.as_ref().map_or(
+        base + if resumed { 20 } else { 10 }, |saved| saved.now)));
+    let params = imported
+        .as_ref()
+        .map(|saved| saved.params.clone())
+        .unwrap_or_else(|| ProtocolParams {
+            trst_expiry_secs: if extend_expiry { 31 } else { u64::MAX },
+            governance_proposal_endorsements: if scenario == Scenario::Rejected { 2 } else { 1 },
+            ..crate::verification_test_support::governance_fixture_params(
+                if scenario == Scenario::VerificationFork {
+                    3
+                } else {
+                    humans as u32 + 1
+                },
+            )
+        });
+    let snapshot_epoch = imported.as_ref().map(|saved| saved.epoch);
     let ports = [port(), port(), port()];
     let mut configs = Vec::new();
     let mut clients = Vec::new();
@@ -289,7 +336,7 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
         workers.push((
             node.shutdown.clone(),
             tokio::spawn(async move {
-                node.start().await.unwrap();
+                node.start_with_services(burst_daemon::start_public_services).await.unwrap();
                 node.stop().await.unwrap();
             }),
         ));
@@ -297,6 +344,7 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
     let journey_stores = stores.clone();
     let journey_clock = clock.clone();
     let journey_params = params.clone();
+    let query_manifest = directory.path().join("governance-query-inputs.json");
     let mut journey = tokio::spawn(async move {
         let params = journey_params;
         let stores = journey_stores;
@@ -313,15 +361,20 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
-        let keys: Vec<_> = (0..3)
-            .map(|seed| burst_crypto::keypair_from_seed(&[seed; 32]))
+        let keys: Vec<_> = (0..humans)
+            .map(|seed| {
+                burst_crypto::keypair_from_seed(&crate::verification_test_support::indexed_seed(
+                    seed as u32,
+                ))
+            })
             .collect();
         let addresses: Vec<_> = keys
             .iter()
             .map(|key| burst_crypto::derive_address(&key.public))
             .collect();
         let now = Timestamp::new(base + 10);
-        for index in 1..3 {
+        let human_setup = std::time::Instant::now();
+        for index in if resumed { humans..humans } else { 1..humans } {
             let tx = Transaction::Endorse(
                 build_endorse_tx(&addresses[0], &addresses[index], 1, now).unwrap(),
             );
@@ -337,14 +390,27 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
             let tx = Transaction::Receive(
                 build_receive_tx(&addresses[index], source.hash.into_tx_hash(), 1, now).unwrap(),
             );
-            submit(
-                &clients,
-                &signed_block(&clients[0], &keys[index], tx, &params).await,
-            )
-            .await;
+            let mut opening = signed_block(&clients[0], &keys[index], tx, &params).await;
+            if index >= 3 {
+                // As in the payment load fixture, every added human still signs
+                // its own account chain and delegates consensus to a live peer.
+                opening.representative = addresses[index % clients.len()].clone();
+                opening.hash = opening.compute_hash();
+                opening = sign_state_block(opening, &keys[index].private);
+            }
+            submit(&clients, &opening).await;
+            if scenario == Scenario::QueryResources && ((index + 1) % 16 == 0 || index + 1 == humans) {
+                query_resources::report("human-signed-inputs", 0, index + 1, human_setup);
+            }
         }
         clock.store(base + 20, Ordering::SeqCst);
-        installed(&stores, 1, &params).await;
+        if let Some(epoch) = snapshot_epoch {
+            for store in &stores {
+                assert_eq!(PaymentAuthority::read(store).unwrap().unwrap().epoch, epoch);
+            }
+        } else {
+            wait_for_installation(&stores, 1, &params).await;
+        }
         for store in &stores {
             assert_eq!(
                 PaymentAuthority::read(store)
@@ -352,10 +418,24 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
                     .unwrap()
                     .roster
                     .total_humans(),
-                3
+                humans as u64
             );
         }
-        if traffic == Scenario::VerificationFork {
+        if scenario == Scenario::QueryResources {
+            query_resources::report("human-authority-installed", 0, humans, human_setup);
+            query_resources::run(
+                &clients,
+                &stores,
+                &keys,
+                &params,
+                &clock,
+                base,
+                &query_manifest,
+            )
+            .await;
+            return None;
+        }
+        if scenario == Scenario::VerificationFork {
             verification_fork::replace(
                 &clients,
                 &stores,
@@ -381,7 +461,7 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
                 burst_transactions::governance::ProposalContent::ParameterChange {
                     parameter: if extend_expiry {
                         "trst_expiry_secs"
-                    } else if traffic == Scenario::Timing {
+                    } else if scenario == Scenario::Timing {
                         "governance_exploration_duration_secs"
                     } else {
                         "brn_rate"
@@ -389,14 +469,14 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
                     .into(),
                     current_value: if extend_expiry {
                         31
-                    } else if traffic == Scenario::Timing {
+                    } else if scenario == Scenario::Timing {
                         20
                     } else {
                         BRN_UNIT
                     },
                     proposed_value: if extend_expiry {
                         1000
-                    } else if traffic == Scenario::Timing {
+                    } else if scenario == Scenario::Timing {
                         0
                     } else {
                         2 * BRN_UNIT
@@ -414,14 +494,14 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
         let mut support = signed_block(&clients[0], &keys[0], tx, &params).await;
         support.block_type = BlockType::GovernanceEndorse;
         support.link = proposal.hash;
-        support.brn_balance += 1;
+        support.brn_spent += 1;
         support.hash = support.compute_hash();
         support = sign_state_block(support, &keys[0].private);
         submit(&clients, &support).await;
-        if matches!(traffic, Scenario::Keys | Scenario::PartitionedKeys) {
+        if matches!(scenario, Scenario::Keys | Scenario::PartitionedKeys) {
             keys::register(&clients, &keys, &params, proposal.hash, base + 20).await;
         }
-        if traffic == Scenario::Withdrawn {
+        if scenario == Scenario::Withdrawn {
             clock.store(base + 25, Ordering::SeqCst);
             let tx = Transaction::ChangeRepresentative(
                 build_change_rep_tx(&addresses[0], &addresses[0], Timestamp::new(base + 25))
@@ -456,7 +536,7 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
                 (0, burst_transactions::governance::GovernanceVote::Yea),
                 (2, burst_transactions::governance::GovernanceVote::Nay),
             ];
-            if matches!(traffic, Scenario::Keys | Scenario::PartitionedKeys) {
+            if matches!(scenario, Scenario::Keys | Scenario::PartitionedKeys) {
                 // A scoped grant overrides blanket delegation even without a
                 // secondary ballot. This journal fixture uses the owner's
                 // direct vote; secondary counting has its own journey.
@@ -479,7 +559,7 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
                 .await;
             }
         }
-        let overlapping = if traffic == Scenario::Timing {
+        let overlapping = if scenario == Scenario::Timing {
             clock.store(base + 50, Ordering::SeqCst);
             Some(
                 supported_rate_proposal(
@@ -495,7 +575,7 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
         } else {
             None
         };
-        let counting_tail = if traffic == Scenario::Counting || terminal {
+        let counting_tail = if scenario == Scenario::Counting || terminal {
             let tx = Transaction::Burn(
                 build_burn_tx(&addresses[2], &addresses[0], 1, Timestamp::new(base + 52)).unwrap(),
             );
@@ -548,7 +628,7 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
         } else {
             None
         };
-        if traffic == Scenario::ExpiryPartition {
+        if scenario == Scenario::ExpiryPartition {
             partitioned_expiry::advance(
                 &registries,
                 &stores,
@@ -561,7 +641,7 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
         } else {
             clock.store(base + 53, Ordering::SeqCst);
         }
-        let counted_epoch = installed(&stores, 2, &params).await;
+        let counted_epoch = wait_for_installation(&stores, 2, &params).await;
         if !terminal {
             for client in &clients {
                 let counted = client
@@ -598,7 +678,7 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
             let payment = signed_block(&clients[0], &keys[1], tx, &params).await;
             assert_eq!(payment.payment_epoch, counted_epoch);
             submit(&clients, &payment).await;
-            return (proposal.hash, payment, counted_epoch, params, Vec::new());
+            return Some((proposal.hash, payment, counted_epoch, params, Vec::new()));
         }
         let tx = Transaction::RevokeDelegation(
             build_revoke_delegation_tx(&addresses[1], Timestamp::new(base + 53)).unwrap(),
@@ -608,7 +688,7 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
             &signed_block(&clients[0], &keys[1], tx, &params).await,
         )
         .await;
-        let late = if traffic == Scenario::Activation {
+        let late = if scenario == Scenario::Activation {
             let tx = Transaction::Burn(
                 build_burn_tx(&addresses[2], &addresses[0], 1, Timestamp::new(base + 63)).unwrap(),
             );
@@ -661,7 +741,7 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
         } else {
             None
         };
-        if traffic == Scenario::PartitionedKeys {
+        if scenario == Scenario::PartitionedKeys {
             keys::partitioned_revoke(
                 &clients,
                 &keys,
@@ -673,14 +753,14 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
             )
             .await;
         }
-        if matches!(traffic, Scenario::Keys | Scenario::PartitionedKeys) {
+        if matches!(scenario, Scenario::Keys | Scenario::PartitionedKeys) {
             keys::rotate(
                 &clients,
                 &keys,
                 &params,
                 proposal.hash,
                 base + 53,
-                traffic == Scenario::PartitionedKeys,
+                scenario == Scenario::PartitionedKeys,
             )
             .await;
         }
@@ -701,7 +781,7 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
             )
             .await;
         }
-        if traffic == Scenario::ExpiryPartition {
+        if scenario == Scenario::ExpiryPartition {
             partitioned_expiry::advance(
                 &registries,
                 &stores,
@@ -714,7 +794,7 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
         } else {
             clock.store(base + 64, Ordering::SeqCst);
         }
-        let mut epoch = installed(&stores, 3, &params).await;
+        let mut epoch = wait_for_installation(&stores, 3, &params).await;
         if let Some(late) = late {
             for store in &stores {
                 assert_ne!(
@@ -730,7 +810,7 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
         let mut governed = params.clone();
         if extend_expiry {
             governed.trst_expiry_secs = 1000;
-        } else if traffic == Scenario::Timing {
+        } else if scenario == Scenario::Timing {
             governed.governance_exploration_duration_secs = 0;
         } else {
             governed.brn_rate = 2 * BRN_UNIT;
@@ -769,7 +849,7 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
                 .accepted
         );
         let mut payment = signed_block(&clients[0], &keys[claimant], tx.clone(), &governed).await;
-        if traffic == Scenario::NativeReturn {
+        if scenario == Scenario::NativeReturn {
             payment.origin = pending_burn.unwrap().into_tx_hash();
             payment.hash = payment.compute_hash();
             payment = sign_state_block(payment, &keys[claimant].private);
@@ -791,7 +871,7 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
                 .unwrap()
                 .to_string()
                 .contains("receive the credit"));
-            let result = if traffic == Scenario::NativeReturn {
+            let result = if scenario == Scenario::NativeReturn {
                 native_return::claim(&clients[0], &burn, Timestamp::new(base + 64)).await
             } else {
                 clients[0]
@@ -867,7 +947,7 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
             assert_eq!(events[2].certificate().signatures.len(), 3);
         }
         let mut extra_proposals = Vec::new();
-        if matches!(traffic, Scenario::Keys | Scenario::PartitionedKeys) {
+        if matches!(scenario, Scenario::Keys | Scenario::PartitionedKeys) {
             keys::check(&stores, &params, proposal.hash);
         }
         if let Some(overlapping) = overlapping {
@@ -919,7 +999,7 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
             }
             for (second, height, cutoff) in [(78, 4, 76), (83, 5, 81), (94, 6, 92)] {
                 clock.store(base + second, Ordering::SeqCst);
-                epoch = installed(&stores, height, &params).await;
+                epoch = wait_for_installation(&stores, height, &params).await;
                 for store in &stores {
                     assert_eq!(
                         chain::load(store, NetworkId::Dev, &params).unwrap()[height - 1]
@@ -939,13 +1019,13 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
             extra_proposals.push((overlapping.hash, "Activated"));
             extra_proposals.push((shorter.hash, "Rejected"));
         }
-        if traffic == Scenario::Conflicts {
+        if scenario == Scenario::Conflicts {
             (payment, epoch, extra_proposals) =
                 conflicts::activate(&clients, &stores, &clock, &keys, (&params, &governed), base)
                     .await;
         }
         if matches!(
-            traffic,
+            scenario,
             Scenario::KeyBallots | Scenario::PartitionedKeyBallots
         ) {
             (payment, epoch, extra_proposals) = key_ballots::activate(
@@ -961,17 +1041,17 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
                         signers: &signers,
                         elections: &elections,
                     },
-                    traffic == Scenario::PartitionedKeyBallots,
+                    scenario == Scenario::PartitionedKeyBallots,
                 ),
             )
             .await;
         }
-        (proposal.hash, payment, epoch, governed, extra_proposals)
+        Some((proposal.hash, payment, epoch, governed, extra_proposals))
     });
     let result = tokio::time::timeout(
         Duration::from_secs(
             if matches!(
-                traffic,
+                scenario,
                 Scenario::Conflicts | Scenario::KeyBallots | Scenario::PartitionedKeyBallots
             ) {
                 180
@@ -986,10 +1066,18 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
         journey.abort();
         let _ = journey.await;
     }
+    if scenario == Scenario::QueryResources {
+        // Retain before cleanup: a startup worker can also exceed its stop wait.
+        let retained = directory.keep();
+        eprintln!("signed_governance_retained_fixture {}", retained.display());
+        stop(&mut workers).await;
+        assert!(result.expect("governance query resource journey timed out").unwrap().is_none());
+        return;
+    }
     stop(&mut workers).await;
     let (proposal, payment, epoch, governed, extra_proposals) =
-        result.expect("governance journey timed out").unwrap();
-    if traffic == Scenario::DelayedRecovery {
+        result.expect("governance journey timed out").unwrap().expect("governance recovery inputs");
+    if scenario == Scenario::DelayedRecovery {
         let bytes = stores[0].block_store().get_block(&proposal).unwrap();
         let proposed: StateBlock = bincode::deserialize(&bytes).unwrap();
         let recovery_at =
@@ -1017,7 +1105,7 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
         .collect();
     let observer_restart = observer.clone();
     configs.push(observer);
-    let delayed_sources: Vec<_> = if traffic == Scenario::DelayedRecovery {
+    let delayed_sources: Vec<_> = if scenario == Scenario::DelayedRecovery {
         configs.drain(1..3).collect()
     } else {
         Vec::new()
@@ -1033,14 +1121,14 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
         workers.push((
             node.shutdown.clone(),
             tokio::spawn(async move {
-                node.start().await.unwrap();
+                node.start_with_services(burst_daemon::start_public_services).await.unwrap();
                 node.stop().await.unwrap();
             }),
         ));
     }
-    if traffic == Scenario::DelayedRecovery {
+    if scenario == Scenario::DelayedRecovery {
         for attempt in 0..2 {
-            assert_eq!(installed(&stores, 3, &params).await, epoch);
+            assert_eq!(wait_for_installation(&stores, 3, &params).await, epoch);
             let observer = stores.last().unwrap();
             let proof = recovery_registries
                 .last()
@@ -1062,7 +1150,7 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
             .expect("observer never received the available representative's final vote");
             let until = tokio::time::Instant::now() + Duration::from_secs(3);
             while tokio::time::Instant::now() < until {
-                assert!(!proof.contains(&payment.hash));
+                assert!(!proof.has_age_exception(&payment.hash));
                 assert!(!observer.block_store().exists(&payment.hash).unwrap());
                 assert_eq!(
                     observer
@@ -1088,14 +1176,14 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
                     .historical_finality
                     .clone();
                 assert_eq!(restarted_proof.collected_weight(&payment.hash), None);
-                assert!(!restarted_proof.contains(&payment.hash));
+                assert!(!restarted_proof.has_age_exception(&payment.hash));
                 assert!(!node.store.block_store().exists(&payment.hash).unwrap());
                 stores.push(node.store.clone());
                 recovery_registries.push(node.connection_registry.clone());
                 workers.push((
                     node.shutdown.clone(),
                     tokio::spawn(async move {
-                        node.start().await.unwrap();
+                        node.start_with_services(burst_daemon::start_public_services).await.unwrap();
                         node.stop().await.unwrap();
                     }),
                 ));
@@ -1110,7 +1198,7 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
             workers.push((
                 node.shutdown.clone(),
                 tokio::spawn(async move {
-                    node.start().await.unwrap();
+                    node.start_with_services(burst_daemon::start_public_services).await.unwrap();
                     node.stop().await.unwrap();
                 }),
             ));
@@ -1118,14 +1206,14 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
     }
     let mut recovery = tokio::spawn(async move {
         assert_eq!(
-            installed(
+            wait_for_installation(
                 &stores,
                 if terminal {
                     2
-                } else if traffic == Scenario::Timing {
+                } else if scenario == Scenario::Timing {
                     6
                 } else if matches!(
-                    traffic,
+                    scenario,
                     Scenario::Conflicts | Scenario::KeyBallots | Scenario::PartitionedKeyBallots
                 ) {
                     5
@@ -1138,7 +1226,7 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
             epoch
         );
         for (index, client) in clients.iter().enumerate() {
-            if traffic == Scenario::VerificationFork {
+            if scenario == Scenario::VerificationFork {
                 let snapshot = burst_verification::OrchestratorSnapshot::decode(
                     &stores[index]
                         .meta_store()
@@ -1172,7 +1260,7 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
                     eprintln!(
                         "recovery node {peer} historical weight {:?}, authorized {}",
                         proof.collected_weight(&payment.hash),
-                        proof.contains(&payment.hash)
+                        proof.has_age_exception(&payment.hash)
                     );
                 }
                 panic!("payment did not confirm on recovery node {index}: {error}");
@@ -1186,7 +1274,7 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
                 .unwrap();
             assert_eq!(
                 view["phase"],
-                match traffic {
+                match scenario {
                     Scenario::Rejected => "Rejected",
                     Scenario::Withdrawn => "Withdrawn",
                     _ => "Activated",
@@ -1210,7 +1298,7 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
                     assert_eq!(view["votes_yea"], 3);
                 }
             }
-            if traffic == Scenario::Conflicts {
+            if scenario == Scenario::Conflicts {
                 conflicts::check_document(client).await;
             }
         }
@@ -1225,11 +1313,11 @@ async fn governance_journey(extend_expiry: bool, reclaim_return: bool, traffic: 
                     .is_err());
             }
         }
-        if matches!(traffic, Scenario::Keys | Scenario::PartitionedKeys) {
+        if matches!(scenario, Scenario::Keys | Scenario::PartitionedKeys) {
             keys::check(&stores, &params, proposal);
         }
         if matches!(
-            traffic,
+            scenario,
             Scenario::KeyBallots | Scenario::PartitionedKeyBallots
         ) {
             key_ballots::check(&clients, &extra_proposals).await;

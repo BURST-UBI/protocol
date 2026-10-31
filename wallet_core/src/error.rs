@@ -26,6 +26,9 @@ pub enum WalletError {
     #[error("node RPC error: {0}")]
     Node(String),
 
+    /// The requested action was not submitted. Earlier preparation operations,
+    /// such as stake-release acknowledgments, may have been submitted and can
+    /// still require journal reconciliation.
     #[error("account preparation incomplete; requested action was not submitted: {0}")]
     Preparation(#[source] Box<WalletError>),
 

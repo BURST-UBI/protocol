@@ -6,12 +6,13 @@ license.workspace = true
 description = "Democratic governance — 4-phase proposals, voting, delegation, parameter amendments"
 
 [dependencies]
+imbl = { workspace = true, features = ["serde"] }
 burst-types = { workspace = true }
 burst-crypto = { workspace = true }
 zeroize = { workspace = true }
 burst-brn = { workspace = true }
 burst-transactions = { workspace = true }
-serde = { workspace = true }
+serde = { workspace = true, features = ["rc"] }
 bincode = { workspace = true }
 hex = { workspace = true }
 thiserror = { workspace = true }

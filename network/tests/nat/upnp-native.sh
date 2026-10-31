@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Requires the running emulator and successful lifecycle forwarding setup.
+# Uses Test-network daemons to check alternate-port advertisement, discovery
+# and graceful mapping removal. Seed/discoverer processes and SNAT remain.
 set -euo pipefail
 test "${BURST_ISOLATED_NAT_LAB:-}" = yes
 source /lab/common.sh
@@ -18,8 +21,8 @@ for attempt in $(seq 1 60); do
   sleep 0.5
 done
 test "$mapped" = true
-# This node knows only the seed. It must learn the private client's randomly
-# allocated external port through the daemon's UPnP -> keepalive gossip path.
+# This node knows only the seed. It must learn the private client's alternate
+# external port through the daemon's UPnP and keepalive gossip path.
 /bin/burst-daemon --network test --data-dir /evidence/upnp-native-discoverer --port 7086 --rpc-port 7087 --rpc-bind 172.30.99.2 --disable-upnp --bootstrap-peers 172.30.99.2:7076 node run > /evidence/upnp-native-discoverer.log 2>&1 &
 wait_for_node_rpcs test 90 http://172.30.99.2:7077 http://10.99.0.2:7077 http://172.30.99.2:7087
 discovered=false

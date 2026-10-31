@@ -1,8 +1,8 @@
 use super::*;
 
 impl Settlement {
-    /// The complete signed vote set, not packet arrival, determines the outcome
-    /// time and reward source. Distributed admission still requires an agreed cut.
+    /// Signed votes and challenge admission determine the outcome time and source.
+    /// Absent voters need recorded certified defaults; packet arrival supplies no authority.
     pub(super) fn from_events(
         batch: &impl Ledger,
         target: &WalletAddress,
@@ -123,7 +123,7 @@ pub(super) fn stake_source(
         || block.compute_hash() != receipt.block
         || block.account != *staker
         || observed_attempt != attempt
-        || crate::ledger_bridge::extract_receiver_from_link(&block.link).as_ref() != Some(target)
+        || crate::block_economics::wallet_from_link(&block.link).as_ref() != Some(target)
     {
         return Err("outcome stake source does not match signed attempt".into());
     }

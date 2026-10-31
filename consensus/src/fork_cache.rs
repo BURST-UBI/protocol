@@ -1,6 +1,4 @@
-//! Fork cache — persistent memory of fork blocks.
-//! When a fork is detected, both competing blocks are cached so the
-//! election can consider all candidates.
+//! Bounded in-memory fork hashes grouped by election root.
 
 use burst_types::BlockHash;
 use std::collections::{HashMap, VecDeque};
@@ -10,7 +8,8 @@ const MAX_ENTRIES: usize = 16_384;
 /// Maximum forks tracked per root.
 const MAX_FORKS_PER_ROOT: usize = 10;
 
-/// Caches fork blocks keyed by root (the `previous` hash they share).
+/// Caches caller-validated fork hashes by election root. Caps total hashes and
+/// hashes per root; at capacity it evicts every hash under the oldest root.
 #[derive(Default)]
 pub struct ForkCache {
     entries: HashMap<BlockHash, Vec<BlockHash>>,
@@ -24,7 +23,7 @@ impl ForkCache {
         Self::default()
     }
 
-    /// Cache a fork block.
+    /// Cache a fork hash.
     pub fn insert(&mut self, root: BlockHash, fork_hash: BlockHash) {
         if self
             .entries
@@ -58,7 +57,7 @@ impl ForkCache {
         self.entries.get(root).map(|v| v.as_slice())
     }
 
-    /// Remove a root and its eviction entry together.
+    /// Remove a root and its eviction entry together, scanning the root FIFO.
     pub fn remove(&mut self, root: &BlockHash) {
         if let Some(forks) = self.entries.remove(root) {
             self.total_count = self.total_count.saturating_sub(forks.len());
@@ -66,7 +65,7 @@ impl ForkCache {
         }
     }
 
-    /// Evict the oldest live root.
+    /// Evict the oldest live root. Removal also scans the remaining FIFO.
     fn evict_oldest(&mut self) {
         while let Some(oldest) = self.insertion_order.pop_front() {
             if self.entries.contains_key(&oldest) {

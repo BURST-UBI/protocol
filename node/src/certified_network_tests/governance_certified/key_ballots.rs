@@ -1,6 +1,6 @@
 use super::*;
 use burst_governance::{
-    key_delegation::{
+    signing_delegation::{
         operation::DelegationOperation, scoped, DelegatedBallot, Grant, KeyScope, Revocation,
     },
     GovernableParam,
@@ -32,7 +32,7 @@ async fn operation(
 
 pub(super) async fn check(clients: &[NodeClient], outcomes: &[(BlockHash, &'static str)]) {
     for client in clients {
-        use burst_governance::key_delegation::view::{Direction, Query, ScopeChoice};
+        use burst_governance::signing_delegation::view::{Direction, Query, ScopeChoice};
         let person = |n| {
             burst_crypto::derive_address(&burst_crypto::keypair_from_seed(&[n; 32]).public)
                 .to_string()
@@ -183,7 +183,7 @@ pub(super) async fn activate(
     }
     let (grant, grant_block) = downstream.unwrap();
     for client in clients {
-        use burst_governance::key_delegation::view::{Direction, Query};
+        use burst_governance::signing_delegation::view::{Direction, Query};
         let found = client
             .delegation_keys(&Query {
                 account: burst_crypto::derive_address(&keys[0].public).to_string(),
@@ -414,7 +414,7 @@ pub(super) async fn activate(
         clock.store(base + 97, Ordering::SeqCst);
         None
     };
-    installed(stores, 4, initial).await;
+    wait_for_installation(stores, 4, initial).await;
     if let Some(late) = late {
         for store in stores {
             assert!(
@@ -429,7 +429,7 @@ pub(super) async fn activate(
     )
     .await;
     clock.store(base + 108, Ordering::SeqCst);
-    let epoch = installed(stores, 5, initial).await;
+    let epoch = wait_for_installation(stores, 5, initial).await;
     let outcomes: Vec<_> = proposals
         .into_iter()
         .enumerate()

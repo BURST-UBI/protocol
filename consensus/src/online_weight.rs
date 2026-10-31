@@ -1,43 +1,16 @@
-//! Online weight sampling — track which representatives are actively voting.
+//! Recent voting activity and smoothed online-weight telemetry.
 //!
-//! Consensus quorum is calculated against *online* voting weight, not total
-//! delegated weight. A representative is considered online if it has cast a
-//! vote within the sampling window (default 5 minutes). This prevents
-//! permanently-offline representatives from inflating the quorum denominator.
-//!
-//! Additional features:
-//! - **Adaptive weight floor**: prevents a small online minority from confirming
-//!   blocks the offline majority would reject — see below.
-//! - **Trended (EMA) weight**: smooths temporary dips so quorum doesn't
-//!   fluctuate wildly.
-//! - **Principal rep classification**: identifies representatives with ≥0.1%
-//!   of online weight.
-//!
-//! ## Adaptive floor vs Nano's fixed floor
-//!
-//! Nano floors the quorum's online weight at a fixed `online_weight_minimum`
-//! (~60M NANO, ≈45% of its ~133M premined supply). That works because Nano
-//! premines the ENTIRE supply into the genesis account, so from block one the
-//! genesis representative holds weight far above the floor and confirmation is
-//! immediate. BURST weights verified people rather than any token supply.
-//! A fixed token-denominated floor would be unreachable at launch. The existing
-//! implementation instead scales the floor to the
-//! TOTAL voting weight currently in existence ([`MIN_ONLINE_WEIGHT_FRACTION_BPS`]):
-//! a small launch network can confirm with its actual verified electorate,
-//! without a genesis voting bonus. This floor limits a small online minority;
-//! it is not a proof of safety against all partitions, and its policy still
-//! needs reconciliation with implementation decision 12.16.
+//! The node samples attendance for diagnostics. Elections use confirmed
+//! representative authority, frozen when they start; this sampler cannot lower
+//! their quorum. `effective_weight` retains an attendance estimate with a 50%
+//! total-weight floor, but the node does not use it to authorize confirmation.
 
 use std::collections::HashMap;
 
 use burst_types::WalletAddress;
 
-/// The quorum's online-weight floor as a fraction (basis points) of the TOTAL
-/// voting weight currently in existence. `floor = total_weight * bps / 10_000`.
-/// 5000 bps = 50%: combined with the 67% confirmation threshold, a block can
-/// only confirm if at least ~33.5% of ALL weight actually votes for it, which
-/// scales with the network (unlike Nano's fixed absolute floor, which assumes a
-/// premined fixed supply). Not governable — a fixed consensus-safety constant.
+/// Floor for the effective attendance estimate, in basis points of supplied
+/// total weight. This is a telemetry constant, not the election quorum policy.
 const MIN_ONLINE_WEIGHT_FRACTION_BPS: u128 = 5000;
 
 /// Decay percentage for EMA trending (95 = 0.95, slow decay).
@@ -112,12 +85,8 @@ impl OnlineWeightSampler {
         }
     }
 
-    /// Get the effective online weight used as the quorum denominator: the max
-    /// of current online weight, the trended (EMA) weight, and the adaptive
-    /// floor (a fraction of the TOTAL weight in `weight_map`). The trend smooths
-    /// temporary dips; the adaptive floor stops a small online minority from
-    /// confirming while scaling with the network so a small/young BURST network
-    /// can still cement (see the module docs on Nano's fixed floor).
+    /// Maximum of current attendance, its EMA, and half the supplied total weight.
+    /// The node reports this estimate without using it as an election denominator.
     pub fn effective_weight(&self, now: u64, weight_map: &HashMap<WalletAddress, u128>) -> u128 {
         let current = self.compute_online_weight(now, weight_map);
         let total_weight: u128 = weight_map.values().sum();
@@ -127,8 +96,8 @@ impl OnlineWeightSampler {
 
     /// Whether a representative is a "principal" rep (≥0.1% of online weight).
     ///
-    /// Principal reps are the ones whose votes matter for quorum. This
-    /// classification avoids counting dust-weight reps as relevant voters.
+    /// This classification does not determine voting eligibility or discard
+    /// smaller representatives' votes from an election.
     pub fn is_principal(&self, rep_weight: u128, total_online: u128) -> bool {
         if total_online == 0 {
             return false;
@@ -241,7 +210,6 @@ mod tests {
         assert_eq!(sampler.online_weight(1000, &HashMap::new()), 0);
     }
 
-    // --- New tests for trending, floor, and principal rep classification ---
 
     #[test]
     fn test_trend_initializes_from_first_sample() {
@@ -308,9 +276,9 @@ mod tests {
         use crate::rep_weights::WEIGHT_PER_HUMAN;
         use burst_types::{BlockHash, Timestamp};
 
-        // Seven people, four delegated to an online rep and three self-repping
-        // offline. A restart has no observed online history yet. Artificially
-        // seeding the trend at seven people would prevent four from confirming.
+        // Exercise the sampler with no attendance history. The standalone
+        // election below deliberately uses its estimate as a denominator;
+        // node elections instead use confirmed authority.
         let weights = HashMap::from([
             (rep("online"), 4 * WEIGHT_PER_HUMAN),
             (rep("offline_a"), WEIGHT_PER_HUMAN),
@@ -350,9 +318,8 @@ mod tests {
 
     #[test]
     fn test_small_network_can_reach_quorum() {
-        // Regression for the launch blocker: a small network (genesis holds ~all
-        // weight and is online) must be able to cement. With the OLD fixed 60M
-        // floor, effective would be 60M and 1M of weight could never reach 67%.
+        // With all supplied weight online, the estimate equals that weight
+        // regardless of its absolute size. This is not a node cementation test.
         let mut sampler = OnlineWeightSampler::new(300);
         sampler.record_vote(&rep("genesis"), 1000);
         sampler.update_trend(1_000_000);

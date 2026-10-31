@@ -10,6 +10,10 @@ pub(crate) struct BacklogScan {
 }
 
 impl BacklogScan {
+    /// Read at most limit accounts in one snapshot and return each account's
+    /// first unconfirmed block. The limit counts accounts, not returned blocks
+    /// or bytes. A successful short page resets the cursor; errors leave it
+    /// unchanged. Each call opens a fresh snapshot.
     pub(crate) fn next(
         &mut self,
         store: &LmdbStore,
@@ -19,7 +23,7 @@ impl BacklogScan {
         let accounts =
             store
                 .account_store()
-                .iter_accounts_paged_txn(&txn, self.cursor.as_ref(), limit)?;
+                .accounts_page_txn(&txn, self.cursor.as_ref(), limit)?;
         let blocks = store.block_store();
         let mut pending = Vec::new();
         for account in &accounts {
@@ -68,6 +72,8 @@ impl BacklogScan {
 
 /// The caller holds the election writer through this fresh ledger read and
 /// registration. Cementation retires roots under the same election writer.
+/// The caller supplies a hash-validated block; this checks its current ledger
+/// position. True means registration succeeded, including an existing candidate.
 pub(crate) fn register_candidate(
     store: &LmdbStore,
     elections: &mut burst_consensus::ActiveElections,
@@ -101,6 +107,39 @@ pub(crate) fn register_candidate(
         .register_candidate(crate::ledger_updater::election_root(block), block.hash, now)
         .map_err(|error| StoreError::Backend(error.to_string()))?;
     Ok(true)
+}
+
+/// Pop at most min(initial free election slots, 256) entries, counting stale
+/// or corrupt entries against the limit. Failed entries are not requeued here.
+/// Return successful registrations, which may include existing elections.
+/// Release the scheduler lock before ledger reads or election-lock waits.
+pub(crate) async fn drain_scheduler(
+    store: &LmdbStore,
+    scheduler: &tokio::sync::Mutex<burst_consensus::PriorityScheduler>,
+    elections: &tokio::sync::RwLock<burst_consensus::ActiveElections>,
+    max_elections: usize,
+    now: burst_types::Timestamp,
+) -> usize {
+    use burst_store::block::BlockStore;
+    let capacity = max_elections.saturating_sub(elections.read().await.election_count());
+    let mut started = 0;
+    for _ in 0..capacity.min(256) {
+        let entry = scheduler.lock().await.pop();
+        let Some((hash, _)) = entry else { break; };
+        let block = store.block_store().get_block(&hash).ok()
+            .and_then(|bytes| bincode::deserialize::<StateBlock>(&bytes).ok());
+        let Some(block) = block.filter(|block| block.hash == hash && block.compute_hash() == hash) else {
+            tracing::warn!(%hash, "scheduler candidate missing or corrupt");
+            continue;
+        };
+        let mut elections = elections.write().await;
+        match register_candidate(store, &mut elections, &block, now) {
+            Ok(true) => started += 1,
+            Ok(false) => {},
+            Err(error) => tracing::warn!(%hash, %error, "scheduler candidate deferred"),
+        }
+    }
+    started
 }
 
 #[cfg(test)]
@@ -138,6 +177,54 @@ mod tests {
         batch.put_account_info(&account, false).unwrap();
         batch.commit().unwrap();
         blocks
+    }
+
+    #[tokio::test]
+    async fn scheduler_drain_bounds_stale_work_and_preserves_next_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LmdbStore::open(dir.path(), 32, 16 * 1024 * 1024).unwrap();
+        let blocks = chain(&store, 1);
+        let mut queue = burst_consensus::PriorityScheduler::new(300);
+        for i in 0..257u32 {
+            let mut bytes = [0; 32];
+            bytes[..4].copy_from_slice(&i.to_le_bytes());
+            queue.push(BlockHash::new(bytes), blocks[0].account.clone(), 100);
+        }
+        queue.push(blocks[1].hash, blocks[1].account.clone(), 1);
+        let queue = tokio::sync::Mutex::new(queue);
+        let elections = tokio::sync::RwLock::new(burst_consensus::ActiveElections::new(5000, 1000));
+        assert_eq!(drain_scheduler(&store, &queue, &elections, 5000, Timestamp::new(100)).await, 0);
+        assert_eq!(queue.lock().await.len(), 2);
+        assert_eq!(drain_scheduler(&store, &queue, &elections, 5000, Timestamp::new(100)).await, 1);
+        assert!(queue.lock().await.is_empty());
+        assert!(elections.read().await.candidate_root(&blocks[1].hash).is_some());
+    }
+
+    #[tokio::test]
+    async fn waiting_for_election_writer_does_not_hold_scheduler_queue() {
+        use std::{sync::Arc, time::Duration};
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(LmdbStore::open(dir.path(), 32, 16 * 1024 * 1024).unwrap());
+        let blocks = chain(&store, 1);
+        let queue = Arc::new(tokio::sync::Mutex::new(burst_consensus::PriorityScheduler::new(4)));
+        queue.lock().await.push(blocks[1].hash, blocks[1].account.clone(), 100);
+        let elections = Arc::new(tokio::sync::RwLock::new(burst_consensus::ActiveElections::new(4, 1000)));
+        let reader = elections.read().await;
+        let task = tokio::spawn({
+            let (store, queue, elections) = (store.clone(), queue.clone(), elections.clone());
+            async move { drain_scheduler(&store, &queue, &elections, 4, Timestamp::new(100)).await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if queue.lock().await.is_empty() { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        assert!(!task.is_finished());
+        queue.try_lock().expect("scheduler must remain available during election wait")
+            .push(blocks[2].hash, blocks[2].account.clone(), 1);
+        drop(reader);
+        assert_eq!(tokio::time::timeout(Duration::from_secs(1), task).await.unwrap().unwrap(), 2);
     }
 
     #[test]
@@ -221,7 +308,7 @@ mod tests {
         let store = LmdbStore::open(dir.path(), 32, 16 * 1024 * 1024).unwrap();
         let blocks = chain(&store, 1);
         let mut corrupt = blocks[1].clone();
-        corrupt.brn_balance += 1;
+        corrupt.brn_spent += 1;
         store
             .block_store()
             .put_block(&blocks[1].hash, &bincode::serialize(&corrupt).unwrap())

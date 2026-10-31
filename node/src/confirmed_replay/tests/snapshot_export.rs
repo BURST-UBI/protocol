@@ -183,7 +183,7 @@ async fn snapshot_peer_transfer_stages_authenticated_archive_over_tcp_and_restar
         stores.push(node.store.clone());
         registries.push(node.connection_registry.clone());
         tasks.push(tokio::spawn(async move {
-            let result = node.start().await;
+            let result = node.start_with_services(burst_daemon::start_public_services).await;
             (node, result)
         }));
     }
@@ -398,7 +398,7 @@ async fn snapshot_peer_transfer_stages_authenticated_archive_over_tcp_and_restar
     node.verification_fixture_clock = Some(Arc::new(|| None));
     let stop = node.shutdown.clone();
     let task = tokio::spawn(async move {
-        let result = node.start().await;
+        let result = node.start_with_services(burst_daemon::start_public_services).await;
         (node, result)
     });
     let ready = tokio::time::timeout(Duration::from_secs(15), async {
@@ -791,6 +791,8 @@ fn daemon_snapshot_attest_export_verify_journey() {
     drop(store);
     let files = tempfile::tempdir().unwrap();
     let key = files.path().join("representative.key");
+    let config_path = files.path().join("node.toml");
+    std::fs::write(&config_path, "database_map_size_bytes = 1610612736\n").unwrap();
     let invoke = |args: &[String], success: bool| {
         let output = std::process::Command::new(&daemon)
             .args(args)
@@ -804,6 +806,8 @@ fn daemon_snapshot_attest_export_verify_journey() {
         );
     };
     let base = vec![
+        "--config".to_owned(),
+        config_path.to_str().unwrap().to_owned(),
         "--network".to_owned(),
         "dev".into(),
         "--data-dir".into(),

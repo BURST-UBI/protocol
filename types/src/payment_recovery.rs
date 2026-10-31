@@ -11,6 +11,8 @@ pub struct SlotQuery {
 pub struct SlotReview {
     pub account: String,
     pub previous: String,
+    /// Confirmed successor found by the node. None does not prove that an
+    /// unconfirmed payment is absent or authorize signing a replacement.
     pub successor: Option<String>,
 }
 
@@ -27,5 +29,7 @@ pub struct ExclusionReview {
     pub previous: String,
     pub payment_epoch: String,
     pub installed_epoch: String,
+    /// Whether the node established exclusion under its installed epoch and
+    /// account frontier. False means exclusion was not established.
     pub excluded: bool,
 }

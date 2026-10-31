@@ -12,8 +12,8 @@ pub fn sign_message(message: &[u8], private_key: &PrivateKey) -> Signature {
 
 /// Verify a signature against a message and public key.
 ///
-/// Returns `true` if the signature is valid, `false` otherwise.
-/// Also rejects non-canonical signatures (malleability protection).
+/// Uses ed25519-dalek's strict verification, including its weak-key checks.
+/// Callers supply the exact signed bytes; this function adds no domain prefix.
 pub fn verify_signature(message: &[u8], signature: &Signature, public_key: &PublicKey) -> bool {
     let Ok(verifying_key) = VerifyingKey::from_bytes(&public_key.0) else {
         return false;

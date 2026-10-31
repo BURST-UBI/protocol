@@ -1,5 +1,5 @@
 use super::*;
-use crate::confirmed_replay::tests::snapshot_history::installed_recovery::Service;
+use crate::confirmed_replay::tests::snapshot_history::installed_recovery::WitnessService;
 
 pub(super) async fn assert_observer(
     fixture: &Fixture,
@@ -106,7 +106,7 @@ pub(super) async fn assert_observer(
             .unwrap(),
         before
     );
-    let service = Service::start(source.clone(), local.clone(), 0).await;
+    let service = WitnessService::start(source.clone(), local.clone(), 0).await;
     receive_over_tcp(
         local.clone(),
         recovered,
@@ -197,7 +197,7 @@ pub(super) async fn assert_observer(
             .recover_stored_epoch(&local, base.anchor().hash(), |_, _, _| unreachable!())
             .unwrap(),
     );
-    let service = Service::start(source, local.clone(), 0).await;
+    let service = WitnessService::start(source, local.clone(), 0).await;
     recovered
         .accept_decision_from_peers(
             local.clone(),
@@ -270,9 +270,9 @@ async fn receive_over_tcp(
     certificate: &CheckpointCertificate,
     manifest: &ReplayManifest,
 ) {
-    use crate::checkpoint_transport::{Body, Context, Transport};
+    use crate::checkpoint_transport::{Body, Transport};
     use tokio::io::AsyncWriteExt;
-    let context = Context::from_anchor(recovered.continuation.anchor()).unwrap();
+    let context = crate::checkpoint_transport::context_from_anchor(recovered.continuation.anchor()).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let (client, server) = tokio::try_join!(
         TcpStream::connect(listener.local_addr().unwrap()),

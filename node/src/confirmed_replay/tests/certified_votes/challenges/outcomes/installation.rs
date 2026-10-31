@@ -276,7 +276,8 @@ fn checkpoint_installer_commits_successive_selections_and_fraud_settlement_once(
             .is_none()
     );
     assert_eq!(
-        store.meta_store().get_meta(TrstEngine::meta_key()).unwrap(),
+        crate::trst_storage::load(&store.tx_begin_write().unwrap(), full.params.trst_expiry_secs)
+            .unwrap().save_wallets(),
         expected_trst
     );
 }

@@ -1,20 +1,16 @@
-//! Anti-spam proof-of-work.
+//! Proof-of-work generation and threshold checks for block admission.
 //!
-//! Not mining — a lightweight computational cost (fractions of a second) that
-//! makes flooding the network prohibitively expensive while keeping legitimate use free.
-//! Transactions are prioritized by account balance and PoW difficulty.
+//! Work adds a computational cost; its duration depends on the threshold and
+//! hardware. It does not establish consensus or guarantee resistance to flooding.
+//! Scheduling and network resource limits belong to the node.
 
-pub mod difficulty;
 pub mod error;
 pub mod generator;
-pub mod precompute;
 pub mod thresholds;
 pub mod validator;
 
-pub use difficulty::DifficultyAdjuster;
 pub use error::WorkError;
 pub use generator::WorkGenerator;
-pub use precompute::{PriorityBlock, WorkCache, WorkPriorityQueue};
 pub use thresholds::{WorkBlockKind, WorkThresholds};
 pub use validator::{validate_work, work_value};
 

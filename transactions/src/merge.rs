@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 
 /// A TRST merge transaction.
 ///
-/// Combines multiple tokens (potentially from different origins) into one.
-/// The merged token's expiry is the **earliest** expiry among all inputs.
+/// Requests one holding from multiple sources, possibly with different origins.
+/// Accepted merges preserve source contributions and the oldest origin time.
+/// Source ownership and spendability require stateful validation.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MergeTx {
     pub hash: TxHash,

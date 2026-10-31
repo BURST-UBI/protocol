@@ -1,4 +1,4 @@
-//! TRST portfolio management — tracking transferable, expired, and revoked TRST.
+//! Wallet holding summaries and expiry-based merge selection.
 
 use burst_types::{Timestamp, TrstState};
 use serde::{Deserialize, Serialize};
@@ -28,13 +28,11 @@ pub struct PortfolioSummary {
 }
 
 /// Auto-merge policy for grouping TRST tokens by expiry similarity.
-///
-/// The whitepaper states wallets auto-merge TRST with similar expiry dates
-/// to maximize retained value. The user can configure aggressiveness via
-/// a slider from 0 (never auto-merge) to 100 (merge everything).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AutoMergePolicy {
-    /// Aggressiveness level (0-100). 0 = never auto-merge, 100 = merge all.
+    /// Selection setting: 0 disables merging; 1..99 maps to lifetime-loss percent
+    /// by integer division by five; 100 removes the lifetime-loss restriction.
+    /// Eligibility and per-merge input limits still apply.
     pub aggressiveness: u8,
 }
 
@@ -59,7 +57,7 @@ impl AutoMergePolicy {
 
     pub fn config(&self) -> crate::auto_merge::AutoMergeConfig {
         crate::auto_merge::AutoMergeConfig {
-            similarity_pct: if self.aggressiveness >= 100 {
+            max_lifetime_loss_pct: if self.aggressiveness >= 100 {
                 100
             } else {
                 self.aggressiveness / 5
@@ -69,13 +67,14 @@ impl AutoMergePolicy {
         }
     }
 
-    /// Maximum loss relative to the longest remaining lifetime in a group.
+    /// Allowed lifetime difference in seconds. At unrestricted aggressiveness,
+    /// returns u64::MAX. This method does not decide whether merging is enabled.
     pub fn max_expiry_diff_secs(&self, longest_remaining_secs: u64) -> u64 {
         let config = self.config();
-        if config.similarity_pct == 100 {
+        if config.max_lifetime_loss_pct == 100 {
             return u64::MAX;
         }
-        ((longest_remaining_secs as u128 * config.similarity_pct as u128) / 100) as u64
+        ((longest_remaining_secs as u128 * config.max_lifetime_loss_pct as u128) / 100) as u64
     }
 
     /// Find groups of tokens that should be merged together based on this policy.

@@ -21,6 +21,9 @@ use burst_store_lmdb::{
 use burst_types::BlockHash;
 use std::collections::{BTreeMap, BTreeSet};
 
+mod revision_waiters;
+use revision_waiters::RevisionWaiters;
+
 const MAX_BLOCKS: usize = 131_072;
 const MAX_BYTES: usize = 64 * 1024 * 1024;
 
@@ -113,16 +116,16 @@ fn dependencies(
     Ok(sources)
 }
 
-/// Inspect without changing disk state or in-memory engines. Missing historical
-/// undo records are an error; reconstructing economics from balances is unsafe.
+/// Inspect under the writer lock without committing or changing live engines.
+/// Missing historical undo records are an error; balances cannot reconstruct them.
 pub fn preflight(store: &LmdbStore, target: BlockHash) -> Result<RollbackPlan, StoreError> {
     let batch = store.tx_begin_write()?;
     plan(&batch, target)
 }
 
-/// Returned only after the replacement and its new undo journal are durable.
-/// `state` belongs to the caller; it must be rebuilt from the rewound writer
-/// snapshot, not cloned from live engines that still describe the old branch.
+/// Replacement effects and unpublished engine state. `replace_with` commits
+/// before returning; `stage_with` leaves commit to its caller. Build `state` from
+/// the rewound writer, not from live engines that still describe the old branch.
 pub struct BranchReplacement<T> {
     pub removed: Vec<StateBlock>,
     pub state: T,
@@ -367,8 +370,10 @@ fn plan(batch: &LmdbWriteTransaction<'_>, target: BlockHash) -> Result<RollbackP
     let mut attempts = 0usize;
     let mut snapshots = SnapshotUndo::default();
     let mut restored_bytes = 0usize;
+    let mut revision_waiters = RevisionWaiters::default();
     while !records.is_empty() {
         let mut selected = None;
+        let mut deferred = Vec::new();
         for hash in &ready {
             attempts += 1;
             if attempts > MAX_BLOCKS * 4 {
@@ -379,11 +384,29 @@ fn plan(batch: &LmdbWriteTransaction<'_>, target: BlockHash) -> Result<RollbackP
             for change in &records[hash].changes {
                 let mut change = change.clone();
                 let key = (change.table, change.key.clone());
-                let current = match values.get(&key) {
-                    Some(value) => value.clone(),
-                    None => batch.undo_value(change.table, &change.key)?,
+                let current = if change.table == UndoTable::BrnMeta
+                    && change.key == b"governance_engine"
+                    && batch.uses_governance_records()?
+                {
+                    batch.governance_undo_snapshot_with_overlay(&values, MAX_BYTES)?
+                } else if change.table == UndoTable::Meta
+                    && change.key == crate::endorsement_commit::SNAPSHOT_KEY.as_bytes()
+                    && batch.uses_verification_records()?
+                {
+                    batch.verification_undo_snapshot_with_overlay(&values, MAX_BYTES)?
+                } else if change.table == UndoTable::Meta
+                    && batch.uses_virtual_verification_target(&change.key)?
+                {
+                    batch.verification_target_undo_with_overlay(
+                        std::str::from_utf8(&change.key).map_err(|e| invalid(&e.to_string()))?,
+                        &values, MAX_BYTES)?
+                } else {
+                    match values.get(&key) {
+                        Some(value) => value.clone(),
+                        None => batch.undo_value(change.table, &change.key)?,
+                    }
                 };
-                if let Err(error) = change.match_current_with_snapshots(
+                if let Err(error) = change.reconcile_current_with_snapshots(
                     current,
                     &mut |key, before, after, current| {
                         snapshots.reconcile(key, before, after, current)
@@ -391,6 +414,11 @@ fn plan(batch: &LmdbWriteTransaction<'_>, target: BlockHash) -> Result<RollbackP
                 ) {
                     if snapshots.bytes > MAX_BYTES * 4 {
                         return Err(error);
+                    }
+                    // Revision guards use exact after-images, unlike aggregate
+                    // snapshots. Retry only when this counter reaches that value.
+                    if revision_waiters.park(*hash, &change) {
+                        deferred.push(*hash);
                     }
                     compatible = false;
                     break;
@@ -402,6 +430,7 @@ fn plan(batch: &LmdbWriteTransaction<'_>, target: BlockHash) -> Result<RollbackP
                 break;
             }
         }
+        for hash in deferred { ready.remove(&hash); }
         let (hash, candidate) = selected.ok_or_else(|| {
             invalid("rollback conflicts with state outside the dependency closure")
         })?;
@@ -415,7 +444,55 @@ fn plan(batch: &LmdbWriteTransaction<'_>, target: BlockHash) -> Result<RollbackP
             if restored_bytes > MAX_BYTES {
                 return Err(invalid("rollback restored snapshots exceed byte limit"));
             }
-            values.insert((change.table, change.key.clone()), change.before.clone());
+            if change.table == UndoTable::BrnMeta
+                && change.key == b"governance_engine"
+                && batch.uses_governance_records()?
+            {
+                burst_governance::GovernanceEngine::visit_optional_snapshot_record_delta(
+                    change.after.as_deref(),
+                    change.before.as_deref(),
+                    |old, new| {
+                        let key = old
+                            .as_ref()
+                            .or(new.as_ref())
+                            .ok_or("empty governance overlay delta")?
+                            .storage_key()?;
+                        let value = new
+                            .map(|r| r.storage_entry().map(|(_, bytes)| bytes))
+                            .transpose()?;
+                        restored_bytes = restored_bytes
+                            .checked_add(key.len())
+                            .and_then(|n| n.checked_add(value.as_ref().map_or(0, Vec::len)))
+                            .ok_or("governance overlay size overflow")?;
+                        if restored_bytes > MAX_BYTES {
+                            return Err("rollback governance overlay exceeds byte limit".into());
+                        }
+                        values.insert((UndoTable::Meta, key.into_bytes()), value);
+                        Ok(())
+                    },
+                )
+                .map_err(|error| invalid(&error))?;
+            } else if change.table == UndoTable::Meta
+                && change.key == crate::endorsement_commit::SNAPSHOT_KEY.as_bytes()
+                && batch.uses_verification_records()?
+            {
+                crate::verification_storage::overlay_snapshot_delta(
+                    batch.uses_normalized_verification_records()?,
+                    change.after.as_deref(), change.before.as_deref(), &mut values,
+                    &mut restored_bytes, MAX_BYTES,
+                )?;
+            } else if change.table == UndoTable::Meta
+                && batch.uses_virtual_verification_target(&change.key)?
+            {
+                crate::verification_storage::overlay_target_delta(
+                    std::str::from_utf8(&change.key).map_err(|e| invalid(&e.to_string()))?,
+                    change.after.as_deref(), change.before.as_deref(), &mut values,
+                    &mut restored_bytes, MAX_BYTES,
+                )?;
+            } else {
+                revision_waiters.wake(&change, &mut ready);
+                values.insert((change.table, change.key.clone()), change.before.clone());
+            }
             changes.push(change);
         }
         records.remove(&hash);
@@ -482,7 +559,7 @@ mod tests {
             account,
             previous,
             link,
-            brn_balance: 0,
+            brn_spent: 0,
             trst_balance: 0,
             origin: TxHash::ZERO,
             transaction: TxHash::ZERO,
@@ -501,6 +578,16 @@ mod tests {
     }
 
     fn save(store: &LmdbStore, block: &StateBlock, sequence: u8, record: bool) {
+        save_with(store, block, sequence, record, |_| {});
+    }
+
+    fn save_with(
+        store: &LmdbStore,
+        block: &StateBlock,
+        sequence: u8,
+        record: bool,
+        stage: impl FnOnce(&mut LmdbWriteTransaction<'_>),
+    ) {
         let first = store.block_store().block_count().unwrap() == 0;
         let mut batch = store.tx_begin_write().unwrap();
         let previous = batch.get_account(&block.account).ok();
@@ -528,6 +615,7 @@ mod tests {
         batch
             .put_meta("test_economic_snapshot", &[sequence])
             .unwrap();
+        stage(&mut batch);
         batch.commit().unwrap();
         if first {
             let mut batch = store.tx_begin_write().unwrap();
@@ -594,6 +682,206 @@ mod tests {
             blocks[3].hash
         );
         assert!(batch.block_undo(&blocks[1].hash).unwrap().is_some());
+    }
+
+    #[test]
+    fn shared_revision_conflicts_resume_in_afterimage_order_and_preserve_external_conflicts() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = LmdbStore::open(directory.path(), 64, 16 << 20).unwrap();
+        let mut batch = store.tx_begin_write().unwrap();
+        crate::payment_epoch::initialize(&mut batch, BlockHash::new([1; 32])).unwrap();
+        batch.commit().unwrap();
+        let root = block(1, BlockType::Open, BlockHash::ZERO, BlockHash::ZERO);
+        save(&store, &root, 0, true);
+        let target = block(1, BlockType::Send, root.hash, BlockHash::new([10; 32]));
+        save(&store, &target, 0, true);
+        // Synthetic storage dependency fan-out exercises the planner, not payment
+        // or ballot admission. Hash order opposes the local journal write order.
+        let mut children: Vec<_> = (2..=33).map(|person|
+            block(person, BlockType::Open, BlockHash::ZERO, target.hash)).collect();
+        children.sort_by_key(|block| block.hash);
+        let key = format!("governance_revision/v1/{}", TxHash::new([7; 32]));
+        for (index, child) in children.iter().enumerate() {
+            save_with(&store, child, 0, true, |batch| {
+                batch.put_meta(&key, &(index as u128 + 1).to_be_bytes()).unwrap();
+            });
+        }
+        crate::causal_cementation::cement(&store, root.hash).unwrap();
+        let before = store.tx_begin_write().unwrap().checkpoint_metadata(b"block_undo/").unwrap();
+        let planned = preflight(&store, target.hash).unwrap();
+        let expected: Vec<_> = children.iter().rev().map(|b| b.hash).chain([target.hash]).collect();
+        assert_eq!(planned.blocks(), expected);
+        assert_eq!(store.tx_begin_write().unwrap().checkpoint_metadata(b"block_undo/").unwrap(), before);
+        // A counter value outside the closure must still reject the whole plan.
+        let mut batch = store.tx_begin_write().unwrap();
+        batch.put_meta(&key, &999u128.to_be_bytes()).unwrap();
+        assert!(plan(&batch, target.hash).is_err());
+        drop(batch);
+        let mut batch = store.tx_begin_write().unwrap();
+        for hash in planned.blocks() { batch.rewind_block(hash).unwrap(); }
+        assert_eq!(batch.get_meta(&key).unwrap(), None);
+        assert_eq!(batch.get_account(&root.account).unwrap().head, root.hash);
+        batch.commit().unwrap();
+    }
+
+    #[test]
+    fn mixed_governance_record_and_global_undo_plan_matches_writer_rewind() {
+        use burst_governance::{engine::GovernanceRecord, GovernableParam, GovernanceEngine};
+        let directory = tempfile::tempdir().unwrap();
+        let store = LmdbStore::open(directory.path(), 32, 16 << 20).unwrap();
+        let empty = GovernanceEngine::new();
+        // Synthetic economic states exercise planner/journal compatibility, not
+        // ballot admission or authority. Existing save fixtures stage signed blocks.
+        let effects = GovernanceRecord::PendingEffects {
+            changes: vec![(GovernableParam::TrstExpirySecs, 42)],
+            amendments: Vec::new(),
+            evictions: Vec::new(),
+        };
+        let ballot = GovernanceRecord::KeyBallot {
+            proposal: TxHash::new([7; 32]),
+            owner: burst_types::WalletAddress::new("brst_overlay"),
+            grant: BlockHash::new([8; 32]),
+            vote: burst_transactions::governance::GovernanceVote::Yea,
+        };
+        let global = GovernanceEngine::from_records([Ok(effects.clone())]).unwrap();
+        let keyed = GovernanceEngine::from_records([Ok(effects), Ok(ballot.clone())]).unwrap();
+        let cleared = GovernanceEngine::from_records([
+            Ok(GovernanceRecord::PendingEffects {
+                changes: Vec::new(),
+                amendments: Vec::new(),
+                evictions: Vec::new(),
+            }),
+            Ok(ballot),
+        ])
+        .unwrap();
+        let mut batch = store.tx_begin_write().unwrap();
+        crate::payment_epoch::initialize(&mut batch, BlockHash::new([1; 32])).unwrap();
+        batch.initialize_governance_records(&empty).unwrap();
+        batch.commit().unwrap();
+        let root = block(1, BlockType::Open, BlockHash::ZERO, BlockHash::ZERO);
+        save(&store, &root, 0, true);
+        let first = block(
+            1,
+            BlockType::ChangeRepresentative,
+            root.hash,
+            BlockHash::ZERO,
+        );
+        let second = block(
+            1,
+            BlockType::ChangeRepresentative,
+            first.hash,
+            BlockHash::ZERO,
+        );
+        let third = block(
+            1,
+            BlockType::ChangeRepresentative,
+            second.hash,
+            BlockHash::ZERO,
+        );
+        for (block, sequence, before, after) in [
+            (&first, 1, &empty, &global),
+            (&second, 2, &global, &keyed),
+            (&third, 3, &keyed, &cleared),
+        ] {
+            save_with(&store, block, sequence, true, |batch| {
+                batch.apply_governance_record_delta(before, after).unwrap()
+            });
+        }
+        crate::causal_cementation::cement(&store, root.hash).unwrap();
+        let planned = preflight(&store, first.hash).unwrap();
+        assert_eq!(planned.blocks(), &[third.hash, second.hash, first.hash]);
+        let mut batch = store.tx_begin_write().unwrap();
+        assert_eq!(batch.read_governance_records().unwrap(), cleared);
+        for hash in planned.blocks() {
+            batch
+                .rewind_block_with_snapshots(hash, |key, before, after, current| {
+                    assert_eq!(key, b"governance_engine");
+                    GovernanceEngine::rewind_snapshot(before, after, current)
+                        .map_err(|e| invalid(&e))
+                })
+                .unwrap();
+        }
+        assert_eq!(batch.read_governance_records().unwrap(), empty);
+        batch.commit().unwrap();
+        drop(store);
+        let store = LmdbStore::open(directory.path(), 32, 16 << 20).unwrap();
+        assert_eq!(
+            store
+                .tx_begin_write()
+                .unwrap()
+                .read_governance_records()
+                .unwrap(),
+            empty
+        );
+    }
+
+    #[test]
+    fn historical_verification_aggregate_and_keyed_undo_share_one_plan() {
+        for normalize_at in [0, 1, 2] {
+        use burst_verification::{OrchestratorSnapshot, VerificationOrchestrator};
+        let directory = tempfile::tempdir().unwrap();
+        let store = LmdbStore::open(directory.path(), 32, 16 << 20).unwrap();
+        let empty = VerificationOrchestrator::new();
+        let empty_bytes = empty.snapshot().encode().unwrap();
+        let mut batch = store.tx_begin_write().unwrap();
+        crate::payment_epoch::initialize(&mut batch, BlockHash::new([1; 32])).unwrap();
+        batch.put_meta(crate::endorsement_commit::SNAPSHOT_KEY, &empty_bytes).unwrap();
+        batch.commit().unwrap();
+        let root = block(1, BlockType::Open, BlockHash::ZERO, BlockHash::ZERO);
+        save(&store, &root, 0, true);
+        let first = block(1, BlockType::ChangeRepresentative, root.hash, BlockHash::ZERO);
+        let second = block(1, BlockType::ChangeRepresentative, first.hash, BlockHash::ZERO);
+        let third = block(1, BlockType::ChangeRepresentative, second.hash, BlockHash::ZERO);
+        let mut state = empty.storage_clone();
+        state.initialize_genesis(&root.account);
+        save_with(&store, &first, 1, true, |batch| {
+            batch.put_meta(crate::endorsement_commit::SNAPSHOT_KEY,
+                &state.snapshot().encode().unwrap()).unwrap();
+        });
+        let mut batch = store.tx_begin_write().unwrap();
+        batch.migrate_verification_records().unwrap();
+        if normalize_at == 1 { batch.normalize_verification_records().unwrap(); }
+        batch.commit().unwrap();
+        // A row journal between historical and virtual aggregate journals forces
+        // preflight to reconcile both representations against the same overlay.
+        save_with(&store, &second, 2, true, |batch| {
+            let before = batch.read_verification_records().unwrap();
+            let mut after = before.storage_clone();
+            after.begin_record_changes();
+            after.initialize_genesis(&block(2, BlockType::Open, BlockHash::ZERO, BlockHash::ZERO).account);
+            batch.apply_verification_record_delta(&before, &after).unwrap();
+            state = after;
+        });
+        if normalize_at == 2 {
+            let mut batch = store.tx_begin_write().unwrap();
+            let historical = batch.block_undo(&second.hash).unwrap().unwrap();
+            batch.normalize_verification_records().unwrap();
+            assert_eq!(batch.block_undo(&second.hash).unwrap().unwrap(), historical);
+            batch.commit().unwrap();
+        }
+        state.initialize_genesis(&block(3, BlockType::Open, BlockHash::ZERO, BlockHash::ZERO).account);
+        save_with(&store, &third, 3, true, |batch| {
+            batch.put_meta(crate::endorsement_commit::SNAPSHOT_KEY,
+                &state.snapshot().encode().unwrap()).unwrap();
+        });
+        crate::causal_cementation::cement(&store, root.hash).unwrap();
+        let plan = preflight(&store, first.hash).unwrap();
+        assert_eq!(plan.blocks(), &[third.hash, second.hash, first.hash]);
+        let mut batch = store.tx_begin_write().unwrap();
+        for hash in plan.blocks() {
+            batch.rewind_block_with_snapshots(hash, |key, before, after, current| {
+                assert_eq!(key, crate::endorsement_commit::SNAPSHOT_KEY.as_bytes());
+                OrchestratorSnapshot::rewind(before, after, current).map_err(|e| invalid(&e))
+            }).unwrap();
+        }
+        assert_eq!(batch.read_verification_records().unwrap().snapshot().encode().unwrap(), empty_bytes);
+        batch.commit().unwrap();
+        drop(store);
+        let store = LmdbStore::open(directory.path(), 32, 16 << 20).unwrap();
+        let batch = store.tx_begin_write().unwrap();
+        assert_eq!(batch.read_verification_records().unwrap().snapshot().encode().unwrap(), empty_bytes);
+        assert!(batch.get_meta(crate::endorsement_commit::SNAPSHOT_KEY).unwrap().is_none());
+    }
     }
 
     #[test]
@@ -910,7 +1198,7 @@ mod tests {
         let other = block(4, BlockType::Open, BlockHash::ZERO, BlockHash::ZERO);
         let dangling = block(1, BlockType::Receive, blocks[0].hash, blocks[4].hash);
         let mut corrupt = block(1, BlockType::VerifierOptIn, blocks[0].hash, BlockHash::ZERO);
-        corrupt.brn_balance = 99;
+        corrupt.brn_spent = 99;
         for candidate in [&other, &dangling, &corrupt, &blocks[1]] {
             assert!(
                 replace_with::<()>(&store, blocks[1].hash, candidate, |_, _| {
@@ -1062,13 +1350,13 @@ mod tests {
             creator.hash,
             BlockHash::new(burst_crypto::decode_address(funded.account.as_str()).unwrap()),
         );
-        burn.brn_balance = 100;
+        burn.brn_spent = 100;
         burn.timestamp = Timestamp::new(10);
         burn.hash = burn.compute_hash();
-        let crate::ledger_bridge::EconomicResult::BurnAndMint {
+        let crate::block_economics::EconomicResult::BurnAndMint {
             mint_token: Some(token),
             ..
-        } = crate::ledger_bridge::process_block_economics(
+        } = crate::block_economics::process_block_economics(
             &burn,
             &mut brn,
             &mut trst,
@@ -1107,7 +1395,7 @@ mod tests {
             .get_pending(&funded.account, &burn.hash.into_tx_hash())
             .unwrap();
         trst.receive_token(
-            crate::ledger_bridge::create_received_token(&funded, &pending, 1_000),
+            crate::block_economics::create_received_token(&funded, &pending, 1_000),
             funded.timestamp,
         );
         // Storage/economic test, not network admission: identity verification,
@@ -1144,7 +1432,7 @@ mod tests {
         receive.trst_balance = 40;
         receive.hash = receive.compute_hash();
         trst.receive_token(
-            crate::ledger_bridge::create_received_token(&receive, &pending, 1_000),
+            crate::block_economics::create_received_token(&receive, &pending, 1_000),
             receive.timestamp,
         );
         persist_block(&store, &receive, None, 0, None, None, (&brn, &trst)).unwrap();

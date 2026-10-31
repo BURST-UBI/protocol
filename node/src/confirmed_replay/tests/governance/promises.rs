@@ -26,7 +26,7 @@ fn withdrawal_uses_signed_ancestry_for_same_second_support_only() {
         }
         fixture.push(endorser, BlockType::GovernanceEndorse, 111, |block| {
             block.link = link;
-            block.brn_balance += 1;
+            block.brn_spent += 1;
         });
         if support_first {
             fixture.push(0, BlockType::GovernanceWithdraw, 111, |block| {
@@ -51,7 +51,7 @@ fn withdrawal_uses_signed_ancestry_for_same_second_support_only() {
 
 #[test]
 fn final_support_and_later_payment_cannot_both_be_promised_in_either_order() {
-    for support_first in [false, true] {
+    for (support_first, grouped) in [(false, false), (true, false), (false, true), (true, true)] {
         let (mut fixture, _) = fixture_with_cooldown(10);
         let support = fixture
             .blocks
@@ -81,7 +81,7 @@ fn final_support_and_later_payment_cannot_both_be_promised_in_either_order() {
         schedule.persist(&mut batch).unwrap();
         batch.commit().unwrap();
         let late = fixture.push(1, BlockType::Burn, CUT + 1, |block| {
-            block.brn_balance += 1;
+            block.brn_spent += 1;
             block.link = destination(0);
         });
         for block in [&support, fixture.blocks.last().unwrap()] {
@@ -101,9 +101,13 @@ fn final_support_and_later_payment_cannot_both_be_promised_in_either_order() {
         } else {
             (late, support.hash)
         };
-        crate::durable_votes::generate_vote(&store, &mut generator, first, true).unwrap();
-        let error =
-            crate::durable_votes::generate_vote(&store, &mut generator, second, true).unwrap_err();
+        let (first_vote, error) = if grouped {
+            let mut results = crate::durable_votes::generate_final_votes(&store, &mut generator, &[first, second]).into_iter();
+            (results.next().unwrap().unwrap(), results.next().unwrap().unwrap_err())
+        } else {
+            (crate::durable_votes::generate_vote(&store, &mut generator, first, true).unwrap(),
+             crate::durable_votes::generate_vote(&store, &mut generator, second, true).unwrap_err())
+        };
         assert!(
             error.to_string().contains(if support_first {
                 "crosses a promised governance deadline"
@@ -118,6 +122,16 @@ fn final_support_and_later_payment_cannot_both_be_promised_in_either_order() {
         let store = LmdbStore::open(dir.path(), 32, 32 << 20).unwrap();
         crate::payment_authority::initialize(&store, NetworkId::Dev, &fixture.params).unwrap();
         assert!(crate::durable_votes::generate_vote(&store, &mut generator, second, true).is_err());
+        if !support_first {
+            let cached = crate::durable_votes::generate_vote(&store, &mut generator, first, true).unwrap();
+            assert_eq!(cached.signature, first_vote.signature);
+            assert_eq!(cached.sequence, first_sequence);
+            assert_eq!(generator.sequence(), first_sequence);
+        }
+        // Restart the signer too: its sequence must recover from durable state.
+        let mut generator = burst_consensus::VoteGenerator::new(address(0), keys.private.0);
+        assert!(crate::durable_votes::generate_vote(&store, &mut generator, second, true).is_err());
+        assert_eq!(generator.sequence(), 0);
         crate::durable_votes::generate_vote(&store, &mut generator, first, true).unwrap();
         assert_eq!(generator.sequence(), first_sequence + 1);
     }

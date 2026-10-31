@@ -6,6 +6,13 @@ license.workspace = true
 description = "LMDB storage backend for the BURST protocol"
 
 [dependencies]
+burst-utils = { workspace = true }
+burst-crypto = { workspace = true }
+burst-brn = { workspace = true }
+burst-consti = { workspace = true }
+burst-governance = { workspace = true }
+burst-trst = { workspace = true }
+burst-verification = { workspace = true }
 burst-types = { workspace = true }
 burst-store = { workspace = true }
 heed = { workspace = true }
@@ -15,4 +22,5 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+burst-transactions = { workspace = true }
 tempfile = { workspace = true }

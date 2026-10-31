@@ -62,6 +62,50 @@ fn committed_selection_heads_authenticate_exact_bodies_without_newer_ancestry() 
             .collect::<Vec<_>>(),
         expected
     );
+    let mut streamed = std::collections::HashSet::new();
+    base.visit_committed_history(
+        |hash| Ok(wanted.contains(&hash)),
+        |mut cursor| {
+            assert_eq!(cursor.context(), base.history_context());
+            let head = cursor.next().unwrap();
+            let proofs = cursor.accept(&[store.block_store().get_block(&head.hash).unwrap()])?;
+            assert_eq!(proofs[0].height(), head.height);
+            streamed.insert(head.hash);
+            Ok(())
+        },
+    ).unwrap();
+    assert_eq!(streamed, expected.iter().copied().collect());
+    let ordered: Vec<_> = std::iter::once(genesis.hash).chain(selections.iter()
+        .flat_map(|receipt| receipt.heads()).map(|head| head.hash)
+        .filter(|hash| *hash != genesis.hash)).collect();
+    for budget in [1, 2, 128] {
+        let mut walk = base.committed_history_walk();
+        let mut actual = Vec::new();
+        loop {
+            let before = actual.len();
+            let done = walk.advance(budget, |_| Ok(true), |cursor| {
+                actual.push(cursor.next().unwrap().hash);
+                Ok(())
+            }).unwrap();
+            assert!(actual.len() - before <= budget);
+            if done { break; }
+        }
+        assert_eq!(actual, ordered);
+        assert!(walk.advance(budget, |_| panic!("completed"), |_| panic!("completed")).unwrap());
+    }
+    let mut failed = base.committed_history_walk();
+    assert!(failed.advance(1, |_| Err(burst_store::StoreError::Corruption("stop".into()).into()), |_| Ok(())).is_err());
+    assert!(failed.advance(1, |_| Ok(true), |_| Ok(())).is_err());
+    let mut failed = base.committed_history_walk();
+    assert!(failed.advance(1, |_| Ok(true), |_| Err(burst_store::StoreError::Corruption("stop".into()).into())).is_err());
+    assert!(failed.advance(1, |_| Ok(true), |_| Ok(())).is_err());
+    let mut zero = base.committed_history_walk();
+    assert!(zero.advance(0, |_| Ok(false), |_| Ok(())).is_err());
+    assert!(zero.advance(1, |_| Ok(false), |_| Ok(())).is_err());
+
+    base.visit_committed_history(|_| Ok(false), |_| panic!("unrequested committed head")).unwrap();
+    assert!(base.visit_committed_history(|_| Err(burst_store::StoreError::Corruption("stop".into()).into()), |_| Ok(())).is_err());
+    assert!(base.visit_committed_history(|_| Ok(true), |_| Err(burst_store::StoreError::Corruption("stop".into()).into())).is_err());
     for mut cursor in cursors {
         assert_eq!(cursor.context(), base.history_context());
         let head = cursor.next().unwrap();

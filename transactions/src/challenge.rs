@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 
 /// A challenge transaction.
 ///
-/// Any verified wallet can challenge another by staking BRN.
-/// Triggers a re-verification vote by new randomly selected verifiers.
+/// Requests a challenge panel with a BRN stake. Eligibility, active challenges,
+/// panel selection and settlement require stateful protocol validation.
+/// This payload has no evidence attachment field.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChallengeTx {
     pub hash: TxHash,
@@ -14,7 +15,7 @@ pub struct ChallengeTx {
     pub challenger: WalletAddress,
     /// The wallet being challenged.
     pub target: WalletAddress,
-    /// BRN staked by the challenger (lost if challenge fails).
+    /// BRN offered as a stake, subject to admission and outcome settlement.
     pub stake_amount: u128,
     /// Why the wallet is being challenged. Fraud (default) → revoke TRST on
     /// upheld; Inactivity → benign deactivation with no revocation. Carried into

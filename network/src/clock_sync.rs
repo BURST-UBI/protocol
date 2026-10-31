@@ -1,8 +1,8 @@
-//! Clock synchronization — required for BRN computation.
+//! Diagnostic offset estimates from unauthenticated SNTP or peer timestamps.
 //!
-//! BRN is a function of time, so nodes must agree on the current time.
-//! Unauthenticated NTP and peer observations are diagnostic estimates, not a
-//! trusted clock-error bound for pre-beacon checkpoint signatures.
+//! Adjusts returned timestamps in process; never sets the host clock. These
+//! observations do not establish a trusted UTC error bound or agreement between
+//! nodes. Certified signing uses the separate trusted-clock path.
 
 use crate::NetworkError;
 use burst_types::Timestamp;
@@ -61,15 +61,15 @@ fn response_offset(response: &[u8], sent: u64, received: u64) -> Result<i64, Net
     i64::try_from(offset).map_err(ntp_error)
 }
 
-/// Clock synchronization service.
+/// Smoothed offset estimate with no automatic freshness expiry.
 pub struct ClockSync {
-    /// Maximum acceptable clock drift in milliseconds.
+    /// Admission threshold for an observed offset and for timestamp comparisons.
     pub max_drift_ms: i64,
-    /// Current estimated offset from true UTC in milliseconds.
+    /// Signed correction added to local time, in milliseconds; not a UTC guarantee.
     pub offset_ms: i64,
-    /// Unix timestamp (seconds) of the last successful sync.
+    /// Local Unix time at the last accepted observation, in seconds.
     pub last_sync_secs: u64,
-    /// Number of sync operations performed.
+    /// Accepted observations, saturating at u32::MAX.
     pub sync_count: u32,
 }
 
@@ -85,8 +85,10 @@ impl ClockSync {
 
     /// Sync with NTP servers to determine clock offset.
     ///
-    /// Queries pool.ntp.org with one bounded SNTP exchange. A failed or rejected
-    /// observation leaves the previous estimate and its freshness unchanged.
+    /// Queries the first resolved pool.ntp.org address with one five-second
+    /// exchange. The first accepted observation sets the offset directly; later
+    /// observations use the moving average. Failure preserves the prior estimate
+    /// and its recorded time; callers must decide whether it is still fresh.
     pub async fn sync_ntp(&mut self) -> Result<(), NetworkError> {
         let offset = Self::query_ntp_offset("pool.ntp.org:123").await?;
         self.accept_offset(offset, Timestamp::now(), self.sync_count == 0)?;
@@ -159,8 +161,9 @@ impl ClockSync {
     /// Computes the drift between local time and the peer's reported time,
     /// then updates the offset using an exponential moving average (EMA)
     /// with a weight of 7/8 on the old value, 1/8 on the new observation.
-    /// This smooths out individual peer discrepancies while still tracking
-    /// the reported offset over time. Peers cannot establish trusted UTC.
+    /// Peer reports use whole seconds and receive no transit-time correction.
+    /// Even the first peer observation is averaged with the current estimate.
+    /// Peers cannot establish trusted UTC.
     ///
     /// Returns an error if the peer's drift exceeds `max_drift_ms`.
     pub async fn sync_with_peer(&mut self, peer_timestamp: Timestamp) -> Result<(), NetworkError> {
@@ -170,13 +173,15 @@ impl ClockSync {
         self.accept_offset(offset, local_now, false)
     }
 
-    /// Get the current adjusted timestamp.
+    /// Add the stored offset to local time, truncating milliseconds toward zero
+    /// and saturating at timestamp bounds. Does not reject a stale estimate.
     pub fn now(&self) -> Timestamp {
         let raw = Timestamp::now();
         Timestamp::new(raw.as_secs().saturating_add_signed(self.offset_ms / 1000))
     }
 
-    /// Validate that a timestamp is within acceptable drift.
+    /// Compare a whole-second timestamp with the adjusted local estimate.
+    /// This checks the configured tolerance, not source trust or freshness.
     pub fn validate_timestamp(&self, ts: Timestamp) -> bool {
         let now = self.now();
         let diff_secs = now.as_secs().abs_diff(ts.as_secs());

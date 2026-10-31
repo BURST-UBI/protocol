@@ -20,7 +20,7 @@ use burst_verification::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::ledger_bridge::EconomicResult;
+use crate::block_economics::EconomicResult;
 use crate::ledger_updater::update_token_counters;
 
 mod appeals;
@@ -28,6 +28,7 @@ mod deadline;
 pub(crate) mod ledger;
 mod outcome_context;
 pub(crate) mod receipts;
+pub(crate) mod retention;
 pub(crate) use deadline::settle_panel_deadline_candidate;
 pub(crate) mod dependencies;
 use ledger::Ledger;
@@ -142,7 +143,27 @@ pub(crate) fn collect(
     economic: &EconomicResult,
     params: &ProtocolParams,
     orchestrator: &mut VerificationOrchestrator,
-    engines: (&mut BrnEngine, &mut TrstEngine),
+    mut engines: (&mut BrnEngine, &mut TrstEngine),
+    network: burst_types::NetworkId,
+) -> Result<(), String> {
+    collect_staged(
+        batch,
+        block,
+        economic,
+        params,
+        orchestrator,
+        &mut engines,
+        network,
+    )
+}
+
+pub(crate) fn collect_staged(
+    batch: &mut impl Ledger,
+    block: &StateBlock,
+    economic: &EconomicResult,
+    params: &ProtocolParams,
+    orchestrator: &mut VerificationOrchestrator,
+    engines: &mut impl crate::economic_candidate::Engines,
     network: burst_types::NetworkId,
 ) -> Result<(), String> {
     apply_policy(
@@ -172,7 +193,7 @@ fn apply(
     economic: &EconomicResult,
     params: &ProtocolParams,
     orchestrator: &mut VerificationOrchestrator,
-    engines: (&mut BrnEngine, &mut TrstEngine),
+    mut engines: (&mut BrnEngine, &mut TrstEngine),
     network: burst_types::NetworkId,
 ) -> Result<(), String> {
     apply_policy(
@@ -181,7 +202,7 @@ fn apply(
         economic,
         params,
         orchestrator,
-        engines,
+        &mut engines,
         SettlementPolicy::UnorderedFixture,
         network,
     )
@@ -194,11 +215,13 @@ fn apply_policy(
     economic: &EconomicResult,
     params: &ProtocolParams,
     orchestrator: &mut VerificationOrchestrator,
-    engines: (&mut BrnEngine, &mut TrstEngine),
+    engines: &mut impl crate::economic_candidate::Engines,
     policy: SettlementPolicy,
     network: burst_types::NetworkId,
 ) -> Result<(), String> {
-    let target = crate::ledger_bridge::extract_receiver_from_link(&block.link)
+    let before = orchestrator.storage_clone();
+    orchestrator.begin_record_changes();
+    let target = crate::block_economics::wallet_from_link(&block.link)
         .ok_or("verification target is invalid")?;
     match economic {
         EconomicResult::Challenge { stake_amount, .. }
@@ -265,14 +288,14 @@ fn apply_policy(
             }
             record_stake(batch, block, &target, *stake_amount)?;
         }
-        EconomicResult::VerificationVoteResult { vote, stake, .. }
+        EconomicResult::VerificationVote { vote, stake, .. }
             if block.block_type == BlockType::VerificationVote =>
         {
-            let previous_brn = block
-                .brn_balance
+            let previous_brn_spent = block
+                .brn_spent
                 .checked_sub(*stake)
                 .ok_or("invalid vote stake delta")?;
-            crate::verification_vote::validate(block, previous_brn, orchestrator, params)?;
+            crate::verification_vote::validate(block, previous_brn_spent, orchestrator, params)?;
             crate::verification_activation::validate_vote(batch, block)?;
             record_stake(batch, block, &target, *stake)?;
             let vote = match vote {
@@ -308,14 +331,14 @@ fn apply_policy(
         .get_account(&block.account)
         .map_err(|e| e.to_string())?;
     account.total_brn_staked = engines
-        .0
+        .brn()
         .get_wallet(&block.account)
         .ok_or("verification BRN wallet missing")?
         .total_staked;
     batch.put_account(&account).map_err(|e| e.to_string())?;
     let events = orchestrator.drain_events();
     if let Some(context) = Settlement::from_events(batch, &target, &events, network)? {
-        settle(batch, &context, events, params, engines)?;
+        settle(batch, &context, events, params, engines.mutable())?;
         dependencies::persist(batch, block.hash, context.hash, &context.sources)?;
     } else if events
         .iter()
@@ -323,17 +346,16 @@ fn apply_policy(
     {
         return Err("verification transition has no signed outcome".into());
     }
-    persist(batch, orchestrator)
+    persist(batch, &before, orchestrator)
 }
 
-fn persist(batch: &mut impl Ledger, orchestrator: &VerificationOrchestrator) -> Result<(), String> {
-    let bytes = orchestrator
-        .snapshot()
-        .encode()
-        .map_err(|e| e.to_string())?;
-    batch
-        .put_meta(crate::endorsement_commit::SNAPSHOT_KEY, &bytes)
-        .map_err(|e| e.to_string())
+fn persist(
+    batch: &mut impl Ledger,
+    before: &VerificationOrchestrator,
+    orchestrator: &VerificationOrchestrator,
+) -> Result<(), String> {
+    batch.persist_verification(before, orchestrator)
+        .map_err(|error| error.to_string())
 }
 
 /// Evaluate an upheld outcome on an isolated, replay-derived cut. This does not
@@ -347,6 +369,8 @@ pub(crate) fn settle_upheld_candidate(
     engines: (&mut BrnEngine, &mut TrstEngine),
     network: burst_types::NetworkId,
 ) -> Result<BlockHash, String> {
+    let before = orchestrator.storage_clone();
+    orchestrator.begin_record_changes();
     let verdict = orchestrator.pending_challenge_verdict(target, params);
     if verdict.is_none()
         || (orchestrator.active_appeal(target).is_none()
@@ -376,7 +400,7 @@ pub(crate) fn settle_upheld_candidate(
     context.timestamp = cutoff;
     settle(batch, &context, events, params, engines)?;
     dependencies::persist(batch, context.hash, context.hash, &context.sources)?;
-    persist(batch, orchestrator)?;
+    persist(batch, &before, orchestrator)?;
     Ok(commitment)
 }
 
@@ -431,6 +455,8 @@ pub(crate) fn expire_candidate(
     orchestrator: &mut VerificationOrchestrator,
     engines: (&mut BrnEngine, &mut TrstEngine),
 ) -> Result<Vec<BlockHash>, String> {
+    let before = orchestrator.storage_clone();
+    orchestrator.begin_record_changes();
     let (brn, trst) = engines;
     let active = orchestrator.snapshot().active_challenges;
     let events = orchestrator
@@ -488,7 +514,7 @@ pub(crate) fn expire_candidate(
         settle(batch, &context, vec![event], params, (brn, trst))?;
         settlements.push(hash);
     }
-    persist(batch, orchestrator)?;
+    persist(batch, &before, orchestrator)?;
     settlements.sort_unstable();
     Ok(settlements)
 }
@@ -647,7 +673,7 @@ fn add_reward(
     Ok(())
 }
 
-pub(crate) fn verify_wallet(
+pub(crate) fn mark_wallet_verified(
     batch: &mut impl Ledger,
     wallet: &WalletAddress,
     now: Timestamp,
@@ -660,7 +686,12 @@ pub(crate) fn verify_wallet(
         Err(error) => return Err(error.to_string()),
     };
     if account.state == WalletState::Revoked {
-        for restored in trst.un_revoke_by_origin(wallet, now) {
+        let mut refreshed = HashSet::new();
+        let restored = trst.restore_by_originator(wallet, now).map_err(|error| error.to_string())?;
+        for restored in &restored {
+            if !refreshed.insert(&restored.holder) {
+                continue;
+            }
             let mut holder = if restored.holder == *wallet {
                 account.clone()
             } else {
@@ -676,12 +707,12 @@ pub(crate) fn verify_wallet(
         }
         restore_pending(batch, trst)?;
     }
-    verify_account(&mut account, now, brn)?;
+    mark_account_verified(&mut account, now, brn)?;
     batch.put_account(&account).map_err(|e| e.to_string())
 }
 
 pub(crate) fn restore_pending(batch: &mut impl Ledger, trst: &TrstEngine) -> Result<(), String> {
-    for (destination, hash, mut entry) in batch.all_pending().map_err(|e| e.to_string())? {
+    for (destination, hash, mut entry) in batch.pending_for_restoration(&trst.merger_graph).map_err(|e| e.to_string())? {
         if entry.return_credit {
             continue;
         }
@@ -704,7 +735,7 @@ pub(crate) fn restore_pending(batch: &mut impl Ledger, trst: &TrstEngine) -> Res
 }
 
 /// Revoked-origin restoration is performed by the caller before this transition.
-pub(crate) fn verify_account(
+pub(crate) fn mark_account_verified(
     account: &mut AccountInfo,
     now: Timestamp,
     brn: &mut BrnEngine,
@@ -734,12 +765,17 @@ pub(crate) fn revoke_pending(
     effects: &[burst_trst::engine::PendingRevocation],
     trst: &mut TrstEngine,
 ) -> Result<u128, String> {
+    let effect_index = burst_trst::engine::PendingRevocationIndex::new(effects);
+    let mut origins: Vec<_> = effect_index.affected_origins().collect();
+    origins.sort_unstable();
     let mut total = 0u128;
-    for (destination, hash, mut entry) in batch.all_pending().map_err(|e| e.to_string())? {
+    let entries = batch.pending_for_revocation(&origins, &trst.merger_graph).map_err(|e| e.to_string())?;
+    let mut cuts = burst_trst::engine::PendingRevocationBatch::new(&mut trst.merger_graph);
+    for (destination, hash, mut entry) in entries {
         if entry.return_credit {
             continue;
         }
-        crate::ledger_bridge::validate_pending(&entry)?;
+        crate::block_economics::validate_pending(&entry)?;
         let mut changed = false;
         for provenance in &mut entry.provenance {
             let split = provenance
@@ -751,7 +787,11 @@ pub(crate) fn revoke_pending(
                 .amount
                 .checked_sub(split)
                 .ok_or("invalid pending split total")?;
-            for effect in effects {
+            let selected = cuts.select_effects(
+                &effect_index, &provenance.origin, provenance.basis, clean,
+                provenance.revoked_amounts.keys().copied().map(TxHash::new),
+            )?;
+            for effect in selected {
                 if let Some(chunk) = provenance.revoked_amounts.get_mut(effect.origin.as_bytes()) {
                     if chunk.restored {
                         chunk.restored = false;
@@ -761,8 +801,8 @@ pub(crate) fn revoke_pending(
                         changed = true;
                     }
                 }
-                let cut = effect.cut_basis(
-                    &mut trst.merger_graph,
+                let cut = cuts.cut_basis(
+                    effect,
                     &provenance.origin,
                     &mut provenance.basis,
                     clean,
@@ -831,7 +871,7 @@ fn settle(
                     return Err("verification settlement target mismatch".into());
                 }
                 if result == VerificationResult::Verified {
-                    verify_wallet(batch, &wallet, context.timestamp, brn, trst)?;
+                    mark_wallet_verified(batch, &wallet, context.timestamp, brn, trst)?;
                     if !matches!(
                         context.authority,
                         SettlementAuthority::CertifiedDeadline { .. }
@@ -919,7 +959,7 @@ fn settle(
     }
     for (recipient, amount) in rewards {
         let recipient = WalletAddress::new(recipient);
-        // The canonical signed stake source gives every node the same claim ID.
+        // The deterministic settlement source gives every node the same claim ID.
         // Cementation must still include the complete outcome's dependencies.
         match batch.get_pending(&recipient, &context.hash.into_tx_hash()) {
             Err(StoreError::NotFound(_)) => {}
@@ -970,6 +1010,7 @@ mod tests {
     mod order_tests;
     mod receipts;
     mod replay_backend;
+    mod holder_refresh;
     mod reverification;
     use super::*;
     use crate::verification_test_support::time as test_time;
@@ -980,6 +1021,7 @@ mod tests {
 
     struct Fixture {
         directory: tempfile::TempDir,
+        map_size: usize,
         store: LmdbStore,
         brn: BrnEngine,
         trst: TrstEngine,
@@ -993,17 +1035,25 @@ mod tests {
     }
 
     fn sign(block: &mut StateBlock, seed: u8) {
+        sign_seed(block, &[seed; 32]);
+    }
+
+    fn sign_seed(block: &mut StateBlock, seed: &[u8; 32]) {
         block.hash = block.compute_hash();
         block.signature = burst_crypto::sign_message(
             block.hash.as_bytes(),
-            &burst_crypto::keypair_from_seed(&[seed; 32]).private,
+            &burst_crypto::keypair_from_seed(seed).private,
         );
     }
 
     impl Fixture {
         fn new() -> Self {
+            Self::with_map_size(32 * 1024 * 1024)
+        }
+
+        fn with_map_size(map_size: usize) -> Self {
             let directory = tempfile::tempdir().unwrap();
-            let store = LmdbStore::open(directory.path(), 32, 32 * 1024 * 1024).unwrap();
+            let store = LmdbStore::open(directory.path(), 32, map_size).unwrap();
             let mut batch = store.tx_begin_write().unwrap();
             crate::payment_epoch::initialize(&mut batch, BlockHash::new([1; 32])).unwrap();
             batch.commit().unwrap();
@@ -1022,6 +1072,7 @@ mod tests {
             };
             let mut fixture = Self {
                 directory,
+                map_size,
                 store,
                 brn: BrnEngine::with_rate(1, test_time(0)),
                 trst: TrstEngine::new(),
@@ -1048,16 +1099,23 @@ mod tests {
         }
 
         fn add_account(&mut self, seed: u8) {
+            self.add_seed_accounts(&[[seed; 32]]);
+        }
+
+        fn add_seed_accounts(&mut self, seeds: &[[u8; 32]]) {
+            let mut batch = self.store.tx_begin_write().unwrap();
+            for seed in seeds {
+            let address = burst_crypto::derive_address(&burst_crypto::keypair_from_seed(seed).public);
             let mut block = StateBlock {
                 signing_grant: burst_types::BlockHash::ZERO,
                 delegation_payload: Vec::new(),
                 version: burst_ledger::CURRENT_BLOCK_VERSION,
                 payment_epoch: burst_types::BlockHash::new([1; 32]),
                 block_type: BlockType::Open,
-                account: address(seed),
-                representative: address(seed),
+                account: address.clone(),
+                representative: address.clone(),
                 previous: BlockHash::ZERO,
-                brn_balance: 0,
+                brn_spent: 0,
                 trst_balance: 0,
                 link: BlockHash::ZERO,
                 origin: TxHash::ZERO,
@@ -1071,10 +1129,9 @@ mod tests {
                 signature: Signature([0; 64]),
                 hash: BlockHash::ZERO,
             };
-            sign(&mut block, seed);
+            sign_seed(&mut block, seed);
             let account =
-                crate::genesis_state::account_to_write(None, address(seed), block.hash).unwrap();
-            let mut batch = self.store.tx_begin_write().unwrap();
+                crate::genesis_state::account_to_write(None, address.clone(), block.hash).unwrap();
             batch.put_account_info(&account, false).unwrap();
             batch
                 .put_block_with_account(
@@ -1086,12 +1143,15 @@ mod tests {
                 .unwrap();
             batch.put_frontier(&block.account, &block.hash).unwrap();
             self.brn
-                .track_wallet(address(seed), burst_brn::BrnWalletState::new(test_time(0)));
+                .track_wallet(address.clone(), burst_brn::BrnWalletState::new(test_time(0)));
+            }
             crate::ledger_updater::persist_economics(&mut batch, &self.brn, &self.trst).unwrap();
             batch.commit().unwrap();
         }
 
         fn select(&mut self, seeds: &[u8]) {
+            let before = self.orchestrator.storage_clone();
+            self.orchestrator.begin_record_changes();
             let pool: Vec<_> = seeds.iter().map(|seed| address(*seed)).collect();
             crate::verification_test_support::select(
                 &mut self.orchestrator,
@@ -1100,13 +1160,32 @@ mod tests {
                 &self.params,
             );
             self.orchestrator.drain_events();
+            let mut batch = self.store.tx_begin_write().unwrap();
+            if batch.uses_verification_records().unwrap() {
+                crate::verification_storage::persist(&mut batch, &before, &self.orchestrator).unwrap();
+                batch.commit().unwrap();
+            }
+        }
+
+        fn migrate_verification(&mut self) {
+            let mut batch = self.store.tx_begin_write().unwrap();
+            batch.put_meta(crate::endorsement_commit::SNAPSHOT_KEY,
+                &self.orchestrator.snapshot().encode().unwrap()).unwrap();
+            batch.migrate_verification_records().unwrap();
+            self.orchestrator = batch.read_verification_records().unwrap();
+            batch.commit().unwrap();
         }
 
         fn vote(&self, seed: u8, vote: u8, time: u64) -> StateBlock {
+            self.vote_seed(&[seed; 32], vote, test_time(time))
+        }
+
+        fn vote_seed(&self, seed: &[u8; 32], vote: u8, timestamp: Timestamp) -> StateBlock {
+            let address = burst_crypto::derive_address(&burst_crypto::keypair_from_seed(seed).public);
             let account = self
                 .store
                 .account_store()
-                .get_account(&address(seed))
+                .get_account(&address)
                 .unwrap();
             let previous: StateBlock =
                 bincode::deserialize(&self.store.block_store().get_block(&account.head).unwrap())
@@ -1117,7 +1196,7 @@ mod tests {
                 block_type: BlockType::VerificationVote,
                 previous: previous.hash,
                 link: BlockHash::new(burst_crypto::decode_address(self.target.as_str()).unwrap()),
-                brn_balance: previous.brn_balance
+                brn_spent: previous.brn_spent
                     + if vote == 3 {
                         0
                     } else {
@@ -1129,15 +1208,15 @@ mod tests {
                     .selection_context(&self.target)
                     .unwrap()
                     .into_tx_hash(),
-                timestamp: test_time(time),
+                timestamp,
                 release_sources: self
                     .brn
-                    .get_wallet(&address(seed))
+                    .get_wallet(&address)
                     .unwrap()
                     .release_sources(burst_ledger::state_block::MAX_RELEASE_SOURCES),
                 ..previous
             };
-            sign(&mut block, seed);
+            sign_seed(&mut block, seed);
             block
         }
 
@@ -1166,7 +1245,7 @@ mod tests {
                 block,
                 crate::economic_candidate::EconomicContext {
                     account: account.as_ref(),
-                    previous_brn: previous.brn_balance,
+                    previous_brn_spent: previous.brn_spent,
                     pending: None,
                     params: &self.params,
                 },
@@ -1177,21 +1256,40 @@ mod tests {
                 &mut batch,
                 block,
                 account.as_ref(),
-                previous.brn_balance,
+                previous.brn_spent,
                 None,
                 None,
             )?;
-            let transition = if collect_only { collect } else { apply };
-            transition(
-                &mut batch,
-                block,
-                &economics.effect,
-                &self.params,
-                &mut orchestrator,
-                (&mut brn, &mut trst),
-                burst_types::NetworkId::Dev,
-            )?;
-            crate::ledger_updater::persist_economics(&mut batch, &brn, &trst)?;
+            if collect_only {
+                let mut engines = crate::economic_candidate::StagedEngines::new(&brn, &trst);
+                collect_staged(
+                    &mut batch,
+                    block,
+                    &economics.effect,
+                    &self.params,
+                    &mut orchestrator,
+                    &mut engines,
+                    burst_types::NetworkId::Dev,
+                )?;
+                let (staged_brn, staged_trst) = engines.into_staged();
+                assert!(
+                    staged_brn.is_none(),
+                    "collection must only read economic state"
+                );
+                assert!(staged_trst.is_none(), "collection must not prepare TRST");
+            } else {
+                apply(
+                    &mut batch,
+                    block,
+                    &economics.effect,
+                    &self.params,
+                    &mut orchestrator,
+                    (&mut brn, &mut trst),
+                    burst_types::NetworkId::Dev,
+                )?;
+            }
+            crate::ledger_updater::persist_brn_delta(&mut batch, &self.brn, &brn)?;
+            crate::ledger_updater::persist_trst(&mut batch, &trst)?;
             if commit {
                 batch.commit().map_err(|e| e.to_string())?;
                 self.brn = brn;
@@ -1204,27 +1302,21 @@ mod tests {
         fn reopen(self) -> Self {
             let Self {
                 directory,
+                map_size,
                 store,
                 params,
                 target,
                 ..
             } = self;
             drop(store);
-            let store = LmdbStore::open(directory.path(), 32, 32 * 1024 * 1024).unwrap();
+            let store = LmdbStore::open(directory.path(), 32, map_size).unwrap();
             let batch = store.tx_begin_write().unwrap();
             let state = crate::payment_transition::restore(&batch, &params).unwrap();
-            let orchestrator = VerificationOrchestrator::restore(
-                burst_verification::OrchestratorSnapshot::decode(
-                    &batch
-                        .get_meta(crate::endorsement_commit::SNAPSHOT_KEY)
-                        .unwrap()
-                        .unwrap(),
-                )
-                .unwrap(),
-            );
+            let orchestrator = crate::verification_storage::load(&batch).unwrap();
             drop(batch);
             Self {
                 directory,
+                map_size,
                 store,
                 brn: state.brn,
                 trst: state.trst,
@@ -1237,7 +1329,7 @@ mod tests {
         fn challenge(&self, reason: burst_verification::ChallengeReason) -> StateBlock {
             let mut block = self.vote(0, 1, 1100);
             block.block_type = BlockType::Challenge;
-            block.brn_balance = block.brn_balance - self.params.verifier_stake_amount
+            block.brn_spent = block.brn_spent - self.params.verifier_stake_amount
                 + self.params.challenge_stake_amount;
             block.transaction = TxHash::ZERO;
             block.origin = TxHash::new(reason.to_origin());
@@ -1277,7 +1369,7 @@ mod tests {
                 account: address(seed),
                 representative: address(seed),
                 previous: account.head,
-                brn_balance: previous.as_ref().map_or(0, |b| b.brn_balance),
+                brn_spent: previous.as_ref().map_or(0, |b| b.brn_spent),
                 trst_balance: account.trst_balance,
                 link: source.0,
                 origin: source.1,
@@ -1297,7 +1389,7 @@ mod tests {
                 hash: BlockHash::ZERO,
             };
             match block.block_type {
-                BlockType::Burn => block.brn_balance += amount,
+                BlockType::Burn => block.brn_spent += amount,
                 BlockType::Receive => block.trst_balance += amount,
                 BlockType::Send => block.trst_balance -= amount,
                 _ => {}
@@ -1313,7 +1405,7 @@ mod tests {
             Ok(block.hash)
         }
 
-        fn verified_target(&mut self) {
+        fn verify_target(&mut self) {
             for seed in [1, 2, 3] {
                 self.apply(&self.vote(seed, 1, 1000 + seed as u64), true)
                     .unwrap();
@@ -1340,26 +1432,395 @@ mod tests {
 
     #[test]
     fn final_vote_settles_atomically_and_reward_has_a_claimable_causal_source() {
-        let mut f = Fixture::new();
-        f.apply(&f.vote(1, 1, 1000), true).unwrap();
-        f.apply(&f.vote(2, 1, 1001), true).unwrap();
-        let last = f.vote(3, 2, 1002);
-        f.apply(&last, false).unwrap();
-        assert!(f.store.block_store().get_block(&last.hash).is_err());
-        assert!(f.store.account_store().get_account(&f.target).is_err());
-        assert_eq!(f.store.pending_store().pending_count().unwrap(), 0);
-        assert_eq!(f.brn.get_wallet(&address(1)).unwrap().total_staked, 20);
-        f.apply(&last, true).unwrap();
-        f = f.reopen();
-        let account = f.store.account_store().get_account(&f.target).unwrap();
+        check_final_vote(0);
+    }
+
+    #[test]
+    fn prepared_final_vote_matches_serial_settlement_abort_reopen_and_rewind() {
+        check_prepared_verification(&[(1, None), (3, None)]);
+    }
+
+    #[test]
+    fn prepared_challenge_preserves_admission_rechecks_target_and_rewinds() {
+        check_prepared_verification(&[
+            (1, Some(burst_verification::ChallengeReason::Fraud)),
+            (1, Some(burst_verification::ChallengeReason::Inactivity)),
+        ]);
+    }
+
+    fn check_prepared_verification(cases: &[(u8, Option<burst_verification::ChallengeReason>)]) {
+        use crate::economic_candidate::{prepared::CapturedPayment, Engines, StagedEngines};
+        for &(vote, challenge) in cases {
+            let mut fixture = Fixture::new();
+            fixture.migrate_verification();
+            let mut batch = fixture.store.tx_begin_write().unwrap();
+            crate::graph_storage::stage_replayed(&mut batch, &fixture.trst.merger_graph).unwrap();
+            crate::trst_storage::stage_replayed_stable(&mut batch, &fixture.trst).unwrap();
+            batch.normalize_verification_records().unwrap();
+            batch.commit().unwrap();
+            let block = if let Some(reason) = challenge {
+                fixture.verify_target();
+                fixture.challenge(reason)
+            } else {
+                fixture.apply(&fixture.vote(1, 1, 1000), true).unwrap();
+                fixture.apply(&fixture.vote(2, 1, 1001), true).unwrap();
+                fixture.vote(3, vote, 1002)
+            };
+            crate::payment_transition::authenticate_contents(&block, &fixture.params).unwrap();
+            let observe = |batch: &burst_store_lmdb::LmdbWriteTransaction<'_>| {
+                let state = crate::payment_transition::restore(batch, &fixture.params).unwrap();
+                let mut graph = Vec::new();
+                state.trst.merger_graph.write_snapshot(&mut graph).unwrap();
+                let wallets: Vec<_> = (0..=6).map(address).chain([fixture.target.clone()]).map(|wallet| {
+                    (bincode::serialize(&state.brn.get_wallet(&wallet)).unwrap(),
+                        bincode::serialize(&batch.get_account(&wallet).ok()).unwrap())
+                }).collect();
+                (wallets, state.trst.save_wallets(), graph,
+                    crate::verification_storage::load(batch).unwrap().snapshot().encode().unwrap())
+            };
+            let baseline = observe(&fixture.store.tx_begin_write().unwrap());
+            if challenge.is_some() {
+                let batch = fixture.store.tx_begin_write().unwrap();
+                let before = crate::payment_transition::restore(&batch, &fixture.params).unwrap();
+                let captured = CapturedPayment::capture(&batch, &block, &fixture.params).unwrap().unwrap();
+                batch.commit().unwrap();
+                let prepared = captured.prepare().unwrap();
+                let mut batch = fixture.store.tx_begin_write().unwrap();
+                let mut target = batch.get_account(&fixture.target).unwrap();
+                target.state = WalletState::Unverified;
+                crate::verification_commit::ledger::Ledger::put_account(&mut batch, &target).unwrap();
+                let changed_baseline = observe(&batch);
+                batch.commit().unwrap();
+                let mut batch = fixture.store.tx_begin_write().unwrap();
+                let staged = prepared.stage_with_economics(&mut batch, &fixture.params).unwrap().unwrap();
+                let mut engines = StagedEngines::new(&before.brn, &before.trst);
+                engines.adopt_persisted(staged.state.brn, staged.state.trst);
+                let mut verification = crate::verification_storage::load(&batch).unwrap();
+                let error = crate::verification_transition::apply_staged(&mut batch, &block,
+                    &staged.economics.effect, &fixture.params, burst_types::NetworkId::Dev,
+                    &mut verification, &mut engines).unwrap_err();
+                assert!(error.contains("challenge target is not verified"), "{error}");
+                drop(batch);
+                assert_eq!(observe(&fixture.store.tx_begin_write().unwrap()), changed_baseline);
+                assert!(fixture.store.block_store().get_block(&block.hash).is_err());
+                let mut batch = fixture.store.tx_begin_write().unwrap();
+                target.state = WalletState::Verified;
+                crate::verification_commit::ledger::Ledger::put_account(&mut batch, &target).unwrap();
+                batch.commit().unwrap();
+                assert_eq!(observe(&fixture.store.tx_begin_write().unwrap()), baseline);
+            }
+            let mut expected = None;
+            for (prepared, commit) in [(false, false), (true, false), (true, true)] {
+                let batch = fixture.store.tx_begin_write().unwrap();
+                let before = crate::payment_transition::restore(&batch, &fixture.params).unwrap();
+                let capture = prepared.then(|| CapturedPayment::capture(&batch, &block, &fixture.params).unwrap().unwrap());
+                batch.commit().unwrap();
+                let candidate = capture.map(|capture| capture.prepare().unwrap());
+                let mut batch = fixture.store.tx_begin_write().unwrap();
+                let mut engines = StagedEngines::new(&before.brn, &before.trst);
+                let economics = if let Some(candidate) = candidate {
+                    let staged = candidate.stage_with_economics(&mut batch, &fixture.params).unwrap().unwrap();
+                    engines.adopt_persisted(staged.state.brn, staged.state.trst);
+                    staged.economics
+                } else {
+                    crate::economic_candidate::stage(&mut batch, &block, &fixture.params, &mut engines).unwrap()
+                };
+                let mut verification = crate::verification_storage::load(&batch).unwrap();
+                crate::verification_transition::apply_staged(&mut batch, &block, &economics.effect,
+                    &fixture.params, burst_types::NetworkId::Dev, &mut verification, &mut engines).unwrap();
+                engines.persist(&mut batch).unwrap();
+                assert_eq!(batch.get_account(&fixture.target).unwrap().state, WalletState::Verified);
+                for seed in [1, 2, 3] {
+                    assert_eq!(engines.brn().get_wallet(&address(seed)).unwrap().total_staked, 0);
+                }
+                if let Some(reason) = challenge {
+                    assert_eq!(engines.brn().get_wallet(&block.account).unwrap().total_staked, fixture.params.challenge_stake_amount);
+                    let admitted = verification.active_challenges().find(|c| c.target == fixture.target).unwrap();
+                    assert_eq!(admitted.reason, reason);
+                    assert_eq!(admitted.challenger, block.account);
+                    assert_eq!(verification.active_challenge_context(&fixture.target).unwrap(), Some(block.hash));
+                }
+                let observed = observe(&batch);
+                if let Some(expected) = &expected { assert_eq!(&observed, expected); }
+                else { expected = Some(observed); }
+                if commit { batch.commit().unwrap(); } else { drop(batch); }
+                let batch = fixture.store.tx_begin_write().unwrap();
+                assert_eq!(observe(&batch), if commit { expected.clone().unwrap() } else { baseline.clone() });
+            }
+            fixture = fixture.reopen();
+            assert_eq!(fixture.store.account_store().get_account(&fixture.target).unwrap().state, WalletState::Verified);
+            let mut batch = fixture.store.tx_begin_write().unwrap();
+            batch.rewind_block(&block.hash).unwrap();
+            assert_eq!(batch.get_account(&block.account).unwrap().head, block.previous);
+            let restored = crate::payment_transition::restore(&batch, &fixture.params).unwrap();
+            if challenge.is_some() {
+                assert_eq!(restored.brn.get_wallet(&block.account).unwrap().total_staked, 0);
+                assert!(!crate::verification_storage::load(&batch).unwrap().has_active_challenge(&fixture.target));
+            } else {
+                assert_eq!(restored.brn.get_wallet(&address(1)).unwrap().total_staked, fixture.params.verifier_stake_amount);
+                assert_eq!(crate::verification_storage::load(&batch).unwrap().get_state(&fixture.target).unwrap().votes.len(), 2);
+            }
+            assert_eq!(crate::verification_storage::load(&batch).unwrap().snapshot().encode().unwrap(), baseline.3);
+            batch.commit().unwrap();
+        }
+    }
+
+    #[test]
+    fn keyed_panel_deadline_candidate_persists_scoped_state_and_preserves_abort() {
+        check_panel_deadline_persistence(&[
+            (3u64, 3, false, 1), (1024, 3, true, 1), (1024, 3, true, 0), (1024, 1024, true, 0),
+        ]);
+    }
+
+    #[test]
+    #[ignore = "explicit capped signed deadline stage diagnostic; not release latency"]
+    fn signed_panel_deadline_stage_scaling() {
+        check_panel_deadline_persistence(&[(1024, 1024, true, 0), (10_000, 10_000, true, 0)]);
+    }
+
+    #[test]
+    fn mixed_signed_panel_deadline_settles_stakes_atomically() {
+        check_panel_deadlines(&[(3, 3, true, 0), (1024, 1024, true, 0)], Some(2));
+    }
+
+    fn check_panel_deadline_persistence(cases: &[(u64, u32, bool, u32)]) {
+        check_panel_deadlines(cases, None);
+    }
+
+    #[test]
+    #[ignore = "explicit capped dense signed-stake diagnostic; not release latency"]
+    fn dense_signed_panel_deadline_stage_scaling() {
+        let selected = std::env::var("BURST_DEADLINE_DENSE_CASE").ok();
+        assert!(matches!(selected.as_deref(), None | Some("small") | Some("large")));
+        if selected.as_deref() != Some("large") {
+            check_panel_deadlines(&[(1024, 1024, true, 0)], Some(512));
+        }
+        if selected.as_deref() != Some("small") {
+            check_panel_deadlines(&[(10_000, 10_000, true, 0)], Some(5000));
+        }
+    }
+
+    fn check_panel_deadlines(cases: &[(u64, u32, bool, u32)], paid_count: Option<usize>) {
+        let mixed = paid_count.is_some();
+        for &(pool_size, panel_size, normalized, max_revotes) in cases {
+        let setup_started = std::time::Instant::now();
+        // Match the existing payment scaling fixture's disk-map capacity.
+        // The worker RAM limit and all settlement assertions remain independent.
+        let mut fixture = if paid_count.is_some_and(|count| count > 512) {
+            Fixture::with_map_size(512 * 1024 * 1024)
+        } else {
+            Fixture::new()
+        };
+        fixture.params.max_revotes = max_revotes;
+        fixture.params.num_verifiers = panel_size;
+        let mut pool: Vec<_> = (0..pool_size).map(|n| {
+            let mut seed = [71u8; 32];
+            seed[..8].copy_from_slice(&n.to_le_bytes());
+            burst_crypto::derive_address(&burst_crypto::keypair_from_seed(&seed).public)
+        }).collect();
+        let paid_seeds: Vec<_> = (0..paid_count.unwrap_or(0)).map(|n| {
+            let mut seed = [72u8; 32];
+            seed[..8].copy_from_slice(&(n as u64).to_le_bytes());
+            seed
+        }).collect();
+        if mixed {
+            assert!(paid_seeds.len() < panel_size as usize);
+            assert_eq!(paid_seeds.len() % 2, 0);
+            fixture.add_seed_accounts(&paid_seeds);
+            assert_eq!(pool_size, u64::from(panel_size));
+            assert_eq!(max_revotes, 0);
+            for (slot, seed) in pool.iter_mut().zip(&paid_seeds) {
+                *slot = burst_crypto::derive_address(&burst_crypto::keypair_from_seed(seed).public);
+            }
+        }
+        // Reuse the certified selection and deadline persistence path.
+        fixture.orchestrator = VerificationOrchestrator::new();
+        fixture.orchestrator.process_endorsement_at(
+            &fixture.target, &address(0), 10, &fixture.params, test_time(100),
+        ).unwrap();
+        fixture.orchestrator.drain_events();
+        let activation = crate::verification_test_support::select_activation(
+            &mut fixture.orchestrator, &fixture.target,
+            &pool, &fixture.params,
+        );
+        fixture.orchestrator.drain_events();
+        if normalized {
+            if panel_size >= 1024 || pool_size >= 1024 {
+                assert!(fixture.orchestrator.target_record(&fixture.target).unwrap().storage_entry().is_err());
+            }
+            let mut batch = fixture.store.tx_begin_write().unwrap();
+            batch.put_meta(crate::endorsement_commit::SNAPSHOT_KEY,
+                &fixture.orchestrator.snapshot().encode().unwrap()).unwrap();
+            batch.normalize_verification_records().unwrap();
+            batch.commit().unwrap();
+        } else { fixture.migrate_verification(); }
+        fixture = fixture.reopen();
+        assert_eq!(fixture.orchestrator.selection_context(&fixture.target), Some(activation.context));
+        let mut paid_votes = Vec::new();
+        if mixed {
+            let votes_started = std::time::Instant::now();
+            for (index, seed) in paid_seeds.iter().enumerate() {
+                let choice = if index % 2 == 0 { 1 } else { 2 };
+                let mut vote = fixture.vote_seed(seed, choice, Timestamp::new(activation.deadline - 1));
+                vote.params_hash = fixture.params.params_hash();
+                sign_seed(&mut vote, seed);
+                crate::payment_transition::authenticate_contents(&vote, &fixture.params).unwrap();
+                fixture.apply(&vote, true).unwrap();
+                paid_votes.push(vote);
+            }
+            println!("signed_deadline_vote_setup panel={panel_size} paid={} elapsed_ns={}",
+                paid_votes.len(), votes_started.elapsed().as_nanos());
+            fixture = fixture.reopen();
+            for vote in &paid_votes {
+                assert_eq!(fixture.brn.get_wallet(&vote.account).unwrap().total_staked,
+                    fixture.params.verifier_stake_amount);
+            }
+        }
+        let initial = fixture.orchestrator.snapshot().encode().unwrap();
+        let diagnostic = std::env::var_os("BURST_DEADLINE_STAGE_DIAGNOSTIC").is_some();
+        if diagnostic {
+            let disk_bytes = std::fs::metadata(fixture.directory.path().join("data.mdb")).unwrap().len();
+            println!("signed_deadline_setup panel={panel_size} pool={pool_size} map_bytes={} disk_bytes={disk_bytes} elapsed_ns={}",
+                fixture.map_size, setup_started.elapsed().as_nanos());
+        }
+        let mut expected = None;
+        for commit in [false, true] {
+            if diagnostic { println!("signed_deadline_case panel={panel_size} commit={commit}"); }
+            let load_started = std::time::Instant::now();
+            let mut batch = fixture.store.tx_begin_write().unwrap();
+            let mut candidate = crate::verification_storage::load(&batch).unwrap();
+            let mut brn = fixture.brn.clone();
+            let mut trst = fixture.trst.clone();
+            if diagnostic { println!("signed_deadline_stage stage=load elapsed_ns={}", load_started.elapsed().as_nanos()); }
+            let before_rejection = candidate.snapshot().encode().unwrap();
+            assert!(settle_panel_deadline_candidate(
+                &mut batch, &activation, Timestamp::new(activation.deadline - 1), &fixture.params,
+                &mut candidate, (&mut brn, &mut trst), &HashSet::new(),
+                burst_types::NetworkId::Dev,
+            ).is_err());
+            assert_eq!(candidate.snapshot().encode().unwrap(), before_rejection);
+            let absent = settle_panel_deadline_candidate(
+                &mut batch, &activation, Timestamp::new(activation.deadline), &fixture.params,
+                &mut candidate, (&mut brn, &mut trst), &HashSet::new(),
+                burst_types::NetworkId::Dev,
+            ).unwrap();
+            assert_eq!(absent.len(), panel_size as usize - paid_votes.len());
+            if mixed {
+                let settlement = paid_votes.iter().map(|vote| vote.hash).max().unwrap();
+                for vote in &paid_votes {
+                    assert!(!absent.contains(&vote.account));
+                    assert_eq!(brn.get_wallet(&vote.account).unwrap().total_staked, 0);
+                    let receipt = read_stake(&batch, &stake_key(
+                        &fixture.target, &vote.account, false, activation.context,
+                    )).unwrap().unwrap();
+                    assert_eq!(receipt.settled_by, Some(settlement));
+                }
+                for (index, vote) in paid_votes.iter().enumerate() {
+                    assert_eq!(brn.get_wallet(&vote.account).unwrap().total_burned,
+                        if index % 2 == 0 { fixture.params.verifier_stake_amount } else { 0 });
+                }
+                crate::ledger_updater::persist_economics(&mut batch, &brn, &trst).unwrap();
+            }
+            if panel_size >= 1024 {
+                assert!(candidate.target_record(&fixture.target).unwrap().storage_entry().is_err(),
+                    "completed panel must exercise the old physical row failure");
+            }
+            let encoded = candidate.snapshot().encode().unwrap();
+            assert_ne!(encoded, initial);
+            assert_eq!(crate::verification_storage::load(&batch).unwrap().snapshot().encode().unwrap(), encoded);
+            assert!(batch.get_meta(crate::endorsement_commit::SNAPSHOT_KEY).unwrap().is_none());
+            if commit {
+                expected = Some(encoded);
+                let commit_started = std::time::Instant::now();
+                batch.commit().unwrap();
+                if diagnostic { println!("signed_deadline_stage stage=commit elapsed_ns={}", commit_started.elapsed().as_nanos()); }
+            } else {
+                drop(batch);
+                let batch = fixture.store.tx_begin_write().unwrap();
+                assert_eq!(crate::verification_storage::load(&batch).unwrap().snapshot().encode().unwrap(), initial);
+                if mixed {
+                    let restored = crate::payment_transition::restore(&batch, &fixture.params).unwrap();
+                    for vote in &paid_votes {
+                        assert_eq!(restored.brn.get_wallet(&vote.account).unwrap().total_staked,
+                            fixture.params.verifier_stake_amount);
+                        assert_eq!(restored.brn.get_wallet(&vote.account).unwrap().total_burned, 0);
+                        assert_eq!(read_stake(&batch, &stake_key(
+                            &fixture.target, &vote.account, false, activation.context,
+                        )).unwrap().unwrap().settled_by, None);
+                    }
+                }
+            }
+        }
+        let reopen_started = std::time::Instant::now();
+        fixture = fixture.reopen();
+        assert_eq!(fixture.orchestrator.snapshot().encode().unwrap(), expected.unwrap());
+        if mixed {
+            let settlement = paid_votes.iter().map(|vote| vote.hash).max().unwrap();
+            for (index, vote) in paid_votes.iter().enumerate() {
+                assert_eq!(fixture.brn.get_wallet(&vote.account).unwrap().total_staked, 0);
+                assert_eq!(fixture.brn.get_wallet(&vote.account).unwrap().total_burned,
+                    if index % 2 == 0 { fixture.params.verifier_stake_amount } else { 0 });
+                if index % 2 == 1 {
+                    let reward = fixture.store.pending_store().get_pending(
+                        &vote.account, &settlement.into_tx_hash(),
+                    ).unwrap();
+                    assert_eq!(reward.amount, fixture.params.verifier_stake_amount);
+                    assert_eq!(reward.provenance.len(), 1);
+                    assert_eq!(reward.provenance[0].origin_wallet, vote.account);
+                }
+            }
+            assert_eq!(fixture.store.pending_store().pending_count().unwrap() as usize, paid_votes.len() / 2);
+        }
+        if diagnostic { println!("signed_deadline_reopen panel={panel_size} elapsed_ns={}", reopen_started.elapsed().as_nanos()); }
+    }
+    }
+
+    #[test]
+    fn keyed_final_vote_settles_atomically_and_survives_restart() {
+        check_final_vote(1);
+    }
+
+    #[test]
+    fn normalized_final_vote_settles_atomically_and_survives_restart() {
+        check_final_vote(2);
+    }
+
+    fn check_final_vote(format: u8) {
+        let keyed = format != 0;
+        let mut fixture = Fixture::new();
+        if keyed {
+            fixture.migrate_verification();
+            if format == 2 {
+                let mut batch = fixture.store.tx_begin_write().unwrap();
+                batch.normalize_verification_records().unwrap();
+                batch.commit().unwrap();
+            }
+            fixture = fixture.reopen();
+        }
+        fixture.apply(&fixture.vote(1, 1, 1000), true).unwrap();
+        fixture.apply(&fixture.vote(2, 1, 1001), true).unwrap();
+        let last = fixture.vote(3, 2, 1002);
+        fixture.apply(&last, false).unwrap();
+        assert!(fixture.store.block_store().get_block(&last.hash).is_err());
+        assert!(fixture.store.account_store().get_account(&fixture.target).is_err());
+        assert_eq!(fixture.store.pending_store().pending_count().unwrap(), 0);
+        assert_eq!(fixture.brn.get_wallet(&address(1)).unwrap().total_staked, 20);
+        fixture.apply(&last, true).unwrap();
+        fixture = fixture.reopen();
+        if keyed {
+            let batch = fixture.store.tx_begin_write().unwrap();
+            assert!(batch.uses_verification_records().unwrap());
+            assert!(batch.get_meta(crate::endorsement_commit::SNAPSHOT_KEY).unwrap().is_none());
+        }
+        let account = fixture.store.account_store().get_account(&fixture.target).unwrap();
         assert_eq!(account.state, WalletState::Verified);
         assert_eq!(account.verified_at, Some(last.timestamp));
         for seed in [1, 2, 3] {
-            assert_eq!(f.brn.get_wallet(&address(seed)).unwrap().total_staked, 0);
+            assert_eq!(fixture.brn.get_wallet(&address(seed)).unwrap().total_staked, 0);
         }
-        assert_eq!(f.brn.get_wallet(&address(3)).unwrap().total_burned, 20);
+        assert_eq!(fixture.brn.get_wallet(&address(3)).unwrap().total_burned, 20);
         for seed in [1, 2] {
-            let pending = f
+            let pending = fixture
                 .store
                 .pending_store()
                 .get_pending(&address(seed), &last.hash.into_tx_hash())
@@ -1368,10 +1829,10 @@ mod tests {
             assert_eq!(pending.provenance[0].origin_wallet, address(seed));
         }
         let previous: StateBlock = bincode::deserialize(
-            &f.store
+            &fixture.store
                 .block_store()
                 .get_block(
-                    &f.store
+                    &fixture.store
                         .account_store()
                         .get_account(&address(1))
                         .unwrap()
@@ -1391,50 +1852,50 @@ mod tests {
             ..previous
         };
         sign(&mut receive, 1);
-        let mut batch = f.store.tx_begin_write().unwrap();
+        let mut batch = fixture.store.tx_begin_write().unwrap();
         let state =
-            crate::payment_transition::apply(&mut batch, &receive, &f.params, receive.timestamp)
+            crate::payment_transition::apply(&mut batch, &receive, &fixture.params, receive.timestamp)
                 .unwrap();
         assert_eq!(
             state.trst.get_portfolio(&address(1)).unwrap().tokens[0].amount,
             10
         );
         batch.commit().unwrap();
-        assert!(f
+        assert!(fixture
             .store
             .pending_store()
             .get_pending(&address(1), &last.hash.into_tx_hash())
             .is_err());
-        assert!(f.apply(&last, true).is_err());
-        assert_eq!(f.brn.get_wallet(&address(3)).unwrap().total_burned, 20);
+        assert!(fixture.apply(&last, true).is_err());
+        assert_eq!(fixture.brn.get_wallet(&address(3)).unwrap().total_burned, 20);
     }
 
     #[test]
     fn stale_outcomes_cannot_settle_new_attempts_or_overwrite_spent_receipts() {
-        let mut f = Fixture::new();
-        let old_vote = f.vote(1, 1, 1000);
+        let mut fixture = Fixture::new();
+        let old_vote = fixture.vote(1, 1, 1000);
         let old_attempt = BlockHash::new(*old_vote.origin.as_bytes());
-        f.apply(&old_vote, true).unwrap();
-        f.apply(&f.vote(2, 1, 1001), true).unwrap();
-        f.apply(&f.vote(3, 1, 1002), true).unwrap();
-        f = f.reopen();
-        f.apply(
-            &f.challenge(burst_verification::ChallengeReason::Fraud),
+        fixture.apply(&old_vote, true).unwrap();
+        fixture.apply(&fixture.vote(2, 1, 1001), true).unwrap();
+        fixture.apply(&fixture.vote(3, 1, 1002), true).unwrap();
+        fixture = fixture.reopen();
+        fixture.apply(
+            &fixture.challenge(burst_verification::ChallengeReason::Fraud),
             true,
         )
         .unwrap();
-        f.select(&[1, 2, 3]);
-        let new_vote = f.vote(1, 1, 1101);
+        fixture.select(&[1, 2, 3]);
+        let new_vote = fixture.vote(1, 1, 1101);
         let new_attempt = BlockHash::new(*new_vote.origin.as_bytes());
         assert_ne!(old_attempt, new_attempt);
-        f.apply(&new_vote, true).unwrap();
-        f = f.reopen();
-        let mut brn = f.brn.clone();
-        let mut batch = f.store.tx_begin_write().unwrap();
+        fixture.apply(&new_vote, true).unwrap();
+        fixture = fixture.reopen();
+        let mut brn = fixture.brn.clone();
+        let mut batch = fixture.store.tx_begin_write().unwrap();
         let context = Settlement {
             hash: new_vote.hash,
             network: burst_types::NetworkId::Dev,
-            target: f.target.clone(),
+            target: fixture.target.clone(),
             timestamp: test_time(1102),
             sources: vec![new_vote.hash],
             authority: SettlementAuthority::SignedVotes,
@@ -1453,18 +1914,18 @@ mod tests {
             assert_eq!(brn.get_wallet(&address(1)).unwrap().total_staked, 20);
             let receipt = read_stake(
                 &batch,
-                &stake_key(&f.target, &address(1), false, new_attempt),
+                &stake_key(&fixture.target, &address(1), false, new_attempt),
             )
             .unwrap()
             .unwrap();
             assert_eq!(receipt.settled_by, None);
         }
-        assert!(record_stake(&mut batch, &old_vote, &f.target, 20)
+        assert!(record_stake(&mut batch, &old_vote, &fixture.target, 20)
             .unwrap_err()
             .contains("already exists"));
         let previous = read_stake(
             &batch,
-            &stake_key(&f.target, &address(1), false, old_attempt),
+            &stake_key(&fixture.target, &address(1), false, old_attempt),
         )
         .unwrap()
         .unwrap();
@@ -1494,156 +1955,168 @@ mod tests {
 
     #[test]
     fn missing_receipt_cannot_partially_verify_burn_or_mint() {
-        let mut f = Fixture::new();
-        f.apply(&f.vote(1, 1, 1000), true).unwrap();
-        f.apply(&f.vote(2, 1, 1001), true).unwrap();
-        f.store
+        let mut fixture = Fixture::new();
+        fixture.apply(&fixture.vote(1, 1, 1000), true).unwrap();
+        fixture.apply(&fixture.vote(2, 1, 1001), true).unwrap();
+        fixture.store
             .meta_store()
             .put_meta(
                 &stake_key(
-                    &f.target,
+                    &fixture.target,
                     &address(2),
                     false,
-                    f.orchestrator.selection_context(&f.target).unwrap(),
+                    fixture.orchestrator.selection_context(&fixture.target).unwrap(),
                 ),
                 &[255],
             )
             .unwrap();
-        let last = f.vote(3, 2, 1002);
-        assert!(f.apply(&last, true).is_err());
-        assert!(f.store.block_store().get_block(&last.hash).is_err());
-        assert!(f.store.account_store().get_account(&f.target).is_err());
-        assert_eq!(f.store.pending_store().pending_count().unwrap(), 0);
-        assert_eq!(f.brn.get_wallet(&address(1)).unwrap().total_staked, 20);
-        assert_eq!(f.brn.get_wallet(&address(3)).unwrap().total_burned, 0);
-        assert_eq!(f.orchestrator.get_state(&f.target).unwrap().votes.len(), 2);
+        let last = fixture.vote(3, 2, 1002);
+        assert!(fixture.apply(&last, true).is_err());
+        assert!(fixture.store.block_store().get_block(&last.hash).is_err());
+        assert!(fixture.store.account_store().get_account(&fixture.target).is_err());
+        assert_eq!(fixture.store.pending_store().pending_count().unwrap(), 0);
+        assert_eq!(fixture.brn.get_wallet(&address(1)).unwrap().total_staked, 20);
+        assert_eq!(fixture.brn.get_wallet(&address(3)).unwrap().total_burned, 0);
+        assert_eq!(fixture.orchestrator.get_state(&fixture.target).unwrap().votes.len(), 2);
     }
 
     #[test]
     fn revote_keeps_prior_stakes_across_restart_and_settles_them_once() {
-        let mut f = Fixture::new();
+        let mut fixture = Fixture::new();
         for seed in [1, 2, 3] {
-            f.apply(&f.vote(seed, 2, 1000 + seed as u64), true).unwrap();
+            fixture.apply(&fixture.vote(seed, 2, 1000 + seed as u64), true).unwrap();
         }
-        assert_eq!(f.orchestrator.get_state(&f.target).unwrap().revote_count, 1);
-        f = f.reopen();
-        assert_eq!(f.brn.get_wallet(&address(1)).unwrap().total_staked, 20);
-        f.select(&[4, 5, 6]);
+        assert_eq!(fixture.orchestrator.get_state(&fixture.target).unwrap().revote_count, 1);
+        fixture = fixture.reopen();
+        assert_eq!(fixture.brn.get_wallet(&address(1)).unwrap().total_staked, 20);
+        fixture.select(&[4, 5, 6]);
         for seed in [4, 5, 6] {
-            f.apply(&f.vote(seed, 1, 1010 + seed as u64), true).unwrap();
+            fixture.apply(&fixture.vote(seed, 1, 1010 + seed as u64), true).unwrap();
         }
         for seed in [1, 2, 3] {
-            assert_eq!(f.brn.get_wallet(&address(seed)).unwrap().total_staked, 0);
-            assert_eq!(f.brn.get_wallet(&address(seed)).unwrap().total_burned, 20);
+            assert_eq!(fixture.brn.get_wallet(&address(seed)).unwrap().total_staked, 0);
+            assert_eq!(fixture.brn.get_wallet(&address(seed)).unwrap().total_burned, 20);
         }
-        let pending = f.store.pending_store().get_all_pending().unwrap();
+        let pending = fixture.store.pending_store().get_all_pending().unwrap();
         assert_eq!(pending.len(), 3);
         assert_eq!(pending.iter().map(|(_, _, p)| p.amount).sum::<u128>(), 60);
     }
 
     #[test]
     fn challenge_panel_rejects_old_context_before_locking_a_new_stake() {
-        let mut f = Fixture::new();
-        let old_context = f.orchestrator.selection_context(&f.target).unwrap();
-        f.verified_target();
-        f.apply(
-            &f.challenge(burst_verification::ChallengeReason::Fraud),
+        let mut fixture = Fixture::new();
+        let old_context = fixture.orchestrator.selection_context(&fixture.target).unwrap();
+        fixture.verify_target();
+        fixture.apply(
+            &fixture.challenge(burst_verification::ChallengeReason::Fraud),
             true,
         )
         .unwrap();
-        f.select(&[3, 4, 5]);
+        fixture.select(&[3, 4, 5]);
         assert_ne!(
-            f.orchestrator.selection_context(&f.target),
+            fixture.orchestrator.selection_context(&fixture.target),
             Some(old_context)
         );
-        let mut replayed = f.vote(3, 1, 1101);
+        let mut replayed = fixture.vote(3, 1, 1101);
         replayed.origin = old_context.into_tx_hash();
         sign(&mut replayed, 3);
-        let before = f.store.account_store().get_account(&address(3)).unwrap();
-        assert!(f
+        let before = fixture.store.account_store().get_account(&address(3)).unwrap();
+        assert!(fixture
             .apply(&replayed, true)
             .unwrap_err()
             .contains("wrong selection context"));
-        assert_eq!(f.brn.get_wallet(&address(3)).unwrap().total_staked, 0);
+        assert_eq!(fixture.brn.get_wallet(&address(3)).unwrap().total_staked, 0);
         assert_eq!(
-            f.store
+            fixture.store
                 .account_store()
                 .get_account(&address(3))
                 .unwrap()
                 .head,
             before.head
         );
-        assert!(f
+        assert!(fixture
             .orchestrator
-            .get_state(&f.target)
+            .get_state(&fixture.target)
             .unwrap()
             .votes
             .is_empty());
-        f.apply(&f.vote(3, 1, 1101), true).unwrap();
-        f = f.reopen();
-        assert_eq!(f.brn.get_wallet(&address(3)).unwrap().total_staked, 20);
+        fixture.apply(&fixture.vote(3, 1, 1101), true).unwrap();
+        fixture = fixture.reopen();
+        assert_eq!(fixture.brn.get_wallet(&address(3)).unwrap().total_staked, 20);
         assert_ne!(
-            f.orchestrator.selection_context(&f.target),
+            fixture.orchestrator.selection_context(&fixture.target),
             Some(old_context)
         );
     }
 
     #[test]
     fn fraud_bounty_uses_downstream_revocation_and_inactivity_never_revokes() {
+        check_challenge_settlement(false);
+    }
+
+    #[test]
+    fn keyed_challenge_settlement_preserves_revocation_and_restart() {
+        check_challenge_settlement(true);
+    }
+
+    fn check_challenge_settlement(keyed: bool) {
         for reason in [
             burst_verification::ChallengeReason::Fraud,
             burst_verification::ChallengeReason::Inactivity,
         ] {
-            let mut f = Fixture::new();
-            f.verified_target();
-            f.seed_target_origin_at_holder();
-            f.apply(&f.challenge(reason), true).unwrap();
-            f.select(&[3, 4, 5]);
-            f.apply(&f.vote(3, 2, 1101), true).unwrap();
-            f.apply(&f.vote(4, 2, 1102), true).unwrap();
-            let last = f.vote(5, 2, 1103);
-            f.apply(&last, false).unwrap();
+            let mut fixture = Fixture::new();
+            fixture.verify_target();
+            fixture.seed_target_origin_at_holder();
+            if keyed {
+                fixture.migrate_verification();
+            }
+            fixture.apply(&fixture.challenge(reason), true).unwrap();
+            fixture.select(&[3, 4, 5]);
+            fixture.apply(&fixture.vote(3, 2, 1101), true).unwrap();
+            fixture.apply(&fixture.vote(4, 2, 1102), true).unwrap();
+            let last = fixture.vote(5, 2, 1103);
+            fixture.apply(&last, false).unwrap();
             assert_eq!(
-                f.store
+                fixture.store
                     .account_store()
-                    .get_account(&f.target)
+                    .get_account(&fixture.target)
                     .unwrap()
                     .state,
                 WalletState::Verified
             );
             assert_eq!(
-                f.store
+                fixture.store
                     .account_store()
                     .get_account(&address(6))
                     .unwrap()
                     .trst_balance,
                 10_000
             );
-            f.apply(&last, true).unwrap();
-            f = f.reopen();
-            let account = f.store.account_store().get_account(&f.target).unwrap();
+            fixture.apply(&last, true).unwrap();
+            fixture = fixture.reopen();
+            let account = fixture.store.account_store().get_account(&fixture.target).unwrap();
             assert_eq!(account.trst_balance, 0);
-            assert_eq!(f.brn.get_wallet(&address(0)).unwrap().total_staked, 0);
-            assert_eq!(f.brn.get_wallet(&address(0)).unwrap().total_burned, 0);
-            let holder = f.store.account_store().get_account(&address(6)).unwrap();
+            assert_eq!(fixture.brn.get_wallet(&address(0)).unwrap().total_staked, 0);
+            assert_eq!(fixture.brn.get_wallet(&address(0)).unwrap().total_burned, 0);
+            let holder = fixture.store.account_store().get_account(&address(6)).unwrap();
             if reason == burst_verification::ChallengeReason::Fraud {
                 assert_eq!(account.state, WalletState::Revoked);
                 assert_eq!(holder.revoked_trst, 10_000);
                 assert_eq!(holder.trst_balance, 10_000);
                 assert_eq!(
-                    f.trst.transferable_balance(&address(6), test_time(1103)),
+                    fixture.trst.transferable_balance(&address(6), test_time(1103)),
                     Some(0)
                 );
-                let reward = f
+                let reward = fixture
                     .store
                     .pending_store()
                     .get_pending(&address(0), &last.hash.into_tx_hash())
                     .unwrap();
                 assert_eq!(reward.amount, 100);
-                let mut brn = f.brn.clone();
-                let mut trst = f.trst.clone();
-                let mut batch = f.store.tx_begin_write().unwrap();
-                verify_wallet(&mut batch, &f.target, test_time(1200), &mut brn, &mut trst).unwrap();
+                let mut brn = fixture.brn.clone();
+                let mut trst = fixture.trst.clone();
+                let mut batch = fixture.store.tx_begin_write().unwrap();
+                mark_wallet_verified(&mut batch, &fixture.target, test_time(1200), &mut brn, &mut trst).unwrap();
                 assert_eq!(batch.get_account(&address(6)).unwrap().trst_balance, 10_000);
                 assert_eq!(batch.get_account(&address(6)).unwrap().revoked_trst, 0);
                 assert_eq!(
@@ -1652,7 +2125,7 @@ mod tests {
                 );
                 drop(batch);
                 assert_eq!(
-                    f.store
+                    fixture.store
                         .account_store()
                         .get_account(&address(6))
                         .unwrap()
@@ -1663,100 +2136,100 @@ mod tests {
                 assert_eq!(account.state, WalletState::Deactivated);
                 assert_eq!(holder.revoked_trst, 0);
                 assert_eq!(holder.trst_balance, 10_000);
-                assert_eq!(f.store.pending_store().pending_count().unwrap(), 0);
+                assert_eq!(fixture.store.pending_store().pending_count().unwrap(), 0);
             }
         }
     }
 
     #[test]
     fn rejected_challenge_burns_stake_without_revoking_and_expiry_is_atomic() {
-        let mut f = Fixture::new();
-        f.verified_target();
-        f.apply(
-            &f.challenge(burst_verification::ChallengeReason::Fraud),
+        let mut fixture = Fixture::new();
+        fixture.verify_target();
+        fixture.apply(
+            &fixture.challenge(burst_verification::ChallengeReason::Fraud),
             true,
         )
         .unwrap();
-        f.select(&[3, 4, 5]);
+        fixture.select(&[3, 4, 5]);
         for seed in [3, 4, 5] {
-            f.apply(&f.vote(seed, 1, 1100 + seed as u64), true).unwrap();
+            fixture.apply(&fixture.vote(seed, 1, 1100 + seed as u64), true).unwrap();
         }
         assert_eq!(
-            f.store
+            fixture.store
                 .account_store()
-                .get_account(&f.target)
+                .get_account(&fixture.target)
                 .unwrap()
                 .state,
             WalletState::Verified
         );
-        assert_eq!(f.brn.get_wallet(&address(0)).unwrap().total_burned, 100);
-        assert_eq!(f.brn.get_wallet(&address(0)).unwrap().total_staked, 0);
-        assert_eq!(f.store.pending_store().pending_count().unwrap(), 0);
+        assert_eq!(fixture.brn.get_wallet(&address(0)).unwrap().total_burned, 100);
+        assert_eq!(fixture.brn.get_wallet(&address(0)).unwrap().total_staked, 0);
+        assert_eq!(fixture.store.pending_store().pending_count().unwrap(), 0);
 
-        let mut f = Fixture::new();
-        f.verified_target();
-        f.apply(
-            &f.challenge(burst_verification::ChallengeReason::Fraud),
+        let mut fixture = Fixture::new();
+        fixture.verify_target();
+        fixture.apply(
+            &fixture.challenge(burst_verification::ChallengeReason::Fraud),
             true,
         )
         .unwrap();
-        f.select(&[3, 4, 5]);
-        f.apply(&f.vote(3, 2, 1101), true).unwrap();
+        fixture.select(&[3, 4, 5]);
+        fixture.apply(&fixture.vote(3, 2, 1101), true).unwrap();
         expire(
-            &f.store,
+            &fixture.store,
             test_time(1199),
-            &f.params,
-            (&mut f.brn, &mut f.trst, &mut f.orchestrator),
+            &fixture.params,
+            (&mut fixture.brn, &mut fixture.trst, &mut fixture.orchestrator),
         )
         .unwrap();
-        assert_eq!(f.brn.get_wallet(&address(0)).unwrap().total_staked, 100);
+        assert_eq!(fixture.brn.get_wallet(&address(0)).unwrap().total_staked, 100);
         let key = stake_key(
-            &f.target,
+            &fixture.target,
             &address(3),
             false,
-            f.orchestrator.selection_context(&f.target).unwrap(),
+            fixture.orchestrator.selection_context(&fixture.target).unwrap(),
         );
-        let saved = f.store.meta_store().get_meta(&key).unwrap();
-        f.store.meta_store().put_meta(&key, &[255]).unwrap();
+        let saved = fixture.store.meta_store().get_meta(&key).unwrap();
+        fixture.store.meta_store().put_meta(&key, &[255]).unwrap();
         assert!(expire(
-            &f.store,
+            &fixture.store,
             test_time(1200),
-            &f.params,
-            (&mut f.brn, &mut f.trst, &mut f.orchestrator)
+            &fixture.params,
+            (&mut fixture.brn, &mut fixture.trst, &mut fixture.orchestrator)
         )
         .is_err());
-        assert_eq!(f.brn.get_wallet(&address(0)).unwrap().total_staked, 100);
-        assert_eq!(f.brn.get_wallet(&address(0)).unwrap().total_burned, 0);
-        assert_eq!(f.orchestrator.snapshot().active_challenges.len(), 1);
-        f.store.meta_store().put_meta(&key, &saved).unwrap();
+        assert_eq!(fixture.brn.get_wallet(&address(0)).unwrap().total_staked, 100);
+        assert_eq!(fixture.brn.get_wallet(&address(0)).unwrap().total_burned, 0);
+        assert_eq!(fixture.orchestrator.snapshot().active_challenges.len(), 1);
+        fixture.store.meta_store().put_meta(&key, &saved).unwrap();
         expire(
-            &f.store,
+            &fixture.store,
             test_time(1200),
-            &f.params,
-            (&mut f.brn, &mut f.trst, &mut f.orchestrator),
+            &fixture.params,
+            (&mut fixture.brn, &mut fixture.trst, &mut fixture.orchestrator),
         )
         .unwrap();
-        f = f.reopen();
-        assert_eq!(f.brn.get_wallet(&address(0)).unwrap().total_staked, 0);
-        assert_eq!(f.brn.get_wallet(&address(0)).unwrap().total_burned, 50);
-        assert_eq!(f.brn.get_wallet(&address(3)).unwrap().total_staked, 0);
+        fixture = fixture.reopen();
+        assert_eq!(fixture.brn.get_wallet(&address(0)).unwrap().total_staked, 0);
+        assert_eq!(fixture.brn.get_wallet(&address(0)).unwrap().total_burned, 50);
+        assert_eq!(fixture.brn.get_wallet(&address(3)).unwrap().total_staked, 0);
         expire(
-            &f.store,
+            &fixture.store,
             test_time(1300),
-            &f.params,
-            (&mut f.brn, &mut f.trst, &mut f.orchestrator),
+            &fixture.params,
+            (&mut fixture.brn, &mut fixture.trst, &mut fixture.orchestrator),
         )
         .unwrap();
-        assert_eq!(f.brn.get_wallet(&address(0)).unwrap().total_burned, 50);
+        assert_eq!(fixture.brn.get_wallet(&address(0)).unwrap().total_burned, 50);
     }
 
     #[test]
     fn partial_revocation_preserves_signed_balances_and_only_clean_funds_can_move() {
-        let mut f = Fixture::new();
-        f.verified_target();
+        let mut fixture = Fixture::new();
+        fixture.verify_target();
         let destination =
             |seed| BlockHash::new(burst_crypto::decode_address(address(seed).as_str()).unwrap());
-        f.payment(
+        fixture.payment(
             10,
             BlockType::Open,
             0,
@@ -1764,7 +2237,7 @@ mod tests {
             1010,
         )
         .unwrap();
-        let tainted = f
+        let tainted = fixture
             .payment(
                 10,
                 BlockType::Burn,
@@ -1773,9 +2246,9 @@ mod tests {
                 2000,
             )
             .unwrap();
-        f.payment(6, BlockType::Receive, 500, (tainted, TxHash::ZERO), 2001)
+        fixture.payment(6, BlockType::Receive, 500, (tainted, TxHash::ZERO), 2001)
             .unwrap();
-        let clean = f
+        let clean = fixture
             .payment(
                 0,
                 BlockType::Burn,
@@ -1784,26 +2257,26 @@ mod tests {
                 2002,
             )
             .unwrap();
-        let head = f
+        let head = fixture
             .payment(6, BlockType::Receive, 300, (clean, TxHash::ZERO), 2003)
             .unwrap();
-        let mut challenge = f.challenge(burst_verification::ChallengeReason::Fraud);
+        let mut challenge = fixture.challenge(burst_verification::ChallengeReason::Fraud);
         challenge.timestamp = test_time(2100);
         sign(&mut challenge, 0);
-        f.apply(&challenge, true).unwrap();
-        f.select(&[3, 4, 5]);
+        fixture.apply(&challenge, true).unwrap();
+        fixture.select(&[3, 4, 5]);
         for seed in [3, 4, 5] {
-            f.apply(&f.vote(seed, 2, 2100 + seed as u64), true).unwrap();
+            fixture.apply(&fixture.vote(seed, 2, 2100 + seed as u64), true).unwrap();
         }
-        let holder = f.store.account_store().get_account(&address(6)).unwrap();
+        let holder = fixture.store.account_store().get_account(&address(6)).unwrap();
         assert_eq!(holder.head, head);
         assert_eq!(holder.trst_balance, 800);
         assert_eq!(holder.revoked_trst, 500);
         assert_eq!(
-            f.trst.transferable_balance(&address(6), test_time(2110)),
+            fixture.trst.transferable_balance(&address(6), test_time(2110)),
             Some(300)
         );
-        f.payment(
+        fixture.payment(
             6,
             BlockType::Send,
             100,
@@ -1811,13 +2284,13 @@ mod tests {
             2110,
         )
         .unwrap();
-        let before = f
+        let before = fixture
             .store
             .account_store()
             .get_account(&address(6))
             .unwrap()
             .head;
-        assert!(f
+        assert!(fixture
             .payment(
                 6,
                 BlockType::Send,
@@ -1827,7 +2300,7 @@ mod tests {
             )
             .is_err());
         assert_eq!(
-            f.store
+            fixture.store
                 .account_store()
                 .get_account(&address(6))
                 .unwrap()
@@ -1835,38 +2308,38 @@ mod tests {
             before
         );
         assert_eq!(
-            f.trst.transferable_balance(&address(6), test_time(2111)),
+            fixture.trst.transferable_balance(&address(6), test_time(2111)),
             Some(200)
         );
     }
 
     #[test]
     fn expired_return_revocation_cannot_consume_an_unrelated_signed_balance() {
-        let mut f = Fixture::new();
-        f.verified_target();
-        let token = f
+        let mut fixture = Fixture::new();
+        fixture.verify_target();
+        let token = fixture
             .trst
             .mint(
                 TxHash::new([91; 32]),
                 address(6),
                 10_000,
-                f.target.clone(),
+                fixture.target.clone(),
                 test_time(0),
             )
             .unwrap();
-        f.trst.track_token(token);
-        // A pending expiry return contributes reputation without a signed Receive.
-        f.trst.flush_all_expired(test_time(10_000));
-        let mut challenge = f.challenge(burst_verification::ChallengeReason::Fraud);
+        fixture.trst.track_token(token);
+        // Model an expired holding without a signed Receive balance update.
+        fixture.trst.flush_all_expired(test_time(10_000));
+        let mut challenge = fixture.challenge(burst_verification::ChallengeReason::Fraud);
         challenge.timestamp = test_time(10_100);
         sign(&mut challenge, 0);
-        f.apply(&challenge, true).unwrap();
-        f.select(&[3, 4, 5]);
+        fixture.apply(&challenge, true).unwrap();
+        fixture.select(&[3, 4, 5]);
         for seed in [3, 4, 5] {
-            f.apply(&f.vote(seed, 2, 10_100 + seed as u64), true)
+            fixture.apply(&fixture.vote(seed, 2, 10_100 + seed as u64), true)
                 .unwrap();
         }
-        let holder = f.store.account_store().get_account(&address(6)).unwrap();
+        let holder = fixture.store.account_store().get_account(&address(6)).unwrap();
         assert_eq!(holder.trst_balance, 0);
         assert_eq!(holder.expired_trst, 0);
         assert_eq!(holder.revoked_trst, 10_000);
@@ -1874,9 +2347,9 @@ mod tests {
 
     #[test]
     fn pending_burn_revokes_after_restart_and_receive_keeps_it_unspendable() {
-        let mut f = Fixture::new();
-        f.verified_target();
-        f.payment(
+        let mut fixture = Fixture::new();
+        fixture.verify_target();
+        fixture.payment(
             10,
             BlockType::Open,
             0,
@@ -1886,38 +2359,38 @@ mod tests {
         .unwrap();
         let destination =
             BlockHash::new(burst_crypto::decode_address(address(6).as_str()).unwrap());
-        let burn = f
+        let burn = fixture
             .payment(10, BlockType::Burn, 500, (destination, TxHash::ZERO), 2000)
             .unwrap();
-        f = f.reopen();
-        assert!(f.trst.wallet_origins[&f.target].contains(&burn.into_tx_hash()));
-        assert!(f.trst.get_portfolio(&address(6)).is_none());
-        let mut challenge = f.challenge(burst_verification::ChallengeReason::Fraud);
+        fixture = fixture.reopen();
+        assert!(fixture.trst.wallet_origins[&fixture.target].contains(&burn.into_tx_hash()));
+        assert!(fixture.trst.get_portfolio(&address(6)).is_none());
+        let mut challenge = fixture.challenge(burst_verification::ChallengeReason::Fraud);
         challenge.timestamp = test_time(2100);
         sign(&mut challenge, 0);
-        f.apply(&challenge, true).unwrap();
-        f.select(&[3, 4, 5]);
+        fixture.apply(&challenge, true).unwrap();
+        fixture.select(&[3, 4, 5]);
         for seed in [3, 4] {
-            f.apply(&f.vote(seed, 2, 2100 + seed as u64), true).unwrap();
+            fixture.apply(&fixture.vote(seed, 2, 2100 + seed as u64), true).unwrap();
         }
-        let last = f.vote(5, 2, 2105);
-        f.apply(&last, true).unwrap();
+        let last = fixture.vote(5, 2, 2105);
+        fixture.apply(&last, true).unwrap();
         assert_eq!(
-            f.store
+            fixture.store
                 .pending_store()
                 .get_pending(&address(0), &last.hash.into_tx_hash())
                 .unwrap()
                 .amount,
             5
         );
-        f = f.reopen();
-        assert!(f.trst.merger_graph.is_origin_revoked(&burn.into_tx_hash()));
-        assert!(f
+        fixture = fixture.reopen();
+        assert!(fixture.trst.merger_graph.is_origin_revoked(&burn.into_tx_hash()));
+        assert!(fixture
             .store
             .pending_store()
             .get_pending(&address(6), &burn.into_tx_hash())
             .is_ok());
-        f.payment(
+        fixture.payment(
             6,
             BlockType::Receive,
             500,
@@ -1925,17 +2398,17 @@ mod tests {
             2110,
         )
         .unwrap();
-        f = f.reopen();
-        let holder = f.store.account_store().get_account(&address(6)).unwrap();
+        fixture = fixture.reopen();
+        let holder = fixture.store.account_store().get_account(&address(6)).unwrap();
         assert_eq!(holder.trst_balance, 500);
         assert_eq!(holder.revoked_trst, 500);
         assert_eq!(
-            f.trst.transferable_balance(&address(6), test_time(2111)),
+            fixture.trst.transferable_balance(&address(6), test_time(2111)),
             Some(0)
         );
         let destination =
             BlockHash::new(burst_crypto::decode_address(address(1).as_str()).unwrap());
-        assert!(f
+        assert!(fixture
             .payment(
                 6,
                 BlockType::Send,
@@ -1945,7 +2418,7 @@ mod tests {
             )
             .is_err());
         assert_eq!(
-            f.store
+            fixture.store
                 .pending_store()
                 .get_pending(&address(0), &last.hash.into_tx_hash())
                 .unwrap()
@@ -1953,20 +2426,20 @@ mod tests {
             5
         );
 
-        let mut batch = f.store.tx_begin_write().unwrap();
-        verify_wallet(
+        let mut batch = fixture.store.tx_begin_write().unwrap();
+        mark_wallet_verified(
             &mut batch,
-            &f.target,
+            &fixture.target,
             test_time(2200),
-            &mut f.brn,
-            &mut f.trst,
+            &mut fixture.brn,
+            &mut fixture.trst,
         )
         .unwrap();
-        crate::ledger_updater::persist_economics(&mut batch, &f.brn, &f.trst).unwrap();
+        crate::ledger_updater::persist_economics(&mut batch, &fixture.brn, &fixture.trst).unwrap();
         batch.commit().unwrap();
-        f = f.reopen();
+        fixture = fixture.reopen();
         assert_eq!(
-            f.store
+            fixture.store
                 .account_store()
                 .get_account(&address(6))
                 .unwrap()
@@ -1974,10 +2447,10 @@ mod tests {
             0
         );
         assert_eq!(
-            f.trst.transferable_balance(&address(6), test_time(2201)),
+            fixture.trst.transferable_balance(&address(6), test_time(2201)),
             Some(500)
         );
-        f.payment(
+        fixture.payment(
             6,
             BlockType::Send,
             1,
@@ -1989,9 +2462,9 @@ mod tests {
 
     #[test]
     fn pending_restoration_is_atomic_and_survives_restart_before_delivery() {
-        let mut f = Fixture::new();
-        f.verified_target();
-        f.payment(
+        let mut fixture = Fixture::new();
+        fixture.verify_target();
+        fixture.payment(
             10,
             BlockType::Open,
             0,
@@ -2001,19 +2474,19 @@ mod tests {
         .unwrap();
         let destination =
             BlockHash::new(burst_crypto::decode_address(address(6).as_str()).unwrap());
-        let burn = f
+        let burn = fixture
             .payment(10, BlockType::Burn, 500, (destination, TxHash::ZERO), 2000)
             .unwrap();
-        let mut challenge = f.challenge(burst_verification::ChallengeReason::Fraud);
+        let mut challenge = fixture.challenge(burst_verification::ChallengeReason::Fraud);
         challenge.timestamp = test_time(2100);
         sign(&mut challenge, 0);
-        f.apply(&challenge, true).unwrap();
-        f.select(&[3, 4, 5]);
+        fixture.apply(&challenge, true).unwrap();
+        fixture.select(&[3, 4, 5]);
         for seed in [3, 4, 5] {
-            f.apply(&f.vote(seed, 2, 2100 + seed as u64), true).unwrap();
+            fixture.apply(&fixture.vote(seed, 2, 2100 + seed as u64), true).unwrap();
         }
-        f = f.reopen();
-        let pending = f
+        fixture = fixture.reopen();
+        let pending = fixture
             .store
             .pending_store()
             .get_pending(&address(6), &burn.into_tx_hash())
@@ -2028,17 +2501,17 @@ mod tests {
             500
         );
         for commit in [false, true] {
-            let mut brn = f.brn.clone();
-            let mut trst = f.trst.clone();
-            let mut batch = f.store.tx_begin_write().unwrap();
-            verify_wallet(&mut batch, &f.target, test_time(2200), &mut brn, &mut trst).unwrap();
+            let mut brn = fixture.brn.clone();
+            let mut trst = fixture.trst.clone();
+            let mut batch = fixture.store.tx_begin_write().unwrap();
+            mark_wallet_verified(&mut batch, &fixture.target, test_time(2200), &mut brn, &mut trst).unwrap();
             crate::ledger_updater::persist_economics(&mut batch, &brn, &trst).unwrap();
             if commit {
                 batch.commit().unwrap();
             } else {
                 drop(batch);
             }
-            let stored = f
+            let stored = fixture
                 .store
                 .pending_store()
                 .get_pending(&address(6), &burn.into_tx_hash())
@@ -2055,8 +2528,8 @@ mod tests {
                 );
             }
         }
-        f = f.reopen();
-        f.payment(
+        fixture = fixture.reopen();
+        fixture.payment(
             6,
             BlockType::Receive,
             500,
@@ -2064,9 +2537,9 @@ mod tests {
             2210,
         )
         .unwrap();
-        f = f.reopen();
+        fixture = fixture.reopen();
         assert_eq!(
-            f.store
+            fixture.store
                 .account_store()
                 .get_account(&address(6))
                 .unwrap()
@@ -2074,7 +2547,7 @@ mod tests {
             0
         );
         assert_eq!(
-            f.trst.transferable_balance(&address(6), test_time(2211)),
+            fixture.trst.transferable_balance(&address(6), test_time(2211)),
             Some(500)
         );
     }

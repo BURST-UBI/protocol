@@ -8,8 +8,8 @@ fn bench_pow_generation(c: &mut Criterion) {
     let generator = WorkGenerator;
     let block_hash = BlockHash::new([0x42; 32]);
 
-    // Low difficulty levels that complete quickly enough for benchmarking.
-    // Higher difficulty => more iterations to find a valid nonce.
+    // These thresholds accept almost every hash. This measures generation
+    // overhead, not search time at the default protocol threshold.
     for difficulty in [0u64, 1_000, 10_000, 100_000] {
         group.bench_with_input(
             BenchmarkId::new("generate", difficulty),

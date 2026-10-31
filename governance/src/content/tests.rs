@@ -234,3 +234,37 @@ fn chunk_wire_decoder_rejects_trailing_truncated_and_forged_lengths() {
     prefix.extend_from_slice(&u64::MAX.to_le_bytes());
     assert!(ContentChunk::decode(&prefix).is_err());
 }
+
+#[test]
+fn parameter_storage_boundaries_are_enforced_on_both_wire_encodings() {
+    for param in GovernableParam::ALL {
+        for emergency in [false, true] {
+            for value in [0, param.maximum_value()] {
+                let content = if emergency {
+                    ProposalContent::Emergency { description: "boundary".into(), param: param.clone(), new_value: value }
+                } else {
+                    ProposalContent::ParameterChange { param: param.clone(), new_value: value }
+                };
+                assert_eq!(ProposalContent::decode_content(&content.encode_content().unwrap()).unwrap(), content);
+                if !emergency {
+                    assert_eq!(ProposalContent::decode_compact(&content.encode_compact().unwrap()).unwrap(), content);
+                }
+            }
+            if let Some(value) = param.maximum_value().checked_add(1) {
+                let content = if emergency {
+                    ProposalContent::Emergency { description: "boundary".into(), param: param.clone(), new_value: value }
+                } else {
+                    ProposalContent::ParameterChange { param: param.clone(), new_value: value }
+                };
+                assert!(content.validate_content().is_err());
+                let raw = bincode::serialize(&content).unwrap();
+                assert!(ProposalContent::decode_content(&raw).is_err());
+                if !emergency {
+                    let mut compact = [0; 32];
+                    compact[..raw.len()].copy_from_slice(&raw);
+                    assert!(ProposalContent::decode_compact(&compact).is_err());
+                }
+            }
+        }
+    }
+}

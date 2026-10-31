@@ -12,7 +12,7 @@ fn challenge(fixture: &mut Fixture, target: u8, reason: ChallengeReason, time: u
         block.link = destination(target);
         block.origin = TxHash::new(reason.to_origin());
         block.transaction = TxHash::ZERO;
-        block.brn_balance += stake;
+        block.brn_spent += stake;
     })
 }
 
@@ -37,11 +37,11 @@ fn pending_with(
     let source = challenge(&mut fixture, 20, reason, CUTOFF + 34);
     fixture.push(20, BlockType::Burn, CUTOFF + 35, |block| {
         block.link = destination(8);
-        block.brn_balance += 1;
+        block.brn_spent += 1;
     });
     let funding = fixture.push(0, BlockType::Burn, CUTOFF + 35, |block| {
         block.link = destination(20);
-        block.brn_balance += 1;
+        block.brn_spent += 1;
     });
     fixture.push(20, BlockType::Receive, CUTOFF + 35, |block| {
         block.link = funding;
@@ -211,7 +211,7 @@ fn pending_challenge_rejects_duplicate_admission_and_unauthenticated_payloads() 
             if invalid_case == "signature" {
                 block.signature.0[0] ^= 1;
             } else {
-                block.brn_balance -= changed.params.challenge_stake_amount - 1;
+                block.brn_spent -= changed.params.challenge_stake_amount - 1;
                 sign(8, block);
             }
         }
@@ -300,7 +300,7 @@ fn collected_upheld_verdict_preserves_rights_stakes_and_survives_its_vote_deadli
         }
         fixture.push(20, BlockType::Burn, CUTOFF + 61, |block| {
             block.link = destination(8);
-            block.brn_balance += 1;
+            block.brn_spent += 1;
         });
         let records = [first, second];
         let state = ConfirmedReplay::replay_with_certificates(
@@ -365,7 +365,7 @@ fn incomplete_challenge_panels_replay_votes_without_settlement_or_loss_of_rights
             let hash = vote_choice(&mut fixture, &records[1], voter, CUTOFF + 60, choice);
             fixture.push(20, BlockType::Burn, CUTOFF + 60, |block| {
                 block.link = destination(8);
-                block.brn_balance += 1;
+                block.brn_spent += 1;
             });
             let after = replay(&fixture, &records).unwrap();
             assert!(after.account(&address(20)).unwrap().state.is_verified());
@@ -455,7 +455,7 @@ fn an_incomplete_challenge_vote_cannot_release_its_stake() {
     assert!(replay(&fixture, &records).is_ok());
     fixture.push(voter, BlockType::Burn, CUTOFF + 60, |block| {
         block.link = destination(20);
-        block.brn_balance += 1;
+        block.brn_spent += 1;
         block.release_sources = vec![source];
     });
     assert!(
@@ -557,7 +557,7 @@ async fn challenge_beacon_worker_skips_the_completed_lifecycle_and_recovers_afte
         .unwrap();
     batch.commit().unwrap();
     let store = Arc::new(store);
-    let service = super::super::snapshot_history::installed_recovery::Service::start(
+    let service = super::super::snapshot_history::installed_recovery::WitnessService::start(
         store.clone(),
         store.clone(),
         0,

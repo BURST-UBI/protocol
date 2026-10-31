@@ -2,18 +2,15 @@ use super::*;
 
 type Visit<'a> = dyn FnMut(Option<GraphRecord>, Option<GraphRecord>) -> Result<(), String> + 'a;
 
-fn changed<T: PartialEq>(
-    before: &Shared<HashMap<TxHash, T>>,
-    after: &Shared<HashMap<TxHash, T>>,
+fn changed<T: Clone + PartialEq>(
+    before: &SharedMap<TxHash, T>,
+    after: &SharedMap<TxHash, T>,
     mut visit: impl FnMut(TxHash, Option<&T>, Option<&T>) -> Result<(), String>,
 ) -> Result<(), String> {
     if before.shares_storage_with(after) {
         return Ok(());
     }
-    for key in before
-        .keys()
-        .chain(after.keys().filter(|key| !before.contains_key(*key)))
-    {
+    for key in after.changed_keys(before) {
         let old = before.get(key);
         let new = after.get(key);
         if old != new {
@@ -70,50 +67,45 @@ fn node_rows(hash: TxHash, node: &MergeNode) -> Vec<GraphRecord> {
 }
 
 fn appended_edges(
-    before: &Shared<HashMap<TxHash, Vec<TxHash>>>,
-    after: &Shared<HashMap<TxHash, Vec<TxHash>>>,
+    before: &SharedMap<TxHash, EdgeList>,
+    after: &SharedMap<TxHash, EdgeList>,
     downstream: bool,
     visit: &mut Visit<'_>,
 ) -> Result<(), String> {
     changed(before, after, |parent, old, new| {
-        let old = old.map_or(&[][..], Vec::as_slice);
-        let new = new.map_or(&[][..], Vec::as_slice);
-        if !new.starts_with(old) {
-            return Err(
-                "ordinary graph delta removes or reorders ancestry; use checked replacement".into(),
-            );
-        }
-        let mut occurrences = HashMap::<TxHash, u64>::new();
-        for (position, child) in new.iter().enumerate() {
-            let occurrence = occurrences.entry(*child).or_default();
-            if position >= old.len() {
-                let record = if downstream {
-                    GraphRecord::DownstreamEdge {
-                        merge: parent,
-                        position: position as u64,
-                        child: *child,
-                        occurrence: *occurrence,
-                    }
-                } else {
-                    GraphRecord::OriginEdge {
-                        origin: parent,
-                        position: position as u64,
-                        child: *child,
-                        occurrence: *occurrence,
-                    }
-                };
-                visit(None, Some(record))?;
-            }
-            *occurrence += 1;
-        }
-        Ok(())
+        let empty = EdgeList::default();
+        let old = old.unwrap_or(&empty);
+        let new = new.unwrap_or(&empty);
+        new.visit_appended(old, |position, child, occurrence| {
+            let record = if downstream {
+                GraphRecord::DownstreamEdge {
+                    merge: parent,
+                    position: position as u64,
+                    child,
+                    occurrence,
+                }
+            } else {
+                GraphRecord::OriginEdge {
+                    origin: parent,
+                    position: position as u64,
+                    child,
+                    occurrence,
+                }
+            };
+            visit(None, Some(record))
+        })
     })
 }
 
 impl MergerGraph {
-    /// Ordinary merge/revocation/restoration writes. Shared maps are skipped;
-    /// detached maps still need key comparisons. Only changed records are
-    /// emitted. Checked replacement/replay handles removal of ancestry.
+    /// Emit old/new record pairs for merges, revocations and restorations. Shared
+    /// map storage is skipped, but changed nodes build their full row lists before
+    /// comparison. Reverse edges must be append-only; ancestry removal needs the
+    /// checked replacement path.
+    ///
+    /// A late edge or callback error can follow earlier emissions. Callers stage
+    /// the entire delta before committing. This visitor does not validate graph
+    /// structure, and record order is not a canonical serialization order.
     pub fn visit_record_delta(
         &self,
         before: &Self,
@@ -138,16 +130,16 @@ impl MergerGraph {
             true,
             &mut visit,
         )?;
-        if !before
-            .revoked_origins
-            .shares_storage_with(&self.revoked_origins)
-        {
-            for origin in before.revoked_origins.difference(&self.revoked_origins) {
-                visit(Some(GraphRecord::RevokedOrigin(*origin)), None)?;
-            }
-            for origin in self.revoked_origins.difference(&before.revoked_origins) {
-                visit(None, Some(GraphRecord::RevokedOrigin(*origin)))?;
-            }
+        for origin in self.revoked_origins.changed_keys(&before.revoked_origins) {
+            let old = before
+                .revoked_origins
+                .contains(origin)
+                .then_some(GraphRecord::RevokedOrigin(*origin));
+            let new = self
+                .revoked_origins
+                .contains(origin)
+                .then_some(GraphRecord::RevokedOrigin(*origin));
+            visit(old, new)?;
         }
         changed(&before.revisions, &self.revisions, |hash, old, new| {
             let record = |r: &RevocationRevision| GraphRecord::Revision {

@@ -3,7 +3,8 @@
 use burst_types::{Signature, Timestamp, TxHash, WalletAddress};
 use serde::{Deserialize, Serialize};
 
-/// A transaction that rejects a pending TRST receive, returning it to the sender.
+/// Decline a pending payment. Acceptance creates a return receipt that the
+/// sender must claim; it does not undo the original send or burn.
 ///
 /// The `send_block_hash` references the original send block being declined.
 #[derive(Clone, Debug, Serialize, Deserialize)]

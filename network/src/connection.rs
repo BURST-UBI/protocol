@@ -1,8 +1,7 @@
-//! TCP connection management.
+//! Length-prefixed TCP I/O and a standalone connection pool.
 //!
-//! `PeerConnection` wraps a `TcpStream` with length-prefixed (4-byte big-endian)
-//! send/recv. `ConnectionPool` enforces a maximum number of simultaneous
-//! connections (default 64).
+//! These helpers do not authenticate peers or enforce deadlines. The running
+//! node owns its connection registry, handshake and traffic policies separately.
 
 use std::collections::HashMap;
 
@@ -17,8 +16,8 @@ pub const DEFAULT_MAX_CONNECTIONS: usize = 64;
 /// Maximum message body size accepted on a connection (same as protocol codec limit).
 const MAX_BODY_SIZE: usize = burst_types::MAX_P2P_MESSAGE_BYTES;
 
-/// Peer RPCs write a length prefix followed by a body. Do not hold the body
-/// behind an unacknowledged small prefix while the receiver waits for the frame.
+/// Disable Nagle buffering so a small frame prefix does not delay its body.
+/// Connection constructors below do not call this helper automatically.
 pub fn configure_peer_stream(stream: &TcpStream) -> std::io::Result<()> {
     stream.set_nodelay(true)
 }
@@ -32,7 +31,7 @@ pub struct PeerConnection {
 }
 
 impl PeerConnection {
-    /// Open a new TCP connection to the given address (e.g. "127.0.0.1:7076").
+    /// Connect without a handshake or application timeout; peer_id starts empty.
     pub async fn connect(address: &str) -> Result<Self, NetworkError> {
         let stream = TcpStream::connect(address)
             .await
@@ -96,7 +95,8 @@ impl PeerConnection {
 
     /// Receive a length-prefixed message from the connection.
     ///
-    /// Reads a 4-byte big-endian length, then reads exactly that many bytes.
+    /// Rejects oversized lengths before allocating the body. A zero-length body
+    /// is allowed here; protocol decoding and deadlines belong to the caller.
     pub async fn recv(&mut self) -> Result<Vec<u8>, NetworkError> {
         let mut len_buf = [0u8; 4];
         self.stream
@@ -122,7 +122,7 @@ impl PeerConnection {
     }
 }
 
-/// Manages a pool of active peer connections, enforcing a maximum count.
+/// Owns up to a configured number of connection entries; does not probe liveness.
 pub struct ConnectionPool {
     connections: HashMap<String, PeerConnection>,
     max_connections: usize,
@@ -142,7 +142,8 @@ impl ConnectionPool {
         Self::new(DEFAULT_MAX_CONNECTIONS)
     }
 
-    /// Add a connection to the pool. Returns an error if the pool is full.
+    /// Insert by nonempty peer_id, otherwise address. Replaces an existing key
+    /// when below capacity; a full pool rejects even a replacement.
     pub fn add(&mut self, conn: PeerConnection) -> Result<(), NetworkError> {
         if self.connections.len() >= self.max_connections {
             return Err(NetworkError::ConnectionFailed(format!(
@@ -180,7 +181,7 @@ impl ConnectionPool {
         self.connections.get(peer_id)
     }
 
-    /// Number of active connections.
+    /// Number of stored connections; remote sockets may already have closed.
     pub fn count(&self) -> usize {
         self.connections.len()
     }
@@ -190,12 +191,13 @@ impl ConnectionPool {
         self.max_connections
     }
 
-    /// Iterate over all peer IDs in the pool.
+    /// Iterate stored keys, which may be peer IDs or fallback addresses.
     pub fn peer_ids(&self) -> impl Iterator<Item = &String> {
         self.connections.keys()
     }
 
-    /// Broadcast raw data to all connected peers. Collects errors per-peer.
+    /// Send sequentially to every stored connection and collect per-peer errors.
+    /// There is no per-peer deadline; a stalled write can delay the rest.
     pub async fn broadcast(&mut self, data: &[u8]) -> Vec<(String, NetworkError)> {
         let mut errors = Vec::new();
         for (id, conn) in self.connections.iter_mut() {
@@ -326,7 +328,6 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        // Accept in background so connect succeeds.
         let accept_handle = tokio::spawn(async move {
             let _ = listener.accept().await.unwrap();
         });

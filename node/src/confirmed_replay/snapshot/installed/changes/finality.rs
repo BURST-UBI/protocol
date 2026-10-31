@@ -91,6 +91,7 @@ mod tests {
             block: BlockHash::new([height as u8; 32]),
             account: address.clone(),
             height,
+            governance: None,
             changes: vec![UndoChange {
                 table: UndoTable::Accounts,
                 key: address.as_str().as_bytes().to_vec(),

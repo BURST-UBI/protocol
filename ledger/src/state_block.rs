@@ -1,7 +1,8 @@
-//! State block — the unified block format for BURST's block-lattice.
+//! Signed account-chain operations and their canonical hash encoding.
 //!
-//! Inspired by Nano's state blocks: every block contains the full account state,
-//! enabling efficient pruning without losing security.
+//! A block records balances and operation references. Holdings, provenance,
+//! pending receipts and shared protocol state live outside it. Retaining an
+//! account head alone is insufficient for validation or recovery.
 
 use burst_crypto::blake2b_256;
 use burst_types::{BlockHash, Signature, Timestamp, TxHash, WalletAddress};
@@ -15,9 +16,9 @@ pub enum BlockType {
     Open,
     /// BRN burn → TRST mint.
     Burn,
-    /// TRST send to another account.
+    /// Send TRST to a destination account, including the sender itself.
     Send,
-    /// Receive TRST from another account.
+    /// Claim a pending TRST payment.
     Receive,
     /// Merge multiple TRST tokens.
     Merge,
@@ -35,18 +36,17 @@ pub enum BlockType {
     RevokeDelegation,
     /// Change consensus representative.
     ChangeRepresentative,
-    /// Epoch block (protocol upgrade marker).
+    /// Bootstrap-authorized marker on an existing account chain; installs no code.
     Epoch,
     /// Reject a pending TRST receive (returns to sender).
     RejectReceive,
     /// Verification vote — verifier casts a vote on a wallet's humanity.
     VerificationVote,
-    /// Governance activation block — records an on-chain parameter change
-    /// (Tezos-style self-amendment). Placed on the genesis account's chain.
+    /// Retained activation encoding. Current node admission rejects authored
+    /// blocks of this kind; governance activates through a certified boundary.
     GovernanceActivation,
-    /// Opt in to the verifier pool — a verified wallet volunteers to be
-    /// randomly selected (via VRF) to verify others. On-chain so every node
-    /// derives the same eligible pool (keeps VRF selection deterministic).
+    /// Volunteer for verifier selection. Eligibility and the certified
+    /// selection context determine whether the account enters a panel.
     VerifierOptIn,
     /// Opt out of the verifier pool (revokes a prior VerifierOptIn).
     VerifierOptOut,
@@ -56,10 +56,13 @@ pub enum BlockType {
     GovernanceWithdraw,
     /// Replace the consumer wallet's active signing-device grant.
     ChangeSigner,
+    /// Explicit creator veto of an approved proposal, only during bootstrap.
+    GovernanceVeto,
 }
 
 /// Current state block version.
-pub const CURRENT_BLOCK_VERSION: u8 = 7;
+// Version 9 binds explicit bootstrap vetoes and permanent creator-authority sunset.
+pub const CURRENT_BLOCK_VERSION: u8 = 9;
 
 pub const MAX_MERGE_INPUTS: usize = 256;
 pub const MAX_RELEASE_SOURCES: usize = 1024;
@@ -68,11 +71,12 @@ pub const MAX_MERGE_BLOCK_BYTES: u64 = MAX_BASE_BLOCK_BYTES + MAX_MERGE_INPUTS a
 
 /// A state block in BURST's block-lattice.
 ///
-/// Each block contains the full account state after the operation,
-/// enabling database pruning without losing balance information.
+/// Records account-chain balances and operation references. Holdings, provenance,
+/// pending receipts and shared protocol state are stored separately; an account
+/// head alone is not a complete recovery snapshot.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StateBlock {
-    /// Consensus format version. Version 7 binds actions to signing-device grants.
+    /// Consensus format version included in the authenticated block.
     pub version: u8,
 
     /// Active grant before this operation. Zero denotes an unenrolled account.
@@ -95,24 +99,20 @@ pub struct StateBlock {
     /// The account's consensus representative.
     pub representative: WalletAddress,
 
-    /// Cumulative BRN this account has committed on-chain (burned + staked),
-    /// monotonically increasing. Must be 0 on Open blocks.
-    ///
-    /// BRN itself never lives on the ledger — it is a computed function of
-    /// time (whitepaper: "it doesn't exist on the ledger until it's spent").
-    /// This field only records spending: the delta between consecutive blocks
-    /// is the burn/stake amount, and nodes validate every delta against the
-    /// independently computed BRN(w) at the block's timestamp.
-    pub brn_balance: u128,
+    /// Cumulative BRN committed by burns and stakes; zero on Open blocks.
+    /// Admission checks the increment against the operation and available BRN.
+    /// Accrual history and stake releases are accounted for separately. The
+    /// legacy serialized name `brn_balance` does not mean spendable BRN.
+    #[serde(rename = "brn_balance")]
+    pub brn_spent: u128,
 
     /// TRST balance after this block (transferable only).
     pub trst_balance: u128,
 
     /// Link field — context-dependent:
-    /// - For Burn: unused (zero)
-    /// - For Send: destination account's block hash (pairing)
+    /// - For Burn or Send: destination account public key
     /// - For Receive: the send block hash being received
-    /// - For Endorse: the target wallet's pending verification
+    /// - For Endorse: target account public key
     /// - For GovernanceVote: the proposal hash
     pub link: BlockHash,
 
@@ -120,7 +120,8 @@ pub struct StateBlock {
     /// certified checkpoint/selection context. All are covered by the signature.
     pub origin: TxHash,
 
-    /// The transaction contained in this block.
+    /// Operation-specific transaction field. Vote blocks encode their choice here
+    /// rather than a transaction digest.
     pub transaction: TxHash,
 
     /// For Endorse: the target's account head observed by the signer. This
@@ -131,12 +132,9 @@ pub struct StateBlock {
     /// Must be zero for other operations.
     pub target_head: BlockHash,
 
-    /// For Merge blocks: the token ids consumed by this merge, chosen by the
-    /// wallet (IMPLEMENTATION_DECISIONS 6.17b: "the merge tx itself lists the
-    /// inputs"). Lets wallets group tokens with similar expiries (whitepaper
-    /// §Merging) and makes the merger graph reconstructible from the chain.
-    /// Empty on non-Merge blocks; empty on a Merge block requests the node's
-    /// deterministic expiry-grouped auto-selection. At most 256 entries (6.12b).
+    /// Token IDs consumed by a merge, chosen by the wallet.
+    /// Empty on other operations; an empty Merge list requests deterministic
+    /// expiry-grouped selection. Limited to `MAX_MERGE_INPUTS` entries.
     #[serde(default)]
     pub merge_sources: Vec<TxHash>,
 
@@ -147,14 +145,15 @@ pub struct StateBlock {
     /// Block timestamp.
     pub timestamp: Timestamp,
 
-    /// Deterministic hash of the ProtocolParams this block was validated under.
-    /// Equivalent to Tezos's protocol hash in block headers.
+    /// Commitment to the protocol parameter set used for this operation.
+    /// This identifies parameter values, not executable protocol code.
     pub params_hash: BlockHash,
 
     /// Proof-of-work nonce (anti-spam).
     pub work: u64,
 
-    /// Signature by the account holder.
+    /// Signature over the block hash. Admission determines the authorized signer;
+    /// bootstrap epoch markers use the creator key rather than the target key.
     pub signature: Signature,
 
     /// The computed hash of this block.
@@ -167,7 +166,9 @@ pub struct StateBlock {
 }
 
 impl StateBlock {
-    /// Versioned structural rules, shared by admission and fork validation.
+    /// Check version, operation-specific fields and encoded size limits.
+    /// Does not authenticate the block or validate balances against ledger state.
+    /// The peer-envelope size bound is checked separately by `fits_p2p_message`.
     pub fn validate_format(&self) -> Result<(), &'static str> {
         if self.version != CURRENT_BLOCK_VERSION {
             return Err("unsupported block version");
@@ -181,6 +182,12 @@ impl StateBlock {
         {
             return Err("epoch marker cannot contain an account action");
         }
+        if self.block_type == BlockType::GovernanceVeto
+            && (self.previous.is_zero() || self.link.is_zero()
+                || !self.origin.is_zero() || !self.delegation_payload.is_empty())
+        {
+            return Err("invalid bootstrap governance veto");
+        }
         if self.block_type == BlockType::ChangeSigner
             && (self.previous.is_zero()
                 || self.link.is_zero()
@@ -192,7 +199,7 @@ impl StateBlock {
             return Err("invalid signing-device handoff");
         }
         if !self.delegation_payload.is_empty() {
-            use burst_governance::key_delegation::operation::DelegationOperation;
+            use burst_governance::signing_delegation::operation::DelegationOperation;
             let operation = DelegationOperation::decode(&self.delegation_payload)
                 .map_err(|_| "invalid delegation payload")?;
             if operation
@@ -252,7 +259,8 @@ impl StateBlock {
         Ok(())
     }
 
-    /// The grant carried by successors, derived from authenticated chain state.
+    /// Grant that a successor must carry. The caller must authenticate this block
+    /// before treating the returned identifier as authority.
     pub fn active_signing_grant(&self) -> BlockHash {
         if self.block_type == BlockType::ChangeSigner {
             self.hash
@@ -261,8 +269,10 @@ impl StateBlock {
         }
     }
 
-    /// Shared by live admission, branch replacement and confirmed replay.
-    /// The caller must authenticate the predecessor, not trust an RPC afterimage.
+    /// Check grant continuity against the supplied predecessor, plus unchanged
+    /// balances and representative for Epoch and ChangeSigner operations.
+    /// The caller must authenticate the predecessor and establish its ledger role;
+    /// matching the supplied hash alone does not prove it is the accepted head.
     pub fn validate_signing_grant(
         &self,
         previous: Option<&StateBlock>,
@@ -283,7 +293,7 @@ impl StateBlock {
         if self.block_type == BlockType::Epoch {
             let previous = previous.ok_or("epoch marker requires an open account")?;
             if self.representative != previous.representative
-                || self.brn_balance != previous.brn_balance
+                || self.brn_spent != previous.brn_spent
                 || self.trst_balance != previous.trst_balance
             {
                 return Err("epoch marker cannot change balances or representative");
@@ -292,7 +302,7 @@ impl StateBlock {
         if self.block_type == BlockType::ChangeSigner {
             let previous = previous.ok_or("signing handoff requires an open account")?;
             if self.representative != previous.representative
-                || self.brn_balance != previous.brn_balance
+                || self.brn_spent != previous.brn_spent
                 || self.trst_balance != previous.trst_balance
             {
                 return Err("signing handoff cannot change balances or representative");
@@ -301,8 +311,8 @@ impl StateBlock {
         Ok(())
     }
 
-    /// Known before constructing the next transaction (decisions 14.4/31.9).
-    /// The opening root is account-bound, never a shared all-zero root.
+    /// Work root known before choosing the next operation's contents.
+    /// Successors use their predecessor hash; openings use an account-bound hash.
     pub fn work_root(&self) -> BlockHash {
         Self::work_root_for(&self.account, self.previous)
     }
@@ -318,26 +328,26 @@ impl StateBlock {
 
     /// Reserve 40 bytes for the largest block-carrying envelope: bootstrap
     /// response tags, request ID, outer vector and per-block vector lengths.
-    /// Do not accept a local block that peers cannot receive (decision 23.15).
+    /// Local admission uses the same bound so accepted blocks fit peer messages.
     /// Structural size limits are enforced separately by `validate_format`.
     pub fn fits_p2p_message(&self) -> bool {
         bincode::serialized_size(self)
             .is_ok_and(|size| size <= (burst_types::MAX_P2P_MESSAGE_BYTES - 40) as u64)
     }
 
-    /// Explicit ledger dependencies. Address-valued links are not source
-    /// blocks; an endorsement or appeal's target_head is. Lifecycle certificates/rewards
-    /// still need their own commitments before those paths can be enabled.
-    pub fn dependencies(&self) -> impl Iterator<Item = BlockHash> + '_ {
-        let proposal = if self.delegation_payload.is_empty() {
+    /// Predecessor, operation source, target head and delegation dependency.
+    /// Address-valued links are not block dependencies. This extracts references;
+    /// it does not establish their existence or validate the referenced operations.
+    fn dependency_heads(&self) -> [Option<BlockHash>; 4] {
+        let delegation_dependency = if self.delegation_payload.is_empty() {
             None
         } else {
-            burst_governance::key_delegation::operation::DelegationOperation::decode(
+            burst_governance::signing_delegation::operation::DelegationOperation::decode(
                 &self.delegation_payload,
             )
             .ok()
             .and_then(|operation| match operation {
-                burst_governance::key_delegation::operation::DelegationOperation::Ballot {
+                burst_governance::signing_delegation::operation::DelegationOperation::Ballot {
                     grant_block,
                     ..
                 } => Some(grant_block),
@@ -353,6 +363,7 @@ impl StateBlock {
                 | BlockType::RejectReceive
                 | BlockType::GovernanceEndorse
                 | BlockType::GovernanceWithdraw
+                | BlockType::GovernanceVeto
                 | BlockType::GovernanceVote
                 | BlockType::GovernanceActivation
         ) && !self.link.is_zero();
@@ -360,42 +371,36 @@ impl StateBlock {
             (!self.previous.is_zero()).then_some(self.previous),
             source.then_some(self.link),
             (!self.target_head.is_zero()).then_some(self.target_head),
+            delegation_dependency,
         ]
-        .into_iter()
-        .flatten()
-        .chain(proposal)
-        .chain(self.release_sources.iter().copied())
+    }
+
+    /// Ledger references followed by returned-stake sources. May contain repeated
+    /// hashes across fields; this is not a deduplicated or validated dependency set.
+    pub fn dependencies(&self) -> impl Iterator<Item = BlockHash> + '_ {
+        self.dependency_heads().into_iter().flatten()
+            .chain(self.release_sources.iter().copied())
+    }
+
+    /// Retain traversal progress without copying the source list or repeatedly
+    /// decoding delegation metadata when a graph walk yields between edges.
+    pub fn into_dependencies(self) -> impl Iterator<Item = BlockHash> + Send {
+        self.dependency_heads().into_iter().flatten().chain(self.release_sources)
     }
 
     /// Compute the hash of this block from its contents.
     ///
-    /// Serializes all fields except `signature` and `work` in canonical order,
+    /// Serializes all fields except `hash`, `signature` and `work` in canonical order,
     /// then hashes with Blake2b-256.
     pub fn compute_hash(&self) -> BlockHash {
-        // Serialize fields in canonical order:
-        // 0. version (1 byte)
-        // 0b. payment_epoch (32 bytes)
-        // 1. block_type (u8 enum discriminant)
-        // 2. account (string bytes)
-        // 3. previous (32 bytes)
-        // 4. representative (string bytes)
-        // 5. brn_balance (16 bytes, big-endian u128)
-        // 6. trst_balance (16 bytes, big-endian u128)
-        // 7. link (32 bytes)
-        // 7b. origin (32 bytes)
-        // 8. transaction (32 bytes)
-        // 9. timestamp (8 bytes, big-endian u64)
-
         let mut buffer = Vec::with_capacity(256);
 
-        // 0. version
         buffer.push(self.version);
         buffer.extend_from_slice(self.signing_grant.as_bytes());
         buffer.extend_from_slice(self.payment_epoch.as_bytes());
         buffer.extend_from_slice(&(self.delegation_payload.len() as u64).to_be_bytes());
         buffer.extend_from_slice(&self.delegation_payload);
 
-        // 1. block_type as u8 discriminant
         let block_type_byte = match self.block_type {
             BlockType::Open => 0,
             BlockType::Burn => 1,
@@ -418,42 +423,31 @@ impl StateBlock {
             BlockType::GovernanceEndorse => 19,
             BlockType::GovernanceWithdraw => 20,
             BlockType::ChangeSigner => 21,
+            BlockType::GovernanceVeto => 22,
         };
         buffer.push(block_type_byte);
 
-        // 2. account (string bytes)
         buffer.extend_from_slice(self.account.as_str().as_bytes());
 
-        // 3. previous (32 bytes)
         buffer.extend_from_slice(self.previous.as_bytes());
 
-        // 4. representative (string bytes)
         buffer.extend_from_slice(self.representative.as_str().as_bytes());
 
-        // 5. brn_balance (16 bytes, big-endian u128)
-        buffer.extend_from_slice(&self.brn_balance.to_be_bytes());
+        buffer.extend_from_slice(&self.brn_spent.to_be_bytes());
 
-        // 6. trst_balance (16 bytes, big-endian u128)
         buffer.extend_from_slice(&self.trst_balance.to_be_bytes());
 
-        // 7. link (32 bytes)
         buffer.extend_from_slice(self.link.as_bytes());
 
-        // 7b. origin (32 bytes)
         buffer.extend_from_slice(self.origin.as_bytes());
 
-        // 8. transaction (32 bytes)
         buffer.extend_from_slice(self.transaction.as_bytes());
         buffer.extend_from_slice(self.target_head.as_bytes());
 
-        // 9. timestamp (8 bytes, big-endian u64)
         buffer.extend_from_slice(&self.timestamp.as_secs().to_be_bytes());
 
-        // 10. params_hash (32 bytes)
         buffer.extend_from_slice(self.params_hash.as_bytes());
 
-        // 11. merge_sources (u16 BE count + 32 bytes each) — committed into
-        // the hash so the merge input set is signed and consensus-final.
         buffer.extend_from_slice(&(self.merge_sources.len() as u16).to_be_bytes());
         for source in &self.merge_sources {
             buffer.extend_from_slice(source.as_bytes());
@@ -463,7 +457,6 @@ impl StateBlock {
             buffer.extend_from_slice(source.as_bytes());
         }
 
-        // Hash the concatenated bytes
         let hash_bytes = blake2b_256(&buffer);
         BlockHash::new(hash_bytes)
     }
@@ -474,7 +467,7 @@ impl StateBlock {
             && validate_work(&self.work_root(), self.work, min_difficulty)
     }
 
-    /// Whether this is the first block in an account chain.
+    /// Whether the operation tag is Open; does not validate chain position.
     pub fn is_open(&self) -> bool {
         self.block_type == BlockType::Open
     }
@@ -537,6 +530,24 @@ mod tests {
         assert_ne!(first, changed.compute_hash());
     }
 
+    #[test]
+    fn veto_is_bound_to_proposal_epoch_and_normal_account_signature() {
+        let mut veto = create_test_block();
+        veto.block_type = BlockType::GovernanceVeto;
+        veto.previous = BlockHash::new([2; 32]);
+        veto.link = BlockHash::new([3; 32]);
+        assert!(veto.validate_format().is_ok());
+        assert!(veto.dependency_heads().contains(&Some(veto.link)));
+        let hash = veto.compute_hash();
+        veto.link = BlockHash::new([4; 32]);
+        assert_ne!(hash, veto.compute_hash());
+        veto.link = BlockHash::ZERO;
+        assert!(veto.validate_format().is_err());
+        veto.link = BlockHash::new([3; 32]);
+        veto.version = CURRENT_BLOCK_VERSION - 1;
+        assert!(veto.validate_format().is_err());
+    }
+
     fn create_test_block() -> StateBlock {
         StateBlock {
             signing_grant: burst_types::BlockHash::ZERO,
@@ -551,7 +562,7 @@ mod tests {
             representative: WalletAddress::new(
                 "brst_2222222222222222222222222222222222222222222222222222222222222222222",
             ),
-            brn_balance: 1000,
+            brn_spent: 1000,
             trst_balance: 500,
             link: BlockHash::ZERO,
             origin: TxHash::ZERO,
@@ -791,7 +802,7 @@ mod tests {
 
     #[test]
     fn scoped_key_payload_is_signed_bounded_and_never_authorizes_spending() {
-        use burst_governance::key_delegation::{operation::DelegationOperation, Grant, KeyScope};
+        use burst_governance::signing_delegation::{operation::DelegationOperation, Grant, KeyScope};
         let owner = burst_crypto::keypair_from_seed(&[1; 32]);
         let recipient = burst_crypto::keypair_from_seed(&[2; 32]);
         let proposal = TxHash::new([3; 32]);
@@ -843,7 +854,6 @@ mod tests {
         let hash1 = block.compute_hash();
         let hash2 = block.compute_hash();
 
-        // Same block should produce same hash
         assert_eq!(hash1, hash2);
     }
 
@@ -852,13 +862,11 @@ mod tests {
         let block1 = create_test_block();
         let mut block2 = create_test_block();
 
-        // Change one field
-        block2.brn_balance = 2000;
+        block2.brn_spent = 2000;
 
         let hash1 = block1.compute_hash();
         let hash2 = block2.compute_hash();
 
-        // Different blocks should produce different hashes
         assert_ne!(hash1, hash2);
     }
 
@@ -899,14 +907,12 @@ mod tests {
         let block1 = create_test_block();
         let mut block2 = create_test_block();
 
-        // Change signature and work (should not affect hash)
         block2.signature = Signature([0xFFu8; 64]);
         block2.work = 999999;
 
         let hash1 = block1.compute_hash();
         let hash2 = block2.compute_hash();
 
-        // Hash should be the same since signature and work are excluded
         assert_eq!(hash1, hash2);
     }
 
@@ -914,20 +920,16 @@ mod tests {
     fn test_verify_work_with_valid_nonce() {
         let mut block = create_test_block();
 
-        // Compute hash first
         block.hash = block.compute_hash();
 
-        // Generate valid work for a low difficulty
         let min_difficulty = 1000;
         let generator = WorkGenerator;
         let work_nonce = generator
             .generate(&block.work_root(), min_difficulty)
             .unwrap();
 
-        // Set the work nonce
         block.work = work_nonce.0;
 
-        // Verify work should pass
         assert!(block.verify_work(min_difficulty));
     }
 
@@ -936,10 +938,8 @@ mod tests {
         let mut block = create_test_block();
         block.hash = block.compute_hash();
 
-        // Use a random nonce that likely won't meet high difficulty
         block.work = 12345;
 
-        // With very high difficulty, this should fail
         assert!(!block.verify_work(u64::MAX));
     }
 
@@ -949,7 +949,6 @@ mod tests {
         block.hash = block.compute_hash();
         block.work = 0;
 
-        // Zero difficulty should always pass
         assert!(block.verify_work(0));
     }
 }

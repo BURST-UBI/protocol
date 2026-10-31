@@ -55,7 +55,7 @@ async fn compact_installation_prepares_only_the_next_epoch_without_writes() {
             _ => &latest,
         };
         let (_dir, local) = cemented::sparse(current, &source);
-        records(&local, &source, &fixture, &bytes);
+        copy_installed_records(&local, &source, &fixture, &bytes);
         let key = format!("checkpoint_chain/v1/dev/{}/3", old.anchor().genesis_hash());
         local
             .meta_store()
@@ -72,13 +72,16 @@ async fn compact_installation_prepares_only_the_next_epoch_without_writes() {
         assert!(
             crate::checkpoint_store::chain::load(&local, NetworkId::Dev, &fixture.params).is_err()
         );
+        let (round_key, round_bytes) = crate::checkpoint_agreement::retention::empty_round_fixture(
+            current.anchor(), &address(0));
+        local.meta_store().put_meta(&round_key, &round_bytes).unwrap();
         let local = Arc::new(local);
         let before = local
             .tx_begin_write()
             .unwrap()
             .checkpoint_metadata(b"")
             .unwrap();
-        let service = Service::start(source.clone(), local.clone(), 0).await;
+        let service = WitnessService::start(source.clone(), local.clone(), 0).await;
         let metadata = installed::recover_metadata_from_peers(
             local.clone(),
             NetworkId::Dev,
@@ -96,6 +99,8 @@ async fn compact_installation_prepares_only_the_next_epoch_without_writes() {
             assert!(candidate.is_none());
         } else {
             let candidate = candidate.unwrap();
+            assert_eq!(candidate.reused_accepted_successor(), height == 2,
+                "only the exact immediate accepted successor may bypass replay");
             let expected = if height == 1 { &next } else { &latest };
             assert_eq!(candidate.anchor().hash(), expected.anchor().hash());
             compact::assert_same(candidate.state(), expected.state());
@@ -128,55 +133,70 @@ async fn compact_installation_rechecks_the_writer_after_preparation() {
     let old =
         authenticate(&source, &fixture.params, manifest.checkpoint.parent).into_continuation();
     let source = Arc::new(source);
-    for key in [
-        installed::BASE_KEY.to_string(),
-        burst_store::meta::PAYMENT_EPOCH_KEY.to_string(),
-        crate::confirmed_replay::installation::CUTOFF_KEY.to_string(),
-        format!(
-            "checkpoint_chain/v1/dev/{}/head",
-            old.anchor().genesis_hash()
-        ),
-        format!("checkpoint_chain/v1/dev/{}/2", old.anchor().genesis_hash()),
-    ] {
-        let (_dir, local) = cemented::sparse(&old, &source);
-        records(&local, &source, &fixture, &bytes);
-        let local = Arc::new(local);
-        let service = Service::start(source.clone(), local.clone(), 0).await;
-        let metadata = installed::recover_metadata_from_peers(
-            local.clone(),
-            NetworkId::Dev,
-            fixture.params.clone(),
-            service.registry.clone(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        let candidate = metadata
-            .prepare_next_from_peers(local.clone(), service.registry.clone())
+    for before_prepare in [false, true] {
+        for key in [
+            installed::BASE_KEY.to_string(),
+            burst_store::meta::PAYMENT_EPOCH_KEY.to_string(),
+            crate::confirmed_replay::installation::CUTOFF_KEY.to_string(),
+            format!(
+                "checkpoint_chain/v1/dev/{}/head",
+                old.anchor().genesis_hash()
+            ),
+            format!("checkpoint_chain/v1/dev/{}/2", old.anchor().genesis_hash()),
+        ] {
+            let (_dir, local) = cemented::sparse(&old, &source);
+            copy_installed_records(&local, &source, &fixture, &bytes);
+            let (round_key, round_bytes) = crate::checkpoint_agreement::retention::empty_round_fixture(
+                old.anchor(), &address(0));
+            local.meta_store().put_meta(&round_key, &round_bytes).unwrap();
+            let local = Arc::new(local);
+            let service = WitnessService::start(source.clone(), local.clone(), 0).await;
+            let metadata = installed::recover_metadata_from_peers(
+                local.clone(),
+                NetworkId::Dev,
+                fixture.params.clone(),
+                service.registry.clone(),
+            )
             .await
             .unwrap()
             .unwrap();
-        service.stop().await;
-        local.meta_store().put_meta(&key, &[99; 32]).unwrap();
-        let before = local
-            .tx_begin_write()
-            .unwrap()
-            .checkpoint_metadata(b"")
-            .unwrap();
-        assert!(
-            candidate
-                .verify_unchanged(&local.tx_begin_write().unwrap())
-                .is_err(),
-            "{key}"
-        );
-        assert!(candidate.commit(&local).is_err(), "{key}");
-        assert_eq!(
-            local
+            if before_prepare {
+                local.meta_store().put_meta(&key, &[99; 32]).unwrap();
+                let before = local.tx_begin_write().unwrap().checkpoint_metadata(b"").unwrap();
+                assert!(metadata.prepare_next_from_peers(local.clone(), service.registry.clone()).await.is_err(),
+                    "changed input before accepted reuse: {key}");
+                service.stop().await;
+                assert_eq!(local.tx_begin_write().unwrap().checkpoint_metadata(b"").unwrap(), before);
+                continue;
+            }
+            let candidate = metadata
+                .prepare_next_from_peers(local.clone(), service.registry.clone())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(candidate.reused_accepted_successor());
+            service.stop().await;
+            local.meta_store().put_meta(&key, &[99; 32]).unwrap();
+            let before = local
                 .tx_begin_write()
                 .unwrap()
                 .checkpoint_metadata(b"")
-                .unwrap(),
-            before
-        );
+                .unwrap();
+            assert!(
+                candidate
+                    .verify_unchanged(&local.tx_begin_write().unwrap())
+                    .is_err(),
+                "{key}"
+            );
+            assert!(candidate.commit(&local).is_err(), "{key}");
+            assert_eq!(
+                local
+                    .tx_begin_write()
+                    .unwrap()
+                    .checkpoint_metadata(b"")
+                    .unwrap(),
+                before
+            );
+        }
     }
 }

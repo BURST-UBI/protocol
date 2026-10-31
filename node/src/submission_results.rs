@@ -32,6 +32,8 @@ impl SubmissionResults {
         }
     }
 
+    /// Mark a payload pending. Retracking clears its result without refreshing
+    /// FIFO position. Eviction does not notify existing waiters.
     pub fn track(&self, payload: &[u8]) {
         let id = burst_crypto::blake2b_256(payload);
         let mut entries = self
@@ -49,6 +51,8 @@ impl SubmissionResults {
         entries.results.insert(id, None);
     }
 
+    /// Record Accepted, Fork or Rejected for a tracked payload and wake waiters.
+    /// Other outcomes and untracked payloads are ignored.
     pub fn complete(&self, payload: &[u8], result: ProcessResult) {
         if !matches!(
             result,
@@ -67,6 +71,8 @@ impl SubmissionResults {
         }
     }
 
+    /// Wait for a result, returning None if the entry is absent when checked.
+    /// The caller must impose a deadline: eviction alone does not wake this wait.
     pub async fn wait(&self, payload: &[u8]) -> Option<ProcessResult> {
         let id = burst_crypto::blake2b_256(payload);
         loop {

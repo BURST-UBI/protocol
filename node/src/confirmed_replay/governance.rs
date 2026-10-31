@@ -7,16 +7,16 @@ pub(super) fn supports(kind: &BlockType) -> bool {
             | BlockType::GovernanceEndorse
             | BlockType::GovernanceVote
             | BlockType::GovernanceWithdraw
+            | BlockType::GovernanceVeto
             | BlockType::Delegate
             | BlockType::RevokeDelegation
     )
 }
 
-/// Collect proposal support before opening its voting window. Withdrawal and
-/// support on independent chains are accepted only when their signed timestamps
-/// agree on support preceding withdrawal. On the proposer's own chain, signed
-/// ancestry orders equal timestamps; a later endorsement creates a causal cycle.
-/// Ambiguous cuts cannot prepare a ballot.
+/// Order each vote after its proposal's endorsements and withdrawal in this cut.
+/// Withdrawals depend on endorsements. Cross-account support must have an earlier
+/// timestamp; equal timestamps on one account rely on chain ancestry. The replay
+/// scheduler rejects any resulting cycle. This helper does not validate signatures.
 pub(super) fn dependencies(
     history: &ConfirmedHistory,
 ) -> Result<HashMap<BlockHash, Vec<BlockHash>>, ReplayError> {
@@ -26,21 +26,17 @@ pub(super) fn dependencies(
 pub(super) fn block_dependencies(
     blocks: &[StateBlock],
 ) -> Result<HashMap<BlockHash, Vec<BlockHash>>, ReplayError> {
-    collect_dependencies(
-        blocks
-            .iter()
-            .map(|block| Ok(std::borrow::Cow::Borrowed(block))),
-    )
+    collect_dependencies(|visit| blocks.iter().try_for_each(visit))
 }
 
 pub(super) fn streamed_dependencies(
     blocks: &super::blocks::source::Source<'_>,
 ) -> Result<HashMap<BlockHash, Vec<BlockHash>>, ReplayError> {
-    collect_dependencies(blocks.iter())
+    collect_dependencies(|visit| blocks.visit_unordered(visit))
 }
 
-fn collect_dependencies<'a>(
-    blocks: impl IntoIterator<Item = Result<std::borrow::Cow<'a, StateBlock>, burst_store::StoreError>>,
+fn collect_dependencies(
+    scan: impl FnOnce(&mut dyn FnMut(&StateBlock) -> Result<(), ReplayError>) -> Result<(), ReplayError>,
 ) -> Result<HashMap<BlockHash, Vec<BlockHash>>, ReplayError> {
     struct Entry {
         hash: BlockHash,
@@ -50,8 +46,7 @@ fn collect_dependencies<'a>(
     let mut endorsements: HashMap<BlockHash, Vec<Entry>> = HashMap::new();
     let mut withdrawals = HashMap::new();
     let mut ballots = Vec::new();
-    for block in blocks {
-        let block = block.map_err(|error| invalid(error.to_string()))?;
+    scan(&mut |block| {
         if block.block_type == BlockType::GovernanceEndorse {
             endorsements.entry(block.link).or_default().push(Entry {
                 hash: block.hash,
@@ -78,7 +73,8 @@ fn collect_dependencies<'a>(
                 },
             ));
         }
-    }
+        Ok(())
+    })?;
     let mut result = HashMap::new();
     let mut budget = MAX_LIFECYCLE_DEPENDENCIES;
     for (link, withdraw, block) in ballots {
@@ -114,7 +110,7 @@ impl ConfirmedReplay {
         through: Timestamp,
     ) -> Result<Option<u64>, ReplayError> {
         Ok(self
-            .governance_counting_cuts(through)?
+            .governance_counting_cuts()?
             .into_iter()
             .chain(self.governance_activation_cuts())
             .map(|(_, at)| at)
@@ -141,16 +137,36 @@ impl ConfirmedReplay {
         history: &impl LifecycleHistory,
         proposal: TxHash,
     ) -> Result<burst_governance::ballot::PreparedBallot, ReplayError> {
+        self.ballot_at_with_electorate(history, proposal, &std::cell::OnceCell::new())
+    }
+
+    /// Reuse the electorate only while the replay's verified account set is
+    /// unchanged. The supplied cell is not keyed by checkpoint or account state.
+    pub(crate) fn ballot_at_with_electorate(
+        &self,
+        history: &impl LifecycleHistory,
+        proposal: TxHash,
+        electorate: &std::cell::OnceCell<burst_governance::ballot::BallotElectorate<'static>>,
+    ) -> Result<burst_governance::ballot::PreparedBallot, ReplayError> {
         let state = self
             .governance
             .as_ref()
             .expect("requested governance candidate");
-        let voters: Vec<_> = self
-            .accounts
-            .values()
-            .filter(|account| account.state.is_verified())
-            .map(|account| account.address.clone())
-            .collect();
+        let mut projection = state.single_projection(&self.lifecycle_metadata);
+        self.ballot_at_with_projection(history, proposal, electorate, &mut projection)
+    }
+
+    fn ballot_at_with_projection<'a>(
+        &'a self,
+        history: &impl LifecycleHistory,
+        proposal: TxHash,
+        electorate: &'a std::cell::OnceCell<burst_governance::ballot::BallotElectorate<'static>>,
+        projection: &mut crate::governance_commit::key_delegation::ProjectionCut<'a>,
+    ) -> Result<burst_governance::ballot::PreparedBallot, ReplayError> {
+        let state = self
+            .governance
+            .as_ref()
+            .expect("requested governance candidate");
         let mut governance = state.governance.clone();
         let mut target = governance
             .get_proposal(&proposal)
@@ -184,17 +200,26 @@ impl ConfirmedReplay {
                 .get_proposal_mut(&proposal)
                 .expect("existing proposal") = target;
         }
-        let delegation = state
-            .delegation_at_cut(proposal, &voters, &self.lifecycle_metadata)
+        let electorate = electorate.get_or_init(|| {
+            let voters: Vec<_> = self
+                .accounts
+                .values()
+                .filter(|account| account.state.is_verified())
+                .map(|account| account.address.clone())
+                .collect();
+            burst_governance::ballot::BallotElectorate::new(voters)
+        });
+        let delegation = projection
+            .delegation(proposal, electorate.verified())
             .map_err(invalid)?;
         governance
-            .prepare_ballot_cut(
+            .prepare_ballot_with_electorate(
                 &proposal,
                 history.commitment(),
                 Timestamp::new(history.cutoff()),
                 &state.params,
                 &delegation,
-                &voters,
+                electorate,
             )
             .map_err(|error| invalid(error.to_string()))
     }
@@ -203,7 +228,7 @@ impl ConfirmedReplay {
         &mut self,
         history: &impl LifecycleHistory,
     ) -> Result<(Vec<TxHash>, BlockHash), ReplayError> {
-        let due = self.governance_counting_cuts(Timestamp::new(history.cutoff()))?;
+        let due = self.governance_counting_cuts()?;
         if due.iter().any(|(_, at)| *at < history.cutoff()) {
             return Err(invalid(
                 "history skipped an unclosed governance counting cut",
@@ -239,10 +264,23 @@ impl ConfirmedReplay {
         let mut encoded = b"BURST/governance-cut/v5\0".to_vec();
         encoded.extend_from_slice(panels.unwrap_or(BlockHash::ZERO).as_bytes());
         encoded.extend_from_slice(&(ids.len() as u64).to_be_bytes());
+        // Panels above fix eligibility; no ballot/activation mutates it until
+        // every result below is prepared. The cache cannot escape this window.
+        let electorate = std::cell::OnceCell::new();
+        let state = self
+            .governance
+            .as_ref()
+            .expect("validated governance replay");
+        let mut projection = if ids.len() > 1 {
+            state.projection_cut(&self.lifecycle_metadata)
+        } else {
+            state.single_projection(&self.lifecycle_metadata)
+        };
         let prepared: Vec<_> = ids
             .iter()
-            .map(|id| self.ballot_at(history, *id))
+            .map(|id| self.ballot_at_with_projection(history, *id, &electorate, &mut projection))
             .collect::<Result<_, _>>()?;
+        drop(projection);
         for ballot in &prepared {
             encoded.extend_from_slice(
                 ballot
@@ -337,7 +375,7 @@ impl ConfirmedReplay {
 
     pub(super) fn require_closed_governance(&self, cutoff: Timestamp) -> Result<(), ReplayError> {
         if self
-            .governance_counting_cuts(cutoff)?
+            .governance_counting_cuts()?
             .iter()
             .any(|(_, at)| *at <= cutoff.as_secs())
         {
@@ -377,10 +415,7 @@ impl ConfirmedReplay {
             .collect()
     }
 
-    fn governance_counting_cuts(
-        &self,
-        _through: Timestamp,
-    ) -> Result<Vec<(TxHash, u64)>, ReplayError> {
+    fn governance_counting_cuts(&self) -> Result<Vec<(TxHash, u64)>, ReplayError> {
         let Some(state) = self.governance.as_ref() else {
             return Ok(Vec::new());
         };

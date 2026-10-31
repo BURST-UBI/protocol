@@ -1,12 +1,13 @@
 use crate::{
     signed_client::{parse_address, parse_hash},
     transaction_builder::build_appeal_tx,
-    wallet::ProcessResult,
+    wallet::ProcessResponse,
     NodeClient, WalletError,
 };
 use burst_transactions::Transaction;
 use burst_types::{appeal::AppealReview, KeyPair, Timestamp, TxHash, WalletAddress};
 
+// Check response fields, not the certificate behind the reported checkpoint.
 fn validate(review: &AppealReview, target: &WalletAddress) -> Result<u128, WalletError> {
     if &parse_address(&review.account)? != target {
         return Err(WalletError::Other(
@@ -68,6 +69,8 @@ pub(crate) fn prepare(
 }
 
 impl NodeClient {
+    /// Fetch the node's appeal status and check target, stake and outcome references.
+    /// Does not verify a checkpoint certificate or submit an appeal.
     pub async fn appeal_review(&self, target: &WalletAddress) -> Result<AppealReview, WalletError> {
         parse_address(target.as_str())?;
         let review: AppealReview = serde_json::from_value(
@@ -82,12 +85,14 @@ impl NodeClient {
         Ok(review)
     }
 
+    /// Refetch status and require the reviewed outcome and stake to remain unchanged
+    /// before using the normal signed-submission path. Node admission still applies.
     pub async fn appeal_signed(
         &self,
         keys: &KeyPair,
         reviewed: &AppealReview,
         now: Timestamp,
-    ) -> Result<ProcessResult, WalletError> {
+    ) -> Result<ProcessResponse, WalletError> {
         let transaction = async {
             let target = parse_address(&reviewed.account)?;
             let current = self.appeal_review(&target).await?;

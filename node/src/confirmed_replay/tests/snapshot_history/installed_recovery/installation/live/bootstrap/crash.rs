@@ -113,7 +113,7 @@ async fn compact_live_bootstrap_crashes_preserve_atomic_state_and_closed_admissi
                 installed::read_stored_base_bytes(&local).unwrap().unwrap(),
                 bytes
             );
-            let service = Service::start(source.store.clone(), local.clone(), 0).await;
+            let service = WitnessService::start(source.store.clone(), local.clone(), 0).await;
             let recovered = installed::recover_metadata_from_peers(
                 local.clone(),
                 NetworkId::Dev,

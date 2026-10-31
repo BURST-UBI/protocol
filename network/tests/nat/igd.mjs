@@ -1,5 +1,8 @@
-// Isolated Linux IGD emulator: SOAP + actual DNAT/forwarding + finite leases.
-// Never run on a host router. All changes are inside the lab router namespace.
+// Minimal IGD fixture with SOAP, real iptables rules and timer-based leases.
+// Launch inside the lab router namespace. The Docker/environment checks below
+// do not verify namespace isolation. Test control endpoints are unauthenticated;
+// this is not a general UPnP service or a model of every physical router.
+// SIGTERM removes recorded mappings; abrupt termination cannot run that cleanup.
 import dgram from 'node:dgram';
 import http from 'node:http';
 import {execFileSync} from 'node:child_process';

@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Add an ISP/CGNAT layer outside the home router. No inbound mappings.
+# Requires the running single-router lab. Replaces its processes with separate
+# double-NAT data directories, adds an ISP layer and blocks unsolicited P2P.
+# Controller RPC remains explicitly reachable. Topology is restored only after
+# success; a failure leaves the container for diagnosis.
 set -euo pipefail
 test "${BURST_ISOLATED_NAT_LAB:-}" = yes
 source /lab/common.sh

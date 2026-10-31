@@ -1,23 +1,27 @@
-//! Democratic governance for the BURST protocol.
+//! Governance proposals, ballots and parameter changes.
 //!
-//! Four phases: Proposal → Voting → Cooldown → Activation.
-//! Voting is stored as Exploration for snapshot compatibility.
+//! Ordinary proposals collect endorsements, hold one vote, then enter cooldown
+//! before scheduled activation. Emergency proposals skip endorsements and cooldown.
+//! `Exploration` is the stored name of the voting phase; `Promotion` is retained
+//! for old records and is not a second ballot in the current lifecycle.
 //!
-//! Key principle: one wallet = one vote (not stake-weighted).
-//! All protocol parameters are governable, including the governance parameters themselves.
+//! Voting weight comes from eligible verified accounts. The node supplies the
+//! electorate, authenticates operations and applies certified outcomes. This crate
+//! manages proposal state and the supported parameter registry.
 
 pub mod ballot;
 pub mod content;
-pub mod delegation;
+pub mod vote_delegation;
 pub mod engine;
 pub mod error;
-pub mod key_delegation;
+pub mod signing_delegation;
 pub mod params;
-mod projection;
+mod proposal_preview;
 pub mod proposal;
+pub mod record_references;
 mod timing;
 
-pub use delegation::{DelegationEngine, DelegationScope, DelegationSnapshot, ScopedDelegation};
+pub use vote_delegation::{DelegationEngine, DelegationScope, DelegationSnapshot, ScopedDelegation};
 pub use engine::GovernanceEngine;
 pub use error::GovernanceError;
 pub use params::GovernableParam;

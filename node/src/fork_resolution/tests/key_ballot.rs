@@ -1,5 +1,5 @@
 use super::*;
-use burst_governance::key_delegation::{
+use burst_governance::signing_delegation::{
     operation::DelegationOperation, DelegatedBallot, Grant, KeyScope,
 };
 use burst_wallet_core::transaction_builder::*;
@@ -11,7 +11,7 @@ fn account(block: &StateBlock, height: u64) -> AccountState {
         block_count: height,
         representative: block.representative.clone(),
         payment_epoch: block.payment_epoch,
-        brn_balance: block.brn_balance,
+        brn_spent: block.brn_spent,
         trst_balance: block.trst_balance,
         release_sources: Vec::new(),
     }
@@ -85,11 +85,11 @@ async fn signed_network_key_ballot_fork_removes_dependency_and_recovers() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn signed_network_direct_ballot_fork_keeps_elected_choice_after_restart() {
+async fn signed_network_ballot_fork_keeps_elected_choice_after_restart() {
     journey(true, true).await;
 }
 
-async fn journey(wire: bool, direct_ballot: bool) {
+async fn journey(wire: bool, ballot_fork: bool) {
     for proposal_scope in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let mut config = crate::NodeConfig {
@@ -143,7 +143,7 @@ async fn journey(wire: bool, direct_ballot: bool) {
             tasks.push((
                 peer.shutdown.clone(),
                 tokio::spawn(async move {
-                    peer.start().await.unwrap();
+                    peer.start_with_services(burst_daemon::start_public_services).await.unwrap();
                     peer.stop().await.unwrap();
                 }),
             ));
@@ -160,7 +160,7 @@ async fn journey(wire: bool, direct_ballot: bool) {
         endorse.payment_epoch = store.meta_store().payment_epoch().unwrap();
         endorse.block_type = BlockType::Endorse;
         endorse.timestamp = now;
-        endorse.brn_balance = 1;
+        endorse.brn_spent = 1;
         endorse.link = BlockHash::new(keys[1].public.0);
         sign(&mut endorse, 0);
         let mut open = base.clone();
@@ -237,7 +237,7 @@ async fn journey(wire: bool, direct_ballot: bool) {
         winner.link = BlockHash::ZERO;
         winner.delegation_payload.clear();
         sign(&mut winner, 0);
-        if direct_ballot {
+        if ballot_fork {
             let nay = DelegatedBallot::sign(
                 &grant,
                 &secondary,
@@ -260,7 +260,7 @@ async fn journey(wire: bool, direct_ballot: bool) {
         tasks.push((
             shutdown,
             tokio::spawn(async move {
-                node.start().await.unwrap();
+                node.start_with_services(burst_daemon::start_public_services).await.unwrap();
                 node.stop().await.unwrap();
             }),
         ));
@@ -304,7 +304,7 @@ async fn journey(wire: bool, direct_ballot: bool) {
                     until(|| store.block_store().exists(&block.hash).unwrap()).await;
                 }
             }
-            if direct_ballot {
+            if ballot_fork {
                 authorize(&elections, &registries, &grant_block, &owner, 10_003).await;
                 for store in &stores {
                     until(|| {
@@ -342,13 +342,13 @@ async fn journey(wire: bool, direct_ballot: bool) {
                         .get_account(&winner.account)
                         .unwrap()
                         .confirmation_height
-                        == if direct_ballot { 2 } else { 4 }
+                        == if ballot_fork { 2 } else { 4 }
                 })
                 .await;
                 assert!(!store.block_store().exists(&ballot_block.hash).unwrap());
                 assert_eq!(
                     store.account_store().get_account(&recipient).unwrap().head,
-                    if direct_ballot {
+                    if ballot_fork {
                         winner.hash
                     } else {
                         open.hash
@@ -360,7 +360,7 @@ async fn journey(wire: bool, direct_ballot: bool) {
                         &owner,
                         grant.id().unwrap()
                     ),
-                    direct_ballot.then_some(burst_transactions::governance::GovernanceVote::Nay)
+                    ballot_fork.then_some(burst_transactions::governance::GovernanceVote::Nay)
                 );
             }
         })
@@ -383,12 +383,12 @@ async fn journey(wire: bool, direct_ballot: bool) {
             let governance = restarted.governance.clone();
             let shutdown = restarted.shutdown.clone();
             let task = tokio::spawn(async move {
-                restarted.start().await.unwrap();
+                restarted.start_with_services(burst_daemon::start_public_services).await.unwrap();
                 restarted.stop().await.unwrap();
             });
             let result = tokio::time::timeout(Duration::from_secs(30), async {
-                if direct_ballot {
-                    use burst_governance::key_delegation::{scoped, Revocation};
+                if ballot_fork {
+                    use burst_governance::signing_delegation::{scoped, Revocation};
                     let revoke = burst_wallet_core::delegation::build_key_operation(
                         &account(&grant_block, 4),
                         &keys[0],

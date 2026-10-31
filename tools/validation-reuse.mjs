@@ -41,19 +41,30 @@ export async function begin(plan) {
   return { version: 1, plan, cwd: process.cwd(), inputs: await inventory(plan.inputs), started: new Date().toISOString() };
 }
 
-export async function finish(start, result) {
+export async function finish(start, result, recordInvalidated = false) {
   requireValue(start.version === 1 && start.cwd === process.cwd(), 'Use the original working directory');
-  requireValue(equal(start.inputs, await inventory(start.plan.inputs)), 'Inputs changed during validation');
+  const observedInputs = await inventory(start.plan.inputs);
+  const inputsChanged = !equal(start.inputs, observedInputs);
+  requireValue(!inputsChanged || recordInvalidated, 'Inputs changed during validation');
   requireValue(['pass', 'fail', 'incomplete'].includes(result.outcome), 'Explicit outcome is required');
   requireValue(Number.isInteger(result.exitCode), 'Terminal exit code is required');
   requireValue(Number.isInteger(result.assertions) && result.assertions >= 0, 'Executed assertion count is required');
   requireValue(typeof result.review === 'string' && result.review.trim(), 'Evidence review is required');
   requireValue(result.outcome !== 'pass' || (result.exitCode === 0 && result.assertions > 0),
     'A pass requires exit zero and executed assertions');
-  return { ...start, result, evidence: await inventory(result.logs), finished: new Date().toISOString() };
+  if (recordInvalidated) {
+    requireValue(inputsChanged, 'Use ordinary finish when inputs did not change');
+    requireValue(result.outcome !== 'pass', 'Invalidated inputs can never qualify a pass');
+    requireValue(typeof result.inputMutationReason === 'string' && result.inputMutationReason.trim(),
+      'Explicit inputMutationReason is required to preserve an invalidated attempt');
+  }
+  return { ...start, result, ...(recordInvalidated ? {
+    invalidation: { reason: result.inputMutationReason, observedInputs },
+  } : {}), evidence: await inventory(result.logs), finished: new Date().toISOString() };
 }
 
 export async function check(plan, receipt) {
+  requireValue(!receipt.invalidation, 'Inputs changed during validation; invalidated attempt cannot qualify reuse');
   const current = await begin(plan);
   requireValue(receipt.version === 1 && receipt.cwd === current.cwd && equal(receipt.plan, plan),
     'Scope, command, context or working directory changed');
@@ -141,6 +152,7 @@ async function main(args) {
   if (mode === 'begin' && paths.length === 2) value = await begin(await json(paths[0]));
   else if (mode === 'prepare' && paths.length === 3) value = await prepare(await json(paths[0]), await json(paths[1]));
   else if (mode === 'finish' && paths.length === 3) value = await finish(await json(paths[0]), await json(paths[1]));
+  else if (mode === 'finish-invalidated' && paths.length === 3) value = await finish(await json(paths[0]), await json(paths[1]), true);
   else if (mode === 'check' && paths.length === 2) {
     console.log(JSON.stringify(await check(await json(paths[0]), await json(paths[1])), null, 2));
     return;
@@ -149,7 +161,7 @@ async function main(args) {
     console.log(JSON.stringify(results, null, 2));
     process.exitCode = results.every(stage => stage.status === 'reuse') ? 0 : 1;
     return;
-  } else throw new Error('Usage: begin PLAN START | prepare PLAN PRIOR_RECEIPT START | finish START RESULT RECEIPT | check PLAN RECEIPT | audit STAGES');
+  } else throw new Error('Usage: begin PLAN START | prepare PLAN PRIOR_RECEIPT START | finish PLAN_START RESULT RECEIPT | finish-invalidated PLAN_START FAILED_RESULT RECEIPT | check PLAN RECEIPT | audit STAGES');
   await writeFile(paths.at(-1), `${JSON.stringify(value, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
 }
 

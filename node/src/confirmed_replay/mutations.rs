@@ -22,7 +22,9 @@ pub(super) fn mint_rows(
     ]
 }
 
-/// Private transition writes, not authenticated history or rollback authority.
+/// Net row changes for one private transition, not authenticated history or
+/// rollback authority. Limits count 65,536 rows and 64 MiB of key/value payload;
+/// map overhead, duplicate key storage and temporary allocations are excluded.
 #[derive(Clone, Default)]
 pub(crate) struct Mutations {
     rows: BTreeMap<(UndoTable, Vec<u8>), UndoChange>,
@@ -58,6 +60,10 @@ impl Mutations {
         Ok(())
     }
 
+    /// Preserve the first before-image and latest after-image for a retained row.
+    /// Reverting to the initial value removes the row, including its continuity
+    /// check. This validates supplied changes, not the database baseline. An
+    /// error leaves this recorder unchanged.
     pub(crate) fn record(
         &mut self,
         table: UndoTable,

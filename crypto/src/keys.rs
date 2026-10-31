@@ -29,7 +29,7 @@ pub fn keypair_from_private(private: PrivateKey) -> KeyPair {
 
 /// Derive a key pair from a 32-byte seed (deterministic).
 ///
-/// This is useful for deriving keys from a BIP39 mnemonic + BIP44 derivation path.
+/// The caller owns seed derivation; this function performs no HD derivation.
 pub fn keypair_from_seed(seed: &[u8; 32]) -> KeyPair {
     let signing_key = SigningKey::from_bytes(seed);
     let verifying_key = signing_key.verifying_key();
@@ -37,6 +37,12 @@ pub fn keypair_from_seed(seed: &[u8; 32]) -> KeyPair {
         public: PublicKey(verifying_key.to_bytes()),
         private: PrivateKey(signing_key.to_bytes()),
     }
+}
+
+/// Derive an account signing key using Nano's seed/index construction.
+/// The index is exactly four big-endian bytes; this is not HD path derivation.
+pub fn derive_account_key(seed: &[u8; 32], index: u32) -> PrivateKey {
+    PrivateKey(crate::blake2b_256_multi(&[seed, &index.to_be_bytes()]))
 }
 
 /// Convert an Ed25519 private key (seed) to X25519 scalar bytes.
@@ -64,6 +70,19 @@ pub fn ed25519_public_to_x25519(ed25519_public: &[u8; 32]) -> Option<[u8; 32]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_key_matches_rsnano_vector() {
+        // rsnano 414dd884: types/src/lib.rs::test_deterministic_key.
+        let mut seed = [0; 32];
+        seed[31] = 1;
+        assert_eq!(derive_account_key(&seed, 3).0, [
+            0x89,0xa5,0x18,0xe3,0xb7,0x0a,0x08,0x43,0xde,0x84,0x70,0xf8,0x7f,0xf8,0x51,0xf9,
+            0xc9,0x80,0xb1,0xb2,0x80,0x22,0x67,0xa0,0x5a,0x08,0x96,0x77,0xb8,0xfa,0x19,0x26,
+        ]);
+        assert_ne!(derive_account_key(&seed, 0).0, derive_account_key(&seed, 1).0);
+        assert_ne!(derive_account_key(&seed, 1).0, derive_account_key(&seed, 256).0);
+    }
 
     #[test]
     fn generate_produces_valid_keypair() {

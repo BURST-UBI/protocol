@@ -1,16 +1,28 @@
 //! BRN balance computation (client-side).
 
 use crate::WalletError;
-use burst_brn::state::RateHistory;
+use burst_brn::state::{BrnWalletState, RateHistory};
 use burst_types::Timestamp;
+
+/// Calculate available BRN from rate history and the supplied wallet state.
+/// Includes pauses, burns and locked stakes, but does not deduct returned stakes
+/// awaiting acknowledgment. Use `spendable_balance_checked` for that deduction.
+pub fn compute_balance_from_state(
+    state: &BrnWalletState,
+    now: Timestamp,
+    rates: &RateHistory,
+) -> Result<u128, WalletError> {
+    state.available_balance_checked(rates, now)
+        .ok_or_else(|| WalletError::Other("invalid BRN accounting or accrual overflow".into()))
+}
 
 /// Compute BRN balance using the full rate history (piecewise integration).
 ///
 /// `BRN = Σ(rate_i × duration_i) − total_burned − total_staked`
 ///
-/// This is the correct computation that accounts for governance rate changes.
+/// Assumes uninterrupted accrual; excludes deactivation and pause history.
 /// Accrual overflow is an error; deductions beyond accrual display as zero.
-pub fn compute_balance_with_history(
+pub fn estimate_balance_with_history(
     verified_at: Timestamp,
     now: Timestamp,
     rate_history: &RateHistory,
@@ -30,17 +42,18 @@ pub fn compute_balance_with_history(
 /// `BRN = rate × (now − verified_at) − total_burned − total_staked`
 ///
 /// This is a simplified offline estimate that assumes a constant rate.
-/// For correct results across governance rate changes, use
-/// `compute_balance_with_history` instead.
+/// Both estimates assume uninterrupted accrual. Use `compute_balance_from_state`
+/// with complete economic state to include pauses and stopped accrual. Neither
+/// helper authenticates that state or deducts unacknowledged stake releases.
 /// Accrual overflow is an error, not a saturated estimate.
-pub fn compute_display_balance(
+pub fn estimate_balance(
     verified_at: Timestamp,
     now: Timestamp,
     rate: u128,
     total_burned: u128,
     total_staked: u128,
 ) -> Result<u128, WalletError> {
-    let elapsed = verified_at.elapsed_since(now) as u128;
+    let elapsed = verified_at.elapsed_secs_until(now) as u128;
     let accrued = rate
         .checked_mul(elapsed)
         .ok_or_else(|| WalletError::Other("BRN accrual overflow".into()))?;
@@ -54,50 +67,64 @@ mod tests {
     use super::*;
 
     #[test]
-    fn display_balance_basic_accrual() {
+    fn complete_state_preserves_pauses_stops_and_accounting_errors() {
+        let mut rates = RateHistory::new(10, Timestamp::EPOCH);
+        rates.apply_rate_change(20, Timestamp::new(50)).unwrap();
+        let mut state = BrnWalletState::new(Timestamp::EPOCH);
+        state.stop_accrual(Timestamp::new(20));
+        assert_eq!(compute_balance_from_state(&state, Timestamp::new(100), &rates).unwrap(), 200);
+        state.resume_accrual(Timestamp::new(80));
+        assert_eq!(compute_balance_from_state(&state, Timestamp::new(100), &rates).unwrap(), 600);
+        state.total_burned = 100;
+        state.total_staked = 200;
+        assert_eq!(compute_balance_from_state(&state, Timestamp::new(100), &rates).unwrap(), 300);
+        state.total_burned = 601;
+        assert!(compute_balance_from_state(&state, Timestamp::new(100), &rates).is_err());
+    }
+
+    #[test]
+    fn estimate_balance_basic_accrual() {
         let verified = Timestamp::new(1000);
         let now = Timestamp::new(2000);
-        let balance = compute_display_balance(verified, now, 10, 0, 0).unwrap();
+        let balance = estimate_balance(verified, now, 10, 0, 0).unwrap();
         assert_eq!(balance, 10_000);
     }
 
     #[test]
-    fn display_balance_subtracts_burned_and_staked() {
+    fn estimate_balance_subtracts_burned_and_staked() {
         let verified = Timestamp::new(0);
         let now = Timestamp::new(100);
-        let balance = compute_display_balance(verified, now, 10, 300, 200).unwrap();
+        let balance = estimate_balance(verified, now, 10, 300, 200).unwrap();
         assert_eq!(balance, 500); // 1000 - 300 - 200
     }
 
     #[test]
-    fn display_balance_saturates_when_deductions_exceed_accrual() {
+    fn estimate_balance_saturates_when_deductions_exceed_accrual() {
         let verified = Timestamp::new(0);
         let now = Timestamp::new(10);
-        let balance = compute_display_balance(verified, now, 1, 50, 50).unwrap();
+        let balance = estimate_balance(verified, now, 1, 50, 50).unwrap();
         assert_eq!(balance, 0); // 10 - 50 saturates to 0
     }
 
     #[test]
-    fn display_balance_zero_elapsed() {
+    fn estimate_balance_zero_elapsed() {
         let t = Timestamp::new(5000);
-        let balance = compute_display_balance(t, t, 100, 0, 0).unwrap();
+        let balance = estimate_balance(t, t, 100, 0, 0).unwrap();
         assert_eq!(balance, 0);
     }
 
     #[test]
-    fn display_balance_direction_regression() {
-        // This is the regression test for the bug we fixed:
-        // verified_at should be BEFORE now, and elapsed = now - verified_at.
+    fn estimate_balance_direction_regression() {
         let verified = Timestamp::new(1000);
         let now = Timestamp::new(5000);
-        let balance = compute_display_balance(verified, now, 1, 0, 0).unwrap();
+        let balance = estimate_balance(verified, now, 1, 0, 0).unwrap();
         assert_eq!(balance, 4000, "elapsed should be now - verified_at = 4000");
     }
 
     #[test]
     fn history_balance_single_rate() {
         let history = RateHistory::new(100, Timestamp::new(0));
-        let balance = compute_balance_with_history(
+        let balance = estimate_balance_with_history(
             Timestamp::new(1000),
             Timestamp::new(2000),
             &history,
@@ -113,7 +140,7 @@ mod tests {
         history
             .apply_rate_change(200, Timestamp::new(5000))
             .unwrap();
-        let balance = compute_balance_with_history(
+        let balance = estimate_balance_with_history(
             Timestamp::new(1000),
             Timestamp::new(8000),
             &history,
@@ -127,7 +154,7 @@ mod tests {
     #[test]
     fn history_balance_with_deductions() {
         let history = RateHistory::new(10, Timestamp::new(0));
-        let balance = compute_balance_with_history(
+        let balance = estimate_balance_with_history(
             Timestamp::new(0),
             Timestamp::new(100),
             &history,
@@ -141,7 +168,7 @@ mod tests {
     fn history_balance_saturates_on_large_deductions() {
         let history = RateHistory::new(1, Timestamp::new(0));
         let balance =
-            compute_balance_with_history(Timestamp::new(0), Timestamp::new(10), &history, 100, 100);
+            estimate_balance_with_history(Timestamp::new(0), Timestamp::new(10), &history, 100, 100);
         assert_eq!(balance.unwrap(), 0);
     }
 
@@ -150,10 +177,10 @@ mod tests {
         let start = Timestamp::EPOCH;
         let now = Timestamp::new(2);
         let history = RateHistory::new(u128::MAX, start);
-        assert!(compute_balance_with_history(start, now, &history, 0, 0).is_err());
-        assert!(compute_display_balance(start, now, u128::MAX, 0, 0).is_err());
+        assert!(estimate_balance_with_history(start, now, &history, 0, 0).is_err());
+        assert!(estimate_balance(start, now, u128::MAX, 0, 0).is_err());
         assert_eq!(
-            compute_display_balance(start, Timestamp::new(1), u128::MAX, 0, 0).unwrap(),
+            estimate_balance(start, Timestamp::new(1), u128::MAX, 0, 0).unwrap(),
             u128::MAX
         );
     }

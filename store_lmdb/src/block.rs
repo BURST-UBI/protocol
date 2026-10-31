@@ -18,28 +18,29 @@ use crate::write_batch::LmdbReadTransaction;
 use crate::LmdbError;
 
 pub(crate) mod inventory;
-pub use inventory::IndexedBlock;
+pub use inventory::{physical_inventory_bytes, BlockPosition, IndexedBlock, IndexedBlockCursor, IndexedBlockWindow, InventoryPage};
 
 pub struct LmdbBlockStore {
     pub(crate) env: SharedEnv,
     pub(crate) blocks_db: Database<Bytes, Bytes>,
     /// Forward height index: `(account_bytes ++ height_be_bytes)` → `block_hash_bytes`.
     pub(crate) height_db: Database<Bytes, Bytes>,
-    /// Reverse height index: `block_hash` → `height_be_bytes`.
+    /// Reverse height index: `block_hash` → `account_bytes ++ height_be_bytes`.
     pub(crate) block_height_db: Database<Bytes, Bytes>,
 }
 
 /// Build the composite key `account_bytes ++ height_be` used in `height_db`.
 fn height_key(account: &WalletAddress, height: u64) -> Vec<u8> {
-    let acct = account.as_str().as_bytes();
-    let mut key = Vec::with_capacity(acct.len() + 8);
-    key.extend_from_slice(acct);
+    let account_bytes = account.as_str().as_bytes();
+    let mut key = Vec::with_capacity(account_bytes.len() + 8);
+    key.extend_from_slice(account_bytes);
     key.extend_from_slice(&height.to_be_bytes());
     key
 }
 
-/// Find the next height for an account by scanning for the last entry in
-/// `height_db` whose key starts with `account_bytes`.
+/// Read the last indexed height with a reverse range seek and add one.
+/// This helper assumes a valid account prefix and a height below u64::MAX;
+/// an empty range or cursor error currently falls back to height one.
 fn next_height_rw(
     height_db: &Database<Bytes, Bytes>,
     txn: &heed::RwTxn<'_>,
@@ -64,7 +65,9 @@ fn next_height_rw(
     }
 }
 
-/// Increment a byte string to form the exclusive upper bound for a prefix scan.
+/// Increment the last non-FF byte, zeroing trailing FF bytes. Callers using the
+/// result as a prefix bound must exclude empty and all-FF prefixes: those have
+/// no finite successor, and this helper does not represent an unbounded range.
 pub(crate) fn increment_prefix(prefix: &mut Vec<u8>) {
     for byte in prefix.iter_mut().rev() {
         if *byte < 0xFF {
@@ -139,19 +142,31 @@ impl LmdbBlockStore {
         Ok(Some(BlockHash::new(hash)))
     }
 
-    /// Read a block within a caller-owned read transaction. The composable
-    /// counterpart to [`BlockStore::get_block`] — lets callers read several
-    /// stores under one consistent snapshot (rsnano txn-threading model).
+    /// Copy block bytes from the caller's read snapshot without a size limit.
+    /// Use `get_block_txn_bounded` when the caller has a byte budget.
     pub fn get_block_txn(
         &self,
         rtxn: &LmdbReadTransaction<'_>,
         hash: &BlockHash,
+    ) -> Result<Vec<u8>, StoreError> {
+        self.get_block_txn_bounded(rtxn, hash, usize::MAX)
+    }
+
+    /// Check the byte budget before allocating a copy from the pinned view.
+    pub fn get_block_txn_bounded(
+        &self,
+        rtxn: &LmdbReadTransaction<'_>,
+        hash: &BlockHash,
+        max_bytes: usize,
     ) -> Result<Vec<u8>, StoreError> {
         let val = self
             .blocks_db
             .get(&rtxn.txn, hash.as_bytes().as_slice())
             .map_err(LmdbError::from)?
             .ok_or_else(|| LmdbError::NotFound(format!("block {:?}", hash)))?;
+        if val.len() > max_bytes {
+            return Err(StoreError::Corruption("block exceeds pinned read byte budget".into()));
+        }
         Ok(val.to_vec())
     }
 
@@ -180,6 +195,8 @@ impl BlockStore for LmdbBlockStore {
         Ok(())
     }
 
+    /// Append at the next indexed height and commit bytes and both indexes
+    /// together. The caller must validate the block and avoid duplicate inserts.
     fn put_block_with_account(
         &self,
         hash: &BlockHash,
@@ -193,13 +210,13 @@ impl BlockStore for LmdbBlockStore {
 
         let height = next_height_rw(&self.height_db, &wtxn, account)?;
 
-        let hk = height_key(account, height);
+        let index_key = height_key(account, height);
         self.height_db
-            .put(&mut wtxn, &hk, hash.as_bytes())
+            .put(&mut wtxn, &index_key, hash.as_bytes())
             .map_err(LmdbError::from)?;
 
         self.block_height_db
-            .put(&mut wtxn, hash.as_bytes(), &hk)
+            .put(&mut wtxn, hash.as_bytes(), &index_key)
             .map_err(LmdbError::from)?;
 
         wtxn.commit().map_err(LmdbError::from)?;
@@ -223,14 +240,14 @@ impl BlockStore for LmdbBlockStore {
             .get(&wtxn, hash.as_bytes().as_slice())
             .map_err(LmdbError::from)?
         {
-            let hk = height_key_bytes.to_vec();
+            let index_key = height_key_bytes.to_vec();
             // A replacement may already own this height. Removing an old
             // block must not erase the replacement's forward index.
-            if self.height_db.get(&wtxn, &hk).map_err(LmdbError::from)?
+            if self.height_db.get(&wtxn, &index_key).map_err(LmdbError::from)?
                 == Some(hash.as_bytes().as_slice())
             {
                 self.height_db
-                    .delete(&mut wtxn, &hk)
+                    .delete(&mut wtxn, &index_key)
                     .map_err(LmdbError::from)?;
             }
             self.block_height_db
@@ -273,6 +290,8 @@ impl BlockStore for LmdbBlockStore {
         Ok(count)
     }
 
+    /// Read the forward index only. `block_at_height_txn` also checks its
+    /// agreement with the reverse index. Neither method verifies block content.
     fn block_at_height(
         &self,
         account: &WalletAddress,
@@ -291,6 +310,8 @@ impl BlockStore for LmdbBlockStore {
         }
     }
 
+    /// Decode the reverse entry's height suffix without checking the forward
+    /// index. Use `height_of_block_txn` for that consistency check.
     fn height_of_block(&self, block_hash: &BlockHash) -> Result<Option<u64>, StoreError> {
         let rtxn = self.env.read_txn().map_err(LmdbError::from)?;
         match self

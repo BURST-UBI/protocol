@@ -1,5 +1,5 @@
 use super::*;
-use crate::{governance_commit::CandidateGovernance, ledger_bridge::EconomicResult};
+use crate::{governance_commit::CandidateGovernance, block_economics::EconomicResult};
 use burst_governance::content::{EncodedContent, MAX_AMENDMENT_CHARS};
 use burst_store::{account::AccountStore, block::BlockStore, meta::MetaStore, BrnStore};
 use burst_store_lmdb::LmdbStore;
@@ -27,7 +27,7 @@ fn proposal() -> (StateBlock, EncodedContent) {
         head: genesis.hash,
         block_count: 1,
         representative: genesis.account,
-        brn_balance: 0,
+        brn_spent: 0,
         trst_balance: 0,
         release_sources: Vec::new(),
     };
@@ -80,7 +80,7 @@ fn apply(
 ) -> Result<(), String> {
     let mut brn = burst_brn::BrnEngine::new();
     let mut trst = burst_trst::TrstEngine::new();
-    let effect = crate::ledger_bridge::process_block_economics(
+    let effect = crate::block_economics::process_block_economics(
         block,
         &mut brn,
         &mut trst,

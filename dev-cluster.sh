@@ -12,8 +12,7 @@ set -euo pipefail
 #
 # Requires: cargo, curl, jq
 
-# ── Configuration ─────────────────────────────────────────────────────
-
+# Configuration
 NUM_NODES=3
 SKIP_BUILD=false
 BINARY="./target/release/burst-daemon"
@@ -26,8 +25,7 @@ LOG_LEVEL="info"
 STARTUP_WAIT=4
 SYNC_WAIT=3
 
-# ── Parse arguments ──────────────────────────────────────────────────
-
+# Parse arguments
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --no-build)  SKIP_BUILD=true; shift ;;
@@ -50,8 +48,7 @@ done
 RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/burst-dev-cluster.XXXXXXXX")
 DATA_PREFIX="$RUN_DIR/node"
 
-# ── Colors ───────────────────────────────────────────────────────────
-
+# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
@@ -65,8 +62,7 @@ fail()  { echo -e "${RED}[ fail ]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[ warn ]${NC} $*"; }
 header(){ echo -e "\n${BOLD}═══ $* ═══${NC}"; }
 
-# ── Cleanup on exit ──────────────────────────────────────────────────
-
+# Cleanup on exit
 PIDS=()
 
 cleanup() {
@@ -88,8 +84,7 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# ── Helpers ──────────────────────────────────────────────────────────
-
+# Helpers
 rpc() {
     local port="$1"
     local payload="$2"
@@ -118,8 +113,7 @@ wait_for_rpc() {
     return 1
 }
 
-# ── Step 1: Build ────────────────────────────────────────────────────
-
+# Step 1: Build
 header "Build"
 
 if [ "$SKIP_BUILD" = true ]; then
@@ -134,8 +128,7 @@ else
     ok "Build complete"
 fi
 
-# ── Step 2: Start nodes ─────────────────────────────────────────────
-
+# Step 2: Start nodes
 header "Starting ${NUM_NODES}-node dev cluster"
 
 for i in $(seq 1 "$NUM_NODES"); do
@@ -177,8 +170,7 @@ for i in $(seq 1 "$NUM_NODES"); do
     info "Node $i: P2P=$p2p_port  RPC=$rpc_port  WS=$ws_port  PID=${PIDS[-1]}"
 done
 
-# ── Step 3: Wait for nodes to come online ────────────────────────────
-
+# Step 3: Wait for nodes to come online
 header "Waiting for nodes"
 
 ALL_UP=true
@@ -201,8 +193,7 @@ fi
 info "Waiting ${SYNC_WAIT}s for peering..."
 sleep "$SYNC_WAIT"
 
-# ── Step 4: Check peering ────────────────────────────────────────────
-
+# Step 4: Check peering
 header "Peer connectivity"
 
 PEERING_FAILURES=0
@@ -224,8 +215,7 @@ for i in $(seq 1 "$NUM_NODES"); do
     fi
 done
 
-# ── Step 5: Smoke tests ─────────────────────────────────────────────
-
+# Step 5: Smoke tests
 header "Smoke tests"
 
 SEED_RPC="$BASE_RPC_PORT"
@@ -376,8 +366,7 @@ else
     test_fail "representatives failed: $REPS"
 fi
 
-# ── Results ──────────────────────────────────────────────────────────
-
+# Results
 header "Results"
 
 echo ""
@@ -397,8 +386,7 @@ if [ "$SMOKE_ONLY" = true ]; then
     exit $?
 fi
 
-# ── Interactive mode ─────────────────────────────────────────────────
-
+# Interactive mode
 header "Cluster is running"
 
 echo ""

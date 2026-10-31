@@ -94,11 +94,11 @@ fn restore_chain(
 fn merged_payments(fixture: &mut Fixture) {
     let tainted = fixture.push(20, BlockType::Burn, CUTOFF + 61, |block| {
         block.link = destination(8);
-        block.brn_balance += 10_000;
+        block.brn_spent += 10_000;
     });
     let clean = fixture.push(0, BlockType::Burn, CUTOFF + 61, |block| {
         block.link = destination(8);
-        block.brn_balance += 10_000;
+        block.brn_spent += 10_000;
     });
     let first = fixture.push(8, BlockType::Receive, CUTOFF + 62, |block| {
         block.link = tainted;

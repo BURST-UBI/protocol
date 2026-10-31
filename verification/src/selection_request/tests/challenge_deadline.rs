@@ -1,3 +1,5 @@
+//! Challenge and appeal deadline candidates. Assertions cover copied engine state
+//! and emitted outcomes, not node certification, BRN settlement or TRST revocation.
 use super::*;
 use crate::{
     state::VerificationPhase, ChallengeReason, ChallengeResult, CommitteeActivation,
@@ -287,8 +289,8 @@ fn a_completed_challenge_can_restart_only_with_fresh_endorsements() {
         );
         for voter in [address(1), address(2)] {
             assert_eq!(
-                restored.neither_tracker.total_assignments(&voter),
-                completed.neither_tracker.total_assignments(&voter)
+                restored.neither_tracker.retained_assignments(&voter),
+                completed.neither_tracker.retained_assignments(&voter)
             );
             assert_eq!(
                 restored.neither_tracker.neither_count(&voter),

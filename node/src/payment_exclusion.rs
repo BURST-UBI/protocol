@@ -9,11 +9,7 @@ use burst_types::{
 };
 
 fn hash(value: &str) -> Result<BlockHash, String> {
-    let bytes = hex::decode(value).map_err(|_| "invalid recovery hash")?;
-    let bytes: [u8; 32] = bytes
-        .try_into()
-        .map_err(|_| "invalid recovery hash length")?;
-    Ok(BlockHash::new(bytes))
+    value.parse().map_err(|error: burst_types::transaction_hash::ParseHashError| error.to_string())
 }
 
 /// Canonical account position and finality are read from one database snapshot.
@@ -22,6 +18,16 @@ pub(crate) fn slot(
     store: &LmdbStore,
     query: burst_types::payment_recovery::SlotQuery,
 ) -> Result<burst_types::payment_recovery::SlotReview, String> {
+    indexed_slot(store, query)?.ok_or_else(|| "confirmed slot history is unavailable".into())
+}
+
+/// Outer None means canonical indexes cannot answer. A returned review with
+/// no successor means no confirmed successor was found for this query, not
+/// that an unconfirmed successor is absent or an earlier payment is excluded.
+pub(crate) fn indexed_slot(
+    store: &LmdbStore,
+    query: burst_types::payment_recovery::SlotQuery,
+) -> Result<Option<burst_types::payment_recovery::SlotReview>, String> {
     burst_crypto::decode_address(&query.account).ok_or("invalid recovery account")?;
     let account = WalletAddress::new(&query.account);
     let previous = hash(&query.previous)?;
@@ -33,14 +39,14 @@ pub(crate) fn slot(
     let txn = store.tx_begin_read().map_err(|e| e.to_string())?;
     let info = match store.account_store().get_account_txn(&txn, &account) {
         Ok(info) => info,
-        Err(StoreError::NotFound(_)) => return Ok(review),
+        Err(StoreError::NotFound(_)) => return Ok(Some(review)),
         Err(error) => return Err(error.to_string()),
     };
     if info.address != account || info.confirmation_height > info.block_count {
         return Err("inconsistent recovery account position".into());
     }
     if info.confirmation_height == 0 {
-        return Ok(review);
+        return Ok(Some(review));
     }
     let blocks = store.block_store();
     if blocks
@@ -57,7 +63,7 @@ pub(crate) fn slot(
             .height_of_block_txn(&txn, &previous)
             .map_err(|e| e.to_string())?
         else {
-            return Ok(review);
+            return Ok(None);
         };
         if height >= info.confirmation_height
             || blocks
@@ -65,20 +71,101 @@ pub(crate) fn slot(
                 .map_err(|e| e.to_string())?
                 != Some(previous)
         {
-            return Ok(review);
+            return Ok(Some(review));
         }
         height.checked_add(1).ok_or("recovery height overflow")?
     };
-    let successor = blocks
+    let Some(successor) = blocks
         .block_at_height_txn(&txn, &account, next)
         .map_err(|e| e.to_string())?
-        .filter(|hash| !hash.is_zero())
-        .ok_or("missing canonical confirmed successor")?;
+    else {
+        return Ok(None);
+    };
+    if successor.is_zero() {
+        return Err("invalid canonical confirmed successor".into());
+    }
     review.successor = Some(successor.to_string());
-    Ok(review)
+    Ok(Some(review))
 }
 
+pub(crate) struct Reader {
+    store: std::sync::Arc<LmdbStore>,
+    authority: std::sync::Mutex<Option<(usize, Option<BlockHash>)>>,
+    #[cfg(test)]
+    validations: std::sync::atomic::AtomicUsize,
+}
+
+impl Reader {
+    pub(crate) fn new(store: std::sync::Arc<LmdbStore>) -> Self {
+        Self {
+            store,
+            authority: Default::default(),
+            #[cfg(test)]
+            validations: Default::default(),
+        }
+    }
+
+    /// Review one closed-epoch payment position from a single snapshot. False
+    /// can mean insufficient evidence, not proof that the payment was included.
+    pub(crate) fn read(&self, query: ExclusionQuery) -> Result<ExclusionReview, String> {
+        read_with_authority(&self.store, query, |txn| self.authority_epoch(txn))
+    }
+
+    fn authority_epoch(
+        &self,
+        txn: &burst_store_lmdb::LmdbReadTransaction<'_>,
+    ) -> Result<Option<BlockHash>, String> {
+        let identity = self.store.read_payment_authority_identity(txn);
+        if let Some(identity) = identity {
+            let cached = self.authority.lock().map_err(|error| error.to_string())?;
+            if let Some((saved, epoch)) = *cached {
+                if saved == identity { return Ok(epoch); }
+            }
+        }
+        // Validate outside the cache lock. Cache only the epoch, never the roster
+        // or the per-query closure, account position and canonical index.
+        #[cfg(test)]
+        self.validations.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let epoch = validated_epoch(&self.store, txn)?;
+        if let Some(identity) = identity {
+            *self.authority.lock().map_err(|error| error.to_string())? = Some((identity, epoch));
+        }
+        Ok(epoch)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn authority_epoch_for_test(
+        &self, txn: &burst_store_lmdb::LmdbReadTransaction<'_>,
+    ) -> Result<Option<BlockHash>, String> {
+        self.authority_epoch(txn)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn validation_count(&self) -> usize {
+        self.validations.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+fn validated_epoch(
+    store: &LmdbStore,
+    txn: &burst_store_lmdb::LmdbReadTransaction<'_>,
+) -> Result<Option<BlockHash>, String> {
+    let meta = store.meta_store();
+    crate::payment_authority::PaymentAuthority::read_at(|key| meta.get_meta_txn(txn, key))
+        .map(|authority| authority.map(|authority| authority.epoch))
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
 pub(crate) fn read(store: &LmdbStore, query: ExclusionQuery) -> Result<ExclusionReview, String> {
+    read_with_authority(store, query, |txn| validated_epoch(store, txn))
+}
+
+fn read_with_authority(
+    store: &LmdbStore,
+    query: ExclusionQuery,
+    authority: impl FnOnce(&burst_store_lmdb::LmdbReadTransaction<'_>) -> Result<Option<BlockHash>, String>,
+) -> Result<ExclusionReview, String> {
     burst_crypto::decode_address(&query.account).ok_or("invalid recovery account")?;
     let account = WalletAddress::new(&query.account);
     let previous = hash(&query.previous)?;
@@ -107,12 +194,10 @@ pub(crate) fn read(store: &LmdbStore, query: ExclusionQuery) -> Result<Exclusion
     }
     // Reuse the installed-authority validator, including its current-epoch fence
     // checks. Startup authenticates this descriptor and closure history from genesis.
-    let Some(authority) =
-        crate::payment_authority::PaymentAuthority::read_at(get).map_err(|e| e.to_string())?
-    else {
+    let Some(authority_epoch) = authority(&txn)? else {
         return Ok(review);
     };
-    if authority.epoch != installed {
+    if authority_epoch != installed {
         return Err("inconsistent installed payment authority".into());
     }
     let Some(closed) = get(&meta::closed_payment_epoch_key(&epoch)).map_err(|e| e.to_string())?
@@ -262,5 +347,44 @@ mod tests {
         info.head = first;
         store.account_store().put_account(&info).unwrap();
         assert!(slot(&store, query).is_err());
+    }
+
+    #[test]
+    fn cached_absence_is_invalidated_by_orphaned_authority_dependencies() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(LmdbStore::open(directory.path(), 32, 8 << 20).unwrap());
+        let installed = BlockHash::new([31; 32]);
+        let mut batch = store.tx_begin_write().unwrap();
+        batch.put_meta(meta::PAYMENT_EPOCH_KEY, installed.as_bytes()).unwrap();
+        batch.commit().unwrap();
+        let reader = Reader::new(store.clone());
+        let account = burst_crypto::derive_address(&burst_crypto::keypair_from_seed(&[92; 32]).public);
+        let query = ExclusionQuery { account: account.to_string(),
+            previous: BlockHash::ZERO.to_string(), payment_epoch: BlockHash::new([32;32]).to_string() };
+        for _ in 0..2 { assert!(!reader.read(query.clone()).unwrap().excluded); }
+        assert_eq!(reader.validation_count(), 1);
+        let mut count = 1;
+        for key in [
+            crate::confirmed_replay::installation::CUTOFF_KEY,
+            meta::PAYMENT_VOTE_LIMIT_KEY,
+            meta::GOVERNANCE_COUNTING_LIMIT_KEY,
+            crate::confirmed_governance::KEY,
+            crate::confirmed_governance::HEADER,
+        ] {
+            let mut batch = store.tx_begin_write().unwrap();
+            batch.put_meta(key, b"orphan").unwrap();
+            batch.commit().unwrap();
+            for _ in 0..2 {
+                assert!(reader.read(query.clone()).is_err(), "{key}");
+                count += 1;
+                assert_eq!(reader.validation_count(), count);
+            }
+            let mut batch = store.tx_begin_write().unwrap();
+            batch.delete_meta(key).unwrap();
+            batch.commit().unwrap();
+            assert!(!reader.read(query.clone()).unwrap().excluded);
+            count += 1;
+            assert_eq!(reader.validation_count(), count);
+        }
     }
 }

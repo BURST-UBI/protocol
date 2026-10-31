@@ -1,5 +1,11 @@
+//! Immutable worker checks: format, message size, content hash, work and signature.
+//! Payment epoch, timestamp, ledger dependencies and economic admission are
+//! checked later. A successful result alone does not admit or confirm a block.
+
 use super::*;
 
+/// Select the account key, or the genesis key for Epoch/GovernanceActivation.
+/// This selection does not establish that the operation is enabled or authorized.
 pub(crate) fn signing_key(
     block: &StateBlock,
     genesis: &WalletAddress,
@@ -24,17 +30,26 @@ pub(crate) struct AuthenticationRules {
     work_threshold: u64,
 }
 
-/// Owns the exact bytes authenticated by a worker. No mutable access or public
-/// constructor: a hash-only cache would incorrectly trust changed signatures.
-pub(crate) struct AuthenticatedBlock {
+/// Owns a worker authentication result, including failures, and its exact input.
+/// No mutable block access or public constructor: a hash-only cache would
+/// incorrectly trust changed signatures.
+pub(crate) struct BlockAuthentication {
     block: StateBlock,
     rules: AuthenticationRules,
     result: Result<(), String>,
     authentication_time: std::time::Duration,
+    // Held until this candidate leaves admission, including durable publication.
+    pub(crate) _preparation_reservation: Option<std::sync::Arc<tokio::sync::OwnedMutexGuard<()>>>,
+    pub(crate) preparation_time: std::time::Duration,
+    pub(crate) preparation_fault: Option<String>,
+    pub(crate) prepared: Option<crate::economic_candidate::prepared::PreparedPayment>,
     pub(crate) retention: Option<crate::block_retention::Slot>,
+    pub(crate) growth_fork_content: Option<std::sync::Arc<Vec<u8>>>,
+    pub(crate) _growth_retry: Option<burst_store_lmdb::GrowthRetry>,
+    pub(crate) _in_flight_payload: Option<std::sync::Arc<crate::block_validation::InFlightPayload>>,
 }
 
-impl AuthenticatedBlock {
+impl BlockAuthentication {
     pub(crate) fn block(&self) -> &StateBlock {
         &self.block
     }
@@ -45,6 +60,10 @@ impl AuthenticatedBlock {
 
     pub(crate) fn result(&self) -> &Result<(), String> {
         &self.result
+    }
+
+    pub(crate) fn worker_time(&self) -> std::time::Duration {
+        self.authentication_time + self.preparation_time
     }
 
     pub(crate) fn authentication_time(&self) -> std::time::Duration {
@@ -65,15 +84,22 @@ impl AuthenticationRules {
         }
     }
 
-    pub(crate) fn authenticate(&self, block: StateBlock) -> AuthenticatedBlock {
+    pub(crate) fn authenticate(&self, block: StateBlock) -> BlockAuthentication {
         let start = std::time::Instant::now();
         let result = self.check(&block);
-        AuthenticatedBlock {
+        BlockAuthentication {
             block,
             rules: self.clone(),
             result,
             authentication_time: start.elapsed(),
             retention: None,
+            _growth_retry: None,
+            growth_fork_content: None,
+            _in_flight_payload: None,
+            prepared: None,
+            _preparation_reservation: None,
+            preparation_time: std::time::Duration::ZERO,
+            preparation_fault: None,
         }
     }
 
@@ -93,6 +119,8 @@ impl AuthenticationRules {
         self.check_signature(block)
     }
 
+    /// Reject zero signatures even when cryptographic verification is disabled.
+    /// The flag controls Ed25519 verification only; it does not bypass format/work.
     pub(super) fn check_signature(&self, block: &StateBlock) -> Result<(), String> {
         if block.signature == Signature([0; 64]) {
             return Err("signature is zero (unsigned block)".into());

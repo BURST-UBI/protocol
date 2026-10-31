@@ -8,6 +8,39 @@ use burst_types::{BlockHash, ProtocolParams, Timestamp, TxHash, WalletAddress};
 use serde::Serialize;
 use std::collections::BTreeSet;
 
+/// Immutable voters and their canonical commitment for one replay-derived cut.
+/// This is derived data, not authentication or authority to publish a ballot.
+/// Validation is lazy so callers retain proposal/delegation error precedence.
+pub struct BallotElectorate<'a> {
+    verified: std::borrow::Cow<'a, [WalletAddress]>,
+    commitment: std::cell::OnceCell<Result<(u32, BlockHash), &'static str>>,
+}
+
+impl<'a> BallotElectorate<'a> {
+    pub fn new(verified: impl Into<std::borrow::Cow<'a, [WalletAddress]>>) -> Self {
+        Self { verified: verified.into(), commitment: std::cell::OnceCell::new() }
+    }
+
+    pub fn verified(&self) -> &[WalletAddress] { &self.verified }
+
+    fn commitment(&self) -> Result<(u32, BlockHash), GovernanceError> {
+        self.commitment.get_or_init(|| {
+            let eligible = u32::try_from(self.verified.len())
+                .map_err(|_| "electorate exceeds supported size")?;
+            let mut keys = BTreeSet::new();
+            for address in self.verified.iter() {
+                let key = burst_crypto::decode_address(address.as_str())
+                    .ok_or("invalid electorate address")?;
+                if !keys.insert(key) { return Err("duplicate electorate member") }
+            }
+            let count = eligible.to_be_bytes();
+            let prefix: [&[u8]; 2] = [b"BURST/governance-electorate/v1\0", &count];
+            let parts = prefix.into_iter().chain(keys.iter().map(|key| key.as_slice()));
+            Ok((eligible, BlockHash::new(burst_crypto::blake2b_256_iter(parts))))
+        }).as_ref().copied().map_err(|error| GovernanceError::Other((*error).into()))
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 struct BallotReceipt {
     proposal: TxHash,
@@ -90,8 +123,9 @@ impl PreparedBallot {
     }
 }
 
-/// The cut closes voting after the propagation buffer. Checked arithmetic
-/// refuses a deadline that cannot be represented instead of saturating it.
+/// Counting time derived from the supplied parameters, after voting and its
+/// propagation buffer. For a stored proposal, use `GovernanceEngine::counting_time`
+/// to retain its submission-time windows. Overflow is an error.
 pub fn counting_time(
     proposal: &Proposal,
     params: &ProtocolParams,
@@ -137,6 +171,20 @@ impl GovernanceEngine {
         delegation: &DelegationEngine,
         verified: &[WalletAddress],
     ) -> Result<PreparedBallot, GovernanceError> {
+        self.prepare_ballot_with_electorate(proposal, history, cutoff, params,
+            delegation, &BallotElectorate::new(verified))
+    }
+
+    /// Reuse only the electorate from this exact immutable replay cut.
+    pub fn prepare_ballot_with_electorate(
+        &self,
+        proposal: &TxHash,
+        history: BlockHash,
+        cutoff: Timestamp,
+        params: &ProtocolParams,
+        delegation: &DelegationEngine,
+        electorate: &BallotElectorate<'_>,
+    ) -> Result<PreparedBallot, GovernanceError> {
         let current = self
             .get_proposal(proposal)
             .ok_or_else(|| GovernanceError::ProposalNotFound(proposal.to_string()))?;
@@ -149,21 +197,8 @@ impl GovernanceEngine {
                 "ballot requires its exact nonzero history and counting cut".into(),
             ));
         }
-        let eligible = u32::try_from(verified.len())
-            .map_err(|_| GovernanceError::Other("electorate exceeds supported size".into()))?;
-        let mut keys = BTreeSet::new();
-        for address in verified {
-            let key = burst_crypto::decode_address(address.as_str())
-                .ok_or_else(|| GovernanceError::Other("invalid electorate address".into()))?;
-            if !keys.insert(key) {
-                return Err(GovernanceError::Other("duplicate electorate member".into()));
-            }
-        }
-        let mut electorate = b"BURST/governance-electorate/v1\0".to_vec();
-        electorate.extend_from_slice(&eligible.to_be_bytes());
-        for key in keys {
-            electorate.extend_from_slice(&key);
-        }
+        let verified = electorate.verified();
+        let (eligible, electorate) = electorate.commitment()?;
         let mut next = current.clone();
         match self.try_advance(&mut next, cutoff, params, Some((delegation, verified))) {
             Ok(GovernancePhase::Cooldown | GovernancePhase::Activation) => (),
@@ -177,6 +212,7 @@ impl GovernanceEngine {
             next.phase,
             GovernancePhase::Cooldown | GovernancePhase::Activation
         ) {
+            next.cooldown_started_at = Some(cutoff);
             let cooldown = if next.phase == GovernancePhase::Cooldown {
                 params.governance_cooldown_duration_secs
             } else {
@@ -197,7 +233,7 @@ impl GovernanceEngine {
             history,
             cutoff,
             parameters: params.params_hash(),
-            electorate: BlockHash::new(burst_crypto::blake2b_256(&electorate)),
+            electorate,
             eligible,
             yea: next.exploration_votes_yea,
             nay: next.exploration_votes_nay,

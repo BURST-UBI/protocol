@@ -29,7 +29,10 @@ pub(super) fn constitutional_amendment(
 }
 
 impl CandidateGovernance {
-    /// The caller owns a staged ledger and discards all effects on error.
+    /// Apply approved effects at the recorded activation time, even if called later.
+    /// The caller owns a staged ledger and engines, persists successful changes,
+    /// and discards all effects on error. A conflicting amendment sets the
+    /// proposal to Conflicted without turning the operation into an error.
     pub(crate) fn activate_approved(
         &mut self,
         batch: &mut impl ledger::Ledger,
@@ -38,6 +41,17 @@ impl CandidateGovernance {
         now: Timestamp,
         brn: &mut BrnEngine,
         trst: &mut TrstEngine,
+    ) -> Result<(), String> {
+        self.activate_with_engines(batch, proposal_hash, expected_params, now, &mut (brn, trst))
+    }
+
+    pub(super) fn activate_with_engines(
+        &mut self,
+        batch: &mut impl ledger::Ledger,
+        proposal_hash: TxHash,
+        expected_params: &BlockHash,
+        now: Timestamp,
+        engines: &mut impl crate::economic_candidate::Engines,
     ) -> Result<(), String> {
         let proposal = self
             .governance
@@ -55,13 +69,14 @@ impl CandidateGovernance {
         batch.observe_bootstrap(&self.params)?;
         for (param, value) in self.governance.drain_pending_changes() {
             match param {
-                GovernableParam::BrnRate => brn
+                GovernableParam::BrnRate => engines
+                    .brn_mut()
                     .apply_rate_change(value, activation_at)
                     .map_err(|e| e.to_string())?,
-                GovernableParam::TrstExpirySecs => trst.set_expiry_period(
+                GovernableParam::TrstExpirySecs => engines.trst_mut().set_expiry_period(
                     u64::try_from(value).map_err(|_| "expiry period overflow")?,
                     activation_at,
-                ),
+                )?,
                 _ => {}
             }
         }

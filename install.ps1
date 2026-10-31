@@ -15,7 +15,8 @@
     irm https://raw.githubusercontent.com/BURST-UBI/protocol/main/install.ps1 | iex
 
     # Uninstall:
-    & { irm https://raw.githubusercontent.com/BURST-UBI/protocol/main/install.ps1 } | iex; Install-BurstNode -Uninstall
+    # After saving and reviewing this script locally:
+    ./install.ps1 --uninstall
 #>
 
 $ErrorActionPreference = 'Stop'
@@ -103,8 +104,7 @@ function Update-BurstNode {
     }
 }
 
-# ── Uninstall ────────────────────────────────────────────────────────
-
+# Uninstall
 function Uninstall-BurstNode {
     Write-Status 'Stopping BURST service...'
     Stop-Service $ServiceName -ErrorAction SilentlyContinue
@@ -123,14 +123,12 @@ function Uninstall-BurstNode {
     exit 0
 }
 
-# ── Check for uninstall flag ─────────────────────────────────────────
-
+# Check for uninstall flag
 if ($args -contains '--uninstall' -or $args -contains '-Uninstall') {
     Uninstall-BurstNode
 }
 
-# ── Preflight ────────────────────────────────────────────────────────
-
+# Preflight
 $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
 if ($arch -ne 'X64') {
     Write-Err "Unsupported architecture: $arch. Only x86_64 is supported."
@@ -147,13 +145,11 @@ $BootstrapPeers = if ($Seed) { '[' + (ConvertTo-BurstTomlString $Seed) + ']' } e
 Write-Status "Platform: windows/amd64"
 Write-Status "Network: $Network"
 
-# ── Create directories ───────────────────────────────────────────────
-
+# Create directories
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 New-Item -ItemType Directory -Path $DataDir    -Force | Out-Null
 
-# ── Download binary ──────────────────────────────────────────────────
-
+# Download binary
 $binaryUrl = "$ReleaseUrl/burst-daemon-windows-amd64.exe"
 $tmpPath   = Join-Path $InstallDir ('.burst-install-' + [guid]::NewGuid().ToString('N') + '.exe')
 
@@ -184,8 +180,7 @@ try {
     Write-Err "Download or checksum validation failed: $failure"
 }
 
-# ── Write config (skip if exists) ────────────────────────────────────
-
+# Write config (skip if exists)
 if (-not (Test-Path $ConfigPath)) {
     $config = @"
 network = "$NetworkName"
@@ -213,8 +208,7 @@ enable_verification = false
     Write-Warn "Config already exists at $ConfigPath - not overwriting."
 }
 
-# ── Register Windows Service ─────────────────────────────────────────
-
+# Register Windows Service
 $existingService = Get-Service $ServiceName -ErrorAction SilentlyContinue
 if ($existingService) {
     sc.exe delete $ServiceName 2>$null | Out-Null
@@ -232,8 +226,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Windows service recovery configuration failed'
 Start-Service $ServiceName
 Write-Status "Windows Service '$ServiceName' started."
 
-# ── Scheduled Task for auto-updates ──────────────────────────────────
-
+# Scheduled Task for auto-updates
 Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
 
 $updateScript = "`$ErrorActionPreference = 'Stop'`n" +
@@ -257,8 +250,7 @@ Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
 
 Write-Status 'Auto-update task registered (checks every 30 minutes).'
 
-# ── Summary ──────────────────────────────────────────────────────────
-
+# Summary
 Write-Host ''
 Write-Host '================================================' -ForegroundColor White
 Write-Host '  BURST node installed successfully' -ForegroundColor White

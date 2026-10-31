@@ -15,7 +15,7 @@ pub enum NetworkError {
     ClockDrift { drift_ms: i64, max_ms: i64 },
 
     #[error("protocol error: {0}")]
-    Protocol(#[from] burst_protocol::ProtocolError),
+    Protocol(#[from] burst_types::ProtocolError),
 
     #[error("IO error: {0}")]
     Io(String),

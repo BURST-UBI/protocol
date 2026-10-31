@@ -7,7 +7,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PublicKey(pub [u8; 32]);
 
-/// A 32-byte Ed25519 private key (secret scalar).
+/// A 32-byte Ed25519 signing seed, before expansion into a scalar.
 ///
 /// This type intentionally does not implement `Debug`, `Serialize`, or `Clone`
 /// to prevent accidental exposure. Key bytes are zeroized on drop.
@@ -63,7 +63,7 @@ impl<'de> Deserialize<'de> for Signature {
 /// An Ed25519 key pair (public + private).
 ///
 /// Use `burst_crypto::generate_keypair()` or `burst_crypto::keypair_from_private()`
-/// to construct key pairs. This struct is intentionally just data.
+/// to construct key pairs.
 pub struct KeyPair {
     pub public: PublicKey,
     pub private: PrivateKey,

@@ -5,6 +5,10 @@
 //!   1 BRN  = 10^18 raw
 //!   1 mBRN = 10^15 raw (milliBRN)
 //!   (same for TRST / mTRST)
+//!
+//! Denomination constructors and the Add/Sub operators use ordinary u128
+//! arithmetic. Callers must bound their inputs. Use checked_add/checked_sub
+//! when overflow or insufficient funds must be returned as an explicit result.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -19,9 +23,7 @@ pub const TRST_UNIT: u128 = 1_000_000_000_000_000_000;
 /// 1 mTRST in raw units (10^15).
 pub const MTRST_UNIT: u128 = 1_000_000_000_000_000;
 
-/// BRN amount — the birthright / production potential.
-///
-/// Internally stored as raw units (u128) for precision.
+/// BRN amount in raw units. One BRN is 10^18 raw.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct BrnAmount(u128);
 
@@ -100,9 +102,7 @@ impl fmt::Display for BrnAmount {
     }
 }
 
-/// TRST amount — the transferable currency.
-///
-/// Internally stored as raw units (u128) for precision.
+/// TRST amount in raw units. One TRST is 10^18 raw.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TrstAmount(u128);
 

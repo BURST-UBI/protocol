@@ -111,7 +111,7 @@ fn review(
 
 fn original(reason: burst_types::ChallengeReason, legitimate: bool) -> Fixture {
     let mut f = Fixture::new();
-    f.verified_target();
+    f.verify_target();
     f.seed_target_origin_at_holder();
     let challenge = f.challenge(reason);
     f.apply(&challenge, true).unwrap();

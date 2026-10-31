@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Run ONLY inside the isolated, network=none NAT-lab container.
+# Run only inside the isolated network=none NAT-lab container. The environment
+# marker and /.dockerenv checks do not establish isolation themselves. Creates
+# namespaces, firewall rules and daemon processes; retains them for later cases.
 set -euo pipefail
 test -f /.dockerenv
 test "${BURST_ISOLATED_NAT_LAB:-}" = yes

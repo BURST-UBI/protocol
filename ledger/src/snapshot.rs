@@ -1,43 +1,40 @@
-//! Ledger snapshots — capture the state of all accounts at a point in time.
-//!
-//! Snapshots enable fast node bootstrapping: a new node can load a verified
-//! snapshot instead of replaying every block from genesis. The snapshot hash
-//! is computed deterministically from the account state so peers can verify
-//! snapshot integrity.
+//! Account summary with a content hash. This format has no authority certificate
+//! or complete economic state; it is not the node bootstrap snapshot format.
 
 use serde::{Deserialize, Serialize};
 
 use burst_types::{BlockHash, Timestamp, WalletAddress, WalletState};
 
-/// A ledger snapshot — captures the state of all accounts at a point in time.
+/// Caller-supplied account summaries with a content digest.
+/// Does not capture a database transaction or certify a consistent ledger cut.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LedgerSnapshot {
-    /// Hash of this snapshot (Blake2b of serialized accounts).
+    /// Blake2b digest of the account fields and block height.
     pub hash: [u8; 32],
-    /// Block height at which this snapshot was taken.
+    /// Caller-supplied height label; no global ledger position is verified.
     pub block_height: u64,
     /// Timestamp when snapshot was created.
     pub created_at: Timestamp,
     /// Account state entries.
     pub accounts: Vec<AccountSnapshot>,
-    /// Snapshot version for compatibility.
+    /// Format label; `from_bytes` does not check it and the hash excludes it.
     pub version: u32,
 }
 
-/// The state of a single account captured in a snapshot.
+/// Partial account summary; omits accrual history, holdings and pending receipts.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AccountSnapshot {
     /// The account's wallet address.
     pub address: WalletAddress,
-    /// Wallet state (Unverified, Pending, Verified).
+    /// Verification state of the wallet.
     pub state: WalletState,
-    /// Timestamp when this wallet was verified (required for BRN computation).
+    /// Reported verification time; insufficient alone to reconstruct BRN accrual.
     pub verified_at: Option<Timestamp>,
     /// Hash of the head (latest) block in this account's chain.
     pub head: BlockHash,
     /// Total number of blocks in this account's chain.
     pub block_count: u64,
-    /// Height below which all blocks are confirmed.
+    /// Reported confirmation height, inclusive.
     pub confirmation_height: u64,
     /// Total BRN burned by this account (to create TRST).
     pub brn_burned: u128,
@@ -50,7 +47,7 @@ pub struct AccountSnapshot {
 }
 
 impl LedgerSnapshot {
-    /// Create a snapshot from the current account store.
+    /// Hash the supplied account summaries in their current order.
     pub fn create(accounts: Vec<AccountSnapshot>, block_height: u64) -> Self {
         let mut snap = Self {
             hash: [0u8; 32],
@@ -63,7 +60,9 @@ impl LedgerSnapshot {
         snap
     }
 
-    /// Compute the Blake2b-256 hash of this snapshot deterministically.
+    /// Hash account fields in vector order, then the height label.
+    /// Excludes `created_at` and `version`; None and epoch-zero `verified_at`
+    /// have the same encoding. Wallet states use their Debug names.
     fn compute_hash(&self) -> [u8; 32] {
         use blake2::digest::consts::U32;
         use blake2::{Blake2b, Digest};
@@ -94,8 +93,9 @@ impl LedgerSnapshot {
         out
     }
 
-    /// Verify the snapshot hash matches the account data.
-    pub fn verify(&self) -> bool {
+    /// Compare the stored digest with the selected fields. This proves neither
+    /// authenticity nor completeness, and does not check the version label.
+    pub fn has_valid_hash(&self) -> bool {
         self.hash == self.compute_hash()
     }
 
@@ -104,7 +104,7 @@ impl LedgerSnapshot {
         bincode::serialize(self).expect("snapshot serialization should not fail")
     }
 
-    /// Deserialize a snapshot from bytes.
+    /// Decode bincode without checking the digest, version or account semantics.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
         bincode::deserialize(bytes).map_err(|e| e.to_string())
     }
@@ -136,25 +136,24 @@ mod tests {
     }
 
     #[test]
-    fn test_create_and_verify() {
+    fn test_create_and_check_hash() {
         let accounts = vec![sample_account("alice"), sample_account("bob")];
         let snap = LedgerSnapshot::create(accounts, 100);
 
-        assert!(snap.verify());
+        assert!(snap.has_valid_hash());
         assert_eq!(snap.block_height, 100);
         assert_eq!(snap.version, 1);
         assert_eq!(snap.account_count(), 2);
     }
 
     #[test]
-    fn test_tampered_snapshot_fails_verify() {
+    fn test_tampered_snapshot_fails_hash_check() {
         let accounts = vec![sample_account("alice")];
         let mut snap = LedgerSnapshot::create(accounts, 42);
-        assert!(snap.verify());
+        assert!(snap.has_valid_hash());
 
-        // Tamper with block_height
         snap.block_height = 999;
-        assert!(!snap.verify());
+        assert!(!snap.has_valid_hash());
     }
 
     #[test]
@@ -168,13 +167,13 @@ mod tests {
         assert_eq!(snap.hash, restored.hash);
         assert_eq!(snap.block_height, restored.block_height);
         assert_eq!(snap.account_count(), restored.account_count());
-        assert!(restored.verify());
+        assert!(restored.has_valid_hash());
     }
 
     #[test]
     fn test_empty_snapshot() {
         let snap = LedgerSnapshot::create(vec![], 0);
-        assert!(snap.verify());
+        assert!(snap.has_valid_hash());
         assert_eq!(snap.account_count(), 0);
     }
 

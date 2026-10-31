@@ -52,7 +52,7 @@ async fn live_child() {
             .with_chain_info(info),
     );
     node.checkpoint_publication_probe = Some(pause);
-    node.start().await.unwrap();
+    node.start_with_services(burst_daemon::start_public_services).await.unwrap();
     panic!("node exited before publication crash");
 }
 
@@ -175,8 +175,8 @@ fn projection(store: &LmdbStore, expiry_secs: u64) -> Contents {
         .iter()
         .any(|name| key == name.as_bytes())
     });
-    // Startup may migrate the aggregate fixture to rows. Compare every decoded
-    // holding and provenance edge, while retaining exact checks for other state.
+    // Startup may migrate aggregate storage to rows. Compare decoded wallets
+    // and provenance graphs alongside the selected raw tables and metadata above.
     let batch = store.tx_begin_write().unwrap();
     let meta = data.get_mut("meta").unwrap();
     meta.push((

@@ -1,14 +1,8 @@
-//! Child wallet custodianship — allows a guardian to manage a ward's wallet
-//! until the ward transitions to independent control.
+//! In-memory guardian relationships for wallet clients.
+//! These records do not grant protocol signing authority or verify consent.
 
 use burst_types::WalletAddress;
 use std::collections::HashMap;
-
-/// Custodianship allows a guardian wallet to manage operations on behalf of a
-/// ward's wallet until the ward transitions to independent control.
-///
-/// The guardian can burn BRN, send TRST, and vote on behalf of the ward.
-/// The ward (or governance) can terminate custodianship at any time.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CustodianshipStatus {
@@ -37,8 +31,8 @@ impl CustodianshipRegistry {
         }
     }
 
-    /// Establish custodianship. The guardian manages the ward's wallet.
-    /// Requires both parties to consent (via endorsement or genesis setup).
+    /// Record a guardian relationship. The caller must establish consent.
+    /// A prior record for the ward, even a terminated one, prevents replacement.
     pub fn establish(
         &mut self,
         guardian: WalletAddress,
@@ -64,7 +58,7 @@ impl CustodianshipRegistry {
         Ok(())
     }
 
-    /// Terminate custodianship. Can be initiated by either the ward or the guardian.
+    /// Mark a recorded relationship terminated. Caller authorization is external.
     pub fn terminate(
         &mut self,
         ward: &WalletAddress,
@@ -89,13 +83,13 @@ impl CustodianshipRegistry {
             .unwrap_or(false)
     }
 
-    /// Check if an action by `actor` on `account` is authorized.
-    /// Returns true if actor == account OR actor is the active guardian of account.
-    pub fn is_authorized(&self, actor: &WalletAddress, account: &WalletAddress) -> bool {
+    /// Check identity or an active relationship in this local registry.
+    /// This does not validate a signature or authorize a protocol operation.
+    pub fn is_self_or_guardian(&self, actor: &WalletAddress, account: &WalletAddress) -> bool {
         actor == account || self.is_guardian(actor, account)
     }
 
-    /// Get the custodianship for a ward, if any.
+    /// Get a ward's record, including a terminated relationship.
     pub fn get(&self, ward: &WalletAddress) -> Option<&Custodianship> {
         self.custodianships.get(ward)
     }
@@ -145,14 +139,14 @@ mod tests {
     }
 
     #[test]
-    fn establish_and_authorize() {
+    fn establish_and_check_relationship() {
         let mut reg = CustodianshipRegistry::new();
         let parent = addr("brst_parent000000000000000000000000000000000000000000000000000parent00");
         let child = addr("brst_child0000000000000000000000000000000000000000000000000child000");
 
         reg.establish(parent.clone(), child.clone(), 1000).unwrap();
-        assert!(reg.is_authorized(&parent, &child));
-        assert!(reg.is_authorized(&child, &child));
+        assert!(reg.is_self_or_guardian(&parent, &child));
+        assert!(reg.is_self_or_guardian(&child, &child));
     }
 
     #[test]

@@ -18,7 +18,7 @@ pub enum TrstError {
     InsufficientBalance { needed: u128, available: u128 },
 
     #[error("merge requires at least 2 tokens")]
-    EmptyMerge,
+    TooFewMergeSources,
 
     #[error("token not owned by {actual}, expected {expected}")]
     NotOwner {

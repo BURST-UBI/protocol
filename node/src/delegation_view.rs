@@ -1,4 +1,7 @@
-use burst_governance::key_delegation::{operation::DelegationOperation, scoped, view::*};
+//! Delegation display queries over one local ledger read transaction.
+//! Rows can be provisional; each reports its source block's confirmation status.
+
+use burst_governance::signing_delegation::{operation::DelegationOperation, scoped, view::*};
 use burst_types::{BlockHash, NetworkId, WalletAddress};
 use std::sync::Arc;
 
@@ -9,6 +12,10 @@ pub(crate) struct Reader {
 }
 
 impl Reader {
+    /// Read up to 50 index rows, or one exact outgoing scope. Zero-hash rows
+    /// are omitted after pagination, so a page can be short and still have a
+    /// cursor. Later pages use fresh snapshots. enabled is response metadata,
+    /// not a gate on reading records or a claim that a grant is usable.
     pub fn read(&self, query: Query, enabled: bool) -> Result<Page, String> {
         let address = WalletAddress::new(query.account);
         let prefix = index_prefix(query.direction, &address)?;

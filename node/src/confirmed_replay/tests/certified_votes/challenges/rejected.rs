@@ -75,7 +75,7 @@ fn rejection_preserves_identity_and_forfeits_only_the_challengers_locked_stake()
         };
         incomplete.push(voter, BlockType::Burn, CUTOFF + 60, |block| {
             block.link = destination(20);
-            block.brn_balance += 1;
+            block.brn_spent += 1;
             block.release_sources = sources
                 .iter()
                 .copied()
@@ -88,7 +88,7 @@ fn rejection_preserves_identity_and_forfeits_only_the_challengers_locked_stake()
         );
         fixture.push(voter, BlockType::Burn, CUTOFF + 60, |block| {
             block.link = destination(20);
-            block.brn_balance += 1;
+            block.brn_spent += 1;
             block.release_sources = sources;
         });
         let spent = replay(&fixture, &records).unwrap();

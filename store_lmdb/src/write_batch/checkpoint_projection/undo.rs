@@ -9,8 +9,11 @@ impl LmdbWriteTransaction<'_> {
         self.replace_checkpoint_undo_stream(records.iter().cloned().map(Ok))
     }
 
-    /// Install one checked record at a time. Any source or validation error
-    /// poisons the writer, so partially staged journals cannot be committed.
+    /// Replace journals one record at a time, checking complete provisional-height
+    /// coverage, encoding and primary block/index insertions. The caller authenticates
+    /// economic before/after images through replay. Limits are 131,072 journals and
+    /// 64 MiB of serialized journals plus keys; seen block hashes remain in memory.
+    /// Any source or validation error prevents committing partially staged journals.
     pub fn replace_checkpoint_undo_stream(
         &mut self,
         records: impl IntoIterator<Item = Result<BlockUndo, StoreError>>,

@@ -1,0 +1,145 @@
+# Rsnano cross-check of the system audit — 2026-10-30
+
+Status: comparison complete. This comparison itself changed no product source.
+Subsequent authorized PA06/FA03 fixes are complete: 326 BRN/TRST tests passed
+(16 existing ignored), node library type-check passed. See the full audit
+follow-up and `target/validation-evidence/audit-needed-fixes-20261030/HANDOFF.md`.
+The comparison table records the rationale for those fixes; optional items remain optional.
+
+Reference: clean `references/rsnano-node` at
+`414dd884c162f78f151b9d912a029bbc9a340866`. A fresh `git ls-remote` confirmed
+that hash as upstream develop during this review. This identifies a source
+snapshot, not every deployed Nano/Rsnano release or third-party wallet.
+BURST scope is the current source reviewed in FULL_AUDIT_20261030.md.
+
+Rsnano is useful evidence about implementation patterns. Shared behavior does not
+prove safety, and a feature absent from Nano cannot establish BURST's intended
+rules. BURST's specification and the actual exposed trust boundary decide that.
+
+## Revised disposition
+
+| Finding | Rsnano comparison | BURST disposition / action |
+| --- | --- | --- |
+| PA06 restoration overflow | No expiring/revocable-origin TRST equivalent. Rsnano validates pending amount/balance before producing insertion instructions and rechecks account head before insertion | Actual engine error-handling defect remains: success-looking restoration with an invalid active sum. Persistence rejects it; valid signed-history reachability remains unproved. Fix checked atomic restoration using existing staging, not a new transaction framework |
+| FA01 backup allocation | CLI import also reads the whole file into a String before wallet JSON parsing, without a byte limit | Shared trusted-local-file assumption. Real resource-exhaustion possibility if opening hostile files, but local hardening, not a protocol vulnerability or evidence BURST is unusually unsafe. Reclassify to P3; a small bounded reader is worthwhile |
+| FA02 temporary secret lifetime | RawKey is a Copy byte-array wrapper; encrypt/decrypt copy buffers. Fan scatters key fragments on the heap but reconstructs ordinary RawKey values. This is not comprehensive zeroization | Defense in depth, not a demonstrated key compromise or uniquely BURST defect. Keep optional P3 hardening; reuse Zeroizing already available in BURST. Do not copy the more elaborate fan mechanism merely for parity |
+| FA03 partial BRN forfeiture on Err | No BRN accrual/staking equivalent. Rsnano ledger validates first, then inserts; this does not establish a universal atomicity contract for every internal helper | Defensive API improvement under inconsistent/extreme state, not an established reachable protocol bug. Compute both totals before assignment; no architecture change or release blocker justified by current evidence |
+| FA04 HTTP group queries | No comparable off-chain group-membership feature. Rsnano client accepts a URL and its RPC defaults to loopback; that does not justify arbitrary remote plaintext queries | Intended simple REST/off-chain trust model; remote plaintext confidentiality is a policy limitation, not a proven spec violation. Keep warning/recommendation, not a mandatory HTTPS-only behavior change |
+| Dashboard buffered logs | No matching Tauri journalctl command in this reference | Local availability hardening only. Arguments are not shell interpolation. Bound output cheaply; do not call it remote command execution |
+| Mutable CI action refs | Rsnano workflows also use checkout@v4, rust-cache@v2 and Docker action version tags | Common release-maintenance tradeoff. SHA pinning is supply-chain hardening, not a consensus defect or reason to redesign release automation |
+
+## Source evidence and reasoning
+
+### PA06 and FA03: validate before mutation, without overstating equivalence
+
+Rsnano `ledger/src/block_insertion/validation/mod.rs::validate` returns
+`BlockInsertInstructions` only after predecessor, signature, pending amount,
+work and spend checks. `receive_block_rules.rs` rejects mismatched pending credit.
+`ledger/src/ledger.rs::process_batch` only sends successful instructions to the
+inserter. `block_inserter.rs` checks whether the account head changed before
+writing. These are useful examples of separating validation from application.
+
+BURST already has staged node transitions and stable persistence validation. The
+PA06 reproduction shows an engine boundary losing an error, not absence of all
+transaction protection. FA03 concerns a caller-provided invalid state and an Err
+return after a partial update. There is no evidence these behaviors were chosen
+as protocol rules, but no valid ledger attack was demonstrated either. Make the
+small local fixes; do not introduce broad extra staging layers throughout BURST.
+
+Sources: [validation](https://github.com/rsnano-node/rsnano-node/blob/414dd884c162f78f151b9d912a029bbc9a340866/ledger/src/block_insertion/validation/mod.rs),
+[receive rules](https://github.com/rsnano-node/rsnano-node/blob/414dd884c162f78f151b9d912a029bbc9a340866/ledger/src/block_insertion/validation/receive_block_rules.rs),
+[inserter](https://github.com/rsnano-node/rsnano-node/blob/414dd884c162f78f151b9d912a029bbc9a340866/ledger/src/block_insertion/block_inserter.rs).
+
+### FA01: same unbounded local-file pattern
+
+Rsnano `cli/src/cli/commands/wallets/import_keys.rs::import_keys` opens the path,
+reads it into a String, then calls wallet import/replace. `LmdbWalletStore::new_from_json`
+parses a serde_json Value and decodes wallet entries. Its variable account-count
+backup format differs from BURST's fixed-size encrypted seed format: equal byte
+limits are not implied. The shared pre-parse allocation pattern is directly
+visible; no Rsnano OOM test was run.
+
+BURST's 1-MiB ignored metadata test demonstrates acceptance, not a crash. There
+was no evidence supporting higher urgency than local availability hardening.
+A user-selected file can still be hostile, so bounded reading is useful despite
+Rsnano sharing the assumption. Unknown JSON fields can be intentionally tolerated
+for compatibility; rejecting every unknown field is unnecessary to impose a cap.
+
+Sources: [CLI import](https://github.com/rsnano-node/rsnano-node/blob/414dd884c162f78f151b9d912a029bbc9a340866/cli/src/cli/commands/wallets/import_keys.rs),
+[wallet store](https://github.com/rsnano-node/rsnano-node/blob/414dd884c162f78f151b9d912a029bbc9a340866/store_lmdb/src/wallet_store.rs).
+
+### FA02: key scattering is not guaranteed wiping
+
+Rsnano `types/src/raw_key.rs` uses `u256_struct!(RawKey)`; the macro derives Copy
+and contains a [u8;32]. `RawKey::encrypt/decrypt` creates another raw buffer.
+`store_lmdb/src/fan.rs` distributes fragments but `value` reconstructs a copy.
+PrivateKey wraps dalek's SigningKey, which is a separate boundary: this review
+does not claim all dalek-managed keys lack wiping. It establishes only that raw
+copies and passwords are not comprehensively erased in the inspected application
+paths. BURST should minimize its own temporary lifetime without treating this
+as a cryptographic algorithm defect.
+
+Sources: [RawKey](https://github.com/rsnano-node/rsnano-node/blob/414dd884c162f78f151b9d912a029bbc9a340866/types/src/raw_key.rs),
+[wrapper macro](https://github.com/rsnano-node/rsnano-node/blob/414dd884c162f78f151b9d912a029bbc9a340866/types/src/u256_struct.rs),
+[Fan](https://github.com/rsnano-node/rsnano-node/blob/414dd884c162f78f151b9d912a029bbc9a340866/store_lmdb/src/fan.rs).
+
+### FA04: explicit simple REST design; TLS restriction was not specified
+
+BURST IMPLEMENTATION_DECISIONS 22.1 selects a public IPFS/web directory; 22.2
+selects simple GET membership queries instead of challenge-response/signed
+responses; 22.3 selects live queries. `groups/src/lib.rs` explicitly describes
+HTTP endpoints and an off-chain application trust overlay. Client, registry and
+wallet validation accept HTTP(S). docs/PRIVACY.md already explains that remote
+plain HTTP is unencrypted for node connections, though it does not specifically
+explain group membership disclosure.
+
+These records establish the simple API choice. They do not prove the owner
+separately evaluated every remote plaintext risk. No document found establishes
+HTTPS-only membership as a requirement. Therefore the original unconditional
+“require HTTPS” recommendation was too strong as a defect fix. Document the group
+query/response trust boundary and prefer HTTPS; making remote HTTP impossible
+would be a policy change. Directory retrieval and membership queries have different
+disclosures and should not be conflated. Interception can still influence a user's
+optional acceptance policy even though it cannot grant consensus voting weight.
+
+Rsnano's local RPC URL policy is only context, not an equivalent group service:
+[RPC client](https://github.com/rsnano-node/rsnano-node/blob/414dd884c162f78f151b9d912a029bbc9a340866/rpc/client/src/lib.rs),
+[RPC defaults](https://github.com/rsnano-node/rsnano-node/blob/414dd884c162f78f151b9d912a029bbc9a340866/rpc/server/src/config.rs).
+
+## Carried findings and other conclusions
+
+* PA03 private RPC priority remains intentional; Rsnano's local source receives
+  its configured local queue priority. No extra public-ingress architecture is
+  needed for the current private-RPC deployment model.
+* PA01 checked governance widths, PA02 full-width balance scheduling, PA04 wallet
+  accounting and PA05 keystore profile validation remain justified fixes. Rsnano
+  has no equivalent BURST governance or BRN model; its Amount stores u128. Human
+  display conversion is not a reason to clamp scheduler balance keys.
+* Q01 constitutional thresholds and Q02 independent custodian authority remain
+  BURST model/documentation questions. Nano has no matching governance or guardian
+  authority whose behavior can settle them. Do not add guardian signing merely
+  to make local metadata look like a completed consensus feature.
+* PD01's correction remains justified: Nano-style pruning is not a guarantee of
+  bounded total state, and BURST retains additional provenance/revocation history.
+  No reason found to remove the production retirement gate.
+* Dependency advisories are package/version/path questions, not choices endorsed
+  by another project. Existing disputed block-buffer classification and unresolved
+  transitive reachability stay unchanged. No second advisory scan was needed.
+* Action tags also occur in Rsnano's
+  [release workflow](https://github.com/rsnano-node/rsnano-node/blob/414dd884c162f78f151b9d912a029bbc9a340866/.github/workflows/docker_release.yml).
+  Shared practice does not authenticate a compromised publisher. No equivalence
+  between its Docker release and BURST's desktop installer signing is claimed.
+
+## Evidence reuse and next action
+
+| Changed input | Affected requirement | Existing evidence | Action |
+| --- | --- | --- | --- |
+| Audit classifications/docs only | Intent vs defect assessment | Pinned source reads and BURST design decisions | Record revised disposition; no compile |
+| No change to PA06/FA01 inputs | Existing reproductions and persistence guard | full-audit-20261030 latest receipts | No scenario rerun; no new runtime claim |
+| No dependency changes | Advisory interpretation | Refreshed full-audit scan and prior Rsnano comparison | Retain scope; no new scan |
+
+Practical order: fix PA06; make FA03's tiny atomicity improvement; optionally batch
+bounded backup/log reads and temporary zeroization. Explain group HTTP exposure
+without silently changing the chosen REST model. None of this comparison supports
+claiming a newly demonstrated critical/high exploit or starting another broad
+network acceptance cycle.

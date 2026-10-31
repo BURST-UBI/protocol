@@ -1,16 +1,9 @@
-//! All BURST transaction types and their validation logic.
+//! Typed transaction payloads and structural checks used by wallet and node code.
 //!
-//! Transaction types:
-//! - **Burn**: Consumer burns BRN → provider receives TRST
-//! - **Send**: Transfer TRST between wallets
-//! - **Merge**: Combine multiple TRST tokens into one
-//! - **Endorse**: Endorser burns BRN to vouch for a new wallet
-//! - **Challenge**: Challenger stakes BRN to contest a wallet's legitimacy
-//! - **GovernanceProposal**: Propose a parameter or constitutional change
-//! - **GovernanceVote**: Cast a vote on a proposal
-//! - **Delegate**: Delegate voting power to a representative
-//! - **RevokeDelegation**: Revoke a previously delegated vote
-//! - **ChangeRepresentative**: Change consensus representative (for ORV)
+//! These payloads cover the variants in `Transaction`, not every ledger block
+//! operation. Block authoring maps them into the ledger's state-block format.
+//! Structural validation does not authenticate signatures or establish balances,
+//! eligibility or permission to apply an operation; admission checks those rules.
 
 pub mod burn;
 pub mod challenge;
@@ -29,7 +22,8 @@ pub mod verification_vote;
 use burst_types::{Signature, Timestamp, TxHash, WalletAddress};
 use serde::{Deserialize, Serialize};
 
-/// The unified transaction enum wrapping all BURST transaction types.
+/// Transaction payloads supported by this crate. Additional operations use
+/// ledger blocks directly.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Transaction {
     Burn(burn::BurnTx),
@@ -48,7 +42,7 @@ pub enum Transaction {
 }
 
 impl Transaction {
-    /// Get the hash of this transaction.
+    /// Stored transaction identifier; this accessor does not recompute it.
     pub fn hash(&self) -> &TxHash {
         match self {
             Self::Burn(tx) => &tx.hash,
@@ -67,7 +61,8 @@ impl Transaction {
         }
     }
 
-    /// Get the sender/signer of this transaction.
+    /// Account named as the actor, including the recipient for a receive.
+    /// Reading this field does not authenticate that account.
     pub fn sender(&self) -> &WalletAddress {
         match self {
             Self::Burn(tx) => &tx.sender,
@@ -86,7 +81,6 @@ impl Transaction {
         }
     }
 
-    /// Get the timestamp.
     pub fn timestamp(&self) -> Timestamp {
         match self {
             Self::Burn(tx) => tx.timestamp,
@@ -105,7 +99,7 @@ impl Transaction {
         }
     }
 
-    /// Get the PoW nonce.
+    /// Stored proof-of-work nonce, without work validation.
     pub fn work(&self) -> u64 {
         match self {
             Self::Burn(tx) => tx.work,
@@ -124,7 +118,7 @@ impl Transaction {
         }
     }
 
-    /// Get the signature.
+    /// Stored signature, without authentication.
     pub fn signature(&self) -> &Signature {
         match self {
             Self::Burn(tx) => &tx.signature,

@@ -9,7 +9,12 @@ impl SnapshotContinuation {
         cemented: &super::super::tail::cemented::CementedTail,
         cutoff: u64,
     ) -> Result<Vec<HistoryHead>, ReplayError> {
-        let tail = cemented.tail();
+        self.replayed_heads_at(cemented.tail(), cutoff)
+    }
+
+    pub(super) fn replayed_heads_at(
+        &self, tail: &SnapshotTail, cutoff: u64,
+    ) -> Result<Vec<HistoryHead>, ReplayError> {
         if tail.context() != self.context || cutoff < self.anchor.cutoff() || cutoff > tail.cutoff()
         {
             return Err(ReplayError::Invalid(

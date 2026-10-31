@@ -1,13 +1,6 @@
-//! Nullable infrastructure for deterministic testing.
-//!
-//! Inspired by the "A-frame architecture" pattern from RsNano.
-//! All external dependencies (clock, network, storage, random) are abstracted
-//! behind traits. This crate provides test-friendly implementations that:
-//! - Return deterministic values
-//! - Can be controlled programmatically
-//! - Never touch the filesystem or network
-//!
-//! Usage: swap real implementations for nullables in tests.
+//! Deterministic test doubles. Production code is injectable only where it
+//! explicitly accepts one of these implementations; this is not a universal
+//! clock/network abstraction. In-memory delegation storage lives in burst-store.
 
 pub mod clock;
 pub mod network;
@@ -17,4 +10,4 @@ pub mod store;
 pub use clock::NullClock;
 pub use network::NullNetwork;
 pub use random::NullRandom;
-pub use store::{NullDelegationStore, NullStore};
+pub use store::NullStore;

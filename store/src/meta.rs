@@ -5,11 +5,12 @@ use burst_types::BlockHash;
 
 pub const PAYMENT_EPOCH_KEY: &str = "payment_epoch/v1";
 pub const CERTIFIED_PAYMENT_AUTHORITY_KEY: &str = "checkpoint_installed/v1";
+pub const CERTIFIED_PAYMENT_AUTHORITY_PAGE_PREFIX: &str = "checkpoint_installed/pages/v1/";
 pub const PAYMENT_VOTE_LIMIT_KEY: &str = "payment_epoch/v1/vote_limit";
 pub const GOVERNANCE_COUNTING_LIMIT_KEY: &str = "payment_epoch/v1/counting_limit";
 
-/// The latest signed timestamp eligible for ordinary voting in this epoch.
-/// Only an authenticated checkpoint projection may change this derived limit.
+/// Encode an epoch-bound ordinary-vote timestamp limit. This only encodes bytes;
+/// the caller must authenticate the projection authorizing a changed limit.
 pub fn encode_payment_vote_limit(epoch: BlockHash, limit: Option<u64>) -> Vec<u8> {
     let mut bytes = epoch.as_bytes().to_vec();
     bytes.push(u8::from(limit.is_some()));
@@ -41,6 +42,19 @@ pub fn closed_payment_epoch_key(epoch: &BlockHash) -> String {
     format!("{PAYMENT_EPOCH_KEY}/closed/{epoch}")
 }
 
+/// Resolve the installed context and reject a closed epoch. The caller must
+/// make both reads through the same pinned metadata view.
+pub fn read_open_payment_epoch(
+    mut read: impl FnMut(&str) -> Result<Option<Vec<u8>>, StoreError>,
+) -> Result<BlockHash, StoreError> {
+    let bytes = read(PAYMENT_EPOCH_KEY)?.ok_or_else(|| StoreError::Corruption("payment epoch is not initialized".into()))?;
+    let epoch = decode_payment_epoch(&bytes)?;
+    if read(&closed_payment_epoch_key(&epoch))?.is_some() {
+        return Err(StoreError::Corruption("installed payment epoch is already closed".into()));
+    }
+    Ok(epoch)
+}
+
 pub fn decode_payment_epoch(bytes: &[u8]) -> Result<BlockHash, StoreError> {
     let hash = BlockHash::new(
         bytes
@@ -60,6 +74,8 @@ pub fn decode_payment_epoch(bytes: &[u8]) -> Result<BlockHash, StoreError> {
 /// This is a generic key-value store for internal bookkeeping that doesn't
 /// belong in any domain-specific store.
 pub trait MetaStore {
+    /// Read the current epoch and its closed marker. This default makes separate
+    /// get_meta calls; use a pinned backend view when consistency is required.
     fn payment_epoch(&self) -> Result<BlockHash, StoreError> {
         let epoch = decode_payment_epoch(&self.get_meta(PAYMENT_EPOCH_KEY)?)?;
         match self.get_meta(&closed_payment_epoch_key(&epoch)) {

@@ -1,5 +1,5 @@
 //! Frozen selection inputs for the checkpoint protocol. The node must derive
-//! these inputs by replaying the checkpoint's ledger cut BEFORE signing it.
+//! these inputs by replaying the checkpoint's ledger cut before signing it.
 //! Certificate validation cannot prove pool completeness or signing time alone.
 
 use burst_consensus::checkpoint::{Checkpoint, CheckpointAnchor, CheckpointCertificate};
@@ -41,7 +41,30 @@ pub struct SelectionRequest {
     round: u64,
 }
 
+#[cfg(test)]
+thread_local! {
+    static COMMITMENT_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl SelectionRequest {
+    pub(crate) fn storage_pool(&self) -> &[WalletAddress] { &self.pool }
+
+    pub(crate) fn storage_header(&self) -> Self {
+        Self {
+            target: self.target.clone(), trigger: self.trigger, attempt: self.attempt,
+            cutoff: self.cutoff, params_hash: self.params_hash, pool: Vec::new(),
+            count: self.count, round: self.round,
+        }
+    }
+
+    /// Storage decomposition only; reconstructed requests still require the
+    /// existing checkpoint/beacon validation before authorizing selection.
+    pub(crate) fn replace_storage_pool(&mut self, pool: Vec<WalletAddress>) -> Vec<WalletAddress> {
+        std::mem::replace(&mut self.pool, pool)
+    }
+
+    /// Sort and validate the supplied pool, then bind the first beacon round
+    /// strictly after the cutoff. Eligibility and pool completeness require replay.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         target: WalletAddress,
@@ -106,15 +129,19 @@ impl SelectionRequest {
     /// The checkpoint hash also binds the network, genesis and parent roster
     /// history. A request digest alone would allow cross-network vote replay.
     pub fn vote_context(&self, checkpoint: &Checkpoint) -> Result<BlockHash, SelectionError> {
-        self.validate_checkpoint(checkpoint)?;
+        let commitment = self.validate_checkpoint(checkpoint)?;
         Ok(BlockHash::new(blake2b_256_multi(&[
             b"BURST/verification-vote-context/v1\0",
             checkpoint.hash().as_bytes(),
-            self.commitment()?.as_bytes(),
+            commitment.as_bytes(),
         ])))
     }
 
+    /// Hash the full canonical request, including every pool member. This scans
+    /// the pool; callers should reuse an installed vote context for later votes.
     pub fn commitment(&self) -> Result<BlockHash, SelectionError> {
+        #[cfg(test)]
+        COMMITMENT_CALLS.with(|calls| calls.set(calls.get() + 1));
         self.validate()?;
         let mut bytes = b"BURST/selection-request/v1\0".to_vec();
         bytes.extend_from_slice(DRAND_MAINNET_CHAIN.as_bytes());
@@ -162,14 +189,15 @@ impl SelectionRequest {
         Ok(())
     }
 
-    fn validate_checkpoint(&self, checkpoint: &Checkpoint) -> Result<(), SelectionError> {
-        if checkpoint.selection_root != self.commitment()?
+    fn validate_checkpoint(&self, checkpoint: &Checkpoint) -> Result<BlockHash, SelectionError> {
+        let commitment = self.commitment()?;
+        if checkpoint.selection_root != commitment
             || checkpoint.cutoff != self.cutoff
             || checkpoint.params_hash != self.params_hash
         {
             return Err(SelectionError::WrongCheckpoint);
         }
-        Ok(())
+        Ok(commitment)
     }
 
     /// Call before durable reservation/signing, after ledger replay validation.
@@ -201,6 +229,8 @@ impl SelectionRequest {
     /// time: doing so would change eligibility after the randomness is known.
     /// A valid certificate assumes honest signers checked completeness and the
     /// pre-beacon deadline; the signature itself is not a timestamp proof.
+    /// Rank the whole pool by Blake2b(beacon value || address), breaking hash
+    /// ties by address, and take `count` members. Sorting costs O(n log n).
     pub fn select(
         &self,
         parent: &CheckpointAnchor,
@@ -344,6 +374,37 @@ mod tests {
         assert_eq!(request.pool.len(), 2);
         assert!(request.pool.contains(&address(1)) && request.pool.contains(&address(2)));
         (orchestrator, params, request)
+    }
+
+    #[test]
+    fn installed_context_skips_pool_hashing_but_restored_context_is_revalidated() {
+        let (mut orchestrator, params, request) = pending();
+        let (parent, certificate) = certificate(&request);
+        assert!(orchestrator.selection_context(&address(99)).is_none());
+        let context = orchestrator.install_selection(&address(99), &parent, &certificate, &output()).unwrap();
+        let bytes = orchestrator.snapshot().encode().unwrap();
+        COMMITMENT_CALLS.with(|calls| calls.set(0));
+        for _ in 0..100 {
+            assert_eq!(orchestrator.selection_context(&address(99)), Some(context));
+            orchestrator.validate_certified_vote(&address(99), &address(1), context,
+                params.params_hash(), Timestamp::new(GENESIS)).unwrap();
+        }
+        assert_eq!(COMMITMENT_CALLS.with(|calls| calls.get()), 0);
+        assert_eq!(orchestrator.snapshot().encode().unwrap(), bytes);
+        let restored = VerificationOrchestrator::restore(OrchestratorSnapshot::decode(&bytes).unwrap());
+        COMMITMENT_CALLS.with(|calls| calls.set(0));
+        for _ in 0..100 { assert_eq!(restored.selection_context(&address(99)), Some(context)); }
+        assert_eq!(COMMITMENT_CALLS.with(|calls| calls.get()), 1);
+        assert_eq!(restored.snapshot().encode().unwrap(), bytes);
+        assert!(restored.validate_certified_vote(&address(99), &address(1), BlockHash::ZERO,
+            params.params_hash(), Timestamp::new(GENESIS)).is_err());
+        assert!(restored.validate_certified_vote(&address(99), &address(1), context,
+            BlockHash::ZERO, Timestamp::new(GENESIS)).is_err());
+        assert!(restored.validate_certified_vote(&address(99), &address(1), context,
+            params.params_hash(), Timestamp::new(GENESIS - 1)).is_err());
+        let mut wrong_checkpoint = certificate.checkpoint.clone();
+        wrong_checkpoint.selection_root = BlockHash::ZERO;
+        assert_eq!(request.vote_context(&wrong_checkpoint), Err(SelectionError::WrongCheckpoint));
     }
 
     #[test]
@@ -526,7 +587,7 @@ mod tests {
             .install_selection(&address(99), &parent, &certificate, &output())
             .unwrap();
         assert_eq!(
-            restored.get_state(&address(99)).unwrap().selected_verifiers,
+            *restored.get_state(&address(99)).unwrap().selected_verifiers,
             request.select(&parent, &certificate, &output()).unwrap()
         );
         restored

@@ -178,13 +178,10 @@ async fn run_round(
                 &events,
             )
             .unwrap();
-            let snapshot = burst_verification::OrchestratorSnapshot::decode(
-                &store
-                    .meta_store()
-                    .get_meta(crate::endorsement_commit::SNAPSHOT_KEY)
-                    .unwrap(),
-            )
-            .unwrap();
+            let snapshot = {
+                let batch = store.tx_begin_write().unwrap();
+                crate::verification_storage::load(&batch).unwrap().snapshot()
+            };
             for address in &addresses[2..4] {
                 let until = snapshot.penalized_verifiers[address];
                 assert!(until > time(104).as_secs());

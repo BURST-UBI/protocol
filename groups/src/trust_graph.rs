@@ -1,7 +1,7 @@
 //! Optional, live group-to-group trust. Registered endpoints are never replaced
 //! by a response, and discovering a group is not itself a reason to trust it.
 
-use crate::{GroupClient, GroupError, GroupRegistry, MemberStatus};
+use crate::{GroupEvaluation, GroupClient, GroupError, GroupRegistry, MemberStatus};
 use serde::Deserialize;
 use std::collections::{BTreeSet, VecDeque};
 use std::time::Duration;
@@ -25,6 +25,14 @@ struct Endorsements {
 }
 
 impl GroupClient {
+    pub async fn verify_member_through_groups(
+        &self, registry: &GroupRegistry, root: &str, wallet_id: &str, max_hops: u8,
+    ) -> Result<Option<MembershipPath>, GroupError> {
+        self.evaluation().verify_member_through_groups(registry, root, wallet_id, max_hops).await
+    }
+}
+
+impl GroupEvaluation<'_> {
     /// A zero-hop policy checks direct membership only. Greater depths explicitly
     /// authorize disclosure to registered groups vouched for by the selected root.
     /// No membership or endorsement response survives this evaluation.
@@ -41,7 +49,7 @@ impl GroupClient {
             )));
         }
         #[cfg(target_arch = "wasm32")]
-        use burst_browser::timeout;
+        use burst_web_runtime::timeout;
         #[cfg(not(target_arch = "wasm32"))]
         use tokio::time::timeout;
         timeout(
@@ -118,7 +126,10 @@ impl GroupClient {
         }
     }
 
-    async fn endorsed_groups(&self, endpoint: &str) -> Result<Vec<String>, GroupError> {
+}
+
+impl GroupClient {
+    pub(crate) async fn endorsed_groups(&self, endpoint: &str) -> Result<Vec<String>, GroupError> {
         let mut url = crate::client::endpoint_url_checked(endpoint)?;
         url.path_segments_mut()
             .map_err(|()| GroupError::InvalidResponse("invalid group trust endpoint".into()))?

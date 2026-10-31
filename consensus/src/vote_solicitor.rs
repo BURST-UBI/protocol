@@ -1,8 +1,8 @@
-//! Vote solicitation — actively request representatives to vote on elections.
+//! Standalone retry bookkeeping for vote requests; not wired into the node.
 //!
-//! When an election starts, the node should not passively wait for votes. This
-//! module tracks which elections need solicitation, which reps have already
-//! responded, and enforces a re-solicitation interval with a maximum retry count.
+//! Produces candidate/representative lists and records a round when returning a
+//! nonempty list, before any network send. Callers authenticate responses, send
+//! requests, bound registered elections and remove completed entries.
 
 use burst_types::{BlockHash, WalletAddress};
 use std::collections::{HashMap, HashSet};
@@ -13,7 +13,7 @@ struct SolicitationState {
     block_hash: BlockHash,
     /// UNIX timestamp (seconds) of the last solicitation round.
     last_solicited: u64,
-    /// How many solicitation rounds have been sent.
+    /// How many nonempty solicitation rounds have been returned.
     solicitation_count: u32,
     /// Maximum number of solicitation rounds before giving up.
     max_solicitations: u32,
@@ -40,7 +40,7 @@ impl VoteSolicitor {
 
     /// Register an election that needs vote solicitation.
     ///
-    /// `root` is the election root (e.g. the `previous` hash of forking blocks).
+    /// `root` is a caller-supplied conflict identifier. Duplicate roots are unchanged.
     /// `block_hash` is the specific block we're asking reps to vote on.
     pub fn add_election(&mut self, root: BlockHash, block_hash: BlockHash) {
         self.pending
@@ -88,7 +88,9 @@ impl VoteSolicitor {
     ///
     /// Returns a list of `(block_hash, target_reps)` for each election
     /// that hasn't been solicited recently and hasn't exceeded its retry limit.
-    /// `target_reps` excludes representatives that have already responded.
+    /// `target_reps` excludes representatives that have already responded. Input
+    /// duplicates are retained. This scans all pending elections and consumes a
+    /// retry for each returned list, regardless of subsequent send success.
     pub fn elections_needing_solicitation(
         &mut self,
         now: u64,
@@ -125,7 +127,7 @@ impl VoteSolicitor {
         results
     }
 
-    /// Number of active solicitations.
+    /// Number of registered elections, including exhausted entries until pruned.
     pub fn active_count(&self) -> usize {
         self.pending.len()
     }
@@ -143,7 +145,7 @@ impl VoteSolicitor {
             .unwrap_or(0)
     }
 
-    /// How many solicitation rounds have been sent for a given election.
+    /// How many nonempty rounds have been returned for a given election.
     pub fn solicitation_count(&self, root: &BlockHash) -> u32 {
         self.pending
             .get(root)
@@ -151,7 +153,7 @@ impl VoteSolicitor {
             .unwrap_or(0)
     }
 
-    /// Remove elections that have exceeded their max solicitations.
+    /// Remove elections that have reached their maximum solicitation count.
     /// Returns the roots of pruned elections.
     pub fn prune_exhausted(&mut self) -> Vec<BlockHash> {
         let exhausted: Vec<BlockHash> = self

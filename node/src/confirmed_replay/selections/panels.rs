@@ -11,8 +11,37 @@ pub(super) struct PanelState {
 }
 
 pub(super) struct Panel<'a> {
-    pub(super) certificate: std::borrow::Cow<'a, CertifiedCheckpoint>,
+    pub(super) certificate: Certificate<'a>,
     state: PanelState,
+}
+
+#[derive(Clone)]
+pub(super) enum Certificate<'a> {
+    Borrowed(&'a CertifiedCheckpoint),
+    Shared(std::sync::Arc<CertifiedCheckpoint>),
+}
+
+impl<'a> From<std::borrow::Cow<'a, CertifiedCheckpoint>> for Certificate<'a> {
+    fn from(value: std::borrow::Cow<'a, CertifiedCheckpoint>) -> Self {
+        match value {
+            std::borrow::Cow::Borrowed(value) => Self::Borrowed(value),
+            std::borrow::Cow::Owned(value) => Self::Shared(std::sync::Arc::new(value)),
+        }
+    }
+}
+
+impl AsRef<CertifiedCheckpoint> for Certificate<'_> {
+    fn as_ref(&self) -> &CertifiedCheckpoint {
+        match self {
+            Self::Borrowed(value) => value,
+            Self::Shared(value) => value,
+        }
+    }
+}
+
+impl std::ops::Deref for Certificate<'_> {
+    type Target = CertifiedCheckpoint;
+    fn deref(&self) -> &Self::Target { self.as_ref() }
 }
 
 impl std::ops::Deref for Panel<'_> {
@@ -48,10 +77,10 @@ enum Records {
 pub(super) struct Panels<'a, S: SelectionSource + ?Sized> {
     certificates: &'a S,
     records: Records,
-    // One already-authenticated certificate, scoped to this replay's immutable
-    // source borrow. Disk panel rows and their identity are still checked on
-    // every access; final durable-history guards remain the caller's duty.
-    last_certificate: std::sync::Mutex<Option<(usize, std::borrow::Cow<'a, CertifiedCheckpoint>)>>,
+    // Cache the last certificate by source position. Each lookup still reads
+    // the panel row and checks its checkpoint and context. The source must keep
+    // positions stable; durable-history checks remain the caller's responsibility.
+    last_certificate: std::sync::Mutex<Option<(usize, Certificate<'a>)>>,
 }
 
 impl<'a, S: SelectionSource + ?Sized> Panels<'a, S> {
@@ -93,7 +122,7 @@ impl<'a, S: SelectionSource + ?Sized> Panels<'a, S> {
         let cache_miss = cached.is_none();
         let certificate = match cached {
             Some(certificate) => certificate,
-            None => self.certificates.read_selection(state.position)?,
+            None => self.certificates.read_selection(state.position)?.into(),
         };
         if certificate.certificate().checkpoint.hash() != state.checkpoint
             || certificate
@@ -162,6 +191,7 @@ pub(in crate::confirmed_replay) fn assert_scoped_reuse(certificate: &CertifiedCh
     struct Counted<'a> {
         certificate: &'a CertifiedCheckpoint,
         reads: Cell<usize>,
+        owned: bool,
     }
     impl SelectionSource for Counted<'_> {
         fn len(&self) -> usize {
@@ -175,7 +205,7 @@ pub(in crate::confirmed_replay) fn assert_scoped_reuse(certificate: &CertifiedCh
             if position != 0 {
                 return Err(invalid("missing selection"));
             }
-            Ok(Cow::Owned(self.certificate.clone()))
+            Ok(if self.owned { Cow::Owned(self.certificate.clone()) } else { Cow::Borrowed(self.certificate) })
         }
     }
     let context = certificate
@@ -183,11 +213,12 @@ pub(in crate::confirmed_replay) fn assert_scoped_reuse(certificate: &CertifiedCh
         .request()
         .vote_context(&certificate.certificate().checkpoint)
         .unwrap();
-    for disk in [false, true] {
+    for (disk, owned) in [(false, false), (false, true), (true, false), (true, true)] {
         let directory = tempfile::tempdir().unwrap();
         let source = Counted {
             certificate,
             reads: Cell::new(0),
+            owned,
         };
         let path = disk.then_some(directory.path());
         let mut panels = Panels::new(&source, path).unwrap();
@@ -199,8 +230,11 @@ pub(in crate::confirmed_replay) fn assert_scoped_reuse(certificate: &CertifiedCh
                 None,
             )
             .unwrap();
+        let first = panels.require(&context).unwrap();
         for _ in 0..32 {
-            panels.require(&context).unwrap();
+            let next = panels.require(&context).unwrap();
+            assert!(std::ptr::eq(first.certificate.as_ref(), next.certificate.as_ref()),
+                "cache hit cloned the authenticated certificate payload");
         }
         assert_eq!(
             source.reads.get(),

@@ -70,7 +70,7 @@ async fn install_and_restart(replace: bool, peer_proofs: bool) {
     let proofs = if peer_proofs {
         None
     } else {
-        let service = Service::start(source.store.clone(), target.store.clone(), 0).await;
+        let service = WitnessService::start(source.store.clone(), target.store.clone(), 0).await;
         target
             .registry
             .write()
@@ -159,7 +159,7 @@ async fn install_and_restart(replace: bool, peer_proofs: bool) {
             .unwrap(),
         bytes
     );
-    assert_economics(
+    assert_trst_state(
         &source.store,
         &target.store,
         prepared.params.trst_expiry_secs,

@@ -368,3 +368,256 @@ fn projections_do_not_recount_an_activated_result() {
         .due_activation_hashes(Timestamp::new(u64::MAX))
         .is_empty());
 }
+
+#[test]
+fn selected_projection_matches_phase_rules_and_only_requires_due_electorates() {
+    let (engine, delegation, params, id, verified) = fixture();
+    let before = bincode::serialize(&engine).unwrap();
+    let original = engine.get_proposal(&id).unwrap();
+    for (seconds, needs_electorate) in [
+        (99, false),
+        (109, false),
+        (110, false),
+        (111, false),
+        (112, true),
+        (u64::MAX, true),
+    ] {
+        let now = Timestamp::new(seconds);
+        assert_eq!(
+            engine.projection_requires_electorate(original, now, &params),
+            needs_electorate
+        );
+        let selected = engine.project_proposal_at(original, now, &params, &delegation, &verified);
+        // Compare with the same phase-transition primitive, not an independent tally.
+        let mut reference = original.clone();
+        for _ in 0..3 {
+            if !matches!(
+                reference.phase,
+                GovernancePhase::Proposal
+                    | GovernancePhase::Exploration
+                    | GovernancePhase::Cooldown
+            ) {
+                break;
+            }
+            if engine
+                .try_advance(&mut reference, now, &params, Some((&delegation, &verified)))
+                .is_err()
+            {
+                break;
+            }
+        }
+        assert_eq!(selected, reference);
+        if !needs_electorate {
+            assert_eq!(
+                selected,
+                engine.project_proposal_at(
+                    original,
+                    now,
+                    &params,
+                    &DelegationEngine::default(),
+                    &[]
+                )
+            );
+        }
+    }
+    for phase in [
+        GovernancePhase::Cooldown,
+        GovernancePhase::Activation,
+        GovernancePhase::Activated,
+        GovernancePhase::Rejected,
+    ] {
+        let mut proposal = original.clone();
+        proposal.phase = phase;
+        assert!(!engine.projection_requires_electorate(
+            &proposal,
+            Timestamp::new(u64::MAX),
+            &params
+        ));
+    }
+    let mut support = original.clone();
+    support.phase = GovernancePhase::Proposal;
+    support.endorsement_count = params.governance_proposal_endorsements;
+    let end = engine
+        .timing(&support, &params)
+        .unwrap()
+        .proposal_end(support.created_at)
+        .unwrap();
+    let counting = engine
+        .timing(&support, &params)
+        .unwrap()
+        .counting_at(end)
+        .unwrap();
+    assert!(!engine.projection_requires_electorate(&support, end, &params));
+    assert!(engine.projection_requires_electorate(&support, counting, &params));
+    support.endorsement_count = 0;
+    assert!(!engine.projection_requires_electorate(&support, counting, &params));
+
+    let mut invalid = original.clone();
+    invalid.exploration_started_at = Some(Timestamp::new(u64::MAX));
+    assert!(!engine.projection_requires_electorate(&invalid, Timestamp::new(u64::MAX), &params));
+    assert_eq!(bincode::serialize(&engine).unwrap(), before);
+}
+
+#[test]
+fn projection_reuse_windows_match_fresh_projection_at_phase_boundaries() {
+    let (engine, delegation, mut params, id, verified) = fixture();
+    params.governance_cooldown_duration_secs = 5;
+    let original = engine.get_proposal(&id).unwrap();
+    let mut variants = vec![original.clone()];
+    let mut support = original.clone();
+    support.phase = GovernancePhase::Proposal;
+    support.endorsement_count = params.governance_proposal_endorsements;
+    variants.push(support.clone());
+    support.endorsement_count = 0;
+    variants.push(support);
+    let mut cooldown = original.clone();
+    cooldown.phase = GovernancePhase::Cooldown;
+    cooldown.cooldown_started_at = Some(Timestamp::new(112));
+    variants.push(cooldown.clone());
+    cooldown.activation_at = Some(Timestamp::new(130));
+    variants.push(cooldown);
+    for phase in [GovernancePhase::Rejected, GovernancePhase::Withdrawn,
+        GovernancePhase::Activation, GovernancePhase::Activated, GovernancePhase::Promotion,
+        GovernancePhase::Conflicted] {
+        let mut terminal = original.clone();
+        terminal.phase = phase;
+        variants.push(terminal);
+    }
+    let proposal_end = engine.timing(original, &params).unwrap()
+        .proposal_end(original.created_at).unwrap().as_secs();
+    let times = [0, 99, 100, 109, 110, 111, 112, 113, 116, 117, 118, 129, 130,
+        proposal_end.saturating_sub(1), proposal_end, proposal_end.saturating_add(12), u64::MAX];
+    for input in variants {
+        for electorate in [&verified[..], &[][..]] {
+            for seconds in times {
+                let now = Timestamp::new(seconds);
+                let projected = engine.project_proposal_at(&input, now, &params, &delegation, electorate);
+                let until = engine.projection_valid_until(&projected, now, &params);
+                for later in times.into_iter().filter(|later| *later >= seconds) {
+                    if until.is_none_or(|end| later < end.as_secs()) {
+                        assert_eq!(projected, engine.project_proposal_at(&input,
+                            Timestamp::new(later), &params, &delegation, electorate),
+                            "invalid reuse window at {seconds} -> {later} for {:?}", input.phase);
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(engine.projection_valid_until(original, Timestamp::new(110), &params), Some(Timestamp::new(112)));
+    let mut invalid = original.clone();
+    invalid.exploration_started_at = None;
+    assert_eq!(engine.projection_valid_until(&invalid, Timestamp::new(110), &params), Some(Timestamp::new(110)));
+    invalid.exploration_started_at = Some(Timestamp::new(u64::MAX));
+    assert_eq!(engine.projection_valid_until(&invalid, Timestamp::new(110), &params), Some(Timestamp::new(110)));
+    let mut overflow = original.clone();
+    overflow.phase = GovernancePhase::Cooldown;
+    overflow.cooldown_started_at = Some(Timestamp::new(u64::MAX - 1));
+    assert_eq!(engine.projection_valid_until(&overflow, Timestamp::new(110), &params), Some(Timestamp::new(u64::MAX)));
+}
+
+#[test]
+fn shared_electorate_preserves_canonical_receipts_and_lazy_validation() {
+    let (engine, delegation, params, id, verified) = fixture();
+    let electorate = BallotElectorate::new(verified.clone());
+    assert!(electorate.commitment.get().is_none());
+    assert!(engine.prepare_ballot_with_electorate(&id, BlockHash::ZERO,
+        Timestamp::new(112), &params, &delegation, &electorate).is_err());
+    assert!(electorate.commitment.get().is_none(), "invalid history must precede electorate work");
+    let expected = prepare(&engine, &delegation, &params, id, &verified);
+    // Construct the expected encoding directly from the count and sorted keys.
+    let mut keys: Vec<_> = verified.iter().map(|a| burst_crypto::decode_address(a.as_str()).unwrap()).collect();
+    keys.sort();
+    let mut bytes = b"BURST/governance-electorate/v1\0".to_vec();
+    bytes.extend_from_slice(&(verified.len() as u32).to_be_bytes());
+    for key in keys { bytes.extend_from_slice(&key); }
+    for _ in 0..4 {
+        let ballot = engine.prepare_ballot_with_electorate(&id, BlockHash::new([9; 32]),
+            Timestamp::new(112), &params, &delegation, &electorate).unwrap();
+        assert_eq!(ballot.receipt.electorate, BlockHash::new(burst_crypto::blake2b_256(&bytes)));
+        assert_eq!(ballot.commitment().unwrap(), expected.commitment().unwrap());
+        assert_eq!(ballot.next_proposal(), expected.next_proposal());
+        assert!(electorate.commitment.get().is_some());
+    }
+    let mut reordered = verified.clone();
+    reordered.reverse();
+    assert_eq!(BallotElectorate::new(reordered).commitment().unwrap(), electorate.commitment().unwrap());
+    for invalid in [vec![wallet(1), wallet(1)], vec![WalletAddress::new("brst_invalid")]] {
+        let invalid = BallotElectorate::new(invalid);
+        assert!(invalid.commitment.get().is_none());
+        assert!(invalid.commitment().is_err());
+        assert!(invalid.commitment().is_err());
+    }
+    let smaller = BallotElectorate::new(verified[..verified.len() - 1].to_vec());
+    assert_ne!(smaller.commitment().unwrap(), electorate.commitment().unwrap());
+}
+
+#[test]
+#[ignore = "explicit capped-host governance scaling diagnostic"]
+fn electorate_commitment_scaling() {
+    use std::time::Instant;
+    let n: usize = std::env::var("BURST_GOV_PROBE_POPULATION").unwrap().parse().unwrap();
+    assert!((10..=100_000).contains(&n));
+    let start = Instant::now();
+    let voters: Vec<_> = (0..n).map(|i| {
+        let mut key = [0u8; 32];
+        key[..8].copy_from_slice(&(i as u64).to_be_bytes());
+        burst_crypto::derive_address(&burst_types::PublicKey(key))
+    }).collect();
+    let setup_ms = start.elapsed().as_secs_f64() * 1000.0;
+    for sample in 0..5 {
+        let electorate = BallotElectorate::new(voters.as_slice());
+        let start = Instant::now();
+        let expected = electorate.commitment().unwrap();
+        let cold_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let start = Instant::now();
+        for _ in 0..1000 {
+            assert_eq!(std::hint::black_box(electorate.commitment().unwrap()), expected);
+        }
+        let warm_per_call_ns = start.elapsed().as_nanos() as f64 / 1000.0;
+        assert_eq!(expected.0 as usize, n);
+        let status = std::fs::read_to_string("/proc/self/status").unwrap();
+        let memory: Vec<_> = status.lines().filter(|line| line.starts_with("VmRSS:") || line.starts_with("VmHWM:")).collect();
+        println!("gov_scale {}", serde_json::json!({"kind":"electorate", "population":n,
+            "sample":sample,"setup_ms":setup_ms,"cold_ms":cold_ms,
+            "warm_per_call_ns":warm_per_call_ns,"memory":memory}));
+    }
+}
+
+impl GovernanceEngine {
+    /// Project elapsed phases for display and candidate preparation. A local
+    /// clock and a possibly incomplete electorate cannot close the stored ballot.
+    /// This copy neither applies activation effects nor authenticates a result.
+    fn project_at(
+        &self,
+        now: Timestamp,
+        params: &ProtocolParams,
+        delegation: &DelegationEngine,
+        verified: &[WalletAddress],
+    ) -> Self {
+        let mut projected = self.clone();
+        for original in self.all_proposals() {
+            let next = self.project_proposal_at(original, now, params, delegation, verified);
+            *projected
+                .get_proposal_mut(&original.hash)
+                .expect("cloned proposal") = next;
+        }
+        projected
+    }
+
+    fn due_activation_hashes(&self, now: Timestamp) -> Vec<TxHash> {
+        let mut due: Vec<_> = self
+            .all_proposals()
+            .filter(|proposal| {
+                proposal.phase == GovernancePhase::Activation
+                    && proposal.activation_at.is_some_and(|at| at <= now)
+            })
+            .collect();
+        due.sort_by_key(|proposal| {
+            (
+                proposal.activation_at.map(|at| at.as_secs()),
+                *proposal.hash.as_bytes(),
+            )
+        });
+        due.into_iter().map(|proposal| proposal.hash).collect()
+    }
+}

@@ -1,3 +1,5 @@
+//! Normal-panel deadline candidates and persistence. Fixtures supply activation
+//! metadata directly; these tests do not certify activation or commit ledger effects.
 use super::*;
 use crate::{state::VerificationPhase, CommitteeActivation, VerificationEvent, VerificationResult};
 
@@ -9,6 +11,14 @@ fn panel(
     ProtocolParams,
     CommitteeActivation,
 ) {
+    panel_with_pool(max_revotes, threshold, &[address(1), address(2)])
+}
+
+fn panel_with_pool(
+    max_revotes: u32,
+    threshold: u32,
+    pool: &[WalletAddress],
+) -> (VerificationOrchestrator, ProtocolParams, CommitteeActivation) {
     let params = ProtocolParams {
         endorsement_threshold: 1,
         endorsement_burn_amount: 100,
@@ -34,7 +44,7 @@ fn panel(
             &address(99),
             BlockHash::new([5; 32]),
             Timestamp::new(GENESIS - 1),
-            &[address(1), address(2)],
+            pool,
             &params,
         )
         .unwrap();
@@ -355,6 +365,8 @@ fn deadline_rejects_early_or_changed_activation_inputs_without_mutating_the_orig
 
 #[test]
 fn a_late_vote_or_an_already_complete_panel_cannot_be_reinterpreted_as_a_timeout() {
+    // Inject through the engine to test defensive timeout validation; normal
+    // node admission checks the upper deadline before recording a signed vote.
     let (mut state, params, activation) = panel(3, 9000);
     state
         .process_certified_vote_at(
@@ -431,4 +443,77 @@ fn legacy_panels_and_active_challenges_do_not_use_normal_deadline_completion() {
     assert!(VerificationOrchestrator::new()
         .normal_deadline_candidate(&activation, &params, Timestamp::new(activation.deadline))
         .is_err());
+}
+
+#[test]
+fn certified_small_panel_large_pool_row_limit_diagnostic() {
+    for count in [128u64, 1_024] {
+        let pool: Vec<_> = (0..count).map(|n| {
+            let mut seed = [71u8; 32];
+            seed[..8].copy_from_slice(&n.to_le_bytes());
+            derive_address(&keypair_from_seed(&seed).public)
+        }).collect();
+        let (mut state, params, activation) = panel_with_pool(0, 9000, &pool);
+        assert_eq!(state.get_state(&activation.target).unwrap().selected_verifiers.len(), 2);
+        assert_eq!(state.selection_context(&activation.target), Some(activation.context));
+        let snapshot = state.snapshot().encode().unwrap();
+        let restored = VerificationOrchestrator::restore(OrchestratorSnapshot::decode(&snapshot).unwrap());
+        assert_eq!(restored.selection_context(&activation.target), Some(activation.context));
+        let row = state.target_record(&activation.target).unwrap().storage_entry();
+        if count == 128 {
+            assert!(row.is_ok());
+        } else {
+            assert_eq!(row.unwrap_err(), "verification record exceeds row limit");
+        }
+        crate::orchestrator::records::assert_normalized_roundtrip(&state);
+        let logical = state.target_record(&activation.target).unwrap();
+        let rows = crate::orchestrator::records::normalized::target_rows(&logical).unwrap();
+        assert!(rows.values().all(|bytes| bytes.len() <= burst_types::MAX_P2P_MESSAGE_BYTES));
+        let decoded = crate::orchestrator::records::normalized::target_from_rows(&activation.target, &rows).unwrap();
+        assert_eq!(bincode::serialize(&decoded).unwrap(), bincode::serialize(&logical).unwrap());
+        for budget in [snapshot.len() as u64, snapshot.len() as u64 - 1] {
+            let mut reader = crate::orchestrator::records::VerificationRecordReader::default();
+            reader.push_bounded(state.rules_record(), budget).unwrap();
+            let result = reader.push_normalized_target(&activation.target, &rows, budget);
+            if budget == snapshot.len() as u64 {
+                result.unwrap();
+                assert_eq!(reader.finish().unwrap().snapshot().encode().unwrap(), snapshot);
+            } else {
+                assert!(result.is_err());
+                assert!(reader.finish().is_err());
+            }
+        }
+        let baseline = state.storage_clone();
+        state.begin_record_changes();
+        let voter = state.get_state(&activation.target).unwrap().selected_verifiers[0].clone();
+        state.process_certified_vote_at(&activation.target, &voter, Vote::Legitimate,
+            activation.context, &params, Timestamp::new(GENESIS + 1)).unwrap();
+        let after = crate::orchestrator::records::normalized::target_rows(
+            &state.target_record(&activation.target).unwrap()).unwrap();
+        let changed: Vec<_> = after.iter().filter(|(key, value)| rows.get(*key) != Some(*value)).collect();
+        assert_eq!(changed.len(), 3, "header, one vote and its attempt binding");
+        assert!(changed.iter().all(|(key, _)| !key.contains("/1/6/")));
+        assert!(rows.keys().all(|key| after.contains_key(key)));
+        let mut patched = rows.clone();
+        let mut writes = 0;
+        crate::orchestrator::records::normalized::VISITS.with(|probe| probe.set(Some([0; 8])));
+        crate::orchestrator::records::normalized::visit_target_delta(&baseline, &state, |key, old, new| {
+            assert_eq!(patched.get(&key), old.as_ref());
+            match new { Some(bytes) => { patched.insert(key, bytes); }, None => { patched.remove(&key); } }
+            writes += 1;
+            Ok(())
+        }).unwrap();
+        let visits = crate::orchestrator::records::normalized::VISITS.with(|probe| probe.replace(None).unwrap());
+        assert_eq!(visits[6], 0, "unchanged eligible pool must not be visited");
+        assert!(visits.iter().sum::<usize>() <= 16);
+        assert_eq!(writes, 3);
+        assert_eq!(patched, after);
+        assert!(crate::orchestrator::records::normalized::visit_target_delta(
+            &VerificationOrchestrator::new(), &state, |_, _, _| Ok(())).is_err());
+        assert!(crate::orchestrator::records::normalized::visit_target_delta(
+            &baseline, &state, |_, _, _| Err("writer aborted".into())).is_err());
+
+        println!("certified_pool_row_boundary pool={count} panel=2 snapshot_bytes={} row_supported={}",
+            snapshot.len(), count == 128);
+    }
 }

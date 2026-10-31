@@ -5,6 +5,8 @@ use crate::{
     confirmed_replay::snapshot::installed,
 };
 
+mod electorate;
+
 fn install(fixture: &Fixture, store: &LmdbStore, epoch: BlockHash, signers: &[u8]) {
     let export = SnapshotExport::prepare(store, NetworkId::Dev, &fixture.params, epoch).unwrap();
     let signatures: Vec<_> = signers
@@ -21,7 +23,8 @@ fn install(fixture: &Fixture, store: &LmdbStore, epoch: BlockHash, signers: &[u8
     let mut bytes = Vec::new();
     export.write(&signatures, &mut bytes).unwrap();
     let genesis = ReplayedCheckpoint::genesis_anchor(NetworkId::Dev, &fixture.params).unwrap();
-    let snapshot = AuthenticatedSnapshot::read(&genesis, &mut bytes.as_slice()).unwrap();
+    let snapshot =
+        AuthenticatedSnapshot::read_in(&genesis, &mut bytes.as_slice(), store.env().path()).unwrap();
     let needs = snapshot.installation_needs(store).unwrap();
     let hashes: Vec<_> = needs
         .snapshot_heads
@@ -53,7 +56,7 @@ async fn repeated_snapshot_rollover_replays_real_roster_changes_beyond_height_12
     fixture.params.bootstrap_exit_threshold = 2;
     fixture.blocks[0] = crate::genesis_state::block(NetworkId::Dev, &fixture.params);
     fixture.push(0, BlockType::Endorse, 100, |block| {
-        block.brn_balance = 1;
+        block.brn_spent = 1;
         block.link = destination(1);
     });
     fixture.push(1, BlockType::Open, 101, |_| {});
@@ -187,7 +190,7 @@ async fn repeated_snapshot_rollover_replays_real_roster_changes_beyond_height_12
     drop(store);
     let store = std::sync::Arc::new(LmdbStore::open(directory.path(), 32, 32 << 20).unwrap());
     let service =
-        super::super::installed_recovery::Service::start(store.clone(), store.clone(), 0).await;
+        super::super::installed_recovery::WitnessService::start(store.clone(), store.clone(), 0).await;
     let recovered = installed::recover_metadata_from_peers(
         store.clone(),
         NetworkId::Dev,
@@ -210,14 +213,14 @@ async fn repeated_snapshot_rollover_replays_real_roster_changes_beyond_height_12
 pub(in crate::confirmed_replay::tests) async fn prepare_retired_rosters(
     mut observe: impl FnMut(u64, &LmdbStore, BlockHash),
 ) -> (Fixture, tempfile::TempDir, BlockHash) {
-    use super::super::installed_recovery::Service;
+    use super::super::installed_recovery::WitnessService;
     use std::sync::Arc;
 
     let mut fixture = Fixture::new();
     fixture.params.bootstrap_exit_threshold = 2;
     fixture.blocks[0] = crate::genesis_state::block(NetworkId::Dev, &fixture.params);
     fixture.push(0, BlockType::Endorse, 100, |block| {
-        block.brn_balance = 1;
+        block.brn_spent = 1;
         block.link = destination(1);
     });
     fixture.push(1, BlockType::Open, 101, |_| {});
@@ -246,7 +249,7 @@ pub(in crate::confirmed_replay::tests) async fn prepare_retired_rosters(
     );
     let original = store.meta_store().get_meta(&format!("{prefix}/1")).unwrap();
     let store = Arc::new(store);
-    let service = Service::start(store.clone(), store.clone(), 0).await;
+    let service = WitnessService::start(store.clone(), store.clone(), 0).await;
     let mut pending_burn = None;
     for height in 2..=130 {
         let recovered = installed::recover_metadata_from_peers(
@@ -270,7 +273,7 @@ pub(in crate::confirmed_replay::tests) async fn prepare_retired_rosters(
             let burn = fixture.push(0, BlockType::Burn, at, |block| {
                 block.payment_epoch = epoch;
                 block.link = destination(1);
-                block.brn_balance += 1;
+                block.brn_spent += 1;
             });
             pending_burn = Some(burn);
             Some(burn)
@@ -422,11 +425,11 @@ pub(in crate::confirmed_replay::tests) async fn prepare_retired_rosters(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn automatic_record_retirement_advances_without_snapshots_and_recovers() {
-    use super::super::installed_recovery::Service;
+    use super::super::installed_recovery::WitnessService;
     use std::sync::Arc;
     let (fixture, directory, epoch) = prepare_retired_rosters(|_, _, _| {}).await;
     let store = Arc::new(LmdbStore::open(directory.path(), 32, 32 << 20).unwrap());
-    let service = Service::start(store.clone(), store.clone(), 0).await;
+    let service = WitnessService::start(store.clone(), store.clone(), 0).await;
     let recovered = installed::recover_metadata_from_peers(
         store.clone(),
         NetworkId::Dev,

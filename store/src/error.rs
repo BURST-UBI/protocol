@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Clone, Debug, Error)]
 pub enum StoreError {
     #[error("key not found: {0}")]
     NotFound(String),
@@ -10,6 +10,15 @@ pub enum StoreError {
 
     #[error("storage backend error: {0}")]
     Backend(String),
+
+    /// Native map capacity was exhausted. This alone does not authorize retry:
+    /// the caller must first release the failed transaction and its live guards.
+    #[error("storage backend error: {0}")]
+    MapFull(String),
+
+    /// A process-local file-growth guard rejected a native page allocation.
+    #[error("storage backend error: {0}")]
+    GrowthLimit(String),
 
     #[error("serialization error: {0}")]
     Serialization(String),

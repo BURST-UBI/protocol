@@ -1,21 +1,21 @@
-//! Bounded backlog — limits unconfirmed blocks to prevent DoS.
+//! Optional in-memory index of unconfirmed blocks.
 //!
-//! Tracks unconfirmed blocks with priority-based eviction. When the backlog
-//! exceeds its capacity, the lowest-priority blocks (by PoW difficulty) that
-//! are not in active elections are candidates for proactive rollback.
+//! Callers check capacity before insertion. Overflow selection returns hashes;
+//! it neither removes entries nor rolls back ledger state. The node can recover
+//! untracked work through its durable scan when this index is full.
 
 use burst_types::{BlockHash, WalletAddress};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-/// Maximum unconfirmed blocks before proactive rollback.
+/// Default capacity used by admission checks.
 const DEFAULT_MAX_BACKLOG: usize = 65_536;
 
-/// Maximum unconfirmed blocks per account (prevents single-account spam).
+/// Per-account tracking limit used by admission checks.
 const MAX_BACKLOG_PER_ACCOUNT: usize = 128;
 
 /// Tracks unconfirmed blocks with priority-based eviction.
 pub struct BoundedBacklog {
-    /// All unconfirmed blocks: hash → entry metadata.
+    /// Tracked unconfirmed blocks: hash → entry metadata.
     entries: HashMap<BlockHash, BacklogEntry>,
     /// Priority index: (priority, hash) for efficient lowest-priority lookup.
     by_priority: BTreeMap<(u64, BlockHash), WalletAddress>,
@@ -23,12 +23,11 @@ pub struct BoundedBacklog {
     per_account: HashMap<WalletAddress, usize>,
     /// Max entries.
     max_size: usize,
-    /// Hashes currently in active elections (cannot be rolled back).
+    /// Caller-protected hashes excluded from overflow selection.
     protected: HashSet<BlockHash>,
 }
 
 struct BacklogEntry {
-    #[allow(dead_code)] // stored for future per-account eviction policies
     account: WalletAddress,
     priority: u64,
     #[allow(dead_code)]
@@ -69,7 +68,9 @@ impl BoundedBacklog {
         self.per_account.get(account).copied().unwrap_or(0)
     }
 
-    /// Add an unconfirmed block to the backlog.
+    /// Insert without enforcing capacity; duplicate hashes leave metadata unchanged.
+    /// Priority is an opaque caller value. The node currently supplies the work
+    /// nonce, not its computed PoW difficulty.
     pub fn insert(&mut self, hash: BlockHash, account: WalletAddress, priority: u64, now: u64) {
         if self.entries.contains_key(&hash) {
             return;
@@ -110,8 +111,9 @@ impl BoundedBacklog {
         self.protected.remove(hash);
     }
 
-    /// Get lowest-priority blocks that should be rolled back to stay within bounds.
-    /// Returns block hashes to evict (lowest priority first), skipping protected ones.
+    /// Select up to the global overflow count in ascending (priority, hash) order.
+    /// May scan the whole index and return fewer hashes when entries are protected.
+    /// Does not mutate the backlog or enforce per-account limits.
     pub fn blocks_to_evict(&self) -> Vec<BlockHash> {
         if self.entries.len() <= self.max_size {
             return Vec::new();
@@ -160,59 +162,59 @@ mod tests {
 
     #[test]
     fn new_backlog_is_empty() {
-        let bl = BoundedBacklog::new(100);
-        assert_eq!(bl.len(), 0);
-        assert!(bl.is_empty());
-        assert!(!bl.is_over_limit());
+        let backlog = BoundedBacklog::new(100);
+        assert_eq!(backlog.len(), 0);
+        assert!(backlog.is_empty());
+        assert!(!backlog.is_over_limit());
     }
 
     #[test]
     fn insert_and_remove() {
-        let mut bl = BoundedBacklog::new(100);
-        bl.insert(hash(1), account("alice"), 10, 1000);
-        assert_eq!(bl.len(), 1);
-        assert!(!bl.is_empty());
+        let mut backlog = BoundedBacklog::new(100);
+        backlog.insert(hash(1), account("alice"), 10, 1000);
+        assert_eq!(backlog.len(), 1);
+        assert!(!backlog.is_empty());
 
-        bl.remove(&hash(1));
-        assert_eq!(bl.len(), 0);
-        assert!(bl.is_empty());
+        backlog.remove(&hash(1));
+        assert_eq!(backlog.len(), 0);
+        assert!(backlog.is_empty());
     }
 
     #[test]
     fn duplicate_insert_ignored() {
-        let mut bl = BoundedBacklog::new(100);
-        bl.insert(hash(1), account("alice"), 10, 1000);
-        bl.insert(hash(1), account("alice"), 20, 2000); // duplicate
-        assert_eq!(bl.len(), 1);
+        let mut backlog = BoundedBacklog::new(100);
+        backlog.insert(hash(1), account("alice"), 10, 1000);
+        backlog.insert(hash(1), account("alice"), 20, 2000); // duplicate
+        assert_eq!(backlog.len(), 1);
     }
 
     #[test]
     fn remove_nonexistent_is_noop() {
-        let mut bl = BoundedBacklog::new(100);
-        bl.remove(&hash(42));
-        assert_eq!(bl.len(), 0);
+        let mut backlog = BoundedBacklog::new(100);
+        backlog.remove(&hash(42));
+        assert_eq!(backlog.len(), 0);
     }
 
     #[test]
     fn no_eviction_under_limit() {
-        let mut bl = BoundedBacklog::new(5);
+        let mut backlog = BoundedBacklog::new(5);
         for i in 0..5 {
-            bl.insert(hash(i), account("a"), i as u64, 1000);
+            backlog.insert(hash(i), account("a"), i as u64, 1000);
         }
-        assert!(!bl.is_over_limit());
-        assert!(bl.blocks_to_evict().is_empty());
+        assert!(!backlog.is_over_limit());
+        assert!(backlog.blocks_to_evict().is_empty());
     }
 
     #[test]
     fn eviction_when_over_limit() {
-        let mut bl = BoundedBacklog::new(3);
-        bl.insert(hash(1), account("a"), 100, 1000); // high priority
-        bl.insert(hash(2), account("b"), 50, 1001); // medium priority
-        bl.insert(hash(3), account("c"), 10, 1002); // low priority
-        bl.insert(hash(4), account("d"), 200, 1003); // highest priority
+        let mut backlog = BoundedBacklog::new(3);
+        backlog.insert(hash(1), account("a"), 100, 1000); // high priority
+        backlog.insert(hash(2), account("b"), 50, 1001); // medium priority
+        backlog.insert(hash(3), account("c"), 10, 1002); // low priority
+        backlog.insert(hash(4), account("d"), 200, 1003); // highest priority
 
-        assert!(bl.is_over_limit());
-        let evict = bl.blocks_to_evict();
+        assert!(backlog.is_over_limit());
+        let evict = backlog.blocks_to_evict();
         assert_eq!(evict.len(), 1); // overage = 4 - 3 = 1
 
         // Lowest priority (10) should be evicted first
@@ -221,15 +223,15 @@ mod tests {
 
     #[test]
     fn eviction_skips_protected_blocks() {
-        let mut bl = BoundedBacklog::new(2);
-        bl.insert(hash(1), account("a"), 10, 1000); // lowest priority
-        bl.insert(hash(2), account("b"), 20, 1001);
-        bl.insert(hash(3), account("c"), 30, 1002);
+        let mut backlog = BoundedBacklog::new(2);
+        backlog.insert(hash(1), account("a"), 10, 1000); // lowest priority
+        backlog.insert(hash(2), account("b"), 20, 1001);
+        backlog.insert(hash(3), account("c"), 30, 1002);
 
         // Protect the lowest-priority block
-        bl.protect(&hash(1));
+        backlog.protect(&hash(1));
 
-        let evict = bl.blocks_to_evict();
+        let evict = backlog.blocks_to_evict();
         assert_eq!(evict.len(), 1);
         // hash(1) is protected, so hash(2) (next lowest) is evicted
         assert_eq!(evict[0], hash(2));
@@ -237,31 +239,31 @@ mod tests {
 
     #[test]
     fn protect_and_unprotect() {
-        let mut bl = BoundedBacklog::new(2);
-        bl.insert(hash(1), account("a"), 10, 1000);
-        bl.insert(hash(2), account("b"), 20, 1001);
-        bl.insert(hash(3), account("c"), 30, 1002);
+        let mut backlog = BoundedBacklog::new(2);
+        backlog.insert(hash(1), account("a"), 10, 1000);
+        backlog.insert(hash(2), account("b"), 20, 1001);
+        backlog.insert(hash(3), account("c"), 30, 1002);
 
-        bl.protect(&hash(1));
-        let evict = bl.blocks_to_evict();
+        backlog.protect(&hash(1));
+        let evict = backlog.blocks_to_evict();
         assert_eq!(evict[0], hash(2)); // hash(1) protected
 
-        bl.unprotect(&hash(1));
-        let evict = bl.blocks_to_evict();
+        backlog.unprotect(&hash(1));
+        let evict = backlog.blocks_to_evict();
         assert_eq!(evict[0], hash(1)); // hash(1) no longer protected
     }
 
     #[test]
     fn eviction_returns_correct_overage_count() {
-        let mut bl = BoundedBacklog::new(2);
-        bl.insert(hash(1), account("a"), 10, 1000);
-        bl.insert(hash(2), account("b"), 20, 1001);
-        bl.insert(hash(3), account("c"), 30, 1002);
-        bl.insert(hash(4), account("d"), 40, 1003);
-        bl.insert(hash(5), account("e"), 50, 1004);
+        let mut backlog = BoundedBacklog::new(2);
+        backlog.insert(hash(1), account("a"), 10, 1000);
+        backlog.insert(hash(2), account("b"), 20, 1001);
+        backlog.insert(hash(3), account("c"), 30, 1002);
+        backlog.insert(hash(4), account("d"), 40, 1003);
+        backlog.insert(hash(5), account("e"), 50, 1004);
 
         // 5 entries, max 2 → need to evict 3
-        let evict = bl.blocks_to_evict();
+        let evict = backlog.blocks_to_evict();
         assert_eq!(evict.len(), 3);
         // Lowest priorities first: 10, 20, 30
         assert_eq!(evict[0], hash(1));
@@ -271,36 +273,36 @@ mod tests {
 
     #[test]
     fn remove_cleans_up_all_indices() {
-        let mut bl = BoundedBacklog::new(10);
-        bl.insert(hash(1), account("a"), 10, 1000);
-        bl.protect(&hash(1));
+        let mut backlog = BoundedBacklog::new(10);
+        backlog.insert(hash(1), account("a"), 10, 1000);
+        backlog.protect(&hash(1));
 
-        bl.remove(&hash(1));
+        backlog.remove(&hash(1));
 
-        assert_eq!(bl.len(), 0);
-        assert!(bl.is_empty());
+        assert_eq!(backlog.len(), 0);
+        assert!(backlog.is_empty());
         // Priority index and protected set should also be cleaned
-        assert!(bl.by_priority.is_empty());
-        assert!(bl.protected.is_empty());
+        assert!(backlog.by_priority.is_empty());
+        assert!(backlog.protected.is_empty());
     }
 
     #[test]
     fn with_default_size_uses_constant() {
-        let bl = BoundedBacklog::with_default_size();
-        assert_eq!(bl.max_size, DEFAULT_MAX_BACKLOG);
+        let backlog = BoundedBacklog::with_default_size();
+        assert_eq!(backlog.max_size, DEFAULT_MAX_BACKLOG);
     }
 
     #[test]
-    fn large_backlog_eviction_performance() {
-        let mut bl = BoundedBacklog::new(100);
+    fn eviction_orders_overflow_by_priority() {
+        let mut backlog = BoundedBacklog::new(100);
         for i in 0u32..200 {
             let mut bytes = [0u8; 32];
             bytes[0..4].copy_from_slice(&i.to_le_bytes());
-            bl.insert(BlockHash::new(bytes), account("x"), i as u64, i as u64);
+            backlog.insert(BlockHash::new(bytes), account("x"), i as u64, i as u64);
         }
 
-        assert!(bl.is_over_limit());
-        let evict = bl.blocks_to_evict();
+        assert!(backlog.is_over_limit());
+        let evict = backlog.blocks_to_evict();
         assert_eq!(evict.len(), 100);
 
         // Verify eviction order: lowest priorities first (0, 1, 2, ...)
@@ -314,17 +316,17 @@ mod tests {
 
     #[test]
     fn all_protected_prevents_eviction() {
-        let mut bl = BoundedBacklog::new(2);
-        bl.insert(hash(1), account("a"), 10, 1000);
-        bl.insert(hash(2), account("b"), 20, 1001);
-        bl.insert(hash(3), account("c"), 30, 1002);
+        let mut backlog = BoundedBacklog::new(2);
+        backlog.insert(hash(1), account("a"), 10, 1000);
+        backlog.insert(hash(2), account("b"), 20, 1001);
+        backlog.insert(hash(3), account("c"), 30, 1002);
 
         // Protect everything
-        bl.protect(&hash(1));
-        bl.protect(&hash(2));
-        bl.protect(&hash(3));
+        backlog.protect(&hash(1));
+        backlog.protect(&hash(2));
+        backlog.protect(&hash(3));
 
-        let evict = bl.blocks_to_evict();
+        let evict = backlog.blocks_to_evict();
         // Can't evict anything — all protected
         assert!(evict.is_empty());
     }

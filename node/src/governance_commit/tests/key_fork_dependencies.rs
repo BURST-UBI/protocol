@@ -1,6 +1,6 @@
 //! Signed writer transitions and dependency closure, not network election evidence.
 use super::*;
-use burst_governance::key_delegation::{
+use burst_governance::signing_delegation::{
     operation::DelegationOperation, scoped, DelegatedBallot, Grant, KeyScope, Revocation,
 };
 use burst_wallet_core::transaction_builder::*;
@@ -12,7 +12,7 @@ fn account(block: &StateBlock, height: u64) -> AccountState {
         block_count: height,
         representative: block.representative.clone(),
         payment_epoch: block.payment_epoch,
-        brn_balance: block.brn_balance,
+        brn_spent: block.brn_spent,
         trst_balance: block.trst_balance,
         release_sources: Vec::new(),
     }

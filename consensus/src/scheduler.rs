@@ -1,16 +1,11 @@
-//! Election schedulers — decide which blocks should have elections started.
+//! Candidate queues for election scheduling.
 //!
-//! Two scheduler strategies:
-//!
-//! - **Hinted**: Starts elections for blocks that have already accumulated
-//!   significant vote weight in the vote cache (i.e. representatives voted
-//!   before the node saw the fork).
-//!
-//! - **Priority**: Schedules elections based on account importance (balance),
-//!   ensuring that high-value accounts get elections resolved first during
-//!   contention.
+//! The node uses `PriorityScheduler` with each block's recorded TRST balance.
+//! Queue priority does not confer consensus voting weight. `HintedScheduler` is
+//! a standalone helper that ranks cached votes; the node does not currently use it.
 
 use burst_types::{BlockHash, WalletAddress};
+use std::collections::BTreeMap;
 
 use crate::vote_cache::VoteCache;
 
@@ -27,12 +22,8 @@ pub enum ElectionBehavior {
 
 // ── Hinted scheduler ────────────────────────────────────────────────────
 
-/// Starts elections for blocks that already have significant vote weight
-/// in the cache.
-///
-/// This is useful when votes arrive before the node has detected the fork.
-/// Instead of waiting for the block processor to see the fork, the hinted
-/// scheduler proactively starts elections based on vote-cache evidence.
+/// Select candidate hashes whose cached vote weight reaches a threshold.
+/// This helper neither validates candidates nor starts elections.
 pub struct HintedScheduler {
     /// Minimum accumulated weight to trigger an election.
     min_weight_threshold: u128,
@@ -51,7 +42,8 @@ impl HintedScheduler {
     /// Find blocks in the vote cache with enough accumulated weight
     /// to warrant starting an election proactively.
     ///
-    /// Returns roots (block hashes) that should have elections started.
+    /// Returns candidate block hashes, not account-position election roots.
+    /// The caller handles cache expiry and validates candidates before registration.
     pub fn check(&self, cache: &VoteCache) -> Vec<BlockHash> {
         let top = cache.top(self.max_per_cycle);
         top.into_iter()
@@ -63,89 +55,52 @@ impl HintedScheduler {
 
 // ── Priority scheduler ──────────────────────────────────────────────────
 
-/// Schedules elections based on account importance (balance).
-///
-/// Higher-balance accounts get their elections resolved first. This is a
-/// simple max-heap (sorted Vec) of pending election requests.
+/// Orders candidates by descending supplied balance, then descending hash.
+/// Both indexes stay bounded by `max_queue`; individual mutations are O(log n).
 pub struct PriorityScheduler {
-    /// Pending accounts needing election, maintained in sorted order.
-    queue: Vec<PriorityEntry>,
-    /// Maximum queue size.
+    queue: BTreeMap<(u128, BlockHash), WalletAddress>,
+    priorities: BTreeMap<BlockHash, u128>,
     max_queue: usize,
-}
-
-struct PriorityEntry {
-    root: BlockHash,
-    account: WalletAddress,
-    priority: u64,
 }
 
 impl PriorityScheduler {
     pub fn clear(&mut self) {
         self.queue.clear();
+        self.priorities.clear();
     }
+
     pub fn remove(&mut self, hash: &BlockHash) {
-        self.queue.retain(|entry| entry.root != *hash);
+        if let Some(priority) = self.priorities.remove(hash) {
+            self.queue.remove(&(priority, *hash));
+        }
     }
+
     pub fn new(max_queue: usize) -> Self {
-        Self {
-            queue: Vec::new(),
-            max_queue,
-        }
+        Self { queue: BTreeMap::new(), priorities: BTreeMap::new(), max_queue }
     }
 
-    /// Add a block that needs an election, with its account balance as priority.
-    ///
-    /// If the queue is full, the entry is dropped (lower priority than
-    /// everything already queued). Duplicate roots are silently ignored.
-    pub fn push(&mut self, root: BlockHash, account: WalletAddress, balance: u64) {
-        // Deduplicate by root
-        if self.queue.iter().any(|e| e.root == root) {
-            return;
+    /// Duplicate candidate hashes retain their original account and priority. At capacity,
+    /// only a strictly higher balance can replace the lowest-priority entry.
+    pub fn push(&mut self, root: BlockHash, account: WalletAddress, balance: u128) {
+        if self.max_queue == 0 || self.priorities.contains_key(&root) { return; }
+        if self.queue.len() == self.max_queue {
+            let (&(lowest, hash), _) = self.queue.first_key_value().expect("full queue");
+            if balance <= lowest { return; }
+            self.remove(&hash);
         }
-
-        if self.queue.len() >= self.max_queue {
-            // Only insert if higher priority than the lowest entry
-            if let Some(min) = self.queue.last() {
-                if balance <= min.priority {
-                    return;
-                }
-                self.queue.pop();
-            }
-        }
-
-        let entry = PriorityEntry {
-            root,
-            account,
-            priority: balance,
-        };
-        // Insert in sorted order (highest priority first)
-        let pos = self
-            .queue
-            .binary_search_by(|e| balance.cmp(&e.priority))
-            .unwrap_or_else(|pos| pos);
-        self.queue.insert(pos, entry);
+        self.queue.insert((balance, root), account);
+        self.priorities.insert(root, balance);
     }
 
-    /// Pop the highest-priority entry.
     pub fn pop(&mut self) -> Option<(BlockHash, WalletAddress)> {
-        if self.queue.is_empty() {
-            None
-        } else {
-            let entry = self.queue.remove(0);
-            Some((entry.root, entry.account))
-        }
+        let ((_, root), account) = self.queue.pop_last()?;
+        self.priorities.remove(&root);
+        Some((root, account))
     }
 
-    /// Current queue length.
-    pub fn len(&self) -> usize {
-        self.queue.len()
-    }
+    pub fn len(&self) -> usize { self.queue.len() }
 
-    /// Whether the queue is empty.
-    pub fn is_empty(&self) -> bool {
-        self.queue.is_empty()
-    }
+    pub fn is_empty(&self) -> bool { self.queue.is_empty() }
 }
 
 #[cfg(test)]
@@ -158,6 +113,20 @@ mod tests {
 
     fn make_addr(name: &str) -> WalletAddress {
         WalletAddress::new(format!("brst_{name}"))
+    }
+
+    #[test]
+    fn full_width_balances_preserve_order_and_capacity_replacement() {
+        let mut scheduler = PriorityScheduler::new(2);
+        let small = u64::MAX as u128 + 1;
+        scheduler.push(make_hash(3), make_addr("small"), small);
+        scheduler.push(make_hash(2), make_addr("large"), small * 50);
+        scheduler.push(make_hash(1), make_addr("maximum"), u128::MAX);
+        // A duplicate cannot change its existing priority.
+        scheduler.push(make_hash(2), make_addr("duplicate"), u128::MAX);
+        assert_eq!(scheduler.pop(), Some((make_hash(1), make_addr("maximum"))));
+        assert_eq!(scheduler.pop(), Some((make_hash(2), make_addr("large"))));
+        assert!(scheduler.is_empty());
     }
 
     // ── HintedScheduler tests ───────────────────────────────────────────
@@ -297,4 +266,26 @@ mod tests {
         let mut sched = PriorityScheduler::new(10);
         assert!(sched.pop().is_none());
     }
+    #[test]
+    fn priority_indexes_survive_eviction_removal_clear_and_reinsertion() {
+        let mut disabled = PriorityScheduler::new(0);
+        disabled.push(make_hash(1), make_addr("a"), 100);
+        assert!(disabled.is_empty());
+        let mut sched = PriorityScheduler::new(2);
+        sched.push(make_hash(1), make_addr("a"), 100);
+        sched.push(make_hash(2), make_addr("b"), 100);
+        sched.push(make_hash(3), make_addr("c"), 100);
+        assert!(!sched.priorities.contains_key(&make_hash(3)));
+        sched.push(make_hash(3), make_addr("c"), 200);
+        assert_eq!(sched.queue.len(), sched.priorities.len());
+        sched.remove(&make_hash(3));
+        sched.push(make_hash(3), make_addr("new"), 300);
+        assert_eq!(sched.pop(), Some((make_hash(3), make_addr("new"))));
+        sched.clear();
+        assert!(sched.priorities.is_empty());
+        sched.push(make_hash(1), make_addr("again"), 1);
+        assert_eq!(sched.pop(), Some((make_hash(1), make_addr("again"))));
+        assert!(sched.priorities.is_empty());
+    }
+
 }

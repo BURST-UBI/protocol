@@ -29,8 +29,9 @@ pub mod installation;
 pub(crate) mod mutations;
 mod outcome;
 mod receipts;
+pub(crate) mod scratch_file;
 mod scratch_index;
-mod scratch_records;
+pub(crate) mod scratch_records;
 mod selections;
 pub mod snapshot;
 
@@ -101,6 +102,12 @@ pub enum ReplayError {
     Invalid(String),
 }
 
+impl From<burst_store::StoreError> for ReplayError {
+    fn from(error: burst_store::StoreError) -> Self {
+        Self::Invalid(error.to_string())
+    }
+}
+
 fn invalid(message: impl Into<String>) -> ReplayError {
     ReplayError::Invalid(message.into())
 }
@@ -155,15 +162,15 @@ impl ConfirmedReplay {
                 "history does not match configured network and genesis parameters",
             ));
         }
-        let mut bootstrap = HashMap::new();
-        let mut challenges = HashSet::new();
+        let mut bootstrap_endorsements = HashMap::new();
+        let mut challenged_wallets = HashSet::new();
         let mut selections = selections::Selections::new(certificates, history.replay_blocks())?;
         let mut verified_count = 1u64;
         for block in history.replay_blocks() {
             if block.block_type == BlockType::Challenge {
-                let target = crate::ledger_bridge::extract_receiver_from_link(&block.link)
+                let target = crate::block_economics::wallet_from_link(&block.link)
                     .ok_or_else(|| invalid("challenge target is invalid"))?;
-                if !challenges.insert(target) {
+                if !challenged_wallets.insert(target) {
                     return Err(invalid(
                         "repeated challenge admissions require agreed lifecycle ordering",
                     ));
@@ -171,11 +178,11 @@ impl ConfirmedReplay {
             }
             if block.block_type == BlockType::Endorse {
                 if block.account == genesis.account
-                    && verified_count < initial_params.bootstrap_exit_threshold as u64
+                    && verified_count < u64::from(initial_params.bootstrap_exit_threshold.min(burst_verification::bootstrap::MAX_BOOTSTRAP_HUMANS))
                 {
-                    let target = crate::ledger_bridge::extract_receiver_from_link(&block.link)
+                    let target = crate::block_economics::wallet_from_link(&block.link)
                         .ok_or_else(|| invalid("endorsement target is invalid"))?;
-                    if target == genesis.account || bootstrap.insert(target, block.hash).is_some() {
+                    if target == genesis.account || bootstrap_endorsements.insert(target, block.hash).is_some() {
                         return Err(invalid("duplicate or self bootstrap verification"));
                     }
                     verified_count += 1;
@@ -205,9 +212,9 @@ impl ConfirmedReplay {
             .iter()
             .filter(|block| block.block_type == BlockType::Endorse)
         {
-            let target = crate::ledger_bridge::extract_receiver_from_link(&block.link)
+            let target = crate::block_economics::wallet_from_link(&block.link)
                 .ok_or_else(|| invalid("endorsement target is invalid"))?;
-            if bootstrap
+            if bootstrap_endorsements
                 .get(&target)
                 .is_some_and(|hash| *hash != block.hash)
             {
@@ -240,12 +247,12 @@ impl ConfirmedReplay {
                     .copied(),
             );
             if needs_verified_history(&block.block_type) {
-                dependencies.extend(bootstrap.get(&block.account).copied());
+                dependencies.extend(bootstrap_endorsements.get(&block.account).copied());
             }
             if block.block_type == BlockType::Challenge {
-                let target = crate::ledger_bridge::extract_receiver_from_link(&block.link)
+                let target = crate::block_economics::wallet_from_link(&block.link)
                     .ok_or_else(|| invalid("challenge target is invalid"))?;
-                dependencies.extend(bootstrap.get(&target).copied());
+                dependencies.extend(bootstrap_endorsements.get(&target).copied());
             }
             dependency_budget = dependency_budget
                 .checked_sub(dependencies.len())
@@ -346,6 +353,9 @@ impl ConfirmedReplay {
         >,
     ) -> Result<(), ReplayError> {
         let authenticated = if block.block_type == BlockType::Epoch {
+            if self.bootstrap_complete() {
+                return Err(invalid("creator epoch authority has ended"));
+            }
             crate::payment_transition::authenticate_epoch_contents(block, params, genesis)
         } else if self.governance.is_some() && governance::supports(&block.block_type) {
             crate::payment_transition::authenticate_signed_contents(block, params)
@@ -362,7 +372,7 @@ impl ConfirmedReplay {
             self.endorse(block, applied, genesis, params)?;
         }
         if block.block_type == BlockType::VerificationVote {
-            let target = crate::ledger_bridge::extract_receiver_from_link(&block.link)
+            let target = crate::block_economics::wallet_from_link(&block.link)
                 .ok_or_else(|| invalid("verification vote target is invalid"))?;
             let source = self
                 .verification_triggers
@@ -380,6 +390,7 @@ impl ConfirmedReplay {
                 | BlockType::Challenge
                 | BlockType::GovernanceEndorse
                 | BlockType::GovernanceWithdraw
+                | BlockType::GovernanceVeto
         ) {
             self.replay_dependencies.insert(block.hash);
         }
@@ -474,7 +485,7 @@ impl ConfirmedReplay {
         genesis: &WalletAddress,
         params: &ProtocolParams,
     ) -> Result<(), ReplayError> {
-        let target = crate::ledger_bridge::extract_receiver_from_link(&block.link)
+        let target = crate::block_economics::wallet_from_link(&block.link)
             .ok_or_else(|| invalid("endorsement target is invalid"))?;
         if !block.target_head.is_zero() {
             let dependency = applied
@@ -508,8 +519,8 @@ impl ConfirmedReplay {
                 .map_err(|error| invalid(error.to_string()))?
                 .ok_or_else(|| invalid("endorser predecessor is missing"))?;
             let burned = block
-                .brn_balance
-                .checked_sub(previous.brn_balance)
+                .brn_spent
+                .checked_sub(previous.brn_spent)
                 .ok_or_else(|| invalid("endorsement spend decreased"))?;
             let restarting = self
                 .verification
@@ -551,6 +562,8 @@ impl ConfirmedReplay {
             return Err(invalid("unexpected bootstrap verification effects"));
         }
         let mut ledger = crate::verification_commit::ledger::ReplayedLedger {
+            bootstrap: &mut self.bootstrap_phase,
+            bootstrap_threshold: self.params.bootstrap_exit_threshold,
             mutations: self.mutations.as_mut(),
             accounts: &mut self.accounts,
             pending: &mut self.pending,
@@ -558,7 +571,7 @@ impl ConfirmedReplay {
             applied,
             current: block,
         };
-        crate::verification_commit::verify_wallet(
+        crate::verification_commit::mark_wallet_verified(
             &mut ledger,
             &target,
             block.timestamp,
@@ -609,18 +622,18 @@ impl ConfirmedReplay {
         block
             .validate_signing_grant(previous.as_deref())
             .map_err(invalid)?;
-        let previous_brn = previous.as_ref().map_or(0, |block| block.brn_balance);
-        let previous_trst = previous.as_ref().map_or(0, |block| block.trst_balance);
+        let previous_brn_spent = previous.as_ref().map_or(0, |block| block.brn_spent);
+        let previous_trst_balance = previous.as_ref().map_or(0, |block| block.trst_balance);
         if previous.is_some() {
-            BlockProcessor::validate_balance_transition(block, previous_brn, previous_trst)
+            BlockProcessor::validate_balance_transition(block, previous_brn_spent, previous_trst_balance)
                 .map_err(invalid)?;
         }
-        let claims = matches!(
+        let consumes_pending = matches!(
             block.block_type,
             BlockType::Receive | BlockType::RejectReceive
         ) || (block.block_type == BlockType::Open && !block.link.is_zero());
         let source_key = (block.account.clone(), block.link.into_tx_hash());
-        let pending = if claims {
+        let pending = if consumes_pending {
             let pending = self
                 .pending
                 .get(&source_key)
@@ -629,7 +642,7 @@ impl ConfirmedReplay {
                 return Err(ReplayError::PendingExpiry);
             }
             if block.block_type != BlockType::RejectReceive {
-                ledger_updater::validate_receive_amount(block, previous_trst, pending)
+                ledger_updater::validate_receive_amount(block, previous_trst_balance, pending)
                     .map_err(invalid)?;
             }
             Some(pending)
@@ -642,7 +655,7 @@ impl ConfirmedReplay {
             block,
             crate::economic_candidate::EconomicContext {
                 account,
-                previous_brn,
+                previous_brn_spent,
                 pending,
                 params,
             },
@@ -651,9 +664,11 @@ impl ConfirmedReplay {
         )
         .map_err(invalid)?;
         let updated =
-            ledger_updater::account_after_block(block, account, previous_brn).map_err(invalid)?;
+            ledger_updater::account_after_block(block, account, previous_brn_spent).map_err(invalid)?;
         use crate::verification_commit::ledger::Ledger;
         let mut ledger = crate::verification_commit::ledger::ReplayedLedger {
+            bootstrap: &mut self.bootstrap_phase,
+            bootstrap_threshold: self.params.bootstrap_exit_threshold,
             mutations: self.mutations.as_mut(),
             accounts: &mut self.accounts,
             pending: &mut self.pending,
@@ -694,6 +709,8 @@ impl ConfirmedReplay {
         ) {
             crate::verification_commit::collect(
                 &mut crate::verification_commit::ledger::ReplayedLedger {
+                    bootstrap: &mut self.bootstrap_phase,
+                    bootstrap_threshold: self.params.bootstrap_exit_threshold,
                     mutations: self.mutations.as_mut(),
                     accounts: &mut self.accounts,
                     pending: &mut self.pending,
@@ -711,6 +728,8 @@ impl ConfirmedReplay {
             .map_err(invalid)?;
         }
         let mut ledger = crate::verification_commit::ledger::ReplayedLedger {
+            bootstrap: &mut self.bootstrap_phase,
+            bootstrap_threshold: self.params.bootstrap_exit_threshold,
             mutations: self.mutations.as_mut(),
             accounts: &mut self.accounts,
             pending: &mut self.pending,
@@ -718,7 +737,7 @@ impl ConfirmedReplay {
             applied,
             current: block,
         };
-        if claims {
+        if consumes_pending {
             let pending = ledger
                 .take_pending(&source_key.0, &source_key.1)
                 .map_err(|error| invalid(error.to_string()))?;
@@ -757,7 +776,7 @@ impl ConfirmedReplay {
     }
 
     /// Eligibility is measured at this cut, never against a live account cache.
-    /// Decision 15.5 requires minimum BRN and real TRST activity in addition to
+    /// Requires minimum BRN and completed external TRST activity in addition to
     /// age and on-chain opt-in. The separate vote stake is checked at voting.
     pub fn eligible_verifiers(&self) -> Result<Vec<WalletAddress>, ReplayError> {
         let mut eligible = Vec::new();
@@ -793,8 +812,8 @@ impl ConfirmedReplay {
 
     pub fn human_roster(&self) -> Result<burst_consensus::checkpoint::HumanRoster, ReplayError> {
         use burst_consensus::checkpoint::{HumanDelegation, HumanRoster};
-        // Governance eviction has not been replayed yet. Never silently drop
-        // these humans or reinterpret an evicted delegation as self-delegation.
+        // Evicted delegations require governance replay; never silently drop
+        // these humans or reinterpret their delegation as self-delegation.
         if self.accounts.values().any(|account| account.orv_evicted) {
             return Err(invalid("evicted representatives require governance replay"));
         }
@@ -963,29 +982,11 @@ impl ConfirmedReplay {
         &self,
         target: &WalletAddress,
     ) -> Result<BlockHash, ReplayError> {
-        let defaults = crate::verification_deadline::history_defaults(
+        let defaults = crate::verification_deadline::history_defaults_from_metadata(
             &self.verification,
             target,
             self.selection_lifecycle(target)?,
-            |voter| {
-                let Some(context) = self
-                    .lifecycle_metadata
-                    .get(&crate::verification_deadline::voter_key(target, voter))
-                else {
-                    return Ok(None);
-                };
-                let context = BlockHash::new(
-                    context
-                        .as_slice()
-                        .try_into()
-                        .map_err(|_| "invalid deadline voter binding")?,
-                );
-                self.lifecycle_metadata
-                    .get(&crate::verification_deadline::key(context))
-                    .ok_or_else(|| "deadline voter has no completion".to_owned())
-                    .and_then(|bytes| crate::verification_deadline::decode(bytes))
-                    .map(Some)
-            },
+            |key| Ok(self.lifecycle_metadata.get(key).cloned()),
         )
         .map_err(invalid)?;
         self.verification
@@ -1054,6 +1055,7 @@ mod tests {
     mod delayed_prepare;
     mod governance;
     mod historical_transfer;
+    mod electorate;
     mod live_clock;
     mod live_selection;
     mod pending_expiry;
@@ -1126,7 +1128,7 @@ mod tests {
             block.previous = previous.map_or(BlockHash::ZERO, |block| block.hash);
             block.signing_grant =
                 previous.map_or(BlockHash::ZERO, StateBlock::active_signing_grant);
-            block.brn_balance = previous.map_or(0, |block| block.brn_balance);
+            block.brn_spent = previous.map_or(0, |block| block.brn_spent);
             block.trst_balance = previous.map_or(0, |block| block.trst_balance);
             block.timestamp = Timestamp::new(time);
             edit(&mut block);
@@ -1262,7 +1264,7 @@ mod tests {
             let mut fixture = Self::new();
             fixture.push(1, BlockType::Open, 90, |_| {});
             let first = fixture.push(0, BlockType::Burn, 100, |block| {
-                block.brn_balance = 40;
+                block.brn_spent = 40;
                 block.link = destination(0);
             });
             let first_receive = fixture.push(0, BlockType::Receive, 101, |block| {
@@ -1270,7 +1272,7 @@ mod tests {
                 block.link = first;
             });
             let second = fixture.push(0, BlockType::Burn, 102, |block| {
-                block.brn_balance = 60;
+                block.brn_spent = 60;
                 block.link = destination(0);
             });
             let second_receive = fixture.push(0, BlockType::Receive, 103, |block| {
@@ -1327,7 +1329,7 @@ mod tests {
             let base = 1_595_431_100;
             for seed in 1..=8 {
                 fixture.push(0, BlockType::Endorse, base, |block| {
-                    block.brn_balance += 1;
+                    block.brn_spent += 1;
                     block.link = destination(seed);
                 });
                 fixture.push(seed, BlockType::Open, base + 1, |_| {});
@@ -1336,7 +1338,7 @@ mod tests {
             // A claimed burn is a payment, not merely a mint or a self-transfer.
             for seed in 1..=8 {
                 let burn = fixture.push(0, BlockType::Burn, base + 3, |block| {
-                    block.brn_balance += 1;
+                    block.brn_spent += 1;
                     block.link = destination(seed);
                 });
                 fixture.push(seed, BlockType::Receive, base + 4, |block| {
@@ -1346,7 +1348,7 @@ mod tests {
             }
             for seed in [1, 2] {
                 fixture.push(seed, BlockType::Endorse, base + 5, |block| {
-                    block.brn_balance = 1;
+                    block.brn_spent = 1;
                     block.link = destination(20);
                 });
             }
@@ -1361,7 +1363,7 @@ mod tests {
         fixture.blocks[0] = crate::genesis_state::block(NetworkId::Dev, &fixture.params);
         let base = fixture.replay(99).unwrap();
         let source = fixture.push(0, BlockType::Endorse, 100, |block| {
-            block.brn_balance = 1;
+            block.brn_spent = 1;
             block.link = destination(1);
         });
         let open = fixture.push(1, BlockType::Open, 101, |_| {});
@@ -1380,7 +1382,7 @@ mod tests {
                         heads: history.heads(),
                         blocks: &blocks::source::Source::new(&fixture.blocks, None).unwrap(),
                         contents: &[],
-                        old: HashSet::from([fixture.blocks[0].hash]),
+                        retained_blocks: HashSet::from([fixture.blocks[0].hash]),
                     },
                     fixture.blocks[0].hash,
                     &[],
@@ -1487,11 +1489,11 @@ mod tests {
         fixture.params.bootstrap_exit_threshold = 2;
         fixture.blocks[0] = crate::genesis_state::block(NetworkId::Dev, &fixture.params);
         let source = fixture.push(0, BlockType::Endorse, 100, |block| {
-            block.brn_balance = 1;
+            block.brn_spent = 1;
             block.link = destination(1);
         });
         let burn = fixture.push(0, BlockType::Burn, 101, |block| {
-            block.brn_balance += 1;
+            block.brn_spent += 1;
             block.link = destination(1);
         });
         let open = fixture.push(1, BlockType::Open, 102, |block| {
@@ -1517,6 +1519,30 @@ mod tests {
     }
 
     #[test]
+    fn creator_epoch_markers_stop_at_bootstrap_exit() {
+        for threshold in [2, 50] {
+            let mut fixture = Fixture::new();
+            fixture.params.bootstrap_exit_threshold = threshold;
+            fixture.blocks[0] = crate::genesis_state::block(NetworkId::Dev, &fixture.params);
+            fixture.push(0, BlockType::Endorse, 100, |block| {
+                block.brn_spent = 1;
+                block.link = destination(1);
+            });
+            fixture.push(1, BlockType::Open, 101, |_| {});
+            fixture.push(0, BlockType::Epoch, 102, |block| {
+                block.link = BlockHash::ZERO;
+                block.transaction = TxHash::ZERO;
+                block.origin = TxHash::ZERO;
+            });
+            if threshold == 2 {
+                fixture.assert_rejected("creator epoch authority has ended");
+            } else {
+                fixture.replay(103).unwrap();
+            }
+        }
+    }
+
+    #[test]
     fn replay_enforces_normal_endorsement_cost_after_creator_bootstrap() {
         for endorser in [0, 1] {
             let mut fixture = Fixture::new();
@@ -1524,7 +1550,7 @@ mod tests {
             fixture.params.bootstrap_exit_threshold = 2;
             fixture.blocks[0] = crate::genesis_state::block(NetworkId::Dev, &fixture.params);
             fixture.push(0, BlockType::Endorse, 100, |block| {
-                block.brn_balance = 1;
+                block.brn_spent = 1;
                 block.link = destination(1);
             });
             fixture.push(1, BlockType::Open, 101, |_| {});
@@ -1533,7 +1559,7 @@ mod tests {
                 "creator bootstrap remains a distinct admission path"
             );
             fixture.push(endorser, BlockType::Endorse, 103, |block| {
-                block.brn_balance += 1;
+                block.brn_spent += 1;
                 block.link = destination(2);
             });
             fixture.assert_rejected("insufficient endorsement burn");
@@ -1544,7 +1570,7 @@ mod tests {
     fn automatic_cut_removes_future_dependencies_and_their_descendants() {
         let mut fixture = Fixture::new();
         let burn = fixture.push(0, BlockType::Burn, 200, |block| {
-            block.brn_balance = 10;
+            block.brn_spent = 10;
             block.link = destination(0);
         });
         let receive = fixture.push(0, BlockType::Receive, 201, |block| {
@@ -1673,7 +1699,7 @@ mod tests {
         );
         fixture.push(3, BlockType::VerifierOptOut, base + 101, |_| {});
         fixture.push(4, BlockType::Endorse, base + 101, |block| {
-            block.brn_balance = 60 * burst_types::BRN_UNIT + 1;
+            block.brn_spent = 60 * burst_types::BRN_UNIT + 1;
             block.link = destination(21);
         });
         let eligible = fixture
@@ -1696,7 +1722,7 @@ mod tests {
         fixture.blocks[0] = crate::genesis_state::block(NetworkId::Dev, &fixture.params);
         fixture.push(0, BlockType::VerifierOptIn, 100, |_| {});
         let burn = fixture.push(0, BlockType::Burn, 101, |block| {
-            block.brn_balance = 1;
+            block.brn_spent = 1;
             block.link = destination(0);
         });
         fixture.push(0, BlockType::Receive, 102, |block| {
@@ -1747,7 +1773,7 @@ mod tests {
         );
         let target_head = fixture.blocks.last().unwrap().hash;
         fixture.push(0, BlockType::Endorse, 108, |block| {
-            block.brn_balance = 2;
+            block.brn_spent = 2;
             block.link = destination(1);
             block.target_head = target_head;
         });
@@ -2041,7 +2067,7 @@ mod tests {
             );
         });
         let service =
-            snapshot_history::installed_recovery::Service::start(store.clone(), store.clone(), 0)
+            snapshot_history::installed_recovery::WitnessService::start(store.clone(), store.clone(), 0)
                 .await;
         let startup = crate::confirmed_replay::snapshot::installed::recover_current_tip_with_cache(
             store.clone(),
@@ -2610,7 +2636,7 @@ mod tests {
         let mut fixture = Fixture::selection();
         for seed in [3, 4] {
             fixture.push(seed, BlockType::Endorse, 1_595_431_106, |block| {
-                block.brn_balance += 1;
+                block.brn_spent += 1;
                 block.link = destination(21);
             });
         }
@@ -3260,7 +3286,7 @@ mod tests {
         let mut fixture = Fixture::selection();
         for seed in [3, 4] {
             fixture.push(seed, BlockType::Endorse, 1_595_431_106, |block| {
-                block.brn_balance += 1;
+                block.brn_spent += 1;
                 block.link = destination(21);
             });
         }
@@ -3411,7 +3437,7 @@ mod tests {
 
         fixture.push(5, BlockType::Endorse, cutoff + 1, |block| {
             block.payment_epoch = first_certificate.checkpoint.hash();
-            block.brn_balance += 1;
+            block.brn_spent += 1;
             block.link = destination(20);
         });
         let (_changed_dir, changed_store, changed_heads) = fixture.store();
@@ -3607,7 +3633,7 @@ mod tests {
     fn receive_open_preserves_origin_and_never_grants_identity_or_accrual() {
         let mut fixture = Fixture::new();
         let burn = fixture.push(0, BlockType::Burn, 100, |block| {
-            block.brn_balance = 40;
+            block.brn_spent = 40;
             block.link = destination(2);
         });
         fixture.push(2, BlockType::Open, 101, |block| {
@@ -3668,12 +3694,12 @@ mod tests {
     #[test]
     fn rejects_signed_inflation_overspending_and_repeated_claims() {
         let mut fixture = Fixture::new();
-        fixture.push(0, BlockType::Burn, 100, |block| block.brn_balance = 101);
+        fixture.push(0, BlockType::Burn, 100, |block| block.brn_spent = 101);
         fixture.assert_rejected("BRN burn failed");
 
         let mut fixture = Fixture::new();
         let burn = fixture.push(0, BlockType::Burn, 100, |block| {
-            block.brn_balance = 40;
+            block.brn_spent = 40;
             block.link = destination(0);
         });
         fixture.push(0, BlockType::Receive, 101, |block| {
@@ -3713,7 +3739,7 @@ mod tests {
     fn refuses_pending_expiry_races_but_preserves_received_expired_reputation() {
         let mut fixture = Fixture::new();
         let burn = fixture.push(0, BlockType::Burn, 100, |block| {
-            block.brn_balance = 40;
+            block.brn_spent = 40;
             block.link = destination(0);
         });
         assert!(fixture.replay(1099).is_ok());
@@ -3826,7 +3852,7 @@ mod tests {
     fn address_valued_link_does_not_consume_a_pending_claim() {
         let mut fixture = Fixture::new();
         let burn = fixture.push(0, BlockType::Burn, 100, |block| {
-            block.brn_balance = 40;
+            block.brn_spent = 40;
             block.link = destination(0);
         });
         fixture.push(0, BlockType::ChangeRepresentative, 101, |block| {
@@ -3864,7 +3890,7 @@ mod tests {
         for opened_at in [90, 110] {
             let mut fixture = Fixture::new();
             fixture.push(0, BlockType::Endorse, 100, |block| {
-                block.brn_balance = 1;
+                block.brn_spent = 1;
                 block.link = destination(1);
             });
             let unopened = fixture.replay(100).unwrap();
@@ -3878,7 +3904,7 @@ mod tests {
             );
             fixture.push(1, BlockType::Open, opened_at, |_| {});
             let burn = fixture.push(1, BlockType::Burn, 120, |block| {
-                block.brn_balance = 10;
+                block.brn_spent = 10;
                 block.link = destination(2);
             });
             fixture.push(2, BlockType::Open, 121, |block| {
@@ -3922,11 +3948,11 @@ mod tests {
                 block.transaction = TxHash::new([nonce; 32])
             });
             let endorsement = fixture.push(0, BlockType::Endorse, 100, |block| {
-                block.brn_balance = 1;
+                block.brn_spent = 1;
                 block.link = destination(1);
                 block.target_head = head;
             });
-            let spent = fixture.push(1, BlockType::Burn, 120, |block| block.brn_balance = 10);
+            let spent = fixture.push(1, BlockType::Burn, 120, |block| block.brn_spent = 10);
             let history = fixture.history(150);
             let index = |hash| {
                 history
@@ -3948,9 +3974,9 @@ mod tests {
     fn rejects_bootstrap_cycles_wrong_target_and_duplicate_identity() {
         let mut fixture = Fixture::new();
         fixture.push(1, BlockType::Open, 90, |_| {});
-        let spent = fixture.push(1, BlockType::Burn, 120, |block| block.brn_balance = 10);
+        let spent = fixture.push(1, BlockType::Burn, 120, |block| block.brn_spent = 10);
         fixture.push(0, BlockType::Endorse, 100, |block| {
-            block.brn_balance = 1;
+            block.brn_spent = 1;
             block.link = destination(1);
             block.target_head = spent;
         });
@@ -3959,7 +3985,7 @@ mod tests {
         let mut fixture = Fixture::new();
         let foreign = fixture.push(2, BlockType::Open, 90, |_| {});
         fixture.push(0, BlockType::Endorse, 100, |block| {
-            block.brn_balance = 1;
+            block.brn_spent = 1;
             block.link = destination(1);
             block.target_head = foreign;
         });
@@ -3968,7 +3994,7 @@ mod tests {
         last.target_head = BlockHash::ZERO;
         sign(0, last);
         fixture.push(0, BlockType::Endorse, 101, |block| {
-            block.brn_balance = 2;
+            block.brn_spent = 2;
             block.link = destination(1);
         });
         fixture.assert_rejected("duplicate or self bootstrap verification");
@@ -3980,7 +4006,7 @@ mod tests {
         fixture.params.bootstrap_exit_threshold = 2;
         fixture.blocks[0] = crate::genesis_state::block(NetworkId::Dev, &fixture.params);
         fixture.push(0, BlockType::Endorse, 100, |block| {
-            block.brn_balance = 1;
+            block.brn_spent = 1;
             block.link = destination(1);
         });
         assert_eq!(
@@ -3993,7 +4019,7 @@ mod tests {
             WalletState::Verified
         );
         fixture.push(0, BlockType::Endorse, 110, |block| {
-            block.brn_balance = 2;
+            block.brn_spent = 2;
             block.link = destination(2);
         });
         let replay = fixture.replay(150).unwrap();
@@ -4005,7 +4031,7 @@ mod tests {
         );
         fixture.push(1, BlockType::Open, 111, |_| {});
         fixture.push(1, BlockType::Endorse, 120, |block| {
-            block.brn_balance = 1;
+            block.brn_spent = 1;
             block.link = destination(2);
         });
         let replay = fixture.replay(150).unwrap();
@@ -4024,7 +4050,7 @@ mod tests {
             "endorsement burns never mint rewards"
         );
         fixture.push(1, BlockType::Endorse, 121, |block| {
-            block.brn_balance = 2;
+            block.brn_spent = 2;
             block.link = destination(2);
         });
         fixture.assert_rejected("already endorsed");
@@ -4036,12 +4062,12 @@ mod tests {
         fixture.params.endorsement_threshold = 1;
         fixture.blocks[0] = crate::genesis_state::block(NetworkId::Dev, &fixture.params);
         fixture.push(0, BlockType::Endorse, 100, |block| {
-            block.brn_balance = 1;
+            block.brn_spent = 1;
             block.link = destination(1);
         });
         fixture.push(1, BlockType::Open, 110, |_| {});
         fixture.push(1, BlockType::Endorse, 120, |block| {
-            block.brn_balance = 5;
+            block.brn_spent = 5;
             block.link = destination(2);
         });
         let replay = fixture.replay(150).unwrap();
@@ -4053,7 +4079,7 @@ mod tests {
         assert_eq!(replay.brn_balance(&address(1)).unwrap(), 45);
         assert!(replay.account(&address(2)).is_none());
         fixture.push(2, BlockType::Open, 130, |_| {});
-        fixture.push(2, BlockType::Burn, 140, |block| block.brn_balance = 1);
+        fixture.push(2, BlockType::Burn, 140, |block| block.brn_spent = 1);
         fixture.assert_rejected("spending requires a verified wallet");
     }
 
@@ -4061,16 +4087,16 @@ mod tests {
     fn overlapping_creator_and_normal_admission_require_explicit_lifecycle_ordering() {
         let mut fixture = Fixture::new();
         fixture.push(0, BlockType::Endorse, 100, |block| {
-            block.brn_balance = 1;
+            block.brn_spent = 1;
             block.link = destination(1);
         });
         fixture.push(1, BlockType::Open, 110, |_| {});
         fixture.push(1, BlockType::Endorse, 120, |block| {
-            block.brn_balance = 1;
+            block.brn_spent = 1;
             block.link = destination(2);
         });
         fixture.push(0, BlockType::Endorse, 130, |block| {
-            block.brn_balance = 2;
+            block.brn_spent = 2;
             block.link = destination(2);
         });
         assert!(matches!(
@@ -4091,13 +4117,15 @@ mod tests {
         fixture.blocks.pop();
         fixture.push(0, BlockType::Endorse, 100, |block| {
             block.link = destination(1);
-            block.brn_balance = 101;
+            block.brn_spent = 101;
         });
         fixture.assert_rejected("endorsement BRN burn failed");
         let last = fixture.blocks.last_mut().unwrap();
-        last.brn_balance = 1;
+        last.brn_spent = 1;
         sign(0, last);
         last.signature = Signature([0; 64]);
         fixture.assert_rejected("signature");
     }
 }
+
+pub(crate) mod retirement;

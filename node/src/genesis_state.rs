@@ -1,36 +1,13 @@
 use burst_store::account::AccountInfo;
 use burst_types::{
-    BlockHash, NetworkId, ProtocolParams, Signature, Timestamp, TxHash, WalletAddress, WalletState,
+    BlockHash, NetworkId, ProtocolParams, Timestamp, WalletAddress, WalletState,
 };
 
 /// The running node's genesis contents, derived only from configured public inputs.
 pub(crate) fn block(network: NetworkId, params: &ProtocolParams) -> burst_ledger::StateBlock {
-    let address = crate::genesis_key::genesis_address(network);
-    let mut block = burst_ledger::StateBlock {
-        signing_grant: burst_types::BlockHash::ZERO,
-        delegation_payload: Vec::new(),
-        version: burst_ledger::CURRENT_BLOCK_VERSION,
-        payment_epoch: BlockHash::ZERO,
-        block_type: burst_ledger::BlockType::Open,
-        account: address.clone(),
-        representative: address,
-        previous: BlockHash::ZERO,
-        brn_balance: 0,
-        trst_balance: 0,
-        link: BlockHash::ZERO,
-        origin: TxHash::ZERO,
-        transaction: TxHash::ZERO,
-        target_head: BlockHash::ZERO,
-        merge_sources: Vec::new(),
-        release_sources: Vec::new(),
-        timestamp: Timestamp::EPOCH,
-        params_hash: params.params_hash(),
-        work: 0,
-        signature: Signature([0; 64]),
-        hash: BlockHash::ZERO,
-    };
-    block.hash = block.compute_hash();
-    block
+    burst_ledger::genesis::configured_genesis_block(
+        crate::genesis_key::genesis_address(network), params,
+    )
 }
 
 /// The configured genesis hash is the trust anchor, not an ORV election result.
@@ -75,14 +52,9 @@ pub(crate) fn initialize_verification(
     }
     confirm_anchor(batch, genesis)?;
     let mut candidate = live.clone();
+    candidate.begin_record_changes();
     candidate.initialize_genesis(&genesis.account);
-    batch.put_meta(
-        crate::endorsement_commit::SNAPSHOT_KEY,
-        &candidate
-            .snapshot()
-            .encode()
-            .map_err(|error| StoreError::Serialization(error.to_string()))?,
-    )?;
+    crate::verification_storage::persist(batch, live, &candidate)?;
     Ok(Some(candidate))
 }
 
@@ -240,7 +212,7 @@ mod tests {
         {
             let mut batch = store.tx_begin_write().unwrap();
             let mut corrupt = genesis.clone();
-            corrupt.brn_balance = 1;
+            corrupt.brn_spent = 1;
             batch
                 .put_block(&genesis.hash, &bincode::serialize(&corrupt).unwrap())
                 .unwrap();

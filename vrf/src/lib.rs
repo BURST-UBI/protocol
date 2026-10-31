@@ -1,9 +1,8 @@
-//! Verifiable Random Function (VRF) for fair verifier selection.
+//! Randomness providers for verifier selection.
 //!
-//! Phased approach:
-//! - **Phase 1**: drand (external beacon from League of Entropy)
-//! - **Phase 2**: Commit-reveal with representatives
-//! - **Phase 3**: BURST-operated threshold randomness (not implemented)
+//! Drand verifies beacons against a pinned BLS key. Commit-reveal is an
+//! experimental local transcript; the threshold provider is unavailable.
+//! Callers must enforce the selection round and eligible population.
 
 pub mod commit_reveal;
 pub mod drand;
@@ -12,17 +11,16 @@ pub mod threshold;
 
 pub use drand::{ChainInfo, DrandBeacon, DrandClient, DrandPolicy, DrandScheme, DrandVerifier};
 pub use error::VrfError;
-pub use threshold::{
-    filter_eligible_verifiers, is_eligible_verifier, select_verifiers, EligibilityConfig,
-    VerifierEligibility, DEFAULT_MIN_BRN_BALANCE, DEFAULT_MIN_VERIFICATION_AGE_SECS,
-};
+
 
 /// Trait for providing verifiable randomness.
 pub trait VrfProvider: Send + Sync {
-    /// Get randomness for a given context (e.g., verification request ID).
+    /// Get randomness for a context, where supported by the provider.
+    /// Drand requires its asynchronous fetch methods instead.
     fn get_randomness(&self, context: &[u8]) -> Result<RandomOutput, VrfError>;
 
-    /// Verify that a randomness output was correctly generated.
+    /// Verify an output under this provider's policy. Drand ignores context;
+    /// callers must separately bind its round to the selection request.
     fn verify(&self, context: &[u8], output: &RandomOutput) -> Result<bool, VrfError>;
 
     /// Human-readable name of this VRF provider.
@@ -34,7 +32,7 @@ pub trait VrfProvider: Send + Sync {
 pub struct RandomOutput {
     /// The random bytes (32 bytes).
     pub value: [u8; 32],
-    /// Proof that the value was correctly generated.
+    /// Provider-specific proof. Commit-reveal also requires the local transcript.
     pub proof: Vec<u8>,
     /// Round number or epoch (for drand).
     pub round: u64,

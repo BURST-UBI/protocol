@@ -1,0 +1,394 @@
+# Protocol consistency audit — 2026-10-30
+
+Status: audit and rsnano comparison complete. Follow-up source fixes are implemented
+for PA01, PA02, PA04, PA05 and PD01; regression validation passed. PA03 is
+intentional private-RPC policy, not a required protocol fix. Q01/Q02 remain unresolved
+policy/API questions. The findings below describe the audited pre-fix behavior.
+
+Current fix evidence and change-impact plan:
+`target/validation-evidence/protocol-consistency-fixes-20261030/HANDOFF.md`.
+The source now uses wire version 37 and block version 8 because rejecting previously
+admissible governance proposals changes consensus. Existing version 36/7 networks
+and ledgers must not be mixed with this source; no existing ledger was migrated,
+no frozen release package was replaced, and release acceptance is not implied.
+
+| Finding | Follow-up implementation | Validation status |
+| --- | --- | --- |
+| PA01 | Shared parameter-width limits at content admission; checked activation; original approved value propagated without clamping | Boundary regressions passed |
+| PA02 | u128 scheduler keys and both node enqueue paths; same bounded O(log n) indexes | Ordering/replacement regression and node check passed |
+| PA04 | Exact BRN helper delegates to complete economic state; old history helper deprecated as estimate; RPC refresh validates before mutation, including deactivated state | Wallet regressions passed |
+| PA05 | Version-1 cipher, KDF and fixed Argon2 profile validated before derivation; existing version-1 parameters preserved | Keystore regressions passed |
+| PD01 | Whitepaper explains reference-aware retirement, revival/recovery and the disabled production gate; removes bounded-growth claim | Documentation reviewed |
+
+This review covers operation contracts and major integration boundaries across
+payments, governance, identity, consensus, persistence/recovery, networking and
+wallet interfaces. It is not a line-by-line verification of every module, a formal
+proof, a penetration test, or qualification of a release binary. In particular,
+absence of another finding in a sampled path is not a claim that the path is safe
+under every adversarial interleaving.
+
+Authority order: explicit owner decisions and `spec/DECISION_RESOLUTIONS.md`, then
+current specifications and implementation, with historical questionnaire/whitepaper
+wording checked for conflicts. Existing security findings and qualification gates
+are retained separately; they are not counted as new discoveries.
+
+## Findings and priorities
+
+| ID | Priority / scope | Finding | Smallest appropriate correction |
+| --- | --- | --- | --- |
+| PA01 | P2, governance correctness; address first | Submitted values can exceed parameter storage width; activation clamps them, while TRST propagation rejects the original value | Validate representable values at shared content admission; apply and propagate exactly the approved value |
+| PA02 | P2, scheduling correctness | Balance priority saturates above about 18.45 TRST | Preserve u128 balances in scheduler keys and both enqueue paths |
+| PA03 | Intentional local-RPC policy; conditional public-service concern | RPC submissions receive local ingress priority, as in rsnano | Keep current private-RPC policy; separate admission only if public untrusted RPC is an intended deployment |
+| PA04 | P2, public wallet-core API | The advertised full-history BRN calculator omits accrual pauses/deactivation | Reuse authoritative wallet-state computation or explicitly expose a limited estimate |
+| PA05 | P2, backup format/compatibility | Keystore decryption ignores serialized cipher/KDF/profile metadata | Validate the supported versioned profile; preserve old-profile decoding when profiles change |
+| PD01 | Documentation; known retirement gate | Whitepaper promises unconditional pruning and bounded ledger growth | Describe reference-aware retirement, revival/reversal requirements and current disabled gate |
+
+P2 here means a concrete correctness or conditional availability problem. None
+of these findings demonstrates signature forgery, theft, conflicting finality or
+a remote unauthenticated ability to activate governance changes.
+
+### PA01 — proposal, parameter and subsystem values can disagree
+
+`governance/src/content.rs:32` validates content length and constitutional structure,
+but does not reject parameter values wider than their target storage. Both normal
+and emergency proposals carry `u128` values. `governance/src/engine.rs:84` calls this
+shared validator during submission. Public wallet-core authoring also accepts u128.
+
+At activation, `governance/src/engine.rs:841` and `:847` saturate to u32/u64.
+`apply_param_change` uses these conversions for counts, durations, difficulty and
+basis-point fields. However, `:996` and `:1008` queue the original, unclamped value
+for subsystem propagation. `node/src/governance_commit/activation.rs:74` converts
+TRST expiry with checked `u64::try_from`, which rejects an oversized original value.
+The staged transaction prevents partial durable publication; that is a protection,
+not a resolution of the disagreement.
+
+Concrete boundary cases:
+
+- A submitted `num_verifiers = 4294967296` can encode and pass content validation,
+  but activation sets the parameter to 4294967295.
+- A submitted `trst_expiry_secs = 18446744073709551616` previews as u64::MAX in the
+  parameter engine, but the node's TRST propagation rejects it as expiry overflow.
+  An otherwise approved proposal can therefore fail its activation path. This
+  audit does not establish that such a proposal halts the entire network.
+
+The official wallet frontend/native command checks the parameter catalog maximum
+(`wallet/src/lib/parameters.ts:63`, `wallet/src-tauri/src/constitution.rs:150`). That
+protects those authoring interfaces, not arbitrary validly signed submissions.
+Existing engine tests around `governance/src/engine.rs:2940` explicitly expect
+saturation; they currently preserve the mismatch instead of rejecting it.
+
+Rejecting an unrepresentable integer is encoding/type validation, not a political
+floor or ceiling on governance. Do not add arbitrary economic thresholds to fix
+this. Reject before endorsement/voting, enforce exact application at activation,
+and cover normal/emergency and compact/full-content authoring. Because this changes
+accepted proposal semantics, review version/activation compatibility before release.
+
+### PA02 — balance priority loses nearly all useful range
+
+TRST uses 10^18 raw units per token (`types/src/amount.rs:18`). Live publication and
+backlog recovery both enqueue `min(block.trst_balance, u64::MAX) as u64`
+(`node/src/node.rs:1782`, `:2639`). `consensus/src/scheduler.rs:70` stores u64 keys.
+
+Consequently every balance at or above 18.446744073709551615 TRST has identical
+priority. For example, 20 TRST and 1000 TRST compare equal. Ties are decided by hash
+order when popping; at capacity an equal-priority new item cannot displace the
+lowest item (`scheduler.rs:93`). This is inconsistent with the documented descending
+balance policy. It is not stake-weighted voting: verified-human consensus weights
+are derived separately, without balances.
+
+The rsnano comparison does **not** justify this clamp. Its `types/src/amount.rs`
+keeps raw amounts as u128, and the election scheduler maps them into 63 explicitly
+chosen balance buckets (`node/src/consensus/election_schedulers/priority/bucketing.rs`).
+Within a bucket it prioritizes time/LRU, with full balance and hash tie-breaks. Its
+small integer bucket index is not a saturated raw balance. The [Nano prioritization
+specification](https://docs.nano.org/protocol-design/spam-work-and-prioritization/)
+describes this deliberate grouping. BURST's current scheduler has neither those
+buckets nor that LRU ordering, so its 18.45-TRST cutoff is not the same trade-off.
+
+BURST history places the u64 scheduler field in initial commit `aca8795`, well before
+the recent hardening. No inspected owner decision specifies that balance cutoff.
+Do not attribute this older representation issue to the recent agent changes, or
+claim rsnano gives strictly higher balances global precedence.
+
+Use u128 in this local scheduler and remove both clamps. This preserves O(log n)
+queue operations and needs no new scheduling framework. Cover balances immediately
+below/above u64::MAX, ordering of two larger balances, duplicate admission, full-queue
+replacement, and both live/backlog callers. Do not claim a measured throughput gain.
+
+### PA03 — revised: local RPC priority is an established intentional pattern
+
+The first audit described this as an implementation mismatch. The rsnano follow-up
+changes that assessment: classifying RPC submissions as local is normal when RPC is
+an operator-controlled service, and BURST already documents that access boundary in
+`README.md:19`. This is not a required change for the current private-RPC design.
+
+At pinned rsnano commit `414dd884c162f78f151b9d912a029bbc9a340866`:
+
+- `rpc/server/src/command_handler/node/process.rs` sends synchronous processing
+  through `node.process_local`; its asynchronous path explicitly uses
+  `BlockSource::Local` and `ChannelId::LOOPBACK`.
+- `node/src/block_processing/process_queue.rs` explicitly describes local RPC as
+  system-component traffic. Defaults give local priority 16 versus live-peer 1,
+  with system queue capacity 16,384 versus peer capacity 1,024.
+- `rpc/server/src/config.rs` defaults to IPv6 loopback. Normal `process` does not
+  require `enable_control`; only its force option does. Do not misrepresent
+  `enable_control` as authentication for every submission.
+
+BURST's corresponding path is `rpc/src/handlers.rs:1209` → node callback
+(`node/src/node.rs:198`, `:219`) → `Origin::Local`
+(`network/src/priority_queue.rs:142`, `:197`). All RPC submissions share that one
+origin. Local weight 4 and capacity reserved from peers are deliberate priority
+policy, not a signature or consensus bypass.
+
+The original conditional observation still holds: exposing this endpoint to
+untrusted Internet callers lets them use local-class admission and compete with
+actual local work. Global bounds, RPC limits, work and signatures remain enforced.
+Treat public RPC as a separate deployment design: authenticate/rate-limit an ingress
+service or add explicit untrusted-RPC scheduling if that service is desired. Do not
+add another queue solely to make BURST differ from rsnano's established private-RPC
+model. Nano's [node security guidance](https://docs.nano.org/running-a-node/security/)
+also limits RPC access to intended operators.
+
+### PA04 — wallet-core's full-rate-history balance is not full wallet history
+
+`wallet_core/src/balance.rs:13` integrates from verification time to now and subtracts
+burned/staked totals. `Wallet::brn_balance_with_history` delegates to it
+(`wallet_core/src/wallet.rs:486`). Neither receives accrual-paused intervals or a
+stopped-accrual timestamp, and the wrapper gates on `verified_at`, not current
+accrual status. In contrast, `brn/src/state.rs:286` cuts off stopped accrual and skips
+paused intervals before subtracting spending.
+
+At a constant rate of 10 raw units/second, verified at 0, read at 100, with accrual
+paused from 20 through 80, the helper returns 1000; the authoritative computation
+returns 400. A continuously deactivated account is similarly not representable by
+this helper's arguments. Native signed submission still goes through node validation;
+this is not evidence of minting excess BRN. The audited native application generally
+uses RPC signing/balance views rather than this convenience method, limiting direct
+current-app impact.
+
+Also, `Wallet::refresh_from_node` silently maps malformed burned/staked strings to
+zero (`wallet.rs:454`) and collapses unrecognized states to Unverified. Those defaults
+can make this SDK's derived display state misleading. Reuse the BRN state computation
+when the complete state is available; otherwise label the result an estimate with
+its assumptions. Parse malformed monetary values as errors, not zero.
+
+### PA05 — keystore declares a profile but does not use or validate it
+
+`wallet_core/src/keystore.rs` serializes `cipher`, `kdf` and `kdf_params` into each
+backup. `decrypt_keystore` at line 102 checks version and nonce length, then calls
+`derive_key` at line 184, which always uses current compile-time Argon2 parameters.
+It neither uses nor verifies the stored algorithm/profile fields. Native unlock and
+key export call this function (`wallet/src-tauri/src/commands.rs:551`, `:1479`).
+
+Changing only those metadata fields on an otherwise valid generated file does not
+change its decryption behavior. A legitimately encoded different-cost profile will
+instead fail with a wrong-password/corruption message. A future constant change
+without versioned decoding would prevent this decoder from opening older backups.
+Existing backups produced with the current fixed constants are not shown broken.
+
+The simple correction is an explicit version-1 fixed-profile validator plus retained
+version-specific derivation. If adjustable profiles are desired, validate supported
+algorithms and bound KDF cost before using file-supplied parameters. Do not blindly
+honor arbitrary memory/iteration values. Test current backup roundtrip, metadata
+mismatch, unsupported profile, and compatibility with a retained old fixture.
+
+### PD01 — pruning wording overstates the model and implementation
+
+`BURST_WHITEPAPER.md:740` says all expired/revoked history can be pruned and concludes
+that ledger growth is bounded. But expiry is evaluated against the current governed
+period (`trst/src/token.rs`), and reversals/restorations retain economic and provenance
+requirements. Non-transferability today does not establish that all references can
+be discarded. The implemented retirement design is reference-aware and gated;
+`node/src/node.rs:386` refuses production enablement.
+
+This is an existing design/qualification limitation, not a new reason to reopen the
+owner-deferred RAM/performance work. Update the claim to distinguish authenticated
+state snapshots, retained provenance/undo obligations, body retirement, and total
+state growth. Do not remove the gate to make implementation match optimistic prose.
+
+## Questions requiring a model decision, not an automatic code change
+
+- **Q01: constitutional quorum changes.** `get_required_quorum` treats both
+  ConstiQuorumBps and ConstiSupermajorityBps as constitutional; the normal/emergency
+  supermajority selection special-cases only ConstiSupermajorityBps
+  (`governance/src/engine.rs:528`, `:562`). Thus changing constitutional participation
+  requirements can use a different approval bar from changing constitutional approval
+  requirements. The whitepaper's "Consti threshold" wording does not clearly resolve
+  this pair. Record the intended policy and add an explicit paired test; do not call
+  the current choice an established authorization bypass.
+- **Q02: custodianship API.** `wallet_core/src/custodianship.rs` describes authorized
+  guardian spending and termination, but its registry is an in-memory address map;
+  repository searches find only its export and internal tests, not a transaction
+  authentication integration. Its establish/terminate methods do not verify consent.
+  Ordinary blocks still require the account's signature. This is not a working
+  independent guardian-signing capability or a remote spend bypass. If custody means
+  a parent holds the child's ordinary keys, document that model and mark this registry
+  as local metadata; if separate guardian authority is intended, it needs an explicit
+  design rather than treating `is_authorized` as a consensus check.
+
+## Operation coverage and boundaries
+
+All 21 StateBlock operation variants were inventoried. The table records the level
+of inspection, not 21 independently proven implementations.
+
+| Operations / surface | Paths and invariants inspected | Outcome / coverage limit |
+| --- | --- | --- |
+| Open, Burn, Send, Receive, RejectReceive, Merge | StateBlock format, common hash/work/signature admission, economic dispatch, staged engine publication; BRN history and TRST provenance/expiry representation | No additional demonstrated balance-creation defect in these sampled paths; PA02/PA04 affect scheduling/client calculations. Full split/merge/revocation graph proof not performed |
+| Endorse, Challenge, VerificationVote | Common signed admission, target settlement, stake/reward dispatch, deactivation versus fraud revocation, certified deadline comments and selection publication | No new demonstrated signer bypass; full adversarial panel/deadline campaign not repeated |
+| VerifierOptIn, VerifierOptOut | Signed operation dispatch, native signed-client path and test-only legacy RPC gate | Prior hardening retained; no raw-key production RPC reopening found in inspected dispatch |
+| GovernanceProposal, GovernanceEndorse, GovernanceVote, GovernanceWithdraw, GovernanceActivation | Content validation, signed submission, timing snapshots, quorum selection, approval preview, checked activation, propagation | PA01 and Q01; complete constitutional conflict/replay execution not repeated |
+| Delegate, RevokeDelegation | Scoped network/genesis grants, secondary-ballot envelopes, release policy, owner-signed account boundary | No claim that secondary keys can spend; Live gate remains separate from experimental-testnet implementation |
+| ChangeRepresentative, ChangeSigner | Balance-preserving dispatch, confirmed human delegation, local device binding and signed grant context | Root-key holder is not cryptographically excluded; this is already explicitly accepted in existing coverage notes, not a new flaw |
+| Epoch / genesis administration | Genesis signing-key selection, network identities, bootstrap/private-testnet separation, RPC admin gate | No new authority bypass demonstrated; published disposable seeds are not private-network authority keys |
+| ORV / checkpoints / VRF | Human-only weight construction, roster/certificate boundaries, exact-round beacon retrieval, publication-after-commit and phased randomness implementation | Scheduler problem PA02 is separate from voting power; quorum intersection, partition liveness and beacon scheduling are not formally proved here |
+| Storage, rollback, compact recovery | Copy-on-write staged economics, checked activation, snapshot authority reconstruction, physical retirement guard | No new durable-publication inconsistency demonstrated in sampled boundaries; vendored LMDB/unsafe code and real power loss not exhaustively audited |
+| P2P / RPC / HTTP / WebSocket | Ingress origins, admission bounds, egress classification/pacing follow-up, request/client limits, existing security remediation report | PA03 reclassified as private-RPC policy; October 30 pacing/classification fixes retained. No new saturation benchmark |
+| Wallet signing, offline actions, backup, groups | Prepared public context caveat, signing-device state, action journal surface, key storage, group response bounds and local trust overlay | PA04, PA05, Q02; native OS behavior and all frontend screens not dynamically retested |
+| Documentation / release claims | Whitepaper, owner resolutions, numeric audit, limited-release scope and prior security report | PD01; experimental features, deferred performance and unsigned Windows status remain qualified as before |
+
+## What was deliberately not reported as a new defect
+
+- Balance-based local scheduling is not balance-based voting. Confirmed verified
+  humans supply voting weight; changing this to monetary authority would contradict C03.
+- Variable expiry reviving expired TRST follows decision 6.9; irreversible expiry is
+  not an authorized simplification.
+- Internal fragment identifiers are expressly resolved by the owner; they need not
+  all name independently authored transactions.
+- Frozen proposal/voting windows with pre-activation counting rules follow the
+  explicit governance timing resolution, rather than being an accidental inconsistency.
+- The initial 1 BRN/hour setting supersedes historical rate-zero launch wording.
+- Snapshot fast recovery does not imply arbitrary incomplete-state validation or
+  that all old provenance can be deleted.
+- Experimental delegation/content/appeals gates, physical retirement qualification,
+  deferred 100+TPS/subsecond/RAM/Pi4 goals and Windows signing hold are existing limits.
+- Phase 2/3 randomness code is not evidence that those phases are production-ready.
+
+## Evidence and validation
+
+This audit made no production changes and ran no new builds, runtime tests or network
+jobs. Findings are source-backed traces. Arithmetic boundary examples are retained
+in `target/validation-evidence/protocol-consistency-audit-20261030/examples.json`;
+they are calculations, not execution of the Rust paths. The accompanying manifest
+hashes the selected reviewed sources at report time.
+
+Earlier network hardening evidence remains scoped to its six network tests, two
+Protobuf integration tests and node type-check; it is not reused as a pass for this
+entire protocol audit. Existing security-audit results are likewise historical
+scoped evidence, not a fresh dependency/advisory scan.
+
+The follow-up implements PA01, PA02, PA04, PA05 and corrects PD01 prose. PA03 needs no mandatory code change for private RPC; revisit only
+for an untrusted public service. Resolve Q01/Q02 before changing policy. Each fix should use the
+existing engines, queue/callback boundaries and tests, with a recorded change-impact
+review. No new subsystem or broad acceptance rerun is justified merely by this list.
+
+
+## Follow-up fix validation — 2026-10-30
+
+Completed: 645 unit tests passed (282 consensus, 167 governance, 46 ledger,
+150 wallet-core; 2 existing governance tests ignored), node library type-check
+passed, and all 3 protobuf integration tests passed. The integration suite uses
+protoc to check the published schema and explicitly rejects the previous wire36
+encoding. Existing version-1 keystore encryption/decryption and serialized-file
+round trips passed with the unchanged profile. Changed-file whitespace check passed.
+
+Receipts: `protocol-consistency-fixes-20261030/{small,node,schema}-receipt.json`
+under `target/validation-evidence/`. The small-crate receipt inventories the changed
+code and major dependencies but omitted the messages crate prospectively; future
+transitive evidence reuse must review that dependency, not assume complete coverage.
+No optimized binary, platform bundle, live network or fresh-ledger acceptance is
+qualified by this batch. The original audit source inventory and examples remain
+historical evidence of the pre-fix findings. PA03 and Q01/Q02 remain as classified.
+
+
+## Pressing-issue follow-up — 2026-10-30
+
+A second, targeted source review found **no additional demonstrated signature
+bypass, unauthorized governance activation, or durable balance-corruption path**
+in the paths below. This is a bounded negative finding, not proof that none exists.
+One lower-priority engine error-handling issue remains open as PA06. No production
+code changed and no new runtime/build/network checks were run for this follow-up.
+The preceding 645 unit tests and 3 integration tests retain their original scopes;
+they are not counted as execution evidence for PA06.
+
+### PA06 — checked TRST mutation failures fall back to unchecked legacy arithmetic
+
+**Priority: P3 hardening at the engine API; production exploit/reachability not
+established.** This is separate from intentional governance policy and from the
+already corrected scheduler width issue.
+
+`trst/src/engine.rs::restore_origins` first clears graph revocation and removes the
+revoked-holder index. For indexed holdings it attempts
+`IndexedPortfolio::with_restored_origin`, which returns an error if replacement
+cannot preserve the aggregate invariant. Any error falls through to the legacy
+mutable portfolio. That path restores token state and uses `saturating_add` for
+both restored value and the cached transferable balance, returning restoration
+results rather than an error. `un_revoke_by_origin` returns a Vec, so its API cannot
+report that the requested restoration exceeded the representation.
+
+A reasoned boundary example is a holder with 1 active unit plus a revoked chunk
+of u128::MAX. Restoring the chunk would require u128::MAX + 1 active units. The raw
+branch records both as active but reports only u128::MAX cached units. The indexed
+branch can reject that replacement and then take this same raw fallback. This is
+a source-derived example, not an executed protocol transaction or proof that a
+valid signed account history can reach the example. Signed account balances and
+receive checks are additional reachability constraints.
+
+Relatedly, `WalletPortfolio::insert_received` returns false both when there is no
+usable index and when indexed insertion actually failed. `track_token` and
+`receive_settled_batch` then fall back to raw `cached_transferable += amount`.
+An invariant failure should not select a less checked arithmetic implementation.
+The existing code explicitly retains legacy/raw compatibility; retaining that
+representation is intentional, but swallowing a validation failure is not needed
+to preserve it.
+
+**Protections found:** raw `holding_rows::visit_delta` calls snapshot validation,
+whose active-total sum uses checked addition. Stable LMDB persistence calls this
+visitor. Economic changes use staged engines and a write transaction. Thus the
+inspected stable publication route rejects the inconsistent portfolio; this audit
+does not claim it commits corrupted balances. Token counters alone are not this
+protection: they check expired/revoked totals, not the active sum. Other storage
+formats and a complete re-verification/appeal failure campaign were not executed.
+
+**Smallest correction:** distinguish an unavailable index from failed insertion;
+propagate mutation errors, and stage all restoration changes so graph, holder
+indexes, outcome invalidations and tokens remain unchanged on failure. Follow the
+existing `set_expiry_period` atomic checked transition rather than introducing a
+new subsystem. Its raw/indexed overflow regression in
+`trst/src/engine/portfolio.rs` is the existing test pattern to extend. Cover exact
+maximum success, maximum+1 rejection, and unchanged state for normal re-verification
+and outcome restoration. A node publication regression is only needed after a
+valid predecessor fixture establishes reachability, or to verify rollback through
+the existing persistence guard; do not label an arbitrary fabricated portfolio a
+remote attack.
+
+### Additional paths inspected and why no new pressing finding was raised
+
+| Boundary | Observed protection / qualification |
+| --- | --- |
+| Live block authentication | Shared format, size, hash and work checks precede signature verification; worker result owns exact bytes and matching rules. Searches found signature-disable calls in test code, not production startup |
+| Historical payment replay | Re-authenticates signed contents, params hash, representative encoding and work; replay does not grant authority solely from a peer label |
+| Signing-device continuity | Expected grant derives from the authenticated predecessor; handoffs and epoch markers cannot change balances or representative under the shared grant check |
+| Prepared economic work | Rechecks exact block hash, params and ledger dependencies before publication; worker output does not itself authorize durable state |
+| Governance activation | Requires Activation phase and activation time; checks committed parameter hash; changes remain in the staged ledger/engines |
+| Extreme governance durations | Deadline addition is checked. Representable but economically disabling settings are policy choices; this review did not invent additional political bounds |
+| Verifier selection and rolling history | Zero/insufficient verifier count is rejected before selection; zero rolling window returns before subtracting one. No new count-driven allocation bypass established |
+| Snapshot framing/recovery | Per-frame lengths and deserializer budget checked; trailing frame bytes rejected; recovered committee state compared with certified replay. Full hostile archive campaign not performed |
+| Offline action storage | Signed actions/content commitments validated, draft size bounded, no-clobber durable publication; archive receipt published before releasing the active journal slot |
+| Governed expiry revival | Existing checked all-portfolio transition and raw/indexed overflow regression already address the corresponding expiry-change case; do not duplicate it as a new finding |
+
+Source fingerprints for the 30 selected files are retained in
+`target/validation-evidence/protocol-consistency-followup-20261030/reviewed-inputs.json`.
+No broad suite, daemon rebuild, remote host, or release gate change was justified
+by this source-only follow-up. Next useful work is the small PA06 engine regression
+and error-propagation fix, not another full-network acceptance run. Q01/Q02 and
+existing release limitations retain their previously recorded status.
+
+
+Subsequent system-wide review: [FULL_AUDIT_20261030.md](FULL_AUDIT_20261030.md).
+PA06 now has an executed raw/indexed reproduction and persistence-guard check;
+the earlier source-only follow-up above remains historical. FA01–FA04 and current
+dependency dispositions are recorded in that report.
+
+Subsequent PA06 remediation: checked atomic restoration is now implemented;
+326 BRN/TRST tests and node library type-check passed. See FULL_AUDIT_20261030.md
+and audit-needed-fixes-20261030/HANDOFF.md for scope, receipts and limitations.

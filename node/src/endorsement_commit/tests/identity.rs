@@ -29,7 +29,7 @@ fn creator_verified_wallet_open_confirms_its_endorsement_first() {
     endorse.previous = genesis.hash;
     endorse.params_hash = params.params_hash();
     endorse.hash = endorse.compute_hash();
-    let target = crate::ledger_bridge::extract_receiver_from_link(&endorse.link).unwrap();
+    let target = crate::block_economics::wallet_from_link(&endorse.link).unwrap();
     let mut batch = store.tx_begin_write().unwrap();
     crate::ledger_updater::stage_block(&mut batch, &endorse, Some(&info), 0, None, None).unwrap();
     apply(
@@ -49,7 +49,7 @@ fn creator_verified_wallet_open_confirms_its_endorsement_first() {
     open.representative = target.clone();
     open.previous = BlockHash::ZERO;
     open.link = BlockHash::ZERO;
-    open.brn_balance = 0;
+    open.brn_spent = 0;
     open.hash = open.compute_hash();
     let mut batch = store.tx_begin_write().unwrap();
     let before = batch.get_account(&target).unwrap();
@@ -101,5 +101,5 @@ fn creator_verified_wallet_open_confirms_its_endorsement_first() {
     assert!(confirmed.complete);
     assert_eq!(confirmed.hashes, vec![endorse.hash, open.hash]);
     let authority = crate::confirmed_authority::ConfirmedAuthority::read(&store).unwrap();
-    assert!(authority.accounts[target.as_str()].state.is_verified());
+    assert!(authority.accounts[&target.to_string()].state.is_verified());
 }

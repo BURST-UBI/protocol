@@ -3,12 +3,12 @@
 //! Address format: `brst_` + base32(public_key, 52 chars) + base32(checksum, 8 chars)
 //!
 //! Checksum: first 5 bytes of Blake2b-256(public_key).
-//! Base32 alphabet: `13456789abcdefghijkmnopqrstuwxyz` (Nano-style, avoids ambiguous chars).
+//! Base32 alphabet: `13456789abcdefghijkmnopqrstuwxyz`.
 //! Total address length: 5 (prefix) + 52 + 8 = 65 characters.
 
 use burst_types::{PublicKey, WalletAddress};
 
-/// Base32 alphabet (32 chars, avoids visually ambiguous 0/O, 2/Z, l/I, v).
+/// Alphabet used by the address encoding.
 const BASE32_ALPHABET: &[u8; 32] = b"13456789abcdefghijkmnopqrstuwxyz";
 
 /// Reverse lookup table: ASCII byte → 5-bit value (0xFF = invalid).
@@ -59,8 +59,8 @@ fn encode_base32(bytes: &[u8]) -> String {
     result
 }
 
-/// Decode a base32 string into a fixed-size byte array. Returns `None` on
-/// invalid characters or wrong length. Zero-allocation.
+/// Decode the first N bytes without allocating. Reject invalid characters or
+/// insufficient input; the caller must check exact length and unused padding.
 fn decode_base32_fixed<const N: usize>(s: &str) -> Option<[u8; N]> {
     let mut buffer: u64 = 0;
     let mut bits_in_buffer = 0;
@@ -93,12 +93,7 @@ fn decode_base32_fixed<const N: usize>(s: &str) -> Option<[u8; N]> {
 }
 
 /// Derive a `brst_`-prefixed wallet address from a public key.
-///
-/// Process:
-/// 1. Compute checksum = Blake2b-256(public_key)[0..5]
-/// 2. Encode public_key as 52 base32 characters
-/// 3. Encode checksum as 8 base32 characters
-/// 4. Address = "brst_" + encoded_pubkey + encoded_checksum
+/// Uses the encoding and checksum described in the module documentation.
 pub fn derive_address(public_key: &PublicKey) -> WalletAddress {
     let pubkey_encoded = encode_base32(public_key.as_bytes());
     let hash = crate::blake2b_256(public_key.as_bytes());
@@ -109,7 +104,8 @@ pub fn derive_address(public_key: &PublicKey) -> WalletAddress {
 
 /// Extract the public key bytes from a valid BURST address.
 ///
-/// Returns `None` if the address is malformed or has an invalid checksum.
+/// Rejects malformed encoding, nonzero padding and invalid checksums.
+/// This checks address encoding, not whether the decoded key can verify signatures.
 pub fn decode_address(address: &str) -> Option<[u8; 32]> {
     if !address.is_ascii() || !address.starts_with(PREFIX) {
         return None;

@@ -36,6 +36,9 @@ impl FutureEvidence {
 
     /// Mixed phases and values can establish round participation, never a value
     /// quorum. Every retained signer must authenticate this exact parent/height.
+    /// Returns evidence when the incoming round has floor((humans - 1) / 3) + 1
+    /// delegated human units. Retaining only each signer's highest round can drop
+    /// its contribution to an older round.
     pub fn insert(
         &mut self,
         vote: SignedBallot,
@@ -145,7 +148,8 @@ impl RoundEvidence {
     }
 
     /// Different choices count towards phase participation, never towards the
-    /// same value's quorum. RoundState checks the threshold before any timeout.
+    /// same value's quorum. RoundState checks this evidence for prevote and
+    /// precommit timeouts; a proposal timeout requires no participation proof.
     pub fn participation(&self, phase: Phase) -> Vec<SignedBallot> {
         self.votes(phase).values().cloned().collect()
     }

@@ -4,7 +4,7 @@ use burst_types::BlockHash;
 use burst_work::{validate_work, WorkGenerator};
 
 proptest! {
-    /// Generated PoW always passes its own validation.
+    /// Generated work passes validation for the sampled easy thresholds.
     #[test]
     fn generated_pow_always_valid(
         hash_byte in 0u8..=255,
@@ -32,17 +32,16 @@ proptest! {
         );
     }
 
-    /// Max difficulty fails for (almost) all random inputs.
+    /// Maximum difficulty accepts arbitrary inputs without panicking.
     #[test]
-    fn max_difficulty_rejects_random(
+    fn max_difficulty_does_not_panic(
         hash_bytes in prop::array::uniform32(0u8..),
         nonce in 0u64..1_000_000,
     ) {
         let block_hash = BlockHash::new(hash_bytes);
-        // u64::MAX difficulty means work_value must be >= u64::MAX,
-        // which is essentially impossible for random inputs.
+        // At this threshold only the exact u64::MAX work value passes.
         let result = validate_work(&block_hash, nonce, u64::MAX);
-        // We just assert it doesn't panic; it should nearly always be false.
+        // This test checks totality, not whether the sampled nonce is valid.
         let _ = result;
     }
 

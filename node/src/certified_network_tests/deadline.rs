@@ -107,7 +107,7 @@ async fn change_panel_rules(
         let mut support = signed_block(&clients[0], key, tx, params).await;
         support.block_type = BlockType::GovernanceEndorse;
         support.link = proposal.hash;
-        support.brn_balance += params.governance_proposal_cost;
+        support.brn_spent += params.governance_proposal_cost;
         support.hash = support.compute_hash();
         submit(clients, &sign_state_block(support, &key.private)).await;
         proposals.push(proposal.hash);
@@ -262,7 +262,7 @@ fn eligible_at(
     .unwrap()
 }
 
-fn check_governed_selection_state(
+fn assert_governed_selection_state(
     store: &burst_store_lmdb::LmdbStore,
     params: &ProtocolParams,
     absent: &WalletAddress,
@@ -293,9 +293,9 @@ fn check_governed_selection_state(
     )
     .unwrap();
     assert!(!snapshot.penalized_verifiers.contains_key(absent));
-    assert_eq!(snapshot.neither_tracker.total_assignments(absent), 1);
+    assert_eq!(snapshot.neither_tracker.retained_assignments(absent), 1);
     assert_eq!(snapshot.neither_tracker.neither_count(absent), 1);
-    assert!(!snapshot.neither_tracker.is_penalized(absent));
+    assert!(!snapshot.neither_tracker.exceeds_penalty_threshold(absent));
     let state = burst_verification::VerificationOrchestrator::restore(snapshot);
     assert!(!state.is_penalized(absent, deadline + 6));
     assert!(!state.is_penalized(absent, deadline + 7));
@@ -370,7 +370,6 @@ async fn deadline_journey(change_rules: bool) {
         verification_timeout_secs: 60,
         min_verification_age_secs: 0,
         new_wallet_spending_limit: 0,
-        new_wallet_tx_limit_per_day: 0,
         trst_expiry_secs: u64::MAX,
         governance_proposal_cost: 1,
         governance_proposal_endorsements: 1,
@@ -421,7 +420,7 @@ async fn deadline_journey(change_rules: bool) {
         workers.push((
             shutdown,
             tokio::spawn(async move {
-                node.start().await.unwrap();
+                node.start_with_services(burst_daemon::start_public_services).await.unwrap();
                 node.stop().await.unwrap();
             }),
         ));
@@ -534,7 +533,7 @@ async fn deadline_journey(change_rules: bool) {
                     selected.sort_by(|left, right| left.as_str().cmp(right.as_str()));
                     let mut expected = addresses[1..4].to_vec();
                     expected.sort_by(|left, right| left.as_str().cmp(right.as_str()));
-                    assert_eq!(selected, expected);
+                    assert_eq!(*selected, expected);
                     contexts.push(context);
                     break;
                 }
@@ -717,7 +716,7 @@ async fn deadline_journey(change_rules: bool) {
         submit(&clients, &target_spend).await;
         if change_rules {
             for store in &stores {
-                check_governed_selection_state(
+                assert_governed_selection_state(
                     store,
                     &params,
                     &addresses[3],
@@ -772,7 +771,7 @@ async fn deadline_journey(change_rules: bool) {
         workers.push((
             node.shutdown.clone(),
             tokio::spawn(async move {
-                node.start().await.unwrap();
+                node.start_with_services(burst_daemon::start_public_services).await.unwrap();
                 node.stop().await.unwrap();
             }),
         ));
@@ -817,7 +816,7 @@ async fn deadline_journey(change_rules: bool) {
                 completion_bytes
             );
             if change_rules {
-                check_governed_selection_state(
+                assert_governed_selection_state(
                     &store,
                     &observed_params,
                     &addresses[3],

@@ -1,152 +1,41 @@
-//! Snapshot pages and their descriptor share the ledger installation transaction.
-//! The descriptor commits bytes, not authority: callers still authenticate from genesis.
-
-use super::{invalid, BASE_KEY};
-use blake2::{digest::consts::U32, Blake2b, Digest};
+//! Snapshot-specific keys for the shared atomic metadata pager.
+use super::BASE_KEY;
+#[cfg(test)]
+use super::invalid;
+use crate::paged_metadata;
+pub(crate) use paged_metadata::Commitment;
 use burst_store::StoreError;
 use burst_store_lmdb::LmdbWriteTransaction;
-use std::io::{self, Read, Write};
+#[cfg(test)]
+use std::io::{self, Read, Seek, SeekFrom, Write};
+#[cfg(test)]
+use paged_metadata::{LEGACY_MAGIC, MAGIC, LEGACY_PAGE_BYTES, PAGE_BYTES};
 
-const MAGIC: &[u8; 16] = b"BURST-BASE-PAGE\x01";
-const PAGE_BYTES: usize = 1024 * 1024;
 const PREFIX: &str = "checkpoint_snapshot/pages/v1/";
-const DESCRIPTOR_BYTES: usize = 16 + 8 + 32;
 
-fn key(index: usize) -> String {
-    format!("{PREFIX}{index:08x}")
+pub(crate) struct SnapshotLocation;
+impl paged_metadata::Location for SnapshotLocation {
+    fn descriptor_key(&self) -> &str { BASE_KEY }
+    fn page_key(&self, index: usize) -> String { key(index) }
 }
+fn key(index: usize) -> String { format!("{PREFIX}{index:08x}") }
 
-fn length(descriptor: &[u8]) -> Result<usize, StoreError> {
-    if descriptor.len() != DESCRIPTOR_BYTES {
-        return Err(invalid("invalid snapshot page descriptor"));
-    }
-    let size = u64::from_be_bytes(descriptor[16..24].try_into().map_err(invalid)?);
-    let size = usize::try_from(size).map_err(invalid)?;
-    if size == 0 {
-        return Err(invalid("stored snapshot is empty"));
-    }
-    Ok(size)
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Commitment {
-    size: usize,
-    hash: [u8; 32],
-}
-
-impl Commitment {
-    /// Recheck every committed page, not only the descriptor, under the writer.
-    pub(crate) fn verify(
-        &self,
-        get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StoreError>,
-    ) -> Result<(), StoreError> {
-        let mut reader = Reader::open(get)?.ok_or_else(|| invalid("snapshot base disappeared"))?;
-        if reader.commitment != *self {
-            return Err(invalid("snapshot base changed during recovery"));
-        }
-        io::copy(&mut reader, &mut io::sink()).map_err(invalid)?;
-        Ok(())
-    }
-}
-
-/// The getter must use one pinned database transaction throughout this stream.
-pub(super) struct Reader<F> {
-    get: F,
-    commitment: Commitment,
-    page: Vec<u8>,
-    offset: usize,
-    consumed: usize,
-    next_page: usize,
-    digest: Blake2b<U32>,
-    verified: bool,
-    failed: bool,
-}
+pub(super) type Reader<F> = paged_metadata::Reader<F, SnapshotLocation>;
+pub(super) type Writer<'a, 'db> = paged_metadata::Writer<'a, 'db, SnapshotLocation>;
 
 impl<F: FnMut(&str) -> Result<Option<Vec<u8>>, StoreError>> Reader<F> {
-    pub(super) fn open(mut get: F) -> Result<Option<Self>, StoreError> {
-        let Some(descriptor) = get(BASE_KEY)? else {
-            return Ok(None);
-        };
-        let (commitment, page) = if descriptor.starts_with(MAGIC) {
-            (
-                Commitment {
-                    size: length(&descriptor)?,
-                    hash: descriptor[24..].try_into().map_err(invalid)?,
-                },
-                Vec::new(),
-            )
-        } else {
-            if descriptor.is_empty() {
-                return Err(invalid("stored snapshot is empty"));
-            }
-            (
-                Commitment {
-                    size: descriptor.len(),
-                    hash: burst_crypto::blake2b_256(&descriptor),
-                },
-                descriptor,
-            )
-        };
-        Ok(Some(Self {
-            get,
-            commitment,
-            page,
-            offset: 0,
-            consumed: 0,
-            next_page: 0,
-            digest: Blake2b::new(),
-            verified: false,
-            failed: false,
-        }))
-    }
-
-    pub(super) fn commitment(&self) -> Result<Commitment, StoreError> {
-        if !self.verified {
-            return Err(invalid("snapshot stream was not fully verified"));
-        }
-        Ok(self.commitment)
+    pub(super) fn open(get: F) -> Result<Option<Self>, StoreError> {
+        Self::open_at(SnapshotLocation, get)
     }
 }
-
-impl<F: FnMut(&str) -> Result<Option<Vec<u8>>, StoreError>> Read for Reader<F> {
-    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
-        if self.failed {
-            return Err(io::Error::other("snapshot stream previously failed"));
-        }
-        if output.is_empty() {
-            return Ok(0);
-        }
-        if self.consumed == self.commitment.size {
-            if !self.verified {
-                let actual: [u8; 32] = self.digest.clone().finalize().into();
-                if actual != self.commitment.hash {
-                    self.failed = true;
-                    return Err(io::Error::other(
-                        "installed snapshot page commitment mismatch",
-                    ));
-                }
-                self.verified = true;
-            }
-            return Ok(0);
-        }
-        if self.offset == self.page.len() {
-            self.failed = true;
-            self.page = (self.get)(&key(self.next_page))
-                .map_err(|error| io::Error::other(error.to_string()))?
-                .ok_or_else(|| io::Error::other("missing installed snapshot page"))?;
-            if self.page.len() != PAGE_BYTES.min(self.commitment.size - self.consumed) {
-                return Err(io::Error::other("invalid installed snapshot page length"));
-            }
-            self.next_page += 1;
-            self.offset = 0;
-            self.failed = false;
-        }
-        let count = output.len().min(self.page.len() - self.offset);
-        output[..count].copy_from_slice(&self.page[self.offset..self.offset + count]);
-        self.digest.update(&output[..count]);
-        self.offset += count;
-        self.consumed += count;
-        Ok(count)
+impl<'a, 'db> Writer<'a, 'db> {
+    pub(super) fn new(batch: &'a mut LmdbWriteTransaction<'db>) -> Result<Self, StoreError> {
+        Self::new_at(SnapshotLocation, batch)
+    }
+}
+impl Commitment {
+    pub(crate) fn verify(&self, get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StoreError>) -> Result<(), StoreError> {
+        self.verify_at(SnapshotLocation, get)
     }
 }
 
@@ -170,91 +59,6 @@ pub(super) fn write(batch: &mut LmdbWriteTransaction<'_>, bytes: &[u8]) -> Resul
     writer.finish()
 }
 
-pub(super) struct Writer<'a, 'db> {
-    batch: &'a mut LmdbWriteTransaction<'db>,
-    page: Vec<u8>,
-    size: usize,
-    next_page: usize,
-    old_pages: usize,
-    digest: Blake2b<U32>,
-    failed: bool,
-}
-
-impl<'a, 'db> Writer<'a, 'db> {
-    pub(super) fn new(batch: &'a mut LmdbWriteTransaction<'db>) -> Result<Self, StoreError> {
-        let previous = batch.get_meta(BASE_KEY)?;
-        let old_pages = match previous.as_deref() {
-            Some(descriptor) if descriptor.starts_with(MAGIC) => {
-                length(descriptor)?.div_ceil(PAGE_BYTES)
-            }
-            _ => 0,
-        };
-        Ok(Self {
-            batch,
-            old_pages,
-            page: Vec::with_capacity(PAGE_BYTES),
-            size: 0,
-            next_page: 0,
-            digest: Blake2b::new(),
-            failed: false,
-        })
-    }
-
-    pub(super) fn finish(mut self) -> Result<(), StoreError> {
-        if self.failed {
-            return Err(invalid("snapshot write previously failed"));
-        }
-        if self.size == 0 {
-            return Err(invalid("empty snapshot stream"));
-        }
-        if !self.page.is_empty() {
-            self.batch.put_meta(&key(self.next_page), &self.page)?;
-            self.next_page += 1;
-        }
-        for index in self.next_page..self.old_pages {
-            self.batch.delete_meta(&key(index))?;
-        }
-        let mut descriptor = MAGIC.to_vec();
-        descriptor.extend_from_slice(&(self.size as u64).to_be_bytes());
-        descriptor.extend_from_slice(&self.digest.finalize());
-        self.batch.put_meta(BASE_KEY, &descriptor)
-    }
-}
-
-impl Write for Writer<'_, '_> {
-    fn write(&mut self, mut bytes: &[u8]) -> io::Result<usize> {
-        if self.failed {
-            return Err(io::Error::other("snapshot write previously failed"));
-        }
-        self.failed = true;
-        let count = bytes.len();
-        let size = self
-            .size
-            .checked_add(count)
-            .ok_or_else(|| io::Error::other("stored snapshot length overflow"))?;
-        self.digest.update(bytes);
-        while !bytes.is_empty() {
-            let take = bytes.len().min(PAGE_BYTES - self.page.len());
-            self.page.extend_from_slice(&bytes[..take]);
-            bytes = &bytes[take..];
-            if self.page.len() == PAGE_BYTES {
-                self.batch
-                    .put_meta(&key(self.next_page), &self.page)
-                    .map_err(|error| io::Error::other(error.to_string()))?;
-                self.next_page += 1;
-                self.page.clear();
-            }
-        }
-        self.size = size;
-        self.failed = false;
-        Ok(count)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,12 +68,12 @@ mod tests {
     #[test]
     fn stored_pages_cross_old_archive_limit_and_reopen_without_an_admission_budget() {
         let dir = tempfile::tempdir().unwrap();
-        let expected = 81 * PAGE_BYTES;
+        let expected = 81 * LEGACY_PAGE_BYTES;
         {
             let store = LmdbStore::open(dir.path(), 32, 128 << 20).unwrap();
             let mut batch = store.tx_begin_write().unwrap();
             let mut writer = Writer::new(&mut batch).unwrap();
-            let page = vec![7; PAGE_BYTES];
+            let page = vec![7; LEGACY_PAGE_BYTES];
             for _ in 0..81 {
                 writer.write_all(&page).unwrap();
             }
@@ -298,7 +102,7 @@ mod tests {
         let mut writer = Writer::new(&mut batch).unwrap();
         for part in original.chunks(7919) {
             writer.write_all(part).unwrap();
-            assert!(writer.page.len() < PAGE_BYTES);
+            assert!(writer.buffered_bytes() < PAGE_BYTES);
         }
         writer.finish().unwrap();
         batch.commit().unwrap();
@@ -314,6 +118,7 @@ mod tests {
         .unwrap();
         assert_eq!(reads.get(), 0, "opening a stream must not load its pages");
         assert!(reader.commitment().is_err());
+        assert!(reader.rewind().is_err());
         let mut offset = 0;
         let mut buffer = [0; 997];
         loop {
@@ -322,13 +127,26 @@ mod tests {
                 break;
             }
             assert_eq!(&buffer[..count], &original[offset..offset + count]);
-            assert!(reader.page.len() <= PAGE_BYTES);
+            assert!(reader.buffered_bytes() <= PAGE_BYTES);
             offset += count;
         }
         assert_eq!(offset, original.len());
         assert_eq!(reads.get(), 4);
         let commitment = reader.commitment().unwrap();
         assert_eq!(commitment.hash, burst_crypto::blake2b_256(&original));
+        for start in [0, PAGE_BYTES - 7, PAGE_BYTES, original.len() - 9] {
+            reader.seek(SeekFrom::Start(start as u64)).unwrap();
+            let mut bytes = [0; 9];
+            reader.read_exact(&mut bytes).unwrap();
+            assert_eq!(&bytes, &original[start..start + 9]);
+        }
+        assert!(reader.seek(SeekFrom::End(1)).is_err());
+        assert!(reader.seek(SeekFrom::Start(u64::MAX)).is_err());
+        reader.seek(SeekFrom::End(-9)).unwrap();
+        let mut suffix = Vec::new();
+        reader.read_to_end(&mut suffix).unwrap();
+        assert_eq!(suffix, original[original.len() - 9..]);
+        assert_eq!(reader.commitment().unwrap().hash, commitment.hash);
         drop(reader);
         drop(txn);
         let mut batch = store.tx_begin_write().unwrap();
@@ -340,10 +158,96 @@ mod tests {
         batch.put_meta(&key(1), b"short").unwrap();
         let mut reader = Reader::open(|name| batch.get_meta(name)).unwrap().unwrap();
         assert!(io::copy(&mut reader, &mut io::sink()).is_err());
+        assert!(reader.rewind().is_err());
         assert!(
             reader.read(&mut buffer).is_err(),
             "failed streams cannot resume with unchecked bytes"
         );
+    }
+
+    #[test]
+    fn verified_inline_archive_can_rewind_and_seek_without_page_lookups() {
+        let original = b"legacy inline snapshot";
+        let mut reader = Reader::open(|name| {
+            assert_eq!(name, BASE_KEY);
+            Ok(Some(original.to_vec()))
+        }).unwrap().unwrap();
+        assert!(reader.seek(SeekFrom::End(0)).is_err());
+        io::copy(&mut reader, &mut io::sink()).unwrap();
+        reader.rewind().unwrap();
+        assert!(reader.seek(SeekFrom::Current(-1)).is_err());
+        reader.seek(SeekFrom::Current(7)).unwrap();
+        let mut suffix = Vec::new();
+        reader.read_to_end(&mut suffix).unwrap();
+        assert_eq!(suffix, &original[7..]);
+        reader.commitment().unwrap();
+    }
+
+    #[test]
+    fn legacy_pages_migrate_atomically_preserving_commitment_and_pinned_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LmdbStore::open(dir.path(), 32, 32 << 20).unwrap();
+        let original: Vec<_> = (0..LEGACY_PAGE_BYTES * 2 + 17).map(|i| (i % 251) as u8).collect();
+        let mut descriptor = LEGACY_MAGIC.to_vec();
+        descriptor.extend_from_slice(&(original.len() as u64).to_be_bytes());
+        descriptor.extend_from_slice(&burst_crypto::blake2b_256(&original));
+        let mut batch = store.tx_begin_write().unwrap();
+        for (index, page) in original.chunks(LEGACY_PAGE_BYTES).enumerate() {
+            batch.put_meta(&key(index), page).unwrap();
+        }
+        batch.put_meta(BASE_KEY, &descriptor).unwrap();
+        batch.commit().unwrap();
+        let pinned = store.tx_begin_read().unwrap();
+        let mut reader = Reader::open(|name| store.meta_store().get_meta_txn(&pinned, name)).unwrap().unwrap();
+        io::copy(&mut reader, &mut io::sink()).unwrap();
+        let commitment = reader.commitment().unwrap();
+        reader.seek(SeekFrom::Start((LEGACY_PAGE_BYTES - 7) as u64)).unwrap();
+        let mut boundary = [0; 19];
+        reader.read_exact(&mut boundary).unwrap();
+        assert_eq!(&boundary, &original[LEGACY_PAGE_BYTES - 7..LEGACY_PAGE_BYTES + 12]);
+        {
+            let mut batch = store.tx_begin_write().unwrap();
+            write(&mut batch, &original).unwrap();
+            commitment.verify(|name| batch.get_meta(name)).unwrap();
+            assert!(batch.get_meta(BASE_KEY).unwrap().unwrap().starts_with(MAGIC));
+        }
+        let mut batch = store.tx_begin_write().unwrap();
+        assert_eq!(batch.get_meta(BASE_KEY).unwrap(), Some(descriptor));
+        write(&mut batch, &original).unwrap();
+        batch.commit().unwrap();
+        reader.rewind().unwrap();
+        let mut old_bytes = Vec::new();
+        reader.read_to_end(&mut old_bytes).unwrap();
+        assert_eq!(old_bytes, original);
+        drop(reader);
+        drop(pinned);
+        let mut batch = store.tx_begin_write().unwrap();
+        commitment.verify(|name| batch.get_meta(name)).unwrap();
+        let replacement = vec![9; PAGE_BYTES + 3];
+        write(&mut batch, &replacement).unwrap();
+        assert!(batch.get_meta(&key(2)).unwrap().is_none());
+        assert!(batch.get_meta(&key(original.len().div_ceil(PAGE_BYTES) - 1)).unwrap().is_none());
+        batch.commit().unwrap();
+        store.env().force_sync().unwrap();
+        drop(store);
+        let reopened = LmdbStore::open(dir.path(), 32, 32 << 20).unwrap();
+        assert_eq!(super::super::read_stored_base_bytes(&reopened).unwrap(), Some(replacement));
+    }
+
+    #[test]
+    fn page_descriptors_reject_unknown_versions_and_malformed_lengths() {
+        for magic in [LEGACY_MAGIC, MAGIC, b"BURST-BASE-PAGE\x03"] {
+            for size in [0u64, 1] {
+                let mut descriptor = magic.to_vec();
+                descriptor.extend_from_slice(&size.to_be_bytes());
+                // Deliberately omit the hash: both known versions must reject it.
+                assert!(Reader::open(|_| Ok(Some(descriptor.clone()))).is_err());
+                descriptor.extend_from_slice(&[0; 32]);
+                if size == 0 || magic != LEGACY_MAGIC && magic != MAGIC {
+                    assert!(Reader::open(|_| Ok(Some(descriptor.clone()))).is_err());
+                }
+            }
+        }
     }
 
     #[test]
@@ -377,6 +281,14 @@ mod tests {
         let mut batch = store.tx_begin_write().unwrap();
         write(&mut batch, &replacement).unwrap();
         batch.commit().unwrap();
+        let mut pinned_reader = Reader::open(|name| store.meta_store().get_meta_txn(&pinned, name))
+            .unwrap().unwrap();
+        io::copy(&mut pinned_reader, &mut io::sink()).unwrap();
+        pinned_reader.seek(SeekFrom::Start(PAGE_BYTES as u64)).unwrap();
+        let mut old_tail = Vec::new();
+        pinned_reader.read_to_end(&mut old_tail).unwrap();
+        assert_eq!(old_tail, original[PAGE_BYTES..]);
+        drop(pinned_reader);
         assert_eq!(
             read(|key| store.meta_store().get_meta_txn(&pinned, key)).unwrap(),
             Some(original)

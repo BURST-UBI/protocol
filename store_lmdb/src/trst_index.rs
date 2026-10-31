@@ -2,11 +2,11 @@
 //!
 //! Three databases:
 //! - `trst_origin_db`: composite key `(origin_hash(32), tx_hash(32))` → empty.
-//!   Enables O(1) put/delete and prefix range-scan for all tokens sharing an origin.
+//!   Supports keyed put/delete and prefix scans for tokens sharing an origin.
 //! - `trst_expiry_db`: binary key `expiry_be_u64(8) ++ tx_hash(32)` → empty.
 //!   Big-endian u64 sorts lexicographically by time, enabling efficient range scans.
 //! - `trst_reverse_db`: `tx_hash(32)` → `origin_hash(32) ++ expiry_be_u64(8)`.
-//!   Enables O(1) `delete_token`.
+//!   Lets `delete_token` locate both index entries without scanning.
 
 use crate::shared_env::SharedEnv;
 use std::ops::Bound;
@@ -93,8 +93,8 @@ impl TrstIndexStore for LmdbTrstIndexStore {
             .put(&mut wtxn, &key[..], &[])
             .map_err(LmdbError::from)?;
 
-        // Update reverse index: store origin for this tx_hash.
-        let mut rev_val = match self
+        // Preserve the expiry half when updating the reverse mapping.
+        let mut reverse_entry = match self
             .trst_reverse_db
             .get(&wtxn, tx_hash.as_bytes().as_slice())
             .map_err(LmdbError::from)?
@@ -102,11 +102,11 @@ impl TrstIndexStore for LmdbTrstIndexStore {
             Some(bytes) => bytes.to_vec(),
             None => vec![0u8; 40],
         };
-        if rev_val.len() >= 32 {
-            rev_val[..32].copy_from_slice(origin_hash.as_bytes());
+        if reverse_entry.len() >= 32 {
+            reverse_entry[..32].copy_from_slice(origin_hash.as_bytes());
         }
         self.trst_reverse_db
-            .put(&mut wtxn, tx_hash.as_bytes().as_slice(), &rev_val)
+            .put(&mut wtxn, tx_hash.as_bytes().as_slice(), &reverse_entry)
             .map_err(LmdbError::from)?;
 
         wtxn.commit().map_err(LmdbError::from)?;
@@ -139,6 +139,7 @@ impl TrstIndexStore for LmdbTrstIndexStore {
         Ok(results)
     }
 
+    /// Removes forward origin rows only; reverse mappings remain unchanged.
     fn delete_origin_index(&self, origin_hash: &TxHash) -> Result<(), StoreError> {
         let mut wtxn = self.env.write_txn().map_err(LmdbError::from)?;
         let prefix = origin_hash.as_bytes();
@@ -171,8 +172,8 @@ impl TrstIndexStore for LmdbTrstIndexStore {
             .put(&mut wtxn, &key[..], &[])
             .map_err(LmdbError::from)?;
 
-        // Update reverse index: store expiry for this tx_hash.
-        let mut rev_val = match self
+        // Preserve the origin half when updating the reverse mapping.
+        let mut reverse_entry = match self
             .trst_reverse_db
             .get(&wtxn, tx_hash.as_bytes().as_slice())
             .map_err(LmdbError::from)?
@@ -180,11 +181,11 @@ impl TrstIndexStore for LmdbTrstIndexStore {
             Some(bytes) => bytes.to_vec(),
             None => vec![0u8; 40],
         };
-        if rev_val.len() >= 40 {
-            rev_val[32..40].copy_from_slice(&expiry.as_secs().to_be_bytes());
+        if reverse_entry.len() >= 40 {
+            reverse_entry[32..40].copy_from_slice(&expiry.as_secs().to_be_bytes());
         }
         self.trst_reverse_db
-            .put(&mut wtxn, tx_hash.as_bytes().as_slice(), &rev_val)
+            .put(&mut wtxn, tx_hash.as_bytes().as_slice(), &reverse_entry)
             .map_err(LmdbError::from)?;
 
         wtxn.commit().map_err(LmdbError::from)?;
@@ -224,35 +225,35 @@ impl TrstIndexStore for LmdbTrstIndexStore {
     fn delete_token(&self, tx_hash: &TxHash) -> Result<(), StoreError> {
         let mut wtxn = self.env.write_txn().map_err(LmdbError::from)?;
 
-        let rev_val = self
+        let reverse_entry = self
             .trst_reverse_db
             .get(&wtxn, tx_hash.as_bytes().as_slice())
             .map_err(LmdbError::from)?;
 
-        if let Some(bytes) = rev_val {
+        if let Some(bytes) = reverse_entry {
             if bytes.len() >= 40 {
-                let mut origin_arr = [0u8; 32];
-                origin_arr.copy_from_slice(&bytes[..32]);
-                let origin_hash = TxHash::new(origin_arr);
+                let mut origin_bytes = [0u8; 32];
+                origin_bytes.copy_from_slice(&bytes[..32]);
+                let origin_hash = TxHash::new(origin_bytes);
 
                 let expiry_secs = u64::from_be_bytes(bytes[32..40].try_into().unwrap());
 
-                // Delete from expiry DB — O(1).
+                // Delete the known expiry entry.
                 if expiry_secs > 0 {
-                    let exp_key = expiry_binary_key(Timestamp::new(expiry_secs), tx_hash);
+                    let expiry_key = expiry_binary_key(Timestamp::new(expiry_secs), tx_hash);
                     let _ = self
                         .trst_expiry_db
-                        .delete(&mut wtxn, &exp_key[..])
+                        .delete(&mut wtxn, &expiry_key[..])
                         .map_err(LmdbError::from)?;
                 }
 
-                // Delete from origin DB — O(1) with composite key.
-                let all_zero = origin_arr.iter().all(|&b| b == 0);
+                // Delete the known origin entry.
+                let all_zero = origin_bytes.iter().all(|&b| b == 0);
                 if !all_zero {
-                    let ck = origin_composite_key(&origin_hash, tx_hash);
+                    let origin_key = origin_composite_key(&origin_hash, tx_hash);
                     let _ = self
                         .trst_origin_db
-                        .delete(&mut wtxn, &ck[..])
+                        .delete(&mut wtxn, &origin_key[..])
                         .map_err(LmdbError::from)?;
                 }
             }

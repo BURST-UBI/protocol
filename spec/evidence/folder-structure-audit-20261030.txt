@@ -1,0 +1,340 @@
+# Folder and crate structure audit — BURST versus rsnano
+
+Source-only review of the current working trees, 2026-10-30. Reference:
+`references/rsnano-node` at `414dd884c162f78f151b9d912a029bbc9a340866`.
+No product files moved or changed, builds run, or release evidence renewed.
+The earlier simplicity fixes are already present in the inspected tree.
+
+Scope: complete workspace-member/dependency inventory, directory/file-size
+inventory, application/repository layout, test and documentation locations, and
+targeted source inspection of responsibility boundaries. This is not a claim
+that every function in every file received another security audit.
+
+## Conclusion
+
+BURST resembles rsnano at the top level, but is less consistent about what those
+folders own. The largest opportunity is clearer ownership, not copying every
+rsnano directory or reducing the number of crates.
+
+The highest-priority concrete defect is a missing sibling repository checkout in
+dashboard native CI. The most valuable architectural improvements are separating
+wire data from node orchestration, separating RPC contracts from server startup,
+and grouping node subsystems. BRN/TRST, verification, governance, constitutional
+state, recovery and browser support justify substantial differences from Nano.
+
+## Inventory and interpretation
+
+| Measurement | BURST protocol | Pinned rsnano |
+|---|---:|---:|
+| Workspace members | 27 | 35 |
+| Rust files below node/src | 489 | 224 |
+| Lines in those files, including tests/comments | 181,765 | 43,470 |
+| Rust files directly in node/src | 93 | 11 |
+| Maximum file-path components relative to node/src | 11 | 5 |
+
+These are layout measurements, not production code size, executable size,
+complexity, or performance measurements. BURST has 155 separately named/path-based
+node test files containing 63,284 lines, plus inline tests. Rsnano places many
+tests inline; the same filename heuristic finds none of its tests and must not
+be interpreted as absence of testing. BURST's confirmed_replay.rs is 4,129 lines
+but its inline test module starts near line 1,042; governance/engine.rs is 3,535
+lines with tests starting near 1,123. Do not split these solely on raw line count.
+node/node.rs and RPC handlers still combine substantial live responsibilities.
+
+## Coverage map: what belongs where
+
+| BURST area | Rsnano analogue | Assessment |
+|---|---|---|
+| types, crypto | types | Separate crypto is reasonable for wallet/browser reuse. Keep fundamental values independent of engines. |
+| brn, trst | No direct equivalent | Real domain boundaries; combining them with node would be worse. |
+| transactions | Blocks/operation values largely in types | BURST has more economic actions. Keep explicit signed-operation types; inspect ledger dependency direction below. |
+| verification, vrf | No humanity-verification/beacon counterpart | Justified. Provider authentication and verification policy should remain separate. |
+| governance, consti | No equivalent governance/constitution system | Justified distinction between rules/process and constitutional documents. A name change from consti alone has little value. |
+| consensus | node/consensus plus types | Reasonable reusable policy/certificate layer. A separate crate is not a defect. |
+| messages, protocol | messages, network_protocol | Names resemble rsnano; actual ownership does not. F02/F03. |
+| network | network plus node/transport | Low-level networking mixed with block-specific admission; F04. |
+| store, store_lmdb | store_lmdb and nullables/lmdb | Real backend traits/transactions exist, but storage also owns engine reconstruction; F06. |
+| ledger | ledger | BURST's actual mutation/replay ownership extends far into node; F05. |
+| node | node | Appropriate composition layer, but root-module organization and server ownership need work; F02/F07. |
+| daemon | daemon and cli | Current CLI size does not justify another cli crate merely for parity. |
+| rpc | rpc/messages, rpc/client, rpc/server | Contract and server boundaries are less clear; F02/F08. |
+| websocket | websocket/messages/client/server | One smaller crate is reasonable. Typed events were just improved; no mandatory three-crate split. |
+| wallet_core | wallet and rpc/client, with different product scope | Shared signing/keystore/offline logic belongs outside Tauri. Heavy dependencies partly follow block types in ledger. |
+| browser, http_client | Nullable HTTP/client infrastructure, not the same product | Small platform libraries are justified by real reuse. Navigation policy is a minor ownership mismatch; F12. |
+| groups | No direct equivalent | Off-chain trust/group product feature; keep it outside consensus authority. |
+| nullables, utils | Several nullables crates and utils | Different actual testing model; F10. Tiny crate count is not a quality metric. |
+| vendor | Dependency sources/patches | Explicit patched dependencies warrant a distinct directory and retained patch notes. Do not scatter native patches into node. |
+| fuzz, tools, deploy, contrib | fuzz/testing/tooling/doc/operational areas as applicable | Separation is sensible. Keep runners and receipts stable during reorganization. |
+| docs, spec, root design documents, questionnaire | doc and root project documentation | Current requirements, historical decisions and run journals need clearer separation; F09. |
+| wallet, node-gui | Separate BURST products; rsnano tools/insight is not the same UI | Independent releases are valid. Fix sibling dependency provisioning and selective sharing; F01/F11. |
+| deck, root security-audit-* | Presentation and historical evidence | Outside protocol execution. Keep historical evidence distinct from current source/specification. No reason to merge presentation code into protocol. |
+
+## Findings
+
+### F01 — Dashboard CI does not provision its sibling path dependency
+
+Priority: fix now; build reproducibility, not stylistic preference.
+
+`node-gui/src-tauri/Cargo.toml:22` depends on
+`../../protocol/http_client`. Its `.github/workflows/ci.yml` native job checks out
+only `node-gui`, downloads the frontend, installs system dependencies, then runs
+`cargo test --locked --lib`. It has no protocol checkout step. On the inspected
+clean-runner layout the sibling manifest is missing. Local compilation succeeds
+because this desktop already has the protocol checkout; that does not establish CI.
+
+`wallet/.github/workflows/ci.yml:112` already reads `ci/protocol-revision` and
+checks out that revision into sibling `protocol`. Reuse this established pattern
+for the dashboard, with a revision containing http_client. Do not use a floating
+branch or introduce a new package publication pipeline for this one fix.
+No GitHub run was launched during this audit; the failure is inferred from the
+workflow and manifest, not presented as an observed remote run.
+
+Rsnano's single workspace naturally supplies its path dependencies. BURST can
+retain independent repositories if each CI job explicitly supplies pinned inputs.
+
+### F02 — Node depends on RPC/WebSocket servers, creating avoidable adapters
+
+Priority: next structural batch.
+
+`node/src/node.rs:18` imports RpcServer/RpcState and the RPC copy of ProcessResult;
+the node constructs RpcState and starts RpcServer around lines 4,070–4,153.
+It also owns WebSocketServer startup. `rpc/src/server.rs:26` explicitly describes
+LedgerCacheView as breaking a circular dependency, and its ProcessResult mirrors
+the node enum. Callbacks can be useful, but avoiding a cycle created by composition
+placement is not a sufficient reason for every adapter.
+
+In rsnano, rpc/server depends on node and the daemon composes Node, RPC and
+WebSocket listeners (`daemon/src/lib.rs`). That direction is clearer here too:
+the daemon/application runner should compose public servers around node services.
+Keep node service interfaces where they have independent value, but move transport
+startup outward before deciding which mirrored types/traits can disappear.
+
+This is not an instruction to replace controlled service access with unrestricted
+mutable node state. Preserve cancellation, read-executor permits, limits and
+signing boundaries. Do not simultaneously redesign the RPC API.
+
+### F03 — The folders named messages/protocol do not own the actual P2P contract
+
+Priority: next structural batch; confusing public architecture.
+
+The 101-line `messages/src/lib.rs` declares MessageHeader, PublishMessage,
+ConfirmReqMessage and other shapes. Searches found those four declarations and
+their internal references, not their use as the running peer envelope. Actual
+messages live in `node/src/wire_message.rs`; the Protobuf codec imports node-owned
+bootstrap, checkpoint transport and governance content packets. `protocol` exports
+legacy codec/handshake/version helpers, while its crate description calls it the
+wire protocol. Some helpers remain used, so neither crate should be blindly deleted.
+
+Rsnano's messages crate owns the real Message and serialization, and
+network_protocol handles receiving/handshake processing. BURST should extract
+passive wire DTOs first, leaving bootstrap/checkpoint state machines in node, then
+move the real envelope/schema codec under the message/protocol owner. A textual
+file move today would make the lower crate depend back on node and recreate a cycle.
+Remove or explicitly classify unused alternative message shapes. Preserve exact
+wire and signed-record bytes; directory reorganization is not a format migration.
+
+### F04 — Low-level network imports the ledger for block scheduling
+
+Priority: medium; responsibility placement.
+
+`network/src/priority_queue.rs` imports StateBlock and work scoring. That direct
+ledger edge gives network 11 transitive internal crate dependencies under the
+normal-manifest inventory, including governance and TRST. This count is a graph
+observation, not a measurement of linked code or compile time.
+
+Rsnano keeps generic connections in network and domain message handling/scheduling
+in node transport/block_processing. Put BURST block-specific priority/admission
+next to its block-processing owner, or extract passive block values first (F05).
+Do not create a generic scheduling framework just to erase one dependency edge.
+
+### F05 — Ledger mixes foundational block values with an incomplete ownership label
+
+Priority: medium; coordinate with F03/F04, not a separate rewrite.
+
+`ledger/src/state_block.rs` contains the fundamental signed block. Importing it
+also imports a crate depending on governance, transactions and storage traits.
+wallet_core consequently has 10 transitive internal dependencies. At the same
+time, durable mutation, rollback planning, economic candidates and replay largely
+live under node (`ledger_bridge`, `ledger_updater`, `economic_candidate`,
+`rollback_plan`, `confirmed_replay`). The ledger crate's Ledger trait mostly
+exposes stores rather than owning the entire durable processing service.
+
+Rsnano puts block values in types, concrete transactional ledger work in ledger,
+and orchestration in node. BURST should make that distinction equally discoverable:
+first separate passive block/operation values from ledger services if doing so
+actually removes dependency edges; group durable application operations under an
+explicit ledger-facing module. Do not move replay certification or live scheduling
+into types. Do not move every node economic operation to ledger at once; BURST's
+cross-domain atomic candidate is a real requirement absent from simple Nano parity.
+
+### F06 — Storage owns both persistence and high-level engine materialization
+
+Priority: medium; staged cleanup, not evidence of broken transactions.
+
+`store_lmdb` depends on BRN, TRST, verification, governance and consti; transitively
+it reaches 12 internal crates. `governance_snapshot.rs` reconstructs a
+GovernanceEngine inside a pinned read view; environment/meta/write_batch retain
+engine caches. `confirmed_governance.rs` also defines schedule behavior. Rsnano's
+store_lmdb primarily depends on types and LMDB infrastructure, with more business
+orchestration in ledger/node.
+
+Typed persisted records and consistent read views are justified. The weak boundary
+is making the backend own engine hydration/policy and its cache. Separate record
+access from materialization only while retaining caller-owned transactions,
+transaction-ID cache tags and atomic rollback. Moving reads outside their snapshot
+to make the dependency diagram look cleaner would be a regression.
+
+Related placement smell: `confirmed_authority.rs` and `confirmed_governance.rs`
+import generic SharedMap/SharedSet from the TRST crate. Those wrappers' semantics
+should have a neutral owner if more domains need them; do not invent a new
+collection library or replace ordered persistent maps with mutable HashMaps.
+
+### F07 — Node is too flat at the top and too deeply nested in some recovery paths
+
+Priority: useful incremental organization.
+
+BURST has 93 root Rust files in node/src versus rsnano's 11. Checkpoint, payment,
+verification, storage and networking families mostly communicate their grouping
+through filename prefixes. Rsnano has visible subsystem roots such as consensus,
+transport, block_processing, bootstrap and representatives.
+
+At the other extreme, BURST has paths such as
+`confirmed_replay/snapshot/installed/metadata/retention/bodies/closure/retirement/owned/catalogue/observed.rs`.
+Depth alone is not a defect, but this encodes successive implementation steps as
+directory ownership rather than giving a reader a clear subsystem entry point.
+
+Group root families under stable domains, with one facade per subsystem. Flatten
+an inner chain only where intermediate modules have no independent responsibility.
+Do this one family at a time and keep visibility deliberate: moving files is not
+permission to make internals public. There is no evidence here that path depth
+itself causes runtime overhead. Splitting a file into child modules also does not
+reduce the Rust crate's test-compilation memory boundary by itself.
+
+### F08 — RPC contracts and handler families need clearer homes
+
+Priority: medium; rsnano's approach is stronger here.
+
+BURST `rpc/src/handlers.rs` is 4,385 lines including tests and many unrelated
+endpoints. Some families already live in handlers/; that existing pattern should
+be extended. Wallet signing/client logic is concentrated in signed_client.rs
+(3,531 lines including a large test module), and application DTOs are distributed
+among handlers, wallet code and frontend types.
+
+Rsnano explicitly separates rpc/messages, rpc/client and rpc/server, and groups
+handlers by operation. BURST's newly shared ProposalReview is progress, not yet a
+complete contract layer. Start with domain handler modules and a small shared
+contract module; extract a crate only when actual server/client dependencies need
+it. Keep governance policy in governance, not in an RPC schema package. Avoid
+one-file-per-tiny-endpoint dogma and wholesale JSON/Serde format changes.
+
+### F09 — Current specifications and historical run journals are mixed together
+
+Priority: medium for reliable maintenance; no evidence deletion.
+
+The four largest spec documents currently contain approximately:
+COMPLETION_LEDGER 58,745 lines / 4.41 MB; OPERATION_COMPLEXITY_AUDIT 33,243 / 2.50 MB;
+COMPLETION_PLAN 25,837 / 1.92 MB; RETIREMENT_CAPTURE_DESIGN 17,779 / 1.27 MB.
+These names suggest four current authorities, while much content records evolving
+validation history. Root decisions, spec/, docs/ and questionnaire/ add more entry
+points. Repeated historical status has already required explicit reconciliation
+in the validation workflow.
+
+Rsnano's doc/ is a simpler entry point, but BURST legitimately needs more evidence.
+Use one concise current status and an explicit normative-doc index; archive dated
+run journals under a history/evidence area with stable links. Separate requirements,
+design rationale, operator guidance and receipts. Preserve immutable logs/hashes
+and references. Do not mechanically move/delete evidence during candidate closure;
+first publish the index and mark historical sections as historical.
+
+### F10 — The nullable architecture claim is stronger than its implementation
+
+Priority: medium documentation/testing architecture; not a demand for more traits.
+
+`nullables/src/lib.rs` says all external dependencies are abstracted behind traits.
+NullClock and NullNetwork mostly have local component/test consumers; a controllable
+AtomicU64 clock by itself does not make the production clock injectable. The node
+also constructs NullDelegationStore as part of its initial state, so the package
+is not simply a dev-only crate. This review does not infer a missing live delegation
+write from that constructor alone.
+
+Rsnano wraps real and nullable clocks/files/TCP/LMDB through facilities actually
+used by its node. BURST should describe its actual test doubles accurately, isolate
+production in-memory stores from test-only naming, and add seams only at expensive
+or nondeterministic boundaries where tests need them. Copying all eleven rsnano
+nullable packages would be overkill. The empty transaction marker traits in store
+are likewise not the real LMDB transaction boundary; correct their architectural
+description rather than claiming BURST lacks atomic transactions.
+
+### F11 — Separate frontends contain some shared product/UI material
+
+Priority: low to medium; selective sharing only.
+
+There are 14 byte-identical relative files under wallet/src and node-gui/src,
+including four documentation images, icons/help/appearance components, several
+small UI components and entrypoint boilerplate. This is concrete duplication but
+not 14 independent bugs. Native wallet commands.rs is 1,482 lines and already has
+domain sibling modules that can receive more commands as features change.
+
+Prefer one source for shared branded help/assets and selected stable primitives
+when they change together. Do not create a design-system package to deduplicate
+main.tsx or a few standard UI wrappers. Keep wallet signing/session/offline logic
+separate from the dashboard's read/admin behavior. Their superficially similar
+HTTP/polling flows have different retry and authority requirements.
+
+Independent repositories are a defensible release decision. A monorepo is an
+option, not required by this audit; pinned cross-repository inputs are the minimum.
+
+### F12 — Minor utility ownership/name issues should not drive a large migration
+
+Priority: low.
+
+`utils` has only three source files and 38 lines. daemon uses utils::init_tracing,
+while node/logging.rs exports another initializer; that is a clearer cleanup target
+than a universal utils package. `http_client` primarily bounds response reads but
+also owns allowed_app_navigation, an app-shell policy. Its reuse is valuable;
+if more shell policy accumulates, give that policy an explicit module/owner rather
+than allowing an HTTP helper to become a general app security bucket.
+
+Keep browser/native separation, vendor patch notes and separate product repos
+unless a concrete dependency or change-frequency problem justifies moving them.
+Rsnano's names are not an external standard BURST must satisfy.
+
+## Suggested destination, not a demand to move everything now
+
+```text
+protocol/
+  types/ + crypto/               foundational values and primitives
+  messages/                      actual passive peer-message contract
+  protocol/                      actual framing/handshake handling
+  network/                       connections, peers, generic traffic control
+  brn/ trst/ verification/ ...    existing BURST domain engines
+  store/ store_lmdb/              store interfaces and transactional records
+  ledger/                        durable ledger operations; explicit ownership
+  node/src/
+    node.rs                      composition/lifecycle facade
+    block_processing/
+    transport/
+    checkpoint/
+    verification/
+    governance/
+    recovery/                    coherent replay/retirement entry points
+  rpc/                           contracts/client/server modules as needed
+  daemon/                        compose node + public servers
+  docs/                          operator/developer entry points
+  spec/                          current normative/design documents + index
+  ...history/evidence...         immutable dated records, stable references
+wallet/ node-gui/                 pinned protocol inputs in each native CI
+```
+
+Do not implement this tree by bulk renaming: DTO extraction must precede protocol
+moves; server composition must precede removal of cycle-avoidance adapters; storage
+changes must preserve snapshot/transaction ownership. In the first batch, fix F01
+and add the documentation ownership/index. Next choose one cohesive boundary,
+preferably RPC composition/contracts or message ownership. Group node modules
+when touching those subsystems, rather than reopening every passing scenario.
+
+Validation is proportional: docs-only needs review; pure moves need affected
+imports/visibility/targets checked; dependency changes need real consumer checks;
+wire/store/signing bytes need compatibility assertions; CI provisioning needs a
+clean checkout check with its exact pinned inputs. None automatically requires
+repeating every mainnet/testnet acceptance scenario.

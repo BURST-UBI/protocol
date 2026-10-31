@@ -1,27 +1,20 @@
-//! SYN cookie challenge-response handshake.
+//! Single-use handshake challenges with bounded entry counts and IP rate windows.
 //!
-//! Prevents connection flooding and identity spoofing:
-//! 1. Node generates a random cookie for the connecting peer's IP
-//! 2. Peer must sign the cookie with their node key
-//! 3. Node verifies the signature matches the claimed identity
-//!
-//! Inspired by rsnano's SYN cookie mechanism. Rate-limits per IP and caps
-//! total pending cookies to prevent memory exhaustion.
+//! The node consumes a challenge for its signed mutual-handshake transcript.
+//! The standalone `verify` helper checks only a signature over the cookie; it
+//! does not bind network, versions or the other participant's challenge.
 
 use burst_types::{PublicKey, Signature, WalletAddress};
 use std::collections::HashMap;
 use std::time::Instant;
 
-/// SYN cookie challenge-response handshake.
-///
-/// Prevents connection flooding and identity spoofing:
-/// 1. Node generates a random cookie for the connecting peer's IP
-/// 2. Peer must sign the cookie with their node key
-/// 3. Node verifies the signature matches the claimed identity
+/// Pending random challenges keyed by connection ID. IP strings identify rate
+/// windows; callers must normalize them and provide bounded identifiers.
+/// This helper does not limit sockets or prove that a peer is a unique person.
 pub struct SynCookies {
     /// Connection ID -> cookie. Rate limiting remains per IP, not per port.
     pending: HashMap<String, CookieEntry>,
-    /// Maximum pending cookies (prevents memory exhaustion)
+    /// Maximum pending entries; the rate-window map has the same independent cap.
     max_pending: usize,
     /// Cookie validity period in seconds
     cookie_ttl_secs: u64,
@@ -58,14 +51,17 @@ impl SynCookies {
         }
     }
 
-    /// Generate a cookie for an incoming connection.
-    /// Returns `None` if rate limit exceeded for this IP or if at max capacity.
+    /// Generate using the IP string as both rate key and connection ID.
+    /// Reuses that pending slot when allowed. Returns None on rate/capacity denial
+    /// or random-source failure.
     pub fn generate(&mut self, peer_ip: &str) -> Option<[u8; 32]> {
         self.generate_for_connection(peer_ip, peer_ip)
     }
 
-    /// Challenge a distinct TCP connection without replacing challenges for
-    /// other peers sharing its IP (localhost or a NAT gateway).
+    /// Generate for a caller-supplied connection ID. Distinct IDs preserve other
+    /// challenges behind the same IP; reusing an ID replaces its challenge when
+    /// capacity permits. Rate windows count attempts before the pending-capacity
+    /// and random-source checks. Each call scans retained entries for expiry.
     pub fn generate_for_connection(
         &mut self,
         peer_ip: &str,
@@ -88,7 +84,6 @@ impl SynCookies {
             return None;
         }
 
-        // Check rate limit
         if let Some((count, window_start)) = self.rate_limits.get_mut(peer_ip) {
             if now.saturating_sub(*window_start) < 60 {
                 if *count >= self.max_per_ip_per_min {
@@ -107,7 +102,6 @@ impl SynCookies {
             return None;
         }
 
-        // Generate random cookie
         let mut cookie = [0u8; 32];
         getrandom::getrandom(&mut cookie).ok()?;
 
@@ -123,9 +117,9 @@ impl SynCookies {
         Some(cookie)
     }
 
-    /// Verify a peer's response to a cookie challenge.
-    /// The peer must sign the cookie with their private key, proving they
-    /// own the claimed identity.
+    /// Consume the challenge, then verify a signature over its raw bytes.
+    /// Failure also consumes it. Success proves control of the claimed key for
+    /// this cookie, not agreement on the complete node handshake.
     pub fn verify(
         &mut self,
         connection_id: &str,
@@ -142,7 +136,8 @@ impl SynCookies {
         }
     }
 
-    /// Consume an unexpired challenge once, for a context-bound handshake proof.
+    /// Remove and return a challenge if its age is at most the configured TTL.
+    /// This performs no signature check; the caller verifies its handshake proof.
     pub fn take_cookie(&mut self, connection_id: &str) -> Option<[u8; 32]> {
         let entry = self.pending.remove(connection_id)?;
 
@@ -166,7 +161,7 @@ impl SynCookies {
             .retain(|_, (_, window_start)| now.saturating_sub(*window_start) < 60);
     }
 
-    /// Number of pending (outstanding) cookies.
+    /// Stored challenges, including expired entries not yet cleaned up.
     pub fn pending_count(&self) -> usize {
         self.pending.len()
     }
@@ -331,7 +326,6 @@ mod tests {
     #[test]
     fn cleanup_removes_expired() {
         let mut sc = make_cookies();
-        // Manually insert an expired entry
         sc.pending.insert(
             "old_peer".to_string(),
             CookieEntry {
@@ -358,7 +352,6 @@ mod tests {
     fn verify_expired_cookie_returns_false() {
         let mut sc = make_cookies();
         sc.started_at = Instant::now() - std::time::Duration::from_secs(31);
-        // Insert an already-expired cookie
         sc.pending.insert(
             "10.0.0.1".to_string(),
             CookieEntry {
@@ -377,13 +370,11 @@ mod tests {
         let mut sc = make_cookies();
         let cookie = sc.generate("10.0.0.5").unwrap();
 
-        // Generate a real keypair and sign the cookie
         let kp = burst_crypto::generate_keypair();
         let sig = burst_crypto::sign_message(&cookie, &kp.private);
         let address = burst_crypto::derive_address(&kp.public);
 
         assert!(sc.verify("10.0.0.5", &address, &sig));
-        // Cookie is consumed after verification
         assert_eq!(sc.pending_count(), 0);
     }
 
@@ -392,7 +383,6 @@ mod tests {
         let mut sc = make_cookies();
         let _cookie = sc.generate("10.0.0.6").unwrap();
 
-        // Sign something different
         let kp = burst_crypto::generate_keypair();
         let wrong_sig = burst_crypto::sign_message(b"wrong data", &kp.private);
         let address = burst_crypto::derive_address(&kp.public);

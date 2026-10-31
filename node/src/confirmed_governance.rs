@@ -1,35 +1,22 @@
 //! Voting boundaries derived from cemented governance, never provisional state.
 
-use std::collections::BTreeMap;
+use burst_utils::SharedMap;
 
-use bincode::Options;
 use burst_governance::{GovernancePhase, ProposalContent};
 use burst_ledger::{BlockType, StateBlock};
 use burst_store::StoreError;
 use burst_store_lmdb::{LmdbStore, LmdbWriteTransaction};
-use burst_types::{BlockHash, NetworkId, ProtocolParams, Timestamp, WalletAddress};
+use burst_types::{BlockHash, NetworkId, ProtocolParams, Timestamp};
 use serde::{Deserialize, Serialize};
 
-pub(crate) const KEY: &str = "confirmed_governance/v2";
-const MAX_BYTES: u64 = 16 << 20;
-const MAX_PROPOSALS: usize = 65_536;
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct Schedule {
-    proposer: WalletAddress,
-    created_at: u64,
-    timing: burst_governance::GovernanceTiming,
-    endorsements: u32,
-    last_endorsement: Option<u64>,
-    withdrawn_at: Option<u64>,
-    exploration_started_at: Option<u64>,
-}
+pub(crate) use burst_store_lmdb::confirmed_governance::{KEY, HEADER};
+use burst_store_lmdb::confirmed_governance::{Schedule, Snapshot, MAX_PROPOSALS};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct ConfirmedGovernance {
     epoch: BlockHash,
     params: ProtocolParams,
-    proposals: BTreeMap<[u8; 32], Schedule>,
+    proposals: SharedMap<[u8; 32], Schedule>,
 }
 
 fn invalid(message: impl ToString) -> StoreError {
@@ -49,10 +36,12 @@ impl ConfirmedGovernance {
         Self {
             epoch,
             params,
-            proposals: BTreeMap::new(),
+            proposals: SharedMap::default(),
         }
     }
 
+    /// Build from caller-authenticated checkpoint state. Only proposal and
+    /// exploration phases contribute schedules.
     pub(crate) fn from_checkpoint(
         epoch: BlockHash,
         params: ProtocolParams,
@@ -89,42 +78,30 @@ impl ConfirmedGovernance {
     }
 
     pub(crate) fn load(batch: &LmdbWriteTransaction<'_>) -> Result<Option<Self>, StoreError> {
-        if batch
-            .get_meta(burst_store::meta::CERTIFIED_PAYMENT_AUTHORITY_KEY)?
-            .is_none()
-        {
+        if !batch.contains_meta(burst_store::meta::CERTIFIED_PAYMENT_AUTHORITY_KEY)? {
             return Ok(None);
         }
-        let bytes = batch
-            .get_meta(KEY)?
-            .ok_or_else(|| invalid("confirmed governance schedule is missing"))?;
-        let result: Self = bincode::DefaultOptions::new()
-            .with_fixint_encoding()
-            .with_limit(MAX_BYTES)
-            .reject_trailing_bytes()
-            .deserialize(&bytes)
-            .map_err(invalid)?;
-        if result.epoch != batch.payment_epoch()? || result.proposals.len() > MAX_PROPOSALS {
-            return Err(invalid(
-                "confirmed governance schedule has an invalid epoch or size",
-            ));
-        }
-        let expected = result.limit_bytes()?;
-        if batch
-            .get_meta(burst_store::meta::GOVERNANCE_COUNTING_LIMIT_KEY)?
-            .as_deref()
-            != Some(expected.as_slice())
-        {
-            return Err(invalid(
-                "confirmed governance counting limit differs from its schedule",
-            ));
-        }
-        Ok(Some(result))
+        let snapshot = batch.read_confirmed_governance()?;
+        Ok(Some(Self { epoch: snapshot.epoch, params: snapshot.params, proposals: snapshot.proposals }))
+    }
+
+    fn snapshot(&self) -> Snapshot {
+        Snapshot { epoch: self.epoch, params: self.params.clone(), proposals: self.proposals.clone() }
     }
 
     pub(crate) fn promote(
         &mut self,
         batch: &LmdbWriteTransaction<'_>,
+        block: &StateBlock,
+    ) -> Result<(), StoreError> {
+        self.promote_view(&batch.read_view(), block)
+    }
+
+    /// Apply one caller-confirmed block to the in-memory schedule. Endorsements
+    /// are not deduplicated here; callers must promote each block exactly once.
+    pub(crate) fn promote_view(
+        &mut self,
+        batch: &burst_store_lmdb::read_view::LedgerReadView<'_>,
         block: &StateBlock,
     ) -> Result<(), StoreError> {
         if !Self::applies_to(&block.block_type) {
@@ -136,7 +113,7 @@ impl ConfirmedGovernance {
         if block.block_type == BlockType::GovernanceProposal {
             let content =
                 if block.origin.as_bytes() == &burst_governance::content::FULL_CONTENT_MARKER {
-                    crate::governance_content::load(batch, block).map_err(invalid)?
+                    crate::governance_content::load_view(batch, block).map_err(invalid)?
                 } else {
                     ProposalContent::decode_compact(block.link.as_bytes()).map_err(invalid)?
                 };
@@ -207,6 +184,8 @@ impl ConfirmedGovernance {
         Ok(())
     }
 
+    /// Return the counting boundary for a proposal or endorsement that needs
+    /// a voting limit. None means no additional limit, not that the block is valid.
     pub(crate) fn promise_limit(
         &self,
         batch: &LmdbWriteTransaction<'_>,
@@ -256,43 +235,12 @@ impl ConfirmedGovernance {
     }
 
     fn limit_bytes(&self) -> Result<Vec<u8>, StoreError> {
-        let mut limit: Option<u64> = None;
-        for proposal in self.proposals.values().filter(|proposal| {
-            proposal.withdrawn_at.is_none()
-                && (proposal.exploration_started_at.is_some()
-                    || proposal.endorsements > 0
-                    || self.params.governance_proposal_endorsements == 0)
-        }) {
-            let start = match proposal.exploration_started_at {
-                Some(start) => start,
-                None => proposal
-                    .timing
-                    .proposal_end(Timestamp::new(proposal.created_at))
-                    .map_err(invalid)?
-                    .as_secs(),
-            };
-            let at = proposal
-                .timing
-                .counting_at(Timestamp::new(start))
-                .map_err(invalid)?
-                .as_secs();
-            limit = Some(limit.map_or(at, |previous| previous.min(at)));
-        }
-        Ok(burst_store::meta::encode_payment_vote_limit(
-            self.epoch, limit,
-        ))
+        self.snapshot().limit_bytes()
     }
 
+    /// Stage the schedule and its voting limit; the caller commits or aborts.
     pub(crate) fn persist(&self, batch: &mut LmdbWriteTransaction<'_>) -> Result<(), StoreError> {
-        let bytes = bincode::serialize(self).map_err(invalid)?;
-        if bytes.len() as u64 > MAX_BYTES || self.proposals.len() > MAX_PROPOSALS {
-            return Err(invalid(
-                "confirmed governance schedule exceeds storage bounds",
-            ));
-        }
-        let limit = self.limit_bytes()?;
-        batch.put_meta(KEY, &bytes)?;
-        batch.put_meta(burst_store::meta::GOVERNANCE_COUNTING_LIMIT_KEY, &limit)
+        batch.write_confirmed_governance(self.snapshot())
     }
 
     /// Startup verifies the projection against the certified baseline and the
@@ -342,10 +290,37 @@ impl ConfirmedGovernance {
         )
     }
 
+    pub(crate) fn verify_compact_tail_view_with_poll(
+        self,
+        batch: &burst_store_lmdb::read_view::LedgerReadView<'_>,
+        tail: &crate::confirmed_replay::snapshot::tail::SnapshotTail,
+        poll: &dyn Fn(&'static str) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        if tail.context().epoch != self.epoch {
+            return Err(invalid("governance tail belongs to another epoch"));
+        }
+        self.verify_blocks_read(
+            batch,
+            tail.blocks()
+                .map(|block| block.map(std::borrow::Cow::Owned)),
+            || batch.read_confirmed_governance(), poll,
+        )
+    }
+
     fn verify_blocks<'a>(
-        mut self,
+        self,
         batch: &LmdbWriteTransaction<'_>,
         blocks: impl IntoIterator<Item = Result<std::borrow::Cow<'a, StateBlock>, StoreError>>,
+    ) -> Result<(), StoreError> {
+        self.verify_blocks_read(&batch.read_view(), blocks, || batch.read_confirmed_governance(), &|_| Ok(()))
+    }
+
+    fn verify_blocks_read<'a>(
+        mut self,
+        batch: &burst_store_lmdb::read_view::LedgerReadView<'_>,
+        blocks: impl IntoIterator<Item = Result<std::borrow::Cow<'a, StateBlock>, StoreError>>,
+        snapshot: impl FnOnce() -> Result<Snapshot, StoreError>,
+        poll: &dyn Fn(&'static str) -> Result<(), StoreError>,
     ) -> Result<(), StoreError> {
         if batch.payment_epoch()? != self.epoch {
             return Err(invalid("governance epoch changed during startup"));
@@ -353,13 +328,15 @@ impl ConfirmedGovernance {
         let epoch = self.epoch;
         for block in blocks {
             let block = block?;
+            poll("metadata:governance-tail-block")?;
             if block.payment_epoch == epoch {
-                self.promote(batch, &block)?;
+                self.promote_view(batch, &block)?;
             }
         }
-        if batch.get_meta(KEY)? != Some(bincode::serialize(&self).map_err(invalid)?)
-            || batch.get_meta(burst_store::meta::GOVERNANCE_COUNTING_LIMIT_KEY)?
-                != Some(self.limit_bytes()?)
+        poll("metadata:governance-tail-snapshot")?;
+        if snapshot()? != self.snapshot()
+            || match batch.get_meta(KEY)? { Some(bytes) => bytes != bincode::serialize(&self.snapshot()).map_err(invalid)?, None => false }
+            || batch.get_meta(burst_store::meta::GOVERNANCE_COUNTING_LIMIT_KEY)? != Some(self.limit_bytes()?)
         {
             return Err(invalid(
                 "confirmed governance schedule differs from cemented history",

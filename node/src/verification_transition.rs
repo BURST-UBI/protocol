@@ -11,21 +11,23 @@ pub(crate) fn supports(kind: &BlockType) -> bool {
     )
 }
 
-pub(crate) fn apply(
+/// Apply lifecycle effects after economic staging. The caller owns persistence
+/// and commit, and must discard candidate engines and abort on error.
+pub(crate) fn apply_staged(
     batch: &mut LmdbWriteTransaction<'_>,
     block: &StateBlock,
-    effect: &crate::ledger_bridge::EconomicResult,
+    effect: &crate::block_economics::EconomicResult,
     params: &ProtocolParams,
     network: NetworkId,
     verification: &mut VerificationOrchestrator,
-    engines: (&mut burst_brn::BrnEngine, &mut burst_trst::TrstEngine),
+    engines: &mut impl crate::economic_candidate::Engines,
 ) -> Result<(), String> {
     match block.block_type {
         BlockType::Endorse => {
-            let crate::ledger_bridge::EconomicResult::Endorse { burn_amount, .. } = effect else {
+            let crate::block_economics::EconomicResult::Endorse { burn_amount, .. } = effect else {
                 return Err("endorsement economic result missing".into());
             };
-            crate::endorsement_commit::apply(
+            crate::endorsement_commit::apply_staged(
                 batch,
                 block,
                 *burn_amount,
@@ -35,15 +37,17 @@ pub(crate) fn apply(
                 engines,
             )
         }
-        BlockType::Challenge | BlockType::VerificationVote => crate::verification_commit::collect(
-            batch,
-            block,
-            effect,
-            params,
-            verification,
-            engines,
-            network,
-        ),
+        BlockType::Challenge | BlockType::VerificationVote => {
+            crate::verification_commit::collect_staged(
+                batch,
+                block,
+                effect,
+                params,
+                verification,
+                engines,
+                network,
+            )
+        }
         _ => Err("unsupported verification transition".into()),
     }
 }

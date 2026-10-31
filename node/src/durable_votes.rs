@@ -9,13 +9,13 @@ use burst_types::BlockHash;
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum VoteGenerationError {
     #[error("vote dependencies are not confirmed")]
-    DependenciesPending,
+    DependenciesPending(Vec<BlockHash>),
     #[error(transparent)]
     Store(#[from] StoreError),
 }
 
 /// Answer only for a locally applied canonical block. Final responses require
-/// durable cementation; a request cannot turn an observed fork into a final vote.
+/// local cementation or a cached final promise validated against durable state.
 pub(crate) fn respond_vote(
     store: &LmdbStore,
     generator: &mut VoteGenerator,
@@ -43,6 +43,27 @@ pub(crate) fn respond_vote(
     {
         return Ok(None);
     }
+    if height > account.confirmation_height {
+        // A final signature may precede local cementation. Repair must replay
+        // that durable promise instead of creating another soft vote while
+        // peers are still waiting for final quorum.
+        if generator.cached_final_response(&hash).is_some() {
+            return match generate_vote(store, generator, hash, true) {
+                Ok(vote) => Ok(Some(vote)),
+                Err(VoteGenerationError::DependenciesPending(_)) => Ok(None),
+                Err(VoteGenerationError::Store(error)) => Err(error),
+            };
+        }
+        if let Some(vote) = generator.cached_soft_response(&block.account, block.previous, hash) {
+            if block.hash != hash || block.compute_hash() != hash {
+                return Err(StoreError::Corruption("vote candidate hash mismatch".into()));
+            }
+            store.meta_store().validate_reserved_soft_vote(&block.payment_epoch,
+                &generator.representative, &block.account, &block.previous, &hash,
+                vote.sequence, block.timestamp.as_secs())?;
+            return Ok(Some(vote.clone()));
+        }
+    }
     match generate_vote(
         store,
         generator,
@@ -50,52 +71,33 @@ pub(crate) fn respond_vote(
         height <= account.confirmation_height,
     ) {
         Ok(vote) => Ok(Some(vote)),
-        Err(VoteGenerationError::DependenciesPending) => Ok(None),
+        Err(VoteGenerationError::DependenciesPending(_)) => Ok(None),
         Err(VoteGenerationError::Store(error)) => Err(error),
     }
 }
 
+/// Reserve voting intent before signing, or revalidate a cached final vote.
+/// Final votes require confirmed dependencies; the candidate itself may still
+/// be provisional. Candidate admission and signer eligibility belong to the caller.
 pub(crate) fn generate_vote(
     store: &LmdbStore,
     generator: &mut VoteGenerator,
     hash: BlockHash,
     is_final: bool,
 ) -> Result<GeneratedVote, VoteGenerationError> {
-    // Derive the account position from stored, hash-checked block bytes;
-    // never trust an election lookup key as evidence of what is being signed.
-    let bytes = match store.block_store().get_block(&hash) {
-        Ok(bytes) => bytes,
-        Err(StoreError::NotFound(_)) => store
-            .meta_store()
-            .fork_candidate(&hash)?
-            .ok_or_else(|| StoreError::NotFound(hash.to_string()))?,
-        Err(error) => return Err(error.into()),
-    };
-    let block: StateBlock = bincode::deserialize(&bytes)
-        .map_err(|error| StoreError::Serialization(error.to_string()))?;
-    if block.hash != hash || block.compute_hash() != hash {
-        return Err(StoreError::Corruption("vote candidate hash mismatch".into()).into());
+    let block = vote_candidate(store, hash)?;
+    let governance_limit = if is_final { final_vote_limit(store, &block)? } else { None };
+    if is_final && governance_limit.is_none() {
+        if let Some(vote) = generator.cached_final_response(&hash) {
+            store.meta_store().validate_reserved_final_vote(
+                &block.payment_epoch, &generator.representative, &block.account,
+                &block.previous, &hash, vote.sequence, block.timestamp.as_secs(),
+            )?;
+            let vote = vote.clone();
+            generator.remember_response_choice(block.account, block.previous, &vote);
+            return Ok(vote);
+        }
     }
-    let governance_limit = if is_final {
-        let batch = store.tx_begin_write()?;
-        if !crate::causal_cementation::dependencies_confirmed(&batch, &block)? {
-            return Err(VoteGenerationError::DependenciesPending);
-        }
-        if matches!(
-            block.block_type,
-            burst_ledger::BlockType::GovernanceProposal
-                | burst_ledger::BlockType::GovernanceEndorse
-        ) {
-            crate::confirmed_governance::ConfirmedGovernance::load(&batch)?
-                .map(|schedule| schedule.promise_limit(&batch, &block))
-                .transpose()?
-                .flatten()
-        } else {
-            None
-        }
-    } else {
-        None
-    };
     let sequence = store
         .meta_store()
         .reserve_consensus_vote_with_governance_limit(
@@ -110,12 +112,80 @@ pub(crate) fn generate_vote(
             governance_limit,
         )?;
     generator.advance_sequence_to(sequence - 1);
-    Ok(if is_final {
+    let vote = if is_final {
         generator.generate_final_vote(hash)
     } else {
         generator.generate_vote(hash)
-    })
+    };
+    if is_final && governance_limit.is_none() {
+        generator.remember_final_response(vote.clone());
+    }
+    generator.remember_response_choice(block.account, block.previous, &vote);
+    Ok(vote)
 }
+
+fn vote_candidate(store: &LmdbStore, hash: BlockHash) -> Result<StateBlock, VoteGenerationError> {
+    // Load stored or retained fork bytes and verify their hash. This does not
+    // repeat signature, work or economic admission checks.
+    let bytes = match store.block_store().get_block(&hash) {
+        Ok(bytes) => bytes,
+        Err(StoreError::NotFound(_)) => store
+            .meta_store()
+            .fork_candidate(&hash)?
+            .ok_or_else(|| StoreError::NotFound(hash.to_string()))?,
+        Err(error) => return Err(error.into()),
+    };
+    let block: StateBlock = bincode::deserialize(&bytes)
+        .map_err(|error| StoreError::Serialization(error.to_string()))?;
+    if block.hash != hash || block.compute_hash() != hash {
+        return Err(StoreError::Corruption("vote candidate hash mismatch".into()).into());
+    }
+    Ok(block)
+}
+
+fn final_vote_limit(store: &LmdbStore, block: &StateBlock) -> Result<Option<u64>, VoteGenerationError> {
+    if needs_governance_readiness(block) {
+        let batch = store.tx_begin_write()?;
+        final_vote_limit_in(&batch, block)
+    } else {
+        let snapshot = crate::verification_commit::dependencies::view::Snapshot::new(store)?;
+        check_final_dependencies(&snapshot, block)?;
+        Ok(None)
+    }
+}
+
+fn final_vote_limit_in(
+    batch: &burst_store_lmdb::LmdbWriteTransaction<'_>,
+    block: &StateBlock,
+) -> Result<Option<u64>, VoteGenerationError> {
+    check_final_dependencies(batch, block)?;
+    if needs_governance_readiness(block) {
+        Ok(crate::confirmed_governance::ConfirmedGovernance::load(batch)?
+            .map(|schedule| schedule.promise_limit(batch, block)).transpose()?.flatten())
+    } else {
+        Ok(None)
+    }
+}
+
+fn needs_governance_readiness(block: &StateBlock) -> bool {
+    matches!(block.block_type,
+        burst_ledger::BlockType::GovernanceProposal | burst_ledger::BlockType::GovernanceEndorse)
+}
+
+fn check_final_dependencies(
+    batch: &impl crate::verification_commit::dependencies::view::DependencyView,
+    block: &StateBlock,
+) -> Result<(), VoteGenerationError> {
+    let pending = crate::causal_cementation::pending_dependencies(batch, block)?;
+    if !pending.is_empty() {
+        return Err(VoteGenerationError::DependenciesPending(pending));
+    }
+    Ok(())
+}
+
+mod final_batch;
+pub(crate) use final_batch::{generate_final_votes, respond_votes};
+pub(crate) mod worker;
 
 #[cfg(test)]
 mod tests {
@@ -162,42 +232,42 @@ mod tests {
         let mut conflict = first.clone();
         conflict.ledger_root = BlockHash::new([11; 32]);
         let anchor = CheckpointAnchor::genesis(NetworkId::Dev, genesis, 100, roster, 6700).unwrap();
-        let sign = |voter: usize, cp: &Checkpoint| CheckpointSignature {
+        let sign = |voter: usize, checkpoint: &Checkpoint| CheckpointSignature {
             representative: addresses[voter].clone(),
             signature: sign_message(
-                &burst_consensus::checkpoint_round::Ballot::precommit(cp, 0).signing_payload(),
+                &burst_consensus::checkpoint_round::Ballot::precommit(checkpoint, 0).signing_payload(),
                 &keys[voter].private,
             ),
         };
         // Voter zero equivocates. Every other representative persists its choice.
-        let mut a = CheckpointCertificate {
+        let mut first_certificate = CheckpointCertificate {
             checkpoint: first.clone(),
             round: 0,
             signatures: vec![sign(0, &first)],
         };
-        let mut b = CheckpointCertificate {
+        let mut conflicting_certificate = CheckpointCertificate {
             checkpoint: conflict.clone(),
             round: 0,
             signatures: vec![sign(0, &conflict)],
         };
         let directories: Vec<_> = (0..4).map(|_| tempfile::tempdir().unwrap()).collect();
-        for (voter, cp) in [(1, &first), (2, &first), (3, &conflict)] {
-            anchor.validate_successor(cp).unwrap();
+        for (voter, checkpoint) in [(1, &first), (2, &first), (3, &conflict)] {
+            anchor.validate_successor(checkpoint).unwrap();
             let store = LmdbStore::open(directories[voter].path(), 32, 16 * 1024 * 1024).unwrap();
             store
                 .meta_store()
                 .reserve_checkpoint_vote(
-                    cp.network,
+                    checkpoint.network,
                     &genesis,
                     &addresses[voter],
-                    cp.height,
-                    &cp.hash(),
+                    checkpoint.height,
+                    &checkpoint.hash(),
                 )
                 .unwrap();
             if voter == 3 {
-                b.signatures.push(sign(voter, cp));
+                conflicting_certificate.signatures.push(sign(voter, checkpoint));
             } else {
-                a.signatures.push(sign(voter, cp));
+                first_certificate.signatures.push(sign(voter, checkpoint));
             }
         }
         let restarted = LmdbStore::open(directories[2].path(), 32, 16 * 1024 * 1024).unwrap();
@@ -214,11 +284,11 @@ mod tests {
                 .is_err(),
             "the overlapping honest voter cannot sign the conflicting branch after restart"
         );
-        assert!(anchor.verify_certificate(&a).is_ok());
-        assert!(anchor.verify_certificate(&b).is_err());
+        assert!(anchor.verify_certificate(&first_certificate).is_ok());
+        assert!(anchor.verify_certificate(&conflicting_certificate).is_err());
     }
 
-    fn opening() -> StateBlock {
+    pub(super) fn opening() -> StateBlock {
         let mut block = StateBlock {
             signing_grant: burst_types::BlockHash::ZERO,
             delegation_payload: Vec::new(),
@@ -228,7 +298,7 @@ mod tests {
             account: WalletAddress::new("brst_alice"),
             previous: BlockHash::ZERO,
             representative: WalletAddress::new("brst_rep"),
-            brn_balance: 0,
+            brn_spent: 0,
             trst_balance: 100,
             link: BlockHash::ZERO,
             origin: TxHash::ZERO,
@@ -246,7 +316,7 @@ mod tests {
         block
     }
 
-    fn candidate(amount: u128) -> StateBlock {
+    pub(super) fn candidate(amount: u128) -> StateBlock {
         let opening = opening();
         let mut block = StateBlock {
             block_type: BlockType::Send,
@@ -315,6 +385,26 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!soft.is_final);
+        let repeated_soft = respond_vote(&store, &mut generator, block.hash).unwrap().unwrap();
+        assert_eq!(repeated_soft.signature, soft.signature);
+        assert_eq!(repeated_soft.sequence, soft.sequence);
+        assert_eq!(generator.sequence(), soft.sequence);
+        let competing = candidate(2);
+        store.meta_store().put_fork_candidate(&competing.hash,
+            &bincode::serialize(&competing).unwrap()).unwrap();
+        let fork_soft = generate_vote(&store, &mut generator, competing.hash, false).unwrap();
+        let canonical_again = respond_vote(&store, &mut generator, block.hash).unwrap().unwrap();
+        assert!(canonical_again.sequence > fork_soft.sequence);
+        assert_ne!(canonical_again.signature, soft.signature);
+        let canonical_repeat = respond_vote(&store, &mut generator, block.hash).unwrap().unwrap();
+        assert_eq!(canonical_repeat.signature, canonical_again.signature);
+        let promised = generate_vote(&store, &mut generator, block.hash, true).unwrap();
+        let before_cementation = respond_vote(&store, &mut generator, block.hash).unwrap().unwrap();
+        assert!(before_cementation.is_final);
+        assert_eq!(before_cementation.signature, promised.signature);
+        assert_eq!(before_cementation.sequence, promised.sequence);
+        assert_eq!(generator.sequence(), promised.sequence);
+        assert_eq!(store.account_store().get_account(&block.account).unwrap().confirmation_height, 1);
         account.confirmation_height = 2;
         store.account_store().put_account(&account).unwrap();
         let final_vote = respond_vote(&store, &mut generator, block.hash)
@@ -322,6 +412,12 @@ mod tests {
             .unwrap();
         assert!(final_vote.is_final);
         assert!(final_vote.sequence > soft.sequence);
+        let reserved_sequence = generator.sequence();
+        let repeated = respond_vote(&store, &mut generator, block.hash).unwrap().unwrap();
+        assert_eq!(repeated.sequence, final_vote.sequence);
+        assert_eq!(repeated.timestamp, final_vote.timestamp);
+        assert_eq!(repeated.signature, final_vote.signature);
+        assert_eq!(generator.sequence(), reserved_sequence);
         assert!(verify_signature(
             &vote_signing_payload(
                 &representative,
@@ -333,6 +429,14 @@ mod tests {
             &final_vote.signature,
             &keys.public
         ));
+        use burst_store::meta::{MetaStore, encode_payment_vote_limit, GOVERNANCE_COUNTING_LIMIT_KEY};
+        store.meta_store().put_meta(GOVERNANCE_COUNTING_LIMIT_KEY,
+            &encode_payment_vote_limit(block.payment_epoch, Some(block.timestamp.as_secs() - 1))).unwrap();
+        assert!(respond_vote(&store, &mut generator, block.hash).is_err());
+        assert_eq!(generator.sequence(), reserved_sequence);
+        store.meta_store().delete_meta(GOVERNANCE_COUNTING_LIMIT_KEY).unwrap();
+        let restored = respond_vote(&store, &mut generator, block.hash).unwrap().unwrap();
+        assert_eq!(restored.signature, final_vote.signature);
         let fork = candidate(2);
         store
             .meta_store()
@@ -382,13 +486,15 @@ mod tests {
             .put_fork_candidate(&fork.hash, &bincode::serialize(&fork).unwrap())
             .unwrap();
         let mut generator = VoteGenerator::new(WalletAddress::new("brst_rep"), [7; 32]);
-        assert!(generate_vote(&store, &mut generator, fork.hash, true).is_err());
+        assert!(matches!(generate_vote(&store, &mut generator, fork.hash, true),
+            Err(VoteGenerationError::DependenciesPending(dependencies)) if dependencies == vec![opening.hash]));
         assert_eq!(generator.sequence(), 0);
         store
             .meta_store()
             .enqueue_confirmation(&opening.hash)
             .unwrap();
-        assert!(generate_vote(&store, &mut generator, fork.hash, true).is_err());
+        assert!(matches!(generate_vote(&store, &mut generator, fork.hash, true),
+            Err(VoteGenerationError::DependenciesPending(dependencies)) if dependencies == vec![opening.hash]));
         assert_eq!(generator.sequence(), 0);
         let soft = generate_vote(&store, &mut generator, fork.hash, false).unwrap();
         assert_eq!(soft.sequence, 1);

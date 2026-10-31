@@ -1,4 +1,4 @@
-//! Endorsement engine — manages the endorsement phase of verification.
+//! Endorsement recording, counting and removal within a verification attempt.
 
 use crate::error::VerificationError;
 use crate::state::{Endorsement, VerificationState};
@@ -10,7 +10,9 @@ pub struct EndorsementEngine;
 impl EndorsementEngine {
     /// Submit an endorsement for a target wallet.
     ///
-    /// The endorser permanently burns their BRN (handled by BRN engine externally).
+    /// Reject duplicates and record the supplied amount. The caller validates
+    /// eligibility, phase and minimum amount, and debits BRN in the surrounding
+    /// transaction. This method only checks whether the endorser is already present.
     pub fn submit_endorsement(
         &self,
         state: &mut VerificationState,
@@ -35,14 +37,14 @@ impl EndorsementEngine {
         state.endorsements.len() as u32 >= threshold
     }
 
-    /// Total BRN burned in endorsements for this wallet.
+    /// Sum recorded endorsement amounts; this does not inspect BRN debits.
     pub fn total_burned(&self, state: &VerificationState) -> u128 {
         state.endorsements.iter().map(|e| e.burn_amount).sum()
     }
 
-    /// Invalidate endorsements from a specific endorser (e.g., if they were revoked).
-    ///
-    /// Returns the number of endorsements removed.
+    /// Remove an endorser from this state and return the number removed.
+    /// The node revocation path does not currently invoke this helper. It does
+    /// not itself change phase, recheck threshold or cancel a selection.
     pub fn invalidate_endorser(
         &self,
         state: &mut VerificationState,
@@ -55,7 +57,7 @@ impl EndorsementEngine {
     }
 
     /// Check if any endorsers in the current verification state have been revoked.
-    /// Returns a list of revoked endorser addresses that need invalidation.
+    /// Returns addresses matching the caller's predicate without changing state.
     pub fn find_revoked_endorsers<'a>(
         &self,
         state: &'a VerificationState,
@@ -84,12 +86,12 @@ mod tests {
         VerificationState {
             target: addr(target),
             phase: VerificationPhase::Endorsing,
-            endorsements: Vec::new(),
-            endorser_set: HashSet::new(),
-            selected_verifiers: Vec::new(),
-            votes: Vec::new(),
+            endorsements: Vec::new().into(),
+            endorser_set: HashSet::new().into(),
+            selected_verifiers: Vec::new().into(),
+            votes: Default::default(),
             revote_count: 0,
-            excluded_verifiers: HashSet::new(),
+            excluded_verifiers: HashSet::new().into(),
             started_at: Timestamp::new(0),
         }
     }

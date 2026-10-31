@@ -1,17 +1,20 @@
-//! BRN (Burn) — the birthright computation engine.
+//! BRN accrual, burns, stakes and release accounting.
 //!
-//! BRN is a deterministic function of time, not a token on the ledger.
-//! `BRN(w) = r × (t_now − t_verified(w)) − total_burned(w) − total_staked(w)`
+//! BRN is computed from eligible time and the shared rate history. Each interval
+//! earns its historical rate; paused intervals earn nothing. Available balance
+//! subtracts cumulative burns and active stakes from that accrual. Spendable
+//! balance also subtracts returned stakes awaiting signed acknowledgment.
 //!
-//! This crate handles:
-//! - Balance computation from time and wallet state
-//! - Recording burn operations (BRN → TRST minting)
-//! - Staking/unstaking for verification and challenges
-//! - Rate change splitting (preserving pre-change accrual)
+//! This crate updates accounting state. Callers authenticate operations, decide
+//! verification outcomes and apply any corresponding TRST payment.
 
 pub mod engine;
+pub mod pauses;
 pub mod error;
 pub mod releases;
+pub mod rate_storage;
+pub mod wallet_storage;
+pub mod retention;
 pub mod stake;
 pub mod state;
 pub mod wallet_states;

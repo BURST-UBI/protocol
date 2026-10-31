@@ -7,7 +7,7 @@ impl BurstNode {
         feedback: &mpsc::Sender<crate::bootstrap::BootstrapFeedback>,
     ) {
         let mut addresses = self.peer_manager.read().await.bootstrap_peers().to_vec();
-        match self.store.peer_store().iter_peers() {
+        match self.store.peer_store().all_peers() {
             Ok(cached) => {
                 for (address, _) in cached {
                     if !addresses.contains(&address) {
@@ -40,7 +40,7 @@ impl BurstNode {
         };
         let mut stop = self.shutdown.subscribe();
         let max_peers = self.config.max_peers;
-        self.task_handles.push(tokio::spawn(async move {
+        self.track_task("recovery peer connections", tokio::spawn(async move {
             let mut timer = tokio::time::interval(Duration::from_secs(2));
             timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut next = 0;

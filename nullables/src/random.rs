@@ -1,18 +1,18 @@
-//! Nullable random — deterministic random number generation.
+//! Cyclic test outputs with no cryptographic proof verification.
 
 use burst_vrf::{RandomOutput, VrfError, VrfProvider};
 use std::sync::Mutex;
 
-/// A deterministic VRF provider for testing.
-///
-/// Returns pre-configured values in order.
+/// Test implementation of VrfProvider. Cycles through configured values, ignores
+/// context, returns empty proofs and accepts every output in verify.
 pub struct NullRandom {
     outputs: Mutex<Vec<[u8; 32]>>,
     index: Mutex<usize>,
 }
 
 impl NullRandom {
-    /// Create with a sequence of deterministic random values.
+    /// Configure the output cycle. The sequence must be nonempty; requesting
+    /// randomness from an empty sequence panics.
     pub fn new(outputs: Vec<[u8; 32]>) -> Self {
         Self {
             outputs: Mutex::new(outputs),

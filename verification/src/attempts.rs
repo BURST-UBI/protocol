@@ -1,35 +1,65 @@
 use crate::{ChallengeOutcomeEvent, VerificationError, VerifierOutcome};
 use burst_types::{BlockHash, WalletAddress};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use imbl::OrdMap;
 
-/// Economic receipts are addressed by the signed attempt, not just its people.
+/// Binds votes and challenges to attempt hashes for economic settlement.
+/// These maps record caller-supplied contexts; they do not verify signatures.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct AttemptContexts {
     #[serde(serialize_with = "ordered_votes")]
-    pub(crate) votes: HashMap<WalletAddress, HashMap<WalletAddress, BlockHash>>,
-    #[serde(serialize_with = "crate::state::ordered_wallet_map")]
-    pub(crate) challenges: HashMap<WalletAddress, BlockHash>,
+    pub(crate) votes:
+        crate::tracked_map::TrackedMap<WalletAddress, OrdMap<WalletAddress, BlockHash>>,
+    #[serde(serialize_with = "ordered_challenges")]
+    pub(crate) challenges: crate::tracked_map::TrackedMap<WalletAddress, BlockHash>,
 }
 
 fn ordered_votes<S: serde::Serializer>(
-    votes: &HashMap<WalletAddress, HashMap<WalletAddress, BlockHash>>,
+    votes: &crate::tracked_map::TrackedMap<WalletAddress, OrdMap<WalletAddress, BlockHash>>,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
-    use std::collections::BTreeMap;
-    votes
-        .iter()
-        .map(|(target, voters)| {
-            (
-                target.as_str(),
-                voters
-                    .iter()
-                    .map(|(wallet, context)| (wallet.as_str(), context))
-                    .collect::<BTreeMap<_, _>>(),
-            )
-        })
-        .collect::<BTreeMap<_, _>>()
-        .serialize(serializer)
+    struct Voters<'a>(&'a OrdMap<WalletAddress, BlockHash>);
+    impl Serialize for Voters<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serializer.collect_map(self.0.iter().map(|(wallet, context)| (wallet.as_str(), context)))
+        }
+    }
+    serializer.collect_map(votes.iter().map(|(target, voters)| (target.as_str(), Voters(voters))))
+}
+
+fn ordered_challenges<S: serde::Serializer>(
+    challenges: &crate::tracked_map::TrackedMap<WalletAddress, BlockHash>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.collect_map(challenges.iter().map(|(wallet, hash)| (wallet.as_str(), hash)))
+}
+
+fn rewind_map<V: Clone + PartialEq>(
+    before: &crate::tracked_map::TrackedMap<WalletAddress, V>,
+    after: &crate::tracked_map::TrackedMap<WalletAddress, V>,
+    current: &mut crate::tracked_map::TrackedMap<WalletAddress, V>,
+) -> Result<(), String> {
+    for key in before
+        .keys()
+        .chain(after.keys())
+        .collect::<std::collections::BTreeSet<_>>()
+    {
+        if before.get(key) == after.get(key) {
+            continue;
+        }
+        if current.get(key) != after.get(key) {
+            return Err("verification undo conflicts with a changed entry".into());
+        }
+        match before.get(key) {
+            Some(value) => {
+                current.insert(key.clone(), value.clone());
+            }
+            None => {
+                current.remove(key);
+            }
+        }
+    }
+    Ok(())
 }
 
 impl AttemptContexts {
@@ -42,14 +72,10 @@ impl AttemptContexts {
             && self.challenges.get(target) == other.challenges.get(target)
     }
 
+    /// Restore changed entries only if they still match `after`. Earlier entries
+    /// may already be restored on error; callers must use a disposable snapshot.
     pub(crate) fn rewind(&mut self, before: &Self, after: &Self) -> Result<(), String> {
-        use crate::orchestrator::snapshot_undo::{rewind_map, rewind_map_by};
-        rewind_map_by(
-            &before.votes,
-            &after.votes,
-            &mut self.votes,
-            |left, right| Ok(left == right),
-        )?;
+        rewind_map(&before.votes, &after.votes, &mut self.votes)?;
         rewind_map(&before.challenges, &after.challenges, &mut self.challenges)
     }
 
@@ -134,6 +160,34 @@ impl AttemptContexts {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn ordered_context_stream_matches_legacy_sorted_maps_including_empty_targets() {
+        use std::collections::BTreeMap;
+        for count in [0, 1, 128] {
+            let mut contexts = super::AttemptContexts::default();
+            for index in (0..count).rev() {
+                let target = burst_types::WalletAddress::new(format!("brst_context_{index}"));
+                let voters = (0..index % 8).rev().map(|voter| (
+                    burst_types::WalletAddress::new(format!("brst_voter_{voter}")),
+                    burst_types::BlockHash::new([(voter + 1) as u8; 32]),
+                )).collect();
+                contexts.votes.insert(target.clone(), voters);
+                if index % 2 == 0 { contexts.challenges.insert(target, burst_types::BlockHash::new([9; 32])); }
+            }
+            let votes: BTreeMap<_, _> = contexts.votes.iter().map(|(target, voters)| (
+                target.as_str(), voters.iter().map(|(wallet, context)| (wallet.as_str(), context))
+                    .collect::<BTreeMap<_, _>>(),
+            )).collect();
+            let challenges: BTreeMap<_, _> = contexts.challenges.iter().map(|(wallet, hash)| (wallet.as_str(), hash)).collect();
+            let legacy = bincode::serialize(&(votes, challenges)).unwrap();
+            let actual = bincode::serialize(&contexts).unwrap();
+            assert_eq!(actual, legacy);
+            let restored: super::AttemptContexts = bincode::deserialize(&actual).unwrap();
+            assert_eq!(bincode::serialize(&restored).unwrap(), legacy);
+            assert_eq!(restored.votes.len(), count as usize);
+        }
+    }
     use super::*;
     use crate::{compute_challenge_outcome, ChallengeResult};
 
@@ -165,6 +219,19 @@ mod tests {
             }
         }
         let bytes = bincode::serialize(&first).unwrap();
+        // The former HashMap-backed two-field representation must decode these
+        // exact bytes; ordered wire maps remain independent of runtime storage.
+        type Legacy = (
+            std::collections::HashMap<WalletAddress, std::collections::HashMap<WalletAddress, BlockHash>>,
+            std::collections::HashMap<WalletAddress, BlockHash>,
+        );
+        let legacy: Legacy = bincode::deserialize(&bytes).unwrap();
+        let ordered_votes: std::collections::BTreeMap<_, _> = legacy.0.iter().map(|(target, voters)|
+            (target.as_str(), voters.iter().map(|(voter, hash)| (voter.as_str(), hash))
+                .collect::<std::collections::BTreeMap<_, _>>())).collect();
+        let ordered_challenges: std::collections::BTreeMap<_, _> = legacy.1.iter()
+            .map(|(target, hash)| (target.as_str(), hash)).collect();
+        assert_eq!(bytes, bincode::serialize(&(ordered_votes, ordered_challenges)).unwrap());
         assert_eq!(bytes, bincode::serialize(&second).unwrap());
         for _ in 0..8 {
             let restored: AttemptContexts = bincode::deserialize(&bytes).unwrap();

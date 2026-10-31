@@ -40,6 +40,12 @@ impl CompactDeadlineCoverage {
         self.cut.check_signing_parent(batch, anchor)
     }
 
+    pub(crate) fn covers_local_promises(
+        &self, batch: &burst_store_lmdb::LmdbWriteTransaction<'_>, representative: &WalletAddress,
+    ) -> Result<bool, burst_store::StoreError> {
+        batch.covers_consensus_votes(representative, &self.cut.parent, &self.cut.parent, &self.cut.included)
+    }
+
     pub(crate) fn seal_local_votes(
         &self,
         batch: &mut burst_store_lmdb::LmdbWriteTransaction<'_>,

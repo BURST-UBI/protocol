@@ -78,3 +78,34 @@ test("exclusions require explicit scope authority", () => {
   coverage.requirements[0].status = "excluded";
   assert.ok(checkCoverage(coverage, texts).errors.some(error => error.includes("exclusion requires")));
 });
+
+test("canonical pages are required independently of the recorded source list", () => {
+  const { coverage, texts } = fixture();
+  const name = "docs/wallet/PAYMENTS.md";
+  texts[name] = "# Payments\n\n## Receive\nThe recipient signs.\n";
+  const required = Object.keys(texts);
+  assert.ok(checkCoverage(coverage, texts, () => true, required).errors.length);
+  coverage.sources[name] = { sha256: createHash("sha256").update(texts[name]).digest("hex") };
+  coverage.requirements.push(...sections(name, texts[name]).map(entry => ({
+    ...entry, status: "unverified", evidence: [], note: "Not qualified by indexing."
+  })));
+  assert.deepEqual(checkCoverage(coverage, texts, () => true, required).errors, []);
+  delete texts[name];
+  assert.ok(checkCoverage(coverage, texts, () => true, required).errors.includes(`missing source ${name}`));
+});
+
+test("sections from different canonical pages cannot share IDs", () => {
+  const a = sections("docs/wallet/PAYMENTS.md", "# Payments\n## Receive\n");
+  const b = sections("docs/protocol/PAYMENTS.md", "# Wallets\n## Receive\n");
+  assert.equal(new Set([...a, ...b].map(entry => entry.id)).size, 4);
+});
+
+test("current inventory needs implementation decisions and docs, without the old root redirect", () => {
+  const { coverage, texts } = fixture();
+  delete coverage.sources["BURST_WHITEPAPER.md"];
+  coverage.requirements = coverage.requirements.filter(entry => entry.source !== "BURST_WHITEPAPER.md");
+  delete texts["BURST_WHITEPAPER.md"];
+  assert.deepEqual(checkCoverage(coverage, texts, () => false, ["IMPLEMENTATION_DECISIONS.md"]).errors, []);
+  // Historical callers still require both original sources.
+  assert.ok(checkCoverage(coverage, texts).errors.includes("missing source BURST_WHITEPAPER.md"));
+});

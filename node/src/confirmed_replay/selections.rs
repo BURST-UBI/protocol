@@ -39,9 +39,7 @@ impl<'a, S: SelectionSource + ?Sized> Selections<'a, S> {
     pub(super) fn new(certificates: &'a S, blocks: &[StateBlock]) -> Result<Self, ReplayError> {
         Self::build(
             certificates,
-            blocks
-                .iter()
-                .map(|block| Ok(std::borrow::Cow::Borrowed(block))),
+            |visit| blocks.iter().try_for_each(visit),
             false,
             None,
         )
@@ -53,14 +51,19 @@ impl<'a, S: SelectionSource + ?Sized> Selections<'a, S> {
         certificates: &'a S,
         blocks: &super::blocks::source::Source<'_>,
     ) -> Result<Self, ReplayError> {
-        Self::build(certificates, blocks.iter(), true, blocks.directory())
+        Self::build(
+            certificates,
+            |visit| blocks.visit_unordered(visit),
+            true,
+            blocks.directory(),
+        )
     }
 
-    fn build<'b>(
+    fn build(
         certificates: &'a S,
-        blocks: impl IntoIterator<
-            Item = Result<std::borrow::Cow<'b, StateBlock>, burst_store::StoreError>,
-        >,
+        scan: impl FnOnce(
+            &mut dyn FnMut(&StateBlock) -> Result<(), ReplayError>,
+        ) -> Result<(), ReplayError>,
         ordered_lifecycles: bool,
         directory: Option<&std::path::Path>,
     ) -> Result<Self, ReplayError> {
@@ -75,7 +78,7 @@ impl<'a, S: SelectionSource + ?Sized> Selections<'a, S> {
         };
         let mut lifecycles = super::scratch_index::ReplayIndex::new(directory)
             .map_err(|error| invalid(error.to_string()))?;
-        for (position, certificate) in certificates.read_all().enumerate() {
+        for (position, certificate) in certificates.iter_selections().enumerate() {
             let certificate = certificate?;
             let request = certificate.replayed().request();
             let context = request
@@ -147,10 +150,9 @@ impl<'a, S: SelectionSource + ?Sized> Selections<'a, S> {
                 return Err(invalid("duplicate certified selection context"));
             }
         }
-        for block in blocks {
-            let block = block.map_err(|error| invalid(error.to_string()))?;
+        scan(&mut |block| {
             if block.block_type != BlockType::VerificationVote {
-                continue;
+                return Ok(());
             }
             let context = BlockHash::new(*block.origin.as_bytes());
             let mut panel = state
@@ -165,7 +167,7 @@ impl<'a, S: SelectionSource + ?Sized> Selections<'a, S> {
                 return Err(invalid("certified verification requires bootstrap exit"));
             }
             if !selected.contains(&block.account)
-                || crate::ledger_bridge::extract_receiver_from_link(&block.link).as_ref()
+                || crate::block_economics::wallet_from_link(&block.link).as_ref()
                     != Some(panel.certificate.replayed().request().target())
                 || panel
                     .votes
@@ -179,12 +181,14 @@ impl<'a, S: SelectionSource + ?Sized> Selections<'a, S> {
                 .insert(*block.hash.as_bytes(), *context.as_bytes())
                 .map_err(|error| invalid(error.to_string()))?;
             state.panels.save(context, panel)?;
-        }
+            Ok(())
+        })?;
         Ok(state)
     }
 
-    /// Only metadata already reconstructed at earlier certified boundaries is
-    /// supplied here. Future completions cannot authorize earlier spending.
+    /// Supply only completions reconstructed at earlier certified boundaries.
+    /// This checks panel membership and coverage, not the completion boundary.
+    /// Discard this selection view if an entry fails after earlier entries applied.
     pub(super) fn include_deadlines(
         &mut self,
         metadata: &HashMap<String, Vec<u8>>,
@@ -221,6 +225,8 @@ impl<'a, S: SelectionSource + ?Sized> Selections<'a, S> {
         Ok(())
     }
 
+    /// Return prerequisite hashes within the supplied count budget. Hashes may
+    /// repeat across dependency groups; the budget counts those repeats.
     pub(super) fn dependencies(
         &self,
         block: &StateBlock,
@@ -275,7 +281,7 @@ impl<'a, S: SelectionSource + ?Sized> Selections<'a, S> {
             dependencies.extend(panel.vote_hashes());
         }
         if block.block_type == BlockType::Challenge {
-            let target = crate::ledger_bridge::extract_receiver_from_link(&block.link)
+            let target = crate::block_economics::wallet_from_link(&block.link)
                 .ok_or_else(|| invalid("challenge target is invalid"))?;
             if let Some(context) = self
                 .targets
@@ -333,21 +339,11 @@ impl<'a, S: SelectionSource + ?Sized> Selections<'a, S> {
                 origin
             }
         };
-        let defaults = crate::verification_deadline::history_defaults(
+        let defaults = crate::verification_deadline::history_defaults_from_completions(
             orchestrator,
             request.target(),
-            record.replayed().lifecycle(),
-            |voter| {
-                Ok(self
-                    .completions
-                    .iter()
-                    .find(|value| {
-                        value.activation.target == *request.target()
-                            && value.lifecycle == lifecycle
-                            && value.absent.contains(voter)
-                    })
-                    .cloned())
-            },
+            lifecycle,
+            &self.completions,
         )
         .map_err(invalid)?;
         if orchestrator

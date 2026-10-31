@@ -1,5 +1,5 @@
-//! Write batching — groups multiple store operations into a single LMDB write
-//! transaction, amortising the cost of the fsync that each commit performs.
+//! Group related store operations into one atomic LMDB write transaction,
+//! sharing the commit and synchronization cost.
 //!
 //! # Usage
 //!
@@ -24,62 +24,245 @@ use crate::block_undo::{BlockUndo, UndoRecorder, UndoTable};
 use crate::environment::LmdbEnvironment;
 use crate::LmdbError;
 
+pub(crate) mod auxiliary_cache;
 pub mod checkpoint_projection;
+mod checkpoint_heads;
+mod governance_records;
+pub use governance_records::{prepare_governance_undo, GovernanceUndoProjection};
+mod verification_records;
 pub(crate) mod payment_epoch;
 pub(crate) mod vote_fence;
 
 pub type BrnWalletEntry<'a> = (WalletAddress, &'a [u8]);
 
-/// A caller-owned read-only LMDB transaction: a consistent snapshot across many
-/// store reads. Threaded through store `*_txn` read methods (rsnano model) so a
-/// composite read (e.g. account info + its frontier + latest block) sees one
-/// atomic view. The self-committing trait methods each open a short-lived one
-/// internally via [`LmdbReadTransaction::from_ro`].
+/// A consistent snapshot shared across store reads. Pass it to `*_txn` methods
+/// when account information, its frontier and its latest block must come from
+/// the same database generation. Separate convenience reads can see different
+/// generations if a writer commits between them.
 pub struct LmdbReadTransaction<'a> {
     pub(crate) txn: RoTxn<'a>,
+    pub(crate) generation: Option<usize>,
+    environment: std::sync::Weak<std::sync::Mutex<Option<(usize, auxiliary_cache::AuxiliaryCache)>>>,
 }
 
 impl<'a> LmdbReadTransaction<'a> {
+    /// ID of the pinned transaction, or None for an unmanaged `from_ro` wrapper.
+    /// Never compare generations from different environments.
+    pub fn generation(&self) -> Option<usize> {
+        self.generation
+    }
+
+    pub(crate) fn belongs_to(&self, env: &LmdbEnvironment) -> bool {
+        self.environment.ptr_eq(&std::sync::Arc::downgrade(&env.auxiliary_cache))
+    }
+
+    /// Detach only this view's identity. The token retains neither the reader
+    /// nor the environment and grants no authentication or deletion authority.
+    pub fn clean_storage_cut(&self) -> Option<CleanStorageCut> {
+        Some(CleanStorageCut {
+            environment: self.environment.clone(),
+            generation: self.generation?,
+        })
+    }
+
     /// Begin a new read transaction against the environment.
     pub(crate) fn new(env: &'a LmdbEnvironment) -> Result<Self, StoreError> {
         let txn = env.env().read_txn().map_err(LmdbError::from)?;
-        Ok(Self { txn })
+        Ok(Self::from_pinned(env, txn))
+    }
+
+    fn from_pinned(env: &LmdbEnvironment, txn: RoTxn<'a>) -> Self {
+        // Metadata can become visible before LMDB publishes it to new readers.
+        // Only the transaction itself identifies the snapshot it actually pins.
+        let generation = Some(txn.id());
+        Self { txn, generation, environment: std::sync::Arc::downgrade(&env.auxiliary_cache) }
     }
 
     /// Wrap an already-opened heed read transaction. Used by self-committing
     /// store methods to delegate to their `*_txn` counterparts.
     pub(crate) fn from_ro(txn: RoTxn<'a>) -> Self {
-        Self { txn }
+        Self { txn, generation: None, environment: std::sync::Weak::new() }
+    }
+}
+
+/// Identity of an unchanged committed view. This carries no authentication or
+/// publication authority and retains no database transaction or environment.
+#[derive(Clone)]
+pub struct CleanStorageCut {
+    environment: std::sync::Weak<std::sync::Mutex<Option<(usize, auxiliary_cache::AuxiliaryCache)>>>,
+    generation: usize,
+}
+
+impl CleanStorageCut {
+    /// Exact committed-view identity; even soft-only commits are different views.
+    /// This comparison grants no authentication or permission to publish.
+    pub fn same_committed_view(&self, other: &Self) -> bool {
+        self.generation == other.generation && self.environment.ptr_eq(&other.environment)
+    }
+
+    pub(crate) fn matches_generation(&self, env: &LmdbEnvironment, generation: usize) -> bool {
+        self.generation == generation
+            && self.environment.ptr_eq(&std::sync::Arc::downgrade(&env.auxiliary_cache))
+    }
+
+    /// Compare detached views for body-dependency reuse only. Soft sequence
+    /// reservations cannot add roots; final votes, gaps and other writes reject.
+    /// This does not authenticate either view or authorize publication. A caller
+    /// publishing changes must still recheck its proof under the writer lock.
+    pub fn body_dependencies_unchanged(
+        &self,
+        later: &Self,
+        env: &LmdbEnvironment,
+    ) -> Result<bool, StoreError> {
+        let identity = std::sync::Arc::downgrade(&env.auxiliary_cache);
+        if !self.environment.ptr_eq(&identity) || !later.environment.ptr_eq(&identity) {
+            return Ok(false);
+        }
+        if self.generation == later.generation { return Ok(true); }
+        let commits = env.sequence_commits.lock()
+            .map_err(|error| StoreError::Backend(error.to_string()))?;
+        Ok(commits.covers(self.generation, later.generation))
     }
 }
 
 impl ReadTxn for LmdbReadTransaction<'_> {}
 
-/// A caller-owned LMDB write transaction: all mutations made through it commit
-/// atomically on [`LmdbWriteTransaction::commit`], or roll back if it is dropped
-/// uncommitted. This is the primitive the rsnano-style port threads through
-/// store methods so an entire logical operation (e.g. applying a block: ledger
-/// + BRN + rep-weights + governance) commits as one transaction.
-///
-/// It also amortises fsync cost — a single commit per transaction.
+/// Stage related store mutations for one atomic commit. Dropping the transaction
+/// uncommitted aborts them. Publish corresponding in-memory state only after
+/// [`LmdbWriteTransaction::commit`] succeeds.
 pub struct LmdbWriteTransaction<'a> {
     txn: RwTxn<'a>,
     env: &'a LmdbEnvironment,
     undo: Option<UndoRecorder>,
+    block_group: Option<block_group::Budget>,
     failed: bool,
     dirty: bool,
+    auxiliary_cache: std::cell::RefCell<auxiliary_cache::AuxiliaryCache>,
+    base_txn_id: usize,
+    changed_value: bool,
+    body_changes: Option<crate::retention::changes::Pending>,
+    governance_cache: std::cell::RefCell<Option<burst_governance::GovernanceEngine>>,
 }
 
 impl ReadTxn for LmdbWriteTransaction<'_> {}
 impl WriteTxn for LmdbWriteTransaction<'_> {}
 
 impl<'a> LmdbWriteTransaction<'a> {
-    /// Directory for transaction-scoped scratch files, separate from ledger rows.
+    /// Borrow this writer's current rows without exposing mutation operations.
+    pub fn read_view(&self) -> crate::read_view::LedgerReadView<'_> {
+        crate::read_view::LedgerReadView::new(self.env, &self.txn, self.clean_storage_cut())
+    }
+
+    /// Start optional mutation coverage under an untouched exclusive writer.
+    /// This observes local bytes only; it is not a replay or retirement proof.
+    pub fn watch_body_changes(&self, max_rows: usize, max_bytes: usize)
+        -> Result<crate::retention::BodyChangeWatch, StoreError> {
+        if self.clean_storage_cut().is_none() {
+            return Err(StoreError::Corruption("body change watch requires a clean writer".into()));
+        }
+        self.env.body_changes.watch(self.base_txn_id, max_rows, max_bytes)
+    }
+
+    fn invalidate_body_changes(&mut self) {
+        if let Some(changes) = self.body_changes.as_mut() { changes.invalidate(); }
+    }
+
+    /// A sealed journal is outside reversible recording, but still contributes
+    /// a carrier and local images to optional dependency-change observation.
+    fn observe_sealed_journal(&mut self, key: &[u8], bytes: &[u8]) -> Result<(), StoreError> {
+        if let Some(changes) = self.body_changes.as_mut() {
+            let before = self.env.meta_db.get(&self.txn, key).map_err(LmdbError::from)?;
+            if before != Some(bytes) {
+                changes.record(UndoTable::Meta, key, before, Some(bytes));
+                // The observed journal change advances the native writer.
+                self.changed_value = true;
+            }
+        }
+        Ok(())
+    }
+
+    /// Capture only an untouched writer. A weak allocation identity prevents
+    /// address reuse from matching a different environment after it is closed.
+    pub fn clean_storage_cut(&self) -> Option<CleanStorageCut> {
+        if self.changed_value || self.require_clean_checkpoint_boundary().is_err() {
+            return None;
+        }
+        Some(CleanStorageCut {
+            environment: std::sync::Arc::downgrade(&self.env.auxiliary_cache),
+            generation: self.base_txn_id,
+        })
+    }
+
+    pub fn matches_clean_storage_cut(&self, cut: &CleanStorageCut) -> bool {
+        !self.changed_value && self.require_clean_checkpoint_boundary().is_ok()
+            && cut.generation == self.base_txn_id
+            && cut.environment.ptr_eq(&std::sync::Arc::downgrade(&self.env.auxiliary_cache))
+    }
+
+    /// Pin committed TRST rows while this writer excludes intervening commits.
+    /// Callers may check their authenticated recovery proof first, then release
+    /// the writer before scanning. This method does not authenticate that proof.
+    /// Uncommitted edits cannot be represented by the returned read transaction.
+    pub fn trst_reference_reader(&self) -> Result<crate::retention::TrstReferenceReader<'a>, StoreError> {
+        self.require_clean_checkpoint_boundary()?;
+        if self.changed_value {
+            return Err(StoreError::Corruption(
+                "retention read view requires an unchanged writer".into(),
+            ));
+        }
+        self.env.trst_reference_reader()
+    }
+
+    /// Constant-size cut recheck while holding the exclusive writer. Call before
+    /// staging publication edits, and publish in this same transaction. Any
+    /// intervening commit rejects the old view, including new queue entries or
+    /// higher signing sequences. This does not prove dependency closure or grant
+    /// deletion authority; it only prevents publishing from a stale storage cut.
+    pub fn check_retention_cut(&self, reader: &crate::retention::TrstReferenceReader<'_>) -> Result<(), StoreError> {
+        self.require_clean_checkpoint_boundary()?;
+        if self.changed_value {
+            return Err(StoreError::Corruption("retention cut requires an unchanged writer".into()));
+        }
+        reader.check_cut(self.env, self.base_txn_id)
+    }
+
+    /// Recheck body dependencies, tolerating only a fully covered sequence-only
+    /// reservation interval. This never restores signer records; callers retain
+    /// newer counters. Final votes, ledger/queue edits and unknown commits reject.
+    /// Complete authenticated closure remains the caller's separate obligation.
+    pub fn check_body_retention_cut(&self, reader: &crate::retention::TrstReferenceReader<'_>) -> Result<(), StoreError> {
+        self.require_clean_checkpoint_boundary()?;
+        if self.changed_value {
+            return Err(StoreError::Corruption("body retention cut requires an unchanged writer".into()));
+        }
+        reader.check_body_cut(self.env, self.base_txn_id)
+    }
+
+    /// Revalidate an owned body-dependency proof's detached cut before any
+    /// publication edits. The cut itself proves neither closure nor authority.
+    /// Only fully covered soft sequence commits may intervene; newer counters
+    /// stay in this writer and must never be restored from the old proof.
+    pub fn check_detached_body_retention_cut(&self, cut: &CleanStorageCut) -> Result<(), StoreError> {
+        let current = self.clean_storage_cut().ok_or_else(|| StoreError::Corruption(
+            "body retention cut requires an unchanged clean writer".into(),
+        ))?;
+        if !cut.body_dependencies_unchanged(&current, self.env)? {
+            return Err(StoreError::Corruption(
+                "body retention dependencies changed or commit coverage is missing".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The ledger environment directory. Callers own any scratch files placed
+    /// here; LMDB commit and abort do not manage those files.
     pub fn storage_directory(&self) -> &std::path::Path {
         self.env.env().path()
     }
 
-    /// Recheck the physical block inventory inside the caller's atomic boundary.
+    /// Borrow the physical block inventory from this writer's current view.
+    /// Consume the iterator and handle every error to finish validation; creating
+    /// it alone checks table counts, not every row.
     pub fn indexed_block_entries(
         &self,
         max_rows: usize,
@@ -98,6 +281,16 @@ impl<'a> LmdbWriteTransaction<'a> {
         )
     }
 
+    /// Borrow a bounded physical hash window from this writer's current view.
+    /// Uncommitted writes are visible. The caller must preserve total coverage
+    /// and budgets; reaching a suffix end alone proves neither completeness nor finality.
+    pub fn visit_indexed_block_window<'view>(
+        &'view self, after: Option<BlockHash>, max_rows: usize, max_bytes: usize,
+        visit: impl FnMut(crate::block::IndexedBlock<'view>) -> Result<(), StoreError>,
+    ) -> Result<crate::block::IndexedBlockWindow, StoreError> {
+        self.read_view().visit_indexed_block_window(after, max_rows, max_bytes, visit)
+    }
+
     /// Collect the bounded physical inventory when the caller needs owned bodies.
     pub fn indexed_blocks(
         &self,
@@ -114,20 +307,69 @@ impl<'a> LmdbWriteTransaction<'a> {
         )
     }
 
+    /// Limit this and subsequent local writers until the guard is dropped.
+    /// Protected readers must drop before the guard. This bounds new file pages,
+    /// not RAM or other processes; callers must handle GrowthLimit by aborting.
+    pub fn limit_file_extent(&mut self, bytes: usize) -> Result<heed::FileGrowthLimit, StoreError> {
+        self.txn.limit_file_extent(bytes).map_err(LmdbError::from).map_err(StoreError::from)
+    }
+
+    /// Live metadata-tree pages in this writer's view, without scanning records.
+    /// Excludes retired/COW pages, allocator free lists and other databases;
+    /// these counts do not measure remaining transaction allocation capacity.
+    pub fn metadata_page_stats(&self) -> Result<heed::DatabaseStat, StoreError> {
+        self.env.meta_db.stat(&self.txn)
+            .map_err(LmdbError::from).map_err(StoreError::from)
+    }
+
+    pub fn growth_outcome(&self) -> Option<heed::GrowthOutcome> { self.txn.growth_outcome() }
+
+    pub fn reserve_growth_retry(&self) -> Result<Option<heed::GrowthRetry>, StoreError> {
+        self.txn.reserve_growth_retry().map_err(LmdbError::from).map_err(StoreError::from)
+    }
+
+    pub fn try_limit_file_extent(&mut self, bytes: usize) -> Result<Option<heed::FileGrowthLimit>, StoreError> {
+        self.txn.try_limit_file_extent(bytes).map_err(LmdbError::from).map_err(StoreError::from)
+    }
+
     /// Begin a new write transaction.
     pub(crate) fn new(env: &'a LmdbEnvironment) -> Result<Self, StoreError> {
         let txn = env.env().write_txn().map_err(LmdbError::from)?;
+        // The exclusive LMDB writer pins this committed generation until commit.
+        let base_txn_id = env.env().info().last_txn_id;
+        let governance_cache = env
+            .governance_cache
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|(id, _)| *id == base_txn_id)
+            .map(|(_, engine)| engine.clone());
+        let auxiliary_cache = env
+            .auxiliary_cache
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|(id, _)| *id == base_txn_id)
+            .map(|(_, cache)| cache.clone())
+            .unwrap_or_default();
         Ok(Self {
+            auxiliary_cache: std::cell::RefCell::new(auxiliary_cache),
+            base_txn_id,
+            changed_value: false,
+            body_changes: env.body_changes.begin(),
+            governance_cache: std::cell::RefCell::new(governance_cache),
             txn,
             env,
             undo: None,
+            block_group: None,
             failed: false,
             dirty: false,
         })
     }
 
-    /// Start before the first write of a block's application. All subsequent
-    /// batch writes join the same local undo record and commit atomically.
+    /// Start before applying a block. Reversible writes join its journal. In a
+    /// block group, calling this again seals the previous journal and starts
+    /// another; all blocks still commit together.
     pub fn begin_block_undo(
         &mut self,
         block: BlockHash,
@@ -135,8 +377,8 @@ impl<'a> LmdbWriteTransaction<'a> {
         height: u64,
     ) -> Result<(), StoreError> {
         if self.failed
-            || self.dirty
-            || self.undo.is_some()
+            || ((self.dirty || self.undo.is_some()) && self.block_group.is_none())
+            || (self.dirty && self.undo.is_none())
             || block.is_zero()
             || height == 0
             || self
@@ -157,17 +399,25 @@ impl<'a> LmdbWriteTransaction<'a> {
                 "invalid or duplicate block undo boundary".into(),
             ));
         }
+        if self.block_group.is_some() {
+            if let Err(error) = self.advance_block_group() {
+                self.failed = true;
+                return Err(error);
+            }
+            // The previous active journal was not in meta_db during the first
+            // duplicate check. Sealing it must not permit reuse of its identity.
+            if self.env.meta_db.get(&self.txn, &crate::block_undo::key(&block))
+                .map_err(LmdbError::from)?.is_some() {
+                self.failed = true;
+                return Err(StoreError::Corruption("duplicate grouped block undo boundary".into()));
+            }
+        }
         self.undo = Some(UndoRecorder::new(block, account, height));
         Ok(())
     }
 
     pub fn block_undo(&self, block: &BlockHash) -> Result<Option<BlockUndo>, StoreError> {
-        self.env
-            .meta_db
-            .get(&self.txn, &crate::block_undo::key(block))
-            .map_err(LmdbError::from)?
-            .map(|bytes| BlockUndo::decode(block, bytes))
-            .transpose()
+        self.read_view().block_undo(block)
     }
 
     /// Restore one unconfirmed account head inside the caller's replacement
@@ -196,7 +446,7 @@ impl<'a> LmdbWriteTransaction<'a> {
     ) -> Result<(), StoreError> {
         let result = (|| {
             let invalid = |message: &str| StoreError::Corruption(message.into());
-            if self.failed || self.dirty || self.undo.is_some() {
+            if self.failed || self.dirty || self.undo.is_some() || self.block_group.is_some() {
                 return Err(invalid("rewind must precede candidate writes"));
             }
             if self.confirmation_pending(block)? {
@@ -270,15 +520,24 @@ impl<'a> LmdbWriteTransaction<'a> {
                 return Err(invalid("rewind journal has an invalid frontier transition"));
             }
             for change in &mut record.changes {
-                change.match_current_with_snapshots(
+                change.reconcile_current_with_snapshots(
                     self.undo_value(change.table, &change.key)?,
                     &mut reconcile,
                 )?;
             }
+            let trst_rewind = self.prepare_trst_rewind(&record.changes)?;
             for change in &record.changes {
-                self.mutate_raw(change.table, &change.key, change.before.as_deref())?;
+                if change.table == UndoTable::BrnMeta
+                    && change.key == b"governance_engine"
+                    && self.uses_governance_records()?
+                {
+                    self.replace_governance_undo_snapshot(change.before.as_deref(), false)?;
+                } else {
+                    self.mutate_raw(change.table, &change.key, change.before.as_deref())?;
+                }
             }
             self.delete_raw(UndoTable::Meta, &crate::block_undo::key(block))?;
+            self.finish_trst_rewind(trst_rewind)?;
             // A completed rewind is a new recording boundary. The replacement
             // journal must start at the common ancestor, not the removed branch.
             self.dirty = false;
@@ -290,8 +549,24 @@ impl<'a> LmdbWriteTransaction<'a> {
         result
     }
 
-    /// Current bytes in the same snapshot as a rollback preflight.
+    /// Read the writer's current rollback image. Verification and governance
+    /// snapshots may be reconstructed from normalized rows rather than copied
+    /// from one physical key.
     pub fn undo_value(&self, table: UndoTable, key: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
+        if table == UndoTable::Meta && key == b"verification_orchestrator" && self.uses_verification_records()? {
+            return self.verification_undo_snapshot_with_overlay(&Default::default(), 64 << 20);
+        }
+        if table == UndoTable::Meta && self.uses_virtual_verification_target(key)? {
+            return self.verification_target_undo_with_overlay(
+                std::str::from_utf8(key).map_err(|e| StoreError::Corruption(e.to_string()))?,
+                &Default::default(), 64 << 20);
+        }
+        if table == UndoTable::BrnMeta
+            && key == b"governance_engine"
+            && self.uses_governance_records()?
+        {
+            return self.governance_undo_snapshot();
+        }
         self.undo_value_ref(table, key)
             .map(|value| value.map(<[u8]>::to_vec))
     }
@@ -302,26 +577,14 @@ impl<'a> LmdbWriteTransaction<'a> {
         table: UndoTable,
         key: &[u8],
     ) -> Result<Option<&[u8]>, StoreError> {
-        table
-            .database(self.env)
-            .get(&self.txn, key)
-            .map_err(LmdbError::from)
-            .map_err(Into::into)
+        self.read_view().undo_value_ref(table, key)
     }
 
     /// Decode one account at a time from this writer's uncommitted view.
     pub fn account_entries(
         &self,
     ) -> Result<impl Iterator<Item = Result<AccountInfo, StoreError>> + '_, StoreError> {
-        let entries = self
-            .env
-            .accounts_db
-            .iter(&self.txn)
-            .map_err(LmdbError::from)?;
-        Ok(entries.map(|entry| {
-            let (key, bytes) = entry.map_err(LmdbError::from)?;
-            crate::account::decode_account_entry(key, bytes)
-        }))
+        self.read_view().account_entries()
     }
 
     pub fn bounded_accounts(&self, limit: usize) -> Result<Vec<AccountInfo>, StoreError> {
@@ -344,28 +607,7 @@ impl<'a> LmdbWriteTransaction<'a> {
         limit: usize,
         byte_limit: usize,
     ) -> Result<impl Iterator<Item = Result<BrnWalletEntry<'_>, StoreError>> + '_, StoreError> {
-        let mut count = 0usize;
-        let mut total = 0usize;
-        let rows = self
-            .env
-            .brn_wallets_db
-            .iter(&self.txn)
-            .map_err(LmdbError::from)?;
-        Ok(rows.map(move |row| {
-            let (key, bytes) = row.map_err(LmdbError::from)?;
-            total = total
-                .checked_add(key.len())
-                .and_then(|n| n.checked_add(bytes.len()))
-                .ok_or_else(|| StoreError::Corruption("BRN snapshot size overflow".into()))?;
-            if count == limit || total > byte_limit {
-                return Err(StoreError::Corruption(
-                    "BRN snapshot exceeds restoration limit".into(),
-                ));
-            }
-            let address = crate::brn::decode_wallet_address(key)?;
-            count += 1;
-            Ok((address, bytes))
-        }))
+        self.read_view().bounded_brn_entries(limit, byte_limit)
     }
 
     pub fn ledger_counts(&self) -> Result<(u64, u64, u64), StoreError> {
@@ -387,22 +629,11 @@ impl<'a> LmdbWriteTransaction<'a> {
         account: &WalletAddress,
         height: u64,
     ) -> Result<Option<BlockHash>, StoreError> {
-        let mut key = account.as_str().as_bytes().to_vec();
-        key.extend_from_slice(&height.to_be_bytes());
-        self.env
-            .height_db
-            .get(&self.txn, &key)
-            .map_err(LmdbError::from)?
-            .map(|bytes| {
-                bytes
-                    .try_into()
-                    .map(BlockHash::new)
-                    .map_err(|_| StoreError::Corruption("invalid height index".into()))
-            })
-            .transpose()
+        self.read_view().block_at_height(account, height)
     }
 
-    /// Prune only after this transaction has made the block irreversible.
+    /// Remove a journal only when the block's indexed height is already confirmed
+    /// in this writer's view. The caller establishes consensus finality.
     pub fn prune_cemented_undo(&mut self, block: &BlockHash) -> Result<(), StoreError> {
         if let Some(record) = self.block_undo(block)? {
             let account = self.get_account(&record.account)?;
@@ -485,23 +716,79 @@ impl<'a> LmdbWriteTransaction<'a> {
         value: Option<&[u8]>,
     ) -> Result<(), StoreError> {
         let result = (|| {
+            if self.undo.is_some() && table == UndoTable::BrnMeta && key == burst_brn::wallet_storage::FORMAT_KEY {
+                return Err(StoreError::Corruption("wallet format cannot change inside block undo".into()));
+            }
+            if table == UndoTable::Meta && key == b"verification_orchestrator" && self.uses_verification_records()? {
+                return self.replace_verification_undo_snapshot(value);
+            }
+            if table == UndoTable::Meta && self.uses_virtual_verification_target(key)? {
+                return self.replace_verification_target_undo(key, value);
+            }
+            if table == UndoTable::BrnMeta
+                && key == b"governance_engine"
+                && self.uses_governance_records()?
+            {
+                return self.replace_governance_undo_snapshot(value, true);
+            }
             let db = table.database(self.env);
+            let before = db.get(&self.txn, key).map_err(LmdbError::from)?;
+            let changed = before != value;
+            if changed {
+                if let Some(changes) = self.body_changes.as_mut() { changes.record(table, key, before, value); }
+                self.auxiliary_cache.get_mut().mark_counter_account(table, key);
+                self.auxiliary_cache.get_mut().mark_pending_expiry(table, key);
+                self.changed_value = true;
+                self.auxiliary_cache.get_mut().update_brn(table, key, before, value);
+                if table == UndoTable::Meta {
+                    self.auxiliary_cache.get_mut().update_confirmations(key, value);
+                    self.auxiliary_cache.get_mut().update_trst(key, before, value);
+                    self.auxiliary_cache.get_mut().invalidate(key);
+                }
+                if (table == UndoTable::Meta
+                    && (key.starts_with(b"governance_state/")
+                        || key == b"governance_records_format"))
+                    || (table == UndoTable::BrnMeta && key == b"governance_engine")
+                {
+                    self.governance_cache.get_mut().take();
+                    self.auxiliary_cache.get_mut().invalidate_projection();
+                }
+            }
             if let Some(undo) = self.undo.as_mut() {
-                let before = db.get(&self.txn, key).map_err(LmdbError::from)?;
                 if before == value {
                     return Ok(());
                 }
-                undo.record(table, key, before.map(<[u8]>::to_vec), value)?;
+                undo.record(table, key, before, value)?;
             }
             self.dirty = true;
+            if table == UndoTable::Accounts {
+                if crate::verified_index::update(&mut self.txn, self.env.accounts_db, self.env.verified_accounts_db, key, value)? {
+                    self.auxiliary_cache.get_mut().clear_electorate(table);
+                }
+            }
             if table == UndoTable::Pending {
-                crate::pending::update_sender_index(
+                crate::pending::update_pending_indexes(
                     &mut self.txn,
                     self.env.pending_db,
                     self.env.pending_sender_db,
+                    self.env.pending_amount_db,
                     key,
                     value,
                 )?;
+            }
+            if table == UndoTable::Meta {
+                crate::graph_position::update(
+                    &mut self.txn,
+                    self.env.meta_db,
+                    self.env.graph_position_db,
+                    key,
+                    value,
+                )?;
+            }
+            // Keep secondary-index validation/update semantics above, but do
+            // not dirty the primary LMDB page for byte-identical publication.
+            if !changed {
+                return Ok(());
             }
             match value {
                 Some(value) => db.put(&mut self.txn, key, value).map_err(LmdbError::from)?,
@@ -525,15 +812,24 @@ impl<'a> LmdbWriteTransaction<'a> {
         self.mutate_raw(table, key, None)
     }
 
-    // ── Block operations ────────────────────────────────────────────────
+    /// Return one past the greatest surviving edge position, or zero if empty.
+    /// Interior gaps remain; a removed highest position can be reused.
+    pub fn next_graph_edge_position(
+        &self,
+        parent: &TxHash,
+        downstream: bool,
+    ) -> Result<u64, StoreError> {
+        crate::graph_position::next_position(
+            &self.txn,
+            self.env.meta_db,
+            self.env.graph_position_db,
+            parent,
+            downstream,
+        )
+    }
 
     pub fn get_block(&self, hash: &BlockHash) -> Result<Vec<u8>, StoreError> {
-        self.env
-            .blocks_db
-            .get(&self.txn, hash.as_bytes())
-            .map_err(LmdbError::from)?
-            .map(<[u8]>::to_vec)
-            .ok_or_else(|| StoreError::NotFound(hash.to_string()))
+        self.read_view().get_block(hash)
     }
 
     /// Check both height indexes in the same snapshot as the write transaction.
@@ -542,37 +838,11 @@ impl<'a> LmdbWriteTransaction<'a> {
         account: &WalletAddress,
         hash: &BlockHash,
     ) -> Result<u64, StoreError> {
-        let key = self
-            .env
-            .block_height_db
-            .get(&self.txn, hash.as_bytes())
-            .map_err(LmdbError::from)?
-            .ok_or_else(|| StoreError::NotFound(hash.to_string()))?;
-        let prefix = account.as_str().as_bytes();
-        if key.len() != prefix.len() + 8
-            || !key.starts_with(prefix)
-            || self
-                .env
-                .height_db
-                .get(&self.txn, key)
-                .map_err(LmdbError::from)?
-                != Some(hash.as_bytes().as_slice())
-        {
-            return Err(StoreError::Corruption(
-                "block is not on the indexed account chain".into(),
-            ));
-        }
-        Ok(u64::from_be_bytes(key[prefix.len()..].try_into().unwrap()))
+        self.read_view().block_height(account, hash)
     }
 
     pub fn get_account(&self, account: &WalletAddress) -> Result<AccountInfo, StoreError> {
-        let bytes = self
-            .env
-            .accounts_db
-            .get(&self.txn, account.as_str().as_bytes())
-            .map_err(LmdbError::from)?
-            .ok_or_else(|| StoreError::NotFound(account.to_string()))?;
-        bincode::deserialize(bytes).map_err(|error| StoreError::Serialization(error.to_string()))
+        self.read_view().get_account(account)
     }
 
     pub fn verified_account_count(&self) -> Result<u64, StoreError> {
@@ -593,19 +863,7 @@ impl<'a> LmdbWriteTransaction<'a> {
     }
 
     pub fn verified_accounts(&self) -> Result<Vec<WalletAddress>, StoreError> {
-        let mut accounts = Vec::new();
-        for entry in self
-            .env
-            .accounts_db
-            .iter(&self.txn)
-            .map_err(LmdbError::from)?
-        {
-            let (_, bytes) = entry.map_err(LmdbError::from)?;
-            let account: AccountInfo = bincode::deserialize(bytes).map_err(LmdbError::from)?;
-            if account.state.is_verified() {
-                accounts.push(account.address);
-            }
-        }
+        let accounts = crate::verified_index::addresses(&self.txn, self.env.verified_accounts_db)?;
         if accounts.len() > u32::MAX as usize {
             return Err(StoreError::Corruption(
                 "governance electorate exceeds supported size".into(),
@@ -614,7 +872,9 @@ impl<'a> LmdbWriteTransaction<'a> {
         Ok(accounts)
     }
 
-    /// Advance finality without replacing concurrently updated account fields.
+    /// Record a caller-validated confirmation height, preserving other account
+    /// fields from this writer's view. Never decreases the height or advances it
+    /// beyond the account's block count; does not authenticate consensus.
     pub fn advance_confirmation_height(
         &mut self,
         account: &WalletAddress,
@@ -652,11 +912,11 @@ impl<'a> LmdbWriteTransaction<'a> {
     ) -> Result<(), StoreError> {
         self.put_raw(UndoTable::Blocks, hash.as_bytes(), block_bytes)?;
 
-        let mut hk = account.as_str().as_bytes().to_vec();
-        hk.extend_from_slice(&height.to_be_bytes());
-        self.put_raw(UndoTable::Heights, &hk, hash.as_bytes())?;
+        let mut height_key = account.as_str().as_bytes().to_vec();
+        height_key.extend_from_slice(&height.to_be_bytes());
+        self.put_raw(UndoTable::Heights, &height_key, hash.as_bytes())?;
 
-        self.put_raw(UndoTable::BlockHeights, hash.as_bytes(), &hk)?;
+        self.put_raw(UndoTable::BlockHeights, hash.as_bytes(), &height_key)?;
 
         Ok(())
     }
@@ -685,11 +945,7 @@ impl<'a> LmdbWriteTransaction<'a> {
         Ok(())
     }
 
-    // ── Frontier operations ─────────────────────────────────────────────
-
-    /// Put a frontier update into the batch.
-    ///
-    /// Mirrors [`LmdbFrontierStore::put_frontier`] — stores the 32-byte hash directly.
+    /// Store the 32-byte frontier hash for this account.
     pub fn put_frontier(
         &mut self,
         account: &WalletAddress,
@@ -709,9 +965,9 @@ impl<'a> LmdbWriteTransaction<'a> {
         Ok(())
     }
 
-    // ── Account operations ──────────────────────────────────────────────
-
-    /// Put an account info into the batch (pre-serialised bytes).
+    /// Store serialized account information and update the verified-address index.
+    /// Unlike `put_account_info`, this does not adjust the verified-human counter
+    /// or preserve an existing confirmation height.
     pub fn put_account(&mut self, address: &WalletAddress, data: &[u8]) -> Result<(), StoreError> {
         self.put_raw(UndoTable::Accounts, address.as_str().as_bytes(), data)?;
         Ok(())
@@ -760,8 +1016,6 @@ impl<'a> LmdbWriteTransaction<'a> {
         Ok(())
     }
 
-    // ── Transaction operations ──────────────────────────────────────────
-
     /// Put a transaction into the batch (raw bytes, keyed by tx hash).
     pub fn put_transaction(&mut self, hash: &TxHash, tx_bytes: &[u8]) -> Result<(), StoreError> {
         self.put_raw(UndoTable::Transactions, hash.as_bytes(), tx_bytes)?;
@@ -777,19 +1031,17 @@ impl<'a> LmdbWriteTransaction<'a> {
     ) -> Result<(), StoreError> {
         self.put_raw(UndoTable::Transactions, hash.as_bytes(), tx_bytes)?;
 
-        let mut ck = account.as_str().as_bytes().to_vec();
-        ck.extend_from_slice(hash.as_bytes());
-        self.put_raw(UndoTable::AccountTransactions, &ck, &[])?;
+        let mut account_tx_key = account.as_str().as_bytes().to_vec();
+        account_tx_key.extend_from_slice(hash.as_bytes());
+        self.put_raw(UndoTable::AccountTransactions, &account_tx_key, &[])?;
         Ok(())
     }
 
-    /// Delete a transaction from the store.
+    /// Delete transaction bytes. The per-account transaction index is unchanged.
     pub fn delete_transaction(&mut self, hash: &TxHash) -> Result<(), StoreError> {
         self.delete_raw(UndoTable::Transactions, hash.as_bytes().as_slice())?;
         Ok(())
     }
-
-    // ── Pending operations ──────────────────────────────────────────────
 
     /// Put a pending entry into the batch using binary composite key.
     pub fn put_pending(
@@ -813,8 +1065,6 @@ impl<'a> LmdbWriteTransaction<'a> {
         self.delete_raw(UndoTable::Pending, &key)?;
         Ok(())
     }
-
-    // ── Meta operations ─────────────────────────────────────────────────
 
     /// Remove the handoff only in the same transaction as completed cementation.
     pub fn acknowledge_confirmation(&mut self, hash: &BlockHash) -> Result<(), StoreError> {
@@ -850,17 +1100,8 @@ impl<'a> LmdbWriteTransaction<'a> {
             if self.confirmation_pending(hash)? {
                 return Ok(());
             }
-            for (count, entry) in self
-                .env
-                .meta_db
-                .prefix_iter(&self.txn, crate::confirmation_queue::PREFIX)
-                .map_err(LmdbError::from)?
-                .enumerate()
-            {
-                entry.map_err(LmdbError::from)?;
-                if count >= crate::confirmation_queue::CAPACITY - 1 {
-                    return Err(StoreError::Backend("confirmation queue full".into()));
-                }
+            if self.confirmation_queue_len()? >= crate::confirmation_queue::CAPACITY {
+                return Err(StoreError::Backend("confirmation queue full".into()));
             }
             self.put_raw(UndoTable::Meta, &crate::confirmation_queue::key(hash), &[1])
         })();
@@ -875,12 +1116,24 @@ impl<'a> LmdbWriteTransaction<'a> {
         address: &WalletAddress,
         value: &[u8],
     ) -> Result<(), StoreError> {
+        if self.uses_brn_wallet_records()? {
+            let state = burst_brn::BrnWalletState::from_persisted_bytes(value)
+                .map_err(|error| StoreError::Serialization(error.to_string()))?;
+            return self.persist_brn_wallet_records(address, Some(&state));
+        }
         self.put_raw(UndoTable::BrnWallets, address.as_str().as_bytes(), value)?;
         Ok(())
     }
 
     pub fn delete_brn_wallet(&mut self, address: &WalletAddress) -> Result<(), StoreError> {
+        if self.uses_brn_wallet_records()? {
+            return self.persist_brn_wallet_records(address, None);
+        }
         self.delete_raw(UndoTable::BrnWallets, address.as_str().as_bytes())
+    }
+
+    pub fn delete_brn_meta(&mut self, key: &[u8]) -> Result<(), StoreError> {
+        self.delete_raw(UndoTable::BrnMeta, key)
     }
 
     pub fn put_brn_meta(&mut self, key: &[u8], value: &[u8]) -> Result<(), StoreError> {
@@ -899,32 +1152,24 @@ impl<'a> LmdbWriteTransaction<'a> {
     }
 
     pub fn get_meta(&self, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
-        self.env
-            .meta_db
-            .get(&self.txn, key.as_bytes())
-            .map(|value| value.map(|bytes| bytes.to_vec()))
-            .map_err(|e| StoreError::Backend(e.to_string()))
+        self.read_view().get_meta(key)
     }
 
-    // ── TRST index operations ─────────────────────────────────────────
+    /// Check presence in this writer's view without copying the stored value.
+    pub fn contains_meta(&self, key: &str) -> Result<bool, StoreError> {
+        self.read_view().contains_meta(key)
+    }
 
     pub fn get_pending(
         &self,
         destination: &WalletAddress,
         source: &TxHash,
     ) -> Result<burst_store::pending::PendingInfo, StoreError> {
-        let key = crate::pending::pending_key_raw(destination, source.as_bytes());
-        let bytes = self
-            .env
-            .pending_db
-            .get(&self.txn, &key)
-            .map_err(LmdbError::from)?
-            .ok_or_else(|| StoreError::NotFound(source.to_string()))?;
-        bincode::deserialize(bytes)
-            .map_err(LmdbError::from)
-            .map_err(Into::into)
+        self.read_view().get_pending(destination, source)
     }
 
+    /// Decode and collect every pending transfer in this writer's view.
+    /// This method has no row or aggregate byte limit.
     pub fn all_pending(
         &self,
     ) -> Result<Vec<(WalletAddress, TxHash, burst_store::pending::PendingInfo)>, StoreError> {
@@ -936,19 +1181,7 @@ impl<'a> LmdbWriteTransaction<'a> {
             .map_err(LmdbError::from)?
         {
             let (key, bytes) = entry.map_err(LmdbError::from)?;
-            if key.len() <= 32 {
-                return Err(StoreError::Corruption("invalid pending key".into()));
-            }
-            let (address, hash) = key.split_at(key.len() - 32);
-            let address =
-                std::str::from_utf8(address).map_err(|e| StoreError::Corruption(e.to_string()))?;
-            if !address.starts_with("brst_") {
-                return Err(StoreError::Corruption("invalid pending destination".into()));
-            }
-            let mut source = [0; 32];
-            source.copy_from_slice(hash);
-            let info = bincode::deserialize(bytes).map_err(LmdbError::from)?;
-            pending.push((WalletAddress::new(address), TxHash::new(source), info));
+            pending.push(crate::pending::decode_pending_entry(key, bytes)?);
         }
         Ok(pending)
     }
@@ -964,7 +1197,7 @@ impl<'a> LmdbWriteTransaction<'a> {
         key[32..].copy_from_slice(tx_hash.as_bytes());
         self.put_raw(UndoTable::TrstOrigins, &key[..], &[])?;
 
-        let mut rev_val = match self
+        let mut reverse_entry = match self
             .env
             .trst_reverse_db
             .get(&self.txn, tx_hash.as_bytes().as_slice())
@@ -973,13 +1206,13 @@ impl<'a> LmdbWriteTransaction<'a> {
             Some(bytes) => bytes.to_vec(),
             None => vec![0u8; 40],
         };
-        if rev_val.len() >= 32 {
-            rev_val[..32].copy_from_slice(origin_hash.as_bytes());
+        if reverse_entry.len() >= 32 {
+            reverse_entry[..32].copy_from_slice(origin_hash.as_bytes());
         }
         self.put_raw(
             UndoTable::TrstReverse,
             tx_hash.as_bytes().as_slice(),
-            &rev_val,
+            &reverse_entry,
         )?;
         Ok(())
     }
@@ -995,7 +1228,7 @@ impl<'a> LmdbWriteTransaction<'a> {
         key[8..].copy_from_slice(tx_hash.as_bytes());
         self.put_raw(UndoTable::TrstExpiry, &key[..], &[])?;
 
-        let mut rev_val = match self
+        let mut reverse_entry = match self
             .env
             .trst_reverse_db
             .get(&self.txn, tx_hash.as_bytes().as_slice())
@@ -1004,18 +1237,16 @@ impl<'a> LmdbWriteTransaction<'a> {
             Some(bytes) => bytes.to_vec(),
             None => vec![0u8; 40],
         };
-        if rev_val.len() >= 40 {
-            rev_val[32..40].copy_from_slice(&expiry.as_secs().to_be_bytes());
+        if reverse_entry.len() >= 40 {
+            reverse_entry[32..40].copy_from_slice(&expiry.as_secs().to_be_bytes());
         }
         self.put_raw(
             UndoTable::TrstReverse,
             tx_hash.as_bytes().as_slice(),
-            &rev_val,
+            &reverse_entry,
         )?;
         Ok(())
     }
-
-    // ── Commit / rollback ───────────────────────────────────────────────
 
     /// Commit only if the candidate has its own atomic undo boundary. Used by
     /// branch replacement so an application callback cannot omit journaling or
@@ -1026,7 +1257,7 @@ impl<'a> LmdbWriteTransaction<'a> {
         account: &WalletAddress,
         height: u64,
     ) -> Result<(), StoreError> {
-        if !self
+        if self.block_group.is_some() || !self
             .undo
             .as_ref()
             .is_some_and(|undo| undo.matches(expected, account, height))
@@ -1047,6 +1278,7 @@ impl<'a> LmdbWriteTransaction<'a> {
         height: u64,
     ) -> Result<(), StoreError> {
         if self.failed
+            || self.block_group.is_some()
             || !self
                 .undo
                 .as_ref()
@@ -1057,6 +1289,7 @@ impl<'a> LmdbWriteTransaction<'a> {
             ));
         }
         let (key, bytes) = self.undo.take().unwrap().finish()?;
+        self.observe_sealed_journal(&key, &bytes)?;
         self.env
             .meta_db
             .put(&mut self.txn, &key, &bytes)
@@ -1090,25 +1323,100 @@ impl<'a> LmdbWriteTransaction<'a> {
         self.put_meta(key, value)
     }
 
-    /// Commit all batched operations in a single write transaction.
-    ///
-    /// This is the only fsync in the entire batch.
+    /// Commit a tracked change and return this transaction's identity, captured
+    /// while its exclusive writer is still held. Never observe an environment
+    /// generation after commit: that could identify an unrelated later writer.
+    /// The token proves identity only, not what changed or deletion authority.
+    /// Empty/untracked transactions must use `commit` and cannot mint this token.
+    pub fn commit_with_storage_cut(self) -> Result<CleanStorageCut, StoreError> {
+        if !self.changed_value || self.base_txn_id.checked_add(1) != Some(self.txn.id()) {
+            return Err(StoreError::Corruption(
+                "committed storage cut requires a tracked advancing transaction".into(),
+            ));
+        }
+        let cut = CleanStorageCut {
+            environment: std::sync::Arc::downgrade(&self.env.auxiliary_cache),
+            generation: self.txn.id(),
+        };
+        self.commit()?;
+        Ok(cut)
+    }
+
+    /// Seal the active undo journal and commit the batch, then publish its caches.
+    /// Durability follows the environment's LMDB flags; this method does not add
+    /// a separate sync barrier.
     pub fn commit(mut self) -> Result<(), StoreError> {
+        #[cfg(test)]
+        let probe = COMMIT_PROBE.with(|slot| slot.borrow().is_some())
+            .then(std::time::Instant::now);
         if self.failed {
             return Err(StoreError::Corruption(
                 "cannot commit a failed write batch".into(),
             ));
         }
-        if let Some(undo) = self.undo.take() {
-            let (key, bytes) = undo.finish()?;
-            self.env
-                .meta_db
-                .put(&mut self.txn, &key, &bytes)
-                .map_err(LmdbError::from)?;
+        if self.block_group.is_some() && self.undo.is_none() {
+            return Err(StoreError::Corruption("block group has no active journal".into()));
         }
-        self.txn.commit().map_err(LmdbError::from)?;
+        self.seal_block_undo()?;
+        let cached = self.governance_cache.into_inner();
+        let auxiliary = self.auxiliary_cache.into_inner();
+        // Only a proven changed value guarantees that LMDB advances its ID.
+        // Untracked direct writes can cause a conservative miss, never a hit
+        // tagged with an unobserved later writer's generation.
+        let cache_id = self.base_txn_id + usize::from(self.changed_value);
+        let next_id = if self.changed_value { self.txn.id() } else { self.base_txn_id };
+        let commit = || self.txn.commit().map_err(LmdbError::from).map_err(StoreError::from);
+        if let Some(changes) = self.body_changes {
+            changes.commit(self.base_txn_id, next_id, commit)?;
+        } else { commit()?; }
+        #[cfg(test)]
+        let database_ns = probe.map(|start| start.elapsed().as_nanos());
+        if !auxiliary.is_empty() {
+            let mut cache = self.env.auxiliary_cache.lock().unwrap();
+            if cache.as_ref().is_none_or(|(id, _)| *id <= cache_id) {
+                *cache = Some((cache_id, auxiliary));
+            }
+        }
+        #[cfg(test)]
+        let auxiliary_ns = probe.map(|start| start.elapsed().as_nanos());
+        if let Some(engine) = cached {
+            let mut cache = self.env.governance_cache.lock().unwrap();
+            if cache.as_ref().is_none_or(|(id, _)| *id <= cache_id) {
+                *cache = Some((cache_id, engine));
+            }
+        }
+        #[cfg(test)]
+        if let Some(start) = probe {
+            let database_ns = database_ns.unwrap();
+            let auxiliary_ns = auxiliary_ns.unwrap();
+            COMMIT_PROBE.with(|slot| slot.borrow_mut().as_mut().unwrap().push([
+                database_ns,
+                auxiliary_ns - database_ns,
+                start.elapsed().as_nanos() - auxiliary_ns,
+            ]));
+        }
         Ok(())
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static COMMIT_PROBE: std::cell::RefCell<Option<Vec<[u128; 3]>>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+#[cfg(test)]
+fn probe_commit(batch: LmdbWriteTransaction<'_>) -> [u128; 3] {
+    COMMIT_PROBE.with(|slot| {
+        assert!(slot.borrow().is_none());
+        *slot.borrow_mut() = Some(Vec::new());
+    });
+    let result = batch.commit();
+    let samples = COMMIT_PROBE.with(|slot| slot.borrow_mut().take().unwrap());
+    result.unwrap();
+    assert_eq!(samples.len(), 1);
+    samples[0]
 }
 
 #[cfg(test)]
@@ -1118,12 +1426,62 @@ mod tests {
     use burst_store::block::BlockStore;
     use burst_store::frontier::FrontierStore;
 
-    /// Helper: open a temporary LMDB environment.
     fn temp_env() -> (tempfile::TempDir, LmdbEnvironment) {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
         let env =
-            LmdbEnvironment::open(dir.path(), 30, 10 * 1024 * 1024).expect("failed to open env");
+            LmdbEnvironment::open(dir.path(), crate::REQUIRED_DATABASES, 10 * 1024 * 1024).expect("failed to open env");
         (dir, env)
+    }
+
+    #[test]
+    fn committed_storage_cut_identifies_only_its_own_successful_writer() {
+        let (_directory, env) = temp_env();
+        let mut writer = env.tx_begin_write().unwrap();
+        writer.put_meta("owned_cut", b"first").unwrap();
+        let native_id = writer.txn.id();
+        let cut = writer.commit_with_storage_cut().unwrap();
+        assert_eq!(cut.generation, native_id);
+        env.tx_begin_write().unwrap().check_detached_body_retention_cut(&cut).unwrap();
+
+        // A later writer must not become part of the returned proof, even if it
+        // restores the same bytes. Each cut retains its own native generation.
+        let mut writer = env.tx_begin_write().unwrap();
+        writer.put_meta("owned_cut", b"second").unwrap();
+        writer.put_meta("owned_cut", b"first").unwrap();
+        let later = writer.commit_with_storage_cut().unwrap();
+        let current = env.tx_begin_write().unwrap();
+        assert!(current.matches_clean_storage_cut(&later));
+        assert!(current.check_detached_body_retention_cut(&cut).is_err());
+        drop(current);
+        let (_other_directory, other) = temp_env();
+        assert!(other.tx_begin_write().unwrap().check_detached_body_retention_cut(&later).is_err());
+    }
+
+    #[test]
+    fn committed_storage_cut_rejects_empty_untracked_and_failed_transactions() {
+        let (_directory, env) = temp_env();
+        let before = env.tx_begin_read().unwrap().clean_storage_cut().unwrap();
+        assert!(env.tx_begin_write().unwrap().commit_with_storage_cut().is_err());
+        let mut writer = env.tx_begin_write().unwrap();
+        writer.delete_meta("absent_cut_key").unwrap();
+        assert!(writer.commit_with_storage_cut().is_err());
+        assert!(env.tx_begin_write().unwrap().matches_clean_storage_cut(&before));
+
+        let mut writer = env.tx_begin_write().unwrap();
+        env.meta_db.put(&mut writer.txn, b"untracked_cut", b"raw").unwrap();
+        assert!(writer.commit_with_storage_cut().is_err());
+        let current = env.tx_begin_write().unwrap();
+        assert!(!current.contains_meta("untracked_cut").unwrap());
+        assert!(current.matches_clean_storage_cut(&before));
+        drop(current);
+
+        let mut writer = env.tx_begin_write().unwrap();
+        writer.put_meta("failed_cut", b"uncommitted").unwrap();
+        writer.failed = true;
+        assert!(writer.commit_with_storage_cut().is_err());
+        let current = env.tx_begin_write().unwrap();
+        assert!(!current.contains_meta("failed_cut").unwrap());
+        assert!(current.matches_clean_storage_cut(&before));
     }
 
     #[test]
@@ -1133,7 +1491,13 @@ mod tests {
         let first = WalletAddress::new("brst_a");
         let second = WalletAddress::new("brst_b");
         batch.put_brn_wallet(&first, b"one").unwrap();
+        assert!(!batch.contains_meta("merger_graph").unwrap());
         batch.put_meta("merger_graph", b"before").unwrap();
+        assert!(batch.contains_meta("merger_graph").unwrap());
+        batch.put_meta("empty", b"").unwrap();
+        assert!(batch.contains_meta("empty").unwrap());
+        batch.delete_meta("empty").unwrap();
+        assert!(!batch.contains_meta("empty").unwrap());
         assert_eq!(
             batch
                 .undo_value_ref(UndoTable::Meta, b"merger_graph")
@@ -1210,6 +1574,7 @@ mod tests {
             .unwrap()
             .is_none());
         assert_eq!(batch.bounded_brn_entries(2, 100).unwrap().count(), 0);
+        assert!(!batch.contains_meta("merger_graph").unwrap());
     }
 
     #[test]
@@ -1315,7 +1680,7 @@ mod tests {
         batch.put_frontier(&account, &hash).unwrap();
         let info = AccountInfo {
             address: account.clone(),
-            state: burst_types::WalletState::Unverified,
+            state: burst_types::WalletState::Verified,
             verified_at: None,
             head: hash,
             block_count: 1,
@@ -1358,8 +1723,9 @@ mod tests {
         assert_eq!(outgoing[0].1, tx);
         assert_eq!(outgoing[0].2.amount, 20);
         drop(env);
-        let env = LmdbEnvironment::open(dir.path(), 30, 10 * 1024 * 1024).unwrap();
+        let env = LmdbEnvironment::open(dir.path(), crate::REQUIRED_DATABASES, 10 * 1024 * 1024).unwrap();
         let txn = env.tx_begin_write().unwrap();
+        assert_eq!(txn.verified_accounts().unwrap(), vec![account.clone()]);
         let record = txn.block_undo(&hash).unwrap().unwrap();
         assert_eq!(record.account, account);
         assert_eq!(record.height, 1);
@@ -1396,8 +1762,10 @@ mod tests {
         drop(txn);
         let mut batch = env.tx_begin_write().unwrap();
         batch.rewind_block(&hash).unwrap();
+        assert!(batch.verified_accounts().unwrap().is_empty());
         batch.commit().unwrap();
         assert_eq!(snapshot(&env), before);
+        assert!(env.tx_begin_write().unwrap().verified_accounts().unwrap().is_empty());
         let outgoing = env
             .pending_store()
             .get_pending_from_account(&account)
@@ -1406,8 +1774,9 @@ mod tests {
         assert_eq!(outgoing[0].1.as_bytes(), hash.as_bytes());
         assert_eq!(outgoing[0].2.amount, 10);
         drop(env);
-        let env = LmdbEnvironment::open(dir.path(), 30, 10 * 1024 * 1024).unwrap();
+        let env = LmdbEnvironment::open(dir.path(), crate::REQUIRED_DATABASES, 10 * 1024 * 1024).unwrap();
         assert_eq!(snapshot(&env), before);
+        assert!(env.tx_begin_write().unwrap().verified_accounts().unwrap().is_empty());
         assert!(env
             .tx_begin_write()
             .unwrap()
@@ -1433,6 +1802,44 @@ mod tests {
         assert!(batch.begin_block_undo(hash, account, 1).is_err());
         assert!(batch.commit().is_err());
         assert!(env.block_store().get_block(&hash).is_err());
+    }
+
+    #[test]
+    fn identical_publication_preserves_lmdb_generation_and_index_guards() {
+        let (_directory, env) = temp_env();
+        let account = AccountInfo::unopened(WalletAddress::new("brst_identical_publication"));
+        let mut writer = env.tx_begin_write().unwrap();
+        writer.put_account_info(&account, false).unwrap();
+        writer.put_meta("verification_identity_source/v1/test", &[7; 32]).unwrap();
+        writer.put_brn_meta(b"publication-test", b"same").unwrap();
+        writer.commit().unwrap();
+        let generation = env.env().info().last_txn_id;
+        let mut writer = env.tx_begin_write().unwrap();
+        writer.put_account_info(&account, false).unwrap();
+        writer.put_meta("verification_identity_source/v1/test", &[7; 32]).unwrap();
+        writer.put_brn_meta(b"publication-test", b"same").unwrap();
+        writer.delete_meta("absent-publication-test").unwrap();
+        assert!(writer.dirty, "attempted writes still invalidate clean-writer guards");
+        assert!(!writer.changed_value);
+        writer.commit().unwrap();
+        assert_eq!(env.env().info().last_txn_id, generation,
+            "identical primary values must not create a durable writer generation");
+
+        let mut writer = env.tx_begin_write().unwrap();
+        writer.put_meta("verification_identity_source/v1/test", &[8; 32]).unwrap();
+        writer.commit().unwrap();
+        assert!(env.env().info().last_txn_id > generation);
+        let mut writer = env.tx_begin_write().unwrap();
+        writer.put_meta("verification_identity_source/v1/test", &[9; 32]).unwrap();
+        drop(writer);
+        let mut writer = env.tx_begin_write().unwrap();
+        assert_eq!(writer.get_meta("verification_identity_source/v1/test").unwrap(), Some(vec![8; 32]));
+        // Equality of the primary row must not hide a corrupt membership index.
+        env.verified_accounts_db.put(&mut writer.txn, account.address.as_str().as_bytes(), &[1]).unwrap();
+        assert!(writer.put_account_info(&account, false).unwrap_err().to_string().contains("verified index disagrees"));
+        assert!(writer.commit().is_err());
+        let writer = env.tx_begin_write().unwrap();
+        assert!(env.verified_accounts_db.get(&writer.txn, account.address.as_str().as_bytes()).unwrap().is_none());
     }
 
     #[test]
@@ -1493,18 +1900,15 @@ mod tests {
         );
         let block_bytes = b"fake-block-data";
 
-        // Write via batch
         let mut batch = env.tx_begin_write().expect("write_batch");
         batch.put_block(&hash, block_bytes).expect("put_block");
         batch.put_frontier(&account, &hash).expect("put_frontier");
         batch.commit().expect("commit");
 
-        // Verify block is readable
         let block_store = env.block_store();
         let stored = block_store.get_block(&hash).expect("get_block");
         assert_eq!(stored, block_bytes);
 
-        // Verify frontier is readable
         let frontier_store = env.frontier_store();
         let head = frontier_store.get_frontier(&account).expect("get_frontier");
         assert_eq!(head, hash);
@@ -1517,14 +1921,11 @@ mod tests {
         let hash = BlockHash::new([2u8; 32]);
         let block_bytes = b"should-not-persist";
 
-        // Start a batch but drop it without committing
         {
             let mut batch = env.tx_begin_write().expect("write_batch");
             batch.put_block(&hash, block_bytes).expect("put_block");
-            // batch is dropped here — implicit rollback
         }
 
-        // Block should NOT be in the store
         let block_store = env.block_store();
         let result = block_store.get_block(&hash);
         assert!(result.is_err(), "dropped batch should not persist");
@@ -1551,11 +1952,38 @@ mod tests {
 
         batch.commit().expect("commit");
 
-        // Verify all blocks are readable
         let block_store = env.block_store();
         for (i, hash) in hashes.iter().enumerate() {
             let stored = block_store.get_block(hash).expect("get_block");
             assert_eq!(stored, format!("block-{i}").as_bytes());
+        }
+    }
+
+    #[test]
+    fn checkpoint_account_clear_replaces_electorate_atomically() {
+        let (_dir, env) = temp_env();
+        let mut original = AccountInfo::unopened(WalletAddress::new("brst_original"));
+        original.state = burst_types::WalletState::Verified;
+        let mut seed = env.tx_begin_write().unwrap();
+        seed.put_account_info(&original, false).unwrap();
+        seed.commit().unwrap();
+        let mut replacement = AccountInfo::unopened(WalletAddress::new("brst_replacement"));
+        replacement.state = burst_types::WalletState::Challenged;
+        for commit in [false, true] {
+            let mut batch = env.tx_begin_write().unwrap();
+            batch.clear_checkpoint_rows(UndoTable::Accounts, None).unwrap();
+            assert!(batch.verified_accounts().unwrap().is_empty());
+            batch.put_account(&replacement.address, &bincode::serialize(&replacement).unwrap()).unwrap();
+            assert_eq!(batch.verified_accounts().unwrap(), vec![replacement.address.clone()]);
+            if commit {
+                batch.commit().unwrap();
+            } else {
+                drop(batch);
+            }
+            assert_eq!(
+                env.tx_begin_write().unwrap().verified_accounts().unwrap(),
+                vec![if commit { replacement.address.clone() } else { original.address.clone() }]
+            );
         }
     }
 
@@ -1566,13 +1994,12 @@ mod tests {
         let address = WalletAddress::new(
             "brst_1genesis1ive1111111111111111111111111111111111111111111111111111111",
         );
-        let data = b"account-info-bytes";
+        let data = bincode::serialize(&AccountInfo::unopened(address.clone())).unwrap();
 
         let mut batch = env.tx_begin_write().expect("write_batch");
-        batch.put_account(&address, data).expect("put_account");
+        batch.put_account(&address, &data).expect("put_account");
         batch.commit().expect("commit");
 
-        // Verify via a raw read transaction
         let rtxn = env.env().read_txn().expect("read_txn");
         let stored = env
             .accounts_db
@@ -1614,7 +2041,6 @@ mod tests {
             .expect("put_account_info");
         batch.commit().expect("commit");
 
-        // Verify via the account store
         use burst_store::account::AccountStore;
         let store = env.account_store();
         let loaded = store.get_account(&info.address).expect("get_account");
@@ -1667,7 +2093,6 @@ mod tests {
             .expect("put_pending");
         batch.commit().expect("commit");
 
-        // Verify via raw read using the same binary composite key
         let key = crate::pending::pending_key_raw(&dest, &source_hash);
         let rtxn = env.env().read_txn().expect("read_txn");
         let stored = env
@@ -1685,12 +2110,10 @@ mod tests {
         let hash = BlockHash::new([3u8; 32]);
         let block_bytes = b"to-be-deleted";
 
-        // First commit the block
         let mut batch = env.tx_begin_write().expect("write_batch");
         batch.put_block(&hash, block_bytes).expect("put_block");
         batch.commit().expect("commit");
 
-        // Delete in a new batch
         let mut batch = env.tx_begin_write().expect("write_batch");
         batch.delete_block(&hash).expect("delete_block");
         batch.commit().expect("commit");
@@ -1777,5 +2200,102 @@ mod tests {
             );
             assert!(env.block_store().exists(&replacement).unwrap());
         }
+    }
+}
+
+mod block_group;
+
+impl crate::read_view::LedgerReadView<'_> {
+    pub fn block_at_height(
+        &self,
+        account: &WalletAddress,
+        height: u64,
+    ) -> Result<Option<BlockHash>, StoreError> {
+        let mut key = account.as_str().as_bytes().to_vec();
+        key.extend_from_slice(&height.to_be_bytes());
+        self.env
+            .height_db
+            .get(&self.txn, &key)
+            .map_err(LmdbError::from)?
+            .map(|bytes| {
+                bytes
+                    .try_into()
+                    .map(BlockHash::new)
+                    .map_err(|_| StoreError::Corruption("invalid height index".into()))
+            })
+            .transpose()
+    }
+
+    pub fn get_block(&self, hash: &BlockHash) -> Result<Vec<u8>, StoreError> {
+        self.env
+            .blocks_db
+            .get(&self.txn, hash.as_bytes())
+            .map_err(LmdbError::from)?
+            .map(<[u8]>::to_vec)
+            .ok_or_else(|| StoreError::NotFound(hash.to_string()))
+    }
+
+    pub fn block_height(
+        &self,
+        account: &WalletAddress,
+        hash: &BlockHash,
+    ) -> Result<u64, StoreError> {
+        let key = self
+            .env
+            .block_height_db
+            .get(&self.txn, hash.as_bytes())
+            .map_err(LmdbError::from)?
+            .ok_or_else(|| StoreError::NotFound(hash.to_string()))?;
+        let prefix = account.as_str().as_bytes();
+        if key.len() != prefix.len() + 8
+            || !key.starts_with(prefix)
+            || self
+                .env
+                .height_db
+                .get(&self.txn, key)
+                .map_err(LmdbError::from)?
+                != Some(hash.as_bytes().as_slice())
+        {
+            return Err(StoreError::Corruption(
+                "block is not on the indexed account chain".into(),
+            ));
+        }
+        Ok(u64::from_be_bytes(key[prefix.len()..].try_into().unwrap()))
+    }
+
+    pub fn get_account(&self, account: &WalletAddress) -> Result<AccountInfo, StoreError> {
+        let bytes = self
+            .env
+            .accounts_db
+            .get(&self.txn, account.as_str().as_bytes())
+            .map_err(LmdbError::from)?
+            .ok_or_else(|| StoreError::NotFound(account.to_string()))?;
+        bincode::deserialize(bytes).map_err(|error| StoreError::Serialization(error.to_string()))
+    }
+
+    pub fn get_pending(
+        &self,
+        destination: &WalletAddress,
+        source: &TxHash,
+    ) -> Result<burst_store::pending::PendingInfo, StoreError> {
+        let key = crate::pending::pending_key_raw(destination, source.as_bytes());
+        let bytes = self
+            .env
+            .pending_db
+            .get(&self.txn, &key)
+            .map_err(LmdbError::from)?
+            .ok_or_else(|| StoreError::NotFound(source.to_string()))?;
+        bincode::deserialize(bytes)
+            .map_err(LmdbError::from)
+            .map_err(Into::into)
+    }
+
+    pub fn block_undo(&self, block: &BlockHash) -> Result<Option<BlockUndo>, StoreError> {
+        self.env
+            .meta_db
+            .get(&self.txn, &crate::block_undo::key(block))
+            .map_err(LmdbError::from)?
+            .map(|bytes| BlockUndo::decode(block, bytes))
+            .transpose()
     }
 }

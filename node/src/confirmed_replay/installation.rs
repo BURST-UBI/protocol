@@ -1,6 +1,6 @@
 //! Atomic durable projection of one authenticated checkpoint successor.
-//! Live workers must be quiesced and their caches replaced before resuming. This
-//! primitive is gated until that coordination and agreed payment voting exist.
+//! The caller quiesces live workers and replaces their caches before resuming.
+//! Installation is subject to the certified-selection network/feature gate.
 
 use super::*;
 use crate::checkpoint_store::chain;
@@ -104,8 +104,8 @@ impl ConfirmedReplay {
 }
 
 impl PreparedInstallation {
-    /// Read and authenticate the chain from configured genesis. Install only
-    /// the immediate successor of the durable epoch, never jump to the tip.
+    /// Authenticate the chain from configured genesis and prepare the immediate
+    /// successor of the durable epoch. This does not write the projection.
     pub fn next(
         store: &LmdbStore,
         network: NetworkId,
@@ -141,7 +141,7 @@ impl PreparedInstallation {
                 .map_err(error)?;
             let cutoff = event.certificate().checkpoint.cutoff;
             let txn = store.tx_begin_read()?;
-            if store.meta_store().get_meta_txn(&txn, INSTALLED_KEY)?
+            if crate::payment_authority::storage::read_at(|key| store.meta_store().get_meta_txn(&txn, key))?
                 != Some(authority_bytes(&anchor, cutoff)?)
                 || store
                     .meta_store()
@@ -188,7 +188,10 @@ impl PreparedInstallation {
             genesis.hash(),
             checkpoint.height
         );
-        let record = store.meta_store().get_meta(&record_key)?;
+        let read = store.tx_begin_read()?;
+        let record = crate::checkpoint_store::record_storage::get_txn(&store.meta_store(), &read, &record_key)?
+            .ok_or_else(|| error("checkpoint disappeared during installation replay"))?;
+        drop(read);
         // A concurrent beacon attachment may change bytes, but never the manifest.
         if !chain::record_matches(&record, event)? {
             return Err(error("checkpoint changed during installation replay"));
@@ -213,8 +216,9 @@ impl PreparedInstallation {
         &self.anchor
     }
 
-    /// The source gate intentionally prevents use by ordinary running nodes.
-    /// Own the writer so any error drops ALL projection and handoff writes.
+    /// Commit the projection, then force synchronization. Errors before commit
+    /// abort the writer; a synchronization error leaves the transaction committed.
+    /// The caller must keep live workers quiesced until recovery or publication.
     pub fn commit(self, store: &LmdbStore) -> Result<InstalledCheckpoint, StoreError> {
         if !cfg!(test) && !burst_verification::checkpoint_selection_enabled(self.anchor.network()) {
             return Err(error("certified live installation is not enabled"));
@@ -222,7 +226,7 @@ impl PreparedInstallation {
         let mut batch = store.tx_begin_write()?;
         if batch.payment_epoch()? != self.parent.hash()
             || batch.get_meta(snapshot::installed::BASE_KEY)?.is_some()
-            || batch.get_meta(&self.record_key)?.as_deref() != Some(self.record.as_slice())
+            || crate::checkpoint_store::record_storage::get_batch(&batch, &self.record_key)?.as_deref() != Some(self.record.as_slice())
         {
             return Err(error("checkpoint installation became stale; replay again"));
         }
@@ -244,7 +248,7 @@ impl PreparedInstallation {
         let retired_blocks =
             batch.replace_checkpoint_ledger(self.parent.hash(), &blocks, &accounts)?;
         validate_retired(&batch, self.parent.hash(), &retired_blocks)?;
-        let governance = self.state.persist_projection(&mut batch, &self.anchor)?;
+        let governance = self.state.persist_projection_stable(&mut batch, &self.anchor)?;
         let minority_promises = batch.advance_payment_epoch(
             &self.parent.hash(),
             &self.parent.hash(),

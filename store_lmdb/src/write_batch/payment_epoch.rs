@@ -14,14 +14,7 @@ fn invalid(message: &str) -> StoreError {
 impl LmdbWriteTransaction<'_> {
     /// Read the installed, unclosed context from this writer's atomic view.
     pub fn payment_epoch(&self) -> Result<BlockHash, StoreError> {
-        let bytes = self
-            .get_meta(burst_store::meta::PAYMENT_EPOCH_KEY)?
-            .ok_or_else(|| invalid("payment epoch is not initialized"))?;
-        let epoch = burst_store::meta::decode_payment_epoch(&bytes)?;
-        if self.get_meta(&closed_key(&epoch))?.is_some() {
-            return Err(invalid("installed payment epoch is already closed"));
-        }
-        Ok(epoch)
+        self.read_view().payment_epoch()
     }
 
     /// The storage portion of a certified handoff. The caller must authenticate
@@ -509,5 +502,11 @@ mod tests {
                 hash(choice).as_bytes()
             );
         }
+    }
+}
+
+impl crate::read_view::LedgerReadView<'_> {
+    pub fn payment_epoch(&self) -> Result<BlockHash, StoreError> {
+        burst_store::meta::read_open_payment_epoch(|key| self.get_meta(key))
     }
 }

@@ -266,7 +266,7 @@ pub(super) async fn run(
         let mut original = addresses[1..4].to_vec();
         original.sort_by(|left, right| left.as_str().cmp(right.as_str()));
         assert_eq!(
-            selected, original,
+            *selected, original,
             "original verifiers remain eligible for a challenge"
         );
         let target = replay.account(&addresses[4]).unwrap();

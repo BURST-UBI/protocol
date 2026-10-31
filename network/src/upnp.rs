@@ -1,16 +1,7 @@
-//! UPnP port mapping for NAT traversal.
-//!
-//! Discovers a UPnP-capable Internet Gateway Device (IGD) on the local network,
-//! requests a TCP port mapping for the node's P2P port, and periodically renews
-//! the lease. On shutdown, the mapping is removed so the router's port table
-//! stays clean.
-//!
-//! Modeled after Nano's `port_mapping.cpp` behaviour:
-//! - Discover IGD on startup
-//! - Map the P2P TCP port with a 1-hour lease
-//! - Refresh the mapping every 30 minutes (half the lease)
-//! - Query the router for the external IP address
-//! - Clean up mappings on shutdown
+//! UPnP discovery and finite TCP port leases for the node's P2P port.
+//! Renews at half the requested lease duration and retries failed sessions.
+//! Gateway-reported mapping success is not an external reachability test.
+//! Shutdown attempts removal; router failure can leave the lease until expiry.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::time::Duration;
@@ -42,18 +33,18 @@ impl Default for PortMapperConfig {
 pub enum UpnpState {
     /// Discovery is still in progress.
     Searching,
-    /// No gateway was found on the network.
+    /// The latest gateway search failed; does not prove no gateway exists.
     NotFound,
-    /// Gateway found but the external address is not publicly routable.
+    /// Gateway returned IPv6 or an IPv4 address rejected by the local filter.
     NonRoutable,
-    /// Port is actively mapped. Contains the external address and port.
+    /// Gateway accepted the mapping; contains its reported address and port.
     Active {
         external_ip: Ipv4Addr,
         external_port: u16,
     },
-    /// Mapping/query failed; discovery will be retried with bounded backoff.
+    /// Mapping/query failed; discovery retries after the configured fixed delay.
     Failed(String),
-    /// UPnP is disabled by configuration.
+    /// Mapper task has stopped.
     Disabled,
 }
 
@@ -73,9 +64,9 @@ impl PortMapper {
         Self::start_with_config(local_port, description, PortMapperConfig::default())
     }
 
-    /// Start with a custom finite lease. Renewals run at half its duration.
-    /// Permanent mappings are deliberately not requested: a crash must not
-    /// leave an unbounded router rule behind.
+    /// Start with a requested finite lease, clamped to at least two seconds.
+    /// Renew at half that duration; retry delay is at least one second. The router
+    /// must honor lease expiry for crash cleanup; permanent leases are not requested.
     pub fn start_with_config(
         local_port: u16,
         description: String,
@@ -107,7 +98,7 @@ impl PortMapper {
         self.state_rx.clone()
     }
 
-    /// Returns the external (public) socket address if a mapping is active.
+    /// Return the address from the latest Active state; no connectivity probe.
     pub fn external_address(&self) -> Option<SocketAddrV4> {
         match &*self.state_rx.borrow() {
             UpnpState::Active {
@@ -118,7 +109,8 @@ impl PortMapper {
         }
     }
 
-    /// Stop the mapper, removing the port mapping from the router.
+    /// Request shutdown and join the mapper, including its removal attempt.
+    /// Router and task failures are logged or ignored, not returned to the caller.
     pub async fn stop(&mut self) {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(true);
@@ -160,8 +152,7 @@ fn gateway_local_address(gateway: SocketAddr, port: u16) -> std::io::Result<Sock
     Ok(SocketAddr::new(ip, port))
 }
 
-/// The main UPnP event loop. Runs entirely on a blocking thread pool because
-/// the synchronous `igd_next::Gateway` API does actual network I/O.
+/// Runs gateway I/O on blocking workers; waits and shutdown stay asynchronous.
 async fn run_upnp_loop(
     local_port: u16,
     description: String,
@@ -188,7 +179,6 @@ async fn run_gateway_session(
     state: &watch::Sender<UpnpState>,
     shutdown: &mut watch::Receiver<bool>,
 ) {
-    // Step 1: Discover the gateway (blocking I/O)
     let gateway = match tokio::task::spawn_blocking(|| {
         igd_next::search_gateway(igd_next::SearchOptions {
             timeout: Some(Duration::from_secs(5)),
@@ -242,7 +232,6 @@ async fn run_gateway_session(
         if *shutdown.borrow() {
             break;
         }
-        // Add port mapping (blocking I/O)
         let gw = gateway.clone();
         let desc = description.to_owned();
         let requested_port = mapped_port.unwrap_or(local_port);
@@ -325,7 +314,8 @@ async fn run_gateway_session(
     }
 }
 
-/// Check if an IPv4 address is publicly routable.
+/// Exclude the special-use ranges listed below from advertisements.
+/// This address filter does not test routing, NAT or inbound connectivity.
 pub fn is_public_ipv4(ip: Ipv4Addr) -> bool {
     !ip.is_private()
         && !ip.is_loopback()

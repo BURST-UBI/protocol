@@ -10,7 +10,7 @@ use burst_store_lmdb::LmdbWriteTransaction;
 use burst_trst::TrstEngine;
 use burst_types::ProtocolParams;
 
-use crate::ledger_bridge::EconomicResult;
+use crate::block_economics::EconomicResult;
 
 mod activation;
 pub(crate) mod key_delegation;
@@ -33,53 +33,23 @@ impl CandidateGovernance {
         network: burst_types::NetworkId,
         genesis: burst_types::BlockHash,
     ) -> Result<Self, String> {
-        use bincode::Options;
-        use burst_store_lmdb::block_undo::UndoTable;
-        fn bytes<'a>(
-            batch: &'a LmdbWriteTransaction<'_>,
-            table: UndoTable,
-            key: &[u8],
-        ) -> Result<&'a [u8], String> {
-            batch
-                .undo_value_ref(table, key)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| {
-                    format!(
-                        "missing persisted {}; authenticated replay required",
-                        String::from_utf8_lossy(key)
-                    )
-                })
-        }
-        fn read<T: serde::de::DeserializeOwned>(
-            batch: &LmdbWriteTransaction<'_>,
-            table: UndoTable,
-            key: &[u8],
-        ) -> Result<T, String> {
-            let bytes = bytes(batch, table, key)?;
-            bincode::DefaultOptions::new()
-                .with_fixint_encoding()
-                .with_limit(bytes.len() as u64)
-                .reject_trailing_bytes()
-                .deserialize(bytes)
-                .map_err(|error| {
-                    format!(
-                        "invalid persisted {}: {error}",
-                        String::from_utf8_lossy(key)
-                    )
-                })
-        }
         Ok(Self {
             network,
             genesis,
             params,
-            governance: read(batch, UndoTable::BrnMeta, b"governance_engine")?,
-            delegation: DelegationEngine::load_state(bytes(
-                batch,
-                UndoTable::Meta,
-                DelegationEngine::meta_key().as_bytes(),
-            )?)
-            .map_err(|error| format!("invalid persisted delegation: {error}"))?,
-            constitution: read(batch, UndoTable::Meta, b"consti_engine")?,
+            governance: crate::governance_storage::load(batch)
+                .map_err(|e| e.to_string())?
+                .ok_or("missing persisted governance_engine; authenticated replay required")?,
+            delegation: batch
+                .read_delegation_engine()
+                .map_err(|error| format!("invalid persisted delegation: {error}"))?
+                .ok_or(
+                    "missing persisted delegation_engine_state; authenticated replay required",
+                )?,
+            constitution: batch
+                .read_constitution_engine()
+                .map_err(|error| format!("invalid persisted consti_engine: {error}"))?
+                .ok_or("missing persisted consti_engine; authenticated replay required")?,
         })
     }
 
@@ -99,14 +69,32 @@ impl CandidateGovernance {
     }
 
     pub(crate) fn persist(&self, batch: &mut LmdbWriteTransaction<'_>) -> Result<(), String> {
-        batch
-            .put_meta(DelegationEngine::meta_key(), &self.delegation.save_state())
-            .map_err(|e| e.to_string())?;
+        self.persist_auxiliary(batch)?;
         batch
             .put_brn_meta(
                 b"governance_engine",
                 &bincode::serialize(&self.governance).map_err(|e| e.to_string())?,
             )
+            .map_err(|e| e.to_string())
+    }
+
+    pub(crate) fn persist_checkpoint(
+        &self,
+        batch: &mut LmdbWriteTransaction<'_>,
+    ) -> Result<(), String> {
+        if batch.uses_governance_records().map_err(|e| e.to_string())? {
+            batch
+                .replace_checkpoint_governance_records(&self.governance)
+                .map_err(|e| e.to_string())?;
+            self.persist_auxiliary(batch)
+        } else {
+            self.persist(batch)
+        }
+    }
+
+    fn persist_auxiliary(&self, batch: &mut LmdbWriteTransaction<'_>) -> Result<(), String> {
+        batch
+            .put_meta(DelegationEngine::meta_key(), &self.delegation.save_state())
             .map_err(|e| e.to_string())?;
         batch
             .put_meta(
@@ -124,11 +112,13 @@ impl CandidateGovernance {
                 | BlockType::GovernanceActivation
                 | BlockType::GovernanceEndorse
                 | BlockType::GovernanceWithdraw
+                | BlockType::GovernanceVeto
                 | BlockType::Delegate
                 | BlockType::RevokeDelegation
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn apply(
         &mut self,
         batch: &mut LmdbWriteTransaction<'_>,
@@ -137,16 +127,41 @@ impl CandidateGovernance {
         brn: &mut BrnEngine,
         trst: &mut TrstEngine,
     ) -> Result<(), String> {
-        self.apply_to(batch, block, economic, brn, trst)?;
-        if block.block_type == BlockType::GovernanceActivation {
+        self.apply_staged(batch, block, economic, &mut (brn, trst))
+    }
+
+    pub(crate) fn apply_staged(
+        &mut self,
+        batch: &mut LmdbWriteTransaction<'_>,
+        block: &StateBlock,
+        economic: &EconomicResult,
+        _engines: &mut impl crate::economic_candidate::Engines,
+    ) -> Result<(), String> {
+        let before = batch
+            .uses_governance_records()
+            .map_err(|e| e.to_string())?
+            .then(|| self.governance.clone());
+        self.apply_to_engines(batch, block, economic)?;
+        if let Some(before) = before {
             batch
-                .put_brn_meta(
-                    b"protocol_params",
-                    &bincode::serialize(&self.params).map_err(|e| e.to_string())?,
-                )
+                .apply_governance_record_delta(&before, &self.governance)
                 .map_err(|e| e.to_string())?;
+            // Key grants/ballots persist their scoped records in the ledger.
+            // Only legacy edge operations mutate the aggregate delegation engine.
+            if block.delegation_payload.is_empty()
+                && matches!(
+                    block.block_type,
+                    BlockType::Delegate | BlockType::RevokeDelegation
+                )
+            {
+                batch
+                    .put_meta(DelegationEngine::meta_key(), &self.delegation.save_state())
+                    .map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        } else {
+            self.persist(batch)
         }
-        self.persist(batch)
     }
 
     /// The caller must discard the ledger and engine candidates on any error.
@@ -156,13 +171,37 @@ impl CandidateGovernance {
         batch: &mut impl ledger::Ledger,
         block: &StateBlock,
         economic: &EconomicResult,
-        brn: &mut BrnEngine,
-        trst: &mut TrstEngine,
+        _brn: &mut BrnEngine,
+        _trst: &mut TrstEngine,
+    ) -> Result<(), String> {
+        self.apply_to_engines(batch, block, economic)
+    }
+
+    fn apply_to_engines(
+        &mut self,
+        batch: &mut impl ledger::Ledger,
+        block: &StateBlock,
+        economic: &EconomicResult,
     ) -> Result<(), String> {
         if !block.delegation_payload.is_empty() {
             return self.apply_key_delegation(batch, block);
         }
         match block.block_type {
+            BlockType::GovernanceVeto => {
+                let bootstrap = batch.bootstrap_phase()?;
+                if block.account != crate::genesis_key::genesis_address(self.network)
+                    || !batch.get_account(&block.account).map_err(|e| e.to_string())?.state.is_verified()
+                    || bootstrap == burst_verification::bootstrap::BootstrapPhase::Complete
+                    || !bootstrap.permits_creator(
+                        batch.verified_account_count().map_err(|e| e.to_string())?,
+                        self.params.bootstrap_exit_threshold)
+                {
+                    return Err("creator veto authority has ended or signer is not the verified creator".into());
+                }
+                self.governance.veto_approved(&block.link.into_tx_hash(), block.timestamp)
+                    .map_err(|e| e.to_string())?;
+            }
+
             BlockType::GovernanceEndorse | BlockType::GovernanceWithdraw => {
                 let proposal_hash = block.link.into_tx_hash();
                 let proposal = self
@@ -202,18 +241,17 @@ impl CandidateGovernance {
                     )
                     .map_err(|e| e.to_string())?;
                     let amount = block
-                        .brn_balance
-                        .checked_sub(previous.brn_balance)
+                        .brn_spent
+                        .checked_sub(previous.brn_spent)
                         .ok_or("governance endorsement spend decreased")?;
                     if amount == 0 || amount != self.params.governance_proposal_cost {
                         return Err("incorrect governance endorsement burn amount".into());
                     }
-                    crate::ledger_bridge::record_brn_burn(
-                        brn,
-                        &block.account,
-                        amount,
-                        block.timestamp,
-                    )?;
+                    if !matches!(economic, EconomicResult::GovernanceEndorse { burn_amount }
+                        if *burn_amount == amount)
+                    {
+                        return Err("governance endorsement economic burn mismatch".into());
+                    }
                     self.governance
                         .endorse_proposal(&proposal_hash, amount)
                         .map_err(|e| e.to_string())?;
@@ -231,7 +269,7 @@ impl CandidateGovernance {
                 {
                     return Err("delegation requires a verified wallet".into());
                 }
-                let target = crate::ledger_bridge::extract_receiver_from_link(&block.link)
+                let target = crate::block_economics::wallet_from_link(&block.link)
                     .ok_or("delegation target is invalid")?;
                 self.delegation
                     .delegate(&block.account, &target)
@@ -295,7 +333,7 @@ impl CandidateGovernance {
                     activation::constitutional_amendment(&proposal, block.timestamp)
                 {
                     self.constitution
-                        .activate_amendment(
+                        .apply_amendment_to_document(
                             &amendment,
                             &mut self.constitution.get_constitution().clone(),
                         )
@@ -346,58 +384,7 @@ impl CandidateGovernance {
                     .map_err(|e| e.to_string())?;
             }
             BlockType::GovernanceActivation => {
-                let EconomicResult::GovernanceActivation {
-                    proposal_hash,
-                    new_params_hash,
-                } = economic
-                else {
-                    return Err("governance activation payload missing".into());
-                };
-                // Catch-up must reproduce due phases from signed time even if
-                // the local ten-second scheduler has not run yet.
-                let mut next = self
-                    .governance
-                    .get_proposal(proposal_hash)
-                    .cloned()
-                    .ok_or("governance activation references unknown proposal")?;
-                let voters = batch.verified_accounts().map_err(|e| e.to_string())?;
-                for _ in 0..3 {
-                    if next.phase == GovernancePhase::Activation {
-                        break;
-                    }
-                    self.governance
-                        .try_advance(
-                            &mut next,
-                            block.timestamp,
-                            &self.params,
-                            Some((&self.delegation, &voters)),
-                        )
-                        .map_err(|e| e.to_string())?;
-                }
-                *self
-                    .governance
-                    .get_proposal_mut(proposal_hash)
-                    .ok_or("proposal missing")? = next;
-                let proposal = self
-                    .governance
-                    .get_proposal(proposal_hash)
-                    .cloned()
-                    .ok_or("governance activation references unknown proposal")?;
-                if proposal.phase != GovernancePhase::Activation
-                    || !proposal
-                        .activation_at
-                        .is_some_and(|at| block.timestamp >= at)
-                {
-                    return Err("proposal has not reached its approved activation time".into());
-                }
-                self.activate_approved(
-                    batch,
-                    *proposal_hash,
-                    new_params_hash,
-                    block.timestamp,
-                    brn,
-                    trst,
-                )?;
+                return Err("governance activation requires its certified boundary".into());
             }
             _ => return Err("block has no governance transition".into()),
         }
@@ -416,6 +403,7 @@ mod tests {
     mod bootstrap_exit;
     mod key_fork_dependencies;
     mod scoped_undo;
+    mod pagination;
 
     fn candidate() -> CandidateGovernance {
         CandidateGovernance {
@@ -439,7 +427,7 @@ mod tests {
             account: account.clone(),
             previous: BlockHash::ZERO,
             representative: account,
-            brn_balance: 0,
+            brn_spent: 0,
             trst_balance: 0,
             link: BlockHash::new(burst_crypto::keypair_from_seed(&[41; 32]).public.0),
             origin: TxHash::ZERO,
@@ -523,20 +511,22 @@ mod tests {
                 .unwrap();
         for commit in [false, true] {
             let mut state = candidate();
-            let mut brn = BrnEngine::new();
-            let mut trst = TrstEngine::new();
+            let brn = BrnEngine::new();
+            let trst = TrstEngine::new();
             let mut batch = store.tx_begin_write().unwrap();
             crate::ledger_updater::stage_block(&mut batch, &block, Some(&account), 0, None, None)
                 .unwrap();
+            let mut engines = crate::economic_candidate::StagedEngines::new(&brn, &trst);
             state
-                .apply(
+                .apply_staged(
                     &mut batch,
                     &block,
                     &EconomicResult::NoEconomicEffect,
-                    &mut brn,
-                    &mut trst,
+                    &mut engines,
                 )
                 .unwrap();
+            let (brn_candidate, trst_candidate) = engines.into_staged();
+            assert!(brn_candidate.is_none() && trst_candidate.is_none());
             if commit {
                 batch.commit().unwrap();
             } else {
@@ -560,7 +550,7 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        let target = crate::ledger_bridge::extract_receiver_from_link(&block.link).unwrap();
+        let target = crate::block_economics::wallet_from_link(&block.link).unwrap();
         assert_eq!(restored.voting_power(&target), 2);
     }
 
@@ -588,7 +578,7 @@ mod tests {
                 brn.next_stake_id(),
             ))
             .unwrap();
-            let mut trst = TrstEngine::new();
+            let trst = TrstEngine::new();
             let mut batch = store.tx_begin_write().unwrap();
             crate::ledger_updater::stage_block(
                 &mut batch,
@@ -599,8 +589,9 @@ mod tests {
                 None,
             )
             .unwrap();
+            let mut engines = crate::economic_candidate::StagedEngines::new(&brn, &trst);
             state
-                .apply(
+                .apply_staged(
                     &mut batch,
                     &proposal,
                     &EconomicResult::GovernanceProposal {
@@ -611,10 +602,49 @@ mod tests {
                             new_value: 2,
                         }),
                     },
-                    &mut brn,
-                    &mut trst,
+                    &mut engines,
                 )
                 .unwrap();
+            let mut withdrawal = block(BlockType::GovernanceWithdraw);
+            withdrawal.link = proposal.hash;
+            let mut withdrawn = state.clone();
+            withdrawn
+                .apply_staged(
+                    &mut batch,
+                    &withdrawal,
+                    &EconomicResult::NoEconomicEffect,
+                    &mut engines,
+                )
+                .unwrap();
+            assert_eq!(
+                withdrawn
+                    .governance
+                    .get_proposal(&proposal.hash.into_tx_hash())
+                    .unwrap()
+                    .phase,
+                GovernancePhase::Withdrawn,
+            );
+            let saved = state
+                .governance
+                .get_proposal_mut(&proposal.hash.into_tx_hash())
+                .unwrap();
+            saved.phase = GovernancePhase::Exploration;
+            saved.exploration_started_at = Some(proposal.timestamp);
+            let vote = block(BlockType::GovernanceVote);
+            state
+                .apply_staged(
+                    &mut batch,
+                    &vote,
+                    &EconomicResult::GovernanceVote {
+                        voter: proposal.account.clone(),
+                        proposal_hash: proposal.hash.into_tx_hash(),
+                        vote: burst_transactions::governance::GovernanceVote::Yea,
+                    },
+                    &mut engines,
+                )
+                .unwrap();
+            let (brn_candidate, trst_candidate) = engines.into_staged();
+            assert!(brn_candidate.is_none() && trst_candidate.is_none());
             assert!(state
                 .governance
                 .get_proposal(&proposal.hash.into_tx_hash())
@@ -658,6 +688,20 @@ mod tests {
 
     #[test]
     fn activation_requires_approved_phase_and_cannot_repeat() {
+        activation_persistence_case(false, false);
+    }
+
+    #[test]
+    fn keyed_parameter_activation_preserves_auxiliary_snapshots() {
+        activation_persistence_case(true, false);
+    }
+
+    #[test]
+    fn keyed_constitution_activation_persists_only_changed_auxiliary_state() {
+        activation_persistence_case(true, true);
+    }
+
+    fn activation_persistence_case(keyed: bool, constitutional: bool) {
         let dir = tempfile::tempdir().unwrap();
         let store = LmdbStore::open(dir.path(), 32, 16 * 1024 * 1024).unwrap();
         let mut state = candidate();
@@ -669,9 +713,16 @@ mod tests {
                 burst_governance::proposal::Proposal {
                     hash: id,
                     proposer: block.account.clone(),
-                    content: ProposalContent::ParameterChange {
-                        param: GovernableParam::BrnRate,
-                        new_value: 123,
+                    content: if constitutional {
+                        ProposalContent::ConstitutionalAmendment {
+                            title: "Fixture amendment".into(),
+                            text: "Preserve the approved constitutional change.".into(),
+                        }
+                    } else {
+                        ProposalContent::ParameterChange {
+                            param: GovernableParam::BrnRate,
+                            new_value: 123,
+                        }
                     },
                     phase: GovernancePhase::Proposal,
                     created_at: Timestamp::new(1),
@@ -712,6 +763,14 @@ mod tests {
             .is_err());
         crate::bootstrap_phase::initialize(&mut batch, &state.params).unwrap();
         state.governance.get_proposal_mut(&id).unwrap().phase = GovernancePhase::Activation;
+        if keyed {
+            batch
+                .initialize_governance_records(&state.governance)
+                .unwrap();
+            state.persist(&mut batch).unwrap();
+        }
+        let prior_delegation = batch.get_meta(DelegationEngine::meta_key()).unwrap();
+        let prior_constitution = batch.get_meta("consti_engine").unwrap();
         let prior_params = state.params.clone();
         assert_eq!(
             state.governance.schedule_activations(
@@ -724,19 +783,50 @@ mod tests {
         );
         assert!(state.governance.drain_pending_changes().is_empty());
         assert_eq!(state.params.params_hash(), prior_params.params_hash());
-        state
-            .apply(&mut batch, &block, &economic, &mut brn, &mut trst)
-            .unwrap();
+        state.activate_approved(&mut batch, id, &new_params_hash, block.timestamp,
+            &mut brn, &mut trst).unwrap();
+        state.persist_checkpoint(&mut batch).unwrap();
         assert_eq!(state.params.params_hash(), new_params_hash);
-        assert_eq!(brn.rate_history.current_rate(), 123);
-        assert_eq!(
-            brn.rate_history.segments.last().unwrap().start,
-            Timestamp::new(block.timestamp.as_secs() - 10)
-        );
+        if !constitutional {
+            assert_eq!(brn.rate_history.current_rate(), 123);
+            assert_eq!(
+                brn.rate_history.segments().last().unwrap().start,
+                Timestamp::new(block.timestamp.as_secs() - 10)
+            );
+        }
+        if keyed {
+            assert_eq!(
+                batch.get_meta(DelegationEngine::meta_key()).unwrap(),
+                prior_delegation
+            );
+            let persisted = batch.get_meta("consti_engine").unwrap();
+            if constitutional {
+                assert_ne!(persisted, prior_constitution);
+                assert_eq!(
+                    bincode::deserialize::<ConstiEngine>(persisted.as_ref().unwrap()).unwrap(),
+                    state.constitution
+                );
+            } else {
+                assert_eq!(persisted, prior_constitution);
+            }
+        }
         assert!(state
             .apply(&mut batch, &block, &economic, &mut brn, &mut trst)
             .is_err());
         batch.commit().unwrap();
+        if keyed {
+            drop(store);
+            let store = LmdbStore::open(dir.path(), 32, 16 << 20).unwrap();
+            let restored = CandidateGovernance::restore(
+                &store.tx_begin_write().unwrap(),
+                state.params.clone(),
+                state.network,
+                state.genesis,
+            )
+            .unwrap();
+            assert_eq!(restored.constitution, state.constitution);
+            assert_eq!(restored.governance, state.governance);
+        }
     }
 
     #[test]
@@ -745,9 +835,28 @@ mod tests {
         let store = LmdbStore::open(dir.path(), 32, 16 * 1024 * 1024).unwrap();
         let mut state = candidate();
         state.params.governance_proposal_cost = 10;
-        let proposal = block(BlockType::GovernanceProposal);
+        state.params.min_work_difficulty = 0;
+        let key = burst_crypto::keypair_from_seed(&[41; 32]);
+        let sign = |mut block: StateBlock| {
+            block.hash = block.compute_hash();
+            burst_wallet_core::transaction_builder::sign_state_block(block, &key.private)
+        };
+        let mut opening = block(BlockType::Open);
+        opening.account = burst_crypto::derive_address(&key.public);
+        opening.representative = opening.account.clone();
+        opening.link = BlockHash::ZERO;
+        opening.transaction = TxHash::ZERO;
+        opening.timestamp = Timestamp::EPOCH;
+        opening.params_hash = state.params.params_hash();
+        let opening = sign(opening);
+        let mut proposal = block(BlockType::GovernanceProposal);
+        proposal.account = opening.account.clone();
+        proposal.representative = opening.representative.clone();
+        proposal.previous = opening.hash;
+        proposal.params_hash = state.params.params_hash();
+        let proposal = sign(proposal);
         let account =
-            crate::genesis_state::account_to_write(None, proposal.account.clone(), proposal.hash)
+            crate::genesis_state::account_to_write(None, opening.account.clone(), opening.hash)
                 .unwrap();
         let mut brn = BrnEngine::with_rate(1, Timestamp::EPOCH);
         brn.wallets.insert(
@@ -755,6 +864,19 @@ mod tests {
             burst_brn::BrnWalletState::new(Timestamp::EPOCH),
         );
         let mut trst = TrstEngine::new();
+        let mut batch = store.tx_begin_write().unwrap();
+        crate::payment_epoch::initialize(&mut batch, opening.payment_epoch).unwrap();
+        batch.put_account_info(&account, false).unwrap();
+        batch.put_block_with_account(&opening.hash, &bincode::serialize(&opening).unwrap(),
+            &opening.account, 1).unwrap();
+        batch.put_frontier(&opening.account, &opening.hash).unwrap();
+        crate::ledger_updater::persist_economics(&mut batch, &brn, &trst).unwrap();
+        crate::graph_storage::stage_replayed(&mut batch, &trst.merger_graph).unwrap();
+        crate::trst_storage::stage_replayed_stable(&mut batch, &trst).unwrap();
+        state.persist(&mut batch).unwrap();
+        assert!(batch.migrate_governance_records().unwrap());
+        CandidateGovernance::restore(&batch, state.params.clone(), state.network, state.genesis).unwrap();
+        batch.commit().unwrap();
         let mut batch = store.tx_begin_write().unwrap();
         crate::ledger_updater::stage_block(&mut batch, &proposal, Some(&account), 0, None, None)
             .unwrap();
@@ -778,36 +900,92 @@ mod tests {
         batch.commit().unwrap();
 
         let mut support = block(BlockType::GovernanceEndorse);
+        support.account = proposal.account.clone();
+        support.representative = proposal.representative.clone();
+        support.params_hash = state.params.params_hash();
         support.previous = proposal.hash;
         support.link = proposal.hash;
-        support.brn_balance = 10;
-        support.hash = support.compute_hash();
+        support.brn_spent = 10;
+        let support = sign(support);
+        crate::payment_transition::authenticate_signed_contents(&support, &state.params).unwrap();
         let marker = format!(
             "governance_endorsement/{}/{}",
             proposal.hash.into_tx_hash(),
             proposal.account
         );
-        for commit in [false, true] {
+        use crate::economic_candidate::{prepared::CapturedPayment, Engines, StagedEngines};
+        let observe = |batch: &LmdbWriteTransaction<'_>| {
+            let economics = crate::payment_transition::restore(batch, &state.params).unwrap();
+            (bincode::serialize(economics.brn.get_wallet(&support.account).unwrap()).unwrap(),
+                bincode::serialize(&batch.get_account(&support.account).unwrap()).unwrap(),
+                bincode::serialize(&batch.read_governance_records().unwrap()).unwrap(),
+                batch.get_meta(&marker).unwrap())
+        };
+        let baseline = observe(&store.tx_begin_write().unwrap());
+        // The proposal can close while actor-local work is being prepared.
+        let batch = store.tx_begin_write().unwrap();
+        let captured = CapturedPayment::capture(&batch, &support, &state.params).unwrap().unwrap();
+        let before = crate::payment_transition::restore(&batch, &state.params).unwrap();
+        batch.commit().unwrap();
+        let prepared = captured.prepare().unwrap();
+        let mut withdrawn = state.clone();
+        withdrawn.governance.withdraw(&proposal.hash.into_tx_hash(), &proposal.account).unwrap();
+        let mut batch = store.tx_begin_write().unwrap();
+        batch.apply_governance_record_delta(&state.governance, &withdrawn.governance).unwrap();
+        let closed = observe(&batch);
+        batch.commit().unwrap();
+        let mut batch = store.tx_begin_write().unwrap();
+        let prepared = prepared.stage_with_economics(&mut batch, &state.params).unwrap().unwrap();
+        let mut engines = StagedEngines::new(&before.brn, &before.trst);
+        engines.adopt_persisted(prepared.state.brn, prepared.state.trst);
+        let mut current = CandidateGovernance::restore(&batch, state.params.clone(), state.network, state.genesis).unwrap();
+        assert!(current.apply_staged(&mut batch, &support, &prepared.economics.effect,
+            &mut engines).unwrap_err().contains("support window is closed"));
+        drop(batch);
+        assert_eq!(observe(&store.tx_begin_write().unwrap()), closed);
+        assert!(store.block_store().get_block(&support.hash).is_err());
+        let mut batch = store.tx_begin_write().unwrap();
+        batch.apply_governance_record_delta(&withdrawn.governance, &state.governance).unwrap();
+        batch.commit().unwrap();
+        assert_eq!(observe(&store.tx_begin_write().unwrap()), baseline);
+        let mut expected = None;
+        for (prepared, commit) in [(false, false), (true, false), (true, true)] {
             let mut staged = state.clone();
-            let mut staged_brn = brn.clone();
+            let batch = store.tx_begin_write().unwrap();
+            let before = crate::payment_transition::restore(&batch, &state.params).unwrap();
+            let captured = prepared.then(|| CapturedPayment::capture(&batch, &support,
+                &state.params).unwrap().unwrap());
+            batch.commit().unwrap();
+            let candidate = captured.map(|capture| capture.prepare().unwrap());
             let mut batch = store.tx_begin_write().unwrap();
-            crate::ledger_updater::stage_block(&mut batch, &support, Some(&account), 0, None, None)
-                .unwrap();
-            staged
-                .apply(
-                    &mut batch,
-                    &support,
-                    &EconomicResult::NoEconomicEffect,
-                    &mut staged_brn,
-                    &mut trst,
-                )
-                .unwrap();
-            crate::ledger_updater::persist_economics(&mut batch, &staged_brn, &trst).unwrap();
+            let mut engines = StagedEngines::new(&before.brn, &before.trst);
+            let economic = if let Some(candidate) = candidate {
+                let prepared = candidate.stage_with_economics(&mut batch, &state.params).unwrap().unwrap();
+                engines.adopt_persisted(prepared.state.brn, prepared.state.trst);
+                prepared.economics
+            } else {
+                crate::economic_candidate::stage(&mut batch, &support, &state.params,
+                    &mut engines).unwrap()
+            };
+            for invalid in [EconomicResult::NoEconomicEffect,
+                EconomicResult::GovernanceEndorse { burn_amount: 9 }] {
+                assert!(staged.clone().apply_staged(&mut batch, &support, &invalid,
+                    &mut engines).unwrap_err().contains("economic burn mismatch"));
+                assert!(batch.get_meta(&marker).unwrap().is_none());
+            }
+            staged.apply_staged(&mut batch, &support, &economic.effect, &mut engines).unwrap();
+            engines.persist(&mut batch).unwrap();
+            assert_eq!(engines.brn().get_wallet(&support.account).unwrap().total_burned, 10);
+            let observed = observe(&batch);
+            if let Some(expected) = &expected { assert_eq!(&observed, expected); }
+            else { expected = Some(observed); }
             if commit {
                 batch.commit().unwrap();
             } else {
                 drop(batch);
             }
+            assert_eq!(observe(&store.tx_begin_write().unwrap()),
+                if commit { expected.clone().unwrap() } else { baseline.clone() });
             assert_eq!(store.block_store().get_block(&support.hash).is_ok(), commit);
             assert_eq!(store.meta_store().get_meta(&marker).is_ok(), commit);
             assert_eq!(
@@ -824,23 +1002,14 @@ mod tests {
                 if commit { 10 } else { 0 }
             );
         }
+        assert_eq!(observe(&store.tx_begin_write().unwrap()), expected.clone().unwrap());
         drop(store);
         let store = LmdbStore::open(dir.path(), 32, 16 * 1024 * 1024).unwrap();
-        let saved = store
-            .brn_store()
-            .get_meta(b"governance_engine")
-            .unwrap()
-            .unwrap();
-        state.governance = bincode::deserialize(&saved).unwrap();
-        assert_eq!(
-            state
-                .governance
-                .get_endorsements(&proposal.hash.into_tx_hash()),
-            Some((1, 10))
-        );
+        state.governance = store.tx_begin_write().unwrap().read_governance_records().unwrap();
+        assert_eq!(state.governance.get_endorsements(&proposal.hash.into_tx_hash()), Some((1, 10)));
         let mut repeated = support.clone();
         repeated.previous = support.hash;
-        repeated.brn_balance = 20;
+        repeated.brn_spent = 20;
         repeated.hash = repeated.compute_hash();
         let mut batch = store.tx_begin_write().unwrap();
         assert!(state
@@ -854,5 +1023,14 @@ mod tests {
             .unwrap_err()
             .contains("already endorsed"));
         assert_eq!(brn.wallets[&proposal.account].total_burned, 0);
+        drop(batch);
+        let mut batch = store.tx_begin_write().unwrap();
+        batch.rewind_block(&support.hash).unwrap();
+        let restored = crate::payment_transition::restore(&batch, &state.params).unwrap();
+        assert_eq!(bincode::serialize(restored.brn.get_wallet(&support.account).unwrap()).unwrap(), baseline.0);
+        assert_eq!(bincode::serialize(&batch.get_account(&support.account).unwrap()).unwrap(), baseline.1);
+        assert_eq!(bincode::serialize(&batch.read_governance_records().unwrap()).unwrap(), baseline.2);
+        assert_eq!(batch.get_meta(&marker).unwrap(), baseline.3);
+        batch.commit().unwrap();
     }
 }

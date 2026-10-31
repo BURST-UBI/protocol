@@ -147,6 +147,8 @@ impl<T: Clone + Serialize + DeserializeOwned> Serialize for OrderedHistory<T> {
     }
 }
 
+/// Decoding writes scratch files in the system temporary directory, including
+/// for an empty history. The caller supplies any input-size or row-count limit.
 impl<'de, T: Clone + Serialize + DeserializeOwned> Deserialize<'de> for OrderedHistory<T> {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct Rows<T>(std::marker::PhantomData<T>);

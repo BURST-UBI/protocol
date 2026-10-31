@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Contrast with multiple-clients.sh: only client 2's listening port changes.
+# Requires the live single-router lab with both client processes and PID files.
+# Restarts client2 using its existing ledger and a different listening port,
+# then runs the transport journey. This is not fresh-node onboarding.
 set -euo pipefail
 test "${BURST_ISOLATED_NAT_LAB:-}" = yes
 source /lab/common.sh

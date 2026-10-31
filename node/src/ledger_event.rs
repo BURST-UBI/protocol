@@ -1,11 +1,12 @@
-//! Events emitted during block processing for subscribers.
+//! Optional ledger event types and synchronous dispatch. The running node does
+//! not currently publish through this bus; WebSocket events use a separate path.
 
 use burst_types::{BlockHash, WalletAddress};
 
 /// Ledger-level events that observers can subscribe to via the [`EventBus`].
 #[derive(Clone, Debug)]
 pub enum LedgerEvent {
-    /// A block was accepted and added to the ledger.
+    /// A block reached consensus confirmation.
     BlockConfirmed {
         hash: BlockHash,
         account: WalletAddress,
@@ -42,7 +43,8 @@ pub enum LedgerEvent {
 /// Synchronous fan-out event bus for ledger events.
 ///
 /// Listeners are invoked inline on the emitting thread; keep handlers fast to
-/// avoid stalling block processing.
+/// avoid stalling the caller. Listeners run in registration order; a panic
+/// propagates and prevents later listeners from running. Events are not retained.
 pub struct EventBus {
     #[allow(clippy::type_complexity)]
     listeners: Vec<Box<dyn Fn(&LedgerEvent) + Send + Sync>>,

@@ -1,9 +1,8 @@
-//! Genesis block creation — the first block on each network.
+//! Configured network anchors and historical genesis fixtures.
 //!
-//! The genesis block is a special open block that bootstraps a network.
-//! It has `previous: BlockHash::ZERO` (no predecessor), embeds the initial
-//! `ProtocolParams`, and differs per `NetworkId` (live, test, dev) so that
-//! each network has a unique, deterministic genesis hash.
+//! The running node uses `configured_genesis_block`, which commits the supplied
+//! parameter hash and creator address at Unix epoch zero. Fixture helpers retain
+//! their separate encoding and timestamps; their hashes are not launch anchors.
 
 use crate::state_block::{BlockType, StateBlock, CURRENT_BLOCK_VERSION};
 use burst_crypto::blake2b_256;
@@ -11,7 +10,7 @@ use burst_types::{
     BlockHash, NetworkId, ProtocolParams, Signature, Timestamp, TxHash, WalletAddress,
 };
 
-/// Configuration for creating a genesis block.
+/// Network and creator used by the historical genesis fixture.
 pub struct GenesisConfig {
     /// Which network this genesis is for.
     pub network: NetworkId,
@@ -19,18 +18,10 @@ pub struct GenesisConfig {
     pub creator: WalletAddress,
 }
 
-/// Create the genesis block for a given configuration.
-///
-/// The genesis block is an open block with:
-/// - `previous: BlockHash::ZERO` (no predecessor)
-/// - `account`: the creator's wallet
-/// - `link`: encodes the network-specific genesis seed
-/// - Balances set to zero (BRN is computed, not stored)
-/// - Timestamp set to the network's epoch start
-///
-/// The initial `ProtocolParams` are embedded into the block's link field
-/// via a deterministic hash of the params + network id.
-pub fn create_genesis_block(config: &GenesisConfig) -> StateBlock {
+/// Historical fixture layout, not the configured node launch anchor.
+/// Uses the current block version and fixture parameters; its hash can change
+/// when those inputs change.
+pub fn legacy_genesis_fixture(config: &GenesisConfig) -> StateBlock {
     let params = initial_params(&config.network);
     let link = params_link(&params, &config.network);
     let timestamp = genesis_timestamp(&config.network);
@@ -44,7 +35,7 @@ pub fn create_genesis_block(config: &GenesisConfig) -> StateBlock {
         account: config.creator.clone(),
         previous: BlockHash::ZERO,
         representative: config.creator.clone(),
-        brn_balance: 0,
+        brn_spent: 0,
         trst_balance: 0,
         link,
         origin: TxHash::ZERO,
@@ -62,26 +53,25 @@ pub fn create_genesis_block(config: &GenesisConfig) -> StateBlock {
     block
 }
 
-/// Return the deterministic genesis block hash for a network.
-///
-/// Uses canonical genesis creator addresses so the hash is fully deterministic
-/// per network. Useful for hardcoding known genesis hashes for bootstrapping.
-pub fn genesis_hash(network: NetworkId) -> BlockHash {
+/// Fixture hash using the network's placeholder creator address.
+/// Deterministic for the current fixture inputs, not a configured launch hash.
+pub fn legacy_genesis_fixture_hash(network: NetworkId) -> BlockHash {
     let config = GenesisConfig {
         network,
         creator: genesis_creator(&network),
     };
-    let block = create_genesis_block(&config);
+    let block = legacy_genesis_fixture(&config);
     block.hash
 }
 
-/// Return the initial protocol params for a network.
+/// Parameter overrides for historical fixtures. Running nodes use their
+/// configured parameters, not these Test/Dev overrides.
 pub fn initial_params(network: &NetworkId) -> ProtocolParams {
     match network {
         NetworkId::Live => ProtocolParams::burst_defaults(),
         NetworkId::Test => {
             let mut params = ProtocolParams::burst_defaults();
-            // Test network uses lower thresholds for faster iteration.
+            // Fixture overrides; not the running Test network defaults.
             params.endorsement_threshold = 1;
             params.num_verifiers = 3;
             params.bootstrap_exit_threshold = 5;
@@ -90,24 +80,18 @@ pub fn initial_params(network: &NetworkId) -> ProtocolParams {
         }
         NetworkId::Dev => {
             let mut params = ProtocolParams::burst_defaults();
-            // Dev network disables anti-spam and lowers all thresholds.
+            // Zero-work fixture with a one-person panel and early bootstrap exit.
             params.endorsement_threshold = 1;
             params.num_verifiers = 1;
             params.verification_threshold_bps = 5000;
             params.bootstrap_exit_threshold = 2;
             params.min_work_difficulty = 0;
-            params.new_wallet_tx_limit_per_day = 1000;
             params
         }
     }
 }
 
-/// Canonical genesis creator address per network.
-///
-/// These are well-known addresses whose private keys are:
-/// - Live: unknown (generated and discarded at launch)
-/// - Test: published for public testing
-/// - Dev: published for local development
+/// Placeholder addresses used only by historical fixtures.
 fn genesis_creator(network: &NetworkId) -> WalletAddress {
     match network {
         NetworkId::Live => WalletAddress::new(
@@ -122,7 +106,7 @@ fn genesis_creator(network: &NetworkId) -> WalletAddress {
     }
 }
 
-/// Genesis timestamp per network.
+/// Fixed fixture timestamp selected by network.
 fn genesis_timestamp(network: &NetworkId) -> Timestamp {
     match network {
         // Live: 2026-01-01 00:00:00 UTC
@@ -134,10 +118,8 @@ fn genesis_timestamp(network: &NetworkId) -> Timestamp {
     }
 }
 
-/// Derive a deterministic link hash from protocol params + network id.
-///
-/// This embeds the initial params into the genesis block so that any node
-/// can verify it was created with the expected configuration.
+/// Fixture link hash over the network name and the six fields below.
+/// This is not a commitment to the complete protocol parameter set.
 fn params_link(params: &ProtocolParams, network: &NetworkId) -> BlockHash {
     let mut buffer = Vec::new();
     buffer.extend_from_slice(network.as_str().as_bytes());
@@ -156,17 +138,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn genesis_hash_is_deterministic() {
-        let h1 = genesis_hash(NetworkId::Dev);
-        let h2 = genesis_hash(NetworkId::Dev);
+    fn fixture_hash_is_deterministic() {
+        let h1 = legacy_genesis_fixture_hash(NetworkId::Dev);
+        let h2 = legacy_genesis_fixture_hash(NetworkId::Dev);
         assert_eq!(h1, h2);
     }
 
     #[test]
-    fn genesis_hashes_differ_per_network() {
-        let live = genesis_hash(NetworkId::Live);
-        let test = genesis_hash(NetworkId::Test);
-        let dev = genesis_hash(NetworkId::Dev);
+    fn fixture_hashes_differ_per_network() {
+        let live = legacy_genesis_fixture_hash(NetworkId::Live);
+        let test = legacy_genesis_fixture_hash(NetworkId::Test);
+        let dev = legacy_genesis_fixture_hash(NetworkId::Dev);
 
         assert_ne!(live, test);
         assert_ne!(live, dev);
@@ -179,19 +161,19 @@ mod tests {
             network: NetworkId::Dev,
             creator: genesis_creator(&NetworkId::Dev),
         };
-        let block = create_genesis_block(&config);
+        let block = legacy_genesis_fixture(&config);
 
         assert!(block.is_open());
         assert!(block.previous.is_zero());
         assert_eq!(block.block_type, BlockType::Open);
-        assert_eq!(block.brn_balance, 0);
+        assert_eq!(block.brn_spent, 0);
         assert_eq!(block.trst_balance, 0);
         assert_eq!(block.version, CURRENT_BLOCK_VERSION);
     }
 
     #[test]
-    fn genesis_hash_not_zero() {
-        let h = genesis_hash(NetworkId::Live);
+    fn fixture_hash_not_zero() {
+        let h = legacy_genesis_fixture_hash(NetworkId::Live);
         assert!(!h.is_zero());
     }
 
@@ -204,7 +186,7 @@ mod tests {
             network: NetworkId::Dev,
             creator: creator.clone(),
         };
-        let block = create_genesis_block(&config);
+        let block = legacy_genesis_fixture(&config);
 
         assert_eq!(block.account, creator);
         assert_eq!(block.representative, creator);
@@ -224,4 +206,34 @@ mod tests {
         assert_eq!(params.brn_rate, defaults.brn_rate);
         assert_eq!(params.trst_expiry_secs, defaults.trst_expiry_secs);
     }
+}
+
+/// Canonical launch anchor from explicit configured identity and parameters.
+/// Network selection belongs to the caller; no placeholder identity is inferred.
+pub fn configured_genesis_block(address: WalletAddress, params: &ProtocolParams) -> StateBlock {
+    let mut block = StateBlock {
+        signing_grant: burst_types::BlockHash::ZERO,
+        delegation_payload: Vec::new(),
+        version: CURRENT_BLOCK_VERSION,
+        payment_epoch: BlockHash::ZERO,
+        block_type: BlockType::Open,
+        account: address.clone(),
+        representative: address,
+        previous: BlockHash::ZERO,
+        brn_spent: 0,
+        trst_balance: 0,
+        link: BlockHash::ZERO,
+        origin: TxHash::ZERO,
+        transaction: TxHash::ZERO,
+        target_head: BlockHash::ZERO,
+        merge_sources: Vec::new(),
+        release_sources: Vec::new(),
+        timestamp: Timestamp::EPOCH,
+        params_hash: params.params_hash(),
+        work: 0,
+        signature: Signature([0; 64]),
+        hash: BlockHash::ZERO,
+    };
+    block.hash = block.compute_hash();
+    block
 }

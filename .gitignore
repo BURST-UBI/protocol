@@ -5,6 +5,7 @@
 # Runtime LMDB data directories — must never be committed (a committed
 # burst_data shipped baked-in live peers that leaked across networks).
 /burst_data/
+/.cf2/
 *.mdb
 **/*.rs.bk
 Cargo.lock

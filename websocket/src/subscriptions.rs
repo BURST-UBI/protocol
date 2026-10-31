@@ -25,11 +25,11 @@ pub enum ClientMessage {
 pub enum SubscriptionTopic {
     /// Block confirmations.
     Confirmation,
-    /// Account balance updates.
+    /// Provisional account balance updates after block acceptance.
     AccountUpdate,
-    /// Governance events.
+    /// Governance events; the node has no lifecycle publisher yet.
     Governance,
-    /// Verification events.
+    /// Verification events; the node has no lifecycle publisher yet.
     Verification,
 }
 
@@ -47,7 +47,8 @@ impl std::fmt::Display for SubscriptionTopic {
 /// Optional filter for subscriptions.
 #[derive(Clone, Debug, Deserialize)]
 pub struct SubscriptionFilter {
-    /// Only receive events for these accounts.
+    /// Match `data.account` exactly. Omitted means all accounts; an empty
+    /// list matches none. Other transaction participants are not checked.
     pub accounts: Option<Vec<String>>,
 }
 
@@ -56,6 +57,7 @@ pub struct SubscriptionFilter {
 pub struct SubscriptionEvent {
     pub topic: String,
     pub data: serde_json::Value,
+    /// Publisher wall-clock time in Unix seconds, not a ledger timestamp.
     pub timestamp: u64,
 }
 
@@ -68,7 +70,8 @@ pub enum ServerMessage {
         action: String,
         topic: SubscriptionTopic,
     },
-    /// An event matching a subscription.
+    /// Tagged event representation. The server currently sends events directly
+    /// as SubscriptionEvent JSON rather than using this variant.
     Event(SubscriptionEvent),
     /// Pong response to a ping.
     Pong,

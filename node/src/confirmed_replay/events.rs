@@ -133,7 +133,7 @@ pub(super) struct EpochInput<'a> {
     pub heads: &'a [crate::confirmed_history::HistoryHead],
     pub blocks: &'a super::blocks::source::Source<'a>,
     pub contents: &'a [crate::confirmed_history::ProposalWitness],
-    pub old: HashSet<BlockHash>,
+    pub retained_blocks: HashSet<BlockHash>,
 }
 
 pub(super) enum InputMode {
@@ -430,7 +430,7 @@ impl ConfirmedReplay {
         history
             .validate_extension(previous.heads())
             .map_err(|error| invalid(error.to_string()))?;
-        let old: HashSet<_> = previous
+        let retained_blocks: HashSet<_> = previous
             .replay_blocks()
             .iter()
             .map(|block| block.hash)
@@ -444,7 +444,7 @@ impl ConfirmedReplay {
                 blocks: &super::blocks::source::Source::new(history.replay_blocks(), None)
                     .map_err(|error| invalid(error.to_string()))?,
                 contents: history.proposal_witnesses(),
-                old,
+                retained_blocks,
             },
             epoch,
             certificates,
@@ -486,20 +486,46 @@ impl ConfirmedReplay {
         ordering: &[(BlockHash, BlockHash)],
         observe: &mut impl FnMut(Option<&StateBlock>, &Self) -> Result<(), ReplayError>,
     ) -> Result<(), ReplayError> {
+        self.append_input_transitions(
+            input,
+            epoch,
+            certificates,
+            mode,
+            ordering,
+            &mut |before, block, state| {
+                if before {
+                    Ok(())
+                } else {
+                    observe(block, state)
+                }
+            },
+        )
+    }
+
+    pub(super) fn append_input_transitions(
+        &mut self,
+        input: EpochInput<'_>,
+        epoch: BlockHash,
+        certificates: &(impl SelectionSource + ?Sized),
+        mode: InputMode,
+        ordering: &[(BlockHash, BlockHash)],
+        observe: &mut impl FnMut(bool, Option<&StateBlock>, &Self) -> Result<(), ReplayError>,
+    ) -> Result<(), ReplayError> {
+        let stage = std::time::Instant::now();
         let params = &self.params.clone();
-        let old = &input.old;
+        let retained_blocks = &input.retained_blocks;
         if epoch.is_zero()
             || self.payment_epoch != epoch
             || input.cutoff < self.cutoff.as_secs()
             || certificates.len() != self.selection_checkpoints.len()
-            || !self.replay_dependencies.is_subset(old)
+            || !self.replay_dependencies.is_subset(retained_blocks)
         {
             return Err(invalid(
                 "tail omits authenticated selection or ordering history",
             ));
         }
         for (certificate, expected) in certificates
-            .read_all()
+            .iter_selections()
             .zip(self.selection_checkpoints.iter())
         {
             if certificate?.certificate().checkpoint.hash() != *expected? {
@@ -513,23 +539,15 @@ impl ConfirmedReplay {
             self.selection_checkpoints.stage(directory)?;
             self.selection_receipts.stage(directory)?;
         }
-        let mut applied = super::blocks::AppliedHistory::new(input.directory)
-            .map_err(|error| invalid(error.to_string()))?;
-        for hash in blocks.hashes() {
-            let hash = hash.map_err(|error| invalid(error.to_string()))?;
-            if !old.contains(&hash) {
-                continue;
-            }
-            let block = blocks
-                .get(&hash)
+        let mut applied =
+            super::blocks::AppliedHistory::from_certified_input(blocks, retained_blocks, input.directory)
                 .map_err(|error| invalid(error.to_string()))?;
-            applied
-                .insert_cow(block)
-                .map_err(|error| invalid(error.to_string()))?;
-        }
-        if applied.len() != old.len() {
-            return Err(invalid("post-checkpoint history omits a certified block"));
-        }
+        tracing::debug!(
+            elapsed_ms = stage.elapsed().as_millis(),
+            certified = retained_blocks.len(),
+            "tail replay checked certified input"
+        );
+        let stage = std::time::Instant::now();
         let mut selections = selections::Selections::for_certified_epoch(certificates, blocks)?;
         selections.include_deadlines(&self.lifecycle_metadata)?;
         let genesis = crate::genesis_key::genesis_address(input.network);
@@ -542,7 +560,7 @@ impl ConfirmedReplay {
                 .count() as u64;
             for hash in blocks.hashes() {
                 let hash = hash.map_err(|error| invalid(error.to_string()))?;
-                if old.contains(&hash) {
+                if retained_blocks.contains(&hash) {
                     continue;
                 }
                 let block = blocks
@@ -550,11 +568,11 @@ impl ConfirmedReplay {
                     .map_err(|error| invalid(error.to_string()))?;
                 if block.block_type != BlockType::Endorse
                     || block.account != genesis
-                    || verified >= params.bootstrap_exit_threshold as u64
+                    || verified >= u64::from(params.bootstrap_exit_threshold.min(burst_verification::bootstrap::MAX_BOOTSTRAP_HUMANS))
                 {
                     continue;
                 }
-                let target = crate::ledger_bridge::extract_receiver_from_link(&block.link)
+                let target = crate::block_economics::wallet_from_link(&block.link)
                     .ok_or_else(|| invalid("invalid bootstrap target"))?;
                 if target == genesis
                     || bootstrap.insert(target.clone(), block.hash).is_some()
@@ -582,26 +600,28 @@ impl ConfirmedReplay {
                     .map(|witness| (witness.block, witness.bytes.clone())),
             );
         }
+        tracing::debug!(
+            elapsed_ms = stage.elapsed().as_millis(),
+            "tail replay scanned selection and governance dependencies"
+        );
+        let stage = std::time::Instant::now();
         let mut budget = MAX_LIFECYCLE_DEPENDENCIES;
         let mut challenges = HashSet::new();
-        for hash in blocks.hashes() {
-            let hash = hash.map_err(|error| invalid(error.to_string()))?;
-            if !old.contains(&hash) {
-                continue;
+        blocks.visit_unordered(|block| {
+            if !retained_blocks.contains(&block.hash) {
+                return Ok::<_, ReplayError>(());
             }
-            let block = blocks
-                .get(&hash)
-                .map_err(|error| invalid(error.to_string()))?;
             if block.block_type == BlockType::Challenge
-                && crate::ledger_bridge::extract_receiver_from_link(&block.link)
+                && crate::block_economics::wallet_from_link(&block.link)
                     .is_some_and(|target| self.verification.has_active_challenge(&target))
             {
                 challenges.insert(block.link);
             }
-        }
+            Ok(())
+        })?;
         for hash in blocks.hashes() {
             let hash = hash.map_err(|error| invalid(error.to_string()))?;
-            if old.contains(&hash) {
+            if retained_blocks.contains(&hash) {
                 continue;
             }
             let block = blocks
@@ -638,7 +658,7 @@ impl ConfirmedReplay {
                 ));
             }
             if block.block_type == BlockType::Endorse {
-                let target = crate::ledger_bridge::extract_receiver_from_link(&block.link)
+                let target = crate::block_economics::wallet_from_link(&block.link)
                     .ok_or_else(|| invalid("invalid endorsement target"))?;
                 if bootstrap
                     .get(&target)
@@ -659,7 +679,7 @@ impl ConfirmedReplay {
                 dependencies.extend(bootstrap.get(&block.account).copied());
             }
             if block.block_type == BlockType::Challenge {
-                let target = crate::ledger_bridge::extract_receiver_from_link(&block.link)
+                let target = crate::block_economics::wallet_from_link(&block.link)
                     .ok_or_else(|| invalid("invalid challenge target"))?;
                 dependencies.extend(bootstrap.get(&target).copied());
             }
@@ -688,13 +708,13 @@ impl ConfirmedReplay {
             }
             prerequisites
                 .get_mut(&block)
-                .filter(|_| !old.contains(&block))
+                .filter(|_| !retained_blocks.contains(&block))
                 .ok_or_else(|| invalid("local ordering cannot change retained history"))?
                 .push(dependency);
         }
         let ordered = crate::confirmed_history::causal_hash_order_after(
-            known.iter().copied().filter(|hash| !old.contains(hash)),
-            old,
+            known.iter().copied().filter(|hash| !retained_blocks.contains(hash)),
+            retained_blocks,
             |hash| {
                 let block = blocks.get(hash)?;
                 Ok(block
@@ -704,22 +724,34 @@ impl ConfirmedReplay {
             },
         )
         .map_err(|error| invalid(error.to_string()))?;
-        observe(None, self)?;
+        tracing::debug!(
+            elapsed_ms = stage.elapsed().as_millis(),
+            suffix = ordered.len(),
+            "tail replay ordered suffix"
+        );
+        let stage = std::time::Instant::now();
+        observe(false, None, self)?;
         for hash in ordered {
             if let Some(mutations) = &mut self.mutations {
                 *mutations = Default::default();
-                self.brn.wallets.record_transition(true);
+                self.brn.wallets.reset_recorded_transition();
             }
             let block = blocks
                 .get(&hash)
                 .map_err(|error| invalid(error.to_string()))?;
+            observe(true, Some(&block), self)?;
             self.apply_authenticated(&block, &applied, params, &genesis, &mut selections)?;
-            observe(Some(&block), self)?;
+            observe(false, Some(&block), self)?;
             applied
                 .insert_cow(block)
                 .map_err(|error| invalid(error.to_string()))?;
         }
-        match mode {
+        tracing::debug!(
+            elapsed_ms = stage.elapsed().as_millis(),
+            "tail replay executed suffix"
+        );
+        let stage = std::time::Instant::now();
+        let result = match mode {
             InputMode::Applied => self.check_head_list(input.heads),
             InputMode::Certified { deadline_candidate } => {
                 self.confirm_head_list(input.heads)?;
@@ -729,6 +761,11 @@ impl ConfirmedReplay {
                     self.advance_cutoff(Timestamp::new(input.cutoff), params)
                 }
             }
-        }
+        };
+        tracing::debug!(
+            elapsed_ms = stage.elapsed().as_millis(),
+            "tail replay checked heads and cutoff"
+        );
+        result
     }
 }

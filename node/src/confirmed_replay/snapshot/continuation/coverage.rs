@@ -21,6 +21,12 @@ impl CompactSelectionCoverage {
         self.cut.check_installed_cut(batch)
     }
 
+    pub(crate) fn covers_local_promises(
+        &self, batch: &LmdbWriteTransaction<'_>, representative: &WalletAddress,
+    ) -> Result<bool, StoreError> {
+        batch.covers_consensus_votes(representative, &self.cut.parent, &self.cut.parent, &self.cut.included)
+    }
+
     pub(crate) fn seal_local_votes(
         &self,
         batch: &mut LmdbWriteTransaction<'_>,
@@ -68,10 +74,11 @@ impl CompactCutCoverage {
 
     /// Read-only finality preflight in the caller's writer. Success is not a
     /// durable reservation: signing must repeat it alongside promise checks.
+    /// This scans all local accounts and durable pending-confirmation targets.
     pub fn check_installed_cut(&self, batch: &LmdbWriteTransaction<'_>) -> Result<(), StoreError> {
-        use crate::confirmed_replay::installation::{CUTOFF_KEY, INSTALLED_KEY};
+        use crate::confirmed_replay::installation::{CUTOFF_KEY};
         if batch.payment_epoch()? != self.parent
-            || batch.get_meta(INSTALLED_KEY)?.as_deref() != Some(self.authority.as_slice())
+            || crate::payment_authority::storage::read_at(|key| batch.get_meta(key))?.as_deref() != Some(self.authority.as_slice())
             || batch.get_meta(CUTOFF_KEY)?.as_deref() != Some(self.cutoff.to_be_bytes().as_slice())
             || batch
                 .get_meta(burst_store::meta::PAYMENT_VOTE_LIMIT_KEY)?
@@ -116,9 +123,12 @@ impl CompactCutCoverage {
         let prefix = b"pending_confirmation/v1/";
         for (key, value) in batch.checkpoint_metadata(prefix)? {
             let hash = BlockHash::new(key[prefix.len()..].try_into().map_err(invalid)?);
-            if hash.is_zero() || value != [1] || !self.included.contains(&hash) {
-                return Err(invalid(
-                    "compact candidate omits a durable confirmation target",
+            if hash.is_zero() || value != [1] {
+                return Err(invalid("invalid durable confirmation target"));
+            }
+            if !self.included.contains(&hash) {
+                return Err(StoreError::StaleRead(
+                    "compact candidate omits a durable confirmation target".into(),
                 ));
             }
         }

@@ -4,7 +4,7 @@
 //! - Each verified human delegates one unit to a representative.
 //! - Representatives vote on conflicting blocks.
 //! - Elections freeze their confirmed-human denominator; online attendance
-//!   cannot lower it. Agreement on roster epochs is still being integrated.
+//!   cannot lower it. The caller authenticates authority and epoch handoffs.
 //!
 //! ## Module overview
 //!
@@ -12,7 +12,6 @@
 //! - [`active_elections`] — Container managing all ongoing elections.
 //! - [`vote_info`] — Per-voter vote data with final/non-final distinction.
 //! - [`vote_cache`] — Pre-election vote storage for out-of-order vote arrival.
-//! - [`voting`] — Representative voting with per-voter tracking and tallying.
 //! - [`conflict`] — Fork detection in account chains.
 //! - [`representative`] — Representative identity and weight.
 //! - [`error`] — Consensus error types.
@@ -28,7 +27,6 @@ pub mod equivocation;
 pub mod error;
 pub mod fork_cache;
 pub mod online_weight;
-pub mod rep_crawler;
 pub mod rep_weights;
 pub mod representative;
 pub mod request_aggregator;
@@ -46,11 +44,10 @@ pub use active_elections::ActiveElections;
 pub use backlog_scanner::BacklogScanner;
 pub use conflict::ConflictDetector;
 pub use election::{Election, ElectionState, ElectionStatus};
-pub use equivocation::{EquivocationDetector, EquivocationProof};
+pub use equivocation::{EquivocationDetector, EquivocationObservation};
 pub use error::ConsensusError;
 pub use fork_cache::ForkCache;
 pub use online_weight::OnlineWeightSampler;
-pub use rep_crawler::{DiscoveredRep, RepCrawler};
 pub use rep_weights::RepWeightCache;
 pub use representative::Representative;
 pub use request_aggregator::RequestAggregator;

@@ -1,5 +1,5 @@
 //! Component fixtures use actual pinned-mainnet drand proofs and independent
-//! checkpoint signatures. They do not stand in for the unfinished wire service.
+//! checkpoint signatures. They do not establish peer transport or agreement liveness.
 
 use burst_consensus::checkpoint::{
     Checkpoint, CheckpointAnchor, CheckpointCertificate, CheckpointSignature, HumanDelegation,
@@ -9,6 +9,38 @@ use burst_crypto::{derive_address, keypair_from_seed, sign_message};
 use burst_types::{BlockHash, NetworkId, ProtocolParams, Timestamp, WalletAddress};
 use burst_verification::VerificationOrchestrator;
 use burst_vrf::{DrandBeacon, DrandClient};
+
+/// Stable indexed fixture keys, preserving the original repeated-byte seeds.
+pub fn indexed_seed(index: u32) -> [u8; 32] {
+    if let Ok(index) = u8::try_from(index) {
+        return [index; 32];
+    }
+    let mut seed = [42; 32];
+    seed[..4].copy_from_slice(&index.to_be_bytes());
+    seed[31] = 43; // Disjoint from every repeated-byte seed.
+    seed
+}
+
+/// Existing signed governance journey parameters; not production-load evidence.
+pub fn governance_fixture_params(bootstrap_exit_threshold: u32) -> ProtocolParams {
+    ProtocolParams {
+        brn_rate: burst_types::BRN_UNIT,
+        min_work_difficulty: 0,
+        bootstrap_exit_threshold,
+        endorsement_burn_amount: 1,
+        new_wallet_spending_limit: 0,
+        trst_expiry_secs: u64::MAX,
+        governance_proposal_cost: 1,
+        governance_proposal_duration_secs: 10,
+        governance_exploration_duration_secs: 20,
+        governance_cooldown_duration_secs: 10,
+        governance_propagation_buffer_secs: 1,
+        governance_proposal_endorsements: 1,
+        governance_supermajority_bps: 6000,
+        governance_quorum_bps: 10000,
+        ..ProtocolParams::burst_defaults()
+    }
+}
 
 // The default fits a 1024-descriptor process. For two independent full meshes,
 // raise that process's soft limit to 4096 before opting into parallel fixtures.
@@ -63,6 +95,15 @@ pub fn select(
     pool: &[WalletAddress],
     params: &ProtocolParams,
 ) -> BlockHash {
+    select_activation(orchestrator, target, pool, params).context
+}
+
+pub fn select_activation(
+    orchestrator: &mut VerificationOrchestrator,
+    target: &WalletAddress,
+    pool: &[WalletAddress],
+    params: &ProtocolParams,
+) -> burst_verification::CommitteeActivation {
     let snapshot = orchestrator.snapshot();
     let state = orchestrator.get_state(target).unwrap();
     let cutoff = state.started_at.as_secs().max(
@@ -130,7 +171,22 @@ pub fn select(
         .find(|beacon| beacon.round == request.round())
         .unwrap_or_else(|| panic!("missing real beacon fixture for round {}", request.round()));
     let output = DrandClient::beacon_to_random_output(beacon).unwrap();
-    orchestrator
+    let context = orchestrator
         .install_selection(target, &parent, &certificate, &output)
-        .unwrap()
+        .unwrap();
+    let started_at = request.beacon_time().unwrap();
+    let duration = if orchestrator.has_active_challenge(target) {
+        params.challenge_duration_secs
+    } else {
+        params.verification_timeout_secs
+    };
+    burst_verification::CommitteeActivation {
+        target: target.clone(),
+        selection: certificate.checkpoint.hash(),
+        context,
+        params_hash: params.params_hash(),
+        rules_at_activation: params.clone(),
+        started_at,
+        deadline: started_at.checked_add(duration).unwrap(),
+    }
 }

@@ -15,7 +15,7 @@ pub(super) fn appeal_context(
     {
         return Err("appeal reference is invalid".into());
     }
-    let target = crate::ledger_bridge::extract_receiver_from_link(&block.link)
+    let target = crate::block_economics::wallet_from_link(&block.link)
         .ok_or("appeal target is invalid")?;
     let latest = batch
         .get_meta(&latest_key(&target))
@@ -66,7 +66,7 @@ pub(super) fn appeal_context(
         if source.hash != hash
             || source.compute_hash() != hash
             || source.timestamp > receipt.completed_at
-            || crate::ledger_bridge::extract_receiver_from_link(&source.link).as_ref()
+            || crate::block_economics::wallet_from_link(&source.link).as_ref()
                 != Some(&target)
             || (is_admission
                 && (source.block_type != BlockType::Challenge
@@ -266,7 +266,7 @@ pub(super) fn prepare(
                     || block.compute_hash() != admission
                     || block.block_type != BlockType::Challenge
                     || block.account != outcome.challenger
-                    || crate::ledger_bridge::extract_receiver_from_link(&block.link).as_ref()
+                    || crate::block_economics::wallet_from_link(&block.link).as_ref()
                         != Some(&context.target)
                 {
                     return Err("challenge receipt has an unrelated admission".into());

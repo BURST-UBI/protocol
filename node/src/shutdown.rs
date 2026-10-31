@@ -1,104 +1,11 @@
-//! Graceful shutdown controller for the BURST node.
-//!
-//! Listens for SIGINT/SIGTERM and broadcasts a shutdown signal to all
-//! subsystems via a `tokio::sync::broadcast` channel.
-
+//! Node task draining and shared shutdown control.
+pub use burst_utils::shutdown::ShutdownController;
+#[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::signal;
-use tokio::sync::broadcast;
 
-/// Coordinates graceful shutdown across all node subsystems.
-///
-/// Subsystems call [`subscribe`] to get a receiver, then `select!` on it
-/// alongside their main loop. When shutdown is triggered (either by OS signal
-/// or programmatically), every receiver is notified.
-pub struct ShutdownController {
-    tx: broadcast::Sender<()>,
-    requested: AtomicBool,
-    failure: std::sync::Mutex<Option<String>>,
-}
-
-impl ShutdownController {
-    pub fn new() -> Self {
-        let (tx, _) = broadcast::channel(1);
-        Self {
-            tx,
-            requested: AtomicBool::new(false),
-            failure: std::sync::Mutex::new(None),
-        }
-    }
-
-    /// Get a receiver that will be notified on shutdown.
-    pub fn subscribe(&self) -> broadcast::Receiver<()> {
-        let receiver = self.tx.subscribe();
-        if self.requested.load(Ordering::Acquire) {
-            let _ = self.tx.send(());
-        }
-        receiver
-    }
-
-    /// Trigger shutdown programmatically.
-    pub fn shutdown(&self) {
-        self.requested.store(true, Ordering::Release);
-        let _ = self.tx.send(());
-    }
-
-    /// Fatal local worker/storage failure, not a rejected peer message or a
-    /// transient relay outage. Preserve the first cause through normal cleanup.
-    pub(crate) fn fail(&self, worker: &str, error: impl std::fmt::Display) {
-        let mut failure = self
-            .failure
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if failure.is_none() {
-            *failure = Some(format!("{worker}: {error}"));
-        }
-        drop(failure);
-        self.shutdown();
-    }
-
-    pub(crate) fn failure(&self) -> Option<String> {
-        self.failure
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-    }
-
-    /// Wait for SIGTERM or SIGINT, then trigger shutdown.
-    pub async fn wait_for_signal(&self) {
-        let mut requested = self.subscribe();
-        if self.requested.load(Ordering::Acquire) {
-            return;
-        }
-        let ctrl_c = signal::ctrl_c();
-
-        #[cfg(unix)]
-        let terminate = async {
-            signal::unix::signal(signal::unix::SignalKind::terminate())
-                .expect("failed to install SIGTERM handler")
-                .recv()
-                .await;
-        };
-
-        #[cfg(not(unix))]
-        let terminate = std::future::pending::<()>();
-
-        tokio::select! {
-            _ = requested.recv() => { return; }
-            _ = ctrl_c => { tracing::info!("received SIGINT, shutting down"); }
-            _ = terminate => { tracing::info!("received SIGTERM, shutting down"); }
-        }
-
-        self.shutdown();
-    }
-}
-
-impl Default for ShutdownController {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
+/// Await all workers within one shared deadline, then abort and await unfinished
+/// tasks. Aborting is cooperative: the final waits have no timeout, and a running
+/// blocking task cannot be stopped this way.
 pub(crate) async fn drain_tasks(
     mut tasks: Vec<tokio::task::JoinHandle<()>>,
     timeout: std::time::Duration,
@@ -121,6 +28,8 @@ pub(crate) async fn drain_tasks(
             .filter(|task| !task.is_finished())
             .collect();
         for task in &unfinished {
+            tracing::error!(task = %task.id(), timeout_ms = timeout.as_millis(),
+                "node background task exceeded shutdown deadline");
             task.abort();
         }
         for task in unfinished {
@@ -256,7 +165,7 @@ mod tests {
                 ..crate::NodeConfig::default()
             };
             let mut node = crate::BurstNode::new(config).await.unwrap();
-            let started = tokio::time::timeout(std::time::Duration::from_secs(10), node.start())
+            let started = tokio::time::timeout(std::time::Duration::from_secs(10), node.start_with_services(burst_daemon::start_public_services))
                 .await
                 .unwrap();
             if server == "P2P listener" {

@@ -13,82 +13,15 @@ fn invalid(reason: impl ToString) -> StoreError {
     StoreError::Corruption(reason.to_string())
 }
 
-pub(crate) fn row_format(batch: &LmdbWriteTransaction<'_>) -> Result<bool, StoreError> {
-    match batch.get_meta(FORMAT_KEY)?.as_deref() {
-        None => {
-            if let Some(row) = batch
-                .checkpoint_metadata_entries(GraphRecord::STORAGE_PREFIX.as_bytes())?
-                .next()
-            {
-                row?;
-                return Err(invalid("graph rows exist without a format marker"));
-            }
-            Ok(false)
-        }
-        Some([1]) => {
-            if batch
-                .undo_value_ref(UndoTable::Meta, LEGACY_KEY.as_bytes())?
-                .is_some()
-            {
-                return Err(invalid("mixed aggregate and row graph state"));
-            }
-            Ok(true)
-        }
-        Some(_) => Err(invalid("unsupported merger graph storage format")),
-    }
-}
-
 pub(crate) fn load(batch: &LmdbWriteTransaction<'_>) -> Result<MergerGraph, StoreError> {
-    if !row_format(batch)? {
-        let bytes = batch
-            .undo_value_ref(UndoTable::Meta, LEGACY_KEY.as_bytes())?
-            .ok_or_else(|| invalid("missing persisted merger graph"))?;
-        return MergerGraph::from_bytes(bytes).map_err(invalid);
-    }
-    MergerGraph::from_records(
-        batch
-            .checkpoint_metadata_entries(GraphRecord::STORAGE_PREFIX.as_bytes())?
-            .map(|row| {
-                let (key, bytes) = row.map_err(|error| error.to_string())?;
-                let key = std::str::from_utf8(key).map_err(|error| error.to_string())?;
-                GraphRecord::from_storage_entry(key, bytes)
-            }),
-    )
-    .map_err(invalid)
+    batch.read_merger_graph()
 }
 
 pub(crate) fn present(batch: &LmdbWriteTransaction<'_>) -> Result<bool, StoreError> {
-    Ok(row_format(batch)?
+    Ok(batch.uses_graph_records()?
         || batch
             .undo_value_ref(UndoTable::Meta, LEGACY_KEY.as_bytes())?
             .is_some())
-}
-
-fn edge(record: &GraphRecord) -> Option<(String, u64)> {
-    match record {
-        GraphRecord::OriginEdge {
-            origin, position, ..
-        } => Some((
-            format!("{}3/{origin}/", GraphRecord::STORAGE_PREFIX),
-            *position,
-        )),
-        GraphRecord::DownstreamEdge {
-            merge, position, ..
-        } => Some((
-            format!("{}4/{merge}/", GraphRecord::STORAGE_PREFIX),
-            *position,
-        )),
-        _ => None,
-    }
-}
-
-fn set_position(record: &mut GraphRecord, value: u64) {
-    match record {
-        GraphRecord::OriginEdge { position, .. } | GraphRecord::DownstreamEdge { position, .. } => {
-            *position = value
-        }
-        _ => unreachable!("position belongs to a reverse edge"),
-    }
 }
 
 /// Ordinary graph publication preserves durable ordering slots for every
@@ -98,20 +31,20 @@ pub(crate) fn persist(
     batch: &mut LmdbWriteTransaction<'_>,
     graph: &MergerGraph,
 ) -> Result<(), StoreError> {
-    if !row_format(batch)? {
+    if !batch.uses_graph_records()? {
         return batch.put_meta(LEGACY_KEY, &graph.to_bytes());
     }
     write_rows(batch, graph, true)
 }
 
-/// Certified replay replaces the graph and every provisional journal in the
-/// same transaction. Fresh ordering slots must match the replay-derived rows;
-/// this must not be used for ordinary publication with surviving journals.
+/// Replace graph rows with replay ordering. The caller must replace provisional
+/// journals in the same transaction to match these slots, and abort on error.
+/// Do not use with surviving journals that refer to the old ordering.
 pub(crate) fn stage_replayed(
     batch: &mut LmdbWriteTransaction<'_>,
     graph: &MergerGraph,
 ) -> Result<(), StoreError> {
-    row_format(batch)?;
+    batch.uses_graph_records()?;
     for row in batch.checkpoint_metadata_entries(GraphRecord::STORAGE_PREFIX.as_bytes())? {
         let (key, bytes) = row?;
         let key = std::str::from_utf8(key).map_err(invalid)?;
@@ -137,7 +70,7 @@ fn write_rows(
         let (key, bytes) = row?;
         let key = std::str::from_utf8(key).map_err(invalid)?;
         let record = GraphRecord::from_storage_entry(key, bytes).map_err(invalid)?;
-        if let Some((group, position)) = edge(&record) {
+        if let Some((group, position)) = record.edge_group_position() {
             highest
                 .entry(group)
                 .and_modify(|old| *old = (*old).max(position))
@@ -150,10 +83,10 @@ fn write_rows(
         let (key, _) = record.storage_entry().map_err(invalid)?;
         let old = batch.get_meta(&key)?;
         if preserve_slots {
-            if let Some((group, _)) = edge(&record) {
+            if let Some((group, _)) = record.edge_group_position() {
                 let position = if let Some(bytes) = &old {
                     let old = GraphRecord::from_storage_entry(&key, bytes).map_err(invalid)?;
-                    edge(&old)
+                    old.edge_group_position()
                         .ok_or_else(|| invalid("graph edge changed record type"))?
                         .1
                 } else {
@@ -173,7 +106,7 @@ fn write_rows(
                     .entry(group)
                     .and_modify(|old| *old = (*old).max(position))
                     .or_insert(position);
-                set_position(&mut record, position);
+                record.set_edge_position(position);
             }
         }
         let (_, bytes) = record.storage_entry().map_err(invalid)?;
@@ -189,6 +122,8 @@ fn write_rows(
     Ok(())
 }
 
+/// Expand aggregate journal images using the installed edge positions.
+/// Existing-edge changes and removed ancestry cannot be converted here.
 pub(crate) fn convert_undo(
     batch: &LmdbWriteTransaction<'_>,
     mut journal: burst_store_lmdb::block_undo::BlockUndo,
@@ -202,8 +137,8 @@ pub(crate) fn convert_undo(
             graph.visit_records(|mut record| {
                 // Historical snapshot positions can differ after an unrelated
                 // rollback. Edge identity, not that old position, is the change.
-                if edge(&record).is_some() {
-                    set_position(&mut record, 0);
+                if record.edge_group_position().is_some() {
+                    record.set_edge_position(0);
                 }
                 let (key, value) = record.storage_entry().map_err(invalid)?;
                 if entries.insert(key, value).is_some() {
@@ -226,7 +161,7 @@ pub(crate) fn convert_undo(
                     continue;
                 }
                 let record = GraphRecord::from_storage_entry(&key, &value).map_err(invalid)?;
-                if edge(&record).is_some() {
+                if record.edge_group_position().is_some() {
                     if previous.is_some() {
                         return Err(invalid("legacy journal changes existing graph edge"));
                     }
@@ -235,7 +170,7 @@ pub(crate) fn convert_undo(
                     })?;
                     let mut normalized =
                         GraphRecord::from_storage_entry(&key, &installed).map_err(invalid)?;
-                    set_position(&mut normalized, 0);
+                    normalized.set_edge_position(0);
                     if normalized.storage_entry().map_err(invalid)?.1 != value {
                         return Err(invalid("journal graph edge differs from installed state"));
                     }
@@ -250,7 +185,7 @@ pub(crate) fn convert_undo(
             }
             for (key, value) in before {
                 let record = GraphRecord::from_storage_entry(&key, &value).map_err(invalid)?;
-                if edge(&record).is_some() {
+                if record.edge_group_position().is_some() {
                     return Err(invalid("legacy journal removes merge ancestry"));
                 }
                 expanded.push(UndoChange {
@@ -278,9 +213,10 @@ pub(crate) fn convert_undo(
 }
 
 /// Called after authenticated startup recovery, before admission workers.
+/// A sync error after commit does not roll back the format conversion.
 pub(crate) fn migrate(store: &burst_store_lmdb::LmdbStore) -> Result<bool, StoreError> {
     let mut batch = store.tx_begin_write()?;
-    if row_format(&batch)? {
+    if batch.uses_graph_records()? {
         return Ok(false);
     }
     let graph = load(&batch)?;

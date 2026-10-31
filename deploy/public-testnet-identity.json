@@ -1,8 +1,0 @@
-{
-  "network": "test",
-  "status": "candidate identity; network not launched; offline identity/governance and operator handoff pending; local creator backup verified, off-device backup not confirmed",
-  "creator_public_key": "948acade65c53fcc5e0d2d001fb1b01edc40b9ea102f1a9ae84d53c92551fd7e",
-  "initial_brn_per_hour": 1,
-  "build_feature": "private-testnet",
-  "build_public_key_variable": "BURST_TEST_GENESIS_PUBLIC_KEY"
-}

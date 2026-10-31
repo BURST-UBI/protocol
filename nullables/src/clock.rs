@@ -1,13 +1,12 @@
-//! Nullable clock — deterministic time for testing.
-//!
-//! Thread-safe: uses AtomicU64 so it can be shared across async tasks.
+//! Manually controlled atomic timestamp for tests.
 
 use burst_types::Timestamp;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A deterministic clock for testing.
 ///
-/// Time only advances when you tell it to. Safe to share across threads.
+/// Time changes only through set or advance. It does not drive Tokio timers
+/// or replace the process wall clock.
 pub struct NullClock {
     current: AtomicU64,
 }
@@ -24,12 +23,12 @@ impl NullClock {
         Timestamp::new(self.current.load(Ordering::SeqCst))
     }
 
-    /// Advance time by a number of seconds.
+    /// Add seconds, wrapping on u64 overflow.
     pub fn advance(&self, secs: u64) {
         self.current.fetch_add(secs, Ordering::SeqCst);
     }
 
-    /// Set the time to a specific value.
+    /// Set an arbitrary timestamp, including an earlier value.
     pub fn set(&self, secs: u64) {
         self.current.store(secs, Ordering::SeqCst);
     }
@@ -40,8 +39,7 @@ impl NullClock {
     }
 }
 
-// NullClock is automatically Send + Sync because AtomicU64 is Send + Sync.
-// Compile-time assertion to catch regressions if fields are added that break this.
+// Keep the clock shareable across test workers.
 const _: () = {
     const fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<NullClock>();

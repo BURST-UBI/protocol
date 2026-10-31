@@ -6,7 +6,9 @@ use super::*;
 use std::collections::{HashMap, HashSet};
 
 mod compact;
+mod brn;
 mod indexes;
+mod overlay;
 mod undo;
 pub use compact::CompactProjection;
 
@@ -17,6 +19,8 @@ pub type BorrowedCheckpointRow<'a> = (&'a [u8], &'a [u8]);
 type ProjectionIter<'a> = Box<dyn Iterator<Item = Result<(&'a [u8], &'a [u8]), heed::Error>> + 'a>;
 
 const LIFECYCLE_PREFIXES: &[&[u8]] = &[
+    b"verification_state/v1/",
+    b"verification_state/v2/",
     b"verification_stake/",
     b"verification_receipt/",
     b"verification_latest_outcome/",
@@ -30,8 +34,7 @@ const LIFECYCLE_PREFIXES: &[&[u8]] = &[
     b"verification_deadline/",
     b"verification_default/",
     b"governance_endorsement/",
-    b"key_delegation/v1/",
-    b"key_delegation/v2/",
+    b"key_delegation/",
 ];
 
 pub fn is_lifecycle_key(key: &str) -> bool {
@@ -54,71 +57,59 @@ fn invalid(message: &str) -> StoreError {
 }
 
 impl LmdbWriteTransaction<'_> {
-    /// Borrow metadata records with a per-record bound, not a lifetime inventory
-    /// bound. Consumers that collect rows must impose their own operation budget.
+    /// Clear all BRN wallet headers and child rows, then select record storage.
+    /// The caller must install the complete authenticated wallet projection and
+    /// matching provisional journals before committing this transaction.
+    pub fn begin_brn_wallet_records_projection(&mut self) -> Result<(), StoreError> {
+        if self.failed || self.undo.is_some() {
+            return Err(invalid("BRN wallet projection requires a projection writer"));
+        }
+        self.clear_checkpoint_rows(UndoTable::BrnWallets, None)?;
+        self.put_brn_meta(burst_brn::wallet_storage::FORMAT_KEY, &[1])
+    }
+
+    pub fn put_checkpoint_brn_wallet_header(&mut self, address: &WalletAddress, value: &[u8]) -> Result<(), StoreError> {
+        let result = (|| {
+            if self.undo.is_some() || !self.uses_brn_wallet_records()? {
+                return Err(invalid("BRN wallet header requires a record projection"));
+            }
+            self.put_raw(UndoTable::BrnWallets, address.as_str().as_bytes(), value)
+        })();
+        if result.is_err() { self.failed = true; }
+        result
+    }
+
+    /// Borrow raw metadata rows with a 64 MiB limit per key/value pair.
+    /// Rows are checked as consumed; callers must bound the total scan or collection.
     pub fn checkpoint_metadata_entries<'a>(
         &'a self,
         prefix: &'a [u8],
     ) -> Result<impl Iterator<Item = Result<BorrowedCheckpointRow<'a>, StoreError>> + 'a, StoreError>
     {
-        let rows = self
-            .env
-            .meta_db
-            .prefix_iter(&self.txn, prefix)
-            .map_err(LmdbError::from)?;
-        Ok(rows.map(|row| {
-            let (key, value) = row.map_err(LmdbError::from)?;
-            if key
-                .len()
-                .checked_add(value.len())
-                .is_none_or(|bytes| bytes > MAX_BYTES)
-            {
-                return Err(invalid("checkpoint metadata row exceeds byte limit"));
-            }
-            Ok((key, value))
-        }))
+        self.read_view().checkpoint_metadata_entries(prefix)
     }
 
-    /// Borrow pending rows from the writer without copying the whole inventory.
-    /// Each value remains bounded; total ledger size is not a decoding budget.
+    /// Borrow raw pending rows with a 64 MiB limit per key/value pair.
+    /// The caller decodes receipts and bounds total work; checks occur on iteration.
     pub fn pending_entries(
         &self,
     ) -> Result<impl Iterator<Item = Result<BorrowedCheckpointRow<'_>, StoreError>> + '_, StoreError>
     {
-        let rows = self
-            .env
-            .pending_db
-            .iter(&self.txn)
-            .map_err(LmdbError::from)?;
-        Ok(rows.map(|row| {
-            let (key, bytes) = row.map_err(LmdbError::from)?;
-            if key
-                .len()
-                .checked_add(bytes.len())
-                .is_none_or(|size| size > MAX_BYTES)
-            {
-                return Err(invalid("pending row exceeds byte limit"));
-            }
-            Ok((key, bytes))
-        }))
+        self.read_view().pending_entries()
     }
 
-    /// Visit replay-owned records without collecting a lifetime inventory.
-    /// The orchestrator is checked separately; signing journals are not projection state.
+    /// Visit raw rows in the replay-owned lifecycle namespaces without collecting them.
+    /// Excludes the aggregate orchestrator record and signing journals. There is no
+    /// total scan limit, and errors can follow earlier callbacks.
     pub fn visit_checkpoint_lifecycle(
         &self,
-        mut visit: impl FnMut(&[u8], &[u8]) -> Result<(), StoreError>,
+        visit: impl FnMut(&[u8], &[u8]) -> Result<(), StoreError>,
     ) -> Result<(), StoreError> {
-        for prefix in LIFECYCLE_PREFIXES {
-            for row in self.checkpoint_metadata_entries(prefix)? {
-                let (key, value) = row?;
-                visit(key, value)?;
-            }
-        }
-        Ok(())
+        self.read_view().visit_checkpoint_lifecycle(visit)
     }
 
-    /// Bounded collecting adapter for callers that need owned records.
+    /// Collect lifecycle rows, excluding the aggregate orchestrator record.
+    /// Reject more than 131,072 rows or 64 MiB of keys plus values.
     pub fn checkpoint_lifecycle(&self) -> Result<CheckpointRows, StoreError> {
         let mut rows = Vec::new();
         let mut bytes = 0usize;
@@ -152,24 +143,22 @@ impl LmdbWriteTransaction<'_> {
         self.checkpoint_rows(UndoTable::Meta, (!prefix.is_empty()).then_some(prefix))
     }
 
-    /// Visit borrowed rows under the same byte/row bounds as checkpoint_metadata.
-    /// Errors stop traversal before any later rows are visited.
+    /// Visit borrowed rows under the same byte/row bounds as `checkpoint_metadata`.
+    /// Errors stop traversal but do not undo earlier callback side effects.
     pub fn visit_checkpoint_metadata(
         &self,
         prefix: &[u8],
         visit: impl FnMut(&[u8], &[u8]) -> Result<(), StoreError>,
     ) -> Result<(), StoreError> {
-        self.visit_checkpoint_rows(
-            UndoTable::Meta,
-            (!prefix.is_empty()).then_some(prefix),
-            visit,
-        )
+        self.read_view().visit_checkpoint_metadata(prefix, visit)
     }
 
-    /// Replace canonical ledger indexes, preserving all cemented positions and
-    /// durable confirmation handoffs. Excluded raw blocks are archived outside
-    /// the applied ledger. Economics, authority and epoch MUST be installed in
-    /// this same transaction. Failure poisons the writer.
+    /// Replace ledger indexes from caller-authenticated replay, preserving cemented
+    /// positions and requiring all queued confirmations in the supplied blocks.
+    /// Archive excluded block bodies and return their hashes. This checks indexes
+    /// and stored-byte consistency, not block signatures or replay validity.
+    /// The caller must install economics, authority and epoch in this transaction.
+    /// Any error prevents commit.
     pub fn replace_checkpoint_ledger(
         &mut self,
         expected_epoch: BlockHash,
@@ -396,23 +385,55 @@ impl LmdbWriteTransaction<'_> {
         Ok(())
     }
 
-    fn clear_checkpoint_rows(
+    pub(super) fn clear_checkpoint_rows(
         &mut self,
         table: UndoTable,
         prefix: Option<&[u8]>,
     ) -> Result<(), StoreError> {
+        self.invalidate_body_changes();
         if self.undo.is_some() {
             return Err(invalid("projection replacement cannot join block undo"));
         }
+        if table == UndoTable::BrnWallets && prefix.is_none() {
+            self.clear_checkpoint_rows(UndoTable::BrnMeta, Some(burst_brn::wallet_storage::ROW_PREFIX))?;
+        }
         let Some(prefix) = prefix else {
+            self.auxiliary_cache.get_mut().invalidate_projection();
+            self.auxiliary_cache.get_mut().clear_electorate(table);
+            self.auxiliary_cache.get_mut().clear_counter_accounts(table);
+            self.auxiliary_cache.get_mut().clear_pending_expiry(table);
+            self.auxiliary_cache.get_mut().clear_brn(table);
+            self.auxiliary_cache.get_mut().clear_trst(table);
+            if table == UndoTable::Meta {
+                let cache = self.auxiliary_cache.get_mut();
+                cache.verification = None;
+                cache.payment_authority_identity = None;
+                cache.invalidate(b"checkpoint_snapshot/");
+                cache.confirmations = None;
+                cache.confirmed_authority = None;
+                cache.confirmed_governance = None;
+            }
             self.dirty = true;
             table
                 .database(self.env)
                 .clear(&mut self.txn)
                 .map_err(LmdbError::from)?;
+            if table == UndoTable::Meta {
+                self.env
+                    .graph_position_db
+                    .clear(&mut self.txn)
+                    .map_err(LmdbError::from)?;
+            }
+            if table == UndoTable::Accounts {
+                self.env.verified_accounts_db.clear(&mut self.txn).map_err(LmdbError::from)?;
+            }
             if table == UndoTable::Pending {
                 self.env
                     .pending_sender_db
+                    .clear(&mut self.txn)
+                    .map_err(LmdbError::from)?;
+                self.env
+                    .pending_amount_db
                     .clear(&mut self.txn)
                     .map_err(LmdbError::from)?;
             }
@@ -447,14 +468,54 @@ impl LmdbWriteTransaction<'_> {
     /// Only replay-owned lifecycle namespaces may be replaced. Agreement,
     /// final-vote journals, epoch markers and unrelated application settings stay.
     pub fn clear_checkpoint_lifecycle(&mut self) -> Result<(), StoreError> {
+        self.retain_checkpoint_lifecycle(|_| false)
+    }
+
+    /// Delete lifecycle keys rejected by `keep`, including the aggregate orchestrator.
+    /// Scan in batches of 256 keys within this transaction; no total row limit applies.
+    /// Retained values are not decoded or rewritten. Any error prevents commit.
+    pub fn retain_checkpoint_lifecycle(
+        &mut self,
+        keep: impl Fn(&[u8]) -> bool,
+    ) -> Result<(), StoreError> {
         let result = (|| {
             if self.failed || self.undo.is_some() {
                 return Err(invalid("invalid lifecycle replacement"));
             }
+            self.invalidate_body_changes();
             for prefix in LIFECYCLE_PREFIXES {
-                self.clear_checkpoint_rows(UndoTable::Meta, Some(prefix))?;
+                let mut cursor: Option<Vec<u8>> = None;
+                loop {
+                    use std::ops::Bound;
+                    let bounds = (
+                        cursor.as_deref().map_or(Bound::Included(*prefix), Bound::Excluded),
+                        Bound::Unbounded,
+                    );
+                    let keys = self.env.meta_db.range(&self.txn, &bounds)
+                        .map_err(LmdbError::from)?
+                        .take_while(|row| row.as_ref().map_or(true, |(key, _)| key.starts_with(prefix)))
+                        .take(256)
+                        .map(|row| {
+                            let (key, _) = row.map_err(LmdbError::from)?;
+                            if key.len() > MAX_BYTES / 256 {
+                                return Err(invalid("checkpoint replacement key exceeds batch limit"));
+                            }
+                            Ok((key.to_vec(), keep(key)))
+                        })
+                        .collect::<Result<Vec<_>, StoreError>>()?;
+                    let Some((last, _)) = keys.last() else { break; };
+                    cursor = Some(last.clone());
+                    for (key, retained) in keys {
+                        if !retained { self.delete_raw(UndoTable::Meta, &key)?; }
+                    }
+                }
             }
-            self.delete_raw(UndoTable::Meta, b"verification_orchestrator")?;
+            let has_verification = self.uses_verification_records()?
+                || self.env.meta_db.get(&self.txn, b"verification_orchestrator")
+                    .map_err(LmdbError::from)?.is_some();
+            if has_verification && !keep(b"verification_orchestrator") {
+                self.delete_raw(UndoTable::Meta, b"verification_orchestrator")?;
+            }
             Ok(())
         })();
         if result.is_err() {
@@ -467,7 +528,7 @@ impl LmdbWriteTransaction<'_> {
     /// be replaced together by the caller. Never join ordinary block undo.
     pub fn clear_checkpoint_token_rows(&mut self, prefix: &[u8]) -> Result<(), StoreError> {
         let result = (|| {
-            if self.failed || !matches!(prefix, b"trst_state/v1/" | b"trst_graph/v1/") {
+            if self.failed || !matches!(prefix, b"trst_state/v1/" | b"trst_holdings/v2/" | b"trst_graph/v1/") {
                 return Err(invalid("invalid token projection namespace"));
             }
             self.clear_checkpoint_rows(UndoTable::Meta, Some(prefix))
@@ -486,10 +547,52 @@ mod tests {
     use burst_store::{block::BlockStore, meta::MetaStore};
 
     #[test]
+    fn lifecycle_retention_visits_each_key_once_and_preserves_atomic_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = LmdbStore::open(directory.path(), 32, 16 << 20).unwrap();
+        let mut batch = store.tx_begin_write().unwrap();
+        for index in 0..600 {
+            batch.put_meta(&format!("verification_identity_source/{index:04}"), b"old").unwrap();
+        }
+        batch.put_meta("verification_identity_source-other", b"keep").unwrap();
+        batch.put_meta("verification_orchestrator", b"legacy").unwrap();
+        batch.commit().unwrap();
+        {
+            let mut batch = store.tx_begin_write().unwrap();
+            let visited = std::cell::Cell::new(0);
+            batch.retain_checkpoint_lifecycle(|_| {
+                visited.set(visited.get() + 1);
+                true
+            }).unwrap();
+            assert_eq!(visited.get(), 601);
+            assert!(!batch.changed_value, "retaining unchanged keys must not rewrite them");
+        }
+        for commit in [false, true] {
+            let mut batch = store.tx_begin_write().unwrap();
+            let visited = std::cell::Cell::new(0);
+            batch.retain_checkpoint_lifecycle(|key| {
+                visited.set(visited.get() + 1);
+                key.ends_with(b"0")
+            }).unwrap();
+            assert_eq!(visited.get(), 601);
+            batch.put_meta("verification_identity_source/0000", b"changed").unwrap();
+            batch.put_meta("verification_identity_source/new", b"inserted").unwrap();
+            assert_eq!(batch.checkpoint_metadata_entries(b"verification_identity_source/").unwrap().count(), 61);
+            assert_eq!(batch.get_meta("verification_identity_source-other").unwrap().unwrap(), b"keep");
+            if commit { batch.commit().unwrap(); } else { drop(batch); }
+            let batch = store.tx_begin_write().unwrap();
+            assert_eq!(batch.checkpoint_metadata_entries(b"verification_identity_source/").unwrap().count(), if commit { 61 } else { 600 });
+            assert_eq!(batch.get_meta("verification_identity_source/0000").unwrap().unwrap(), if commit { b"changed".as_slice() } else { b"old".as_slice() });
+            assert_eq!(batch.get_meta("verification_orchestrator").unwrap(),
+                if commit { None } else { Some(b"legacy".to_vec()) });
+        }
+    }
+
+    #[test]
     fn token_projection_replacement_is_scoped_atomic_and_rejects_block_undo() {
         let directory = tempfile::tempdir().unwrap();
         let store = LmdbStore::open(directory.path(), 32, 16 << 20).unwrap();
-        let prefixes = ["trst_state/v1/", "trst_graph/v1/"];
+        let prefixes = ["trst_state/v1/", "trst_holdings/v2/", "trst_graph/v1/"];
         let mut batch = store.tx_begin_write().unwrap();
         for prefix in prefixes {
             for row in 0..513 {
@@ -499,6 +602,8 @@ mod tests {
             }
         }
         batch.put_meta("trst_state/v1-other", b"keep").unwrap();
+        batch.put_meta("trst_holdings/v2-other", b"keep").unwrap();
+        batch.put_meta("trst_state_format", &[1]).unwrap();
         batch.put_meta("checkpoint_vote/keep", b"promise").unwrap();
         batch.commit().unwrap();
         for commit in [false, true] {
@@ -520,10 +625,9 @@ mod tests {
                 batch.commit().unwrap();
             } else {
                 drop(batch);
-                assert_eq!(
-                    store.meta_store().get_meta("trst_state/v1/0000").unwrap(),
-                    b"old"
-                );
+                for prefix in prefixes {
+                    assert_eq!(store.meta_store().get_meta(&format!("{prefix}0000")).unwrap(), b"old");
+                }
             }
         }
         store.force_sync().unwrap();
@@ -547,24 +651,24 @@ mod tests {
             batch.get_meta("trst_state/v1-other").unwrap().unwrap(),
             b"keep"
         );
+        assert_eq!(batch.get_meta("trst_holdings/v2-other").unwrap().unwrap(), b"keep");
+        assert_eq!(batch.get_meta("trst_state_format").unwrap(), Some(vec![1]));
         assert_eq!(
             batch.get_meta("checkpoint_vote/keep").unwrap().unwrap(),
             b"promise"
         );
         drop(batch);
-        for prefix in [b"".as_slice(), b"checkpoint_vote/", b"trst_state/"] {
+        for prefix in [b"".as_slice(), b"checkpoint_vote/", b"trst_state/", b"trst_holdings/", b"trst_holdings/v2"] {
             let mut batch = store.tx_begin_write().unwrap();
             assert!(batch.clear_checkpoint_token_rows(prefix).is_err());
             assert!(batch.commit().is_err());
         }
-        let mut batch = store.tx_begin_write().unwrap();
-        batch
-            .begin_block_undo(BlockHash::new([9; 32]), WalletAddress::new("brst_test"), 1)
-            .unwrap();
-        assert!(batch
-            .clear_checkpoint_token_rows(prefixes[0].as_bytes())
-            .is_err());
-        assert!(batch.commit().is_err());
+        for prefix in prefixes {
+            let mut batch = store.tx_begin_write().unwrap();
+            batch.begin_block_undo(BlockHash::new([9; 32]), WalletAddress::new("brst_test"), 1).unwrap();
+            assert!(batch.clear_checkpoint_token_rows(prefix.as_bytes()).is_err());
+            assert!(batch.commit().is_err());
+        }
     }
 
     #[test]
@@ -894,5 +998,35 @@ mod tests {
             .is_err());
         assert!(batch.commit().is_err());
         assert_eq!(store.block_store().get_block(&hash(2)).unwrap(), b"tail");
+    }
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+    #[test]
+    fn whole_table_clear_invalidates_body_change_coverage() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = crate::LmdbEnvironment::open(dir.path(), crate::REQUIRED_DATABASES, 32 << 20).unwrap();
+        let mut observer = env.tx_begin_write().unwrap().watch_body_changes(16, 4096).unwrap();
+        let mut writer = env.tx_begin_write().unwrap();
+        writer.clear_checkpoint_rows(UndoTable::Transactions, None).unwrap();
+        writer.commit().unwrap();
+        assert!(observer.visit(&env, |_| Ok(())).is_err());
+    }
+}
+
+impl crate::read_view::LedgerReadView<'_> {
+    pub fn visit_checkpoint_lifecycle(
+        &self,
+        mut visit: impl FnMut(&[u8], &[u8]) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        for prefix in LIFECYCLE_PREFIXES {
+            for row in self.checkpoint_metadata_entries(prefix)? {
+                let (key, value) = row?;
+                visit(key, value)?;
+            }
+        }
+        Ok(())
     }
 }

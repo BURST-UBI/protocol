@@ -2,17 +2,13 @@
 //! that have already been confirmed by consensus.
 //!
 //! This is a bounded FIFO set: when full, the oldest entry is evicted to
-//! make room for a new insertion. Lookups are O(1) via a `HashSet`.
+//! make room for a new insertion. Hash-set lookups take expected O(1) time.
 
 use burst_types::BlockHash;
 use std::collections::{HashSet, VecDeque};
 
-/// A bounded set of recently confirmed block hashes.
-///
-/// Used to short-circuit election creation for blocks that have already
-/// been confirmed and cemented. Without this cache the node would
-/// re-start elections for blocks it just confirmed whenever late votes
-/// arrive.
+/// FIFO cache used to skip election work for recently cemented blocks.
+/// Entries are supplied by the caller; the cache itself does not verify finality.
 pub struct RecentlyConfirmed {
     set: HashSet<BlockHash>,
     order: VecDeque<BlockHash>,
@@ -28,7 +24,8 @@ impl RecentlyConfirmed {
         }
     }
 
-    /// Insert a hash into the cache, evicting the oldest entry if at capacity.
+    /// Insert, evicting the oldest entry if full. Duplicates do not refresh age;
+    /// zero capacity disables the cache.
     pub fn insert(&mut self, hash: BlockHash) {
         if self.capacity == 0 {
             return;

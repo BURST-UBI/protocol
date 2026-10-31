@@ -1,6 +1,6 @@
-//! Phase 1: drand — external randomness beacon from the League of Entropy.
+//! Fetching and verifying drand randomness beacons.
 //!
-//! The chain approved in implementation decision 19.1 emits every 30 seconds.
+//! The default policy pins the chained network with 30-second rounds.
 //! This module provides an HTTP client to fetch and verify drand beacons,
 //! including full BLS12-381 signature verification against the network's
 //! distributed public key.
@@ -29,9 +29,6 @@ const DRAND_QUICKNET_DST: &[u8] = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_"
 /// Distributed public key for the drand quicknet network (G2 point, compressed).
 ///
 /// Chain hash: `52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971`
-///
-/// This can be fetched from `https://api.drand.sh/52db9ba.../info` and verified
-/// against the League of Entropy's published keys.
 const DRAND_QUICKNET_PUBKEY_HEX: &str = concat!(
     "83cf0f2896adee7eb8b5f01fcad3912212c437e0073e911fb90022d3e760183c",
     "8c4b450b6a0a6c3ac6a5776a2d1064510d1fec758c921cc22b0e17e63aaf4bcb",
@@ -116,7 +113,8 @@ impl DrandVerifier {
     /// Verify a drand beacon using full BLS12-381 signature verification.
     ///
     /// Returns `Ok(true)` if both the randomness derivation and BLS signature
-    /// are valid, `Ok(false)` if either check fails.
+    /// are valid. A mismatch returns `Ok(false)`; malformed inputs may return
+    /// an error. This does not check freshness or the caller's requested round.
     pub fn verify_beacon(&self, beacon: &DrandBeacon) -> Result<bool, VrfError> {
         if beacon.round == 0 {
             return Err(VrfError::InvalidProof("drand rounds start at 1".into()));
@@ -126,16 +124,13 @@ impl DrandVerifier {
         let randomness_bytes = hex::decode(&beacon.randomness)
             .map_err(|e| VrfError::InvalidProof(format!("randomness hex decode: {e}")))?;
 
-        // Step 1: Verify randomness == SHA-256(signature)
         let computed_randomness = Sha256::digest(&sig_bytes);
         if computed_randomness.as_slice() != randomness_bytes.as_slice() {
             return Ok(false);
         }
 
-        // Step 2: Construct the message that was signed
         let message = self.beacon_message(beacon)?;
 
-        // Step 3: Verify BLS signature
         self.verify_bls(&sig_bytes, &message)
     }
 
@@ -209,12 +204,9 @@ impl DrandVerifier {
     }
 }
 
-/// Simplified verification: only checks `randomness == SHA-256(signature)`.
-///
-/// This does NOT verify the BLS signature and should only be used for testing
-/// or when the `blst` library is unavailable. An attacker can forge beacons
-/// that pass this check.
-pub fn verify_beacon_simple(beacon: &DrandBeacon) -> Result<bool, VrfError> {
+/// Check only `randomness == SHA-256(signature)`. This does not authenticate
+/// the beacon: forged signatures can satisfy the same hash relationship.
+pub fn matches_randomness_hash(beacon: &DrandBeacon) -> Result<bool, VrfError> {
     let sig_bytes =
         hex::decode(&beacon.signature).map_err(|e| VrfError::InvalidProof(e.to_string()))?;
     let hash = Sha256::digest(&sig_bytes);
@@ -228,7 +220,7 @@ pub fn verify_beacon_simple(beacon: &DrandBeacon) -> Result<bool, VrfError> {
 pub struct ChainInfo {
     /// Network's distributed public key (compressed).
     pub public_key: Vec<u8>,
-    /// Seconds between rounds (typically 3 for quicknet).
+    /// Seconds between rounds.
     pub period: u64,
     /// UNIX timestamp of round 1.
     pub genesis_time: u64,
@@ -299,7 +291,7 @@ pub struct DrandClient {
 }
 
 impl DrandClient {
-    /// Create a client for the chain approved in implementation decision 19.1.
+    /// Create a client with the pinned mainnet chain, key and round schedule.
     pub fn new() -> Self {
         Self::mainnet().expect("the pinned mainnet public key is valid")
     }
@@ -370,7 +362,8 @@ impl DrandClient {
         self
     }
 
-    /// Attach chain info for round-to-time calculations and future-round rejection.
+    /// Attach chain metadata for consistency checks and round-to-time mapping.
+    /// Wall-clock validation requires an explicit `validate_round_timing` call.
     pub fn with_chain_info(mut self, info: ChainInfo) -> Self {
         self.chain_info = Some(info);
         self
@@ -441,7 +434,7 @@ impl DrandClient {
     pub async fn fetch_latest(&self) -> Result<DrandBeacon, VrfError> {
         let url = format!("{}/public/latest", self.api_prefix());
         let beacon = self.fetch_beacon_from(&url).await?;
-        self.maybe_verify(&beacon)?;
+        self.authenticate_beacon(&beacon)?;
         Ok(beacon)
     }
 
@@ -461,7 +454,7 @@ impl DrandClient {
                 beacon.round
             )));
         }
-        self.maybe_verify(&beacon)?;
+        self.authenticate_beacon(&beacon)?;
         Ok(beacon)
     }
 
@@ -499,7 +492,7 @@ impl DrandClient {
                         beacon.round
                     )));
                 }
-                self.maybe_verify(&beacon)?;
+                self.authenticate_beacon(&beacon)?;
                 Ok(beacon)
             })
             .collect();
@@ -554,7 +547,7 @@ impl DrandClient {
     }
 
     /// Require full BLS verification; a signature hash alone is not authentication.
-    fn maybe_verify(&self, beacon: &DrandBeacon) -> Result<(), VrfError> {
+    fn authenticate_beacon(&self, beacon: &DrandBeacon) -> Result<(), VrfError> {
         let verifier = self.verifier.as_ref().ok_or_else(|| {
             VrfError::Unavailable("custom drand clients require a pinned BLS verifier".into())
         })?;
@@ -572,8 +565,8 @@ impl DrandClient {
         verifier.require_beacon(beacon)
     }
 
-    /// Fetch the latest beacon with caching — returns the cached beacon if
-    /// the current round hasn't changed since the last fetch.
+    /// Reuse a cached beacon only when its round matches the local clock
+    /// under the configured chain schedule. Otherwise fetch the latest beacon.
     pub async fn fetch_latest_cached(&mut self) -> Result<DrandBeacon, VrfError> {
         if let Some(ref info) = self.chain_info {
             let now = std::time::SystemTime::now()
@@ -593,7 +586,9 @@ impl DrandClient {
         Ok(beacon)
     }
 
-    /// Validate that a beacon's round is not from the future.
+    /// Check round availability against the local clock when metadata is set.
+    /// With no metadata this returns success without checking the round.
+    /// Fetching and proof verification do not call this method.
     pub fn validate_round_timing(&self, beacon: &DrandBeacon) -> Result<(), VrfError> {
         if let Some(ref info) = self.chain_info {
             let now = std::time::SystemTime::now()
@@ -615,7 +610,8 @@ impl DrandClient {
         DrandPolicy::mainnet()?.verifier.verify_beacon(beacon)
     }
 
-    /// Convert a drand beacon into a [`RandomOutput`] for use in verifier selection.
+    /// Encode a beacon as [`RandomOutput`], preserving its complete proof.
+    /// This checks randomness length but does not authenticate the beacon.
     pub fn beacon_to_random_output(beacon: &DrandBeacon) -> Result<RandomOutput, VrfError> {
         let randomness_bytes =
             hex::decode(&beacon.randomness).map_err(|e| VrfError::InvalidProof(e.to_string()))?;
@@ -653,7 +649,7 @@ impl VrfProvider for DrandClient {
     fn verify(&self, _context: &[u8], output: &RandomOutput) -> Result<bool, VrfError> {
         // If we have a verifier, reconstruct the beacon and do full BLS verification.
         if self.verifier.is_some() {
-            return policy::verify_output(output, |beacon| self.maybe_verify(beacon));
+            return policy::verify_output(output, |beacon| self.authenticate_beacon(beacon));
         }
 
         Err(VrfError::Unavailable(
@@ -722,7 +718,7 @@ mod tests {
         let client = DrandClient::new();
         assert_eq!(client.chain_hash.as_deref(), Some(DRAND_MAINNET_CHAIN));
         let beacon = mainnet_round_one();
-        client.maybe_verify(&beacon).unwrap();
+        client.authenticate_beacon(&beacon).unwrap();
         let mut output = DrandClient::beacon_to_random_output(&beacon).unwrap();
         assert!(client.verify(&[], &output).unwrap());
         output.round = 2;
@@ -731,7 +727,7 @@ mod tests {
         output.proof.push(0);
         assert!(client.verify(&[], &output).is_err());
         let quicknet = DrandClient::quicknet().unwrap();
-        assert!(quicknet.maybe_verify(&beacon).is_err());
+        assert!(quicknet.authenticate_beacon(&beacon).is_err());
     }
 
     #[test]
@@ -740,7 +736,7 @@ mod tests {
         let beacon = mainnet_round_one();
         let output = DrandClient::beacon_to_random_output(&beacon).unwrap();
         client.chain_info.as_mut().unwrap().chain_hash = "another-chain".into();
-        assert!(client.maybe_verify(&beacon).is_err());
+        assert!(client.authenticate_beacon(&beacon).is_err());
         assert!(client.verify(&[], &output).is_err());
     }
 
@@ -1068,7 +1064,7 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_beacon_simple_valid() {
+    fn test_matches_randomness_hash_valid() {
         let sig_hex = "deadbeef".to_string();
         let sig_bytes = hex::decode(&sig_hex).unwrap();
         let hash = Sha256::digest(&sig_bytes);
@@ -1081,11 +1077,11 @@ mod tests {
             previous_signature: None,
         };
 
-        assert!(verify_beacon_simple(&beacon).unwrap());
+        assert!(matches_randomness_hash(&beacon).unwrap());
     }
 
     #[test]
-    fn test_verify_beacon_simple_invalid() {
+    fn test_matches_randomness_hash_invalid() {
         let beacon = DrandBeacon {
             round: 1,
             randomness: "0000000000000000000000000000000000000000000000000000000000000000"
@@ -1094,7 +1090,7 @@ mod tests {
             previous_signature: None,
         };
 
-        assert!(!verify_beacon_simple(&beacon).unwrap());
+        assert!(!matches_randomness_hash(&beacon).unwrap());
     }
 
     #[test]
@@ -1152,7 +1148,7 @@ mod tests {
         assert!(!matches!(client.verify(&[], &output), Ok(true)));
         let custom = DrandClient::with_url("http://127.0.0.1");
         assert!(custom.verify(&[], &output).is_err());
-        assert!(custom.maybe_verify(&quicknet_round_one()).is_err());
+        assert!(custom.authenticate_beacon(&quicknet_round_one()).is_err());
     }
 
     #[test]
@@ -1236,7 +1232,7 @@ mod tests {
         };
 
         // SHA-256 check passes, but BLS verification must fail
-        assert!(verify_beacon_simple(&forged).unwrap());
+        assert!(matches_randomness_hash(&forged).unwrap());
         let result = verifier.verify_beacon(&forged);
         // Deserialization failure also rejects the forged beacon.
         if let Ok(valid) = result {

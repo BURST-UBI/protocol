@@ -39,7 +39,7 @@ fn checkpoint_driver_recovers_authority_after_certified_outcome() {
     let (mut fixture, selections) = completed(ChallengeReason::Fraud);
     pending_successor(&mut fixture);
     let (_dir, store, heads) = restore_chain(&fixture, &selections);
-    let outcome = install_outcome(&fixture, &store, &heads);
+    let outcome = persist_outcome(&fixture, &store, &heads);
     crate::confirmed_replay::tests::snapshot_history::boundaries::assert_chain(&fixture, &store);
     let next = CertifiedCheckpoint::prepare(
         &store,
@@ -68,12 +68,12 @@ fn pending_successor(fixture: &mut Fixture) {
     for seed in [1, 2] {
         fixture.push(seed, BlockType::Endorse, CUTOFF + 67, |block| {
             block.link = destination(21);
-            block.brn_balance += 1;
+            block.brn_spent += 1;
         });
     }
 }
 
-fn install_outcome(
+fn persist_outcome(
     fixture: &Fixture,
     store: &LmdbStore,
     heads: &[HistoryHead],
@@ -102,7 +102,7 @@ fn mixed_chain_restarts_with_revoked_authority_and_no_duplicate_settlement() {
     pending_successor(&mut fixture);
     let (dir, store, heads) = restore_chain(&fixture, &selections);
     let before = store.account_store().get_account(&address(20)).unwrap();
-    let outcome = install_outcome(&fixture, &store, &heads);
+    let outcome = persist_outcome(&fixture, &store, &heads);
     {
         let mut batch = store.tx_begin_write().unwrap();
         assert!(!selections[0].live_epoch_ready(&batch).unwrap());
@@ -253,7 +253,7 @@ fn mixed_chain_restarts_with_revoked_authority_and_no_duplicate_settlement() {
         4
     );
     assert_eq!(
-        crate::checkpoint_beacon::pending_selections(restored).len(),
+        crate::checkpoint_beacon::selection_checkpoints(restored).len(),
         3
     );
     let store = std::sync::Arc::new(store);
@@ -288,7 +288,7 @@ fn mixed_chain_raw_import_checks_kind_domain_and_exact_parent_before_writing() {
     let (mut fixture, selections) = completed(ChallengeReason::Fraud);
     pending_successor(&mut fixture);
     let (_dir, source, heads) = restore_chain(&fixture, &selections);
-    install_outcome(&fixture, &source, &heads);
+    persist_outcome(&fixture, &source, &heads);
     let next = CertifiedCheckpoint::prepare(
         &source,
         NetworkId::Dev,
@@ -469,7 +469,7 @@ fn post_outcome_legacy_block_tail_is_rejected_without_advancing_chain() {
     let (mut fixture, selections) = completed(ChallengeReason::Inactivity);
     pending_successor(&mut fixture);
     let (_dir, store, heads) = restore_chain(&fixture, &selections);
-    install_outcome(&fixture, &store, &heads);
+    persist_outcome(&fixture, &store, &heads);
     let records: Vec<_> = (1..=3)
         .map(|height| {
             CertifiedCheckpoint::export_record(&store, NetworkId::Dev, &fixture.params, height)
@@ -568,7 +568,7 @@ fn consecutive_outcomes_replay_in_order_without_reopening_creator_bootstrap() {
         }
     }
     let (dir, store, heads) = restore_chain(&fixture, &selections);
-    let first_outcome = install_outcome(&fixture, &store, &heads);
+    let first_outcome = persist_outcome(&fixture, &store, &heads);
     assert_eq!(first_outcome.certificate().checkpoint.height, 4);
     assert!(
         first_outcome

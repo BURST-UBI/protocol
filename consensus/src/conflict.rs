@@ -6,12 +6,9 @@ use burst_types::{BlockHash, WalletAddress};
 pub struct ConflictDetector;
 
 impl ConflictDetector {
-    /// Check if two blocks represent a fork (same account, same previous, different hash).
-    ///
-    /// Two blocks form a fork if:
-    /// - They have the same previous block hash (`previous_a == previous_b`)
-    /// - They have different block hashes (`block_a != block_b`)
-    /// - Both belong to the same account (account parameter ensures this)
+    /// Compare hashes at a position the caller has already bound to one account.
+    /// The account argument is unused; this helper only checks for equal previous
+    /// hashes and different candidate hashes. It does not inspect block contents.
     pub fn is_fork(
         &self,
         _account: &WalletAddress,

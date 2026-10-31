@@ -6,6 +6,7 @@ license.workspace = true
 description = "BRN computation engine — accrual, burning, staking, rate-change splitting"
 
 [dependencies]
+imbl = { workspace = true, features = ["serde"] }
 burst-types = { workspace = true }
 burst-crypto = { workspace = true }
 burst-store = { workspace = true }

@@ -1,12 +1,18 @@
 use super::*;
 
+fn owned_map<V: Clone>(map: &SharedMap<TxHash, V>) -> HashMap<TxHash, V> {
+    map.iter()
+        .map(|(key, value)| (*key, value.clone()))
+        .collect()
+}
+
 #[test]
 fn structural_equality_covers_every_persisted_graph_field() {
     let mut graph = MergerGraph::new();
     graph.record_merge(node(20, &[(1, 60), (2, 40)]));
     graph.apply_revocation(tx(1));
     graph.record_merge(node(30, &[(20, 40)]));
-    graph.apply_unrevocation(&tx(1));
+    graph.apply_restoration(&tx(1));
     let bytes = graph.to_bytes();
     let decoded = MergerGraph::from_bytes(&bytes).unwrap();
     assert!(!decoded.shares_storage_with(&graph));
@@ -15,24 +21,22 @@ fn structural_equality_covers_every_persisted_graph_field() {
         let mut changed = graph.clone();
         match field {
             0 => {
-                changed.origin_to_merges.insert(tx(99), vec![tx(20)]);
+                changed.origin_to_merges.insert(tx(99), vec![tx(20)].into());
             }
             1 => {
                 changed.merge_nodes.remove(&tx(20));
             }
             2 => {
-                changed.merge_to_downstream.insert(tx(99), vec![tx(30)]);
+                changed
+                    .merge_to_downstream
+                    .insert(tx(99), vec![tx(30)].into());
             }
             3 => {
                 changed.revoked_origins.insert(tx(99));
             }
             4 => {
-                changed
-                    .revisions
-                    .values_mut()
-                    .next()
-                    .expect("revision fixture")
-                    .remaining += 1;
+                let key = *changed.revisions.keys().next().expect("revision fixture");
+                changed.revisions.get_mut(&key).unwrap().remaining += 1;
             }
             5 => {
                 changed.current_revisions.insert(tx(99), tx(30));
@@ -89,7 +93,7 @@ fn candidates_share_reads_but_merge_and_revocation_writes_are_isolated() {
     assert_eq!(live.to_bytes(), before);
     let revoked = candidate.to_bytes();
     let mut restored = candidate.clone();
-    restored.apply_unrevocation(&tx(1));
+    restored.apply_restoration(&tx(1));
     assert!(!restored.is_origin_revoked(&tx(1)));
     assert_eq!(candidate.to_bytes(), revoked);
     assert_eq!(live.to_bytes(), before);
@@ -103,35 +107,43 @@ fn candidates_share_reads_but_merge_and_revocation_writes_are_isolated() {
 #[test]
 fn shared_storage_preserves_the_existing_canonical_snapshot_bytes() {
     #[derive(Serialize)]
-    struct LegacyGraph<'a> {
+    struct LegacyGraph {
         #[serde(serialize_with = "sorted_map")]
-        origin_to_merges: &'a HashMap<TxHash, Vec<TxHash>>,
+        origin_to_merges: HashMap<TxHash, Vec<TxHash>>,
         #[serde(serialize_with = "sorted_map")]
-        merge_nodes: &'a HashMap<TxHash, MergeNode>,
+        merge_nodes: HashMap<TxHash, MergeNode>,
         #[serde(serialize_with = "sorted_map")]
-        merge_to_downstream: &'a HashMap<TxHash, Vec<TxHash>>,
+        merge_to_downstream: HashMap<TxHash, Vec<TxHash>>,
         #[serde(serialize_with = "sorted_set")]
-        revoked_origins: &'a HashSet<TxHash>,
+        revoked_origins: HashSet<TxHash>,
         #[serde(serialize_with = "sorted_map")]
-        revisions: &'a HashMap<TxHash, RevocationRevision>,
+        revisions: HashMap<TxHash, RevocationRevision>,
         #[serde(serialize_with = "sorted_map")]
-        current_revisions: &'a HashMap<TxHash, TxHash>,
+        current_revisions: HashMap<TxHash, TxHash>,
         #[serde(serialize_with = "sorted_map")]
-        source_revisions: &'a HashMap<TxHash, Vec<(usize, TrstBasis)>>,
+        source_revisions: HashMap<TxHash, Vec<(usize, TrstBasis)>>,
     }
     let mut graph = MergerGraph::new();
     graph.record_merge(node(20, &[(1, 60), (2, 40)]));
     graph.apply_revocation(tx(1));
     graph.record_merge(node(30, &[(20, 40)]));
-    graph.apply_unrevocation(&tx(1));
+    graph.apply_restoration(&tx(1));
     let legacy = LegacyGraph {
-        origin_to_merges: &graph.origin_to_merges,
-        merge_nodes: &graph.merge_nodes,
-        merge_to_downstream: &graph.merge_to_downstream,
-        revoked_origins: &graph.revoked_origins,
-        revisions: &graph.revisions,
-        current_revisions: &graph.current_revisions,
-        source_revisions: &graph.source_revisions,
+        origin_to_merges: graph
+            .origin_to_merges
+            .iter()
+            .map(|(k, v)| (*k, v.iter().copied().collect::<Vec<_>>()))
+            .collect::<HashMap<_, _>>(),
+        merge_nodes: owned_map(&graph.merge_nodes),
+        merge_to_downstream: graph
+            .merge_to_downstream
+            .iter()
+            .map(|(k, v)| (*k, v.iter().copied().collect::<Vec<_>>()))
+            .collect::<HashMap<_, _>>(),
+        revoked_origins: graph.revoked_origins.iter().copied().collect(),
+        revisions: owned_map(&graph.revisions),
+        current_revisions: owned_map(&graph.current_revisions),
+        source_revisions: owned_map(&graph.source_revisions),
     };
     let mut bytes = SNAPSHOT_MAGIC.to_vec();
     bytes.extend(bincode::serialize(&legacy).unwrap());
@@ -160,15 +172,28 @@ fn merger_snapshot_clone_cost() {
     }
     let start = std::time::Instant::now();
     for _ in 0..100 {
-        // The seven owned collections copied by the previous Clone derive.
+        // Compare rebuilding seven owned collections with sharing their roots.
+        // Timings include destruction; no mutations, storage or network work run.
         std::hint::black_box((
-            (*graph.origin_to_merges).clone(),
-            (*graph.merge_nodes).clone(),
-            (*graph.merge_to_downstream).clone(),
-            (*graph.revoked_origins).clone(),
-            (*graph.revisions).clone(),
-            (*graph.current_revisions).clone(),
-            (*graph.source_revisions).clone(),
+            graph
+                .origin_to_merges
+                .iter()
+                .map(|(k, v)| (*k, v.iter().copied().collect::<Vec<_>>()))
+                .collect::<HashMap<_, _>>(),
+            owned_map(&graph.merge_nodes),
+            graph
+                .merge_to_downstream
+                .iter()
+                .map(|(k, v)| (*k, v.iter().copied().collect::<Vec<_>>()))
+                .collect::<HashMap<_, _>>(),
+            graph
+                .revoked_origins
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>(),
+            owned_map(&graph.revisions),
+            owned_map(&graph.current_revisions),
+            owned_map(&graph.source_revisions),
         ));
     }
     eprintln!(

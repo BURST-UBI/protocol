@@ -1,6 +1,7 @@
 //! Time formatting helpers.
 
-/// Format a duration in seconds to a human-readable string.
+/// Format seconds as s, m/s, h/m or d/h. Discard units smaller than the
+/// displayed pair rather than rounding upward.
 pub fn format_duration(secs: u64) -> String {
     if secs < 60 {
         format!("{}s", secs)

@@ -1,4 +1,4 @@
-//! DAG frontier — the set of all account chain tips.
+//! In-memory map of account addresses to chain heads.
 
 use burst_types::{BlockHash, WalletAddress};
 use std::collections::HashMap;
@@ -28,10 +28,8 @@ impl DagFrontier {
         self.heads.len()
     }
 
-    /// Remove an account from the frontier entirely.
-    ///
-    /// Used during rollback of an open block — the account ceases to exist.
-    /// Returns the previous head hash if the account was present.
+    /// Remove the cached head and return it if present. Rollback callers use
+    /// this when removing an opening block; persistent account removal is separate.
     pub fn remove(&mut self, account: &WalletAddress) -> Option<BlockHash> {
         self.heads.remove(account)
     }

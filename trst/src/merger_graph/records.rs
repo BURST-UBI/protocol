@@ -3,6 +3,9 @@
 use super::*;
 use std::collections::BTreeMap;
 mod delta;
+mod removal;
+mod retention;
+mod revocation_undo;
 
 #[cfg(test)]
 mod tests;
@@ -61,6 +64,37 @@ impl GraphRecord {
     pub const STORAGE_PREFIX: &'static str = "trst_graph/v1/";
     const MAX_BYTES: u64 = 1024;
 
+    /// Storage prefix and durable ordering slot for a reverse edge.
+    pub fn edge_group_position(&self) -> Option<(String, u64)> {
+        match self {
+            GraphRecord::OriginEdge {
+                origin, position, ..
+            } => Some((
+                format!("{}3/{origin}/", GraphRecord::STORAGE_PREFIX),
+                *position,
+            )),
+            GraphRecord::DownstreamEdge {
+                merge, position, ..
+            } => Some((
+                format!("{}4/{merge}/", GraphRecord::STORAGE_PREFIX),
+                *position,
+            )),
+            _ => None,
+        }
+    }
+
+    /// Set a reverse edge slot without changing its storage key.
+    ///
+    /// Panics for records other than OriginEdge and DownstreamEdge.
+    pub fn set_edge_position(&mut self, value: u64) {
+        match self {
+            GraphRecord::OriginEdge { position, .. } | GraphRecord::DownstreamEdge { position, .. } => {
+                *position = value
+            }
+            _ => unreachable!("position belongs to a reverse edge"),
+        }
+    }
+
     fn key(&self) -> String {
         let suffix = match self {
             Self::Node { hash, .. } => format!("0/{hash}"),
@@ -100,6 +134,9 @@ impl GraphRecord {
         Ok((self.key(), bytes))
     }
 
+    /// Decode a bounded version-1 row and check its primary key. Edge positions
+    /// live in the payload, not the key; ordering and occurrence checks happen
+    /// during reconstruction. This does not validate graph relationships.
     pub fn from_storage_entry(key: &str, bytes: &[u8]) -> Result<Self, String> {
         if bytes.len() as u64 > Self::MAX_BYTES
             || !key.starts_with(Self::STORAGE_PREFIX)
@@ -120,6 +157,12 @@ impl GraphRecord {
     }
 }
 
+/// Reconstruct a graph from caller-supplied records. Nodes precede sources and
+/// contributions; source-revision headers precede their entries. Both source
+/// sequences require contiguous positions from zero. Reverse edges can arrive
+/// out of order and have position gaps, but positions must be unique per parent
+/// and each child's occurrences must count from zero in position order.
+/// Any push error permanently invalidates the reader.
 #[derive(Default)]
 pub struct GraphRecordReader {
     graph: MergerGraph,
@@ -129,7 +172,14 @@ pub struct GraphRecordReader {
 }
 
 #[derive(Default)]
-struct EdgeReader(HashMap<TxHash, BTreeMap<u64, (TxHash, u64)>>);
+struct EdgeReader(HashMap<TxHash, Box<PendingEdges>>);
+
+// A pointer-sized table value avoids enlarging every hash slot for the common
+// one-child case. Only parents with multiple positions allocate an ordered tree.
+enum PendingEdges {
+    Single { position: u64, child: TxHash, occurrence: u64 },
+    Multiple(BTreeMap<u64, (TxHash, u64)>),
+}
 
 impl EdgeReader {
     fn push(
@@ -139,25 +189,57 @@ impl EdgeReader {
         child: TxHash,
         occurrence: u64,
     ) -> Result<(), String> {
-        if self
-            .0
-            .entry(parent)
-            .or_default()
-            .insert(position, (child, occurrence))
-            .is_some()
-        {
-            return Err("duplicate merger graph edge position".into());
+        use std::collections::hash_map::Entry;
+        match self.0.entry(parent) {
+            Entry::Vacant(entry) => {
+                entry.insert(Box::new(PendingEdges::Single { position, child, occurrence }));
+            }
+            Entry::Occupied(mut entry) => {
+                let pending = entry.get_mut().as_mut();
+                match pending {
+                    PendingEdges::Single { position: old_position, child: old_child, occurrence: old_occurrence } => {
+                        if *old_position == position {
+                            return Err("duplicate merger graph edge position".into());
+                        }
+                        let mut edges = BTreeMap::new();
+                        edges.insert(*old_position, (*old_child, *old_occurrence));
+                        edges.insert(position, (child, occurrence));
+                        *pending = PendingEdges::Multiple(edges);
+                    }
+                    PendingEdges::Multiple(edges) => {
+                        if edges.insert(position, (child, occurrence)).is_some() {
+                            return Err("duplicate merger graph edge position".into());
+                        }
+                    }
+                }
+            }
         }
         Ok(())
     }
 
-    fn finish(self) -> Result<HashMap<TxHash, Vec<TxHash>>, String> {
+    #[cfg(test)]
+    fn finish(self) -> Result<SharedMap<TxHash, EdgeList>, String> {
+        self.finish_with_poll(&|_| Ok(()))
+    }
+
+    fn finish_with_poll(self, poll: &dyn Fn(&'static str) -> Result<(), String>) -> Result<SharedMap<TxHash, EdgeList>, String> {
         self.0
             .into_iter()
             .map(|(parent, edges)| {
+                poll("trst:graph-build-parent")?;
+                let edges = match *edges {
+                    PendingEdges::Single { child, occurrence, .. } => {
+                        if occurrence != 0 {
+                            return Err("nonsequential merger graph edge occurrence".into());
+                        }
+                        return Ok((parent, vec![child].into()));
+                    }
+                    PendingEdges::Multiple(edges) => edges,
+                };
                 let mut counts = HashMap::<TxHash, u64>::new();
-                let mut children = Vec::with_capacity(edges.len());
+                let mut children = EdgeList::default();
                 for (child, occurrence) in edges.into_values() {
+                    poll("trst:graph-build-edge")?;
                     let expected = counts.entry(child).or_default();
                     if *expected != occurrence {
                         return Err("nonsequential merger graph edge occurrence".into());
@@ -315,19 +397,27 @@ impl GraphRecordReader {
         Ok(())
     }
 
-    pub fn finish(mut self) -> Result<MergerGraph, String> {
+    pub fn finish(self) -> Result<MergerGraph, String> {
+        self.finish_with_poll(&|_| Ok(()))
+    }
+
+    /// Assemble edges and validate graph structure and revision records. Errors,
+    /// including cancellation, return no partial graph. Burn ownership, holding
+    /// references and ledger authentication still require combined validation.
+    pub fn finish_with_poll(mut self, poll: &dyn Fn(&'static str) -> Result<(), String>) -> Result<MergerGraph, String> {
         if self.failed {
             return Err("cannot publish failed merger graph reconstruction".into());
         }
-        self.graph.origin_to_merges = self.origins.finish()?.into();
-        self.graph.merge_to_downstream = self.downstream.finish()?.into();
-        self.graph.validate_persisted()?;
+        self.graph.origin_to_merges = self.origins.finish_with_poll(poll)?;
+        self.graph.merge_to_downstream = self.downstream.finish_with_poll(poll)?;
+        self.graph.validate_persisted_with_poll(poll)?;
         Ok(self.graph)
     }
 }
 
 impl MergerGraph {
-    /// Count the rows without constructing ordering indexes or encoded records.
+    /// Sum record counts across nodes and indexes without encoding rows. Returns
+    /// None on usize overflow; this scans containers rather than using one cache.
     pub fn record_count(&self) -> Option<usize> {
         [
             self.merge_nodes.len(),
@@ -361,18 +451,23 @@ impl MergerGraph {
         .try_fold(0usize, usize::checked_add)
     }
 
-    /// Emit individual sources, edges and revision contributions, not growing
-    /// per-origin vectors or whole-graph encoded buffers.
+    /// Emit records in deterministic groups, with headers before dependent rows.
+    /// Sorting uses temporary reference vectors, and each edge group tracks child
+    /// occurrence counts. No whole-graph encoded buffer is built. Edge positions
+    /// are dense output offsets, not original durable slots. Callback errors stop
+    /// emission without undoing prior effects; callers stage persistent writes.
     pub fn visit_records<E>(
         &self,
         mut visit: impl FnMut(GraphRecord) -> Result<(), E>,
     ) -> Result<(), E> {
-        fn ordered<T>(map: &HashMap<TxHash, T>) -> Vec<(&TxHash, &T)> {
-            let mut values: Vec<_> = map.iter().collect();
+        fn ordered<'a, T: 'a>(
+            entries: impl Iterator<Item = (&'a TxHash, &'a T)>,
+        ) -> Vec<(&'a TxHash, &'a T)> {
+            let mut values: Vec<_> = entries.collect();
             values.sort_unstable_by_key(|(key, _)| *key.as_bytes());
             values
         }
-        for (hash, node) in ordered(&self.merge_nodes) {
+        for (hash, node) in ordered(self.merge_nodes.iter()) {
             visit(GraphRecord::Node {
                 hash: *hash,
                 total: node.total_amount,
@@ -384,7 +479,7 @@ impl MergerGraph {
                     source: source.clone(),
                 })?;
             }
-            for (origin, amount) in ordered(&node.revoked_contribs) {
+            for (origin, amount) in ordered(node.revoked_contribs.iter()) {
                 visit(GraphRecord::Contribution {
                     merge: *hash,
                     origin: *origin,
@@ -392,7 +487,7 @@ impl MergerGraph {
                 })?;
             }
         }
-        for (origin, children) in ordered(&self.origin_to_merges) {
+        for (origin, children) in ordered(self.origin_to_merges.iter()) {
             let mut occurrences = HashMap::<TxHash, u64>::new();
             for (position, child) in children.iter().enumerate() {
                 let occurrence = occurrences.entry(*child).or_default();
@@ -405,7 +500,7 @@ impl MergerGraph {
                 *occurrence += 1;
             }
         }
-        for (merge, children) in ordered(&self.merge_to_downstream) {
+        for (merge, children) in ordered(self.merge_to_downstream.iter()) {
             let mut occurrences = HashMap::<TxHash, u64>::new();
             for (position, child) in children.iter().enumerate() {
                 let occurrence = occurrences.entry(*child).or_default();
@@ -423,7 +518,7 @@ impl MergerGraph {
         for origin in revoked {
             visit(GraphRecord::RevokedOrigin(origin))?;
         }
-        for (hash, revision) in ordered(&self.revisions) {
+        for (hash, revision) in ordered(self.revisions.iter()) {
             visit(GraphRecord::Revision {
                 hash: *hash,
                 merge: revision.merge_tx,
@@ -433,13 +528,13 @@ impl MergerGraph {
                 remaining: revision.remaining,
             })?;
         }
-        for (merge, revision) in ordered(&self.current_revisions) {
+        for (merge, revision) in ordered(self.current_revisions.iter()) {
             visit(GraphRecord::CurrentRevision {
                 merge: *merge,
                 revision: *revision,
             })?;
         }
-        for (merge, sources) in ordered(&self.source_revisions) {
+        for (merge, sources) in ordered(self.source_revisions.iter()) {
             visit(GraphRecord::SourceRevisions(*merge))?;
             for (position, (index, basis)) in sources.iter().enumerate() {
                 visit(GraphRecord::SourceRevision {
@@ -453,6 +548,8 @@ impl MergerGraph {
         Ok(())
     }
 
+    /// Reconstruct and structurally validate records from one caller-owned
+    /// consistent view. This helper does not open or pin a storage transaction.
     pub fn from_records(
         records: impl IntoIterator<Item = Result<GraphRecord, String>>,
     ) -> Result<Self, String> {

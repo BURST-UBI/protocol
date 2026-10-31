@@ -122,7 +122,7 @@ jobs:
         with:
           shared-key: burst-wasm
       - run: cargo check -p burst-wallet-core -p burst-crypto --locked --target wasm32-unknown-unknown
-      - run: cargo clippy -p burst-wallet-core -p burst-groups -p burst-browser --locked --target wasm32-unknown-unknown -- -D warnings
+      - run: cargo clippy -p burst-wallet-core -p burst-groups -p burst-web-runtime --locked --target wasm32-unknown-unknown -- -D warnings
 
   test:
     needs: scope
@@ -140,11 +140,11 @@ jobs:
           shared-key: burst-nightly
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo test --workspace --exclude burst-node --locked
-      - name: Check Protobuf schema against the running node codec
+      - name: Check Protobuf schema against the live message codec
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
-          cargo test -p burst-node --test protobuf_schema --locked -- --ignored
+          cargo test -p burst-messages --test protobuf_schema --locked -- --ignored
 
   node-test-build:
     name: Build node test executable once

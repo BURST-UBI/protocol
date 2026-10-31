@@ -8,6 +8,19 @@ pub(in crate::confirmed_replay::snapshot) enum Authority {
 }
 
 impl AuthoritySource for Authority {
+    fn authenticated_steps(&self, base: &CheckpointAnchor) -> Box<dyn Iterator<Item = Result<source::AuthenticatedStep, ReplayError>> + '_> {
+        match self {
+            Self::Memory(steps) => steps.authenticated_steps(base),
+            Self::File(history) => AuthoritySource::authenticated_steps(history.as_ref(), base),
+        }
+    }
+    fn entries(&self, base: &CheckpointAnchor) -> Box<dyn Iterator<Item = Result<super::super::installed::authority_history::Entry, ReplayError>> + '_> {
+        match self {
+            Self::Memory(steps) => steps.entries(base),
+            Self::File(history) => AuthoritySource::entries(history.as_ref(), base),
+        }
+    }
+
     fn count(&self) -> Result<usize, ReplayError> {
         match self {
             Self::Memory(steps) => steps.count(),
@@ -30,6 +43,8 @@ impl Authority {
         AuthoritySource::steps(self)
     }
 
+    /// Authenticate in-memory steps from base, or return an existing file history
+    /// unchanged. The file variant retains its original base and directory.
     pub(in crate::confirmed_replay::snapshot) fn into_history(
         self,
         base: &CheckpointAnchor,
@@ -125,6 +140,8 @@ impl<'de> Visitor<'de> for HeaderSeed<'_> {
     }
 }
 
+/// Decode the v2 header and authenticate its authority steps. The caller must
+/// still verify the snapshot certificate and beacon supplements.
 pub(super) fn read_header(
     base: &CheckpointAnchor,
     reader: &mut impl Read,

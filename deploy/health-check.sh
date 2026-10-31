@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# health-check.sh — Check the health of BURST testnet nodes.
+# Report RPC reachability and counters for BURST testnet nodes.
 #
 # Usage:
 #   ./deploy/health-check.sh <ip1> [ip2 ...]
 #
 # Queries each node's RPC "node_info" endpoint and reports:
-#   - Online/offline status
+#   - RPC response/error status (not consensus or signing readiness)
 #   - Block count, account count
 #   - Peer count
 #   - Uptime

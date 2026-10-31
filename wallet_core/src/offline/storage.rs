@@ -47,7 +47,8 @@ pub fn save_payment_with_ancestry(
     save_draft(path, block, ancestry, None, 3)
 }
 
-/// Journal an already-reviewed online action, including its signed content commitment.
+/// Save a signed action and any proposal content bound by its commitment.
+/// The caller owns user review; this function checks the signature and content binding.
 pub fn save_signed_action(
     path: &Path,
     block: &StateBlock,
@@ -132,7 +133,9 @@ fn attempt_path(path: &Path, hash: &burst_types::BlockHash) -> std::path::PathBu
     path.with_file_name(format!("attempted-{hash}.marker"))
 }
 
-/// Publish the complete recovery receipt before releasing the account slot.
+/// Archive a resolved draft before removing its active file.
+/// The caller establishes the outcome; `prefix` labels it but is not proof of it.
+/// Retention runs after archival and logs failures without undoing resolution.
 pub fn archive_payment(path: &Path, prefix: &str) -> Result<(), WalletError> {
     if prefix.is_empty()
         || !prefix
@@ -195,7 +198,9 @@ fn ensure_same_receipt(path: &Path, draft: &Draft) -> Result<(), WalletError> {
     Ok(())
 }
 
-pub fn payment_was_submitted(
+/// True when submission was attempted or an older draft has no attempt history.
+/// The marker does not prove network delivery or acceptance.
+pub fn payment_may_have_been_submitted(
     path: &Path,
     hash: &burst_types::BlockHash,
 ) -> Result<bool, WalletError> {
@@ -210,7 +215,7 @@ pub fn payment_was_submitted(
     }
 }
 
-pub(crate) fn record_submission(
+pub(crate) fn record_submission_attempt(
     path: &Path,
     hash: &burst_types::BlockHash,
 ) -> Result<(), WalletError> {
@@ -245,7 +250,8 @@ pub(crate) fn record_submission(
     })
 }
 
-/// Read bounded, versioned data and verify its signed contents before submission.
+/// Read a bounded, versioned payment or action draft and verify its signature.
+/// Loading does not establish ledger acceptance or confirmation.
 pub fn load_payment(path: &Path) -> Result<StateBlock, WalletError> {
     Ok(read_draft(path)?.block)
 }
@@ -324,7 +330,7 @@ mod tests {
             block_count: 1,
             payment_epoch: burst_types::BlockHash::new([2; 32]),
             representative: account.clone(),
-            brn_balance: 1000,
+            brn_spent: 1000,
             trst_balance: 0,
             release_sources: vec![],
         };
@@ -357,7 +363,7 @@ mod tests {
             let block = payment(94, amount);
             let path = completed.join(format!("confirmed-{}.json", block.hash));
             save_payment(&path, &block).unwrap();
-            record_submission(&active_path, &block.hash).unwrap();
+            record_submission_attempt(&active_path, &block.hash).unwrap();
         }
         assert_eq!(migrate_account_named_journal(directory.path()).unwrap(), 0);
         assert_eq!(std::fs::read_dir(&completed).unwrap().count(), 100);
@@ -372,7 +378,7 @@ mod tests {
         let active = payment(92, 999);
         let active_path = directory.path().join(format!("{}.json", active.account));
         save_payment(&active_path, &active).unwrap();
-        record_submission(&active_path, &active.hash).unwrap();
+        record_submission_attempt(&active_path, &active.hash).unwrap();
         let original = std::fs::read(&active_path).unwrap();
         let unknown = directory.path().join("unrecognized-receipt.json");
         save_payment(&unknown, &active).unwrap();
@@ -386,7 +392,7 @@ mod tests {
                 .unwrap()
                 .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(amount as u64))
                 .unwrap();
-            record_submission(&path, &block.hash).unwrap();
+            record_submission_attempt(&path, &block.hash).unwrap();
         }
         assert_eq!(
             migrate_account_named_journal(directory.path()).unwrap(),
@@ -394,7 +400,7 @@ mod tests {
         );
         assert_eq!(migrate_account_named_journal(directory.path()).unwrap(), 0);
         assert_eq!(std::fs::read(&active_path).unwrap(), original);
-        assert!(payment_was_submitted(&active_path, &active.hash).unwrap());
+        assert!(payment_may_have_been_submitted(&active_path, &active.hash).unwrap());
         assert!(unknown.exists());
         let completed = retention::directory(&active_path, &active.account).unwrap();
         assert_eq!(std::fs::read_dir(&completed).unwrap().count(), 100);
@@ -439,7 +445,7 @@ mod tests {
         let protected = directory.path().join("unresolved.json");
         let unresolved = payment(84, 999);
         save_payment(&protected, &unresolved).unwrap();
-        record_submission(&protected, &unresolved.hash).unwrap();
+        record_submission_attempt(&protected, &unresolved.hash).unwrap();
         let original = std::fs::read(&protected).unwrap();
         let other = payment(85, 1);
         save_payment(&pending, &other).unwrap();
@@ -447,7 +453,7 @@ mod tests {
         for amount in 1..=COMPLETED_RECEIPTS_PER_ACCOUNT + 5 {
             let block = payment(84, amount as u128);
             save_payment(&pending, &block).unwrap();
-            record_submission(&pending, &block.hash).unwrap();
+            record_submission_attempt(&pending, &block.hash).unwrap();
             archive_payment(&pending, "confirmed").unwrap();
             assert!(!attempt_path(&pending, &block.hash).exists());
             let receipt = retention::directory(&pending, &block.account)
@@ -468,7 +474,7 @@ mod tests {
             1
         );
         assert_eq!(std::fs::read(&protected).unwrap(), original);
-        assert!(payment_was_submitted(&protected, &unresolved.hash).unwrap());
+        assert!(payment_may_have_been_submitted(&protected, &unresolved.hash).unwrap());
     }
 
     #[test]
@@ -479,13 +485,13 @@ mod tests {
         let block = payment(86, 1);
         save_payment(&first, &block).unwrap();
         save_payment(&second, &block).unwrap();
-        record_submission(&first, &block.hash).unwrap();
+        record_submission_attempt(&first, &block.hash).unwrap();
         archive_payment(&first, "confirmed").unwrap();
-        assert!(payment_was_submitted(&second, &block.hash).unwrap());
+        assert!(payment_may_have_been_submitted(&second, &block.hash).unwrap());
         let later = payment(86, 2);
         save_payment(&first, &later).unwrap();
         archive_payment(&first, "confirmed").unwrap();
-        assert!(payment_was_submitted(&second, &block.hash).unwrap());
+        assert!(payment_may_have_been_submitted(&second, &block.hash).unwrap());
         archive_payment(&second, "confirmed").unwrap();
         assert!(!attempt_path(&second, &block.hash).exists());
     }
@@ -497,7 +503,7 @@ mod tests {
         let unknown = directory.path().join("unknown.json");
         let first = payment(89, 1);
         save_payment(&pending, &first).unwrap();
-        record_submission(&pending, &first.hash).unwrap();
+        record_submission_attempt(&pending, &first.hash).unwrap();
         std::fs::write(&unknown, b"unreadable record").unwrap();
         archive_payment(&pending, "confirmed").unwrap();
         assert!(attempt_path(&pending, &first.hash).exists());
@@ -506,7 +512,7 @@ mod tests {
         // Reopen through the public storage API with a different transaction.
         let second = payment(89, 2);
         save_payment(&pending, &second).unwrap();
-        record_submission(&pending, &second.hash).unwrap();
+        record_submission_attempt(&pending, &second.hash).unwrap();
         archive_payment(&pending, "confirmed").unwrap();
         assert!(!attempt_path(&pending, &first.hash).exists());
         assert!(!attempt_path(&pending, &second.hash).exists());
@@ -521,7 +527,7 @@ mod tests {
         let unknown = directory.path().join("unknown.json");
         let block = payment(88, 1);
         save_payment(&pending, &block).unwrap();
-        record_submission(&pending, &block.hash).unwrap();
+        record_submission_attempt(&pending, &block.hash).unwrap();
         std::fs::write(&unknown, b"unreadable legacy record").unwrap();
         archive_payment(&pending, "confirmed").unwrap();
         assert!(!pending.exists());
@@ -559,7 +565,7 @@ mod tests {
             block_count: 1,
             payment_epoch: burst_types::BlockHash::new([2; 32]),
             representative: burst_crypto::derive_address(&keys.public),
-            brn_balance: u64::MAX as u128 + 1,
+            brn_spent: u64::MAX as u128 + 1,
             trst_balance: 0,
             release_sources: vec![],
         };
@@ -586,12 +592,12 @@ mod tests {
         assert!(save_signed_action(&path, &block, &[], Some(b"wrong content")).is_err());
         assert!(!path.exists());
         save_signed_action(&path, &block, &[], Some(&bytes)).unwrap();
-        record_submission(&path, &block.hash).unwrap();
+        record_submission_attempt(&path, &block.hash).unwrap();
         let original = std::fs::read(&path).unwrap();
         let recovered = read_draft(&path).unwrap();
         assert_eq!(recovered.version, 4);
         assert_eq!(recovered.block.hash, block.hash);
-        assert_eq!(recovered.block.brn_balance, state.brn_balance);
+        assert_eq!(recovered.block.brn_spent, state.brn_spent);
         assert_eq!(
             recovered.proposal_content.as_deref(),
             Some(bytes.as_slice())

@@ -1,10 +1,26 @@
 use super::*;
 
+fn verification_tamper_row(store: &LmdbStore) -> (String, Vec<u8>) {
+    let batch = store.tx_begin_write().unwrap();
+    if batch.uses_verification_records().unwrap() {
+        let (key, value) = batch
+            .checkpoint_metadata(b"verification_state/")
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("fixture must contain a persisted verification record");
+        (String::from_utf8(key).unwrap(), value)
+    } else {
+        let key = crate::endorsement_commit::SNAPSHOT_KEY;
+        (key.to_owned(), batch.get_meta(key).unwrap().expect("fixture verification snapshot"))
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn batched_recovery_beacons_publish_only_after_complete_authentication() {
     let (fixture, _directory, store, _, certificate) = selection::setup();
     let store = Arc::new(store);
-    let service = Service::start(store.clone(), store.clone(), 0).await;
+    let service = WitnessService::start(store.clone(), store.clone(), 0).await;
     let mut cache = installed::recover_current_tip_with_cache(
         store.clone(),
         NetworkId::Dev,
@@ -24,10 +40,12 @@ async fn batched_recovery_beacons_publish_only_after_complete_authentication() {
     let index = cache
         .recovered
         .selections
-        .read_all()
+        .iter_selections()
         .map(Result::unwrap)
         .position(|selection| selection.certificate().checkpoint.hash() == hash)
         .unwrap();
+    let mut original_hints = cache.recovered.selections.refresh_cursor().unwrap();
+    let missing_height = certificate.checkpoint.height;
     let before = store
         .tx_begin_write()
         .unwrap()
@@ -61,7 +79,13 @@ async fn batched_recovery_beacons_publish_only_after_complete_authentication() {
             .unwrap()
             .beacon()
             .is_none());
+        assert_eq!(cache.recovered.selections.refresh_cursor().unwrap().next(&store).unwrap(),
+            Some(missing_height), "failed batches must not publish hint updates");
     }
+    let mut single = cache.recovered.fork(store.env().path()).unwrap();
+    single.selections.attach_beacon(hash, beacon.clone()).unwrap();
+    assert_eq!(single.selections.refresh_cursor().unwrap().next(&store).unwrap(), None);
+    assert_eq!(cache.recovered.selections.refresh_cursor().unwrap().next(&store).unwrap(), Some(missing_height));
     cache
         .recovered
         .selections
@@ -109,13 +133,20 @@ async fn batched_recovery_beacons_publish_only_after_complete_authentication() {
             .unwrap(),
         before
     );
+    // Scheduling owns only small derived rows; it does not decode damaged receipts.
+    cache.recovered.selections.truncate_for_test();
+    assert!(cache.recovered.selections.read_selection(index).is_err());
+    assert_eq!(cache.recovered.selections.refresh_cursor().unwrap().next(&store).unwrap(), None);
+    assert_eq!(original_hints.next(&store).unwrap(), Some(missing_height),
+        "existing hint cursors keep their frozen view after enrichment");
+
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn cached_selection_accepts_only_authenticated_beacon_enrichment_without_replay() {
     let (fixture, _directory, store, _, certificate) = selection::setup();
     let store = Arc::new(store);
-    let service = Service::start(store.clone(), store.clone(), 0).await;
+    let service = WitnessService::start(store.clone(), store.clone(), 0).await;
     let cache = installed::recover_current_tip_with_cache(
         store.clone(),
         NetworkId::Dev,
@@ -168,7 +199,7 @@ async fn cached_selection_accepts_only_authenticated_beacon_enrichment_without_r
                 .expect("valid late beacon must preserve cached replay");
             let selection = recovered
                 .selections
-                .read_all()
+                .iter_selections()
                 .map(Result::unwrap)
                 .find(|selection| selection.certificate().checkpoint == certificate.checkpoint)
                 .unwrap();
@@ -213,7 +244,7 @@ async fn cached_selection_accepts_only_authenticated_beacon_enrichment_without_r
 async fn recovery_forks_keep_late_beacons_private_without_changing_durable_authority() {
     let (fixture, _directory, store, _, certificate) = selection::setup();
     let store = Arc::new(store);
-    let service = Service::start(store.clone(), store.clone(), 0).await;
+    let service = WitnessService::start(store.clone(), store.clone(), 0).await;
     let cache = installed::recover_current_tip_with_cache(
         store.clone(),
         NetworkId::Dev,
@@ -227,7 +258,7 @@ async fn recovery_forks_keep_late_beacons_private_without_changing_durable_autho
     let find = |recovered: &installed::RecoveredSnapshot| {
         recovered
             .selections
-            .read_all()
+            .iter_selections()
             .map(Result::unwrap)
             .position(|selection| selection.certificate().checkpoint.height == height)
             .unwrap()
@@ -336,7 +367,7 @@ async fn recovery_forks_keep_late_beacons_private_without_changing_durable_autho
     assert!(second
         .recovered
         .selections
-        .read_all()
+        .iter_selections()
         .next()
         .unwrap()
         .is_err());
@@ -359,7 +390,7 @@ async fn recovery_forks_keep_late_beacons_private_without_changing_durable_autho
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn replay_cache_accepts_only_an_identical_durable_beacon_copy() {
     let (fixture, _directory, store, _, certificate) = selection::setup();
-    let mut selection = crate::checkpoint_beacon::pending_selections(
+    let mut selection = crate::checkpoint_beacon::selection_checkpoints(
         crate::checkpoint_store::chain::load(&store, NetworkId::Dev, &fixture.params).unwrap(),
     )
     .pop()
@@ -373,7 +404,7 @@ async fn replay_cache_accepts_only_an_identical_durable_beacon_copy() {
         .attach_beacon(&store, &fixture.params, beacon.clone())
         .unwrap();
     let store = Arc::new(store);
-    let service = Service::start(store.clone(), store.clone(), 0).await;
+    let service = WitnessService::start(store.clone(), store.clone(), 0).await;
     let cache = installed::recover_current_tip_with_cache(
         store.clone(),
         NetworkId::Dev,
@@ -462,7 +493,7 @@ async fn known_selection_refresh_reuses_checked_receipt_without_peer_replay() {
         .unwrap();
         let beacon = burst_vrf::DrandClient::beacon_to_random_output(&beacons[0]).unwrap();
         if with_beacon {
-            let mut selection = crate::checkpoint_beacon::pending_selections(
+            let mut selection = crate::checkpoint_beacon::selection_checkpoints(
                 crate::checkpoint_store::chain::load(&source, NetworkId::Dev, &fixture.params)
                     .unwrap(),
             )
@@ -477,9 +508,9 @@ async fn known_selection_refresh_reuses_checked_receipt_without_peer_replay() {
             authenticate(&source, &fixture.params, manifest.checkpoint.parent).into_continuation();
         let source = Arc::new(source);
         let (_dir, local) = cemented::sparse(&old, &source);
-        records(&local, &source, &fixture, &bytes);
+        copy_installed_records(&local, &source, &fixture, &bytes);
         let local = Arc::new(local);
-        let service = Service::start(source.clone(), local.clone(), 0).await;
+        let service = WitnessService::start(source.clone(), local.clone(), 0).await;
         let cache = installed::recover_current_tip_with_cache(
             local.clone(),
             NetworkId::Dev,
@@ -682,7 +713,7 @@ async fn known_selection_refresh_reuses_checked_receipt_without_peer_replay() {
                 crate::checkpoint_store::historical::snapshot_transfer::Session::from_recovery(
                     Some(retained),
                 );
-            let mut selection = crate::checkpoint_beacon::pending_selections(
+            let mut selection = crate::checkpoint_beacon::selection_checkpoints(
                 crate::checkpoint_store::chain::load(&source, NetworkId::Dev, &fixture.params)
                     .unwrap(),
             )
@@ -753,9 +784,9 @@ async fn recovery_progress_survives_failed_journal_checks_without_authorizing_th
         authenticate(&source, &fixture.params, manifest.checkpoint.parent).into_continuation();
     let source = Arc::new(source);
     let (_dir, local) = cemented::sparse(&old, &source);
-    records(&local, &source, &fixture, &bytes);
+    copy_installed_records(&local, &source, &fixture, &bytes);
     let local = Arc::new(local);
-    let service = Service::start(source.clone(), local.clone(), 0).await;
+    let service = WitnessService::start(source.clone(), local.clone(), 0).await;
     let mut progress = None;
     let bad_key = "consensus_final/unsupported";
     local
@@ -878,11 +909,10 @@ async fn recovery_progress_survives_failed_journal_checks_without_authorizing_th
     .unwrap()
     .unwrap();
     compact::assert_same(body_restored.recovered().continuation.state(), old.state());
-    let snapshot_key = crate::endorsement_commit::SNAPSHOT_KEY;
-    let snapshot = local.meta_store().get_meta(snapshot_key).unwrap();
+    let (snapshot_key, snapshot) = verification_tamper_row(&local);
     local
         .meta_store()
-        .put_meta(snapshot_key, b"corrupt applied snapshot")
+        .put_meta(&snapshot_key, b"corrupt applied snapshot")
         .unwrap();
     assert!(
         installed::recover_metadata_retaining_progress(
@@ -896,9 +926,14 @@ async fn recovery_progress_survives_failed_journal_checks_without_authorizing_th
         .is_err(),
         "a cached projection must not hide a changed economic snapshot"
     );
+    assert_eq!(
+        local.meta_store().get_meta(&snapshot_key).unwrap(),
+        b"corrupt applied snapshot",
+        "failed recovery must not repair the stored verification record"
+    );
     local
         .meta_store()
-        .put_meta(snapshot_key, &snapshot)
+        .put_meta(&snapshot_key, &snapshot)
         .unwrap();
     let restored = installed::recover_metadata_retaining_progress(
         local.clone(),
@@ -911,9 +946,10 @@ async fn recovery_progress_survives_failed_journal_checks_without_authorizing_th
     .unwrap()
     .unwrap();
     assert!(
-        !checked.shares_projection(&restored),
-        "invalidated projections must be replayed"
+        checked.shares_projection(&restored),
+        "exactly restored contents may reuse a revalidated shared projection"
     );
+    restored.verify_unchanged(&local.tx_begin_write().unwrap()).unwrap();
     compact::assert_same(restored.recovered().continuation.state(), old.state());
     local
         .meta_store()
@@ -1029,9 +1065,9 @@ async fn agreement_replay_cache_rechecks_installed_authority_and_metadata() {
     let source = Arc::new(source);
     for change in 0..4 {
         let (_dir, local) = cemented::sparse(&old, &source);
-        records(&local, &source, &fixture, &bytes);
+        copy_installed_records(&local, &source, &fixture, &bytes);
         let local = Arc::new(local);
-        let service = Service::start(source.clone(), local.clone(), 0).await;
+        let service = WitnessService::start(source.clone(), local.clone(), 0).await;
         let settings = Settings {
             store: local.clone(),
             network: NetworkId::Dev,
@@ -1104,7 +1140,7 @@ async fn compact_idle_signer_recovers_after_late_beacon_changes_its_read_set() {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .try_init();
     let (fixture, _directory, store, _, _) = selection::setup();
-    let mut selection = crate::checkpoint_beacon::pending_selections(
+    let mut selection = crate::checkpoint_beacon::selection_checkpoints(
         crate::checkpoint_store::chain::load(&store, NetworkId::Dev, &fixture.params).unwrap(),
     )
     .pop()
@@ -1121,7 +1157,7 @@ async fn compact_idle_signer_recovers_after_late_beacon_changes_its_read_set() {
         .unwrap();
     }
     let store = Arc::new(store);
-    let service = Service::start(store.clone(), store.clone(), 0).await;
+    let service = WitnessService::start(store.clone(), store.clone(), 0).await;
     let mut settings = Settings {
         store: store.clone(),
         network: NetworkId::Dev,
@@ -1231,7 +1267,7 @@ async fn cached_recovery_matches_full_replay_and_rejects_changed_history() {
     )
     .unwrap();
     let store = Arc::new(store);
-    let service = Service::start(store.clone(), store.clone(), 0).await;
+    let service = WitnessService::start(store.clone(), store.clone(), 0).await;
     let recovered = installed::RecoveredSnapshot::genesis(&store, NetworkId::Dev, &fixture.params)
         .unwrap()
         .advance_from_peers(store.clone(), service.registry.clone(), epoch)
@@ -1328,7 +1364,7 @@ async fn genesis_transfer(record_request: bool) {
         .checkpoint_metadata(b"")
         .unwrap();
     let source = Arc::new(source);
-    let service = Service::start(source.clone(), local.clone(), 0).await;
+    let service = WitnessService::start(source.clone(), local.clone(), 0).await;
     let record_only = CertifiedCheckpoint::export_transfer_for_request(
         &source,
         NetworkId::Dev,
@@ -1426,7 +1462,7 @@ async fn genesis_transfer(record_request: bool) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn archived_selection_accepts_a_late_beacon_and_publishes_after_reopen() {
     let (fixture, directory, store, _, certificate) = selection::setup();
-    let mut selection = crate::checkpoint_beacon::pending_selections(
+    let mut selection = crate::checkpoint_beacon::selection_checkpoints(
         crate::checkpoint_store::chain::load(&store, NetworkId::Dev, &fixture.params).unwrap(),
     )
     .pop()
@@ -1472,7 +1508,7 @@ async fn archived_selection_accepts_a_late_beacon_and_publishes_after_reopen() {
         crate::checkpoint_store::archive_selection::beacon_key(certificate.checkpoint.hash());
     assert!(store.meta_store().get_meta(&proof_key).is_err());
     let store = Arc::new(store);
-    let service = Service::start(store.clone(), store.clone(), 0).await;
+    let service = WitnessService::start(store.clone(), store.clone(), 0).await;
     let before = installed::RecoveredSnapshot::recover_genesis_from_peers(
         store.clone(),
         NetworkId::Dev,
@@ -1570,7 +1606,7 @@ async fn archived_selection_accepts_a_late_beacon_and_publishes_after_reopen() {
     drop(store);
 
     let store = Arc::new(LmdbStore::open(directory.path(), 32, 32 << 20).unwrap());
-    let service = Service::start(store.clone(), store.clone(), 0).await;
+    let service = WitnessService::start(store.clone(), store.clone(), 0).await;
     let recovered = installed::RecoveredSnapshot::recover_genesis_from_peers(
         store.clone(),
         NetworkId::Dev,
@@ -1694,7 +1730,7 @@ async fn incremental_installed_recovery_and_successor_do_not_require_snapshot_cr
         .unwrap();
         let local = Arc::new(local);
         let source = Arc::new(source);
-        let service = Service::start(source.clone(), local.clone(), 0).await;
+        let service = WitnessService::start(source.clone(), local.clone(), 0).await;
         assert!(crate::checkpoint_store::uses_incremental_replay(
             &local,
             NetworkId::Dev,
@@ -1881,7 +1917,7 @@ async fn incremental_installed_recovery_and_successor_do_not_require_snapshot_cr
             local.force_sync().unwrap();
         }
         let local = Arc::new(LmdbStore::open(directory.path(), 32, 32 << 20).unwrap());
-        let service = Service::start(source.clone(), local.clone(), 0).await;
+        let service = WitnessService::start(source.clone(), local.clone(), 0).await;
         let recovered = installed::recover_metadata_from_peers(
             local.clone(),
             NetworkId::Dev,
@@ -1975,11 +2011,11 @@ async fn compact_runtime_rejects_corrupt_live_base_without_returning_to_full_his
     assert_previous_decision(true, true).await;
 }
 
-async fn assert_previous_decision(switch: bool, corrupt: bool) {
+async fn assert_previous_decision(start_with_full_history: bool, corrupt: bool) {
     use crate::checkpoint_store::chain;
     use crate::{
         checkpoint_service,
-        checkpoint_transport::{Context, Incoming, Transport},
+        checkpoint_transport::{Incoming, Transport},
         shutdown::ShutdownController,
         wire_message::WireMessage,
     };
@@ -1993,7 +2029,7 @@ async fn assert_previous_decision(switch: bool, corrupt: bool) {
         authenticate(&source, &fixture.params, manifest.checkpoint.parent).into_continuation();
     let next =
         authenticate(&source, &fixture.params, certificate.checkpoint.hash()).into_continuation();
-    let (_dir, local) = if switch {
+    let (_dir, local) = if start_with_full_history {
         let (dir, local, _) = fixture.store();
         for height in 1..=2 {
             let transfer = CertifiedCheckpoint::export_transfer(
@@ -2027,12 +2063,12 @@ async fn assert_previous_decision(switch: bool, corrupt: bool) {
         (dir, local)
     } else {
         let (dir, local) = cemented::sparse(&next, &source);
-        records(&local, &source, &fixture, &bytes);
+        copy_installed_records(&local, &source, &fixture, &bytes);
         assert!(chain::load(&local, NetworkId::Dev, &fixture.params).is_err());
         (dir, local)
     };
     let local = Arc::new(local);
-    let service = Service::start(Arc::new(source), local.clone(), 0).await;
+    let service = WitnessService::start(Arc::new(source), local.clone(), 0).await;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let (mut client, server) = tokio::try_join!(
         TcpStream::connect(listener.local_addr().unwrap()),
@@ -2059,7 +2095,7 @@ async fn assert_previous_decision(switch: bool, corrupt: bool) {
         Arc::new(|| None),
         shutdown.clone(),
     ));
-    if switch {
+    if start_with_full_history {
         // A frame before archive publication proves the genesis-backed service has
         // started. Its existing receiver and peer connection must survive.
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -2119,11 +2155,11 @@ async fn assert_previous_decision(switch: bool, corrupt: bool) {
         return;
     }
     let mut transport = Transport::new(
-        Context::from_anchor(old.anchor()).unwrap(),
+        crate::checkpoint_transport::context_from_anchor(old.anchor()).unwrap(),
         std::time::Instant::now(),
     );
     let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        if switch {
+        if start_with_full_history {
             while service.requests.load(Ordering::SeqCst) == 0 {
                 assert!(
                     !worker.is_finished(),
@@ -2195,372 +2231,392 @@ async fn assert_previous_decision(switch: bool, corrupt: bool) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn compact_runtime_rotates_only_after_checked_economic_installation() {
     use crate::checkpoint_service::{compact_runtime::CompactRuntime, Settings};
-    let (fixture, _source_dir, source, manifest, certificate) = selection::setup();
-    let bytes = archive(&source, &fixture, manifest.checkpoint.parent);
-    let old =
-        authenticate(&source, &fixture.params, manifest.checkpoint.parent).into_continuation();
-    let next =
-        authenticate(&source, &fixture.params, certificate.checkpoint.hash()).into_continuation();
-    let (_dir, local) = cemented::sparse(&old, &source);
-    records(&local, &source, &fixture, &bytes);
-    let local = Arc::new(local);
-    let service = Service::start(Arc::new(source), local.clone(), 0).await;
-    let startup = installed::recover_metadata_from_peers(
-        local.clone(),
-        NetworkId::Dev,
-        fixture.params.clone(),
-        service.registry.clone(),
-    )
-    .await
-    .unwrap()
-    .unwrap()
-    .into_checkpoint_recovery(&local, None)
-    .unwrap();
-    let mut behind = Some(startup.fork(local.env().path()).unwrap());
-    let requests = service.requests.load(Ordering::SeqCst);
-    let mut runtime = CompactRuntime::new(
-        Settings {
-            store: local.clone(),
-            network: NetworkId::Dev,
-            initial_params: fixture.params.clone(),
-            key: None,
-        },
-        service.registry.clone(),
-        Arc::new(|| None),
-        Some(startup),
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        service.requests.load(Ordering::SeqCst),
-        requests,
-        "agreement startup must reuse authenticated history"
-    );
-    assert_eq!(runtime.anchor().hash(), old.anchor().hash());
-    assert!(runtime.previous_context().is_none());
-    runtime.refresh().await.unwrap();
-    assert_eq!(runtime.anchor().hash(), old.anchor().hash());
-
-    local
-        .meta_store()
-        .put_meta(
-            burst_store::meta::PAYMENT_EPOCH_KEY,
-            next.anchor().hash().as_bytes(),
-        )
-        .unwrap();
-    assert!(runtime.refresh().await.is_err());
-    assert_eq!(runtime.anchor().hash(), old.anchor().hash());
-    assert!(runtime.previous_context().is_none());
-
-    local
-        .meta_store()
-        .put_meta(
-            burst_store::meta::PAYMENT_EPOCH_KEY,
-            old.anchor().hash().as_bytes(),
-        )
-        .unwrap();
-    let (_, cache, handoff) = installed::recover_metadata_from_peers(
-        local.clone(),
-        NetworkId::Dev,
-        fixture.params.clone(),
-        service.registry.clone(),
-    )
-    .await
-    .unwrap()
-    .unwrap()
-    .prepare_next_from_peers(local.clone(), service.registry.clone())
-    .await
-    .unwrap()
-    .unwrap()
-    .commit_with_recovery(&local)
-    .unwrap();
-    assert_eq!(
-        cache.recovered.continuation.anchor().hash(),
-        next.anchor().hash()
-    );
-    compact::assert_same(cache.recovered.continuation.state(), next.state());
-    let shared = service.registry.read().await.recovery_projection.clone();
-    handoff.clone().publish(&shared, &local).unwrap();
-    let initial = fixture.params.params_hash();
-    assert!(shared
-        .replay(
-            &local,
-            NetworkId::Dev,
-            initial,
-            cache.base,
-            old.anchor().hash()
-        )
-        .unwrap()
-        .is_none());
-    assert!(shared
-        .replay(
-            &local,
-            NetworkId::Dev,
-            BlockHash::new([91; 32]),
-            cache.base,
-            next.anchor().hash()
-        )
-        .unwrap()
-        .is_none());
-    assert!(shared
-        .replay(
-            &local,
-            NetworkId::Test,
-            initial,
-            cache.base,
-            next.anchor().hash()
-        )
-        .unwrap()
-        .is_none());
-    assert!(cache.base.is_some());
-    assert!(shared
-        .replay(&local, NetworkId::Dev, initial, None, next.anchor().hash())
-        .unwrap()
-        .is_none());
-    let other_directory = tempfile::tempdir().unwrap();
-    let other = Arc::new(LmdbStore::open(other_directory.path(), 32, 32 << 20).unwrap());
-    assert!(shared
-        .replay(
-            &other,
-            NetworkId::Dev,
-            initial,
-            cache.base,
-            next.anchor().hash()
-        )
-        .unwrap()
-        .is_none());
-    let reused = shared
-        .replay(
-            &local,
-            NetworkId::Dev,
-            initial,
-            cache.base,
-            next.anchor().hash(),
-        )
-        .unwrap()
-        .expect("committed installation retains its exact replay parent");
-    let reused = reused
-        .recover(
-            cache.base,
+    // Separate installation from replay checks: the combined fixture poll frame
+    // otherwise nests 775KiB of temporaries above recovery on the test thread.
+    let (fixture, directories, local, service, old, next, mut runtime,
+        mut behind, cache, handoff, shared, initial) = tokio::spawn(async move {
+        let (fixture, _source_dir, source, manifest, certificate) = selection::setup();
+        let bytes = archive(&source, &fixture, manifest.checkpoint.parent);
+        let old =
+            authenticate(&source, &fixture.params, manifest.checkpoint.parent).into_continuation();
+        let next =
+            authenticate(&source, &fixture.params, certificate.checkpoint.hash()).into_continuation();
+        let (_dir, local) = cemented::sparse(&old, &source);
+        copy_installed_records(&local, &source, &fixture, &bytes);
+        let local = Arc::new(local);
+        let service = WitnessService::start(Arc::new(source), local.clone(), 0).await;
+        let startup = installed::recover_metadata_from_peers(
             local.clone(),
+            NetworkId::Dev,
+            fixture.params.clone(),
             service.registry.clone(),
-            next.anchor().hash(),
         )
         .await
         .unwrap()
+        .unwrap()
+        .into_checkpoint_recovery(&local, None)
         .unwrap();
-    compact::assert_same(reused.continuation.state(), next.state());
-    let handoffs = shared.replay_handoffs();
-    let checked_handoff = installed::recover_metadata_from_peers(
-        local.clone(),
-        NetworkId::Dev,
-        fixture.params.clone(),
-        service.registry.clone(),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(
-        shared.replay_handoffs(),
-        handoffs + 1,
-        "metadata without caller progress must consume the installed replay"
-    );
-    assert!(
-        checked_handoff.uses_committed_projection(&handoff),
-        "first recovery after commit must reuse the writer-captured projection"
-    );
-    checked_handoff
-        .verify_unchanged(&local.tx_begin_write().unwrap())
+        let behind = Some(startup.fork(local.env().path()).unwrap());
+        let requests = service.requests.load(Ordering::SeqCst);
+        let mut runtime = CompactRuntime::new(
+            Settings {
+                store: local.clone(),
+                network: NetworkId::Dev,
+                initial_params: fixture.params.clone(),
+                key: None,
+            },
+            service.registry.clone(),
+            Arc::new(|| None),
+            Some(startup),
+        )
+        .await
         .unwrap();
-    let handoffs = shared.replay_handoffs();
-    let advanced = installed::recover_metadata_retaining_progress(
-        local.clone(),
-        NetworkId::Dev,
-        fixture.params.clone(),
-        service.registry.clone(),
-        &mut behind,
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(
-        shared.replay_handoffs(),
-        handoffs + 1,
-        "installed replay must replace an older worker's progress"
-    );
-    compact::assert_same(advanced.recovered().continuation.state(), next.state());
-    advanced
-        .verify_unchanged(&local.tx_begin_write().unwrap())
+        assert_eq!(
+            service.requests.load(Ordering::SeqCst),
+            requests,
+            "agreement startup must reuse authenticated history"
+        );
+        assert_eq!(runtime.anchor().hash(), old.anchor().hash());
+        assert!(runtime.previous_context().is_none());
+        runtime.refresh().await.unwrap();
+        assert_eq!(runtime.anchor().hash(), old.anchor().hash());
+
+        local
+            .meta_store()
+            .put_meta(
+                burst_store::meta::PAYMENT_EPOCH_KEY,
+                next.anchor().hash().as_bytes(),
+            )
+            .unwrap();
+        assert!(runtime.refresh().await.is_err());
+        assert_eq!(runtime.anchor().hash(), old.anchor().hash());
+        assert!(runtime.previous_context().is_none());
+
+        local
+            .meta_store()
+            .put_meta(
+                burst_store::meta::PAYMENT_EPOCH_KEY,
+                old.anchor().hash().as_bytes(),
+            )
+            .unwrap();
+        let (_, cache, handoff) = installed::recover_metadata_from_peers(
+            local.clone(),
+            NetworkId::Dev,
+            fixture.params.clone(),
+            service.registry.clone(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .prepare_next_from_peers(local.clone(), service.registry.clone())
+        .await
+        .unwrap()
+        .unwrap()
+        .commit_with_recovery(&local)
         .unwrap();
-    let handoffs = shared.replay_handoffs();
-    installed::recover_metadata_retaining_progress(
-        local.clone(),
-        NetworkId::Dev,
-        fixture.params.clone(),
-        service.registry.clone(),
-        &mut behind,
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(
-        shared.replay_handoffs(),
-        handoffs,
-        "already-current caller progress must not fork the shared replay again"
-    );
-    assert!(
-        shared
+        assert_eq!(
+            cache.recovered.continuation.anchor().hash(),
+            next.anchor().hash()
+        );
+        compact::assert_same(cache.recovered.continuation.state(), next.state());
+        let shared = service.registry.read().await.recovery_projection.clone();
+        handoff.clone().publish(&shared, &local).unwrap();
+        let initial = fixture.params.params_hash();
+        assert!(shared
             .replay(
                 &local,
+                NetworkId::Dev,
+                initial,
+                cache.base,
+                old.anchor().hash()
+            )
+            .unwrap()
+            .is_none());
+        assert!(shared
+            .replay(
+                &local,
+                NetworkId::Dev,
+                BlockHash::new([91; 32]),
+                cache.base,
+                next.anchor().hash()
+            )
+            .unwrap()
+            .is_none());
+        assert!(shared
+            .replay(
+                &local,
+                NetworkId::Test,
+                initial,
+                cache.base,
+                next.anchor().hash()
+            )
+            .unwrap()
+            .is_none());
+        assert!(cache.base.is_some());
+        assert!(shared
+            .replay(&local, NetworkId::Dev, initial, None, next.anchor().hash())
+            .unwrap()
+            .is_none());
+        let other_directory = tempfile::tempdir().unwrap();
+        let other = Arc::new(LmdbStore::open(other_directory.path(), 32, 32 << 20).unwrap());
+        assert!(shared
+            .replay(
+                &other,
                 NetworkId::Dev,
                 initial,
                 cache.base,
                 next.anchor().hash()
             )
             .unwrap()
-            .is_some(),
-        "ordinary projection refresh must preserve the same committed replay"
-    );
-    let replay_key = format!(
-        "checkpoint_chain/v1/dev/{}/{}",
-        next.anchor().genesis_hash(),
-        next.anchor().height()
-    );
-    let replay_bytes = local.meta_store().get_meta(&replay_key).unwrap();
-    let stale = shared
-        .replay(
-            &local,
-            NetworkId::Dev,
-            initial,
-            cache.base,
-            next.anchor().hash(),
-        )
-        .unwrap()
-        .unwrap();
-    local
-        .meta_store()
-        .put_meta(&replay_key, b"changed after replay handoff")
-        .unwrap();
-    assert!(
-        stale
+            .is_none());
+        assert!(shared.selection_refresh(&other, NetworkId::Dev, initial, None).unwrap().is_none());
+        assert!(shared.selection_refresh(&local, NetworkId::Test, initial, None).unwrap().is_none());
+        assert!(shared.selection_refresh(&local, NetworkId::Dev, BlockHash::new([99; 32]), None).unwrap().is_none());
+        let (hint_epoch, _) = shared.selection_refresh(&local, NetworkId::Dev, initial, None)
+            .unwrap().expect("committed replay supplies selection hints");
+        assert_eq!(hint_epoch, next.anchor().hash());
+        assert!(shared.selection_refresh(&local, NetworkId::Dev, initial, Some(hint_epoch)).unwrap().is_none());
+        (fixture, (_source_dir, _dir), local, service, old, next, runtime,
+            behind, cache, handoff, shared, initial)
+    }).await.unwrap();
+    tokio::spawn(async move {
+        let reused = shared
+            .replay(
+                &local,
+                NetworkId::Dev,
+                initial,
+                cache.base,
+                next.anchor().hash(),
+            )
+            .unwrap()
+            .expect("committed installation retains its exact replay parent");
+        let reused = reused
             .recover(
                 cache.base,
                 local.clone(),
                 service.registry.clone(),
-                next.anchor().hash()
+                next.anchor().hash(),
             )
             .await
             .unwrap()
-            .is_none(),
-        "shared replay must reject changed durable history"
-    );
-    assert!(
-        installed::recover_metadata_from_peers(
+            .unwrap();
+        compact::assert_same(reused.continuation.state(), next.state());
+        let handoffs = shared.replay_handoffs();
+        let checked_handoff = installed::recover_metadata_from_peers(
             local.clone(),
             NetworkId::Dev,
             fixture.params.clone(),
             service.registry.clone(),
-        )
-        .await
-        .is_err(),
-        "metadata handoff must not hide changed durable history"
-    );
-    local
-        .meta_store()
-        .put_meta(&replay_key, &replay_bytes)
-        .unwrap();
-    let snapshot_key = crate::endorsement_commit::SNAPSHOT_KEY;
-    let snapshot = local.meta_store().get_meta(snapshot_key).unwrap();
-    local
-        .meta_store()
-        .put_meta(snapshot_key, b"changed after committed handoff")
-        .unwrap();
-    assert!(
-        installed::recover_metadata_from_peers(
-            local.clone(),
-            NetworkId::Dev,
-            fixture.params.clone(),
-            service.registry.clone(),
-        )
-        .await
-        .is_err(),
-        "committed handoff must not conceal a later economic mutation"
-    );
-    local
-        .meta_store()
-        .put_meta(snapshot_key, &snapshot)
-        .unwrap();
-    let restored_handoff = installed::recover_metadata_from_peers(
-        local.clone(),
-        NetworkId::Dev,
-        fixture.params.clone(),
-        service.registry.clone(),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert!(!restored_handoff.uses_committed_projection(&handoff));
-    compact::assert_same(
-        restored_handoff.recovered().continuation.state(),
-        next.state(),
-    );
-    let commitment = cache.base.clone();
-    let recovered = cache
-        .recover(
-            commitment,
-            local.clone(),
-            service.registry.clone(),
-            next.anchor().hash(),
         )
         .await
         .unwrap()
         .unwrap();
-    compact::assert_same(recovered.continuation.state(), next.state());
-    let record_key = format!(
-        "checkpoint_chain/v1/dev/{}/{}",
-        next.anchor().genesis_hash(),
-        next.anchor().height()
-    );
-    let record = local.meta_store().get_meta(&record_key).unwrap();
-    local.meta_store().put_meta(&record_key, &[0]).unwrap();
-    assert!(matches!(
-        recovered
-            .advance_from_peers(
+        assert_eq!(
+            shared.replay_handoffs(),
+            handoffs + 1,
+            "metadata without caller progress must consume the installed replay"
+        );
+        assert!(
+            checked_handoff.uses_committed_projection(&handoff),
+            "first recovery after commit must reuse the writer-captured projection"
+        );
+        checked_handoff
+            .verify_unchanged(&local.tx_begin_write().unwrap())
+            .unwrap();
+        let handoffs = shared.replay_handoffs();
+        let advanced = installed::recover_metadata_retaining_progress(
+            local.clone(),
+            NetworkId::Dev,
+            fixture.params.clone(),
+            service.registry.clone(),
+            &mut behind,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            shared.replay_handoffs(),
+            handoffs + 1,
+            "installed replay must replace an older worker's progress"
+        );
+        compact::assert_same(advanced.recovered().continuation.state(), next.state());
+        advanced
+            .verify_unchanged(&local.tx_begin_write().unwrap())
+            .unwrap();
+        let handoffs = shared.replay_handoffs();
+        installed::recover_metadata_retaining_progress(
+            local.clone(),
+            NetworkId::Dev,
+            fixture.params.clone(),
+            service.registry.clone(),
+            &mut behind,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            shared.replay_handoffs(),
+            handoffs,
+            "already-current caller progress must not fork the shared replay again"
+        );
+        assert!(
+            shared
+                .replay(
+                    &local,
+                    NetworkId::Dev,
+                    initial,
+                    cache.base,
+                    next.anchor().hash()
+                )
+                .unwrap()
+                .is_some(),
+            "ordinary projection refresh must preserve the same committed replay"
+        );
+        let replay_key = format!(
+            "checkpoint_chain/v1/dev/{}/{}",
+            next.anchor().genesis_hash(),
+            next.anchor().height()
+        );
+        let replay_bytes = local.meta_store().get_meta(&replay_key).unwrap();
+        let stale = shared
+            .replay(
+                &local,
+                NetworkId::Dev,
+                initial,
+                cache.base,
+                next.anchor().hash(),
+            )
+            .unwrap()
+            .unwrap();
+        local
+            .meta_store()
+            .put_meta(&replay_key, b"changed after replay handoff")
+            .unwrap();
+        assert!(
+            stale
+                .recover(
+                    cache.base,
+                    local.clone(),
+                    service.registry.clone(),
+                    next.anchor().hash()
+                )
+                .await
+                .unwrap()
+                .is_none(),
+            "shared replay must reject changed durable history"
+        );
+        assert!(
+            installed::recover_metadata_from_peers(
+                local.clone(),
+                NetworkId::Dev,
+                fixture.params.clone(),
+                service.registry.clone(),
+            )
+            .await
+            .is_err(),
+            "metadata handoff must not hide changed durable history"
+        );
+        local
+            .meta_store()
+            .put_meta(&replay_key, &replay_bytes)
+            .unwrap();
+        let (snapshot_key, snapshot) = verification_tamper_row(&local);
+        local
+            .meta_store()
+            .put_meta(&snapshot_key, b"changed after committed handoff")
+            .unwrap();
+        assert!(
+            installed::recover_metadata_from_peers(
+                local.clone(),
+                NetworkId::Dev,
+                fixture.params.clone(),
+                service.registry.clone(),
+            )
+            .await
+            .is_err(),
+            "committed handoff must not conceal a later economic mutation"
+        );
+        local
+            .meta_store()
+            .put_meta(&snapshot_key, &snapshot)
+            .unwrap();
+        let restored_handoff = installed::recover_metadata_from_peers(
+            local.clone(),
+            NetworkId::Dev,
+            fixture.params.clone(),
+            service.registry.clone(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        // A pinned-reader miss must not evict a newer shared projection. Once the
+        // exact contents are restored, reuse is valid only after the normal guards.
+        assert!(restored_handoff.uses_committed_projection(&handoff));
+        restored_handoff.verify_unchanged(&local.tx_begin_write().unwrap()).unwrap();
+        compact::assert_same(
+            restored_handoff.recovered().continuation.state(),
+            next.state(),
+        );
+        let commitment = cache.base.clone();
+        let recovered = cache
+            .recover(
+                commitment,
                 local.clone(),
                 service.registry.clone(),
-                next.anchor().hash()
+                next.anchor().hash(),
             )
-            .await,
-        Err(burst_store::StoreError::StaleRead(_))
-    ));
-    local.meta_store().put_meta(&record_key, &record).unwrap();
-    let installed = local
-        .tx_begin_write()
-        .unwrap()
-        .checkpoint_metadata(b"")
-        .unwrap();
-    runtime.refresh().await.unwrap();
-    assert_eq!(runtime.anchor().hash(), next.anchor().hash());
-    assert_eq!(
-        runtime.previous_context().unwrap(),
-        crate::checkpoint_transport::Context::from_anchor(old.anchor()).unwrap()
-    );
-    runtime.refresh().await.unwrap();
-    runtime.stop().await.unwrap();
-    drop(runtime);
-    assert!(service.stop().await > 0);
-    assert_eq!(
-        local
+            .await
+            .unwrap()
+            .unwrap();
+        compact::assert_same(recovered.continuation.state(), next.state());
+        let record_key = format!(
+            "checkpoint_chain/v1/dev/{}/{}",
+            next.anchor().genesis_hash(),
+            next.anchor().height()
+        );
+        let record = local.meta_store().get_meta(&record_key).unwrap();
+        local.meta_store().put_meta(&record_key, &[0]).unwrap();
+        assert!(matches!(
+            recovered
+                .advance_from_peers(
+                    local.clone(),
+                    service.registry.clone(),
+                    next.anchor().hash()
+                )
+                .await,
+            Err(burst_store::StoreError::StaleRead(_))
+        ));
+        local.meta_store().put_meta(&record_key, &record).unwrap();
+        let installed = local
             .tx_begin_write()
             .unwrap()
             .checkpoint_metadata(b"")
-            .unwrap(),
-        installed
-    );
+            .unwrap();
+        runtime.refresh().await.unwrap();
+        assert_eq!(runtime.anchor().hash(), next.anchor().hash());
+        assert_eq!(
+            runtime.previous_context().unwrap(),
+            crate::checkpoint_transport::context_from_anchor(old.anchor()).unwrap()
+        );
+        runtime.refresh().await.unwrap();
+        runtime.stop().await.unwrap();
+        drop(runtime);
+        assert!(service.stop().await > 0);
+        assert_eq!(
+            local
+                .tx_begin_write()
+                .unwrap()
+                .checkpoint_metadata(b"")
+                .unwrap(),
+            installed
+        );
+        drop(directories);
+    }).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn compact_worker_authority_uses_installed_descendants_and_rechecks_handoff() {
+    static CHANGE_EPOCH: std::sync::Mutex<Option<Arc<LmdbStore>>> = std::sync::Mutex::new(None);
     let (fixture, _source_dir, source, manifest, certificate) = selection::setup();
     let bytes = archive(&source, &fixture, manifest.checkpoint.parent);
     let old =
@@ -2576,7 +2632,7 @@ async fn compact_worker_authority_uses_installed_descendants_and_rechecks_handof
         };
         let (_dir, local) = cemented::sparse(expected, &source);
         if case < 8 {
-            records(&local, &source, &fixture, &bytes);
+            copy_installed_records(&local, &source, &fixture, &bytes);
         }
         if case == 6 {
             local
@@ -2605,8 +2661,20 @@ async fn compact_worker_authority_uses_installed_descendants_and_rechecks_handof
             .checkpoint_metadata(b"")
             .unwrap();
         let local = Arc::new(local);
-        let service =
-            Service::start(source.clone(), local.clone(), if case == 7 { 1 } else { 0 }).await;
+        let service = WitnessService::start(source.clone(), local.clone(), 0).await;
+        if case == 7 {
+            // Captured recovery may satisfy witnesses locally. Inject at the
+            // witness boundary itself so the mutation cannot silently be skipped.
+            *CHANGE_EPOCH.lock().unwrap() = Some(local.clone());
+            service.registry.write().await.recovery_probe = Some(|stage| {
+                if stage == "private-recovery:confirmed-witnesses" {
+                    if let Some(store) = CHANGE_EPOCH.lock().unwrap().take() {
+                        store.meta_store().put_meta(burst_store::meta::PAYMENT_EPOCH_KEY,
+                            BlockHash::new([77; 32]).as_bytes()).unwrap();
+                    }
+                }
+            });
+        }
         let result = crate::checkpoint_service::recover_compact_authority(
             &crate::checkpoint_service::Settings {
                 store: local.clone(),
@@ -2618,7 +2686,7 @@ async fn compact_worker_authority_uses_installed_descendants_and_rechecks_handof
             previous,
         )
         .await;
-        let requests = service.stop().await;
+        service.stop().await;
         match case {
             0 | 1 => {
                 let recovered = result.unwrap().unwrap();
@@ -2646,7 +2714,7 @@ async fn compact_worker_authority_uses_installed_descendants_and_rechecks_handof
         };
         assert_eq!(unchanged(before), unchanged(after), "handoff case {case}");
         if case == 7 {
-            assert!(requests > 0);
+            assert!(CHANGE_EPOCH.lock().unwrap().is_none(), "epoch change was not exercised");
         }
     }
 }

@@ -1,18 +1,14 @@
-//! Unique Humanity Verification (UHV) system.
+//! Endorsement, verifier selection, voting and challenge state.
 //!
-//! Two-phase process:
-//! 1. **Endorsement**: People in the wallet holder's social circle permanently burn BRN to vouch.
-//! 2. **Verification**: Randomly selected verifiers vote (Legitimate / Illegitimate / Neither).
-//!
-//! Plus the post-verification **challenge** mechanism: any verified wallet can
-//! challenge another at any time by staking BRN.
-//!
-//! The verification *method* is modular — the protocol specifies *that* verification
-//! must happen, not *how*. Different methods can be plugged in.
+//! Nodes authenticate operations and apply these transitions to agreed ledger
+//! state. Evidence assessment is separate from vote counting and settlement.
 
 mod attempts;
+mod tracked_map;
+pub mod shared;
 pub mod bootstrap;
 pub mod challenge;
+pub mod committee;
 pub mod endorsement;
 pub mod error;
 pub mod method;
@@ -20,12 +16,11 @@ pub mod orchestrator;
 pub mod outcomes;
 pub mod selection_request;
 pub mod state;
-pub mod verifier_selection;
 pub mod voting;
+pub mod votes;
 
-/// Default-build release gate. Full lifecycle and missed-deadline recovery
-/// qualification remain incomplete. The explicit testnet policy below is not
-/// public-release approval.
+/// Global switch for certified selection. Experimental builds can enable it
+/// on Dev and Test through `checkpoint_selection_enabled`.
 pub const CHECKPOINT_SELECTION_ENABLED: bool = false;
 
 /// Experimental artifacts can exercise the normal protocol on test networks.
@@ -39,7 +34,7 @@ pub const fn checkpoint_selection_enabled(network: burst_types::NetworkId) -> bo
             ))
 }
 
-/// Appeal admission and reversal require their own live/recovery evidence.
+/// Global appeal gate; node policy may enable appeals on experimental networks.
 pub const META_CHALLENGES_ENABLED: bool = false;
 
 pub use challenge::{AppealContext, ChallengeEngine, ChallengeReason};
@@ -55,5 +50,4 @@ pub use outcomes::{
     VerifierOutcome,
 };
 pub use state::VerificationState;
-pub use verifier_selection::VerifierSelector;
 pub use voting::{NeitherPenaltyAction, NeitherVoteTracker, VerificationVoting, Vote};

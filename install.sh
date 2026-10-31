@@ -1,5 +1,5 @@
 #!/bin/sh
-# BURST Node — universal installer for Linux and macOS
+# BURST node installer for supported Linux and macOS targets
 #
 # Linux:
 #   curl -fsSL https://raw.githubusercontent.com/BURST-UBI/protocol/main/install.sh | sudo sh
@@ -24,7 +24,7 @@ BURST_SEED="${BURST_SEED:-}"
 # Set BURST_IS_SEED=1 when installing a seed node (no bootstrap; no faucet).
 BURST_IS_SEED="${BURST_IS_SEED:-0}"
 # BURST_ADVERTISE_ADDRESS — optional override for keepalive self-advertisement.
-# Node auto-detects public IP on cloud VPSes; set this only if auto-detect fails.
+# Auto-detection only finds a public IP directly assigned to the outbound interface.
 BURST_ADVERTISE_ADDRESS="${BURST_ADVERTISE_ADDRESS:-}"
 
 RED='\033[0;31m'
@@ -86,8 +86,7 @@ toml_string() {
     printf '"'
 }
 
-# ── Detect platform ─────────────────────────────────────────────────
-
+# Detect platform
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 
@@ -106,8 +105,7 @@ esac
 
 BINARY_URL="${RELEASE_URL}/burst-daemon-${PLATFORM}-${ARCH_LABEL}"
 
-# ── Platform-specific paths ──────────────────────────────────────────
-
+# Platform-specific paths
 if [ "${PLATFORM}" = "linux" ]; then
     BIN_PATH="/usr/local/bin/burst-daemon"
     CONFIG_DIR="/etc/burst"
@@ -134,8 +132,7 @@ for value in "$DATA_DIR" "$BIN_PATH" "$CONFIG_PATH" "$BURST_SEED" "$BURST_ADVERT
     [ "$clean" = "$value" ] || error "Paths and endpoint settings cannot contain control characters"
 done
 
-# ── Uninstall ────────────────────────────────────────────────────────
-
+# Uninstall
 uninstall_linux() {
     info "Stopping BURST services..."
     systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
@@ -187,8 +184,7 @@ for arg in "$@"; do
     esac
 done
 
-# ── Preflight ────────────────────────────────────────────────────────
-
+# Preflight
 if [ "${PLATFORM}" = "linux" ]; then
     [ "$(id -u)" -eq 0 ] || error "This script must be run as root (use sudo)."
     command -v systemctl >/dev/null 2>&1 || error "systemd is required but not found."
@@ -223,8 +219,7 @@ esac
 info "Platform: ${PLATFORM}/${ARCH_LABEL}"
 info "Network: ${BURST_NETWORK} (${NET_NAME}, P2P ${NET_PORT})"
 
-# ── Download binary ──────────────────────────────────────────────────
-
+# Download binary
 info "Downloading burst-daemon..."
 
 # macOS: create user-owned bin directory (no sudo needed for updates)
@@ -243,8 +238,7 @@ if ! download_verified_binary "${UPDATER_PATH}" "burst-update.sh"; then
     error "Could not install the verified updater"
 fi
 
-# ── Write config (skip if exists) ────────────────────────────────────
-
+# Write config (skip if exists)
 mkdir -p "${CONFIG_DIR}"
 mkdir -p "${DATA_DIR}"
 
@@ -292,10 +286,9 @@ else
     warn "Config already exists at ${CONFIG_PATH} — not overwriting."
 fi
 
-# ══════════════════════════════════════════════════════════════════════
+#
 # Linux: systemd service + timer
-# ══════════════════════════════════════════════════════════════════════
-
+#
 install_linux() {
     if ! id "${BURST_USER}" >/dev/null 2>&1; then
         useradd --system --no-create-home --home-dir "${DATA_DIR}" --shell /usr/sbin/nologin "${BURST_USER}"
@@ -376,10 +369,9 @@ EOF
     echo ""
 }
 
-# ══════════════════════════════════════════════════════════════════════
+#
 # macOS: launchd plists
-# ══════════════════════════════════════════════════════════════════════
-
+#
 install_macos() {
     mkdir -p "${PLIST_DIR}"
 
@@ -464,8 +456,7 @@ EOF
     echo ""
 }
 
-# ── Run platform-specific installer ──────────────────────────────────
-
+# Run platform-specific installer
 if [ "${PLATFORM}" = "linux" ]; then
     install_linux
 else

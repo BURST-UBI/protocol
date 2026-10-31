@@ -1,3 +1,6 @@
+//! Feature availability: a protocol-wide enable flag or experimental-testnet
+//! on Dev/Test. The experimental feature alone never enables Live.
+
 use burst_types::NetworkId;
 
 const fn experimental(network: NetworkId) -> bool {
@@ -9,7 +12,7 @@ pub(crate) const fn governance_content(network: NetworkId) -> bool {
 }
 
 pub(crate) const fn delegation(network: NetworkId) -> bool {
-    burst_governance::key_delegation::operation::LEDGER_DELEGATION_ENABLED || experimental(network)
+    burst_governance::signing_delegation::operation::LEDGER_DELEGATION_ENABLED || experimental(network)
 }
 
 pub(crate) const fn appeals(network: NetworkId) -> bool {

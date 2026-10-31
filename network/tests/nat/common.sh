@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-
-# Recovery peering can start before RPC. Require every application's RPC before
-# testing wallet operations; a peer count alone does not establish readiness.
+# Poll node_info until every endpoint reports the requested network.
+# This establishes RPC availability, not synchronization, signing authority or
+# readiness for every wallet operation. Scenario assertions must check those.
 wait_for_node_rpcs() {
   local network=$1 budget=$2
   shift 2

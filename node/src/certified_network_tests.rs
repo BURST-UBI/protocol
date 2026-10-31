@@ -25,8 +25,13 @@ mod native_delegation;
 mod partition;
 mod pending_challenge;
 mod pending_expiry;
+mod payment_load;
 mod post_challenge_recovery;
 mod roster;
+
+pub(crate) async fn governance_queries_from_snapshot(baseline: &std::path::Path) {
+    governance_certified::queries_from_snapshot(baseline).await;
+}
 
 fn port() -> u16 {
     // Nodes bind all IPv4 interfaces. A localhost-only probe can choose a port
@@ -108,7 +113,10 @@ async fn signed_block(
             return loaded;
         }
     }
+    let state_started = std::time::Instant::now();
     let state = client.signing_state(&address).await.unwrap();
+    let state_elapsed = state_started.elapsed();
+    let signing_started = std::time::Instant::now();
     let origin = match &tx {
         Transaction::Send(send) => send.origin,
         _ => TxHash::ZERO,
@@ -125,10 +133,16 @@ async fn signed_block(
         block.block_type = BlockType::Open;
     }
     block.hash = block.compute_hash();
-    sign_state_block(block, &key.private)
+    let signed = sign_state_block(block, &key.private);
+    if std::env::var_os("BURST_FINALITY_STAGE_LOG").is_some() {
+        println!("payment_signing_stages hash={} account={} head={} state_us={} construct_sign_us={}",
+            signed.hash, address, state.head, state_elapsed.as_micros(), signing_started.elapsed().as_micros());
+    }
+    signed
 }
 
 async fn submit(clients: &[NodeClient], block: &StateBlock) {
+    let started = std::time::Instant::now();
     let response = clients[0]
         .process(&serde_json::to_string(block).unwrap())
         .await
@@ -138,6 +152,7 @@ async fn submit(clients: &[NodeClient], block: &StateBlock) {
         "rejected {:?}: {response:?}",
         block.block_type
     );
+    let accepted = started.elapsed();
     for (index, client) in clients.iter().enumerate() {
         if let Err(error) = client
             .wait_confirmed(&block.hash.to_string(), Duration::from_secs(25))
@@ -155,6 +170,11 @@ async fn submit(clients: &[NodeClient], block: &StateBlock) {
                 "{:?} {} did not confirm on peer {index}: {error}",
                 block.block_type, block.hash
             );
+        }
+        if std::env::var_os("BURST_FINALITY_STAGE_LOG").is_some() {
+            println!("confirmed_observation operation={:?} hash={} peer={} accepted_ms={:.3} published_to_observed_ms={:.3}",
+                block.block_type, block.hash, index, accepted.as_secs_f64() * 1000.0,
+                started.elapsed().as_secs_f64() * 1000.0);
         }
     }
 }
@@ -333,6 +353,47 @@ impl ChallengeMode {
 }
 
 async fn certified_journey(mode: ChallengeMode) {
+    certified_journey_with_load(mode, None).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "explicit capped authenticated payment-load diagnostic; not release qualification"]
+async fn certified_independent_account_payment_load() {
+    let seconds = std::env::var("BURST_PAYMENT_LOAD_SECONDS").expect("set load duration")
+        .parse::<u64>().expect("integer duration");
+    assert!((2..=30).contains(&seconds));
+    certified_journey_with_load(ChallengeMode::Rejected, Some(PaymentExercise::Load(Duration::from_secs(seconds)))).await;
+}
+
+#[derive(Clone, Copy)]
+enum PaymentExercise {
+    Load(Duration),
+    FragmentedSend,
+    FragmentedLoad(Duration),
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn certified_fragmented_send_round_trip() {
+    certified_journey_with_load(ChallengeMode::Rejected, Some(PaymentExercise::FragmentedSend)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "explicit capped fragmented-wallet payment diagnostic; not release qualification"]
+async fn certified_fragmented_account_payment_load() {
+    let seconds = std::env::var("BURST_PAYMENT_LOAD_SECONDS").expect("set load duration")
+        .parse::<u64>().expect("integer duration");
+    assert!((2..=30).contains(&seconds));
+    certified_journey_with_load(ChallengeMode::Rejected,
+        Some(PaymentExercise::FragmentedLoad(Duration::from_secs(seconds)))).await;
+}
+
+async fn certified_journey_with_load(mode: ChallengeMode, load: Option<PaymentExercise>) {
+    let load_accounts = if load.is_some() {
+        std::env::var("BURST_PAYMENT_LOAD_ACCOUNTS").map_or(3, |value| {
+            value.parse::<usize>().expect("integer account count")
+        })
+    } else { 3 };
+    assert!((3..=32).contains(&load_accounts));
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_test_writer()
@@ -390,7 +451,7 @@ async fn certified_journey(mode: ChallengeMode) {
     let params = ProtocolParams {
         brn_rate: BRN_UNIT,
         min_work_difficulty: 0,
-        bootstrap_exit_threshold: 4,
+        bootstrap_exit_threshold: (load_accounts + 1) as u32,
         endorsement_threshold: 1,
         endorsement_burn_amount: 1,
         num_verifiers: 3,
@@ -413,7 +474,6 @@ async fn certified_journey(mode: ChallengeMode) {
         },
         min_verification_age_secs: 0,
         new_wallet_spending_limit: 0,
-        new_wallet_tx_limit_per_day: 0,
         trst_expiry_secs: u64::MAX,
         ..ProtocolParams::burst_defaults()
     };
@@ -422,6 +482,7 @@ async fn certified_journey(mode: ChallengeMode) {
     let mut workers = Vec::new();
     let mut orchestrators = Vec::new();
     let mut stores = Vec::new();
+    let mut election_views = Vec::new();
     let mut configs = Vec::new();
     for index in 0..4 {
         let key_file = directory.path().join(format!("representative-{index}.key"));
@@ -453,16 +514,18 @@ async fn certified_journey(mode: ChallengeMode) {
         let mut node = fixture_node(config, &clock, &relay_url).await;
         orchestrators.push(node.verification_orchestrator.clone());
         stores.push(node.store.clone());
+        election_views.push(node.active_elections.clone());
         let shutdown = node.shutdown.clone();
         workers.push((
             shutdown,
             tokio::spawn(async move {
-                node.start().await.unwrap();
+                node.start_with_services(burst_daemon::start_public_services).await.unwrap();
                 node.stop().await.unwrap();
             }),
         ));
     }
     let restart_clock = clock.clone();
+    let load_failure_path = directory.path().join("payment-load-failure.json");
     let mut journey = tokio::spawn(async move {
         for client in &clients {
             loop {
@@ -476,15 +539,17 @@ async fn certified_journey(mode: ChallengeMode) {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
-        let keys: Vec<_> = (0..5)
-            .map(|index| burst_crypto::keypair_from_seed(&[index; 32]))
+        let key_count = if load_accounts > 3 { load_accounts + 1 } else { 5 };
+        let funding = if load_accounts > 3 { BRN_UNIT / 32 } else { BRN_UNIT };
+        let keys: Vec<_> = (0..key_count)
+            .map(|index| burst_crypto::keypair_from_seed(&[index as u8; 32]))
             .collect();
         let addresses: Vec<_> = keys
             .iter()
             .map(|key| burst_crypto::derive_address(&key.public))
             .collect();
-        for index in 1..5 {
-            if index < 4 {
+        for index in 1..key_count {
+            if index <= load_accounts {
                 let tx = Transaction::Endorse(
                     build_endorse_tx(&addresses[0], &addresses[index], 1, time(10)).unwrap(),
                 );
@@ -495,7 +560,7 @@ async fn certified_journey(mode: ChallengeMode) {
                 .await;
             }
             let tx = Transaction::Burn(
-                build_burn_tx(&addresses[0], &addresses[index], BRN_UNIT, time(10)).unwrap(),
+                build_burn_tx(&addresses[0], &addresses[index], funding, time(10)).unwrap(),
             );
             let burn = signed_block(&clients[0], &keys[0], tx, &params).await;
             submit(&clients, &burn).await;
@@ -503,12 +568,19 @@ async fn certified_journey(mode: ChallengeMode) {
                 build_receive_tx(
                     &addresses[index],
                     burn.hash.into_tx_hash(),
-                    BRN_UNIT,
+                    funding,
                     time(10),
                 )
                 .unwrap(),
             );
-            let opening = signed_block(&clients[0], &keys[index], tx, &params).await;
+            let mut opening = signed_block(&clients[0], &keys[index], tx, &params).await;
+            if index >= 4 && index <= load_accounts {
+                // Additional humans delegate to live representatives; their own
+                // keys still authorize every payment on their account chains.
+                opening.representative = addresses[index % 4].clone();
+                opening.hash = opening.compute_hash();
+                opening = sign_state_block(opening, &keys[index].private);
+            }
             submit(&clients, &opening).await;
             if index < 4 {
                 let mut opt_in = opening.clone();
@@ -523,7 +595,19 @@ async fn certified_journey(mode: ChallengeMode) {
             }
         }
         clock.store(time(20).as_secs(), Ordering::SeqCst);
-        wait_human_authority(&stores, 4).await;
+        wait_human_authority(&stores, (load_accounts + 1) as u64).await;
+        if let Some(exercise) = load {
+            match exercise {
+                PaymentExercise::Load(duration) => payment_load::run(&clients, &stores, &election_views,
+                    &keys[..load_accounts + 1], &params, time(20), duration, &load_failure_path, payment_load::Workload::BurnReceive).await,
+                PaymentExercise::FragmentedLoad(duration) => payment_load::run(&clients, &stores, &election_views,
+                    &keys[..load_accounts + 1], &params, time(20), duration, &load_failure_path,
+                    payment_load::Workload::FragmentedSend).await,
+                PaymentExercise::FragmentedSend => payment_load::fragmented_send_round_trip(
+                    &clients, &stores, &keys, &params, time(20)).await,
+            }
+            return None;
+        }
         let tx = Transaction::Endorse(
             build_endorse_tx(&addresses[0], &addresses[4], 1, time(100)).unwrap(),
         );
@@ -567,7 +651,7 @@ async fn certified_journey(mode: ChallengeMode) {
                     selected.sort_by(|left, right| left.as_str().cmp(right.as_str()));
                     let mut expected = addresses[1..4].to_vec();
                     expected.sort_by(|left, right| left.as_str().cmp(right.as_str()));
-                    assert_eq!(selected, expected);
+                    assert_eq!(*selected, expected);
                     contexts.push(context);
                     break;
                 }
@@ -713,14 +797,14 @@ async fn certified_journey(mode: ChallengeMode) {
         for address in &addresses {
             heads.push(clients[0].signing_state(address).await.unwrap().head);
         }
-        (
+        Some((
             clients,
             addresses,
             heads,
             now,
             contexts[0],
             activation_bytes,
-        )
+        ))
     });
     let outcome = tokio::time::timeout(Duration::from_secs(240), &mut journey).await;
     if outcome.is_err() {
@@ -730,15 +814,24 @@ async fn certified_journey(mode: ChallengeMode) {
     for (shutdown, _) in &workers {
         shutdown.shutdown();
     }
-    for (_, worker) in workers.drain(..) {
-        tokio::time::timeout(Duration::from_secs(20), worker)
-            .await
-            .unwrap()
-            .unwrap();
+    let worker_failures = payment_load::drain_workers(
+        workers.drain(..).map(|(_, worker)| worker), Duration::from_secs(20),
+    ).await;
+    if load.is_some() {
+        relay_task.abort();
+        let _ = relay_task.await;
+        if !matches!(&outcome, Ok(Ok(None))) || !worker_failures.is_empty() {
+            let retained = directory.keep();
+            eprintln!("payment_load_retained_fixture {}", retained.display());
+        }
+        assert!(worker_failures.is_empty(), "payment load workers failed: {worker_failures:?}");
+        assert!(outcome.expect("payment load fixture timed out").unwrap().is_none());
+        return;
     }
-    let (mut clients, addresses, heads, verified_at, context, activation_bytes) = outcome
-        .expect("certified verification network journey timed out")
-        .unwrap();
+    assert!(worker_failures.is_empty(), "certified network workers failed: {worker_failures:?}");
+    let completed = outcome.expect("certified verification network journey timed out");
+    let (mut clients, addresses, heads, verified_at, context, activation_bytes) = completed
+        .unwrap().expect("lifecycle journey must return recovery inputs");
     let mut observer = configs[0].clone();
     observer.data_dir = directory.path().join("fresh-observer");
     observer.port = port();
@@ -762,7 +855,7 @@ async fn certified_journey(mode: ChallengeMode) {
         workers.push((
             shutdown,
             tokio::spawn(async move {
-                node.start().await.unwrap();
+                node.start_with_services(burst_daemon::start_public_services).await.unwrap();
                 node.stop().await.unwrap();
             }),
         ));

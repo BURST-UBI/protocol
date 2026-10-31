@@ -6,7 +6,7 @@ use serde::Deserialize;
 use std::time::Duration;
 
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
-const MAX_CONCURRENT_REQUESTS: usize = 8;
+use crate::evaluation::MAX_CONCURRENT_REQUESTS;
 
 pub struct GroupClient {
     #[cfg(not(target_arch = "wasm32"))]
@@ -149,8 +149,8 @@ impl GroupClient {
         url: reqwest::Url,
         max_bytes: usize,
     ) -> Result<Vec<u8>, GroupError> {
-        use burst_browser::FetchError;
-        burst_browser::fetch_bytes(url.as_str(), None, self.timeout, max_bytes)
+        use burst_web_runtime::FetchError;
+        burst_web_runtime::fetch_bytes(url.as_str(), None, self.timeout, max_bytes)
             .await
             .map_err(|error| match error {
                 FetchError::Timeout | FetchError::Http(500..=599) => {

@@ -12,18 +12,18 @@ fn invalid(error: impl ToString) -> ReplayError {
 pub(super) trait ReadSeek: Read + Seek {}
 impl<T: Read + Seek> ReadSeek for T {}
 
-pub(crate) struct StagedBody(
-    pub(super) std::sync::Mutex<std::fs::File>,
-    pub(super) std::path::PathBuf,
-);
+pub(crate) struct StagedBody {
+    pub(super) file: std::sync::Mutex<crate::confirmed_replay::scratch_file::ScratchFile>,
+    pub(super) directory: std::path::PathBuf,
+}
 
 impl StagedBody {
     pub(super) fn prepare(
         anchor: &CheckpointAnchor,
         directory: &std::path::Path,
-        encode: impl FnOnce(&mut BufWriter<std::fs::File>) -> Result<(), ReplayError>,
+        encode: impl FnOnce(&mut BufWriter<crate::confirmed_replay::scratch_file::ScratchFile>) -> Result<(), ReplayError>,
     ) -> Result<(Self, super::SnapshotManifest), ReplayError> {
-        let file = tempfile::tempfile_in(directory).map_err(invalid)?;
+        let file = crate::confirmed_replay::scratch_file::ScratchFile::new_in(directory).map_err(invalid)?;
         let mut writer = BufWriter::with_capacity(BUFFER_BYTES, file);
         encode(&mut writer)?;
         let mut file = writer.into_inner().map_err(invalid)?;
@@ -32,7 +32,7 @@ impl StagedBody {
         let manifest =
             super::SnapshotManifest::from_commitment(anchor, length, hash).map_err(invalid)?;
         Ok((
-            Self(std::sync::Mutex::new(file), directory.to_path_buf()),
+            Self { file: std::sync::Mutex::new(file), directory: directory.to_path_buf() },
             manifest,
         ))
     }
@@ -63,10 +63,12 @@ enum Source<'a> {
     Borrowed(Cursor<&'a [u8]>),
     Stream(BufReader<&'a mut dyn ReadSeek>),
     Memory(Cursor<Vec<u8>>),
-    File(BufReader<std::fs::File>),
+    File(BufReader<crate::confirmed_replay::scratch_file::ScratchFile>),
 }
 
-/// Owns or borrows the exact bytes authenticated before any state decoding.
+/// Body bytes checked against a snapshot certificate before state decoding.
+/// A borrowed seekable stream must remain unchanged across verification, decoding
+/// and canonical comparison; this wrapper does not lock its underlying storage.
 pub(super) struct VerifiedBody<'a> {
     source: Source<'a>,
     length: u64,
@@ -140,12 +142,16 @@ impl<'a> VerifiedBody<'a> {
         Ok(())
     }
 
-    pub(super) fn matches_state(&mut self, state: &super::State<'_>) -> Result<bool, ReplayError> {
+    pub(super) fn matches_state_with_poll(&mut self, state: &super::State<'_>,
+        poll: &dyn Fn(&'static str) -> Result<(), ReplayError>,
+    ) -> Result<bool, ReplayError> {
         self.rewind()?;
         let directory = self.directory.clone();
         let mut comparator = Comparator {
             body: self,
             buffer: [0; BUFFER_BYTES],
+            poll,
+            bytes_until_poll: 0,
         };
         state.encode_into_in(&mut comparator, directory.as_deref())?;
         Ok(self.consumed_all())
@@ -160,6 +166,8 @@ impl<'a> VerifiedBody<'a> {
         let mut comparator = Comparator {
             body: self,
             buffer: [0; BUFFER_BYTES],
+            poll: &|_| Ok(()),
+            bytes_until_poll: 0,
         };
         super::canonical::encode_into(state, &mut comparator)?;
         Ok(self.consumed_all())
@@ -183,18 +191,47 @@ impl<'a> VerifiedBody<'a> {
     }
 }
 
+pub(super) struct PollingReader<'a, R> {
+    pub inner: &'a mut R,
+    pub poll: &'a dyn Fn(&'static str) -> Result<(), ReplayError>,
+    pub bytes_until_poll: usize,
+}
+
+impl<R: Read> Read for PollingReader<'_, R> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        if self.bytes_until_poll == 0 {
+            (self.poll)("snapshot:decode-bytes").map_err(std::io::Error::other)?;
+            self.bytes_until_poll = BUFFER_BYTES;
+        }
+        let length = bytes.len().min(self.bytes_until_poll);
+        let count = self.inner.read(&mut bytes[..length])?;
+        self.bytes_until_poll -= count;
+        Ok(count)
+    }
+}
+
 struct Comparator<'a, 'b> {
     body: &'a mut VerifiedBody<'b>,
     buffer: [u8; BUFFER_BYTES],
+    poll: &'a dyn Fn(&'static str) -> Result<(), ReplayError>,
+    bytes_until_poll: usize,
 }
 
 impl Write for Comparator<'_, '_> {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        for expected in bytes.chunks(BUFFER_BYTES) {
+        let mut remaining = bytes;
+        while !remaining.is_empty() {
+            if self.bytes_until_poll == 0 {
+                (self.poll)("snapshot:canonical-bytes").map_err(std::io::Error::other)?;
+                self.bytes_until_poll = BUFFER_BYTES;
+            }
+            let (expected, rest) = remaining.split_at(remaining.len().min(self.bytes_until_poll));
+            self.bytes_until_poll -= expected.len();
             self.body.read_exact(&mut self.buffer[..expected.len()])?;
             if &self.buffer[..expected.len()] != expected {
                 return Err(std::io::Error::other("noncanonical snapshot bytes"));
             }
+            remaining = rest;
         }
         Ok(bytes.len())
     }
@@ -205,6 +242,8 @@ impl Write for Comparator<'_, '_> {
 }
 
 impl VerifiedBody<'static> {
+    /// Copy exactly the certified body length, using memory up to 1 MiB and
+    /// scratch storage above it. The caller checks for trailing archive bytes.
     pub(super) fn stage(
         anchor: &CheckpointAnchor,
         certificate: &SnapshotCertificate,
@@ -220,8 +259,8 @@ impl VerifiedBody<'static> {
         let mut file = if length > MEMORY_BYTES {
             Some(
                 match directory {
-                    Some(directory) => tempfile::tempfile_in(directory),
-                    None => tempfile::tempfile(),
+                    Some(directory) => crate::confirmed_replay::scratch_file::ScratchFile::new_in(directory),
+                    None => crate::confirmed_replay::scratch_file::ScratchFile::new(),
                 }
                 .map_err(invalid)?,
             )
@@ -303,13 +342,39 @@ mod tests {
                 }],
                 manifest,
             };
+            // Interrupt after a complete chunk of a valid, authenticated large
+            // body; neither decoding nor comparison may consume the remaining bytes.
+            if size > MEMORY_BYTES as usize {
+                for comparing in [false, true] {
+                    let mut body = VerifiedBody::borrowed(&anchor, &certificate, &bytes).unwrap();
+                    let calls = std::cell::Cell::new(0);
+                    let poll = |_: &'static str| {
+                        calls.set(calls.get() + 1);
+                        if calls.get() == 2 { Err(invalid("body cancellation")) } else { Ok(()) }
+                    };
+                    let error = if comparing {
+                        let mut comparator = Comparator {
+                            body: &mut body, buffer: [0; BUFFER_BYTES], poll: &poll, bytes_until_poll: 0,
+                        };
+                        super::super::canonical::encode_into(&value, &mut comparator).unwrap_err().to_string()
+                    } else {
+                        ciborium::from_reader::<super::super::Blob<'_>, _>(PollingReader {
+                            inner: &mut body, poll: &poll, bytes_until_poll: 0,
+                        }).err().unwrap().to_string()
+                    };
+                    assert!(error.contains("body cancellation"));
+                    assert_eq!(calls.get(), 2);
+                    assert_eq!(body.consumed, BUFFER_BYTES as u64);
+                    assert!(!body.consumed_all());
+                }
+            }
             let (disk, manifest) = StagedBody::prepare(&anchor, directory.path(), |writer| {
                 writer.write_all(&bytes).map_err(invalid)
             })
             .unwrap();
             assert_eq!(manifest, certificate.manifest);
             {
-                let mut file = disk.0.lock().unwrap();
+                let mut file = disk.file.lock().unwrap();
                 #[cfg(target_os = "linux")]
                 {
                     use std::os::fd::AsRawFd;

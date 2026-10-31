@@ -1,7 +1,7 @@
-use super::governance_certified::{installed, stop};
+use super::governance_certified::{wait_for_installation, stop};
 use super::*;
 use burst_governance::{
-    key_delegation::view::{Direction, Query},
+    signing_delegation::view::{Direction, Query},
     GovernableParam,
 };
 
@@ -53,7 +53,6 @@ async fn desktop_journey(constitution: bool, parameter_authoring: bool) {
         bootstrap_exit_threshold: 4,
         endorsement_burn_amount: 1,
         new_wallet_spending_limit: 0,
-        new_wallet_tx_limit_per_day: 0,
         governance_proposal_cost: 1,
         governance_proposal_duration_secs: if constitution || parameter_authoring {
             15
@@ -108,7 +107,7 @@ async fn desktop_journey(constitution: bool, parameter_authoring: bool) {
         workers.push((
             node.shutdown.clone(),
             tokio::spawn(async move {
-                node.start().await.unwrap();
+                node.start_with_services(burst_daemon::start_public_services).await.unwrap();
                 node.stop().await.unwrap();
             }),
         ));
@@ -180,7 +179,7 @@ async fn desktop_journey(constitution: bool, parameter_authoring: bool) {
         }
         // Finish the setup batch before the roster cut retires its payment epoch.
         journey_clock.store(Timestamp::now().as_secs(), Ordering::SeqCst);
-        installed(&journey_stores, 1, &journey_params).await;
+        wait_for_installation(&journey_stores, 1, &journey_params).await;
         wait_human_authority(&journey_stores, 3).await;
         use_wall_clock.store(true, Ordering::SeqCst);
         let proposal = if !constitution && !parameter_authoring {
@@ -273,7 +272,7 @@ async fn desktop_journey(constitution: bool, parameter_authoring: bool) {
             crate::checkpoint_store::chain::load(&check_stores[0], NetworkId::Dev, &check_params)
                 .unwrap()
                 .len();
-        let epoch = installed(&check_stores, height, &check_params).await;
+        let epoch = wait_for_installation(&check_stores, height, &check_params).await;
         check_result(&check_clients, &check_proposal).await;
         if constitution {
             check_document(&check_clients).await;
@@ -304,13 +303,13 @@ async fn desktop_journey(constitution: bool, parameter_authoring: bool) {
         workers.push((
             node.shutdown.clone(),
             tokio::spawn(async move {
-                node.start().await.unwrap();
+                node.start_with_services(burst_daemon::start_public_services).await.unwrap();
                 node.stop().await.unwrap();
             }),
         ));
     }
     let recovered = tokio::spawn(async move {
-        assert_eq!(installed(&stores, height, &params).await, epoch);
+        assert_eq!(wait_for_installation(&stores, height, &params).await, epoch);
         if constitution {
             check_document(&clients).await;
         } else if parameter_authoring {

@@ -4,6 +4,8 @@ impl VerificationOrchestrator {
     /// Start review of a specific earlier judgment. The caller must derive the
     /// context from the latest certified receipt; this method checks only the
     /// panel state machine and does not authorize ledger admission or reversal.
+    /// `challenger_is_verified` is a caller assertion. This method checks the
+    /// supplied stake amount but neither authenticates the signer nor debits BRN.
     pub fn initiate_signed_appeal_at(
         &mut self,
         target: &WalletAddress,
@@ -82,27 +84,25 @@ impl OrchestratorSnapshot {
         validate_appeals(
             &self.active_appeals,
             &self.attempts,
-            &self.active_challenges,
-            &self.states,
+            |target| self.active_challenges.get(target),
+            |target| self.states.get(target),
         )
     }
 }
 
-pub(super) fn validate_appeals(
-    appeals: &HashMap<WalletAddress, AppealContext>,
+pub(super) fn validate_appeals<'a>(
+    appeals: impl IntoIterator<Item = (&'a WalletAddress, &'a AppealContext)>,
     attempts: &AttemptContexts,
-    challenges: &HashMap<WalletAddress, Challenge>,
-    states: &HashMap<WalletAddress, VerificationState>,
+    challenges: impl Fn(&WalletAddress) -> Option<&'a Challenge>,
+    states: impl Fn(&WalletAddress) -> Option<&'a VerificationState>,
 ) -> Result<(), bincode::Error> {
     for (target, appeal) in appeals {
         let valid = !appeal.reviewed_outcome.is_zero()
             && attempts.challenge_context(target).is_some_and(|admission| {
                 !admission.is_zero() && admission != appeal.reviewed_outcome
             })
-            && challenges
-                .get(target)
-                .is_some_and(|challenge| &challenge.target == target)
-            && states.get(target).is_some_and(|state| {
+            && challenges(target).is_some_and(|challenge| &challenge.target == target)
+            && states(target).is_some_and(|state| {
                 &state.target == target
                     && matches!(
                         state.phase,

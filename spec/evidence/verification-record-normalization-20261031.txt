@@ -1,0 +1,336 @@
+# Verification record normalization implementation contract
+
+Status: implemented and active during production startup after recovery, before admission.
+Codecs, scoped writers, historical-journal compatibility, bounded fallback, planner,
+process-crash and startup checks pass. Certified1,024-pool and completed1,024-panel node
+persistence now pass, closing the demonstrated row-size blocker. Cold/global/resource
+and broader lifecycle qualification remain in the operation audit. This document's
+historical sections record earlier incomplete states; the current ledger is authoritative.
+
+## Proven problem
+
+A certified two-member committee from1024 eligible, valid addresses installs and
+roundtrips its snapshot (76227 bytes), but its target row fails the64KiB local codec.
+The128-pool control succeeds (10819 snapshot bytes). Separately, a1024-member synthetic
+panel initially fits its target row but its completed deadline does not. Thus the
+problem is both immutable pool duplication and growing vote/history payloads; it is
+not confined to choosing a huge committee. These are codec diagnostics, not successful
+node persistence scenarios. The selection fixture uses its existing checkpoint
+signature and beacon validation; no authority checks were bypassed.
+
+## Representation requirements
+
+Keep each physical row within64KiB and keys within511 bytes. Retain the64MiB snapshot/
+undo budgets and65536 journal change bound. Keep signed block/checkpoint encodings,
+selection commitments, governed committee counts, economic outcomes and peer framing.
+
+Normalize the logical target by semantic identity, not fixed byte offsets in its
+serialized aggregate. Byte pages alone would shift after a vote insertion and retain
+whole-target serialization. Separate bounded target/selection scalar headers from:
+
+- Endorsements and endorser membership, keyed by endorser identity.
+- Selected committee members and immutable selection pool, preserving their validated
+  order. Write the pool when a selection changes; ordinary votes must not rewrite it.
+- Current votes and prior-round votes, keyed by voter in separate domains. Valid
+  settlement forbids duplicate voters across rounds; preserve the existing canonical
+  snapshot order and reject duplicates rather than silently coalescing them.
+- Excluded identities and attempt vote bindings, keyed by identity.
+- Existing verifier penalty/history records, with their current validation rules.
+
+Headers must retain absent-versus-present-empty domains and exact member counts.
+Readers reject missing headers, missing/extra members, duplicate keys, mixed old/new
+representations and mismatched identities. Reader memory and snapshot accounting must
+include all reconstructed state before publication. Small challenge/appeal fields
+stay available to the existing point-read consumer without loading the entire pool.
+
+Scoped writes must compare changed members and leave unrelated pool/history bytes
+untouched. Merely emitting small rows after cloning/serializing the whole target is
+an intermediate codec fix, not completion of the complexity requirement. Trace mutable
+state tracking and immutable baselines as part of the same implementation.
+
+## Consumer and compatibility map
+
+| Source | Required adaptation |
+| --- | --- |
+| verification/src/orchestrator/records.rs | New physical emit/read/delta contract, canonical logical snapshot parity, exact budget accounting |
+| verification/src/selection_request.rs | Controlled pool decomposition/reassembly without exposing mutable authenticated request fields to callers |
+| store_lmdb/src/write_batch/verification_records.rs | Cold load, scoped before-images, migration, aggregate overlay, rules/global fallback and auxiliary cache publication |
+| store_lmdb/src/block_undo.rs and block_undo/stable.rs | Reuse journal validation/bounds patterns; preserve block/account/height and unrelated changes |
+| node/src/verification_storage.rs | Mode selection, historic aggregate-to-row overlay and state-key recognition |
+| node/src/appeal_view.rs | Keyed challenge point read under the same read transaction; fail closed on mixed/incomplete state |
+| store_lmdb/src/write_batch/auxiliary_cache.rs and checkpoint_projection.rs | Invalidate/include all new row namespaces |
+| node/src/confirmed_replay/installation/economics.rs | Certified projection excludes/replaces the complete verification state namespace |
+
+Existing v1 target journal images are self-contained: unlike positional TRST undo,
+normalizing their before/after images does not require guessing ledger order. Preserve
+all historical aggregate journals through the existing virtual snapshot adapter.
+Migration must atomically publish data, mode and any necessary journal conversion;
+rejection/over-budget conversion leaves the original database unchanged. Do not merely
+change the marker while old target-row undo can reintroduce incomplete aggregate state.
+
+A large deadline can change more than65536 physical member/penalty rows. Use the
+existing bounded logical aggregate undo path where applicable, or demonstrate another
+compatible bounded representation. Do not increase the change limit, drop rollback
+rights, partially commit the deadline or silently omit rows. Check checkpoint and
+ordinary block journal ownership separately; they are not interchangeable.
+
+## Coherent validation boundary
+
+Extend existing record, storage, undo, appeal and certified deadline fixtures. Before
+node compilation, cover full logical roundtrips,128/1024-pool signed-selection codecs,
+large current/prior votes, one-vote write amplification with an unchanged pool,
+missing/duplicate/trailing rows, exact byte budgets and mixed-format rejection.
+Then cover migration abort/reopen, old aggregate and v1 target journal undo, non-tail
+overlays, scoped before-image mismatch, point appeal reads, and certified deadline
+restart/continuation. Reuse the existing23+1 node evidence for unrelated assertions;
+new representation-sensitive checks need matching inputs and latest receipts.
+Include the pending widened tally at that node integration boundary. The frozen
+release candidate and its earlier acceptance remain unchanged until explicit affected
+candidate qualification. No production-readiness claim follows from this contract.
+
+## Implemented prerequisite — 2026-10-21
+
+records/normalized.rs exports a bounded scalar header and eight independently keyed
+member domains (endorsements, endorser membership, selected members, votes, exclusions,
+prior votes, pool, contexts). Ordinals preserve selected/pool order; identity keys
+preserve stable votes and bindings. Header retains option presence and exact counts.
+Decode checks physical row/key limits, version, key identity, required header, missing/
+extra members, ordinal continuity and target snapshot byte accounting. The existing
+reader can accept a reconstructed normalized target while retaining duplicate-target,
+identity, global budget and final logical validation. Decode failure poisons that reader.
+
+Codec and reader runs each passed140 library tests (one explicit scaling test ignored).
+128/1024 pool and deadline cases roundtrip exact logical bytes below64KiB per physical
+row; one signed vote changes three exported rows (header/vote/context), no pool row.
+Missing header/member, key substitution and trailing data reject. Exact snapshot budget
+passes and one-byte-short fails. Prior-vote/revote states retain canonical bytes.
+Receipts: verification-normalized-codec and verification-normalized-reader (20261021).
+
+No database marker or live storage consumer uses this format yet. Full target export
+currently clones/traverses all fields; it is a codec/migration building block, not the
+scoped write algorithm. Next implement per-domain/member changes using existing tracked
+state before wiring writers, migration and undo. Old-format rejection diagnostics remain
+true; neither larger-pool persistence nor node qualification is closed.
+
+## Scoped target generation — 2026-10-21
+
+normalized::visit_target_delta uses tracked target-domain changes and constant-size
+scalar/request headers. A signed vote in128/1024 eligible pools emits three changed
+rows and visits zero pool members; prior-vote domains also skip when unchanged. Delta
+application matches full exports through terminal/revote transitions, including member
+deletions and prior histories. Wrong baseline rejects; callback failure propagates.
+140 library cases passed (one explicit scaling diagnostic ignored), receipt
+verification-normalized-delta-20261021 verified.
+
+Changed vector domains still require member comparison, so this removes unrelated
+selection-pool work without claiming constant-time current-panel/history mutation.
+The caller must verify stored before-images, enforce aggregate/journal budgets and
+abort on error. No live mode switched. Whole-state normalized loading/export, atomic
+migration and historical undo compatibility remain the next integration boundary.
+
+## Whole normalized state — 2026-10-21
+
+visit_state_rows emits rules/verifiers in their existing encodings followed by sorted
+normalized target rows. StateReader requires global strict ordering, decodes each
+member directly into the active target, flushes complete targets into the existing
+logical reader, and charges the remaining canonical snapshot budget before retention.
+It holds no second encoded target-row map. Export still buffers one full target and
+is explicitly a migration/oracle operation, not the ordinary scoped write path.
+
+141 library tests passed (one explicit scaling diagnostic ignored). Existing record
+roundtrips, signed128/1024 eligible pools and terminal/revote histories compare exact
+whole snapshots and byte budgets. Missing/mixed/duplicate/out-of-order/trailing/unknown
+version rows fail and poison the reader. Receipt verification-normalized-state-20261021.
+
+Next LMDB integration must merge base and staged overlay streams in sorted order,
+include both existing rules/verifier and normalized target namespaces, and reject
+legacy aggregate target rows in normalized mode. Historic target undo, aggregate
+adapters, migration, appeal point reads and namespace invalidation remain outstanding.
+No live format marker changed and no persistence defect is declared closed.
+
+## Historical v1 target journals — 2026-10-21
+
+store_lmdb::block_undo::verification::convert now transforms self-contained v1
+target images into exact normalized physical deltas. It validates the original
+canonical journal, preserves identity/unrelated changes, leaves aggregate journals
+for their existing adapter and is idempotent for normalized journals. Mixed old/new
+target or aggregate/target journals reject. Expanded changes and bytes remain bounded
+by the existing65536/64MiB limits, checked incrementally and by final canonical decode.
+
+Three focused tests passed (build31.13s/runtime0.72s): forward/inverse full-export
+parity with target creation/update/deletion; malformed/mixed rejection; expanded
+100-target/400-endorsement fixture rejected at the existing change cap. Receipt
+verification-normalized-journals-20261021 verified. This pure converter performs no
+database write and does not enable the new format. Atomic migration and aggregate
+undo integration remain required, with a bound across the whole migration job.
+
+
+## Explicit LMDB adapter — 2026-10-21
+
+The writer recognizes format2, uses scoped normalized state deltas, reconstructs cold
+state with StateReader and merges base/overlay rows in key order without retaining a
+second encoded state map. Historical global undo replacements use the active physical
+format. Cache invalidation and checkpoint lifecycle prefixes include v2 rows.
+`normalize_verification_records` atomically converts current rows and retained journals,
+then changes the marker. Total input and output each stop at64MiB; journal count stops
+at65,536. Failures poison the transaction. This is explicit, not startup activation.
+
+Ten focused storage cases passed, one scaling case ignored; receipt
+verification-normalized-lmdb-20261021. Large target commit/abort/reopen/inverse and both
+historical journal formats are covered. Remaining integration: node appeal point reads,
+aggregate rollback overlays and installation namespace handling, normalized conflicts/
+governed-rules/cache regressions, signed eligible-pool node persistence, large-transition
+aggregate journal fallback and a supported migration path for histories above the
+explicit bounded migration envelope. Existing resource and undo caps stay unchanged.
+
+
+### Normalized node consumer qualification — 2026-10-21
+
+Appeal display uses validated bounded target headers; this is a scalar read, not
+member integrity/authentication. Historical aggregate rollback expands to the active
+physical format; state filtering includes normalized rows and the format marker.
+Existing stale-write/global-rules/cache tests now cover both formats (10 component
+cases passed;1 scaling case ignored). Host validation compilation79s, five exact
+appeal/overlay/mixed-journal-plan tests passed, including reopen. Build/runtime receipt
+audits are reusable in complexity-normalized-consumers-20261021. Node SHA256
+63aaf8fa8c84532bc3041af050b562d230be96ca3183abdaf99130fd8f8d0b22.
+Startup still uses format1. Signed large-pool node lifecycle, large-transition journal
+fallback, supported larger-history migration and production gates remain unresolved.
+
+
+### Large physical delta undo ownership — 2026-10-21
+
+Normalized block writes now preview existing journal capacity and select bounded
+aggregate undo when physical changes cannot fit. Earlier physical verification changes
+are folded into the writer-entry logical image; later changes retain the same owner.
+Unrelated entries stay intact. This also corrects physical-then-global-rules composition
+in v1. Existing byte/change limits remain enforced. Checkpoint writes without a block
+journal still stream physical rows; no new block undo is invented for them.
+
+Twelve focused storage cases passed, one scaling probe ignored, receipt
+verification-normalized-undo-promotion-20261021 (build3.70s/runtime20.55s). A synthetic
+65,537-target transition exceeds the real physical change cap and preserves earlier/
+later writes, unrelated undo, abort, reopen and exact inverse. Both formats pass
+physical/global-rules/later-delta composition. This does not qualify a signed large
+pool or deadline. Host source remains at the prior normalized-consumers boundary;
+new recorder/writer changes require affected host qualification. Fallback remains
+bounded by aggregate snapshot and total journal bytes; larger-history migration and
+automatic startup are still unresolved.
+
+
+### Certified large-pool node persistence — 2026-10-21
+
+Existing signed selection fixture now covers3-member panels from1,024eligible addresses,
+terminal/revote deadlines, initial cold reopen/context retention, early-deadline rejection,
+abort/commit and exact restart state. Old target storage explicitly rejects the initial
+large-pool state; normalized storage succeeds. Format2 signed final-vote economics and
+mixed historical aggregate/row rollback also pass. Host validation build74s; three cases
+passed (0.719/0.152/0.178s), build/runtime audits reusable. Evidence:
+normalized-lifecycle-host-20261021 locally, complexity-normalized-lifecycle-20261021 on host.
+Node f8ef365f0f27f90503ae68f6224a3c27743e2eac0e3769139b1d2ef8d4bc5c58.
+
+Startup remainsv1. This closes the focused large-eligible-pool node persistence assertion,
+not the original completed1024-panel node requirement, sustained throughput, full cold
+resource bounds or release qualification. Format marker journal protection, explicit
+byte-budget failure assertions and larger-history migration need closure before activation.
+
+
+### Irreversible format and byte-exhaustion rejection — 2026-10-21
+
+Verification format marker is now excluded from both recorded and decoded block undo.
+Global snapshot fallback checks canonical size before encoding. Three focused component
+checks pass (build3.09s/runtime0.09s): irreversible metadata decoder/recorder rejection,
+marker write rejection in both modes, and actual64MiB recorder exhaustion leaving no
+partial verification state, unrelated value, block or journal after refused commit.
+Receipt verification-normalized-limits-20261021 verified. Changes are local; the retained
+host artifact still describes normalized-lifecycle inputs. Larger-history migration,
+completed large-panel node persistence, automatic activation and broader gates remain.
+
+
+## Larger-history migration direction — 2026-10-21
+
+Converting every retained v1 target journal can expand a valid original beyond65,536
+physical changes and requires retaining a cumulative history buffer in the current
+migration. Preserve original journal bytes instead, with target-specific virtual undo
+reads/writes and planner overlays. This alternative is not activated yet; it must retain
+original before-image conflict semantics and atomically switch current state/mode. It
+must not treat a successful point codec as history authentication or discard malformed
+journals. Total-history conversion/copying is avoidable; total history validation work
+may still be required, with bounded retained memory and explicit interruption behavior.
+
+The read prerequisite now passes4 focused component cases (verification-target-undo-read-
+20261021). It streams one target, validates a canonical old key and canonical byte budget,
+and preserves exact old target images/absence under normalized overlays. Unrelated base
+target corruption remains outside point scope while full reconstruction rejects it.
+Global overlay regressions still pass after extracting their shared iterator. Remaining:
+metadata-range overlay lookup instead of whole-map filtering, inverse target writes,
+undo dispatch, planner expansion, journal-preserving migration and restart qualification.
+Current converter/activation behavior remains unchanged.
+
+
+### Retained target inverse and scoped overlays — 2026-10-21
+
+Undo dispatch and recovery-only target replacement now accept original v1 target images
+against normalized members. No new ordinary block journal may use virtual target writes.
+The overlay iterator uses a BTreeMap metadata-prefix range rather than filtering every
+staged entry. Node planner source reconstructs target images from normalized overlays
+and expands their inverse into the same physical overlay; host assertions are pending.
+
+First component attempt failed4/6 because dispatch called full mode validation while
+v1 migration had staged rows but not its marker. Evidence verification-target-undo-write-
+20261021 retained. Corrected dispatch engages only explicit mode2; all6 unchanged focused
+assertions then passed (verification-target-undo-dispatch-20261021, runtime0.15s), including
+original journal bytes/reopen/member inverse and prevention of new historical writes.
+The test restores retained journal bytes after the current converter: migration itself
+still converts and retains its cumulative bounds. Journal-preserving migration and
+non-tail planner qualification remain required before automatic startup activation.
+
+
+### Journal-preserving normalization — 2026-10-21
+
+Explicit normalization no longer converts or buffers historical journals. It canonically
+validates one record at a time, retaining original bytes and target conflict scope.
+Old target identity/member keys receive the same codec checks as conversion, at most
+one bounded target expansion at a time. Current-state64MiB, journal64MiB/65,536 changes,
+old-target64KiB and machine caps are unchanged. The obsolete cumulative-history buffer
+and population bound are removed along with the buffer; work still scales O(history).
+The pure converter remains available diagnostically, not used by migration.
+
+Nine focused checks passed (verification-retained-history-20261021,28.31s), including
+65MiB history exact byte preservation across abort/commit/reopen and actual retained
+indexed journal inverse. Two strengthened validator checks passed (verification-retained-
+validation-20261021,0.96s): malformed/mixed rejection and retention of a valid old journal
+whose physical expansion exceeds the existing change cap. The unrelated-journal65MiB
+path is unchanged by this strengthening and its prior evidence is retained by review.
+Node mixed-plan fixture now includes migration after a v1 journal, but host qualification
+and killed-process migration boundary remain pending. Startup still uses format1.
+
+
+### Retained migration process-crash and planner proof — 2026-10-21
+
+Existing SIGKILL harness now covers normalization from aggregate/v1 at staged and
+committed boundaries. Four killed children preserve the expected state/format and exact
+journal bytes; reopen/retry succeeds. Non-tail mixed aggregate/retained-target/normalized
+overlay planning and bounded aggregate overlays also pass. Host compile79s; three exact
+cases pass0.116/0.261/0.037s. Receipt audits: retained-migration-host-20261021 locally,
+complexity-retained-migration-20261021 on host; node SHA256
+c93211a8eef7939070253bbd47182a49b0602d043355124ab5473fca6fcd5e2a.
+This is process interruption, not power-loss qualification. Startup remainsv1 and must
+be switched/tested; completed1024-member panel node persistence is still outstanding.
+Broader cold/resource/performance/release assertions remain unproven.
+
+
+### Normalized startup and completed-panel boundary — 2026-10-21
+
+Production startup now calls normalized migration at its existing post-recovery/
+pre-admission boundary. Four affected host checks passed: durable startup recovery,
+prepared admission/faults with explicitformat2 assertions, certified completed1024-panel
+plus large-pool terminal/revote abort/reopen, and live certified challenge continuation.
+Compile68s; runtimes0.087/0.276/1.276/16.310s. Build+runtime audits reusable at
+normalized-startup-host-20261021 locally, complexity-normalized-startup-20261021 on host.
+Node22a436d75d844af36eed322ee2b222626c95d75074fb1e5e7efbab44a609a5a1.
+
+The demonstrated initial large-pool/completed-panel row-size blocker and normalization
+activation requirements are closed in focused functional scope. CX13/R4 still include
+panel-dependent comparison/validation work, cold/full-state budgets, integrated bursts
+and resource/release qualification. No broader performance or finality claim follows.

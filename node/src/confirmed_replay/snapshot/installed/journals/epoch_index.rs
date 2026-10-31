@@ -1,7 +1,7 @@
+use crate::confirmed_replay::scratch_file::ScratchFile as File;
 use super::*;
 use std::{
     cell::RefCell,
-    fs::File,
     io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::Path,
 };
@@ -10,8 +10,9 @@ const ROW_BYTES: u64 = 40;
 const RUN_ROWS: usize = 4096;
 type Row = [u8; ROW_BYTES as usize];
 
-/// Derived scratch only. Call `verify` after the last lookup, before accepting
-/// its results. Anonymous files are removed when their handles close.
+/// Disk-backed hash-to-height index. Call `verify_with_poll` after the last
+/// lookup to check its bytes and ordering before accepting the results.
+/// The caller supplies authenticated epochs; this index does not authenticate them.
 pub(super) struct EpochIndex {
     file: File,
     rows: u64,
@@ -55,16 +56,26 @@ fn write_row(
 }
 
 impl EpochIndex {
+    #[cfg(test)]
     pub(super) fn build(
         directory: &Path,
         epochs: impl IntoIterator<Item = Result<(BlockHash, u64), StoreError>>,
     ) -> Result<Self, StoreError> {
-        let mut writer = BufWriter::new(tempfile::tempfile_in(directory).map_err(invalid)?);
+        Self::build_with_poll(directory, epochs, &|_| Ok(()))
+    }
+
+    pub(super) fn build_with_poll(
+        directory: &Path,
+        epochs: impl IntoIterator<Item = Result<(BlockHash, u64), StoreError>>,
+        poll: &dyn Fn(&'static str) -> Result<(), StoreError>,
+    ) -> Result<Self, StoreError> {
+        let mut writer = BufWriter::new(File::new_in(directory).map_err(invalid)?);
         let mut digest = Blake2b::<U32>::new();
         let mut rows = 0u64;
         let mut run = Vec::with_capacity(RUN_ROWS);
         for epoch in epochs {
             let (hash, height) = epoch?;
+            poll("journal:epoch-input")?;
             let mut row = [0; ROW_BYTES as usize];
             row[..32].copy_from_slice(hash.as_bytes());
             row[32..].copy_from_slice(&height.to_be_bytes());
@@ -91,16 +102,16 @@ impl EpochIndex {
         };
         let mut width = RUN_ROWS as u64;
         while width < rows {
-            index = index.merge(directory, width)?;
+            index = index.merge(directory, width, poll)?;
             width = width.saturating_mul(2);
         }
-        index.verify()?;
+        index.verify_with_poll(poll)?;
         Ok(index)
     }
 
-    fn merge(self, directory: &Path, width: u64) -> Result<Self, StoreError> {
+    fn merge(self, directory: &Path, width: u64, poll: &dyn Fn(&'static str) -> Result<(), StoreError>) -> Result<Self, StoreError> {
         let source = RefCell::new(self.file);
-        let mut writer = BufWriter::new(tempfile::tempfile_in(directory).map_err(invalid)?);
+        let mut writer = BufWriter::new(File::new_in(directory).map_err(invalid)?);
         let mut digest = Blake2b::<U32>::new();
         let mut start = 0;
         while start < self.rows {
@@ -118,6 +129,7 @@ impl EpochIndex {
             let mut a = next(&mut left)?;
             let mut b = next(&mut right)?;
             while a.is_some() || b.is_some() {
+                poll("journal:epoch-merge")?;
                 if a.as_ref()
                     .is_some_and(|a| b.as_ref().is_none_or(|b| a <= b))
                 {
@@ -135,7 +147,7 @@ impl EpochIndex {
             rows: self.rows,
             digest: self.digest,
         }
-        .verify_bytes()?;
+        .scan(false, poll)?;
         Ok(Self {
             file: writer.into_inner().map_err(invalid)?,
             rows: self.rows,
@@ -164,15 +176,16 @@ impl EpochIndex {
         Ok(None)
     }
 
-    fn verify_bytes(&mut self) -> Result<(), StoreError> {
-        self.scan(false)
-    }
-
+    #[cfg(test)]
     pub(super) fn verify(&mut self) -> Result<(), StoreError> {
-        self.scan(true)
+        self.verify_with_poll(&|_| Ok(()))
     }
 
-    fn scan(&mut self, sorted: bool) -> Result<(), StoreError> {
+    pub(super) fn verify_with_poll(&mut self, poll: &dyn Fn(&'static str) -> Result<(), StoreError>) -> Result<(), StoreError> {
+        self.scan(true, poll)
+    }
+
+    fn scan(&mut self, sorted: bool, poll: &dyn Fn(&'static str) -> Result<(), StoreError>) -> Result<(), StoreError> {
         if self.file.metadata().map_err(invalid)?.len() != self.rows * ROW_BYTES {
             return Err(invalid("epoch index length changed"));
         }
@@ -181,6 +194,7 @@ impl EpochIndex {
         let mut digest = Blake2b::<U32>::new();
         let mut previous: Option<[u8; 32]> = None;
         while let Some(row) = next(&mut reader)? {
+            poll("journal:epoch-scan")?;
             let hash: [u8; 32] = row[..32].try_into().map_err(invalid)?;
             if sorted && previous.is_some_and(|previous| previous >= hash) {
                 return Err(invalid("duplicate or unordered epoch index"));
@@ -237,6 +251,23 @@ mod tests {
             [Ok((hash(0), 0)), Err(invalid("missing authority"))]
         )
         .is_err());
+        for target in ["journal:epoch-input", "journal:epoch-merge", "journal:epoch-scan"] {
+            let cancelled_dir = tempfile::tempdir().unwrap();
+            let limit = crate::confirmed_replay::scratch_file::ScratchLimit::acquire(cancelled_dir.path(), 2 << 20).unwrap();
+            let polls = std::cell::Cell::new(0);
+            let result = EpochIndex::build_with_poll(cancelled_dir.path(),
+                (0..(RUN_ROWS as u64 + 1)).map(|height| Ok((hash(height), height))), &|stage| {
+                    if stage == target {
+                        polls.set(polls.get() + 1);
+                        if polls.get() == 3 { return Err(StoreError::Backend("epoch checkpoint sentinel".into())); }
+                    }
+                    Ok(())
+                });
+            assert!(matches!(result, Err(ref error) if error.to_string().contains("epoch checkpoint sentinel")));
+            assert_eq!(polls.get(), 3, "checkpoint not reached: {target}");
+            drop(result);
+            assert_eq!(limit.used_temporary_bytes().unwrap(), 0, "scratch leaked: {target}");
+        }
         let mut empty = EpochIndex::build(directory.path(), std::iter::empty()).unwrap();
         assert_eq!(empty.height(hash(0)).unwrap(), None);
         empty.verify().unwrap();

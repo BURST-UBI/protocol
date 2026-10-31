@@ -57,6 +57,29 @@ pub(crate) struct ArchiveRows<'a> {
 }
 
 impl TailArchive {
+    pub(in crate::confirmed_replay) fn visit_input<E: From<StoreError>>(
+        &self,
+        mut visit: impl FnMut(&StateBlock) -> Result<(), E>,
+    ) -> Result<(), E> {
+        self.retained.try_visit_with(|proof| visit(proof.block()))?;
+        self.blocks.visit_with(|block| visit(&block))
+    }
+
+    // Replay input order is retained witnesses followed by the signed suffix.
+    pub(in crate::confirmed_replay) fn input_hashes(&self) -> impl Iterator<Item = BlockHash> + '_ {
+        self.retained.hashes().chain(self.order.iter().copied())
+    }
+
+    pub(in crate::confirmed_replay) fn input_block(
+        &self,
+        hash: &BlockHash,
+    ) -> Result<Option<std::borrow::Cow<'_, StateBlock>>, StoreError> {
+        match self.blocks.get(hash)? {
+            Some(block) => Ok(Some(block)),
+            None => self.retained.input_block(hash),
+        }
+    }
+
     pub(super) fn encoded(&self, hash: &BlockHash) -> Result<Option<Vec<u8>>, StoreError> {
         if self.blocks.contains(hash)? {
             return self.blocks.encoded(hash).map(Some);
@@ -119,7 +142,7 @@ pub struct SnapshotTailPlan {
     commitment: BlockHash,
     applied: HashSet<BlockHash>,
     required: Vec<BlockHash>,
-    used: u64,
+    used_bytes: u64,
 }
 
 /// Untrusted transport bodies. Planning checks the signed suffix; it does not
@@ -191,6 +214,10 @@ impl TransferredTail {
 }
 
 impl SnapshotTail {
+    pub(in crate::confirmed_replay) fn storage_directory(&self) -> &std::path::Path {
+        &self.directory
+    }
+
     pub(crate) fn archive(&self) -> TailArchive {
         self.archive.clone()
     }
@@ -311,7 +338,7 @@ impl SnapshotTailPlan {
             .filter(|account| account.block_count > 0)
             .map(|account| account.head)
             .collect();
-        let mut used = 0u64;
+        let mut used_bytes = 0u64;
         let mut blocks = StagedBlocks::new(directory).map_err(invalid)?;
         let mut contents = Vec::new();
         for head in &heads {
@@ -324,7 +351,7 @@ impl SnapshotTailPlan {
             for offset in (base_height..head.height).rev() {
                 let height = offset + 1;
                 let bytes = get(hash)?;
-                used = used
+                used_bytes = used_bytes
                     .checked_add(bytes.len() as u64)
                     .filter(|size| *size <= MAX_TAIL_BYTES as u64)
                     .ok_or_else(|| invalid("snapshot tail exceeds byte budget"))?;
@@ -356,10 +383,10 @@ impl SnapshotTailPlan {
                 {
                     return Err(invalid("invalid signed snapshot tail block"));
                 }
-                let mut content_used = used as usize;
+                let mut content_bytes = used_bytes as usize;
                 if let Some(content) = crate::confirmed_history::content::read_bounded(
                     &block,
-                    &mut content_used,
+                    &mut content_bytes,
                     MAX_TAIL_BYTES,
                     &mut get_meta,
                 )
@@ -367,7 +394,7 @@ impl SnapshotTailPlan {
                 {
                     contents.push(content);
                 }
-                used = content_used as u64;
+                used_bytes = content_bytes as u64;
                 hash = block.previous;
                 blocks.insert(&block).map_err(invalid)?;
             }
@@ -429,7 +456,7 @@ impl SnapshotTailPlan {
             commitment: BlockHash::new(burst_crypto::blake2b_256(&encoding)),
             applied,
             required,
-            used,
+            used_bytes,
         })
     }
 
@@ -452,24 +479,30 @@ impl SnapshotTailPlan {
             ));
         }
         let mut witnesses = HashSet::new();
-        for witness in retained.iter() {
-            let witness = witness.map_err(invalid)?;
-            if witness.context() != self.context
-                || self
-                    .blocks
-                    .contains(&witness.block().hash)
-                    .map_err(invalid)?
-                || !witnesses.insert(witness.block().hash)
-            {
-                return Err(invalid("duplicate or unrelated historical witness"));
-            }
-            self.used = self
-                .used
-                .checked_add(bincode::serialized_size(witness.block()).map_err(invalid)?)
-                .filter(|size| *size <= MAX_TAIL_BYTES as u64)
-                .ok_or_else(|| invalid("retained witnesses exceed tail byte budget"))?;
-            self.applied.insert(witness.block().hash);
-        }
+        retained
+            .try_visit(|witness| {
+                if witness.context() != self.context
+                    || self.blocks.contains(&witness.block().hash)?
+                    || !witnesses.insert(witness.block().hash)
+                {
+                    return Err(StoreError::Corruption(
+                        "duplicate or unrelated historical witness".into(),
+                    ));
+                }
+                self.used_bytes = self
+                    .used_bytes
+                    .checked_add(
+                        bincode::serialized_size(witness.block())
+                            .map_err(|error| StoreError::Corruption(error.to_string()))?,
+                    )
+                    .filter(|size| *size <= MAX_TAIL_BYTES as u64)
+                    .ok_or_else(|| {
+                        StoreError::Corruption("retained witnesses exceed tail byte budget".into())
+                    })?;
+                self.applied.insert(witness.block().hash);
+                Ok(())
+            })
+            .map_err(invalid)?;
         let ordered = crate::confirmed_history::causal_fallible_hash_order_after(
             self.blocks.hashes(),
             &self.applied,
@@ -520,7 +553,7 @@ mod staged_witness_tests {
             commitment: BlockHash::ZERO,
             applied: HashSet::new(),
             required: vec![BlockHash::new([4; 32])],
-            used: 0,
+            used_bytes: 0,
         };
         let witnesses = Arc::new(HistoricalBlocks::stage(directory.path(), Vec::new()).unwrap());
         let error = plan
@@ -564,7 +597,8 @@ impl AuthenticatedSnapshot {
         hashes
     }
 
-    /// Execute a same-epoch compact candidate without publishing state on error.
+    /// Execute a same-epoch candidate and return its replay state without
+    /// installing it in the database.
     pub fn replay_tail(
         self,
         tail: SnapshotTail,
@@ -628,6 +662,18 @@ mod archive_tests {
             contents: Vec::new().into(),
         };
         let shared = archive.clone();
+        let input = crate::confirmed_replay::blocks::source::Source::Tail {
+            archive: archive.clone(),
+            directory: directory.path().to_owned(),
+        };
+        assert_eq!(
+            input.hashes().collect::<Result<Vec<_>, _>>().unwrap(),
+            vec![block.hash]
+        );
+        assert_eq!(
+            bincode::serialize(input.get(&block.hash).unwrap().as_ref()).unwrap(),
+            bytes
+        );
         assert!(Arc::ptr_eq(&archive.blocks, &shared.blocks));
         drop(archive);
         let mut rows = shared.rows();
@@ -642,8 +688,22 @@ mod archive_tests {
         assert!(rows.next().is_none());
         assert_eq!(shared.encoded(&block.hash).unwrap(), Some(bytes));
         assert!(shared.encoded(&BlockHash::ZERO).unwrap().is_none());
+        let certified = HashSet::from([block.hash]);
+        let applied = crate::confirmed_replay::blocks::AppliedHistory::from_certified_input(
+            &input,
+            &certified,
+            Some(directory.path()),
+        )
+        .unwrap();
         shared.blocks.truncate_for_test();
         assert!(shared.rows().next().unwrap().is_err());
         assert!(shared.encoded(&block.hash).is_err());
+        assert!(applied.get(&block.hash).is_err());
+        assert!(applied.contains(&block.hash).is_err());
+        assert!(applied.encoded(&block.hash).is_err());
+        assert!(input.visit_unordered(|_| Ok::<_, StoreError>(())).is_err());
+        assert!(input.get(&block.hash).is_err());
+        assert!(input.iter().next().unwrap().is_err());
+        assert!(crate::confirmed_replay::governance::streamed_dependencies(&input).is_err());
     }
 }

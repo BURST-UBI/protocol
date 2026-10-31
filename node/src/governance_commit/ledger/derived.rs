@@ -1,7 +1,9 @@
 use super::*;
 use std::collections::HashMap;
 
-/// Only facts reconstructed from the selected history are available here.
+/// Replay ledger over caller-supplied reconstructed state. Reads do not fall
+/// back to the live database. Writes update these maps and optionally record
+/// undo mutations; the caller must discard the candidate on replay failure.
 pub(crate) struct DerivedLedger<'a> {
     pub mutations: Option<&'a mut crate::confirmed_replay::mutations::Mutations>,
     pub accounts: &'a mut HashMap<WalletAddress, AccountInfo>,
@@ -55,14 +57,7 @@ impl Ledger for DerivedLedger<'_> {
         self.metadata.insert(key.into(), bytes.into());
         Ok(())
     }
-    fn verified_accounts(&self) -> Result<Vec<WalletAddress>, StoreError> {
-        Ok(self
-            .accounts
-            .values()
-            .filter(|account| account.state.is_verified())
-            .map(|account| account.address.clone())
-            .collect())
-    }
+    // Replay counts the supplied account map; there is no persisted count index.
     fn verified_account_count(&self) -> Result<u64, StoreError> {
         Ok(self
             .accounts
@@ -78,6 +73,9 @@ impl Ledger for DerivedLedger<'_> {
         crate::governance_content::authenticate(block)?
             .decode_verified(bytes)
             .map_err(|error| error.to_string())
+    }
+    fn bootstrap_phase(&self) -> Result<burst_verification::bootstrap::BootstrapPhase, String> {
+        Ok(*self.bootstrap)
     }
     fn observe_bootstrap(&mut self, params: &ProtocolParams) -> Result<(), String> {
         self.bootstrap.observe(

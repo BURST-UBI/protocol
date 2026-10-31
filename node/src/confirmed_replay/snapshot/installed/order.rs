@@ -10,6 +10,14 @@ pub(super) fn read(
     applied: &super::super::tail::cemented::AppliedTail,
     base: &super::super::SnapshotContinuation,
 ) -> Result<Vec<(BlockHash, BlockHash)>, StoreError> {
+        read_view(&batch.read_view(), applied, base)
+    }
+
+    pub(super) fn read_view(
+    batch: &burst_store_lmdb::read_view::LedgerReadView<'_>,
+    applied: &super::super::tail::cemented::AppliedTail,
+    base: &super::super::SnapshotContinuation,
+) -> Result<Vec<(BlockHash, BlockHash)>, StoreError> {
     let tail = applied.tail();
     let fresh: HashSet<_> = tail.block_hashes().collect();
     let mut edges = BTreeSet::new();
@@ -52,7 +60,7 @@ pub(super) fn read(
             block.block_type,
             BlockType::Endorse | BlockType::VerificationVote
         ) {
-            let target = crate::ledger_bridge::extract_receiver_from_link(&block.link)
+            let target = crate::block_economics::wallet_from_link(&block.link)
                 .ok_or_else(|| invalid("invalid local identity ordering target"))?;
             let source = batch.get_meta(&format!("verification_identity_source/v1/{target}"))?;
             if source.as_deref() == Some(block.hash.as_bytes().as_slice())

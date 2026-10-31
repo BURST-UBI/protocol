@@ -1,9 +1,11 @@
 //! Endorsement burns, verification state and accrual share the block transaction.
 
+#[cfg(test)]
 use burst_brn::BrnEngine;
 use burst_ledger::StateBlock;
 use burst_store::StoreError;
 use burst_store_lmdb::LmdbWriteTransaction;
+#[cfg(test)]
 use burst_trst::TrstEngine;
 use burst_types::{NetworkId, ProtocolParams};
 use burst_verification::{VerificationEvent, VerificationOrchestrator, VerificationResult};
@@ -13,16 +15,7 @@ pub(crate) const SNAPSHOT_KEY: &str = "verification_orchestrator";
 pub(crate) fn restore(
     batch: &LmdbWriteTransaction<'_>,
 ) -> Result<VerificationOrchestrator, String> {
-    let bytes = batch
-        .undo_value_ref(
-            burst_store_lmdb::block_undo::UndoTable::Meta,
-            SNAPSHOT_KEY.as_bytes(),
-        )
-        .map_err(|error| error.to_string())?
-        .ok_or("missing persisted verification orchestrator; authenticated replay required")?;
-    let snapshot = burst_verification::OrchestratorSnapshot::decode(bytes)
-        .map_err(|error| format!("invalid persisted verification orchestrator: {error}"))?;
-    Ok(VerificationOrchestrator::restore(snapshot))
+    crate::verification_storage::load(batch).map_err(|error| error.to_string())
 }
 
 pub(crate) fn validate_target_head(
@@ -44,6 +37,7 @@ pub(crate) fn validate_target_head(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn apply(
     batch: &mut LmdbWriteTransaction<'_>,
     block: &StateBlock,
@@ -51,10 +45,31 @@ pub(crate) fn apply(
     network: NetworkId,
     params: &ProtocolParams,
     orchestrator: &mut VerificationOrchestrator,
-    engines: (&mut BrnEngine, &mut TrstEngine),
+    mut engines: (&mut BrnEngine, &mut TrstEngine),
 ) -> Result<(), String> {
-    let (brn, trst) = engines;
-    let target = crate::ledger_bridge::extract_receiver_from_link(&block.link)
+    apply_staged(
+        batch,
+        block,
+        burn_amount,
+        network,
+        params,
+        orchestrator,
+        &mut engines,
+    )
+}
+
+pub(crate) fn apply_staged(
+    batch: &mut LmdbWriteTransaction<'_>,
+    block: &StateBlock,
+    burn_amount: u128,
+    network: NetworkId,
+    params: &ProtocolParams,
+    orchestrator: &mut VerificationOrchestrator,
+    engines: &mut impl crate::economic_candidate::Engines,
+) -> Result<(), String> {
+    let before = orchestrator.storage_clone();
+    orchestrator.begin_record_changes();
+    let target = crate::block_economics::wallet_from_link(&block.link)
         .ok_or("endorsement target is invalid")?;
     if !block.target_head.is_zero() {
         let bytes = batch
@@ -111,7 +126,8 @@ pub(crate) fn apply(
                 result: VerificationResult::Verified,
                 outcomes,
             } if wallet == target && outcomes.verifiers.is_empty() => {
-                crate::verification_commit::verify_wallet(
+                let (brn, trst) = engines.mutable();
+                crate::verification_commit::mark_wallet_verified(
                     batch,
                     &target,
                     block.timestamp,
@@ -126,13 +142,8 @@ pub(crate) fn apply(
         }
     }
     crate::bootstrap_phase::observe(batch, params)?;
-    let bytes = orchestrator
-        .snapshot()
-        .encode()
-        .map_err(|e| e.to_string())?;
-    batch
-        .put_meta(SNAPSHOT_KEY, &bytes)
-        .map_err(|e| e.to_string())
+    crate::verification_storage::persist(batch, &before, orchestrator)
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -159,7 +170,7 @@ mod tests {
             account: genesis.clone(),
             previous: BlockHash::ZERO,
             representative: genesis,
-            brn_balance: 10,
+            brn_spent: 10,
             trst_balance: 0,
             link: BlockHash::new(target.public.0),
             origin: TxHash::ZERO,
@@ -204,11 +215,58 @@ mod tests {
     }
 
     #[test]
+    fn keyed_endorsement_restores_writer_cut_and_commits_only_with_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LmdbStore::open(dir.path(), 32, 16 * 1024 * 1024).unwrap();
+        let block = endorsement();
+        let target = crate::block_economics::wallet_from_link(&block.link).unwrap();
+        let params = ProtocolParams {
+            bootstrap_exit_threshold: 0,
+            endorsement_burn_amount: 10,
+            ..ProtocolParams::default()
+        };
+        let mut batch = store.tx_begin_write().unwrap();
+        crate::bootstrap_phase::initialize(&mut batch, &params).unwrap();
+        batch.put_meta(SNAPSHOT_KEY, &VerificationOrchestrator::new().snapshot().encode().unwrap())
+            .unwrap();
+        batch.migrate_verification_records().unwrap();
+        batch.commit().unwrap();
+        for commit in [false, true] {
+            let mut batch = store.tx_begin_write().unwrap();
+            let before = restore(&batch).unwrap();
+            assert!(before.get_state(&target).is_none());
+            let mut candidate = restore(&batch).unwrap();
+            assert!(candidate.shares_record_storage_with(&before));
+            apply(
+                &mut batch, &block, 10, NetworkId::Dev, &params, &mut candidate,
+                (&mut BrnEngine::new(), &mut TrstEngine::new()),
+            ).unwrap();
+            let staged = restore(&batch).unwrap();
+            assert!(staged.get_state(&target).is_some());
+            assert!(staged.shares_record_storage_with(&candidate));
+            assert!(before.get_state(&target).is_none());
+            assert!(batch.get_meta(SNAPSHOT_KEY).unwrap().is_none());
+            if commit {
+                batch.commit().unwrap();
+            } else {
+                drop(batch);
+            }
+            let batch = store.tx_begin_write().unwrap();
+            assert_eq!(restore(&batch).unwrap().get_state(&target).is_some(), commit);
+        }
+        drop(store);
+        let store = LmdbStore::open(dir.path(), 32, 16 * 1024 * 1024).unwrap();
+        let batch = store.tx_begin_write().unwrap();
+        assert!(restore(&batch).unwrap().get_state(&target).is_some());
+        assert!(batch.get_meta(SNAPSHOT_KEY).unwrap().is_none());
+    }
+
+    #[test]
     fn target_dependency_checks_account_and_preserves_clock_tolerance() {
         let dir = tempfile::tempdir().unwrap();
         let store = LmdbStore::open(dir.path(), 32, 16 * 1024 * 1024).unwrap();
         let original = endorsement();
-        let target = crate::ledger_bridge::extract_receiver_from_link(&original.link).unwrap();
+        let target = crate::block_economics::wallet_from_link(&original.link).unwrap();
         for (correct_account, timestamp, valid) in [
             (false, 1200, false),
             (true, 1295, false),
@@ -267,7 +325,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = LmdbStore::open(dir.path(), 32, 16 * 1024 * 1024).unwrap();
         let block = endorsement();
-        let target = crate::ledger_bridge::extract_receiver_from_link(&block.link).unwrap();
+        let target = crate::block_economics::wallet_from_link(&block.link).unwrap();
         let live = VerificationOrchestrator::new();
         let mut batch = store.tx_begin_write().unwrap();
         crate::bootstrap_phase::initialize(&mut batch, &ProtocolParams::default()).unwrap();
@@ -350,7 +408,7 @@ mod tests {
         )
         .is_err());
         assert!(orch
-            .get_state(&crate::ledger_bridge::extract_receiver_from_link(&block.link).unwrap())
+            .get_state(&crate::block_economics::wallet_from_link(&block.link).unwrap())
             .is_none());
         assert!(batch.get_meta(SNAPSHOT_KEY).unwrap().is_none());
         apply(

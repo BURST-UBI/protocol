@@ -17,8 +17,8 @@ pub trait FrontierStore {
     /// Delete the frontier entry for an account.
     fn delete_frontier(&self, account: &WalletAddress) -> Result<(), StoreError>;
 
-    /// Iterate over all frontiers, returning (account, head) pairs.
-    fn iter_frontiers(&self) -> Result<Vec<(WalletAddress, BlockHash)>, StoreError>;
+    /// Collect all frontiers as (account, head) pairs.
+    fn all_frontiers(&self) -> Result<Vec<(WalletAddress, BlockHash)>, StoreError>;
 
     /// Total number of frontier entries.
     fn frontier_count(&self) -> Result<u64, StoreError>;

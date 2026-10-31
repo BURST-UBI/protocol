@@ -37,7 +37,7 @@ fn tail(fixture: &mut Fixture, store: &LmdbStore, kind: BlockType) -> BlockHash 
     let hash = fixture.push(0, kind, CUTOFF + 1, |block| {
         if burn {
             block.link = destination(21);
-            block.brn_balance += 1;
+            block.brn_spent += 1;
         }
     });
     let block = fixture.blocks.last().unwrap();
@@ -128,7 +128,9 @@ fn checkpoint_installation_replaces_poisoned_projections_and_retains_minority_ev
             .len(),
         1
     );
+    assert!(!store.tx_begin_write().unwrap().uses_stable_trst_records().unwrap());
     let installed = installation.commit(&store).unwrap();
+    assert!(store.tx_begin_write().unwrap().uses_stable_trst_records().unwrap());
     assert_eq!(installed.retired_blocks, vec![excluded]);
     assert_eq!(installed.minority_promises, vec![excluded]);
     assert_eq!(installed.anchor.hash(), epoch);
@@ -198,8 +200,11 @@ fn checkpoint_installation_replaces_poisoned_projections_and_retains_minority_ev
     drop(store);
     let store = LmdbStore::open(dir.path(), 32, 32 << 20).unwrap();
     assert_eq!(store.meta_store().payment_epoch().unwrap(), epoch);
+    assert!(store.tx_begin_write().unwrap().uses_stable_trst_records().unwrap());
+    assert!(store.meta_store().get_meta(TrstEngine::meta_key()).is_err());
     assert_eq!(
-        store.meta_store().get_meta(TrstEngine::meta_key()).unwrap(),
+        crate::trst_storage::load(&store.tx_begin_write().unwrap(), fixture.params.trst_expiry_secs)
+            .unwrap().save_wallets(),
         installed.trst.save_wallets()
     );
     assert!(
@@ -337,7 +342,7 @@ fn installed_cutoff_is_enforced_at_live_admission() {
     fixture.push(0, BlockType::Burn, CUTOFF, |block| {
         block.payment_epoch = installed.anchor.hash();
         block.link = destination(21);
-        block.brn_balance += 1;
+        block.brn_spent += 1;
     });
     let block = fixture.blocks.last_mut().unwrap();
     for (time, accepted) in [(CUTOFF - 1, false), (CUTOFF, true), (CUTOFF + 1, true)] {

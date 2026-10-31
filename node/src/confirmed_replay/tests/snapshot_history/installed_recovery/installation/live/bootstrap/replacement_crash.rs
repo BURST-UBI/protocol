@@ -90,7 +90,7 @@ async fn compact_live_replacement_crashes_preserve_history_and_signing_promises(
                 installed::read_stored_base_bytes(&local).unwrap().unwrap(),
                 bytes
             );
-            let service = Service::start(source.store.clone(), local.clone(), 0).await;
+            let service = WitnessService::start(source.store.clone(), local.clone(), 0).await;
             let recovered = installed::recover_metadata_from_peers(
                 local.clone(),
                 NetworkId::Dev,

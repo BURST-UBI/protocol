@@ -2,8 +2,9 @@ use super::*;
 use std::io::Write;
 mod records;
 
-/// Export borrows engines. Record imports build validated engines incrementally;
-/// legacy imports retain their bounded byte strings until decoding.
+/// Export borrows engines. Record imports validate rows while building the
+/// in-memory engine; legacy imports retain the whole byte string until decoding.
+/// The caller bounds input size and authenticates the snapshot.
 pub(super) enum Binary<'a> {
     Wallets(&'a TrstEngine),
     Graph(&'a MergerGraph),

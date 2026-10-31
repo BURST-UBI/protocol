@@ -1,5 +1,25 @@
 # Resolving specification conflicts
 
+This record preserves decisions and their historical implementation notes. Version
+numbers and open/active status in those notes refer to their dated transitions.
+Use [current behavior](../IMPLEMENTATION_DECISIONS.md) and the
+[qualification handoff](COMPLETION_LEDGER.md) for present implementation and evidence.
+A later rewrite of explanatory prose does not erase a decision or qualify a release.
+
+## Wallet seed derivation (owner decision, 2026-10-31)
+
+The owner selected rsnano's deterministic account-key construction:
+BLAKE2b-256 of a 32-byte wallet seed followed by a four-byte big-endian account
+index. The current wallet uses index zero. Its 24-word BIP39 phrase encodes the
+seed's original entropy; there is no PBKDF2 expansion or passphrase option.
+BURST's existing signature and address formats remain unchanged.
+
+This supersedes the earlier custom path-string HMAC, including the D01 decision
+to retain that calculation. Old phrases derive different accounts with this
+implementation. Existing raw private keys and keystores remain usable; there is
+no automatic old-scheme fallback. See [the format](../docs/development/CRYPTOGRAPHY.md#recovery-phrases).
+Source implementation and validation status remain separate.
+
 ## Internal TRST identifiers and release operator (owner decision, 2026-10-19)
 
 The owner accepted deterministic internal identifiers for automatic TRST

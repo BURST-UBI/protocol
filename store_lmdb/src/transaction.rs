@@ -2,7 +2,8 @@
 //!
 //! Per-account transaction index uses composite key
 //! `account_bytes ++ tx_hash(32)` → empty. Listing all transactions for
-//! an account is a prefix range-scan.
+//! an account collects a prefix range. Account-aware writes and deletes update
+//! both tables in one transaction; the plain methods affect only stored bytes.
 
 use crate::shared_env::SharedEnv;
 use std::ops::Bound;
@@ -25,9 +26,9 @@ pub struct LmdbTransactionStore {
 
 /// Build composite key `account_bytes ++ tx_hash`.
 fn account_tx_key(account: &WalletAddress, hash: &TxHash) -> Vec<u8> {
-    let acct = account.as_str().as_bytes();
-    let mut key = Vec::with_capacity(acct.len() + 32);
-    key.extend_from_slice(acct);
+    let account_bytes = account.as_str().as_bytes();
+    let mut key = Vec::with_capacity(account_bytes.len() + 32);
+    key.extend_from_slice(account_bytes);
     key.extend_from_slice(hash.as_bytes());
     key
 }
@@ -53,9 +54,9 @@ impl TransactionStore for LmdbTransactionStore {
             .put(&mut wtxn, hash.as_bytes(), tx_bytes)
             .map_err(LmdbError::from)?;
 
-        let ck = account_tx_key(account, hash);
+        let index_key = account_tx_key(account, hash);
         self.account_txs_db
-            .put(&mut wtxn, &ck, &[])
+            .put(&mut wtxn, &index_key, &[])
             .map_err(LmdbError::from)?;
 
         wtxn.commit().map_err(LmdbError::from)?;
@@ -94,12 +95,12 @@ impl TransactionStore for LmdbTransactionStore {
             .range(&rtxn, &bounds)
             .map_err(LmdbError::from)?;
         let mut hashes = Vec::new();
-        let acct_len = prefix.len();
+        let account_len = prefix.len();
         for result in iter {
             let (key, _) = result.map_err(LmdbError::from)?;
-            if key.len() == acct_len + 32 {
+            if key.len() == account_len + 32 {
                 let mut arr = [0u8; 32];
-                arr.copy_from_slice(&key[acct_len..]);
+                arr.copy_from_slice(&key[account_len..]);
                 hashes.push(TxHash::new(arr));
             }
         }
@@ -124,9 +125,9 @@ impl TransactionStore for LmdbTransactionStore {
         self.transactions_db
             .delete(&mut wtxn, hash.as_bytes().as_slice())
             .map_err(LmdbError::from)?;
-        let ck = account_tx_key(account, hash);
+        let index_key = account_tx_key(account, hash);
         self.account_txs_db
-            .delete(&mut wtxn, &ck)
+            .delete(&mut wtxn, &index_key)
             .map_err(LmdbError::from)?;
         wtxn.commit().map_err(LmdbError::from)?;
         Ok(())

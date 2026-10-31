@@ -2,7 +2,8 @@
 //!
 //! Endorsements and votes use composite keys `target_bytes ++ actor_bytes`
 //! so each entry is its own LMDB key/value pair. Listing all entries for a
-//! target is a prefix range-scan.
+//! target collects a prefix range. Callers must supply validated, fixed-length
+//! addresses: this layer concatenates their text without separators or checks.
 
 use crate::shared_env::SharedEnv;
 use std::ops::Bound;

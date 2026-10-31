@@ -24,7 +24,7 @@ function run(args, overrides = {}, affinity, prebuilt = false) {
   const dir = mkdtempSync(join(tmpdir(), "burst-test-runner-"));
   try {
     const cargo = join(dir, "cargo"), log = join(dir, "calls.jsonl");
-    copyFileSync(new URL("./fixtures/test-node-cargo.mjs", import.meta.url), cargo);
+    copyFileSync(new URL("./fixtures/mock-cargo.mjs", import.meta.url), cargo);
     chmodSync(cargo, 0o700);
     const env = { ...process.env };
     delete env.BURST_NODE_TEST_BINARY;

@@ -30,7 +30,7 @@ fn creator_endorsements_lose_special_authority_permanently_after_exit() {
     block.previous = genesis.hash;
     block.params_hash = params.params_hash();
     block.hash = block.compute_hash();
-    let target = crate::ledger_bridge::extract_receiver_from_link(&block.link).unwrap();
+    let target = crate::block_economics::wallet_from_link(&block.link).unwrap();
     for commit in [false, true] {
         let mut orchestrator = VerificationOrchestrator::new();
         let mut brn = BrnEngine::new();
@@ -90,7 +90,7 @@ fn creator_endorsements_lose_special_authority_permanently_after_exit() {
     let mut second = block.clone();
     second.previous = block.hash;
     second.link = BlockHash::new(second_target.public.0);
-    second.brn_balance += 10;
+    second.brn_spent += 10;
     second.timestamp = Timestamp::new(1235);
     second.params_hash = params.params_hash();
     second.hash = second.compute_hash();
@@ -99,7 +99,7 @@ fn creator_endorsements_lose_special_authority_permanently_after_exit() {
         &mut batch,
         &second,
         Some(&previous),
-        block.brn_balance,
+        block.brn_spent,
         None,
         None,
     )

@@ -6,7 +6,7 @@ fn missing_challenge_target_rejects_without_mutation_or_panic() {
     let (brn, trst, mut block, account) = fixture(1);
     let params = ProtocolParams::default();
     block.block_type = BlockType::Challenge;
-    block.brn_balance = 10;
+    block.brn_spent = 10;
     block.link = BlockHash::ZERO;
     let mut staged = StagedEngines::new(&brn, &trst);
     assert_eq!(
@@ -61,7 +61,7 @@ fn transfers_copy_only_trst_and_match_full_evaluation() {
         block.hash = block.compute_hash();
         let make_context = || EconomicContext {
             account: Some(if sending { &account } else { &recipient }),
-            previous_brn: 0,
+            previous_brn_spent: 0,
             pending: if sending { None } else { Some(&pending) },
             params: &params,
         };
@@ -178,7 +178,7 @@ fn brn_only_effects_never_copy_or_persist_trst() {
     ] {
         let mut block = template.clone();
         block.block_type = kind;
-        block.brn_balance = 10;
+        block.brn_spent = 10;
         if block.block_type != BlockType::Burn {
             block.link =
                 BlockHash::new(burst_crypto::decode_address(template.account.as_str()).unwrap());

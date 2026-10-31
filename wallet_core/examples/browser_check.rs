@@ -58,7 +58,7 @@ pub async fn rpc(url: &str, action: &str) -> Result<String, JsValue> {
 
 #[wasm_bindgen]
 pub async fn bounded(url: &str, milliseconds: u32, limit: u32) -> Result<u32, JsValue> {
-    burst_browser::fetch_bytes(
+    burst_web_runtime::fetch_bytes(
         url,
         None,
         Duration::from_millis(milliseconds.into()),

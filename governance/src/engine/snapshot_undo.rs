@@ -3,11 +3,13 @@ use super::*;
 use bincode::Options;
 use std::collections::HashSet;
 
-const MAX_BYTES: usize = 64 << 20;
-type BallotScopes<'a> =
-    HashMap<TxHash, HashMap<(&'a WalletAddress, &'a burst_types::BlockHash), GovernanceVote>>;
+pub(super) const MAX_BYTES: usize = 64 << 20;
+type BallotScopes<'a> = std::collections::HashMap<
+    TxHash,
+    std::collections::HashMap<(&'a WalletAddress, &'a burst_types::BlockHash), GovernanceVote>,
+>;
 
-fn decode(bytes: &[u8]) -> Result<GovernanceEngine, String> {
+pub(super) fn decode(bytes: &[u8]) -> Result<GovernanceEngine, String> {
     if bytes.len() > MAX_BYTES {
         return Err("governance undo exceeds size limit".into());
     }
@@ -19,7 +21,7 @@ fn decode(bytes: &[u8]) -> Result<GovernanceEngine, String> {
         .map_err(|error| error.to_string())
 }
 
-fn restore_entry<V: Clone>(map: &mut HashMap<TxHash, V>, before: &HashMap<TxHash, V>, id: TxHash) {
+fn restore_entry<V: Clone>(map: &mut OrdMap<TxHash, V>, before: &OrdMap<TxHash, V>, id: TxHash) {
     match before.get(&id) {
         Some(value) => {
             map.insert(id, value.clone());
@@ -76,6 +78,9 @@ impl GovernanceEngine {
     /// Undo only changed proposal scopes. Votes, timing and secondary ballots
     /// belong to the proposal they affect. Later changes in that scope require
     /// the caller to roll back their dependencies first.
+    /// A change to any pending-effect queue instead requires the complete current
+    /// engine to equal `after`. This reconciles stored state, not economic effects
+    /// that a node may already have applied outside the engine.
     pub fn rewind_snapshot(before: &[u8], after: &[u8], current: &[u8]) -> Result<Vec<u8>, String> {
         let before = decode(before)?;
         let after = decode(after)?;
@@ -124,9 +129,15 @@ impl GovernanceEngine {
                 );
                 restore_entry(&mut current.timings, &before.timings, *id);
             }
-            current
+            let removed: Vec<_> = current
                 .key_ballots
-                .retain(|key, _| !changed.contains(&key.0));
+                .keys()
+                .filter(|key| changed.contains(&key.0))
+                .cloned()
+                .collect();
+            for key in removed {
+                current.key_ballots.remove(&key);
+            }
             current.key_ballots.extend(
                 before
                     .key_ballots

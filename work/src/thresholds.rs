@@ -1,4 +1,4 @@
-//! Uniform PoW difficulty, as specified by implementation decision 14.6.
+//! One configured proof-of-work threshold for every block kind.
 
 /// Callers retain block-kind classification without changing consensus work.
 /// This type avoids a dependency cycle with the ledger crate.

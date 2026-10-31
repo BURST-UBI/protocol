@@ -1,4 +1,4 @@
-//! Phase 2: Commit-reveal with representatives.
+//! Experimental commit-reveal transcript for representatives.
 //!
 //! When verification is needed, representatives commit hashed random values,
 //! then reveal them. This experimental local transcript waits for every sealed
@@ -24,9 +24,9 @@ pub struct Reveal {
     pub value: [u8; 32],
 }
 
-/// Commit-reveal VRF provider — self-sovereign randomness.
+/// A sealed set of commitments and their reveals, held locally.
 pub struct CommitRevealVrf {
-    /// Commitments indexed by representative for O(1) lookup.
+    /// Commitments indexed by representative.
     commitment_index: HashMap<WalletAddress, [u8; 32]>,
     /// Reveals received so far.
     reveals: Vec<Reveal>,
@@ -66,7 +66,7 @@ impl CommitRevealVrf {
         Ok(())
     }
 
-    /// Access commitments (for compatibility / inspection).
+    /// Iterate over representative addresses and their commitment hashes.
     pub fn commitments_iter(&self) -> impl Iterator<Item = (&WalletAddress, &[u8; 32])> {
         self.commitment_index.iter()
     }
@@ -153,9 +153,9 @@ impl VrfProvider for CommitRevealVrf {
     }
 
     /// Verify that all reveals match their commitments and that the output
-    /// was correctly derived from the combined reveals.
+    /// was correctly derived from this local transcript. The output alone
+    /// does not authenticate participants or reconstruct their commitments.
     fn verify(&self, context: &[u8], output: &RandomOutput) -> Result<bool, VrfError> {
-        // Verify every reveal has a matching commitment (O(r) with HashMap)
         for reveal in &self.reveals {
             match self.commitment_index.get(&reveal.representative) {
                 None => return Ok(false),
@@ -168,7 +168,6 @@ impl VrfProvider for CommitRevealVrf {
             }
         }
 
-        // Verify the output value matches the combined reveals + context
         let combined = self.combine_reveals()?;
         let expected = burst_crypto::blake2b_256_multi(&[&combined, context]);
         Ok(expected == output.value && output.proof == combined && output.round == 0)

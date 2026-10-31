@@ -1,9 +1,7 @@
-//! Unchecked block queue — holds blocks whose dependencies are not yet known.
+//! Blocks awaiting a missing predecessor or another ledger dependency.
 //!
-//! When a block arrives referencing a previous block or a source (linked send)
-//! block we haven't seen, it is stored here keyed by the missing dependency hash.
-//! Once that dependency is confirmed, all waiting blocks are drained and
-//! re-submitted to the block processor.
+//! Callers insert and drain dependency buckets; the queue does not establish
+//! availability or confirmation. Drained blocks must pass admission again.
 
 use crate::block_retention::{BlockRetention, RetainedBlock, Slot};
 use burst_ledger::StateBlock;
@@ -11,7 +9,7 @@ use burst_types::BlockHash;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-/// Implementation decision 26.2: retain missing-dependency blocks for 15 minutes.
+/// Age cutoff used by timed drains; cleanup accepts its own cutoff.
 pub(crate) const MAX_AGE_SECS: u64 = 15 * 60;
 
 /// Reason a block is in the unchecked map.
@@ -19,7 +17,7 @@ pub(crate) const MAX_AGE_SECS: u64 = 15 * 60;
 pub enum GapType {
     /// Block's `previous` hash is unknown.
     Previous,
-    /// Block's `link` (source send block) is unknown (for receive blocks).
+    /// A non-previous ledger dependency is unknown, such as a receive source.
     Source,
 }
 
@@ -31,24 +29,26 @@ pub struct UncheckedEntry {
     /// Unix timestamp (seconds) when this entry was received.
     pub received_at: u64,
     slot: Option<Slot>,
+    _in_flight_payload: Option<Arc<crate::block_validation::InFlightPayload>>,
 }
 
-/// Extended unchecked map that tracks both gap-previous and gap-source.
+/// Unchecked map that tracks both gap-previous and gap-source.
 ///
 /// Maps `dependency_hash -> Vec<UncheckedEntry>`. When the missing block arrives,
 /// dependents can be drained and re-processed.
 pub struct UncheckedMap {
     /// Maps previous_hash → blocks waiting for it (gap-previous).
     entries: HashMap<BlockHash, Vec<UncheckedEntry>>,
-    /// Maps source_hash → blocks waiting for the linked send block (gap-source).
+    /// Maps non-previous dependency hashes to their waiting blocks.
     source_dependents: HashMap<BlockHash, Vec<UncheckedEntry>>,
     queued: HashSet<BlockHash>,
     /// Total number of individual entries across all dependency keys.
     count: usize,
-    /// Maximum total entries allowed (prevents memory exhaustion from spam).
+    /// Maximum entries across both maps; this is not a byte budget.
     max_size: usize,
     retention: Option<Arc<BlockRetention>>,
     pub(crate) admission_slot: Option<Slot>,
+    pub(crate) admission_payload: Option<Arc<crate::block_validation::InFlightPayload>>,
 }
 
 impl UncheckedMap {
@@ -68,6 +68,7 @@ impl UncheckedMap {
             max_size,
             retention: None,
             admission_slot: None,
+            admission_payload: None,
         }
     }
 
@@ -90,7 +91,8 @@ impl UncheckedMap {
     /// Insert a block that depends on `dependency` (the hash of its missing previous block).
     ///
     /// Duplicate arrivals are retained once and do not extend the expiry time.
-    /// Returns `false` only if a new entry cannot fit.
+    /// Deduplication uses the declared hash without authentication. Returns false
+    /// when entry capacity or the shared retention budget is exhausted.
     pub fn insert(&mut self, dependency: BlockHash, block: StateBlock, now: u64) -> bool {
         if self.queued.contains(&block.hash) {
             return true;
@@ -106,16 +108,18 @@ impl UncheckedMap {
             block,
             received_at: now,
             slot,
+            _in_flight_payload: self.admission_payload.clone(),
         };
         self.entries.entry(dependency).or_default().push(entry);
         self.count += 1;
         true
     }
 
-    /// Insert a block waiting for its source (linked send) block to arrive.
+    /// Insert a block waiting for a non-previous dependency.
     ///
     /// Duplicate arrivals, including those waiting on a predecessor, do not
-    /// allocate another entry. Returns `false` if a new entry cannot fit.
+    /// allocate another entry or change its bucket/time. Returns false when
+    /// entry capacity or the shared retention budget is exhausted.
     pub fn insert_source(&mut self, source_hash: BlockHash, block: StateBlock, now: u64) -> bool {
         if self.queued.contains(&block.hash) {
             return true;
@@ -131,6 +135,7 @@ impl UncheckedMap {
             block,
             received_at: now,
             slot,
+            _in_flight_payload: self.admission_payload.clone(),
         };
         self.source_dependents
             .entry(source_hash)
@@ -140,23 +145,20 @@ impl UncheckedMap {
         true
     }
 
-    /// Drain all entries that were waiting for `hash` to arrive (gap-previous).
-    ///
-    /// Returns the blocks that can now be re-processed.
-    pub fn get_dependents(&mut self, hash: &BlockHash) -> Vec<StateBlock> {
+    /// Drain a predecessor bucket without filtering age. Returning bare blocks
+    /// drops their retention permits; use take_retained to carry permits onward.
+    pub fn take_dependents(&mut self, hash: &BlockHash) -> Vec<StateBlock> {
         self.take_entries(hash, GapType::Previous, None)
     }
 
-    /// Drain all entries that were waiting for `source_hash` as their linked send
-    /// block (gap-source).
-    ///
-    /// Returns the blocks that can now be re-processed.
-    pub fn get_source_dependents(&mut self, source_hash: &BlockHash) -> Vec<StateBlock> {
+    /// Drain a non-previous dependency bucket without filtering age or carrying
+    /// retention permits into the returned bare blocks.
+    pub fn take_source_dependents(&mut self, source_hash: &BlockHash) -> Vec<StateBlock> {
         self.take_entries(source_hash, GapType::Source, None)
     }
 
-    /// Drain one dependency bucket, returning only entries still within the
-    /// selected timeout even when the periodic cleanup has not run yet.
+    /// Drain one bucket and return blocks younger than MAX_AGE_SECS. Expired
+    /// entries are removed too; returned bare blocks do not carry their permits.
     pub fn take_ready(&mut self, hash: &BlockHash, gap: GapType, now: u64) -> Vec<StateBlock> {
         self.take_entries(hash, gap, Some(now))
     }
@@ -173,6 +175,8 @@ impl UncheckedMap {
             .collect()
     }
 
+    /// Drain a whole bucket, optionally filtering age, and transfer live permits.
+    /// Payload-dedup guards are dropped so retries can authenticate again.
     pub(crate) fn take_retained(
         &mut self,
         hash: &BlockHash,
@@ -208,14 +212,12 @@ impl UncheckedMap {
         self.count == 0
     }
 
-    /// Remove entries older than `max_age_secs` relative to `now`.
-    ///
-    /// Returns the number of entries removed.
+    /// Scan both maps and remove entries aged at least max_age_secs. Clock
+    /// rewind saturates age to zero. Returns the number removed.
     pub fn clear_expired(&mut self, max_age_secs: u64, now: u64) -> usize {
         let mut removed = 0;
         let queued = &mut self.queued;
 
-        // Clear expired gap-previous entries
         self.entries.retain(|_dep, entries| {
             let before = entries.len();
             entries.retain(|e| {
@@ -230,7 +232,6 @@ impl UncheckedMap {
             !entries.is_empty()
         });
 
-        // Clear expired gap-source entries
         self.source_dependents.retain(|_dep, entries| {
             let before = entries.len();
             entries.retain(|e| {
@@ -278,7 +279,7 @@ mod tests {
             account: test_account(),
             previous,
             representative: test_representative(),
-            brn_balance: 100,
+            brn_spent: 100,
             trst_balance: 50,
             link: BlockHash::ZERO,
             origin: TxHash::ZERO,
@@ -305,7 +306,7 @@ mod tests {
         assert!(map.insert(dep, block.clone(), 1000));
         assert_eq!(map.len(), 1);
 
-        let dependents = map.get_dependents(&dep);
+        let dependents = map.take_dependents(&dep);
         assert_eq!(dependents.len(), 1);
         assert_eq!(dependents[0].hash, block.hash);
         assert_eq!(map.len(), 0);
@@ -325,16 +326,16 @@ mod tests {
         assert!(map.insert(dep, b2, 1001));
         assert_eq!(map.len(), 2);
 
-        let dependents = map.get_dependents(&dep);
+        let dependents = map.take_dependents(&dep);
         assert_eq!(dependents.len(), 2);
         assert_eq!(map.len(), 0);
     }
 
     #[test]
-    fn get_dependents_for_unknown_hash_returns_empty() {
+    fn take_dependents_for_unknown_hash_returns_empty() {
         let mut map = UncheckedMap::new(100);
         let unknown = BlockHash::new([0xCC; 32]);
-        assert!(map.get_dependents(&unknown).is_empty());
+        assert!(map.take_dependents(&unknown).is_empty());
     }
 
     #[test]
@@ -361,13 +362,12 @@ mod tests {
         map.insert(dep2, make_block(dep2), 500);
         assert_eq!(map.len(), 2);
 
-        // At time 700, entries older than 300s are expired → dep1 (age=600) removed, dep2 (age=200) stays
+        // Ages are 600 and 200 seconds; only the first exceeds the cutoff.
         let removed = map.clear_expired(300, 700);
         assert_eq!(removed, 1);
         assert_eq!(map.len(), 1);
 
-        // dep2 should still be retrievable
-        let dependents = map.get_dependents(&dep2);
+        let dependents = map.take_dependents(&dep2);
         assert_eq!(dependents.len(), 1);
     }
 
@@ -424,8 +424,8 @@ mod tests {
             assert!(insert(&mut map, 2899));
             assert_eq!(map.clear_expired(MAX_AGE_SECS, 2900), 1);
             assert!(map.is_empty());
-            assert!(map.get_dependents(&dependency).is_empty());
-            assert!(map.get_source_dependents(&dependency).is_empty());
+            assert!(map.take_dependents(&dependency).is_empty());
+            assert!(map.take_source_dependents(&dependency).is_empty());
             assert!(insert(&mut map, 2901));
             assert!(map.take_ready(&dependency, gap, 3801).is_empty());
             assert!(map.is_empty());
@@ -433,7 +433,6 @@ mod tests {
         }
     }
 
-    // ── Gap-source tests ──────────────────────────────────────────────────
 
     fn make_receive_block(previous: BlockHash, source: BlockHash) -> StateBlock {
         let mut block = StateBlock {
@@ -445,7 +444,7 @@ mod tests {
             account: test_account(),
             previous,
             representative: test_representative(),
-            brn_balance: 100,
+            brn_spent: 100,
             trst_balance: 150,
             link: source,
             origin: TxHash::ZERO,
@@ -473,7 +472,7 @@ mod tests {
         assert!(map.insert_source(source, block.clone(), 1000));
         assert_eq!(map.len(), 1);
 
-        let dependents = map.get_source_dependents(&source);
+        let dependents = map.take_source_dependents(&source);
         assert_eq!(dependents.len(), 1);
         assert_eq!(dependents[0].hash, block.hash);
         assert_eq!(map.len(), 0);
@@ -493,16 +492,16 @@ mod tests {
         assert!(map.insert_source(source, b2, 1001));
         assert_eq!(map.len(), 2);
 
-        let dependents = map.get_source_dependents(&source);
+        let dependents = map.take_source_dependents(&source);
         assert_eq!(dependents.len(), 2);
         assert_eq!(map.len(), 0);
     }
 
     #[test]
-    fn get_source_dependents_for_unknown_hash_returns_empty() {
+    fn take_source_dependents_for_unknown_hash_returns_empty() {
         let mut map = UncheckedMap::new(100);
         let unknown = BlockHash::new([0xCC; 32]);
-        assert!(map.get_source_dependents(&unknown).is_empty());
+        assert!(map.take_source_dependents(&unknown).is_empty());
     }
 
     #[test]
@@ -536,12 +535,12 @@ mod tests {
         map.insert_source(source2, make_receive_block(prev, source2), 500);
         assert_eq!(map.len(), 2);
 
-        // At time 700, entries older than 300s → source1 (age=600) removed, source2 (age=200) stays
+        // Ages are 600 and 200 seconds; only the first exceeds the cutoff.
         let removed = map.clear_expired(300, 700);
         assert_eq!(removed, 1);
         assert_eq!(map.len(), 1);
 
-        let dependents = map.get_source_dependents(&source2);
+        let dependents = map.take_source_dependents(&source2);
         assert_eq!(dependents.len(), 1);
     }
 
@@ -568,10 +567,10 @@ mod tests {
         assert!(map.is_empty());
         assert!(map.queued.is_empty());
         assert!(map.insert_source(source, block.clone(), 201));
-        assert_eq!(map.get_source_dependents(&source).len(), 1);
+        assert_eq!(map.take_source_dependents(&source).len(), 1);
         assert!(map.queued.is_empty());
         assert!(map.insert(dependency, block, 202));
-        assert_eq!(map.get_dependents(&dependency).len(), 1);
+        assert_eq!(map.take_dependents(&dependency).len(), 1);
         assert!(map.queued.is_empty());
     }
 }

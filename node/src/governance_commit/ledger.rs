@@ -12,9 +12,9 @@ pub(crate) trait Ledger {
     fn get_block(&self, hash: &BlockHash) -> Result<Vec<u8>, StoreError>;
     fn get_meta(&self, key: &str) -> Result<Option<Vec<u8>>, StoreError>;
     fn put_meta(&mut self, key: &str, bytes: &[u8]) -> Result<(), StoreError>;
-    fn verified_accounts(&self) -> Result<Vec<WalletAddress>, StoreError>;
     fn verified_account_count(&self) -> Result<u64, StoreError>;
     fn full_content(&self, block: &StateBlock) -> Result<ProposalContent, String>;
+    fn bootstrap_phase(&self) -> Result<burst_verification::bootstrap::BootstrapPhase, String>;
     fn observe_bootstrap(&mut self, params: &ProtocolParams) -> Result<(), String>;
 }
 
@@ -34,14 +34,14 @@ impl Ledger for LmdbWriteTransaction<'_> {
     fn put_meta(&mut self, key: &str, bytes: &[u8]) -> Result<(), StoreError> {
         LmdbWriteTransaction::put_meta(self, key, bytes)
     }
-    fn verified_accounts(&self) -> Result<Vec<WalletAddress>, StoreError> {
-        LmdbWriteTransaction::verified_accounts(self)
-    }
     fn verified_account_count(&self) -> Result<u64, StoreError> {
         LmdbWriteTransaction::verified_account_count(self)
     }
     fn full_content(&self, block: &StateBlock) -> Result<ProposalContent, String> {
         crate::governance_content::load(self, block)
+    }
+    fn bootstrap_phase(&self) -> Result<burst_verification::bootstrap::BootstrapPhase, String> {
+        crate::bootstrap_phase::read(self)
     }
     fn observe_bootstrap(&mut self, params: &ProtocolParams) -> Result<(), String> {
         crate::bootstrap_phase::observe(self, params).map(|_| ())

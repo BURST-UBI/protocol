@@ -22,13 +22,16 @@ pub trait TransactionStore {
     /// Check if a transaction exists.
     fn exists(&self, hash: &TxHash) -> Result<bool, StoreError>;
 
-    /// Get all transaction hashes involving an account (as sender or receiver).
+    /// Collect hashes explicitly indexed under this account. The store does not
+    /// infer sender or recipient relationships from transaction bytes.
     fn get_account_transactions(&self, address: &WalletAddress) -> Result<Vec<TxHash>, StoreError>;
 
     /// Delete a transaction (for pruning expired/revoked TRST history).
     fn delete_transaction(&self, hash: &TxHash) -> Result<(), StoreError>;
 
-    /// Delete a transaction and its per-account index entry atomically.
+    /// Delete a transaction, optionally maintaining its account index.
+    /// The default ignores the account and deletes only the transaction bytes.
+    /// Backends must override this method to remove both entries atomically.
     fn delete_transaction_with_account(
         &self,
         hash: &TxHash,

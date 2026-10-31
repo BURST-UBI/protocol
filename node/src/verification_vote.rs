@@ -1,4 +1,5 @@
-//! Admission checks for signed humanity votes, before any BRN is locked.
+//! Vote encoding, stake amount and certified committee checks.
+//! Signature verification and stake mutation happen outside this module.
 
 use burst_ledger::StateBlock;
 use burst_types::ProtocolParams;
@@ -23,9 +24,11 @@ pub(crate) fn availability_error(
     }
 }
 
+/// Use current parameters for the stake amount and the certified selection
+/// for committee eligibility. Does not mutate state or check activation metadata.
 pub(crate) fn validate(
     block: &StateBlock,
-    previous_brn: u128,
+    previous_brn_spent: u128,
     orchestrator: &VerificationOrchestrator,
     params: &ProtocolParams,
 ) -> Result<(), String> {
@@ -41,12 +44,12 @@ pub(crate) fn validate(
     } else {
         params.verifier_stake_amount
     };
-    if block.brn_balance.checked_sub(previous_brn) != Some(expected) {
+    if block.brn_spent.checked_sub(previous_brn_spent) != Some(expected) {
         return Err(format!(
             "verification vote must lock exactly {expected} raw BRN"
         ));
     }
-    let target = crate::ledger_bridge::extract_receiver_from_link(&block.link)
+    let target = crate::block_economics::wallet_from_link(&block.link)
         .ok_or("verification vote has an invalid target")?;
     let selection_params = orchestrator
         .selection_request(&target)
@@ -120,7 +123,7 @@ mod tests {
             head: BlockHash::new([1; 32]),
             block_count: 1,
             representative: voter,
-            brn_balance: 20,
+            brn_spent: 20,
             trst_balance: 0,
         };
         let block = build_state_block(
@@ -140,11 +143,11 @@ mod tests {
         governed.brn_rate += 1;
         governed.verifier_stake_amount = 17;
         block.params_hash = governed.params_hash();
-        block.brn_balance = 37;
+        block.brn_spent = 37;
         assert!(validate(&block, 20, &orchestrator, &governed).is_ok());
-        block.brn_balance = 30;
+        block.brn_spent = 30;
         assert!(validate(&block, 20, &orchestrator, &governed).is_err());
-        block.brn_balance = 37;
+        block.brn_spent = 37;
         block.params_hash = params.params_hash();
         assert!(validate(&block, 20, &orchestrator, &governed).is_err());
     }

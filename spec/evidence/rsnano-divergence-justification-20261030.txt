@@ -1,0 +1,104 @@
+# Are BURST's departures from rsnano justified?
+
+Implementation follow-up: [current fix tracker](SIMPLICITY_FIX_TRACKER_20261030.md).
+The findings below preserve the pre-fix review; consult the tracker for current status.
+
+Source review, 2026-10-30. Reference: local rsnano commit
+`414dd884c162f78f151b9d912a029bbc9a340866`; not latest-upstream advice.
+BURST evidence is the current, already modified working tree. No production code
+changed and no builds or runtime checks were run for this report.
+
+This complements [the simplicity review](IMPLEMENTATION_SIMPLICITY_REVIEW_20261030.md).
+Different is not automatically worse. A departure needs a protocol requirement,
+product requirement, measured benefit, or simpler ownership. An explanation
+inferred from code is not evidence that the original author made that decision.
+This covers the material direct dependency families and architectural departures
+inspected below, not every transitive package, platform feature, or supply-chain risk.
+
+## Dependency comparison
+
+Paths below are relative to protocol; rsnano paths are under references/rsnano-node.
+
+| Choice | rsnano reference | Why BURST differs; evidence | Verdict / smallest useful action |
+|---|---|---|---|
+| Standard `ed25519-dalek` 2 | `types/Cargo.toml` pins a Git fork with legacy compatibility | BURST `crypto/src/sign.rs` uses ordinary signing and `verify_strict`; decisions 4.1 and signature canonicalization support standard Ed25519. BURST is a separate protocol, not a Nano-compatible node. | Justified. Copying rsnano's fork would add compatibility obligations with no demonstrated requirement. Preserve BURST key/signature vectors. |
+| `bip39`, `hmac`, `sha2` | Nano deterministic derivation is in `types/src/lib.rs::deterministic_key`; not BURST mnemonic recovery | Decision 4.1 explicitly chooses BIP39, 4.2 specifies a BIP44-style path. The library validates phrases and derives the seed; BURST then invents a path-string HMAC. | BIP39 dependency justified; custom child derivation is **not justified by that decision**. See D01 below. |
+| `argon2` + `aes-gcm` | `rust-argon2`, `aes` + `ctr` in rsnano types | Decision 4.4 selects Argon2id. `wallet_core/src/keystore.rs` uses password-derived encryption and authenticated AES-GCM. BURST has its own wallet-file format. | Reasonable, direct implementation of a real need. Do not replace authenticated encryption simply to match Nano's wallet format. Exact crate selection rationale was not found; no defect follows from that absence. |
+| `x25519-dalek`, `chacha20poly1305`, `zeroize` | No equivalent delegation envelope in the inspected rsnano types | `crypto/src/encryption.rs` implements an ephemeral X25519 envelope using XChaCha20-Poly1305; key conversion is in `keys.rs`. This is distinct from password-encrypted storage. | Purpose justified by delegation. Two AEADs are not automatically duplication. Envelope/KDF design still needs its own cryptographic review; dependency reuse alone does not certify composition. |
+| `blst` and SHA-256 use in drand | No humanity-verifier randomness requirement in Nano | `vrf/src/drand.rs` validates BLS public keys/signatures; decision 19 chooses drand. | Justified. A hash or ordinary Ed25519 verifier cannot replace the beacon signature scheme. Remove unused alternate selection machinery (S12), not beacon authentication. |
+| `blake2b_simd` alongside `blake2` | rsnano types/node use `blake2` | `crypto/src/hash.rs` supplies the existing 32-byte hash interface. OPERATION_COMPLEXITY_AUDIT entry 412 records byte/streaming comparisons and a measured backend improvement. | Documented performance rationale, not arbitrary replacement. This review did not reverify the benchmark receipts and does not renew release qualification. Other digest sizes/callers need checking before removing `blake2`. |
+| `heed` rather than `lmdb-rkv` | rsnano `nullables/lmdb/Cargo.toml` | Both use LMDB; BURST `store_lmdb` has actual caller-owned transactions and typed database access. A historical reason for choosing the wrapper was not established. | Reasonable alternative, not proven superior. Replacing the store wrapper solely for similarity is unjustified churn. Keep transactional semantics, not wrapper-name parity. |
+| Vendored heed transaction ID | rsnano uses its own LMDB wrapper | `vendor/heed/BURST_PATCH.md`: cache identity needs the opened transaction's ID, not environment metadata. The note describes an API backport available in newer heed. | Narrow, documented correctness reason. Retire the backport at a separately qualified compatible upstream upgrade; do not bundle a store upgrade into cleanup. |
+| Vendored LMDB file-growth controls and heed lease/retry ownership | No equivalent shown in inspected rsnano storage | Both BURST_PATCH.md files explain a native page-allocation ceiling. Consumers include `node/src/body_retirement/capture_budget.rs` and snapshot metadata capture. Polling alone cannot enforce an allocation-time ceiling. | **Conditionally justified, highest maintenance burden here.** If a hard per-capture growth bound is required, this has a concrete purpose. If only best-effort cancellation is required, it may be excessive. Do not delete it without settling that requirement. It does not bound RAM or other processes; platform qualification remains separate. |
+| `imbl` persistent ordered maps | rsnano ledger/node use conventional collections including `rustc-hash` | BURST candidate economic state must be cloned and updated; `trst/src/shared_map.rs` shares roots/values. The complexity audit records avoiding full state copies. | Justified by BURST state ownership, rather than a homemade persistent-tree implementation. Preserve deterministic ordering where required; a faster unordered map is not a drop-in replacement. |
+| `prost` / Protobuf P2P | rsnano messages and network_protocol use Nano's wire format | Decision 23.3 explicitly chooses Protobuf for cross-language compatibility/schema evolution. Actual BURST codec: `node/src/wire_message/protobuf.rs`. | Explicitly justified. Limits, version handling and canonical signed bytes still matter. Retire misleading unused bincode P2P tests (S20), not the chosen protocol. |
+| `bincode` plus `ciborium` | rsnano has concrete Nano storage/message encodings | BURST bincode has multiple storage/record users; CBOR serves replay snapshots (`node/src/confirmed_replay/snapshot.rs`, checked body reader and compact schema). These are not the same boundary as Protobuf P2P. | Separate formats can be reasonable; the original reason for choosing CBOR was not established in this pass. Document format ownership/versioning. Do not consolidate serialized formats blindly: persisted data and authenticated bytes are compatibility boundaries. |
+| `ntp-proto` + direct `rustls` | No equivalent BURST trusted-clock subsystem identified in rsnano | `network/src/trusted_clock/nts.rs` and measurement code reuse NTS protocol/TLS implementations. The manifest explicitly pins an unstable internal API. BURST's time-sensitive economics gives trusted time a concrete purpose. | Purpose justified; maintenance risk is real. Keep the library behind the existing clock boundary and review upgrades explicitly. Do not hand-write NTS to save a dependency or equate ordinary unauthenticated NTP with it. |
+| `igd-next` | No direct counterpart in inspected rsnano workspace dependency inventory | BURST network owns NAT/port mapping; this is deployment support, not consensus. | Plausible product requirement, not a protocol necessity. Keep optional operational behavior isolated. Absence from rsnano does not establish unnecessary code. |
+| `prometheus` | rsnano has its own stats/container reporting | Decision 25.4 metrics choice includes Prometheus; BURST NodeMetrics integrates it. | Justified reuse. The unused string-keyed StatsCounter is the duplication to remove (S09); importing another full stats framework would worsen it. |
+| Tokio, Axum, Reqwest, Serde, tracing, clap | Same families occur in rsnano | Workspace inventories show substantial existing ecosystem reuse. | No general dependency reinvention here. Reuse client instances (S19) and typed DTOs (S06); replacing these libraries has no demonstrated benefit. |
+| Browser bindings / Tauri application boundary | rsnano core does not provide BURST's browser wallet product | `browser/Cargo.toml` isolates WASM browser HTTP/timers. Desktop clients need native credential and signing boundaries. | Product-driven difference. Share protocol semantics and bounded transport helpers; do not force native/browser APIs into one elaborate abstraction. Desktop dependency trees were not exhaustively audited. |
+
+Workspace dependency declarations alone do not prove a crate ships or executes.
+For example, a root-only dependency declaration is not evidence of a parallel
+runtime. Inventory above was drawn from member manifests as well as root settings;
+target-specific consumers were inspected where relevant, not exhaustively enumerated.
+
+## D01 — Custom mnemonic derivation is mislabeled as BIP44
+
+Priority: recovery interoperability and accurate public documentation, before
+claiming standard HD-wallet compatibility. This is a live path:
+`wallet_core/src/wallet.rs` calls `keypair_from_mnemonic`.
+
+`crypto/src/mnemonic.rs:57` uses the literal `m/44'/9999'/0'/0/0` string as the
+HMAC-SHA512 key and the BIP39 seed as its message, taking the first 32 output bytes.
+There are no successive child derivations, child indexes, or retained chain code.
+This is deterministic BURST-specific derivation, not implementation of that path.
+
+Decision 4.2 selects a BIP44 coin path; it does not authorize replacing the
+derivation algorithm with a path-string HMAC. BIP44 specifies a BIP32 hierarchy.
+For a standard Ed25519 design, SLIP-0010 supplies a relevant established derivation
+scheme, but it supports hardened children only: the existing unhardened suffix
+cannot simply be passed through unchanged.
+
+Primary references checked:
+[BIP44](https://github.com/bitcoin/bips/blob/master/bip-0044.mediawiki),
+[SLIP-0010](https://github.com/satoshilabs/slips/blob/master/slip-0010.md).
+
+This finding does **not** demonstrate key compromise, weak entropy, or a broken
+BIP39 library. It demonstrates a mismatch between promised derivation and code.
+Rsnano's own deterministic key handling is not a reason to invent an undocumented
+BURST variant or to copy Nano recovery rules into BURST.
+
+Smallest safe next step: specify and name the current recovery scheme accurately,
+preserve independent known phrase-to-key/address vectors, and determine whether
+existing wallets require legacy recovery. If adopting standard HD derivation for
+new wallets, use a reviewed implementation with explicit derivation version and
+compatible recovery handling. Never silently change the output for old phrases.
+Coin-type registration status was not checked here.
+
+## Architectural departures: retain the requirements, simplify their expression
+
+| Departure | Justification judgment | Action |
+|---|---|---|
+| BRN/TRST state, provenance, expiry/revocation, certified enrollment and governance | Real BURST semantics with no direct Nano substitute | Keep the rules. Shared live/fork economic transitions are good reuse; old local verification and alternate tally APIs are not (S01/S12/S14). |
+| Score-sorted square-root gossip rather than randomized selection | No demonstrated need to repeatedly favor the same peers; decision 23.9 follows Nano | S08: reuse bounded subset/random selection after preserving peer eligibility and budgets. No throughput improvement or eclipse exploit is established by this source review. |
+| Adaptive difficulty bookkeeping alongside governed work thresholds | No live consumer justifying the extra node bookkeeping found | S07: remove inactive machinery; do not activate a second policy to justify its existence. |
+| Raw JSON repeated in signing review vs rsnano typed RPC DTOs | No protocol reason for repeated string contracts | S06: incrementally share typed response contracts while preserving independent signing checks. |
+| JSON serialize/reparse per WebSocket subscriber | No identified requirement | S16: route typed existing events and serialize at the boundary; no new event-bus framework needed. |
+| Several genesis constructors and simulation rollback APIs | Historical fixtures may explain some copies, but do not justify ambiguous production entry points | S10/S13: isolate simulations and canonicalize launch construction without altering historical fixtures accidentally. |
+
+## Stopping point and priorities
+
+The useful next work is targeted correction, not a wholesale port to rsnano.
+First resolve D01's recovery contract, S02/S03 error handling, and S15 unchecked
+aggregation. Then remove inactive alternate policy machinery and consolidate
+existing parsing, HTTP and event paths. Keep native storage patch qualification
+as a distinct release/maintenance obligation; this report does not pass its gates.
+
+Another broad style pass has diminishing value now. Stop before replacing sound
+libraries just for parity, writing a universal codec/transport framework, removing
+trust-boundary checks as duplicates, or changing consensus and wallet formats to
+make the tree resemble Nano. Reopen review when a concrete change or new evidence
+provides a specific question. No vulnerability-advisory, license-compliance, or
+exhaustive transitive-dependency audit is claimed here.

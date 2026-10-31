@@ -521,3 +521,72 @@ async fn activation_worker_refreshes_an_expired_start_without_deciding_alone() {
         1
     );
 }
+
+#[test]
+fn compact_unsigned_activation_refreshes_finality_without_replacing_signed_choices() {
+    use crate::checkpoint_agreement::CompactReplayCandidate;
+    use crate::confirmed_replay::tests::snapshot_history::{authenticate, compact::retained};
+    let (mut fixture, _dir, store, selection, _) = setup();
+    let initial = PreparedActivation::prepare_next(
+        &store, NetworkId::Dev, &fixture.params, CUTOFF + 31,
+    ).unwrap().unwrap().manifest().clone();
+    let coverage = |fixture: &Fixture, manifest: &crate::checkpoint_activation::ActivationManifest| {
+        let snapshot = authenticate(&store, &fixture.params, manifest.checkpoint.parent);
+        let witnesses = retained(&snapshot, fixture, &store, &[]);
+        let base = snapshot.into_continuation();
+        let tail = base.read_tail(&store, manifest.checkpoint.cutoff, &manifest.heads, witnesses).unwrap();
+        (base.anchor().clone(), CompactReplayCandidate::Activation(Box::new(
+            base.activation_vote_coverage_for_manifest(&tail, manifest, &[&selection]).unwrap(),
+        )))
+    };
+    let (anchor, initial_coverage) = coverage(&fixture, &initial);
+    let seed = proposer(&anchor, 0);
+    let store = Arc::new(store);
+    let mut driver = CheckpointDriver::new_compact(
+        store.clone(), fixture.params.clone(),
+        Arc::new(burst_crypto::keypair_from_seed(&[seed; 32]).private),
+        anchor, initial_coverage, Vec::new(),
+    ).unwrap();
+    driver.resume().unwrap();
+    let journal = bincode::serialize(&driver.state().unwrap().unwrap()).unwrap();
+    assert!(driver.compact_candidate_refresh_signer().unwrap().is_none());
+    let voter = panel(&selection)[0];
+    vote(&mut fixture, &selection, voter, CUTOFF + 32);
+    fixture.append_confirmed_prefix(&store, CUTOFF + 32);
+    let early = fixture.blocks.last().unwrap();
+    store.meta_store().reserve_consensus_vote_at(
+        &selection.certificate().checkpoint.hash(), &address(seed), &early.account,
+        &early.previous, &early.hash, true, 0, Some(early.timestamp.as_secs()),
+    ).unwrap();
+    assert!(driver.propose(clock(34)).is_err());
+    assert_eq!(driver.compact_candidate_refresh_signer().unwrap(), Some(address(seed)));
+    let fresh = PreparedActivation::prepare_next(
+        &store, NetworkId::Dev, &fixture.params, CUTOFF + 33,
+    ).unwrap().unwrap().manifest().clone();
+    let compact = |manifest: &crate::checkpoint_activation::ActivationManifest| {
+        let snapshot = authenticate(&store, &fixture.params, manifest.checkpoint.parent);
+        let witnesses = retained(&snapshot, &fixture, &store, &[]);
+        let base = snapshot.into_continuation();
+        let tail = base.read_tail(&store, manifest.checkpoint.cutoff, &manifest.heads, witnesses).unwrap();
+        CompactReplayCandidate::Activation(Box::new(
+            base.activation_vote_coverage_for_manifest(&tail, manifest, &[&selection]).unwrap(),
+        ))
+    };
+    assert!(driver.replace_unsigned_compact_candidate(compact(&fresh)).unwrap());
+    assert_eq!(bincode::serialize(&driver.state().unwrap().unwrap()).unwrap(), journal);
+    let (_, manifest) = proposed(driver.propose(clock(34)).unwrap());
+    assert_eq!(manifest, ReplayManifest::Activation(fresh.clone()));
+    assert_eq!(fresh.activation, initial.activation);
+    assert!(fresh.heads.iter().any(|head| head.hash == early.hash));
+    let signed = bincode::serialize(&driver.state().unwrap().unwrap()).unwrap();
+    assert!(driver.compact_candidate_refresh_signer().unwrap().is_none());
+    let alternative = PreparedActivation::prepare_next(
+        &store, NetworkId::Dev, &fixture.params, CUTOFF + 34,
+    ).unwrap().unwrap().manifest().clone();
+    assert!(!driver.replace_unsigned_compact_candidate(compact(&alternative)).unwrap());
+    assert_eq!(bincode::serialize(&driver.state().unwrap().unwrap()).unwrap(), signed);
+    assert!(store.meta_store().reserve_consensus_vote_at(
+        &selection.certificate().checkpoint.hash(), &address(seed), &early.account,
+        &early.hash, &BlockHash::new([91; 32]), false, 0, Some(CUTOFF + 34),
+    ).is_err(), "refresh must not release the durable signing fence");
+}

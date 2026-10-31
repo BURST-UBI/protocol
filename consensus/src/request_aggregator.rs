@@ -1,16 +1,14 @@
-//! Request aggregator — batches inbound vote requests to minimize vote generation.
+//! FIFO grouping of vote requests by block hash.
 //!
-//! When multiple peers request votes for the same block, the aggregator
-//! batches them so we only generate one vote and send copies to all requesters.
-//! This is critical for performance under high load.
+//! This helper groups requesters but does not generate or send votes. The node
+//! constructs an instance, but its current request path does not enqueue or drain it.
 
 use burst_types::BlockHash;
 use std::collections::{HashMap, VecDeque};
 
-/// Aggregates inbound vote requests to minimize vote generation.
-///
-/// When multiple peers request votes for the same block, the aggregator
-/// batches them so we only generate one vote and send copies to all requesters.
+/// Groups distinct peer IDs under each pending block hash.
+/// `max_pending` bounds hashes, not peers per hash or peer-ID lengths. Duplicate
+/// detection scans each hash's peer list; callers must bound admitted peers.
 pub struct RequestAggregator {
     /// Pending requests: block_hash -> list of requesting peer IDs
     pending: HashMap<BlockHash, Vec<String>>,

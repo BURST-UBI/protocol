@@ -1,5 +1,5 @@
-// Run after: cargo build --release --locked --offline --bin burst-daemon
-// Disposable local ledgers only. No wallet secrets are printed or saved.
+// Run with BURST_DAEMON pointing to the selected validation artifact.
+// Disposable local ledgers only; keep wallet keys out of diagnostics.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdtemp, open } from 'node:fs/promises';

@@ -8,14 +8,15 @@ pub trait BlockStore {
     /// Store a block (serialized bytes keyed by hash).
     fn put_block(&self, hash: &BlockHash, block_bytes: &[u8]) -> Result<(), StoreError>;
 
-    /// Store a block and update the per-account block index atomically.
+    /// Backend hook for storing a block with its account association.
+    /// The default stores bytes only; it ignores the account and updates no index.
+    /// Atomic indexed writes require a backend implementation.
     fn put_block_with_account(
         &self,
         hash: &BlockHash,
         block_bytes: &[u8],
         _account: &WalletAddress,
     ) -> Result<(), StoreError> {
-        // Default: just put the block (backward compat for non-LMDB impls).
         self.put_block(hash, block_bytes)
     }
 
@@ -25,7 +26,8 @@ pub trait BlockStore {
     /// Check if a block exists.
     fn exists(&self, hash: &BlockHash) -> Result<bool, StoreError>;
 
-    /// Delete a block (for pruning).
+    /// Delete stored block bytes. The caller must establish retirement or rollback
+    /// eligibility and account for backend-specific index maintenance.
     fn delete_block(&self, hash: &BlockHash) -> Result<(), StoreError>;
 
     /// Get all block hashes for an account (the account chain).

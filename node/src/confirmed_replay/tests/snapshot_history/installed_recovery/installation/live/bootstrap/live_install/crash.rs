@@ -48,7 +48,7 @@ async fn compact_live_snapshot_crash_child() {
     let installer = node.snapshot_installer();
     let store = node.store.clone();
     assert!(STORE.set(store.clone()).is_ok());
-    let running = tokio::spawn(async move { node.start().await });
+    let running = tokio::spawn(async move { node.start_with_services(burst_daemon::start_public_services).await });
     tokio::time::timeout(Duration::from_secs(90), async {
         loop {
             assert!(
@@ -239,7 +239,7 @@ async fn crash_installation(replace: bool) {
                 }
                 .clone()
             );
-            let proofs = Service::start(source.store.clone(), local.clone(), 0).await;
+            let proofs = WitnessService::start(source.store.clone(), local.clone(), 0).await;
             let recovered = installed::recover_metadata_from_peers(
                 local.clone(),
                 NetworkId::Dev,

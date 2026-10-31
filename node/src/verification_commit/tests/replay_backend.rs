@@ -23,6 +23,8 @@ fn replayed_pending_claim_and_return_match_the_storage_adapter() {
     let applied = HashMap::<BlockHash, &StateBlock>::new();
     let mut mutations = crate::confirmed_replay::mutations::Mutations::default();
     let mut replay = ReplayedLedger {
+        bootstrap: &mut burst_verification::bootstrap::BootstrapPhase::Active,
+        bootstrap_threshold: 50,
         mutations: Some(&mut mutations),
         accounts: &mut accounts,
         pending: &mut claims,
@@ -104,7 +106,7 @@ fn replayed_expiry_matches_storage_without_granting_spendable_deadline_credit() 
     // as the agreed missing-vote policy required by decision 15.16.
     for partial_panel in [false, true] {
         let mut fixture = Fixture::new();
-        fixture.verified_target();
+        fixture.verify_target();
         let challenge = fixture.challenge(burst_verification::ChallengeReason::Fraud);
         fixture.apply(&challenge, true).unwrap();
         let mut keys = vec![stake_key(
@@ -183,6 +185,8 @@ fn replayed_expiry_matches_storage_without_granting_spendable_deadline_credit() 
             let mut verification = original_verification.clone();
             let applied = HashMap::from([(challenge.hash, &challenge)]);
             let mut ledger = ReplayedLedger {
+                bootstrap: &mut burst_verification::bootstrap::BootstrapPhase::Active,
+                bootstrap_threshold: 50,
                 mutations: None,
                 accounts: &mut accounts,
                 pending: &mut pending,
@@ -307,7 +311,7 @@ fn replayed_candidate_and_lmdb_share_stake_and_reward_transitions() {
             block,
             crate::economic_candidate::EconomicContext {
                 account,
-                previous_brn: previous.brn_balance,
+                previous_brn_spent: previous.brn_spent,
                 pending: None,
                 params: &fixture.params,
             },
@@ -316,11 +320,13 @@ fn replayed_candidate_and_lmdb_share_stake_and_reward_transitions() {
         )
         .unwrap();
         let updated =
-            crate::ledger_updater::account_after_block(block, account, previous.brn_balance)
+            crate::ledger_updater::account_after_block(block, account, previous.brn_spent)
                 .unwrap();
         accounts.insert(block.account.clone(), updated);
         apply(
             &mut ReplayedLedger {
+                bootstrap: &mut burst_verification::bootstrap::BootstrapPhase::Active,
+                bootstrap_threshold: 50,
                 mutations: None,
                 accounts: &mut accounts,
                 pending: &mut pending,
@@ -374,4 +380,37 @@ fn replayed_candidate_and_lmdb_share_stake_and_reward_transitions() {
     }
     assert_eq!(accounts[&fixture.target].state, WalletState::Verified);
     assert_eq!(pending.len(), 2);
+}
+
+#[test]
+fn ordinary_verification_replay_retires_creator_authority_before_a_later_revocation() {
+    use crate::verification_commit::ledger::Ledger;
+    use burst_verification::bootstrap::BootstrapPhase;
+    let fixture = Fixture::new();
+    let block = fixture.challenge(burst_verification::ChallengeReason::Fraud);
+    let mut accounts = HashMap::new();
+    for seed in 0..49 {
+        let mut account = burst_store::account::AccountInfo::unopened(address(seed));
+        account.state = WalletState::Verified;
+        accounts.insert(account.address.clone(), account);
+    }
+    let mut phase = BootstrapPhase::Active;
+    let mut pending = HashMap::new();
+    let mut metadata = HashMap::new();
+    let applied = HashMap::<BlockHash, &StateBlock>::new();
+    let mut replay = ReplayedLedger {
+        bootstrap: &mut phase, bootstrap_threshold: 1000,
+        mutations: None, accounts: &mut accounts, pending: &mut pending,
+        metadata: &mut metadata, applied: &applied, current: &block,
+    };
+    let mut fiftieth = burst_store::account::AccountInfo::unopened(address(49));
+    replay.put_account(&fiftieth).unwrap();
+    assert_eq!(*replay.bootstrap, BootstrapPhase::Active);
+    fiftieth.state = WalletState::Verified;
+    replay.put_account(&fiftieth).unwrap();
+    assert_eq!(*replay.bootstrap, BootstrapPhase::Complete);
+    fiftieth.state = WalletState::Revoked;
+    replay.put_account(&fiftieth).unwrap();
+    let restored = BootstrapPhase::decode(Some(&replay.bootstrap.encoding())).unwrap();
+    assert!(!restored.permits_creator(49, 1000));
 }

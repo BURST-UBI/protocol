@@ -20,7 +20,8 @@ impl ConfirmedReplay {
         targets
     }
 
-    /// Changes only this replay candidate, never the live ledger.
+    /// Apply the challenge outcome to this replay candidate. Discard the
+    /// candidate on error; earlier settlement changes are not rolled back.
     pub(crate) fn apply_upheld(
         &mut self,
         history: &impl LifecycleHistory,
@@ -30,6 +31,8 @@ impl ConfirmedReplay {
         let applied = history.applied_blocks();
         let current = history.first_block()?;
         let mut ledger = ReplayedLedger {
+            bootstrap: &mut self.bootstrap_phase,
+            bootstrap_threshold: self.params.bootstrap_exit_threshold,
             mutations: self.mutations.as_mut(),
             accounts: &mut self.accounts,
             pending: &mut self.pending,

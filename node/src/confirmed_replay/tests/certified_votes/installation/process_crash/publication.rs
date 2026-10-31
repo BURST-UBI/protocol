@@ -208,7 +208,7 @@ async fn check_caches(node: &BurstNode) {
     let frontier = node.frontier.read().await;
     let accounts: Vec<_> = store
         .account_store()
-        .iter_accounts()
+        .all_accounts()
         .unwrap()
         .into_iter()
         .filter(|account| account.block_count > 0)
@@ -238,7 +238,7 @@ async fn restart_and_admit(directory: &Path, fixture: &Fixture, epoch: BlockHash
     }));
     let shutdown = node.shutdown.clone();
     let mut task = tokio::spawn(async move {
-        node.start().await.unwrap();
+        node.start_with_services(burst_daemon::start_public_services).await.unwrap();
         node
     });
     let result = tokio::time::timeout(Duration::from_secs(30), async {

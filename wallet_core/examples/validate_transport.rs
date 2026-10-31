@@ -1,5 +1,6 @@
-//! Repeatable NAT/firewall journey with one public dev signer and non-voting peers.
-//! Independent-signer consensus is exercised separately by run-validation.sh.
+//! Signed payment and merge checks across disposable Dev RPC endpoints.
+//! The NAT runner configures routing and firewalls separately. Its fixture uses
+//! one representative; this probe does not establish independent-signer consensus.
 use burst_types::{BlockHash, Timestamp, TxHash};
 use burst_wallet_core::{
     transaction_builder::{build_merge_tx, build_reject_receive_tx},

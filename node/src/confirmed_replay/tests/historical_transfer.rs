@@ -125,7 +125,7 @@ fn historical_transfer_authenticates_before_admission_and_does_not_install_peer_
                 altered.blocks.pop();
             }
             2 => altered.blocks.push(altered.blocks[candidate_index].clone()),
-            3 => altered.blocks[candidate_index].brn_balance += 1,
+            3 => altered.blocks[candidate_index].brn_spent += 1,
             4 => altered.version = 3,
             8 => altered
                 .contents

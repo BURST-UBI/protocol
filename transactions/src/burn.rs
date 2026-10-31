@@ -1,11 +1,11 @@
-//! Burn transaction: consumer burns BRN → provider receives TRST.
+//! Burn payload for creating a pending TRST payment from BRN.
 
 use burst_types::{Signature, Timestamp, TxHash, WalletAddress};
 use serde::{Deserialize, Serialize};
 
-/// A burn transaction. The consumer destroys BRN; the provider receives fresh TRST.
-///
-/// The timestamp on this transaction determines the TRST expiry date.
+/// Request to burn BRN for a recipient. Acceptance creates pending TRST; the
+/// recipient must claim it with a receive. The burn time starts its expiry age.
+/// This payload alone does not establish acceptance or available funds.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BurnTx {
     pub hash: TxHash,

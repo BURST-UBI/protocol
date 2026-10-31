@@ -1,101 +1,99 @@
-//! Network message types for BURST node-to-node communication.
+//! Live peer envelopes, payloads, Protobuf framing and stateless bounds.
 
-use burst_transactions::Transaction;
-use burst_types::{BlockHash, Timestamp, WalletAddress};
+use burst_types::{BlockHash, Signature, WalletAddress};
 use serde::{Deserialize, Serialize};
 
-/// Header present on every network message.
+pub mod bootstrap;
+
+pub use burst_types::PeerAddress;
+
+/// A vote broadcast on the network.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct MessageHeader {
-    pub message_type: MessageType,
-    pub network_id: burst_types::NetworkId,
-    pub protocol_version: u16,
-    pub timestamp: Timestamp,
+pub struct WireVote {
+    pub voter: WalletAddress,
+    pub block_hashes: Vec<BlockHash>,
+    pub is_final: bool,
+    pub timestamp: u64,
+    pub sequence: u64,
+    pub signature: Signature,
 }
 
-/// All message types in the protocol.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum MessageType {
-    // Block/transaction propagation
-    Keepalive,
-    Publish,
-    ConfirmReq,
-    ConfirmAck,
-
-    // Sync — ascending bootstrap (the typed, id-correlated pull protocol lives
-    // in `burst_node::bootstrap`). The legacy serial FrontierReq/BulkPull/
-    // BulkPush scheme was removed.
-    AscPullReq,
-    AscPullAck,
-
-    // Verification
-    VerificationRequest,
-    VerificationVote,
-
-    // Governance
-    GovernanceProposal,
-    GovernanceVote,
-
-    // Handshake
-    NodeIdHandshake,
-
-    // Telemetry
-    TelemetryReq,
-    TelemetryAck,
+/// Request votes for specific block hashes (confirm_req).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ConfirmReqMsg {
+    pub block_hashes: Vec<BlockHash>,
+    pub remaining_hops: u8,
 }
 
-/// A block/transaction publish message.
+/// Vote response to a confirm_req (confirm_ack).
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PublishMessage {
-    pub header: MessageHeader,
-    pub transaction: Transaction,
+pub struct ConfirmAckMsg {
+    pub vote: WireVote,
 }
 
-/// Request confirmation of a block.
+/// Keepalive message carrying a list of known peer addresses.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ConfirmReqMessage {
-    pub header: MessageHeader,
-    pub block_hash: BlockHash,
+pub struct KeepaliveMsg {
+    pub peers: Vec<String>,
 }
 
-/// Confirmation acknowledgment (representative vote).
+/// Legacy verification request. The node logs it without admitting an endorsement.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ConfirmAckMessage {
-    pub header: MessageHeader,
-    pub representative: WalletAddress,
-    pub block_hash: BlockHash,
-    pub signature: burst_types::Signature,
+pub struct VerificationRequestMessage {
+    pub target: WalletAddress,
+    pub endorser: WalletAddress,
 }
 
-/// Keepalive message with peer addresses.
+/// Legacy verification vote. The node logs it without recording a verifier vote.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct KeepaliveMessage {
-    pub header: MessageHeader,
-    pub peers: Vec<PeerAddress>,
+pub struct VerificationVoteMessage {
+    pub target: WalletAddress,
+    pub voter: WalletAddress,
+    /// 0 = Legitimate, 1 = Illegitimate, 2 = Neither
+    pub vote: u8,
+    pub signature: Vec<u8>,
 }
 
-/// A peer's network address.
+/// Legacy proposal announcement. The node logs it without admitting a proposal.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PeerAddress {
-    pub ip: String,
-    pub port: u16,
+pub struct GovernanceProposalMessage {
+    pub proposal_hash: BlockHash,
+    pub proposer: WalletAddress,
+    pub content: Vec<u8>,
 }
 
-/// Node ID handshake for peer authentication.
+/// Legacy governance vote. The node logs it without recording a ballot.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct NodeIdHandshakeMessage {
-    pub header: MessageHeader,
-    pub node_id: burst_types::PublicKey,
-    pub signature: burst_types::Signature,
+pub struct GovernanceVoteMessage {
+    pub proposal_hash: BlockHash,
+    pub voter: WalletAddress,
+    /// 0 = Yea, 1 = Nay, 2 = Abstain
+    pub vote: u8,
 }
 
-/// Telemetry data shared between nodes.
+/// Peer-reported node statistics. These values are not consensus evidence.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TelemetryData {
+pub struct TelemetryAckMessage {
     pub block_count: u64,
+    pub cemented_count: u64,
+    pub unchecked_count: u64,
     pub account_count: u64,
+    pub bandwidth_cap: u64,
     pub peer_count: u32,
-    pub protocol_version: u16,
-    pub uptime_secs: u64,
-    pub timestamp: Timestamp,
+    pub protocol_version: u8,
+    pub uptime: u64,
+    pub genesis_hash: BlockHash,
+    pub major_version: u8,
+    pub minor_version: u8,
+    pub patch_version: u8,
+    pub timestamp: u64,
+    /// Deterministic hash of the node's current ProtocolParams.
+    #[serde(default)]
+    pub params_hash: BlockHash,
 }
+
+pub mod checkpoint_sync;
+pub mod checkpoint_transport;
+pub mod governance_content;
+pub mod wire_message;
+pub use wire_message::{WireMessage, HandshakeMsg};

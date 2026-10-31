@@ -2,6 +2,8 @@ use crate::{error::RpcError, server::RpcState};
 use burst_store::{block::BlockStore, StoreError};
 use burst_types::{BlockHash, WalletAddress};
 
+/// Check that the stored account position matches the hash and is within the
+/// supplied confirmation height. This uses indexes without loading block bodies.
 pub(super) fn confirmed(
     store: &dyn BlockStore,
     hash: &BlockHash,
@@ -16,6 +18,8 @@ pub(super) fn confirmed(
         && store.block_at_height(account, height)? == Some(*hash))
 }
 
+/// Return the next confirmed hash only when both positions exist in local indexes.
+/// A missing sparse-history position returns `None`; no historical body is loaded.
 pub(super) fn lookup(
     hash: &BlockHash,
     account: &WalletAddress,

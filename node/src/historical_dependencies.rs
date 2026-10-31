@@ -31,8 +31,8 @@ pub(crate) fn start(
     counts: Arc<LedgerCache>,
     shutdown: Arc<ShutdownController>,
 ) -> (mpsc::Sender<StateBlock>, tokio::task::JoinHandle<()>) {
-    // One active request and one queued block. Unavailable requests are retried
-    // by ordinary bootstrap, without retaining an unbounded dependency graph.
+    // One active request and one queued block. Recovery errors are logged and
+    // dropped here; later bootstrap traffic must trigger another attempt.
     let (sender, mut receiver) = mpsc::channel::<StateBlock>(1);
     let task = tokio::spawn(async move {
         let mut stop = shutdown.subscribe();
@@ -145,6 +145,10 @@ async fn recover(
     .map_err(invalid)?
 }
 
+/// Stage authenticated historical bodies and height indexes without replaying
+/// economics. The caller supplies witnesses and checks the installed commitment.
+/// Errors can follow earlier staged writes; abort the transaction on failure.
+/// Proof lookup scans the supplied slice for each requested hash.
 pub(crate) fn install(
     batch: &mut burst_store_lmdb::LmdbWriteTransaction<'_>,
     context: crate::confirmed_replay::snapshot::history::HistoryContext,

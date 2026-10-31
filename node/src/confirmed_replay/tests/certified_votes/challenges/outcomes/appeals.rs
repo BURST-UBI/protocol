@@ -51,7 +51,7 @@ fn pending_appeal(
         block.origin = TxHash::new(reason.to_origin());
         block.transaction = TxHash::ZERO;
         block.target_head = root.source;
-        block.brn_balance += stake;
+        block.brn_spent += stake;
     });
     fixture.append_confirmed_prefix(&store, beacon_time - 1);
     let selection =
@@ -318,6 +318,6 @@ async fn compact_live_appeal_archive_continues_through_certified_outcome() {
         .unwrap();
     for reason in [ChallengeReason::Fraud, ChallengeReason::Inactivity] {
         let (fixture, directory, store) = corrected_from(reason, true);
-        crate::confirmed_replay::tests::snapshot_history::installed_recovery::installation::live::bootstrap::progression::assert_successor(fixture, directory, store, 5).await;
+        crate::confirmed_replay::tests::snapshot_history::installed_recovery::installation::live::bootstrap::progression::assert_successor_after_retirement(fixture, directory, store, 5).await;
     }
 }

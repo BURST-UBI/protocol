@@ -18,7 +18,7 @@ async fn compact_live_snapshot_installation_rechecks_late_confirmation() {
     let target = Running::start(config, prepared.now + 1).await;
     let genesis = crate::genesis_state::block(NetworkId::Dev, &prepared.params).hash;
     target.ready(genesis).await;
-    let proofs = Service::start(source, target.store.clone(), 0).await;
+    let proofs = WitnessService::start(source, target.store.clone(), 0).await;
     let (sender, mut requests) = tokio::sync::mpsc::channel(1);
     target.registry.write().await.set_witness_requests(sender);
     let installer = target.installer.clone();

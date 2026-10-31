@@ -13,7 +13,7 @@ fn fixture() -> Fixture {
     fixture.params.bootstrap_exit_threshold = 2;
     fixture.blocks[0] = crate::genesis_state::block(NetworkId::Dev, &fixture.params);
     fixture.push(0, BlockType::Endorse, 100, |block| {
-        block.brn_balance = 1;
+        block.brn_spent = 1;
         block.link = destination(1);
     });
     fixture.push(1, BlockType::Open, 101, |_| {});
@@ -144,7 +144,7 @@ fn roster_checkpoint_replays_delegation_and_installs_across_archival_catchup() {
             .unwrap()
             .is_none()
     );
-    assert!(crate::checkpoint_beacon::pending_selections(
+    assert!(crate::checkpoint_beacon::selection_checkpoints(
         chain::load(&store, NetworkId::Dev, &fixture.params).unwrap()
     )
     .is_empty());
@@ -303,7 +303,7 @@ fn roster_checkpoint_dilutes_genesis_before_bootstrap_exit_and_replays_later_adm
     fixture.params.bootstrap_exit_threshold = 3;
     fixture.blocks[0] = crate::genesis_state::block(NetworkId::Dev, &fixture.params);
     fixture.push(0, BlockType::Endorse, 100, |block| {
-        block.brn_balance = 1;
+        block.brn_spent = 1;
         block.link = destination(1);
     });
     fixture.push(1, BlockType::Open, 101, |_| {});
@@ -319,12 +319,12 @@ fn roster_checkpoint_dilutes_genesis_before_bootstrap_exit_and_replays_later_adm
     let epoch = installed.anchor.hash();
     fixture.push(0, BlockType::Endorse, 112, |block| {
         block.payment_epoch = epoch;
-        block.brn_balance += 1;
+        block.brn_spent += 1;
         block.link = destination(2);
     });
     fixture.push(2, BlockType::Open, 111, |_| {});
     fixture.push(2, BlockType::Burn, 114, |block| {
-        block.brn_balance = 1;
+        block.brn_spent = 1;
         block.link = destination(0);
     });
     fixture.append_confirmed_prefix(&store, 115);
@@ -397,7 +397,7 @@ fn roster_checkpoint_installer_preserves_a_later_cemented_payment() {
     let prepared = candidate(&store, &fixture.params, 110);
     accept(&store, &fixture.params, &prepared, &[0]);
     let hash = fixture.push(0, BlockType::Burn, 112, |block| {
-        block.brn_balance += 1;
+        block.brn_spent += 1;
         block.link = destination(1);
     });
     let block = fixture.blocks.last().unwrap();
@@ -447,7 +447,7 @@ fn roster_epoch_rejects_competing_creator_and_ordinary_admissions() {
     fixture.params.bootstrap_exit_threshold = 3;
     fixture.blocks[0] = crate::genesis_state::block(NetworkId::Dev, &fixture.params);
     fixture.push(0, BlockType::Endorse, 100, |block| {
-        block.brn_balance = 1;
+        block.brn_spent = 1;
         block.link = destination(1);
     });
     fixture.push(1, BlockType::Open, 101, |_| {});
@@ -457,11 +457,11 @@ fn roster_epoch_rejects_competing_creator_and_ordinary_admissions() {
     let epoch = first.manifest().checkpoint.hash();
     fixture.push(1, BlockType::Endorse, 111, |block| {
         block.payment_epoch = epoch;
-        block.brn_balance += 1;
+        block.brn_spent += 1;
         block.link = destination(2);
     });
     fixture.push(0, BlockType::Endorse, 112, |block| {
-        block.brn_balance += 1;
+        block.brn_spent += 1;
         block.link = destination(2);
     });
     let events = chain::load(&store, NetworkId::Dev, &fixture.params).unwrap();

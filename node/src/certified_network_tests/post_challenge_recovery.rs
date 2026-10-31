@@ -40,7 +40,7 @@ pub(super) async fn capture(
         }
         accounts.push(json!({"head":signing.head.to_string(),
             "payment_epoch":signing.payment_epoch.to_string(),
-            "brn_counter":signing.brn_balance.to_string(), "trst_balance":signing.trst_balance.to_string(),
+            "brn_counter":signing.brn_spent.to_string(), "trst_balance":signing.trst_balance.to_string(),
             "staked":components["total_staked"], "burned":components["total_burned"],
             "release_sources":components["release_sources"],
             "accrual_active":components["accrual_active"],
@@ -86,7 +86,7 @@ pub(super) async fn run(
         workers.push((
             shutdown,
             tokio::spawn(async move {
-                node.start().await.unwrap();
+                node.start_with_services(burst_daemon::start_public_services).await.unwrap();
                 node.stop().await.unwrap();
             }),
         ));

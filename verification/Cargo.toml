@@ -9,6 +9,7 @@ description = "Unique Humanity Verification — endorsers, verifiers, challenges
 experimental-testnet = []
 
 [dependencies]
+imbl = { workspace = true, features = ["serde"] }
 burst-types = { workspace = true }
 burst-brn = { workspace = true }
 burst-crypto = { workspace = true }

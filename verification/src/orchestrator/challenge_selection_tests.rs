@@ -126,7 +126,7 @@ fn selection_history_binds_challenge_identity_and_every_economic_input() {
         digest
     );
 
-    // A mismatched live snapshot must not pass comparison even with a copied hash.
+    // Each challenge field must affect the history digest.
     for change in 0..4 {
         let mut other = state.clone();
         let challenge = other.active_challenges.get_mut(&address(40)).unwrap();
@@ -165,7 +165,8 @@ fn a_later_challenge_cannot_reuse_the_previous_challenges_first_panel() {
     let previous = request(&params, first);
     state.freeze_replayed_selection(&previous, &params).unwrap();
     let prior_history = state.selection_history_commitment(&address(40)).unwrap();
-    // This component test advances a supplied deadline, not a local node clock.
+    // Use legacy admission expiry to arrange a second attempt. This fixture
+    // does not exercise certified missing-voter deadline settlement.
     state
         .cleanup_expired_challenges(Timestamp::new(CUTOFF - 1), 9)
         .unwrap();

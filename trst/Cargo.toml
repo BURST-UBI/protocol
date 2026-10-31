@@ -6,6 +6,8 @@ license.workspace = true
 description = "TRST lifecycle engine — minting, transfer, split, merge, expiry, revocation, merger graph"
 
 [dependencies]
+burst-utils = { workspace = true }
+imbl = { workspace = true }
 burst-types = { workspace = true }
 burst-crypto = { workspace = true }
 burst-brn = { workspace = true }

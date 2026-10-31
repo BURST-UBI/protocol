@@ -17,13 +17,13 @@ pub struct GroupInfo {
     pub member_count: u64,
 }
 
-/// Response from a group's member verification endpoint.
+/// Parsed membership result. The HTTP client's `since` field becomes metadata.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MemberStatus {
     /// Whether the wallet is currently a valid group member.
     pub valid: bool,
     /// A trust score [0.0, 1.0] assigned by the group.
     pub score: f64,
-    /// Optional metadata (e.g., membership level, join date).
+    /// The HTTP client sets `{ "since": timestamp }` when supplied by the service.
     pub metadata: Option<serde_json::Value>,
 }

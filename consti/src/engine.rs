@@ -1,7 +1,7 @@
-//! Consti engine — manages constitutional amendments with diff-based operations.
+//! Amendment storage and atomic in-memory document patches.
 //!
 //! Amendments can add, modify, or repeal articles in the constitution.
-//! Uses a 90% supermajority threshold (from `consti_supermajority_bps` in params).
+//! Voting uses the governed `consti_supermajority_bps` threshold.
 
 use crate::amendment::{Amendment, AmendmentOp};
 use crate::document::{Article, ConstiDocument, VersionEntry};
@@ -11,6 +11,9 @@ use burst_types::{TxHash, WalletAddress};
 use std::collections::HashMap;
 
 mod snapshot_undo;
+mod retention;
+mod snapshot_view;
+pub use snapshot_view::SnapshotView;
 
 /// A vote on a constitutional amendment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -27,10 +30,17 @@ pub enum AmendmentConflict {
     ArticleAlreadyRepealed(u64),
 }
 
-/// The constitutional engine manages amendments through their lifecycle,
-/// tracking votes and applying diff-based changes to the constitution.
+/// Stores amendments, local votes and the current document. Activation callers
+/// must supply governance authorization; this engine does not verify signatures
+/// or a certified counting/activation boundary.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ConstiEngine {
+#[serde(transparent)]
+pub struct ConstiEngine(std::sync::Arc<ConstiState>);
+
+/// Shared engine representation; fields remain private to the engine.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ConstiState {
     /// All submitted amendments indexed by their transaction hash.
     amendments: HashMap<TxHash, Amendment>,
     /// Votes per amendment: amendment_hash → (voter → vote).
@@ -40,34 +50,50 @@ pub struct ConstiEngine {
     conflicts: HashMap<TxHash, AmendmentConflict>,
 }
 
+impl std::ops::Deref for ConstiEngine {
+    type Target = ConstiState;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for ConstiEngine {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        std::sync::Arc::make_mut(&mut self.0)
+    }
+}
+
 impl ConstiEngine {
+    /// Whether two immutable candidates share the same complete backing state.
+    pub fn shares_storage_with(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+
     /// Create a new consti engine with empty state.
     pub fn new() -> Self {
-        Self {
+        Self(std::sync::Arc::new(ConstiState {
             amendments: HashMap::new(),
             votes: HashMap::new(),
             document: ConstiDocument::genesis(),
             conflicts: HashMap::new(),
-        }
+        }))
     }
 
-    /// Like [`new`](Self::new) but seeded with the minimal launch constitution
-    /// (fraud / evidence / rights) instead of an empty document
-    /// (IMPLEMENTATION_DECISIONS §21.2). Used by the node at startup.
+    /// Seed the launch articles rather than an empty document.
     pub fn bootstrap() -> Self {
-        Self {
+        Self(std::sync::Arc::new(ConstiState {
             amendments: HashMap::new(),
             votes: HashMap::new(),
             document: ConstiDocument::bootstrap(),
             conflicts: HashMap::new(),
-        }
+        }))
     }
 
     /// Submit a constitutional amendment.
     ///
-    /// Validates that the amendment operations are well-formed against the
-    /// current constitution state. For example, you can't modify or repeal
-    /// an article that doesn't exist.
+    /// Validate the patch against the supplied document, then store it by hash.
+    /// The supplied document may differ from this engine's document; callers
+    /// choose the authoritative view and enforce proposal identity.
     pub fn submit_amendment(
         &mut self,
         amendment: Amendment,
@@ -108,7 +134,6 @@ impl ConstiEngine {
 
         votes.insert(voter.clone(), vote);
 
-        // Update aggregate counts on the amendment
         let amendment = self.amendments.get_mut(amendment_hash).unwrap();
         match vote {
             ConstiVote::Yea => amendment.votes_yea += 1,
@@ -119,12 +144,10 @@ impl ConstiEngine {
         Ok(())
     }
 
-    /// Activate an amendment — apply diff operations to the constitution document.
-    ///
-    /// If the amendment has diff operations, applies them. Otherwise falls back
-    /// to legacy behavior (add an article from the title/text fields).
-    /// Apply an amendment to the engine's internal constitution.
-    pub fn activate_amendment_internal(
+    /// Apply the patch and mark it activated. Reject an already activated or
+    /// conflicted stored amendment. The caller must establish approval and
+    /// activation timing; this method does not check a quorum certificate.
+    pub fn activate_amendment(
         &mut self,
         amendment: &Amendment,
     ) -> Result<(), ConstiError> {
@@ -149,7 +172,7 @@ impl ConstiEngine {
         &mut self,
         amendment: &Amendment,
     ) -> Result<Option<AmendmentConflict>, ConstiError> {
-        let conflict = match self.activate_amendment_internal(amendment) {
+        let conflict = match self.activate_amendment(amendment) {
             Ok(()) => return Ok(None),
             Err(ConstiError::ArticleNotFound(number)) => AmendmentConflict::ArticleNotFound(number),
             Err(ConstiError::ArticleAlreadyRepealed(number)) => {
@@ -169,7 +192,7 @@ impl ConstiEngine {
     }
 
     /// Apply an amendment to the given constitution document.
-    pub fn activate_amendment(
+    pub fn apply_amendment_to_document(
         &self,
         amendment: &Amendment,
         document: &mut ConstiDocument,
@@ -211,7 +234,7 @@ impl ConstiEngine {
             .ok_or_else(|| ConstiError::Other("constitution version overflow".into()))?;
 
         if amendment.operations.is_empty() {
-            // Legacy behavior: add a single article from title/text
+            // The whole-text form adds one article.
             document.push_article(Article {
                 number: 0, // assigned by push_article
                 title: amendment.title.clone(),
@@ -220,7 +243,6 @@ impl ConstiEngine {
                 repealed: false,
             });
         } else {
-            // Diff-based: apply each operation
             for op in &amendment.operations {
                 match op {
                     AmendmentOp::AddArticle { title, text } => {
@@ -251,7 +273,6 @@ impl ConstiEngine {
                             return Err(ConstiError::ArticleAlreadyRepealed(*article_number));
                         }
                         document.repeal_article(*article_number);
-                        // Update introduced_by_amendment on the repealed article
                         if let Some(&pos) = document.article_index.get(article_number) {
                             if let Some(a) = document.articles.get_mut(pos) {
                                 a.introduced_by_amendment = new_version;
@@ -262,7 +283,6 @@ impl ConstiEngine {
             }
         }
 
-        // Record version history
         document.version = new_version;
         document.version_history.push(VersionEntry {
             version: new_version,
@@ -292,15 +312,10 @@ impl ConstiEngine {
         self.votes.get(hash)
     }
 
-    /// Check if a constitutional supermajority is met.
-    ///
-    /// The Consti has its own separate threshold (`consti_supermajority_bps`)
-    /// independent from the parameter governance threshold (`governance_supermajority_bps`).
-    /// Per the whitepaper: "The Consti threshold is changed by hitting that same
-    /// Consti threshold (not the parameter threshold)." This self-referential
-    /// property is enforced by `GovernanceEngine::get_required_supermajority`,
-    /// which routes `ConstiSupermajorityBps` changes through the current
-    /// `consti_supermajority_bps` value.
+    /// Compare yea/(yea+nay), truncated to basis points, with a supplied threshold.
+    /// Zero votes produce zero basis points. This helper checks neither quorum
+    /// nor voter eligibility and does not load the governed threshold.
+    /// Callers must bound counts so u32 addition and multiplication by 10,000 fit.
     pub fn check_supermajority(
         &self,
         votes_yea: u32,
@@ -332,6 +347,29 @@ mod tests {
     use super::*;
     use burst_governance::proposal::GovernancePhase;
     use burst_types::{Timestamp, TxHash, WalletAddress};
+
+    #[test]
+    fn shared_constitution_clone_detaches_and_preserves_wire_layout() {
+        let original = ConstiEngine::bootstrap();
+        let mut candidate = original.clone();
+        assert!(std::sync::Arc::ptr_eq(&original.0, &candidate.0));
+        let encoded = bincode::serialize(&original).unwrap();
+        let legacy: ConstiState = bincode::deserialize(&encoded).unwrap();
+        assert_eq!(legacy, *original.0);
+        assert_eq!(bincode::serialize(original.0.as_ref()).unwrap(), encoded);
+        let restored: ConstiEngine =
+            bincode::deserialize(&bincode::serialize(&legacy).unwrap()).unwrap();
+        assert_eq!(restored, original);
+        candidate
+            .activate_amendment(&create_test_amendment(
+                "Shared-state amendment".into(),
+                "Preserve the original constitution.".into(),
+            ))
+            .unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&original.0, &candidate.0));
+        assert_eq!(original, restored);
+        assert_ne!(candidate.document, original.document);
+    }
 
     fn test_wallet() -> WalletAddress {
         WalletAddress::new("brst_test123456789012345678901234567890")
@@ -374,8 +412,6 @@ mod tests {
             operations: ops,
         }
     }
-
-    // ── Legacy activate (backward compatibility) ────────────────────
 
     #[test]
     fn approved_conflicts_are_atomic_terminal_and_preserve_votes() {
@@ -437,7 +473,7 @@ mod tests {
                 Err(ConstiError::WrongPhase)
             ));
             assert!(matches!(
-                engine.activate_amendment_internal(&later),
+                engine.activate_amendment(&later),
                 Err(ConstiError::WrongPhase)
             ));
             let mut independent = create_diff_amendment(
@@ -519,7 +555,7 @@ mod tests {
                 },
             ],
         );
-        assert!(engine.activate_amendment_internal(&invalid).is_err());
+        assert!(engine.activate_amendment(&invalid).is_err());
         assert_eq!(
             serde_json::to_value(engine.get_constitution()).unwrap(),
             before
@@ -541,7 +577,7 @@ mod tests {
         engine
             .submit_amendment(valid.clone(), &engine.get_constitution().clone())
             .unwrap();
-        engine.activate_amendment_internal(&valid).unwrap();
+        engine.activate_amendment(&valid).unwrap();
         assert_eq!(engine.get_constitution().version, 1);
         assert_eq!(
             engine.get_constitution().get_article(4).unwrap().text,
@@ -549,7 +585,7 @@ mod tests {
         );
         assert!(engine.get_constitution().get_article(2).is_none());
         let before = serde_json::to_value(engine.get_constitution()).unwrap();
-        assert!(engine.activate_amendment_internal(&valid).is_err());
+        assert!(engine.activate_amendment(&valid).is_err());
         assert_eq!(
             serde_json::to_value(engine.get_constitution()).unwrap(),
             before
@@ -568,7 +604,7 @@ mod tests {
         assert_eq!(document.article_count(), 0);
 
         engine
-            .activate_amendment(&amendment, &mut document)
+            .apply_amendment_to_document(&amendment, &mut document)
             .unwrap();
 
         assert_eq!(document.article_count(), 1);
@@ -591,20 +627,19 @@ mod tests {
         assert_eq!(document.version, 0);
 
         engine
-            .activate_amendment(&amendment, &mut document)
+            .apply_amendment_to_document(&amendment, &mut document)
             .unwrap();
 
         assert_eq!(document.version, 1);
         let article = document.get_article(1).unwrap();
         assert_eq!(article.introduced_by_amendment, 1);
 
-        // Activate another amendment
         let amendment2 = create_test_amendment(
             "Second Article".to_string(),
             "This is the second article.".to_string(),
         );
         engine
-            .activate_amendment(&amendment2, &mut document)
+            .apply_amendment_to_document(&amendment2, &mut document)
             .unwrap();
 
         assert_eq!(document.version, 2);
@@ -622,8 +657,6 @@ mod tests {
         assert!(constitution.articles.is_empty());
     }
 
-    // ── Diff-based: AddArticle ──────────────────────────────────────
-
     #[test]
     fn test_diff_add_article() {
         let engine = ConstiEngine::new();
@@ -637,7 +670,7 @@ mod tests {
         );
 
         engine
-            .activate_amendment(&amendment, &mut document)
+            .apply_amendment_to_document(&amendment, &mut document)
             .unwrap();
 
         assert_eq!(document.article_count(), 1);
@@ -666,7 +699,7 @@ mod tests {
         );
 
         engine
-            .activate_amendment(&amendment, &mut document)
+            .apply_amendment_to_document(&amendment, &mut document)
             .unwrap();
 
         assert_eq!(document.article_count(), 2);
@@ -675,14 +708,11 @@ mod tests {
         assert!(document.get_article(2).is_some());
     }
 
-    // ── Diff-based: ModifyArticle ───────────────────────────────────
-
     #[test]
     fn test_diff_modify_article() {
         let engine = ConstiEngine::new();
         let mut document = ConstiDocument::genesis();
 
-        // First add an article
         let add = create_diff_amendment(
             "Initial".to_string(),
             vec![AmendmentOp::AddArticle {
@@ -690,10 +720,9 @@ mod tests {
                 text: "Original text.".to_string(),
             }],
         );
-        engine.activate_amendment(&add, &mut document).unwrap();
+        engine.apply_amendment_to_document(&add, &mut document).unwrap();
         assert_eq!(document.get_article(1).unwrap().text, "Original text.");
 
-        // Now modify it
         let modify = create_diff_amendment(
             "Update Verification".to_string(),
             vec![AmendmentOp::ModifyArticle {
@@ -701,7 +730,7 @@ mod tests {
                 new_text: "Updated and improved text.".to_string(),
             }],
         );
-        engine.activate_amendment(&modify, &mut document).unwrap();
+        engine.apply_amendment_to_document(&modify, &mut document).unwrap();
 
         assert_eq!(document.version, 2);
         let article = document.get_article(1).unwrap();
@@ -723,18 +752,15 @@ mod tests {
             }],
         );
 
-        let result = engine.activate_amendment(&modify, &mut document);
+        let result = engine.apply_amendment_to_document(&modify, &mut document);
         assert!(result.is_err());
     }
-
-    // ── Diff-based: RepealArticle ───────────────────────────────────
 
     #[test]
     fn test_diff_repeal_article() {
         let engine = ConstiEngine::new();
         let mut document = ConstiDocument::genesis();
 
-        // Add an article
         let add = create_diff_amendment(
             "Initial".to_string(),
             vec![AmendmentOp::AddArticle {
@@ -742,24 +768,19 @@ mod tests {
                 text: "This rule is temporary.".to_string(),
             }],
         );
-        engine.activate_amendment(&add, &mut document).unwrap();
+        engine.apply_amendment_to_document(&add, &mut document).unwrap();
         assert_eq!(document.article_count(), 1);
 
-        // Repeal it
         let repeal = create_diff_amendment(
             "Repeal Obsolete".to_string(),
             vec![AmendmentOp::RepealArticle { article_number: 1 }],
         );
-        engine.activate_amendment(&repeal, &mut document).unwrap();
+        engine.apply_amendment_to_document(&repeal, &mut document).unwrap();
 
         assert_eq!(document.version, 2);
-        // Active count is 0 (repealed)
         assert_eq!(document.article_count(), 0);
-        // But total count is still 1
         assert_eq!(document.total_article_count(), 1);
-        // get_article skips repealed
         assert!(document.get_article(1).is_none());
-        // Can still access including repealed
         let article = document.get_article_including_repealed(1).unwrap();
         assert!(article.repealed);
         assert_eq!(article.introduced_by_amendment, 2);
@@ -770,7 +791,6 @@ mod tests {
         let engine = ConstiEngine::new();
         let mut document = ConstiDocument::genesis();
 
-        // Add and repeal
         let add = create_diff_amendment(
             "Initial".to_string(),
             vec![AmendmentOp::AddArticle {
@@ -778,20 +798,19 @@ mod tests {
                 text: "Temp text.".to_string(),
             }],
         );
-        engine.activate_amendment(&add, &mut document).unwrap();
+        engine.apply_amendment_to_document(&add, &mut document).unwrap();
 
         let repeal = create_diff_amendment(
             "First Repeal".to_string(),
             vec![AmendmentOp::RepealArticle { article_number: 1 }],
         );
-        engine.activate_amendment(&repeal, &mut document).unwrap();
+        engine.apply_amendment_to_document(&repeal, &mut document).unwrap();
 
-        // Try to repeal again
         let repeal2 = create_diff_amendment(
             "Double Repeal".to_string(),
             vec![AmendmentOp::RepealArticle { article_number: 1 }],
         );
-        let result = engine.activate_amendment(&repeal2, &mut document);
+        let result = engine.apply_amendment_to_document(&repeal2, &mut document);
         assert!(result.is_err());
     }
 
@@ -804,18 +823,15 @@ mod tests {
             "Bad Repeal".to_string(),
             vec![AmendmentOp::RepealArticle { article_number: 99 }],
         );
-        let result = engine.activate_amendment(&repeal, &mut document);
+        let result = engine.apply_amendment_to_document(&repeal, &mut document);
         assert!(result.is_err());
     }
-
-    // ── Complex multi-operation amendments ───────────────────────────
 
     #[test]
     fn test_diff_complex_amendment() {
         let engine = ConstiEngine::new();
         let mut document = ConstiDocument::genesis();
 
-        // Setup: add two articles
         let setup = create_diff_amendment(
             "Foundation".to_string(),
             vec![
@@ -829,7 +845,7 @@ mod tests {
                 },
             ],
         );
-        engine.activate_amendment(&setup, &mut document).unwrap();
+        engine.apply_amendment_to_document(&setup, &mut document).unwrap();
         assert_eq!(document.article_count(), 2);
 
         // Complex amendment: modify one, repeal another, add a new one
@@ -848,7 +864,7 @@ mod tests {
                 },
             ],
         );
-        engine.activate_amendment(&complex, &mut document).unwrap();
+        engine.apply_amendment_to_document(&complex, &mut document).unwrap();
 
         assert_eq!(document.version, 2);
         // 2 active articles (article 1 modified, article 2 repealed, article 3 added)
@@ -865,21 +881,19 @@ mod tests {
         assert_eq!(a3.title, "New Verification");
     }
 
-    // ── Version history tracking ────────────────────────────────────
-
     #[test]
     fn test_version_history() {
         let engine = ConstiEngine::new();
         let mut document = ConstiDocument::genesis();
 
         engine
-            .activate_amendment(
+            .apply_amendment_to_document(
                 &create_test_amendment("First".to_string(), "Text 1.".to_string()),
                 &mut document,
             )
             .unwrap();
         engine
-            .activate_amendment(
+            .apply_amendment_to_document(
                 &create_test_amendment("Second".to_string(), "Text 2.".to_string()),
                 &mut document,
             )
@@ -891,8 +905,6 @@ mod tests {
         assert_eq!(document.version_history[1].version, 2);
         assert_eq!(document.version_history[1].description, "Second");
     }
-
-    // ── Submit amendment validation ─────────────────────────────────
 
     #[test]
     fn test_submit_amendment_validates_add() {
@@ -951,8 +963,6 @@ mod tests {
         assert!(engine.submit_amendment(amendment, &document).is_err());
     }
 
-    // ── Vote amendment ──────────────────────────────────────────────
-
     #[test]
     fn test_vote_amendment() {
         let mut engine = ConstiEngine::new();
@@ -969,7 +979,6 @@ mod tests {
         amendment.phase = GovernancePhase::Exploration;
         let hash = engine.submit_amendment(amendment, &document).unwrap();
 
-        // Cast votes
         engine
             .vote_amendment(&hash, &voter_wallet(1), ConstiVote::Yea)
             .unwrap();
@@ -1029,8 +1038,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ── Supermajority check ─────────────────────────────────────────
-
     #[test]
     fn test_check_supermajority_90_percent() {
         let engine = ConstiEngine::new();
@@ -1053,14 +1060,11 @@ mod tests {
         assert!(engine.check_supermajority(0, 0, 9000).is_err());
     }
 
-    // ── Full lifecycle with engine ──────────────────────────────────
-
     #[test]
     fn test_full_amendment_lifecycle() {
         let mut engine = ConstiEngine::new();
         let mut document = ConstiDocument::genesis();
 
-        // Submit
         let mut amendment = create_diff_amendment(
             "Privacy Right".to_string(),
             vec![AmendmentOp::AddArticle {
@@ -1084,15 +1088,13 @@ mod tests {
                 .unwrap();
         }
 
-        // Check supermajority
         let stored = engine.get_amendment(&hash).unwrap();
         assert!(engine
             .check_supermajority(stored.votes_yea, stored.votes_nay, 9000)
             .is_ok());
 
-        // Activate
         engine
-            .activate_amendment(engine.get_amendment(&hash).unwrap(), &mut document)
+            .apply_amendment_to_document(engine.get_amendment(&hash).unwrap(), &mut document)
             .unwrap();
 
         assert_eq!(document.version, 1);

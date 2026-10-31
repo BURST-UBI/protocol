@@ -6,6 +6,9 @@ use burst_governance::{content::EncodedContent, ProposalContent};
 use burst_ledger::{BlockType, StateBlock};
 use burst_types::{BlockHash, KeyPair, Timestamp, TxHash};
 
+/// Return the signed commitment block together with its encoded proposal content.
+/// The caller must retain and transmit both; the block alone cannot recover the
+/// proposal text. Proof of work remains zero.
 pub fn build_signed_proposal(
     state: &AccountState,
     keys: &KeyPair,
@@ -66,7 +69,7 @@ mod tests {
                 block_count: 1,
                 payment_epoch: BlockHash::new([2; 32]),
                 representative: burst_crypto::derive_address(&keys.public),
-                brn_balance: 7,
+                brn_spent: 7,
                 trst_balance: 9,
                 release_sources: Vec::new(),
             };

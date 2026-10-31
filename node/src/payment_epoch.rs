@@ -1,10 +1,12 @@
-//! Signed economic context. Only the genesis epoch can be installed until the
-//! certified authority and outcome handoff is implemented.
+//! Initialize the genesis payment epoch and check blocks against the installed
+//! epoch and cutoff. Later epochs are installed by checkpoint replay.
 
 use burst_store::{meta::PAYMENT_EPOCH_KEY, StoreError};
 use burst_store_lmdb::LmdbWriteTransaction;
 use burst_types::BlockHash;
 
+/// Stage a nonzero genesis epoch only when no epoch record exists.
+/// The caller validates genesis and commits the transaction.
 pub(crate) fn initialize(
     batch: &mut LmdbWriteTransaction<'_>,
     genesis: BlockHash,
@@ -18,7 +20,7 @@ pub(crate) fn initialize(
 }
 
 pub(crate) fn require(
-    batch: &LmdbWriteTransaction<'_>,
+    batch: &impl crate::verification_commit::dependencies::view::DependencyView,
     expected: BlockHash,
 ) -> Result<(), StoreError> {
     if batch.payment_epoch()? != expected || expected.is_zero() {
@@ -29,8 +31,11 @@ pub(crate) fn require(
     Ok(())
 }
 
+/// Require the installed epoch and a timestamp at or after its cutoff.
+/// Missing cutoff is allowed only without an installed-authority record.
+/// This does not authenticate the block or check its age against the local clock.
 pub(crate) fn require_block(
-    batch: &LmdbWriteTransaction<'_>,
+    batch: &impl crate::verification_commit::dependencies::view::DependencyView,
     block: &burst_ledger::StateBlock,
 ) -> Result<(), StoreError> {
     require(batch, block.payment_epoch)?;

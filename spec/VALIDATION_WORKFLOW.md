@@ -1,10 +1,8 @@
 # Validation without repeated work
 
-The October 18 catch-up work repeatedly built optimized node tests and a daemon
-for small changes. Each attempt also copied sources to a different build path.
-Shared dependency artifacts survived, but that did not prevent recompiling the
-large node crate. Subsequent live failures exposed costs that a stage-timed run
-could have distinguished earlier. Keep that failure mode out of future work.
+Build once for a coherent change, preserve stage results, and rerun only the
+requirements affected by changed inputs. Keep failed evidence and all resource
+limits intact.
 
 ## Before spending build or test time
 
@@ -119,10 +117,43 @@ another runner or reporting system. A combined script should retain stage exit
 codes and output so the failure location is clear.
 
 Before compiling, check executable paths, required fixture files, available
-disk/memory and port ownership. If browser startup previously failed, establish
+disk/memory and port ownership. Resolve the actual compiler target and fixture
+mounts when checking disk capacity (for example, `df -B1 "$CARGO_TARGET_DIR"` and
+`findmnt -T "$CARGO_TARGET_DIR"`). Free space on `/home` or `/` does not establish
+capacity on a separate or bind-mounted target. The October23 signer-authority
+retry failed on a full64GiB data disk after a root-filesystem check reported
+2.3GiB free. Record target-path free space and leave headroom for transient object
+and linker output before starting another compiler. A capacity failure requires
+storage diagnosis; do not clean retained targets or evidence to manufacture a pass.
+ If browser startup previously failed, establish
 that it can start under the same resource limits before another browser suite.
 Do not run this smoke check before every healthy test run. Preserve its result
 until the relevant environment changes or a new launch failure occurs.
+
+VM1 has an enabled daily Azure shutdown at02:00UTC. Before scheduling a capped
+job, check that its complete20-minute window and stop grace fit before that event;
+do not disable the schedule to make validation pass. The October25 shutdown
+interrupted node compilation094. Preserve the incomplete start and partial logs,
+inspect process/service state after boot,then use the latest incomplete receipt
+for a bounded cache-preserving retry. A missing result is not a passing build.
+Keep the command's exit status explicitly unknown if shutdown erased it; do not
+infer cargo success from systemd successfully stopping the service.
+
+For independently versioned desktop apps, check `cargo metadata --no-deps`
+resolves each app's own workspace before compiling. A parent checkout manifest
+can capture an app nested beneath it even when all app files are correct. Keep
+CI orchestration separate from the frozen candidate workspace; do not modify the
+candidate manifest merely to accommodate an accidental checkout layout.
+
+Frontend input closure must include the build tool's actual scan footprint.
+Tailwind's automatic scan can read tests, docs and generated native schemas,
+not only `src` and `public`; ignore files also affect that footprint. The October29
+Mac reconstruction omitted those inputs and changed CSS plus every referencing
+chunk hash. Restoring the scan inputs reproduced all49 previously qualified
+wallet/dashboard files exactly. For this frozen candidate, reuse those exact
+assets and verify the complete path/hash map before native packaging. Do not
+rebuild the frontend on each target. A future explicit source-scan restriction
+is a separate candidate change, not a reason to silently replace frozen assets.
 
 Check receipt readability as the service user, not only as the deployment user.
 For generated shell drivers with embedded JavaScript, check both languages before
@@ -298,7 +329,15 @@ The result JSON supplies `outcome` (`pass`, `fail` or `incomplete`), terminal
 `exitCode`, executed `assertions`, `review` explaining what the evidence proves,
 and `logs` paths. No zero-test pass. Records are write-once. Inputs changing
 between begin and finish invalidate the attempt. Missing or altered evidence
-invalidates reuse. Failed records remain failures and tell the caller not to
+invalidates reuse. If a terminal failed attempt cannot finish because a declared
+input changed during execution, preserve the original start/result/logs. Use
+`finish-invalidated START FAILED_RESULT RECEIPT` with an explicit
+`inputMutationReason` to record both the original and observed inventories;
+this mode refuses passes and unchanged inputs. Its receipt always fails reuse
+checks, even if old inputs are restored. Review that invalidation and use this
+latest receipt for subsequent `prepare`; never branch from an older attempt.
+Keep the original terminal result intact when adding the diagnostic explanation.
+ Failed records remain failures and tell the caller not to
 repeat an unchanged run. Keep receipts private; they contain paths and context.
 
 Reuse a retained ledger for diagnosis or restart testing. Keep an immutable
@@ -325,3 +364,12 @@ transfer server is necessary, expose only an explicit artifact directory with no
 keys or user data, bound its lifetime/resources and stop it before reusing the
 port. Do not open firewall rules or trust downloaded artifacts merely because
 the transport stayed inside the private network.
+
+For frozen source archives on ephemeral Mac hosts, preserve directory metadata
+as well as file contents: build scripts can watch directories such as vendored
+LMDB. A newly created directory timestamp can invalidate otherwise matching
+Cargo artifacts. Keep desktop and daemon cache lanes separate when their
+`MACOSX_DEPLOYMENT_TARGET` settings differ. The October29 Intel warm attempt
+rebuilt node dependencies for both reasons; merely finding an rlib did not prove
+Cargo would reuse it. Cached build outputs are mutable and must not be declared
+immutable inputs to a command that can rebuild them.

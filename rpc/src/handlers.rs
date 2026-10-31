@@ -1,14 +1,11 @@
-//! RPC request/response types and handler implementations.
-//!
-//! Each handler accepts `(params, state)` and returns
-//! `Result<serde_json::Value, RpcError>`. Handlers query real storage
-//! backends, compute BRN balances, process blocks, and generate work.
+//! RPC handlers for ledger queries, block submission and test-wallet helpers.
 
 use crate::error::RpcError;
-use crate::pagination::{self, PaginationParams};
-use crate::server::RpcState;
+use crate::pagination;
+use crate::state::RpcState;
 
-use crate::server::ProcessResult;
+use crate::state::ProcessResult;
+#[cfg(test)]
 use burst_brn::BrnWalletState;
 use burst_governance::Proposal;
 use burst_ledger::StateBlock;
@@ -16,18 +13,20 @@ use burst_store::account::AccountInfo;
 use burst_store::StoreError;
 use burst_types::{BlockHash, Signature, Timestamp, TxHash, WalletAddress};
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tracing::debug;
 
 mod confirmed_successor;
 mod governance_projection;
+mod origin_history;
 pub(crate) mod provenance;
-
-// ── Helpers ─────────────────────────────────────────────────────────────
+mod representatives;
+mod telemetry;
+mod trace_origin;
+mod verification_activity;
 
 impl RpcState {
-    /// Governance persists activated parameters; startup configuration is only
-    /// the fallback before the first activation.
+    /// Read persisted parameters, falling back to startup configuration if absent.
     fn current_params(&self) -> Result<burst_types::ProtocolParams, RpcError> {
         match self.brn_store.get_meta(b"protocol_params")? {
             Some(bytes) => bincode::deserialize(&bytes).map_err(|e| {
@@ -38,105 +37,8 @@ impl RpcState {
     }
 }
 
-fn validate_account(account: &str) -> Result<(), RpcError> {
-    if account.is_empty() {
-        return Err(RpcError::InvalidRequest(
-            "account address must not be empty".into(),
-        ));
-    }
-    if !account.starts_with("brst_") || account.len() != 65 {
-        return Err(RpcError::InvalidRequest(
-            "invalid account address: must be 65 characters starting with brst_".into(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_positive_amount(amount_str: &str) -> Result<u128, RpcError> {
-    let amount: u128 = amount_str
-        .parse()
-        .map_err(|e| RpcError::InvalidRequest(format!("invalid amount: {e}")))?;
-    if amount == 0 {
-        return Err(RpcError::InvalidRequest(
-            "amount must be greater than zero".into(),
-        ));
-    }
-    Ok(amount)
-}
-
-fn validate_hash(hash: &str) -> Result<(), RpcError> {
-    if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(RpcError::InvalidRequest(
-            "invalid hash: expected 64-character hex string".into(),
-        ));
-    }
-    Ok(())
-}
-
-fn to_value<T: Serialize>(v: &T) -> serde_json::Value {
-    serde_json::to_value(v).expect("serialization should not fail")
-}
-
-/// Parse a 64-char hex string into a 32-byte BlockHash.
-fn parse_block_hash(hex_str: &str) -> Result<BlockHash, RpcError> {
-    let bytes =
-        hex::decode(hex_str).map_err(|e| RpcError::InvalidRequest(format!("invalid hex: {e}")))?;
-    if bytes.len() != 32 {
-        return Err(RpcError::InvalidRequest(
-            "hash must decode to 32 bytes".into(),
-        ));
-    }
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(&bytes);
-    Ok(BlockHash::new(arr))
-}
-
-/// Parse a 64-char hex string into a 32-byte TxHash.
-fn parse_tx_hash(hex_str: &str) -> Result<TxHash, RpcError> {
-    let bytes =
-        hex::decode(hex_str).map_err(|e| RpcError::InvalidRequest(format!("invalid hex: {e}")))?;
-    if bytes.len() != 32 {
-        return Err(RpcError::InvalidRequest(
-            "hash must decode to 32 bytes".into(),
-        ));
-    }
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(&bytes);
-    Ok(TxHash::new(arr))
-}
-
-/// Parse an optional difficulty string (hex u64), defaulting to protocol params.
-fn parse_difficulty(raw: &Option<String>, default: u64) -> Result<u64, RpcError> {
-    match raw {
-        Some(s) => u64::from_str_radix(s.trim_start_matches("0x"), 16)
-            .map_err(|e| RpcError::InvalidRequest(format!("invalid difficulty: {e}"))),
-        None => Ok(default),
-    }
-}
-
-/// Build a `BrnWalletState` from an `AccountInfo`.
-/// Rate is now stored globally in `RateHistory`, not per-wallet.
-fn brn_state_from_account(account: &AccountInfo, _brn_rate: u128) -> BrnWalletState {
-    let verified_at = account.verified_at.unwrap_or(Timestamp::new(0));
-    let mut state = BrnWalletState::new(verified_at);
-    state.total_burned = account.total_brn_burned;
-    state.total_staked = account.total_brn_staked;
-    state.accrual_active = account.verified_at.is_some();
-    if !state.accrual_active {
-        state.accrual_stopped_at = Some(Timestamp::new(0));
-    }
-    state
-}
-
-fn checked_brn_balance(
-    engine: &burst_brn::BrnEngine,
-    wallet: &BrnWalletState,
-    now: Timestamp,
-) -> Result<u128, RpcError> {
-    engine
-        .compute_balance_checked(wallet, now)
-        .map_err(|error| RpcError::Server(error.to_string()))
-}
+mod helpers;
+use helpers::*;
 
 #[cfg(test)]
 mod brn_balance_tests {
@@ -156,37 +58,42 @@ mod brn_balance_tests {
     }
 }
 
-/// Decision 5.11(b): expose inputs, so wallets compute BRN locally. The old
-/// account balance field remains for compatibility; it is not a ledger field.
+/// Return wallet accrual state and rate history for local BRN calculations.
 pub async fn handle_brn_components(
     params: serde_json::Value,
     state: &RpcState,
 ) -> Result<serde_json::Value, RpcError> {
     let req: AccountInfoRequest =
         serde_json::from_value(params).map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
-    validate_account(&req.account)?;
+    validate_account_format(&req.account)?;
     let address = WalletAddress::new(req.account.clone());
-    let account = state
-        .account_store
-        .get_account(&address)
-        .map_err(|e| account_not_found(e, &req.account))?;
-    let brn = state.brn_engine.lock().await;
-    let wallet = brn
-        .get_wallet(&address)
-        .cloned()
-        .unwrap_or_else(|| brn_state_from_account(&account, 0));
-    Ok(serde_json::json!({
-        "account": req.account, "verified_at": wallet.verified_at.as_secs(),
-        "total_burned": wallet.total_burned.to_string(), "total_staked": wallet.total_staked.to_string(),
-        "release_sources": wallet.release_sources(burst_ledger::state_block::MAX_RELEASE_SOURCES).iter().map(ToString::to_string).collect::<Vec<_>>(),
-        "accrual_active": wallet.accrual_active,
-        "accrual_stopped_at": wallet.accrual_stopped_at.map(|t| t.as_secs()),
-        "paused_intervals": wallet.paused_intervals.iter().map(|(start,end)| serde_json::json!({"start":start.as_secs(),"end":end.as_secs()})).collect::<Vec<_>>(),
-        "as_of": Timestamp::now().as_secs(),
-        "rate_history": brn.rate_history.segments.iter().map(|s| serde_json::json!({
-            "rate": s.rate.to_string(), "start": s.start.as_secs(), "end": s.end.map(|t|t.as_secs())
-        })).collect::<Vec<_>>()
-    }))
+    let account_store = state.account_store.clone();
+    let engine = state.brn_engine.clone();
+    state.read_executor.run(move || {
+        let account = account_store
+            .get_account(&address)
+            .map_err(|e| account_not_found(e, &req.account))?;
+        let (wallet, rate_history) = {
+            let brn = engine.blocking_lock();
+            let wallet = brn
+            .get_wallet(&address)
+            .cloned()
+            .unwrap_or_else(|| brn_state_from_account(&account, 0));
+            (wallet, brn.rate_history.clone())
+        };
+        Ok(serde_json::json!({
+            "account": req.account, "verified_at": wallet.verified_at.as_secs(),
+            "total_burned": wallet.total_burned.to_string(), "total_staked": wallet.total_staked.to_string(),
+            "release_sources": wallet.release_sources(burst_ledger::state_block::MAX_RELEASE_SOURCES).iter().map(ToString::to_string).collect::<Vec<_>>(),
+            "accrual_active": wallet.accrual_active,
+            "accrual_stopped_at": wallet.accrual_stopped_at.map(|t| t.as_secs()),
+            "paused_intervals": wallet.paused_intervals.iter().map(|(start,end)| serde_json::json!({"start":start.as_secs(),"end":end.as_secs()})).collect::<Vec<_>>(),
+            "as_of": Timestamp::now().as_secs(),
+            "rate_history": rate_history.segments().iter().map(|s| serde_json::json!({
+                "rate": s.rate.to_string(), "start": s.start.as_secs(), "end": s.end.map(|t|t.as_secs())
+            })).collect::<Vec<_>>()
+        }))
+    }).await
 }
 
 pub async fn handle_trst_portfolio(
@@ -195,38 +102,90 @@ pub async fn handle_trst_portfolio(
 ) -> Result<serde_json::Value, RpcError> {
     let req: AccountInfoRequest =
         serde_json::from_value(params).map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
-    validate_account(&req.account)?;
+    validate_account_format(&req.account)?;
     let address = WalletAddress::new(req.account);
-    let trst = state.trst_engine.lock().await;
-    let outgoing = state.pending_store.get_pending_from_account(&address)?;
-    portfolio_response(&trst, &address, Timestamp::now(), &outgoing)
+    let engine = state.trst_engine.clone();
+    let pending = state.pending_store.clone();
+    state
+        .read_executor
+        .run(move || {
+            let (snapshot, outgoing) =
+                PortfolioSnapshot::capture_with_pending(&engine, &address, || {
+                    pending.capture_pending_from_account(&address)
+                })?;
+            let totals = outgoing.totals(&address)?;
+            portfolio_snapshot_totals_response(&snapshot, Timestamp::now(), totals)
+        })
+        .await
 }
 
+struct PortfolioSnapshot {
+    portfolio: Option<burst_utils::Shared<burst_trst::WalletPortfolio>>,
+    merger_graph: burst_trst::MergerGraph,
+    wallet_origins: burst_utils::SharedMap<WalletAddress, burst_utils::SharedSet<TxHash>>,
+    expiry_secs: u64,
+}
+
+impl PortfolioSnapshot {
+    fn capture_with_pending<T>(
+        engine: &tokio::sync::Mutex<burst_trst::TrstEngine>,
+        address: &WalletAddress,
+        pending: impl FnOnce() -> Result<T, StoreError>,
+    ) -> Result<(Self, T), RpcError> {
+        let engine = engine.blocking_lock();
+        let outgoing = pending()?;
+        Ok((Self::capture(&engine, address), outgoing))
+    }
+
+    fn capture(engine: &burst_trst::TrstEngine, address: &WalletAddress) -> Self {
+        Self {
+            portfolio: engine.wallets.get(address).cloned(),
+            merger_graph: engine.merger_graph.clone(),
+            wallet_origins: engine.wallet_origins.clone(),
+            expiry_secs: engine.expiry_secs,
+        }
+    }
+}
+
+#[cfg(test)]
 fn portfolio_response(
     trst: &burst_trst::TrstEngine,
     address: &WalletAddress,
     now: Timestamp,
     outgoing: &[(WalletAddress, TxHash, burst_store::pending::PendingInfo)],
 ) -> Result<serde_json::Value, RpcError> {
-    let outgoing: Vec<_> = outgoing
-        .iter()
-        .filter(|(_, _, pending)| !pending.return_credit)
-        .collect();
-    let pending = outgoing.iter().try_fold(0u128, |total, (_, _, pending)| {
-        if &pending.source != address {
-            return Err(RpcError::Server(
-                "pending transfer belongs to another sender".into(),
-            ));
-        }
-        total
-            .checked_add(pending.amount)
-            .ok_or_else(|| RpcError::Server("pending amount overflow".into()))
-    })?;
+    portfolio_snapshot_response(
+        &PortfolioSnapshot::capture(trst, address),
+        address,
+        now,
+        outgoing,
+    )
+}
+
+#[cfg(test)]
+fn portfolio_snapshot_response(
+    trst: &PortfolioSnapshot,
+    address: &WalletAddress,
+    now: Timestamp,
+    outgoing: &[(WalletAddress, TxHash, burst_store::pending::PendingInfo)],
+) -> Result<serde_json::Value, RpcError> {
+    let mut totals = burst_store::pending::PendingSourceTotals::default();
+    for (_, _, pending) in outgoing {
+        totals.include(address, pending)?;
+    }
+    portfolio_snapshot_totals_response(trst, now, totals)
+}
+
+fn portfolio_snapshot_totals_response(
+    trst: &PortfolioSnapshot,
+    now: Timestamp,
+    totals: burst_store::pending::PendingSourceTotals,
+) -> Result<serde_json::Value, RpcError> {
     let mut active = 0u128;
     let mut expired = 0u128;
     let mut revoked = 0u128;
     let mut batches = Vec::new();
-    if let Some(portfolio) = trst.get_portfolio(address) {
+    if let Some(portfolio) = trst.portfolio.as_ref() {
         for token in &portfolio.tokens {
             let (status, sum) = if token.state == burst_types::TrstState::Revoked {
                 ("revoked", &mut revoked)
@@ -260,13 +219,82 @@ fn portfolio_response(
     }
     Ok(
         serde_json::json!({"batches":batches,"total_active":active.to_string(),"total_expired":expired.to_string(),"total_revoked":revoked.to_string(),
-        "total_pending":pending.to_string(), "pending_count":outgoing.len()}),
+        "total_pending":totals.amount.to_string(), "pending_count":totals.count}),
     )
 }
 
 #[cfg(test)]
 mod portfolio_tests {
     use super::*;
+
+    #[test]
+    fn portfolio_pending_capture_is_locked_but_enumeration_is_unlocked() {
+        let owner = WalletAddress::new("brst_cut");
+        let engine = tokio::sync::Mutex::new(burst_trst::TrstEngine::new());
+        let (snapshot, outgoing) = PortfolioSnapshot::capture_with_pending(&engine, &owner, || {
+            assert!(
+                engine.try_lock().is_err(),
+                "pending and live holdings must share the lock cut"
+            );
+            Ok(|| {
+                assert!(
+                    engine.try_lock().is_ok(),
+                    "pending enumeration must not retain the live lock"
+                );
+                Vec::new()
+            })
+        })
+        .unwrap();
+        let outgoing = outgoing();
+        assert!(
+            engine.try_lock().is_ok(),
+            "formatting must not retain the live lock"
+        );
+        assert_eq!(
+            portfolio_snapshot_response(&snapshot, &owner, Timestamp::new(1), &outgoing).unwrap()
+                ["total_pending"],
+            "0"
+        );
+    }
+
+    #[test]
+    fn captured_portfolio_preserves_order_and_totals_after_live_mutation() {
+        let owner = WalletAddress::new("brst_snapshot");
+        let mut engine = burst_trst::TrstEngine::with_expiry(100);
+        for id in [3u8, 1, 2] {
+            let token = engine
+                .mint(
+                    TxHash::new([id; 32]),
+                    owner.clone(),
+                    id as u128,
+                    owner.clone(),
+                    Timestamp::new(100),
+                )
+                .unwrap();
+            engine.track_token(token);
+        }
+        let expected = portfolio_response(&engine, &owner, Timestamp::new(150), &[]).unwrap();
+        let snapshot = PortfolioSnapshot::capture(&engine, &owner);
+        let token = engine
+            .mint(
+                TxHash::new([4; 32]),
+                owner.clone(),
+                10,
+                owner.clone(),
+                Timestamp::new(150),
+            )
+            .unwrap();
+        engine.track_token(token);
+        engine.set_expiry_period(1, Timestamp::new(150)).unwrap();
+        assert_eq!(
+            portfolio_snapshot_response(&snapshot, &owner, Timestamp::new(150), &[]).unwrap(),
+            expected
+        );
+        assert_ne!(
+            portfolio_response(&engine, &owner, Timestamp::new(150), &[]).unwrap(),
+            expected
+        );
+    }
 
     #[test]
     fn linear_reference_does_not_change_face_amount_or_expiry_state() {
@@ -293,7 +321,9 @@ mod portfolio_tests {
             assert_eq!(result["total_active"], active);
             assert_eq!(result["total_expired"], expired);
         }
-        engine.set_expiry_period(u64::MAX, Timestamp::new(200));
+        engine
+            .set_expiry_period(u64::MAX, Timestamp::new(200))
+            .unwrap();
         let result = portfolio_response(&engine, &owner, Timestamp::new(200), &[]).unwrap();
         assert_eq!(result["batches"][0]["reference_value_bps"], 10_000);
         assert_eq!(result["total_active"], "1000");
@@ -478,112 +508,42 @@ pub async fn handle_consti(
     state: &RpcState,
 ) -> Result<serde_json::Value, RpcError> {
     let params = state.current_params()?;
-    let engine = state.consti_engine.lock().await;
-    let document = engine.get_constitution();
-    Ok(serde_json::json!({"version":document.version,
-        "amendment_threshold":format!("{}%",params.consti_supermajority_bps as f64 / 100.0),
-        "articles":document.articles.iter().filter(|a|!a.repealed).map(|a|serde_json::json!({
-            "id":a.number.to_string(), "title":a.title, "text":a.text,
-            "adopted_at":null, "amended_at":null, "introduced_by_amendment":a.introduced_by_amendment
-        })).collect::<Vec<_>>()
-    }))
+    let engine = state.consti_engine.clone();
+    state.read_executor.run(move || {
+        let engine = engine.blocking_lock().clone();
+        let document = engine.get_constitution();
+        Ok(serde_json::json!({"version":document.version,
+            "amendment_threshold":format!("{}%",params.consti_supermajority_bps as f64 / 100.0),
+            "articles":document.articles.iter().filter(|a|!a.repealed).map(|a|serde_json::json!({
+                "id":a.number.to_string(), "title":a.title, "text":a.text,
+                "adopted_at":null, "amended_at":null, "introduced_by_amendment":a.introduced_by_amendment
+            })).collect::<Vec<_>>()
+        }))
+    }).await
 }
 
 pub async fn handle_verification_activity(
     _: serde_json::Value,
     state: &RpcState,
 ) -> Result<serde_json::Value, RpcError> {
-    use burst_verification::state::VerificationPhase;
-    let accounts = state.account_store.iter_accounts()?;
-    let snapshot = state.verification_engine.lock().await.snapshot();
-    let mut endorsements: Vec<_> = snapshot.states.values().flat_map(|s|s.endorsements.iter().map(|e|serde_json::json!({
-        "endorser":e.endorser.as_str(), "target":s.target.as_str(), "amount":e.burn_amount.to_string(), "timestamp":e.timestamp.as_secs()
-    }))).collect();
-    endorsements.sort_by_key(|e| std::cmp::Reverse(e["timestamp"].as_u64().unwrap_or(0)));
-    endorsements.truncate(50);
-    let mut verified: Vec<_> = accounts.iter().filter_map(|a|a.verified_at.map(|at|serde_json::json!({
-        "account":a.address.as_str(),"result":format!("{:?}",a.state).to_lowercase(),"timestamp":at.as_secs(),
-        "verifier_count":snapshot.states.get(&a.address).map_or(0, |s|s.votes.len())
-    }))).collect();
-    verified.sort_by_key(|e| std::cmp::Reverse(e["timestamp"].as_u64().unwrap_or(0)));
-    verified.truncate(50);
-    let challenges: Vec<_> = snapshot.active_challenges.values().take(50).map(|c|serde_json::json!({
-        "challenger":c.challenger.as_str(),"target":c.target.as_str(),"stake":c.stake_amount.to_string(),"status":"active","timestamp":c.initiated_at.as_secs()
-    })).collect();
-    Ok(serde_json::json!({
-        "active_verifications":snapshot.states.values().filter(|s|matches!(s.phase,VerificationPhase::Endorsing|VerificationPhase::Voting|VerificationPhase::Challenged)).count(),
-        "pending_endorsements":snapshot.states.values().filter(|s|s.phase==VerificationPhase::Endorsing).map(|s|s.endorsements.len()).sum::<usize>(),
-        "active_challenges":snapshot.active_challenges.len(),
-        "verifier_pool_size":accounts.iter().filter(|a|a.state==burst_types::WalletState::Verified && a.verifier_opted_in_at.is_some()).count(),
-        "total_verified":accounts.iter().filter(|a|a.state==burst_types::WalletState::Verified).count(),
-        "total_revoked":accounts.iter().filter(|a|a.state==burst_types::WalletState::Revoked).count(),
-        "recent_verifications":verified,"recent_endorsements":endorsements,"recent_challenges":challenges
-    }))
+    verification_activity::read(state).await
 }
 
 pub async fn handle_merger_graph_stats(
     _: serde_json::Value,
     state: &RpcState,
 ) -> Result<serde_json::Value, RpcError> {
-    fn depth(
-        id: TxHash,
-        graph: &burst_trst::MergerGraph,
-        memo: &mut std::collections::HashMap<TxHash, u64>,
-        path: &mut std::collections::HashSet<TxHash>,
-    ) -> Result<u64, RpcError> {
-        if let Some(d) = memo.get(&id) {
-            return Ok(*d);
-        }
-        let Some(node) = graph.get_merge(&id) else {
-            return Ok(0);
-        };
-        if path.len() >= 512 || !path.insert(id) {
-            return Err(RpcError::Server(
-                "merger ancestry too deep or cyclic for dashboard traversal".into(),
-            ));
-        }
-        let mut max = 0;
-        for source in &node.source_origins {
-            max = max.max(depth(source.origin, graph, memo, path)?);
-        }
-        path.remove(&id);
-        memo.insert(id, max + 1);
-        Ok(max + 1)
-    }
-    let trst = state.trst_engine.lock().await;
-    let mut memo = std::collections::HashMap::new();
-    let mut depths = Vec::new();
-    let mut origins = std::collections::HashSet::new();
-    for node in trst.merger_graph.iter_merges() {
-        depths.push(depth(
-            node.merge_tx,
-            &trst.merger_graph,
-            &mut memo,
-            &mut std::collections::HashSet::new(),
-        )?);
-        for source in &node.source_origins {
-            if !trst.merger_graph.contains_merge(&source.origin) {
-                origins.insert(source.origin);
-            }
-        }
-    }
-    for ids in trst.wallet_origins.values() {
-        origins.extend(ids);
-    }
-    let now = Timestamp::now();
-    let active = trst
-        .wallets
-        .values()
-        .flat_map(|p| p.tokens.iter())
-        .filter(|t| {
-            t.state != burst_types::TrstState::Revoked && !t.is_expired(now, trst.expiry_secs)
+    let cache = state.merger_stats_cache.clone();
+    let trst = state.trst_engine.clone();
+    let now = (state.display_now)();
+    state
+        .read_executor
+        .run(move || {
+            let mut cache = cache.blocking_lock();
+            let snapshot = crate::merger_stats::Snapshot::new(&trst.blocking_lock());
+            cache.read(snapshot, now)
         })
-        .count();
-    Ok(
-        serde_json::json!({"total_origins":origins.len(),"total_merges":depths.len(),"total_active_chains":active,
-        "total_revoked_origins":trst.merger_graph.revoked_origins().len(),"max_chain_depth":depths.iter().max().copied().unwrap_or(0),
-        "avg_chain_depth":if depths.is_empty(){0.0}else{depths.iter().sum::<u64>() as f64 / depths.len() as f64}}),
-    )
+        .await
 }
 
 pub async fn handle_trace_origin(
@@ -595,88 +555,45 @@ pub async fn handle_trace_origin(
             .as_str()
             .ok_or_else(|| RpcError::InvalidRequest("origin hash required".into()))?,
     )?;
-    let bytes = state
-        .block_store
-        .get_block(&BlockHash::new(*origin.as_bytes()))?;
-    let block: burst_ledger::StateBlock =
-        bincode::deserialize(&bytes).map_err(|e| RpcError::Server(e.to_string()))?;
-    if block.block_type != burst_ledger::BlockType::Burn {
-        return Err(RpcError::InvalidRequest(
-            "trace_origin expects the original BRN burn hash, not a send or merge hash".into(),
-        ));
-    }
-    let previous: burst_ledger::StateBlock =
-        bincode::deserialize(&state.block_store.get_block(&block.previous)?)
-            .map_err(|e| RpcError::Server(e.to_string()))?;
-    let amount = block
-        .brn_balance
-        .checked_sub(previous.brn_balance)
-        .ok_or_else(|| RpcError::Server("invalid burn odometer".into()))?;
-    let trst = state.trst_engine.lock().await;
-    let status = if trst.merger_graph.is_origin_revoked(&origin) {
-        "revoked"
-    } else if trst.expiry_secs != u64::MAX
-        && Timestamp::now().as_secs() >= block.timestamp.as_secs().saturating_add(trst.expiry_secs)
-    {
-        "expired"
-    } else {
-        "active"
-    };
-    let mut forward = std::collections::HashMap::<TxHash, Vec<TxHash>>::new();
-    for node in trst.merger_graph.iter_merges() {
-        for source in &node.source_origins {
-            forward
-                .entry(source.origin)
-                .or_default()
-                .push(node.merge_tx);
+    let mut history = origin_history::Reader::new(state);
+    let engine = state.trst_engine.clone();
+    state.read_executor.run(move || {
+        let block = history.get(BlockHash::new(*origin.as_bytes()))?.block.clone();
+        if block.block_type != burst_ledger::BlockType::Burn {
+            return Err(RpcError::InvalidRequest(
+                "trace_origin expects the original BRN burn hash, not a send or merge hash".into(),
+            ));
         }
-    }
-    let mut queue = std::collections::VecDeque::from([origin]);
-    let mut visited = std::collections::HashSet::new();
-    let mut merges = Vec::new();
-    while let Some(parent) = queue.pop_front() {
-        for &id in forward.get(&parent).into_iter().flatten() {
-            if !visited.insert(id) {
-                continue;
-            }
-            queue.push_back(id);
-            let node = trst
-                .merger_graph
-                .get_merge(&id)
-                .ok_or_else(|| RpcError::Server("missing merge node".into()))?;
-            let merged_bytes = state
-                .block_store
-                .get_block(&BlockHash::new(*id.as_bytes()))?;
-            let merged: burst_ledger::StateBlock =
-                bincode::deserialize(&merged_bytes).map_err(|e| RpcError::Server(e.to_string()))?;
-            let mut found = false;
-            for (holder, portfolio) in &trst.wallets {
-                let tokens: Vec<_> = portfolio.tokens.iter().filter(|t| t.origin == id).collect();
-                if tokens.is_empty() {
-                    continue;
-                }
-                let amount = tokens
-                    .iter()
-                    .try_fold(0u128, |sum, t| sum.checked_add(t.amount))
-                    .ok_or_else(|| RpcError::Server("holding amount overflow".into()))?;
-                found = true;
-                merges.push(serde_json::json!({"merge_hash":id.to_string(),"holder":holder.as_str(),"amount":amount.to_string(),"timestamp":merged.timestamp.as_secs()}));
-            }
-            if !found {
-                merges.push(serde_json::json!({"merge_hash":id.to_string(),"holder":null,"amount":node.total_amount.to_string(),"timestamp":merged.timestamp.as_secs()}));
-            }
+        let previous = &history.get(block.previous)?.block;
+        if previous.account != block.account {
+            return Err(RpcError::Server("burn predecessor belongs to another account".into()));
         }
-    }
-    merges.sort_by_key(|m| {
-        (
-            m["timestamp"].as_u64().unwrap_or(0),
-            m["merge_hash"].as_str().unwrap_or("").to_string(),
-            m["holder"].as_str().unwrap_or("").to_string(),
-        )
-    });
-    Ok(
-        serde_json::json!({"origin":origin.to_string(),"originator":block.account.as_str(),"timestamp":block.timestamp.as_secs(),"amount":amount.to_string(),"status":status,"forward_merges":merges}),
-    )
+        let amount = block.brn_spent.checked_sub(previous.brn_spent)
+            .ok_or_else(|| RpcError::Server("invalid burn odometer".into()))?;
+        let (graph, wallets, expiry_secs) = {
+            let trst = engine.blocking_lock();
+            (trst.merger_graph.clone(), trst.wallets.clone(), trst.expiry_secs)
+        };
+        let status = if graph.is_origin_revoked(&origin) {
+            "revoked"
+        } else if expiry_secs != u64::MAX
+            && Timestamp::now().as_secs() >= block.timestamp.as_secs().saturating_add(expiry_secs)
+        {
+            "expired"
+        } else {
+            "active"
+        };
+        let descendants = trace_origin::descendants(origin, &graph)?;
+        history.prefetch(descendants.iter().map(|id| BlockHash::new(*id.as_bytes())).collect())?;
+        let merges = trace_origin::forward_merges(origin, &graph, &wallets, |id| {
+            let merged = &history.get(BlockHash::new(*id.as_bytes()))?.block;
+            if merged.block_type != burst_ledger::BlockType::Merge {
+                return Err(RpcError::Server("merge history contains a non-merge block".into()));
+            }
+            Ok(merged.timestamp.as_secs())
+        })?;
+        Ok(serde_json::json!({"origin":origin.to_string(),"originator":block.account.as_str(),"timestamp":block.timestamp.as_secs(),"amount":amount.to_string(),"status":status,"forward_merges":merges}))
+    }).await
 }
 
 /// Map a `StoreError::NotFound` to an `RpcError::AccountNotFound`.
@@ -690,23 +607,31 @@ fn account_not_found(e: StoreError, address: &str) -> RpcError {
 /// Check whether a specific block is confirmed by looking up its height
 /// directly and comparing against the account's `confirmation_height`.
 ///
-/// Uses `BlockStore::height_of_block` for O(1) lookup instead of loading
-/// the entire account chain.
+/// Uses indexed height lookups instead of loading the entire account chain.
 fn is_block_confirmed(block_hash: &BlockHash, account: &WalletAddress, state: &RpcState) -> bool {
-    let acct = match state.account_store.get_account(account) {
+    is_block_confirmed_in(
+        block_hash,
+        account,
+        state.account_store.as_ref(),
+        state.block_store.as_ref(),
+    )
+}
+
+fn is_block_confirmed_in(
+    block_hash: &BlockHash,
+    account: &WalletAddress,
+    accounts: &dyn burst_store::account::AccountStore,
+    blocks: &dyn burst_store::block::BlockStore,
+) -> bool {
+    let account_info = match accounts.get_account(account) {
         Ok(a) => a,
         Err(_) => return false,
     };
-    if acct.confirmation_height == 0 {
+    if account_info.confirmation_height == 0 {
         return false;
     }
-    confirmed_successor::confirmed(
-        state.block_store.as_ref(),
-        block_hash,
-        account,
-        acct.confirmation_height,
-    )
-    .unwrap_or(false)
+    confirmed_successor::confirmed(blocks, block_hash, account, account_info.confirmation_height)
+        .unwrap_or(false)
 }
 
 /// Deserialize stored block bytes to a `StateBlock`, trying JSON then bincode.
@@ -725,449 +650,6 @@ fn deserialize_proposal(bytes: &[u8]) -> Result<Proposal, RpcError> {
     }
     bincode::deserialize::<Proposal>(bytes)
         .map_err(|e| RpcError::Node(format!("failed to deserialize proposal: {e}")))
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// Account handlers
-// ═══════════════════════════════════════════════════════════════════════
-
-// ── account_info ────────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct AccountInfoRequest {
-    pub account: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct AccountInfoResponse {
-    /// Canonical first block, exposed only after the opening position is confirmed.
-    pub confirmed_open: Option<String>,
-    pub payment_epoch: String,
-    pub release_sources: Vec<String>,
-    pub has_more_releases: bool,
-    pub address: String,
-    pub head: String,
-    pub brn_balance: String,
-    pub trst_balance: String,
-    pub trst_expired: String,
-    pub trst_revoked: String,
-    pub total_brn_burned: String,
-    pub total_brn_staked: String,
-    pub verification_state: String,
-    pub verified_at: Option<u64>,
-    pub block_count: u64,
-    pub confirmation_height: u64,
-    pub representative: String,
-    /// Unix seconds when this wallet opted in to the verifier pool, if it has.
-    pub verifier_opted_in_at: Option<u64>,
-    /// Whether this representative has been evicted from the ORV consensus set.
-    pub orv_evicted: bool,
-}
-
-pub async fn handle_account_info(
-    params: serde_json::Value,
-    state: &RpcState,
-) -> Result<serde_json::Value, RpcError> {
-    let payment_epoch = state.meta_store.payment_epoch()?;
-    let req: AccountInfoRequest =
-        serde_json::from_value(params).map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
-    validate_account(&req.account)?;
-
-    let address = WalletAddress::new(req.account.clone());
-    let account = state
-        .account_store
-        .get_account(&address)
-        .map_err(|e| account_not_found(e, &req.account))?;
-
-    let now = Timestamp::now();
-    let brn_state = brn_state_from_account(&account, state.current_params()?.brn_rate);
-    let (brn_balance, release_sources, has_more_releases) = {
-        let brn = state.brn_engine.lock().await;
-        let wallet = brn.get_wallet(&account.address).unwrap_or(&brn_state);
-        let sources = wallet.release_sources(burst_ledger::state_block::MAX_RELEASE_SOURCES);
-        (
-            checked_brn_balance(&brn, wallet, now)?,
-            sources.iter().map(ToString::to_string).collect(),
-            wallet.has_more_releases(&sources),
-        )
-    };
-
-    let verification_state = format!("{:?}", account.state).to_lowercase();
-
-    let trst_expired = account.expired_trst.to_string();
-    let trst_revoked = account.revoked_trst.to_string();
-    if state.meta_store.payment_epoch()? != payment_epoch {
-        return Err(RpcError::Server(
-            "payment epoch changed while reading account; retry".into(),
-        ));
-    }
-
-    Ok(to_value(&AccountInfoResponse {
-        confirmed_open: if account.confirmation_height > 0 {
-            state
-                .block_store
-                .block_at_height(&address, 1)?
-                .map(|hash| hash.to_string())
-        } else {
-            None
-        },
-        payment_epoch: payment_epoch.to_string(),
-        release_sources,
-        has_more_releases,
-        address: req.account,
-        head: format!("{}", account.head),
-        brn_balance: brn_balance.to_string(),
-        trst_balance: account.trst_balance.to_string(),
-        trst_expired,
-        trst_revoked,
-        total_brn_burned: account.total_brn_burned.to_string(),
-        total_brn_staked: account.total_brn_staked.to_string(),
-        verification_state,
-        verified_at: account.verified_at.map(|t| t.as_secs()),
-        block_count: account.block_count,
-        confirmation_height: account.confirmation_height,
-        representative: account.representative.to_string(),
-        verifier_opted_in_at: account.verifier_opted_in_at.map(|t| t.as_secs()),
-        orv_evicted: account.orv_evicted,
-    }))
-}
-
-// ── account_history ─────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct AccountHistoryRequest {
-    pub account: String,
-    #[serde(flatten)]
-    pub pagination: PaginationParams,
-}
-
-#[derive(Debug, Serialize)]
-pub struct HistoryEntry {
-    pub hash: String,
-    pub block_type: String,
-    pub account: String,
-    pub amount: String,
-    pub timestamp: u64,
-}
-
-#[derive(Debug, Serialize)]
-pub struct AccountHistoryResponse {
-    pub account: String,
-    pub history: Vec<HistoryEntry>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<String>,
-}
-
-pub async fn handle_account_history(
-    params: serde_json::Value,
-    state: &RpcState,
-) -> Result<serde_json::Value, RpcError> {
-    let req: AccountHistoryRequest =
-        serde_json::from_value(params).map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
-    validate_account(&req.account)?;
-
-    let count = req.pagination.effective_count();
-    let offset = req.pagination.decode_offset();
-
-    let address = WalletAddress::new(req.account.clone());
-    let account = match state.account_store.get_account(&address) {
-        Ok(account) => Some(account),
-        Err(StoreError::NotFound(_)) => None,
-        Err(error) => return Err(RpcError::Store(error.to_string())),
-    };
-    let total = account.as_ref().map_or(0, |account| account.block_count);
-    let start = offset.min(total);
-    let end = start.saturating_add(u64::from(count)).min(total);
-    let mut entries = std::collections::BTreeMap::new();
-    let mut indexed = std::collections::BTreeMap::new();
-    for offset in start..end {
-        let height = offset + 1;
-        if let Some(hash) = state.block_store.block_at_height(&address, height)? {
-            indexed.insert(height, hash);
-            match state.block_store.get_block(&hash) {
-                Ok(bytes) => {
-                    let block = deserialize_block(&bytes)?;
-                    if block.hash != hash || block.account != address {
-                        return Err(RpcError::Store(
-                            "account history index/body mismatch".into(),
-                        ));
-                    }
-                    entries.insert(height, block);
-                }
-                Err(StoreError::NotFound(_)) => {}
-                Err(error) => return Err(RpcError::Store(error.to_string())),
-            }
-        }
-    }
-    if entries.len() as u64 != end - start {
-        let recovered = state
-            .block_processor
-            .historical_account_page(address.clone(), start + 1, (end - start) as u32)
-            .await
-            .map_err(RpcError::Node)?;
-        for (height, block) in recovered {
-            if height <= start
-                || height > end
-                || block.account != address
-                || indexed.get(&height).is_some_and(|hash| *hash != block.hash)
-                || entries
-                    .get(&height)
-                    .is_some_and(|local| local.hash != block.hash)
-            {
-                return Err(RpcError::Node(
-                    "historical account page disagrees with requested chain".into(),
-                ));
-            }
-            entries.insert(height, block);
-        }
-        if entries.len() as u64 != end - start {
-            return Err(RpcError::Node(
-                "account history is unavailable; reconnect to an archival peer and retry".into(),
-            ));
-        }
-    }
-    if let Some(before) = account {
-        let after = state.account_store.get_account(&address)?;
-        if before.head != after.head || before.block_count != after.block_count {
-            return Err(RpcError::Node(
-                "account changed during history lookup; retry".into(),
-            ));
-        }
-    }
-    let history = entries
-        .into_values()
-        .map(|block| HistoryEntry {
-            hash: block.hash.to_string(),
-            block_type: format!("{:?}", block.block_type),
-            account: block.account.to_string(),
-            amount: block.trst_balance.to_string(),
-            timestamp: block.timestamp.as_secs(),
-        })
-        .collect();
-
-    let cursor = if end < total {
-        Some(pagination::encode_cursor(end))
-    } else {
-        None
-    };
-
-    Ok(to_value(&AccountHistoryResponse {
-        account: req.account,
-        history,
-        cursor,
-    }))
-}
-
-// ── account_balance ─────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct AccountBalanceRequest {
-    pub account: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct AccountBalanceResponse {
-    pub brn_balance: String,
-    pub trst_balance: String,
-}
-
-pub async fn handle_account_balance(
-    params: serde_json::Value,
-    state: &RpcState,
-) -> Result<serde_json::Value, RpcError> {
-    let req: AccountBalanceRequest =
-        serde_json::from_value(params).map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
-    validate_account(&req.account)?;
-
-    let address = WalletAddress::new(req.account.clone());
-    let account = state
-        .account_store
-        .get_account(&address)
-        .map_err(|e| account_not_found(e, &req.account))?;
-
-    let now = Timestamp::now();
-    let brn_state = brn_state_from_account(&account, state.current_params()?.brn_rate);
-    let brn_balance = {
-        let brn = state.brn_engine.lock().await;
-        checked_brn_balance(
-            &brn,
-            brn.get_wallet(&account.address).unwrap_or(&brn_state),
-            now,
-        )?
-    };
-
-    Ok(to_value(&AccountBalanceResponse {
-        brn_balance: brn_balance.to_string(),
-        trst_balance: account.trst_balance.to_string(),
-    }))
-}
-
-// ── account_pending ─────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct AccountPendingRequest {
-    pub account: String,
-    /// Inspect one pending source without scanning a truncated first page.
-    pub hash: Option<String>,
-    /// Minimum amount threshold — only return pending entries with amount >= this value.
-    pub threshold: Option<String>,
-    #[serde(flatten)]
-    pub pagination: PaginationParams,
-}
-
-#[derive(Debug, Serialize)]
-pub struct PendingEntry {
-    pub hash: String,
-    pub source: String,
-    pub amount: String,
-    pub timestamp: u64,
-    pub return_credit: bool,
-}
-
-#[derive(Debug, Serialize)]
-pub struct AccountPendingResponse {
-    pub account: String,
-    pub pending: Vec<PendingEntry>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<String>,
-}
-
-pub async fn handle_account_pending(
-    params: serde_json::Value,
-    state: &RpcState,
-) -> Result<serde_json::Value, RpcError> {
-    let req: AccountPendingRequest =
-        serde_json::from_value(params).map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
-    validate_account(&req.account)?;
-
-    let count = req.pagination.effective_count();
-    let offset = req.pagination.decode_offset();
-
-    let threshold: u128 = match req.threshold.as_deref() {
-        Some(s) => s
-            .parse()
-            .map_err(|e| RpcError::InvalidRequest(format!("invalid threshold: {e}")))?,
-        None => 0,
-    };
-
-    let address = WalletAddress::new(req.account.clone());
-    if let Some(hash) = req.hash.as_deref() {
-        let hash = parse_tx_hash(hash)?;
-        let pending = match state.pending_store.get_pending(&address, &hash) {
-            Ok(info) if info.amount >= threshold => vec![PendingEntry {
-                return_credit: info.return_credit,
-                hash: hash.to_string(),
-                source: info.source.to_string(),
-                amount: info.amount.to_string(),
-                timestamp: info.timestamp.as_secs(),
-            }],
-            Ok(_) | Err(StoreError::NotFound(_)) => Vec::new(),
-            Err(error) => return Err(RpcError::Store(error.to_string())),
-        };
-        return Ok(to_value(&AccountPendingResponse {
-            account: req.account,
-            pending,
-            cursor: None,
-        }));
-    }
-    let mut all_pending = state
-        .pending_store
-        .get_pending_for_account_with_hashes(&address)
-        .map_err(|e| RpcError::Store(format!("failed to query pending: {e}")))?;
-
-    // Sort by amount descending (highest priority first)
-    all_pending.sort_by_key(|(_, p)| std::cmp::Reverse(p.amount));
-
-    // Apply threshold filter
-    let filtered: Vec<_> = if threshold > 0 {
-        all_pending
-            .into_iter()
-            .filter(|(_, p)| p.amount >= threshold)
-            .collect()
-    } else {
-        all_pending
-    };
-
-    let start = (offset as usize).min(filtered.len());
-    let end = (start + count as usize).min(filtered.len());
-    let page = &filtered[start..end];
-
-    let pending: Vec<PendingEntry> = page
-        .iter()
-        .map(|(source_hash, p)| PendingEntry {
-            return_credit: p.return_credit,
-            hash: format!("{}", source_hash),
-            source: p.source.to_string(),
-            amount: p.amount.to_string(),
-            timestamp: p.timestamp.as_secs(),
-        })
-        .collect();
-
-    let cursor = if end < filtered.len() {
-        Some(pagination::encode_cursor(end as u64))
-    } else {
-        None
-    };
-
-    Ok(to_value(&AccountPendingResponse {
-        account: req.account,
-        pending,
-        cursor,
-    }))
-}
-
-// ── account_representative ──────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct AccountRepresentativeRequest {
-    pub account: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct AccountRepresentativeResponse {
-    pub account: String,
-    pub representative: String,
-}
-
-pub async fn handle_account_representative(
-    params: serde_json::Value,
-    state: &RpcState,
-) -> Result<serde_json::Value, RpcError> {
-    let req: AccountRepresentativeRequest =
-        serde_json::from_value(params).map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
-    validate_account(&req.account)?;
-
-    let address = WalletAddress::new(req.account.clone());
-    let account = state
-        .account_store
-        .get_account(&address)
-        .map_err(|e| account_not_found(e, &req.account))?;
-
-    Ok(to_value(&AccountRepresentativeResponse {
-        account: req.account,
-        representative: account.representative.to_string(),
-    }))
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// Block / transaction handlers
-// ═══════════════════════════════════════════════════════════════════════
-
-// ── process (submit block) ──────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct ProcessRequest {
-    pub block: String,
-    /// Canonical full proposal bytes, hex encoded. Never an unsigned proposal.
-    pub proposal_content: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ProcessResponse {
-    pub hash: String,
-    pub accepted: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
 }
 
 pub async fn handle_process(
@@ -1223,7 +705,10 @@ pub async fn handle_process(
             .block_processor
             .process_block_with_content(&block_bytes, &bytes)
     } else {
-        state.block_processor.process_block(&block_bytes)
+        state
+            .block_processor
+            .process_block_async(&block_bytes)
+            .await
     }
     .map_err(RpcError::Server)?;
 
@@ -1381,41 +866,11 @@ mod submission_response_tests {
     }
 }
 
-// ── block_info ──────────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct BlockInfoRequest {
-    pub hash: String,
-    #[serde(default)]
-    pub include_signed_block: bool,
-}
-
-#[derive(Debug, Serialize)]
-pub struct BlockInfoResponse {
-    pub active_signing_grant: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    // Keep u128 fields out of serde_json::Value and JavaScript number conversion.
-    pub signed_block: Option<String>,
-    pub payment_epoch: String,
-    pub block_type: String,
-    pub account: String,
-    pub previous: String,
-    pub representative: String,
-    pub brn_balance: String,
-    pub trst_balance: String,
-    pub link: String,
-    pub origin: String,
-    pub transaction: String,
-    pub target_head: String,
-    pub timestamp: u64,
-    pub confirmed: bool,
-    pub confirmed_successor: Option<String>,
-}
-
 pub async fn handle_block_info(
     params: serde_json::Value,
     state: &RpcState,
 ) -> Result<serde_json::Value, RpcError> {
+    let request_started = std::time::Instant::now();
     let req: BlockInfoRequest =
         serde_json::from_value(params).map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
     validate_hash(&req.hash)?;
@@ -1440,8 +895,13 @@ pub async fn handle_block_info(
         Err(error) => return Err(RpcError::Store(error.to_string())),
     };
 
+    let block_loaded = std::time::Instant::now();
     let confirmed = historical || is_block_confirmed(&block_hash, &block.account, state);
     let confirmed_successor = confirmed_successor::lookup(&block_hash, &block.account, state)?;
+    tracing::debug!(hash = %block_hash, historical,
+        load_us = block_loaded.duration_since(request_started).as_micros(),
+        confirmation_lookup_us = block_loaded.elapsed().as_micros(),
+        "block signing view stages");
 
     Ok(to_value(&BlockInfoResponse {
         active_signing_grant: block.active_signing_grant().to_string(),
@@ -1455,7 +915,7 @@ pub async fn handle_block_info(
         account: block.account.to_string(),
         previous: format!("{}", block.previous),
         representative: block.representative.to_string(),
-        brn_balance: block.brn_balance.to_string(),
+        brn_balance: block.brn_spent.to_string(),
         trst_balance: block.trst_balance.to_string(),
         link: format!("{}", block.link),
         origin: format!("{}", block.origin),
@@ -1467,28 +927,7 @@ pub async fn handle_block_info(
     }))
 }
 
-// ── blocks_info ─────────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct BlocksInfoRequest {
-    pub hashes: Vec<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct BlocksInfoResponse {
-    pub blocks: Vec<BlocksInfoEntry>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct BlocksInfoEntry {
-    pub hash: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub block: Option<BlockInfoResponse>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-const MAX_BATCH_SIZE: usize = 1000;
+const MAX_BLOCKS_PER_REQUEST: usize = 1000;
 
 pub async fn handle_blocks_info(
     params: serde_json::Value,
@@ -1503,11 +942,11 @@ pub async fn handle_blocks_info(
         ));
     }
 
-    if req.hashes.len() > MAX_BATCH_SIZE {
+    if req.hashes.len() > MAX_BLOCKS_PER_REQUEST {
         return Err(RpcError::InvalidRequest(format!(
             "batch size {} exceeds maximum of {}",
             req.hashes.len(),
-            MAX_BATCH_SIZE
+            MAX_BLOCKS_PER_REQUEST
         )));
     }
 
@@ -1551,7 +990,7 @@ pub async fn handle_blocks_info(
                             account: block.account.to_string(),
                             previous: format!("{}", block.previous),
                             representative: block.representative.to_string(),
-                            brn_balance: block.brn_balance.to_string(),
+                            brn_balance: block.brn_spent.to_string(),
                             trst_balance: block.trst_balance.to_string(),
                             link: format!("{}", block.link),
                             origin: format!("{}", block.origin),
@@ -1585,33 +1024,11 @@ pub async fn handle_blocks_info(
     Ok(to_value(&BlocksInfoResponse { blocks }))
 }
 
-// ── pending (alias for account_pending) ─────────────────────────────────
-
 pub async fn handle_pending(
     params: serde_json::Value,
     state: &RpcState,
 ) -> Result<serde_json::Value, RpcError> {
     handle_account_pending(params, state).await
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// Work
-// ═══════════════════════════════════════════════════════════════════════
-
-#[derive(Debug, Deserialize)]
-pub struct WorkGenerateRequest {
-    /// Work root: predecessor hash, or the account-bound opening root.
-    pub hash: String,
-    pub difficulty: Option<String>,
-    pub block_type: Option<burst_ledger::BlockType>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct WorkGenerateResponse {
-    pub work: String,
-    pub difficulty: String,
-    pub multiplier: String,
-    pub hash: String,
 }
 
 pub async fn handle_work_generate(
@@ -1634,13 +1051,8 @@ pub async fn handle_work_generate(
         burst_work::WorkThresholds::with_base(state.current_params()?.min_work_difficulty)
             .threshold_for(kind);
     let difficulty = parse_difficulty(&req.difficulty, required)?.max(required);
-    let generator = state.work_generator.clone();
-
-    // PoW generation is CPU-intensive; run it on a blocking thread.
-    let result = tokio::task::spawn_blocking(move || generator.generate(&block_hash, difficulty))
-        .await
-        .map_err(|e| RpcError::Server(format!("work generation task failed: {e}")))?
-        .map_err(|e| RpcError::WorkError(e.to_string()))?;
+    crate::work_budget::check_difficulty(difficulty, required)?;
+    let result = crate::work_budget::generate(state.work_generator.clone(), block_hash, difficulty).await?;
 
     let base_difficulty = state.current_params()?.min_work_difficulty;
     let multiplier = if base_difficulty > 0 {
@@ -1655,19 +1067,6 @@ pub async fn handle_work_generate(
         multiplier: format!("{:.6}", multiplier),
         hash: req.hash,
     }))
-}
-
-// ── params_hash ────────────────────────────────────────────────────────
-
-#[derive(Debug, Serialize)]
-pub struct ParamsHashResponse {
-    pub online_signing: String,
-    pub full_governance_content: bool,
-    pub delegation_key_journal: bool,
-    pub payment_epoch: String,
-    pub params_hash: String,
-    pub block_version: u8,
-    pub min_work_difficulty: String,
 }
 
 fn online_signing_phase(
@@ -1781,425 +1180,6 @@ pub async fn handle_protocol_params(
     }))
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// Governance
-// ═══════════════════════════════════════════════════════════════════════
-
-// ── governance_proposals ────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct GovernanceProposalsRequest {
-    #[serde(flatten)]
-    pub pagination: PaginationParams,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ProposalSummary {
-    pub hash: String,
-    pub proposer: String,
-    pub phase: String,
-    pub phase_projected: bool,
-    pub description: String,
-    pub votes_yea: u32,
-    pub votes_nay: u32,
-}
-
-#[derive(Debug, Serialize)]
-pub struct GovernanceProposalsResponse {
-    pub proposals: Vec<ProposalSummary>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<String>,
-}
-
-pub async fn handle_governance_proposals(
-    params: serde_json::Value,
-    state: &RpcState,
-) -> Result<serde_json::Value, RpcError> {
-    let req: GovernanceProposalsRequest =
-        serde_json::from_value(params).map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
-
-    let count = req.pagination.effective_count();
-    let offset = req.pagination.decode_offset();
-
-    if let Some((gov, projected)) = governance_projection::read(state).await? {
-        let all: Vec<_> = gov.all_proposals().collect();
-        let start = (offset as usize).min(all.len());
-        let end = (start + count as usize).min(all.len());
-        let page = &all[start..end];
-
-        let proposals: Vec<ProposalSummary> = page
-            .iter()
-            .map(|proposal| {
-                let description = proposal_description(proposal);
-                let (votes_yea, votes_nay) = current_vote_counts(proposal);
-                ProposalSummary {
-                    hash: format!("{}", proposal.hash),
-                    proposer: proposal.proposer.to_string(),
-                    phase: format!("{:?}", proposal.phase),
-                    phase_projected: projected.contains(&proposal.hash),
-                    description,
-                    votes_yea,
-                    votes_nay,
-                }
-            })
-            .collect();
-
-        let cursor = if end < all.len() {
-            Some(pagination::encode_cursor(end as u64))
-        } else {
-            None
-        };
-
-        return Ok(to_value(&GovernanceProposalsResponse { proposals, cursor }));
-    }
-
-    let active_hashes = state
-        .governance_store
-        .list_active_proposals()
-        .unwrap_or_default();
-
-    let start = (offset as usize).min(active_hashes.len());
-    let end = (start + count as usize).min(active_hashes.len());
-    let page_hashes = &active_hashes[start..end];
-
-    let mut proposals = Vec::with_capacity(page_hashes.len());
-    for ph in page_hashes {
-        if let Ok(data) = state.governance_store.get_proposal(ph) {
-            if let Ok(proposal) = deserialize_proposal(&data) {
-                let description = proposal_description(&proposal);
-                let (votes_yea, votes_nay) = current_vote_counts(&proposal);
-
-                proposals.push(ProposalSummary {
-                    hash: format!("{}", ph),
-                    proposer: proposal.proposer.to_string(),
-                    phase: format!("{:?}", proposal.phase),
-                    phase_projected: false,
-                    description,
-                    votes_yea,
-                    votes_nay,
-                });
-            }
-        }
-    }
-
-    let cursor = if end < active_hashes.len() {
-        Some(pagination::encode_cursor(end as u64))
-    } else {
-        None
-    };
-
-    Ok(to_value(&GovernanceProposalsResponse { proposals, cursor }))
-}
-
-/// Extract a human-readable description from proposal content.
-fn proposal_description(proposal: &Proposal) -> String {
-    match &proposal.content {
-        burst_governance::ProposalContent::ParameterChange { param, new_value } => {
-            format!("Change {:?} to {}", param, new_value)
-        }
-        burst_governance::ProposalContent::ConstitutionalAmendment { title, .. }
-        | burst_governance::ProposalContent::ConstitutionalDiff { title, .. } => {
-            format!("Constitutional amendment: {}", title)
-        }
-        burst_governance::ProposalContent::Emergency {
-            description, param, ..
-        } => {
-            format!("EMERGENCY {:?}: {}", param, description)
-        }
-        burst_governance::ProposalContent::RepresentativeEviction {
-            target,
-            evict,
-            reason,
-        } => {
-            let verb = if *evict { "Evict" } else { "Reinstate" };
-            format!(
-                "{} representative {} from ORV set: {}",
-                verb, target, reason
-            )
-        }
-    }
-}
-
-/// Get the current active vote counts (from whichever phase is active).
-fn current_vote_counts(proposal: &Proposal) -> (u32, u32) {
-    match proposal.phase {
-        burst_governance::GovernancePhase::Exploration => (
-            proposal.exploration_votes_yea,
-            proposal.exploration_votes_nay,
-        ),
-        burst_governance::GovernancePhase::Promotion => {
-            (proposal.promotion_votes_yea, proposal.promotion_votes_nay)
-        }
-        _ => (
-            proposal.exploration_votes_yea + proposal.promotion_votes_yea,
-            proposal.exploration_votes_nay + proposal.promotion_votes_nay,
-        ),
-    }
-}
-
-// ── governance_vote ─────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct GovernanceVoteRequest {
-    pub proposal_hash: String,
-    pub voter: String,
-    pub vote: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct GovernanceVoteResponse {
-    pub proposal_hash: String,
-    pub vote: String,
-    pub accepted: bool,
-}
-
-pub async fn handle_governance_vote(
-    _params: serde_json::Value,
-    _state: &RpcState,
-) -> Result<serde_json::Value, RpcError> {
-    // A public address is not authorization. Real governance stays available
-    // through the signed DAG transaction path used by the desktop wallet.
-    Err(RpcError::InvalidRequest(
-        "governance votes require a signed GovernanceVote block submitted through process".into(),
-    ))
-}
-
-// ── governance_proposal_info ────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct GovernanceProposalInfoRequest {
-    pub hash: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct GovernanceProposalInfoResponse {
-    pub hash: String,
-    pub proposer: String,
-    pub phase: String,
-    pub phase_projected: bool,
-    pub description: String,
-    pub param: String,
-    pub proposed_value: String,
-    pub votes_yea: u32,
-    pub votes_nay: u32,
-    pub votes_abstain: u32,
-    pub created_at: u64,
-    pub phase_deadline: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub amendment_text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub amendment_operations: Option<Vec<burst_governance::proposal::AmendmentOp>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub activation_conflict: Option<burst_consti::AmendmentConflict>,
-}
-
-#[cfg(test)]
-mod governance_response_tests {
-    use super::GovernanceProposalInfoResponse;
-
-    #[test]
-    fn amendment_text_is_complete_and_absent_for_other_proposals() {
-        let text = "Article 1\nEvery verified person has an equal vote.";
-        let mut response = GovernanceProposalInfoResponse {
-            hash: "a".repeat(64),
-            proposer: "brst_fixture".into(),
-            phase: "Exploration".into(),
-            phase_projected: true,
-            description: "Amend article 1".into(),
-            param: "constitution".into(),
-            proposed_value: "Article 1".into(),
-            votes_yea: 0,
-            votes_nay: 0,
-            votes_abstain: 0,
-            created_at: 1,
-            phase_deadline: 2,
-            amendment_text: Some(text.into()),
-            amendment_operations: None,
-            activation_conflict: None,
-        };
-        assert_eq!(
-            serde_json::to_value(&response).unwrap()["amendment_text"],
-            text
-        );
-        response.amendment_text = None;
-        assert!(serde_json::to_value(&response)
-            .unwrap()
-            .get("amendment_text")
-            .is_none());
-    }
-}
-
-pub async fn handle_governance_proposal_info(
-    params: serde_json::Value,
-    state: &RpcState,
-) -> Result<serde_json::Value, RpcError> {
-    let req: GovernanceProposalInfoRequest =
-        serde_json::from_value(params).map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
-    validate_hash(&req.hash)?;
-
-    let proposal_hash = parse_tx_hash(&req.hash)?;
-    // Use the same read-only phase projection as governance_proposals. The legacy
-    // proposal table is not the live node's governance state.
-    let current_params = state.current_params()?;
-    let (proposal, phase_projected, timing) = if let Some((gov, projected)) =
-        governance_projection::read(state).await?
-    {
-        let proposal = gov
-            .get_proposal(&proposal_hash)
-            .cloned()
-            .ok_or_else(|| RpcError::ProposalNotFound(req.hash.clone()))?;
-        let timing = gov
-            .timing(&proposal, &current_params)
-            .map_err(|error| RpcError::Store(error.to_string()))?;
-        (proposal, projected.contains(&proposal_hash), timing)
-    } else {
-        let data = state
-            .governance_store
-            .get_proposal(&proposal_hash)
-            .map_err(|e| match e {
-                StoreError::NotFound(_) => RpcError::ProposalNotFound(req.hash.clone()),
-                other => RpcError::Store(other.to_string()),
-            })?;
-        let proposal = deserialize_proposal(&data)?;
-        let timing = burst_governance::GovernanceTiming::new(&current_params, &proposal.content);
-        (proposal, false, timing)
-    };
-
-    let (param, proposed_value) = match &proposal.content {
-        burst_governance::ProposalContent::ParameterChange { param, new_value } => {
-            (format!("{:?}", param), new_value.to_string())
-        }
-        burst_governance::ProposalContent::ConstitutionalAmendment { title, .. }
-        | burst_governance::ProposalContent::ConstitutionalDiff { title, .. } => {
-            ("constitution".to_string(), title.clone())
-        }
-        burst_governance::ProposalContent::Emergency {
-            param, new_value, ..
-        } => (format!("{:?}", param), new_value.to_string()),
-        burst_governance::ProposalContent::RepresentativeEviction { target, evict, .. } => (
-            if *evict { "evict_rep" } else { "reinstate_rep" }.to_string(),
-            target.to_string(),
-        ),
-    };
-
-    let (votes_yea, votes_nay, votes_abstain) = match proposal.phase {
-        burst_governance::GovernancePhase::Exploration => (
-            proposal.exploration_votes_yea,
-            proposal.exploration_votes_nay,
-            proposal.exploration_votes_abstain,
-        ),
-        burst_governance::GovernancePhase::Promotion => (
-            proposal.promotion_votes_yea,
-            proposal.promotion_votes_nay,
-            proposal.promotion_votes_abstain,
-        ),
-        _ => (
-            proposal.exploration_votes_yea + proposal.promotion_votes_yea,
-            proposal.exploration_votes_nay + proposal.promotion_votes_nay,
-            proposal.exploration_votes_abstain + proposal.promotion_votes_abstain,
-        ),
-    };
-
-    let phase_deadline = compute_phase_deadline(&proposal, &current_params, timing)?;
-    let amendment_text = match &proposal.content {
-        burst_governance::ProposalContent::ConstitutionalAmendment { text, .. } => {
-            Some(text.clone())
-        }
-        _ => None,
-    };
-    let amendment_operations = match &proposal.content {
-        burst_governance::ProposalContent::ConstitutionalDiff { operations, .. } => {
-            Some(operations.clone())
-        }
-        _ => None,
-    };
-
-    let activation_conflict = state
-        .consti_engine
-        .lock()
-        .await
-        .activation_conflict(&proposal_hash);
-    Ok(to_value(&GovernanceProposalInfoResponse {
-        hash: req.hash,
-        proposer: proposal.proposer.to_string(),
-        phase: format!("{:?}", proposal.phase),
-        phase_projected,
-        description: proposal_description(&proposal),
-        param,
-        proposed_value,
-        votes_yea,
-        votes_nay,
-        votes_abstain,
-        created_at: proposal.created_at.as_secs(),
-        phase_deadline,
-        amendment_text,
-        amendment_operations,
-        activation_conflict,
-    }))
-}
-
-/// Compute the deadline (Unix timestamp) for the current phase of a proposal.
-fn compute_phase_deadline(
-    proposal: &Proposal,
-    params: &burst_types::ProtocolParams,
-    timing: burst_governance::GovernanceTiming,
-) -> Result<u64, RpcError> {
-    let deadline = match proposal.phase {
-        burst_governance::GovernancePhase::Proposal => timing
-            .proposal_end(proposal.created_at)
-            .map_err(|error| RpcError::Store(error.to_string()))?
-            .as_secs(),
-        burst_governance::GovernancePhase::Exploration => proposal
-            .exploration_started_at
-            .map(|t| timing.voting_end(t).map(|at| at.as_secs()))
-            .transpose()
-            .map_err(|error| RpcError::Store(error.to_string()))?
-            .unwrap_or(0),
-        burst_governance::GovernancePhase::Cooldown => proposal
-            .activation_at
-            .map(|at| at.as_secs())
-            .unwrap_or_else(|| {
-                proposal
-                    .cooldown_started_at
-                    .map(|t| {
-                        t.as_secs()
-                            .saturating_add(params.governance_cooldown_duration_secs)
-                    })
-                    .unwrap_or(0)
-            }),
-        burst_governance::GovernancePhase::Activation => {
-            proposal.activation_at.map(|t| t.as_secs()).unwrap_or(0)
-        }
-        _ => 0,
-    };
-    Ok(deadline)
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// Telemetry
-// ═══════════════════════════════════════════════════════════════════════
-
-#[derive(Debug, Deserialize)]
-pub struct TelemetryRequest {}
-
-#[derive(Debug, Serialize)]
-pub struct TelemetryResponse {
-    pub network: String,
-    pub faucet_enabled: bool,
-    pub block_count: u64,
-    pub account_count: u64,
-    pub peer_count: u32,
-    pub protocol_version: u16,
-    pub uptime_secs: u64,
-    pub verified_count: u64,
-    pub unverified_count: u64,
-    /// Active tokens currently held; excludes unaccepted pending transfers.
-    pub trst_circulating: String,
-    pub trst_expired_total: String,
-    pub trst_revoked_total: String,
-    pub ntp_offset_ms: Option<i64>,
-}
-
 pub async fn handle_telemetry(
     _params: serde_json::Value,
     state: &RpcState,
@@ -2209,39 +1189,31 @@ pub async fn handle_telemetry(
         .unwrap_or_default()
         .as_secs();
 
-    let accounts = state.account_store.iter_accounts()?;
-    let account_count = accounts.len() as u64;
-    let verified_count = accounts.iter().filter(|a| a.state.is_verified()).count() as u64;
-    let unverified_count = accounts
-        .iter()
-        .filter(|a| a.state == burst_types::WalletState::Unverified)
-        .count() as u64;
-    let block_count = if let Some(ref cache) = state.ledger_cache {
-        cache.block_count()
-    } else {
-        state.block_store.block_count()?
-    };
+    let account_store = state.account_store.clone();
+    let block_store = state.block_store.clone();
+    let ledger_cache = state.ledger_cache.clone();
+    let trst_engine = state.trst_engine.clone();
+    let (account_count, verified_count, unverified_count, block_count, totals) = state
+        .read_executor
+        .run(move || {
+            let summary = telemetry::read(&trst_engine, Timestamp::new(now), |visit| {
+                account_store.visit_accounts(visit)
+            })?;
+            let block_count = if let Some(cache) = ledger_cache {
+                cache.block_count()
+            } else {
+                block_store.block_count()?
+            };
+            Ok((
+                summary.accounts,
+                summary.verified,
+                summary.unverified,
+                block_count,
+                summary.holdings,
+            ))
+        })
+        .await?;
     let peer_count = state.peer_manager.read().await.connected_count() as u32;
-    let mut totals = [0u128; 3];
-    {
-        let trst = state.trst_engine.lock().await;
-        for account in &accounts {
-            if let Some(portfolio) = trst.get_portfolio(&account.address) {
-                for token in &portfolio.tokens {
-                    let index = if token.state == burst_types::TrstState::Revoked {
-                        2
-                    } else if token.is_expired(Timestamp::new(now), trst.expiry_secs) {
-                        1
-                    } else {
-                        0
-                    };
-                    totals[index] = totals[index]
-                        .checked_add(token.amount)
-                        .ok_or_else(|| RpcError::Server("TRST total overflow".into()))?;
-                }
-            }
-        }
-    }
     let clock = state.clock_sync.lock().await;
     let ntp_offset_ms =
         if clock.last_sync_secs > 0 && now.saturating_sub(clock.last_sync_secs) < 600 {
@@ -2264,6 +1236,7 @@ pub async fn handle_telemetry(
         trst_expired_total: totals[1].to_string(),
         trst_revoked_total: totals[2].to_string(),
         ntp_offset_ms,
+        signing_clock: Some(telemetry::signing_clock(state.signing_clock.as_deref())),
     }))
 }
 
@@ -2271,18 +1244,9 @@ pub async fn handle_peers(
     _params: serde_json::Value,
     state: &RpcState,
 ) -> Result<serde_json::Value, RpcError> {
-    let pm = state.peer_manager.read().await;
-    let peers: Vec<String> = pm.iter_connected().map(|(id, _)| id.clone()).collect();
+    let manager = state.peer_manager.read().await;
+    let peers: Vec<String> = manager.iter_connected().map(|(id, _)| id.clone()).collect();
     Ok(serde_json::json!({ "peers": peers, "count": peers.len() }))
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// Verification
-// ═══════════════════════════════════════════════════════════════════════
-
-#[derive(Debug, Deserialize)]
-pub struct VerificationStatusRequest {
-    pub account: String,
 }
 
 pub async fn handle_verifier_assignments(
@@ -2296,15 +1260,21 @@ pub async fn handle_verifier_assignments(
     }
     let request: Request =
         serde_json::from_value(params).map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
-    validate_account(&request.account)?;
+    validate_account_format(&request.account)?;
     if let Some(cursor) = &request.cursor {
-        validate_account(cursor)?;
+        validate_account_format(cursor)?;
     }
     let verifier = WalletAddress::new(request.account);
-    let engine = state.verification_engine.lock().await;
-    let (targets, cursor) =
-        verifier_assignment_page(engine.states(), &verifier, request.cursor.as_deref());
-    Ok(serde_json::json!({"targets": targets, "cursor": cursor}))
+    let engine = state.verification_engine.clone();
+    state
+        .read_executor
+        .run(move || {
+            let snapshot = engine.blocking_lock().activity_snapshot();
+            let (targets, cursor) =
+                verifier_assignment_page(snapshot.states(), &verifier, request.cursor.as_deref());
+            Ok(serde_json::json!({"targets": targets, "cursor": cursor}))
+        })
+        .await
 }
 
 fn verifier_assignment_page<'a>(
@@ -2349,10 +1319,10 @@ mod verifier_assignment_tests {
             .map(|index| VerificationState {
                 target: WalletAddress::new(format!("brst_target{index:02}")),
                 phase: VerificationPhase::Voting,
-                endorsements: Vec::new(),
+                endorsements: Vec::new().into(),
                 endorser_set: Default::default(),
-                selected_verifiers: vec![voter.clone()],
-                votes: Vec::new(),
+                selected_verifiers: vec![voter.clone()].into(),
+                votes: Default::default(),
                 revote_count: 0,
                 excluded_verifiers: Default::default(),
                 started_at: Timestamp::new(1),
@@ -2394,114 +1364,96 @@ mod verifier_assignment_tests {
     }
 }
 
-#[derive(Debug, Serialize)]
-pub struct VerificationStatusResponse {
-    pub account: String,
-    pub status: String,
-    pub phase: Option<String>,
-    pub verified_at: Option<u64>,
-    pub endorser_count: u32,
-    pub endorsement_threshold: u32,
-    pub endorsers: Vec<String>,
-    pub verifier_votes: Vec<serde_json::Value>,
-    pub challenge_active: bool,
-    pub selection_available: bool,
-    pub verifier_opted_in: bool,
-    pub selected_verifiers: Vec<String>,
-    pub selection_context: Option<String>,
-    pub selection_unavailable_reason: Option<&'static str>,
-}
-
 pub async fn handle_verification_status(
     params: serde_json::Value,
     state: &RpcState,
 ) -> Result<serde_json::Value, RpcError> {
     let req: VerificationStatusRequest =
         serde_json::from_value(params).map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
-    validate_account(&req.account)?;
+    validate_account_format(&req.account)?;
 
     let address = WalletAddress::new(req.account.clone());
 
-    // Get endorsements count
-    let endorsements = state
-        .verification_store
-        .get_endorsements(&address)
-        .unwrap_or_default();
-    let mut endorser_count = endorsements.len() as u32;
+    let account_store = state.account_store.clone();
+    let verification_store = state.verification_store.clone();
+    let engine = state.verification_engine.clone();
+    let network = state.network;
+    let endorsement_threshold = state.current_params()?.endorsement_threshold;
+    state.read_executor.run(move || {
+        let endorsements = verification_store.get_endorsements(&address)?;
+        let mut endorser_count = endorsements.len() as u32;
 
-    // Check for active challenge
-    let mut challenge_active = state
-        .verification_store
-        .get_challenge(&address)
-        .ok()
-        .flatten()
-        .is_some();
+        let mut challenge_active = verification_store
+            .get_challenge(&address)?
+            .is_some();
 
-    // Get verification state from account store
-    let (mut status, verified_at, verifier_opted_in) =
-        match state.account_store.get_account(&address) {
-            Ok(account) => {
-                let status = format!("{:?}", account.state).to_lowercase();
-                let verified_at = account.verified_at.map(|t| t.as_secs());
-                (status, verified_at, account.verifier_opted_in_at.is_some())
-            }
-            Err(StoreError::NotFound(_)) => ("unverified".to_string(), None, false),
-            Err(error) => return Err(error.into()),
+        let (mut status, verified_at, verifier_opted_in) =
+            match account_store.get_account(&address) {
+                Ok(account) => {
+                    let status = format!("{:?}", account.state).to_lowercase();
+                    let verified_at = account.verified_at.map(|t| t.as_secs());
+                    (status, verified_at, account.verifier_opted_in_at.is_some())
+                }
+                Err(StoreError::NotFound(_)) => ("unverified".to_string(), None, false),
+                Err(error) => return Err(error.into()),
+            };
+
+        let mut endorsers = Vec::new();
+        let mut verifier_votes = Vec::new();
+        let mut phase = None;
+        let mut selected_verifiers = Vec::new();
+        let (process, live_challenge, selection_context) = {
+            let verification = engine.blocking_lock();
+            (verification.get_state(&address).cloned(), verification.has_active_challenge(&address),
+                verification.selection_context(&address))
         };
-
-    let mut endorsers = Vec::new();
-    let mut verifier_votes = Vec::new();
-    let mut phase = None;
-    let mut selected_verifiers = Vec::new();
-    let verification = state.verification_engine.lock().await;
-    if let Some(process) = verification.get_state(&address) {
-        selected_verifiers = process
-            .selected_verifiers
-            .iter()
-            .map(ToString::to_string)
-            .collect();
-        endorsers = process
-            .endorsements
-            .iter()
-            .map(|e| e.endorser.to_string())
-            .collect();
-        endorser_count = endorsers.len() as u32;
-        challenge_active = verification.has_active_challenge(&address);
-        let process_phase = format!("{:?}", process.phase).to_lowercase();
-        phase = Some(process_phase.clone());
-        if !matches!(status.as_str(), "revoked" | "deactivated")
-            && !challenge_active
-            && !matches!(
-                process.phase,
-                burst_verification::state::VerificationPhase::Verified
-            )
-        {
-            status = process_phase;
+        if let Some(process) = process {
+            selected_verifiers = process
+                .selected_verifiers
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            endorsers = process
+                .endorsements
+                .iter()
+                .map(|e| e.endorser.to_string())
+                .collect();
+            endorser_count = endorsers.len() as u32;
+            challenge_active = live_challenge;
+            let process_phase = format!("{:?}", process.phase).to_lowercase();
+            phase = Some(process_phase.clone());
+            if !matches!(status.as_str(), "revoked" | "deactivated")
+                && !challenge_active
+                && !matches!(
+                    process.phase,
+                    burst_verification::state::VerificationPhase::Verified
+                )
+            {
+                status = process_phase;
+            }
+            verifier_votes = process.votes.iter().map(|v| serde_json::json!({"verifier":v.verifier.to_string(), "vote":format!("{:?}",v.vote), "timestamp":v.timestamp.as_secs()})).collect();
         }
-        verifier_votes = process.votes.iter().map(|v| serde_json::json!({"verifier":v.verifier.to_string(), "vote":format!("{:?}",v.vote), "timestamp":v.timestamp.as_secs()})).collect();
-    }
 
-    Ok(to_value(&VerificationStatusResponse {
-        account: req.account,
-        status,
-        phase,
-        verified_at,
-        endorser_count,
-        endorsement_threshold: state.current_params()?.endorsement_threshold,
-        endorsers,
-        verifier_votes,
-        challenge_active,
-        selection_available: burst_verification::checkpoint_selection_enabled(state.network),
-        verifier_opted_in,
-        selected_verifiers,
-        selection_context: verification
-            .selection_context(&address)
-            .map(|hash| hash.to_string()),
-        selection_unavailable_reason: (!burst_verification::checkpoint_selection_enabled(
-            state.network,
-        ))
-        .then_some("certified_checkpoint_selection_release_gated"),
-    }))
+        Ok(to_value(&VerificationStatusResponse {
+            account: req.account,
+            status,
+            phase,
+            verified_at,
+            endorser_count,
+            endorsement_threshold: endorsement_threshold,
+            endorsers,
+            verifier_votes,
+            challenge_active,
+            selection_available: burst_verification::checkpoint_selection_enabled(network),
+            verifier_opted_in,
+            selected_verifiers,
+            selection_context: selection_context.map(|hash| hash.to_string()),
+            selection_unavailable_reason: (!burst_verification::checkpoint_selection_enabled(
+                network,
+            ))
+            .then(|| "certified_checkpoint_selection_release_gated".to_owned()),
+        }))
+    }).await
 }
 
 pub async fn handle_delegation_info(
@@ -2510,39 +1462,16 @@ pub async fn handle_delegation_info(
 ) -> Result<serde_json::Value, RpcError> {
     let req: AccountInfoRequest =
         serde_json::from_value(params).map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
-    validate_account(&req.account)?;
+    validate_account_format(&req.account)?;
     let address = WalletAddress::new(req.account);
-    let delegation = state.delegation_engine.lock().await;
-    Ok(serde_json::json!({
-        "delegated_to": delegation.get_delegate(&address).map(|a| a.to_string()),
-        "delegated_from": delegation.get_delegators(&address).iter().map(|a| a.to_string()).collect::<Vec<_>>()
-    }))
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// Representatives
-// ═══════════════════════════════════════════════════════════════════════
-
-// ── representatives (list with weight) ──────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct RepresentativesRequest {
-    #[serde(flatten)]
-    pub pagination: PaginationParams,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RepresentativeEntry {
-    pub account: String,
-    pub weight: String,
-    pub delegator_count: u64,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RepresentativesResponse {
-    pub representatives: Vec<RepresentativeEntry>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<String>,
+    let engine = state.delegation_engine.clone();
+    state.read_executor.run(move || {
+        let delegation = engine.blocking_lock().clone();
+        Ok(serde_json::json!({
+            "delegated_to": delegation.get_delegate(&address).map(|a| a.to_string()),
+            "delegated_from": delegation.get_delegators(&address).iter().map(|a| a.to_string()).collect::<Vec<_>>()
+        }))
+    }).await
 }
 
 pub async fn handle_representatives(
@@ -2555,62 +1484,29 @@ pub async fn handle_representatives(
     let count = req.pagination.effective_count();
     let offset = req.pagination.decode_offset();
 
-    let mut reps: Vec<(String, u128, u64)> = {
-        let cache = state.rep_weight_cache.read().await;
-        cache
-            .all_weights()
-            .into_iter()
-            .map(|(addr, weight)| {
-                let people = weight / burst_consensus::rep_weights::WEIGHT_PER_HUMAN;
-                (
-                    addr.to_string(),
-                    weight,
-                    u64::try_from(people).unwrap_or(u64::MAX),
-                )
-            })
-            .collect()
-    };
-    reps.sort_by_key(|r| std::cmp::Reverse(r.1));
-
-    let start = (offset as usize).min(reps.len());
-    let end = (start + count as usize).min(reps.len());
-    let page = &reps[start..end];
-
-    let representatives: Vec<RepresentativeEntry> = page
-        .iter()
-        .map(|(account, weight, delegator_count)| RepresentativeEntry {
-            account: account.clone(),
-            weight: weight.to_string(),
-            delegator_count: *delegator_count,
+    let cache = state.rep_weight_cache.clone();
+    state
+        .read_executor
+        .run(move || {
+            let snapshot = cache.blocking_read().snapshot();
+            let (page, next) = representatives::page(snapshot.weights(), offset, count);
+            let representatives = page
+                .into_iter()
+                .map(|(account, weight)| RepresentativeEntry {
+                    account: account.to_string(),
+                    weight: weight.to_string(),
+                    delegator_count: u64::try_from(
+                        weight / burst_consensus::rep_weights::WEIGHT_PER_HUMAN,
+                    )
+                    .unwrap_or(u64::MAX),
+                })
+                .collect();
+            Ok(to_value(&RepresentativesResponse {
+                representatives,
+                cursor: next.map(pagination::encode_cursor),
+            }))
         })
-        .collect();
-
-    let cursor = if end < reps.len() {
-        Some(pagination::encode_cursor(end as u64))
-    } else {
-        None
-    };
-
-    Ok(to_value(&RepresentativesResponse {
-        representatives,
-        cursor,
-    }))
-}
-
-// ── representatives_online ──────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct RepresentativesOnlineRequest {}
-
-#[derive(Debug, Serialize)]
-pub struct RepresentativeOnlineEntry {
-    pub account: String,
-    pub weight: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RepresentativesOnlineResponse {
-    pub representatives: Vec<RepresentativeOnlineEntry>,
+        .await
 }
 
 pub async fn handle_representatives_online(
@@ -2633,48 +1529,19 @@ pub async fn handle_representatives_online(
     Ok(to_value(&RepresentativesOnlineResponse { representatives }))
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// Convenience transaction endpoints
-// ═══════════════════════════════════════════════════════════════════════
-
-// ── send (TRST transfer) ────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct SendRequest {
-    pub wallet: String,
-    pub source: String,
-    pub destination: String,
-    pub amount: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct SendResponse {
-    pub block_hash: String,
-    pub accepted: bool,
-}
-
 pub async fn handle_send(
     params: serde_json::Value,
     _state: &RpcState,
 ) -> Result<serde_json::Value, RpcError> {
     let req: SendRequest =
         serde_json::from_value(params).map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
-    validate_account(&req.source)?;
-    validate_account(&req.destination)?;
+    validate_account_format(&req.source)?;
+    validate_account_format(&req.destination)?;
     let _amount = validate_positive_amount(&req.amount)?;
 
     Err(RpcError::InvalidRequest(
         "send requires a signed block via 'process' — use wallet_core to build and sign, then submit via 'process'".into(),
     ))
-}
-
-// ── burn (BRN → TRST) ──────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct BurnRequest {
-    pub source: String,
-    pub destination: String,
-    pub amount: String,
 }
 
 pub async fn handle_burn(
@@ -2683,21 +1550,13 @@ pub async fn handle_burn(
 ) -> Result<serde_json::Value, RpcError> {
     let req: BurnRequest =
         serde_json::from_value(params).map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
-    validate_account(&req.source)?;
-    validate_account(&req.destination)?;
+    validate_account_format(&req.source)?;
+    validate_account_format(&req.destination)?;
     let _amount = validate_positive_amount(&req.amount)?;
 
     Err(RpcError::InvalidRequest(
         "burn requires a signed block via 'process' — use wallet_core to build and sign, then submit via 'process'".into(),
     ))
-}
-
-// ── receive ─────────────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct ReceiveRequest {
-    pub account: String,
-    pub block: String,
 }
 
 pub async fn handle_receive(
@@ -2706,29 +1565,15 @@ pub async fn handle_receive(
 ) -> Result<serde_json::Value, RpcError> {
     let req: ReceiveRequest =
         serde_json::from_value(params).map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
-    validate_account(&req.account)?;
+    validate_account_format(&req.account)?;
 
     Err(RpcError::InvalidRequest(
         "receive requires a signed block via 'process' — use wallet_core to build and sign, then submit via 'process'".into(),
     ))
 }
 
-// ── wallet_create ───────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct WalletCreateRequest {
-    #[serde(default)]
-    pub seed: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct WalletCreateResponse {
-    pub address: String,
-    pub public_key: String,
-}
-
-// Private key is NOT returned over RPC for security.
-// Wallet creation with key custody should be done client-side.
+/// Generate an address and public key, discarding the private key.
+/// The optional seed is ignored. Create spendable wallets client-side.
 pub async fn handle_wallet_create(
     params: serde_json::Value,
     _state: &RpcState,
@@ -2736,9 +1581,9 @@ pub async fn handle_wallet_create(
     let _req: WalletCreateRequest =
         serde_json::from_value(params).map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
 
-    let kp = burst_crypto::generate_keypair();
-    let address = burst_crypto::derive_address(&kp.public);
-    let public_key = hex::encode(kp.public.as_bytes());
+    let keys = burst_crypto::generate_keypair();
+    let address = burst_crypto::derive_address(&keys.public);
+    let public_key = hex::encode(keys.public.as_bytes());
 
     Ok(to_value(&WalletCreateResponse {
         address: address.to_string(),
@@ -2746,42 +1591,18 @@ pub async fn handle_wallet_create(
     }))
 }
 
-// ── wallet_info ─────────────────────────────────────────────────────────
-
 pub async fn handle_wallet_info(
     params: serde_json::Value,
     state: &RpcState,
 ) -> Result<serde_json::Value, RpcError> {
-    // Alias for account_info
     handle_account_info(params, state).await
 }
-
-// ── node_info ───────────────────────────────────────────────────────────
 
 pub async fn handle_node_info(
     params: serde_json::Value,
     state: &RpcState,
 ) -> Result<serde_json::Value, RpcError> {
-    // Alias for telemetry
     handle_telemetry(params, state).await
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// Testnet faucet
-// ═══════════════════════════════════════════════════════════════════════
-
-#[derive(Debug, Deserialize)]
-pub struct FaucetRequest {
-    pub account: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct FaucetResponse {
-    pub account: String,
-    pub status: String,
-    pub message: String,
-    pub send_block_hash: String,
-    pub amount: String,
 }
 
 /// Test-only funding through a real burn. Verification is a separate action:
@@ -2796,7 +1617,7 @@ pub async fn handle_faucet(
 
     let req: FaucetRequest =
         serde_json::from_value(params).map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
-    validate_account(&req.account)?;
+    validate_account_format(&req.account)?;
 
     let address = WalletAddress::new(req.account.clone());
     let seed = state.genesis_seed.ok_or_else(|| {
@@ -2809,7 +1630,8 @@ pub async fn handle_faucet(
     let account = state.account_store.get_account(&genesis)?;
     let params = state.current_params()?;
     let amount = 1_000_000_000_000_000_000u128;
-    let spent = prev_spent_brn(state, &account.head)
+    let (previous_spent, signing_grant) = signing_predecessor(state, &account.head)?;
+    let spent = previous_spent
         .checked_add(amount)
         .ok_or_else(|| RpcError::InvalidRequest("BRN odometer overflow".into()))?;
     let link = BlockHash::new(
@@ -2826,7 +1648,6 @@ pub async fn handle_faucet(
         .map_or_else(Vec::new, |wallet| {
             wallet.release_sources(burst_ledger::state_block::MAX_RELEASE_SOURCES)
         });
-    let signing_grant = prev_signing_grant(state, &account.head)?;
     let block = tokio::task::spawn_blocking(move || {
         build_and_sign_block(
             signing_grant,
@@ -2861,32 +1682,10 @@ pub async fn handle_faucet(
     }))
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// Genesis bootstrap endorsement (authority node only)
-// ═══════════════════════════════════════════════════════════════════════
-
-#[derive(Debug, Deserialize)]
-pub struct GenesisEndorseRequest {
-    /// The wallet address to verify during the bootstrap phase.
-    pub account: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct GenesisEndorseResponse {
-    pub target: String,
-    pub block_hash: String,
-    pub genesis: String,
-    pub verified: bool,
-    pub message: String,
-}
-
-/// Author a genesis Endorse block that directly verifies `account` during the
-/// bootstrap phase (whitepaper §Genesis: the creator endorses the first
-/// wallets). Only works on the node holding the genesis seed; the resulting
-/// block, signed by the genesis key, triggers `genesis_verify` when processed.
-///
-/// Call once per wallet, sequentially — each block builds on the genesis
-/// account's previous one, so let each confirm before the next.
+/// Author and confirm a genesis Endorse block during bootstrap. Requires the
+/// genesis seed. Ledger rules determine whether this verifies the target;
+/// the response reports its verification state after confirmation.
+/// Genesis authoring is serialized because each block extends the same account.
 pub async fn handle_genesis_endorse(
     params: serde_json::Value,
     state: &RpcState,
@@ -2907,31 +1706,33 @@ async fn genesis_endorse_locked(
 
     let req: GenesisEndorseRequest =
         serde_json::from_value(params).map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
-    validate_account(&req.account)?;
+    validate_account_format(&req.account)?;
     let target = WalletAddress::new(req.account.clone());
 
-    // Genesis identity from the seed.
-    let kp = burst_crypto::keypair_from_seed(&seed);
-    let genesis_addr = burst_crypto::derive_address(&kp.public);
-    if target == genesis_addr {
+    let keys = burst_crypto::keypair_from_seed(&seed);
+    let genesis_address = burst_crypto::derive_address(&keys.public);
+    if target == genesis_address {
         return Err(RpcError::InvalidRequest(
             "cannot endorse the genesis account itself".into(),
         ));
     }
-    let accounts = state.account_store.iter_accounts()?;
-    let target_head = accounts
-        .iter()
-        .find(|a| a.address == target)
-        .map_or(BlockHash::ZERO, |a| a.head);
-    if accounts
-        .iter()
-        .any(|a| a.address == target && a.state.is_verified())
+    let account = match state.account_store.get_account(&target) {
+        Ok(account) => Some(account),
+        Err(StoreError::NotFound(_)) => None,
+        Err(error) => return Err(error.into()),
+    };
+    let target_head = account
+        .as_ref()
+        .map_or(BlockHash::ZERO, |account| account.head);
+    if account
+        .as_ref()
+        .is_some_and(|account| account.state.is_verified())
     {
         return Err(RpcError::InvalidRequest(
             "target is already verified".into(),
         ));
     }
-    let verified_count = accounts.iter().filter(|a| a.state.is_verified()).count() as u64;
+    let verified_count = state.account_store.verified_account_count()?;
     let phase_bytes = state
         .brn_store
         .get_meta(burst_verification::bootstrap::BootstrapPhase::KEY)?;
@@ -2943,16 +1744,16 @@ async fn genesis_endorse_locked(
         state.current_params()?.bootstrap_exit_threshold,
     )?;
 
-    // Target → link (its public key bytes), same encoding the econ layer decodes.
+    // Endorse encodes the target public key in link.
     let target_pubkey = burst_crypto::decode_address(target.as_str()).ok_or_else(|| {
         RpcError::InvalidRequest(format!("invalid target address: {}", target.as_str()))
     })?;
     let link = BlockHash::new(target_pubkey);
 
-    // Genesis account current state: head (previous) + spent-BRN odometer.
-    let genesis_acct = state
+
+    let genesis_account = state
         .account_store
-        .get_account(&genesis_addr)
+        .get_account(&genesis_address)
         .map_err(|e| {
             RpcError::Server(format!(
                 "genesis account not found (is this the authority node?): {e}"
@@ -2960,32 +1761,31 @@ async fn genesis_endorse_locked(
         })?;
     let previous = state
         .frontier_store
-        .get_frontier(&genesis_addr)
-        .unwrap_or(genesis_acct.head);
-    let prev_spent = prev_spent_brn(state, &previous);
+        .get_frontier(&genesis_address)
+        .unwrap_or(genesis_account.head);
+    let (previous_brn_spent, signing_grant) = signing_predecessor(state, &previous)?;
     let burn_amount = state.current_params()?.endorsement_burn_amount;
 
     // Endorse block: odometer += burn, TRST unchanged; signed by genesis key.
-    let genesis_rep = genesis_acct.representative.clone();
-    let pk_bytes = seed;
-    let work_gen = state.work_generator.clone();
-    let min_diff = state.current_params()?.min_work_difficulty;
-    let (payment_epoch, ph) = (
+    let genesis_rep = genesis_account.representative.clone();
+    let genesis_seed = seed;
+    let work_generator = state.work_generator.clone();
+    let min_work_difficulty = state.current_params()?.min_work_difficulty;
+    let (payment_epoch, params_hash) = (
         state.meta_store.payment_epoch()?,
         state.current_params()?.params_hash(),
     );
-    let genesis_for_build = genesis_addr.clone();
+    let genesis_for_build = genesis_address.clone();
     let release_sources = state
         .brn_engine
         .lock()
         .await
-        .get_wallet(&genesis_addr)
+        .get_wallet(&genesis_address)
         .map_or_else(Vec::new, |wallet| {
             wallet.release_sources(burst_ledger::state_block::MAX_RELEASE_SOURCES)
         });
-    let signing_grant = prev_signing_grant(state, &previous)?;
     let block = tokio::task::spawn_blocking(move || {
-        let pk = burst_crypto::keypair_from_seed(&pk_bytes).private;
+        let private_key = burst_crypto::keypair_from_seed(&genesis_seed).private;
         let mut block = build_and_sign_block(
             signing_grant,
             payment_epoch,
@@ -2994,22 +1794,22 @@ async fn genesis_endorse_locked(
             &genesis_for_build,
             previous,
             &genesis_rep,
-            prev_spent
+            previous_brn_spent
                 .checked_add(burn_amount)
                 .ok_or_else(|| RpcError::Server("BRN spend overflow".into()))?,
-            genesis_acct.trst_balance,
+            genesis_account.trst_balance,
             link,
             TxHash::ZERO,
             TxHash::ZERO,
-            &pk,
-            &work_gen,
-            min_diff,
-            ph,
+            &private_key,
+            &work_generator,
+            min_work_difficulty,
+            params_hash,
             Vec::new(),
         )?;
         block.target_head = target_head;
         block.hash = block.compute_hash();
-        block.signature = burst_crypto::sign_message(block.hash.as_bytes(), &pk);
+        block.signature = burst_crypto::sign_message(block.hash.as_bytes(), &private_key);
         Ok::<_, RpcError>(block)
     })
     .await
@@ -3025,7 +1825,7 @@ async fn genesis_endorse_locked(
     Ok(to_value(&GenesisEndorseResponse {
         target: req.account,
         block_hash: format!("{}", block.hash),
-        genesis: genesis_addr.to_string(),
+        genesis: genesis_address.to_string(),
         verified,
         message: if verified {
             "Bootstrap verification confirmed."
@@ -3036,13 +1836,7 @@ async fn genesis_endorse_locked(
     }))
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// Testnet convenience RPCs (faucet-only)
-//
-// These endpoints construct, sign, and submit blocks server-side so that
-// testnet validation can be performed via simple curl commands without a
-// local wallet. They are gated behind `enable_faucet`.
-// ═══════════════════════════════════════════════════════════════════════
+// Server-side signing helpers require Dev or Test with enable_faucet.
 
 fn test_tools_allowed(network: burst_types::NetworkId, enabled: bool) -> bool {
     enabled
@@ -3057,8 +1851,7 @@ fn require_bootstrap_window(
     verified_count: u64,
     threshold: u32,
 ) -> Result<(), RpcError> {
-    if phase == burst_verification::bootstrap::BootstrapPhase::Complete
-        || verified_count >= u64::from(threshold)
+    if !phase.permits_creator(verified_count, threshold)
     {
         return Err(RpcError::InvalidRequest(
             "genesis bootstrap has ended; use normal endorsements and verifier votes".into(),
@@ -3100,7 +1893,7 @@ fn build_and_sign_block(
     account: &WalletAddress,
     previous: BlockHash,
     representative: &WalletAddress,
-    brn_balance: u128,
+    brn_spent: u128,
     trst_balance: u128,
     link: BlockHash,
     origin: TxHash,
@@ -3124,7 +1917,7 @@ fn build_and_sign_block(
         account: account.clone(),
         previous,
         representative: representative.clone(),
-        brn_balance,
+        brn_spent,
         trst_balance,
         link,
         origin,
@@ -3150,9 +1943,11 @@ fn build_and_sign_block(
     };
     let threshold =
         burst_work::WorkThresholds::with_base(min_work_difficulty).threshold_for(work_kind);
-    let nonce = work_generator
-        .generate(&block.work_root(), threshold)
-        .map_err(|e| RpcError::Server(format!("work generation failed: {e}")))?;
+    let nonce = crate::work_budget::generate_blocking(
+        work_generator,
+        &block.work_root(),
+        threshold,
+    )?;
     block.work = nonce.0;
 
     Ok(block)
@@ -3160,9 +1955,9 @@ fn build_and_sign_block(
 
 // These root-key authoring helpers are test-tools-only, not device wallets.
 // A missing or corrupt predecessor must not silently reset their grant.
-fn prev_signing_grant(state: &RpcState, head: &BlockHash) -> Result<BlockHash, RpcError> {
+fn signing_predecessor(state: &RpcState, head: &BlockHash) -> Result<(u128, BlockHash), RpcError> {
     if head.is_zero() {
-        return Ok(BlockHash::ZERO);
+        return Ok((0, BlockHash::ZERO));
     }
     let bytes = state.block_store.get_block(head)?;
     let block: burst_ledger::StateBlock = bincode::deserialize(&bytes)
@@ -3170,31 +1965,21 @@ fn prev_signing_grant(state: &RpcState, head: &BlockHash) -> Result<BlockHash, R
     if block.hash != *head || block.compute_hash() != *head {
         return Err(RpcError::Server("signing predecessor hash mismatch".into()));
     }
-    Ok(block.active_signing_grant())
+    Ok((block.brn_spent, block.active_signing_grant()))
 }
 
-/// Cumulative-spent BRN (odometer) recorded on the account's head block.
-/// Zero for new accounts — open blocks must not claim BRN (birthright is
-/// computed, never self-reported).
-fn prev_spent_brn(state: &RpcState, head: &BlockHash) -> u128 {
-    if head.is_zero() {
-        return 0;
-    }
-    state
-        .block_store
-        .get_block(head)
-        .ok()
-        .and_then(|b| bincode::deserialize::<burst_ledger::StateBlock>(&b).ok())
-        .map_or(0, |b| b.brn_balance)
-}
-
-/// Submit a block through the block processor and return whether it was accepted.
-fn submit_block(block: &burst_ledger::StateBlock, state: &RpcState) -> Result<bool, RpcError> {
+/// Submit a block and return true for accepted or queued results. Other outcomes
+/// are errors; this does not wait for persistence or consensus confirmation.
+async fn submit_block(
+    block: &burst_ledger::StateBlock,
+    state: &RpcState,
+) -> Result<bool, RpcError> {
     let block_bytes = bincode::serialize(block)
         .map_err(|e| RpcError::Server(format!("block serialization failed: {e}")))?;
     let result = state
         .block_processor
-        .process_block(&block_bytes)
+        .process_block_async(&block_bytes)
+        .await
         .map_err(RpcError::Server)?;
     let accepted = matches!(
         result,
@@ -3213,10 +1998,11 @@ fn submit_block(block: &burst_ledger::StateBlock, state: &RpcState) -> Result<bo
     Ok(true)
 }
 
-/// Queued is not confirmed. Do not advertise test funding as successful until
-/// the same consensus path used by real wallets confirms the exact block.
+/// Submit, then poll the exact block's canonical confirmation position for up to
+/// 15 seconds. A timeout does not cancel the submission; callers must query its
+/// status before retrying.
 async fn submit_and_confirm(block: &StateBlock, state: &RpcState) -> Result<(), RpcError> {
-    submit_block(block, state)?;
+    submit_block(block, state).await?;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
     while tokio::time::Instant::now() < deadline {
         if is_block_confirmed(&block.hash, &block.account, state) {
@@ -3260,21 +2046,6 @@ mod test_tool_policy_tests {
     }
 }
 
-// ── wallet_create_full (testnet-only, returns private key) ──────────
-
-#[derive(Debug, Deserialize)]
-pub struct WalletCreateFullRequest {
-    #[serde(default)]
-    pub seed: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct WalletCreateFullResponse {
-    pub address: String,
-    pub public_key: String,
-    pub private_key: String,
-}
-
 pub async fn handle_wallet_create_full(
     params: serde_json::Value,
     state: &RpcState,
@@ -3284,33 +2055,14 @@ pub async fn handle_wallet_create_full(
     let _req: WalletCreateFullRequest =
         serde_json::from_value(params).map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
 
-    let kp = burst_crypto::generate_keypair();
-    let address = burst_crypto::derive_address(&kp.public);
+    let keys = burst_crypto::generate_keypair();
+    let address = burst_crypto::derive_address(&keys.public);
 
     Ok(to_value(&WalletCreateFullResponse {
         address: address.to_string(),
-        public_key: hex::encode(kp.public.0),
-        private_key: hex::encode(kp.private.0),
+        public_key: hex::encode(keys.public.0),
+        private_key: hex::encode(keys.private.0),
     }))
-}
-
-// ── burn_simple (BRN → TRST) ────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct BurnSimpleRequest {
-    pub private_key: String,
-    pub amount: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct BurnSimpleResponse {
-    pub block_hash: String,
-    pub account: String,
-    pub brn_before: String,
-    pub brn_after: String,
-    pub trst_before: String,
-    pub trst_after: String,
-    pub origin: String,
 }
 
 pub async fn handle_burn_simple(
@@ -3333,7 +2085,7 @@ pub async fn handle_burn_simple(
 
     if !account.state.is_verified() {
         return Err(RpcError::InvalidRequest(
-            "account must be verified to burn BRN (use faucet first)".into(),
+            "account must be verified to burn BRN".into(),
         ));
     }
 
@@ -3356,7 +2108,7 @@ pub async fn handle_burn_simple(
 
     let brn_after = brn_balance - amount; // computed remaining (for the response)
     let trst_before = account.trst_balance;
-    // Two-phase burn (8.4a): the minted TRST goes to pending and must be
+    // A burn creates pending TRST: the minted TRST goes to pending and must be
     // claimed with a Receive block — the burn block itself never changes
     // the burner's TRST balance.
     let trst_after = trst_before;
@@ -3381,8 +2133,8 @@ pub async fn handle_burn_simple(
             .ok_or_else(|| RpcError::InvalidRequest("invalid burn recipient".into()))?,
     );
 
-    let spent_brn = prev_spent_brn(state, &account.head);
-    let pk_bytes = private_key.0;
+    let (spent_brn, signing_grant) = signing_predecessor(state, &account.head)?;
+    let private_key_bytes = private_key.0;
     let release_sources = state
         .brn_engine
         .lock()
@@ -3391,19 +2143,18 @@ pub async fn handle_burn_simple(
         .map_or_else(Vec::new, |wallet| {
             wallet.release_sources(burst_ledger::state_block::MAX_RELEASE_SOURCES)
         });
-    let signing_grant = prev_signing_grant(state, &account.head)?;
     let block = tokio::task::spawn_blocking({
         let address = address.clone();
         let representative = account.representative.clone();
         let previous = account.head;
-        let work_gen = state.work_generator.clone();
-        let min_diff = state.current_params()?.min_work_difficulty;
-        let (payment_epoch, ph) = (
+        let work_generator = state.work_generator.clone();
+        let min_work_difficulty = state.current_params()?.min_work_difficulty;
+        let (payment_epoch, params_hash) = (
             state.meta_store.payment_epoch()?,
             state.current_params()?.params_hash(),
         );
         move || {
-            let pk = burst_types::PrivateKey(pk_bytes);
+            let private_key = burst_types::PrivateKey(private_key_bytes);
             build_and_sign_block(
                 signing_grant,
                 payment_epoch,
@@ -3419,10 +2170,10 @@ pub async fn handle_burn_simple(
                 destination,
                 TxHash::ZERO,
                 tx_hash,
-                &pk,
-                &work_gen,
-                min_diff,
-                ph,
+                &private_key,
+                &work_generator,
+                min_work_difficulty,
+                params_hash,
                 Vec::new(),
             )
         }
@@ -3430,12 +2181,7 @@ pub async fn handle_burn_simple(
     .await
     .map_err(|e| RpcError::Server(format!("block build task failed: {e}")))??;
 
-    // The block processor is the single authoritative writer: it persists the
-    // block (with a consistent per-account height index), updates the account
-    // record, applies the BRN burn, and updates rep weights. The handler must
-    // NOT also write the block/account directly — doing both double-counted
-    // block_count and corrupted the height index, which made the account chain
-    // unservable to the ascending-bootstrap responder.
+    // The processor owns ledger writes, including balances and account indexes.
     submit_and_confirm(&block, state).await?;
 
     Ok(to_value(&BurnSimpleResponse {
@@ -3449,27 +2195,6 @@ pub async fn handle_burn_simple(
     }))
 }
 
-// ── send_simple (TRST transfer) ─────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct SendSimpleRequest {
-    pub private_key: String,
-    pub destination: String,
-    /// Burn or merge origin selected from trst_portfolio, just like a wallet.
-    pub origin: String,
-    pub amount: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct SendSimpleResponse {
-    pub block_hash: String,
-    pub source: String,
-    pub destination: String,
-    pub amount: String,
-    pub trst_before: String,
-    pub trst_after: String,
-}
-
 pub async fn handle_send_simple(
     params: serde_json::Value,
     state: &RpcState,
@@ -3478,7 +2203,7 @@ pub async fn handle_send_simple(
 
     let req: SendSimpleRequest =
         serde_json::from_value(params).map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
-    validate_account(&req.destination)?;
+    validate_account_format(&req.destination)?;
     let amount = validate_positive_amount(&req.amount)?;
     let private_key = parse_private_key(&req.private_key)?;
     let public_key = burst_crypto::public_from_private(&private_key);
@@ -3529,8 +2254,8 @@ pub async fn handle_send_simple(
     }
     let block_type = burst_ledger::BlockType::Send;
 
-    let spent_brn = prev_spent_brn(state, &account.head);
-    let pk_bytes = private_key.0;
+    let (spent_brn, signing_grant) = signing_predecessor(state, &account.head)?;
+    let private_key_bytes = private_key.0;
     let release_sources = state
         .brn_engine
         .lock()
@@ -3539,19 +2264,18 @@ pub async fn handle_send_simple(
         .map_or_else(Vec::new, |wallet| {
             wallet.release_sources(burst_ledger::state_block::MAX_RELEASE_SOURCES)
         });
-    let signing_grant = prev_signing_grant(state, &account.head)?;
     let block = tokio::task::spawn_blocking({
         let address = address.clone();
         let representative = account.representative.clone();
         let previous = account.head;
-        let work_gen = state.work_generator.clone();
-        let min_diff = state.current_params()?.min_work_difficulty;
-        let (payment_epoch, ph) = (
+        let work_generator = state.work_generator.clone();
+        let min_work_difficulty = state.current_params()?.min_work_difficulty;
+        let (payment_epoch, params_hash) = (
             state.meta_store.payment_epoch()?,
             state.current_params()?.params_hash(),
         );
         move || {
-            let pk = burst_types::PrivateKey(pk_bytes);
+            let private_key = burst_types::PrivateKey(private_key_bytes);
             build_and_sign_block(
                 signing_grant,
                 payment_epoch,
@@ -3565,10 +2289,10 @@ pub async fn handle_send_simple(
                 dest_hash,
                 origin,
                 tx_hash,
-                &pk,
-                &work_gen,
-                min_diff,
-                ph,
+                &private_key,
+                &work_generator,
+                min_work_difficulty,
+                params_hash,
                 Vec::new(),
             )
         }
@@ -3587,23 +2311,6 @@ pub async fn handle_send_simple(
         trst_before: trst_before.to_string(),
         trst_after: trst_after.to_string(),
     }))
-}
-
-// ── receive_simple (pocket a pending TRST transfer) ──────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct ReceiveSimpleRequest {
-    pub private_key: String,
-    pub send_block_hash: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ReceiveSimpleResponse {
-    pub block_hash: String,
-    pub account: String,
-    pub amount: String,
-    pub trst_before: String,
-    pub trst_after: String,
 }
 
 pub async fn handle_receive_simple(
@@ -3681,8 +2388,8 @@ pub async fn handle_receive_simple(
         .concat(),
     ));
 
-    let spent_brn = prev_spent_brn(state, &account.head);
-    let pk_bytes = private_key.0;
+    let (spent_brn, signing_grant) = signing_predecessor(state, &account.head)?;
+    let private_key_bytes = private_key.0;
     let release_sources = state
         .brn_engine
         .lock()
@@ -3691,19 +2398,18 @@ pub async fn handle_receive_simple(
         .map_or_else(Vec::new, |wallet| {
             wallet.release_sources(burst_ledger::state_block::MAX_RELEASE_SOURCES)
         });
-    let signing_grant = prev_signing_grant(state, &account.head)?;
     let block = tokio::task::spawn_blocking({
         let address = address.clone();
         let representative = account.representative.clone();
         let previous = account.head;
-        let work_gen = state.work_generator.clone();
-        let min_diff = state.current_params()?.min_work_difficulty;
-        let (payment_epoch, ph) = (
+        let work_generator = state.work_generator.clone();
+        let min_work_difficulty = state.current_params()?.min_work_difficulty;
+        let (payment_epoch, params_hash) = (
             state.meta_store.payment_epoch()?,
             state.current_params()?.params_hash(),
         );
         move || {
-            let pk = burst_types::PrivateKey(pk_bytes);
+            let private_key = burst_types::PrivateKey(private_key_bytes);
             build_and_sign_block(
                 signing_grant,
                 payment_epoch,
@@ -3717,10 +2423,10 @@ pub async fn handle_receive_simple(
                 link,
                 origin,
                 tx_hash,
-                &pk,
-                &work_gen,
-                min_diff,
-                ph,
+                &private_key,
+                &work_generator,
+                min_work_difficulty,
+                params_hash,
                 Vec::new(),
             )
         }
@@ -3739,22 +2445,6 @@ pub async fn handle_receive_simple(
     }))
 }
 
-// ── change_rep_simple (change consensus representative) ──────────────
-
-#[derive(Debug, Deserialize)]
-pub struct ChangeRepSimpleRequest {
-    pub private_key: String,
-    pub new_representative: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ChangeRepSimpleResponse {
-    pub block_hash: String,
-    pub account: String,
-    pub old_representative: String,
-    pub new_representative: String,
-}
-
 pub async fn handle_change_rep_simple(
     params: serde_json::Value,
     state: &RpcState,
@@ -3763,7 +2453,7 @@ pub async fn handle_change_rep_simple(
 
     let req: ChangeRepSimpleRequest =
         serde_json::from_value(params).map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
-    validate_account(&req.new_representative)?;
+    validate_account_format(&req.new_representative)?;
     let private_key = parse_private_key(&req.private_key)?;
     let public_key = burst_crypto::public_from_private(&private_key);
     let address = burst_crypto::derive_address(&public_key);
@@ -3799,8 +2489,8 @@ pub async fn handle_change_rep_simple(
         .concat(),
     ));
 
-    let spent_brn = prev_spent_brn(state, &account.head);
-    let pk_bytes = private_key.0;
+    let (spent_brn, signing_grant) = signing_predecessor(state, &account.head)?;
+    let private_key_bytes = private_key.0;
     let release_sources = state
         .brn_engine
         .lock()
@@ -3809,20 +2499,19 @@ pub async fn handle_change_rep_simple(
         .map_or_else(Vec::new, |wallet| {
             wallet.release_sources(burst_ledger::state_block::MAX_RELEASE_SOURCES)
         });
-    let signing_grant = prev_signing_grant(state, &account.head)?;
     let block = tokio::task::spawn_blocking({
         let address = address.clone();
         let new_rep = new_representative.clone();
         let previous = account.head;
         let trst_balance = account.trst_balance;
-        let work_gen = state.work_generator.clone();
-        let min_diff = state.current_params()?.min_work_difficulty;
-        let (payment_epoch, ph) = (
+        let work_generator = state.work_generator.clone();
+        let min_work_difficulty = state.current_params()?.min_work_difficulty;
+        let (payment_epoch, params_hash) = (
             state.meta_store.payment_epoch()?,
             state.current_params()?.params_hash(),
         );
         move || {
-            let pk = burst_types::PrivateKey(pk_bytes);
+            let private_key = burst_types::PrivateKey(private_key_bytes);
             build_and_sign_block(
                 signing_grant,
                 payment_epoch,
@@ -3836,10 +2525,10 @@ pub async fn handle_change_rep_simple(
                 BlockHash::ZERO,
                 TxHash::ZERO,
                 tx_hash,
-                &pk,
-                &work_gen,
-                min_diff,
-                ph,
+                &private_key,
+                &work_generator,
+                min_work_difficulty,
+                params_hash,
                 Vec::new(),
             )
         }
@@ -3859,25 +2548,8 @@ pub async fn handle_change_rep_simple(
     }))
 }
 
-// ── verifier_opt_in / verifier_opt_out ───────────────────────────────
-// A verified wallet volunteers for (or leaves) the verifier pool. Published
-// on-chain so every node derives the same eligible set (deterministic VRF
-// selection). Not faucet-gated: opting in is a real protocol action needed for
-// decentralized verification after the genesis window. (Server-side signing
-// with the caller's key follows the same convenience pattern as the other
-// build-and-submit RPCs; a client-signed submission path is the mainnet ideal.)
-
-#[derive(Debug, Deserialize)]
-pub struct VerifierOptRequest {
-    pub private_key: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct VerifierOptResponse {
-    pub block_hash: String,
-    pub account: String,
-    pub opted_in: bool,
-}
+// Server-side signing is a test tool. Production wallets sign locally through
+// set_verifier_opt_in_signed and submit the resulting block via process.
 
 pub async fn handle_verifier_opt_in(
     params: serde_json::Value,
@@ -3898,6 +2570,7 @@ async fn verifier_opt(
     state: &RpcState,
     opt_in: bool,
 ) -> Result<serde_json::Value, RpcError> {
+    require_faucet(state)?;
     let req: VerifierOptRequest =
         serde_json::from_value(params).map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
     let private_key = parse_private_key(&req.private_key)?;
@@ -3934,8 +2607,8 @@ async fn verifier_opt(
         .concat(),
     ));
 
-    let spent_brn = prev_spent_brn(state, &account.head);
-    let pk_bytes = private_key.0;
+    let (spent_brn, signing_grant) = signing_predecessor(state, &account.head)?;
+    let private_key_bytes = private_key.0;
     let release_sources = state
         .brn_engine
         .lock()
@@ -3944,20 +2617,19 @@ async fn verifier_opt(
         .map_or_else(Vec::new, |wallet| {
             wallet.release_sources(burst_ledger::state_block::MAX_RELEASE_SOURCES)
         });
-    let signing_grant = prev_signing_grant(state, &account.head)?;
     let block = tokio::task::spawn_blocking({
         let address = address.clone();
         let representative = account.representative.clone();
         let previous = account.head;
         let trst_balance = account.trst_balance;
-        let work_gen = state.work_generator.clone();
-        let min_diff = state.current_params()?.min_work_difficulty;
-        let (payment_epoch, ph) = (
+        let work_generator = state.work_generator.clone();
+        let min_work_difficulty = state.current_params()?.min_work_difficulty;
+        let (payment_epoch, params_hash) = (
             state.meta_store.payment_epoch()?,
             state.current_params()?.params_hash(),
         );
         move || {
-            let pk = burst_types::PrivateKey(pk_bytes);
+            let private_key = burst_types::PrivateKey(private_key_bytes);
             build_and_sign_block(
                 signing_grant,
                 payment_epoch,
@@ -3971,10 +2643,10 @@ async fn verifier_opt(
                 BlockHash::ZERO,
                 TxHash::ZERO,
                 tx_hash,
-                &pk,
-                &work_gen,
-                min_diff,
-                ph,
+                &private_key,
+                &work_generator,
+                min_work_difficulty,
+                params_hash,
                 Vec::new(),
             )
         }
@@ -3982,9 +2654,9 @@ async fn verifier_opt(
     .await
     .map_err(|e| RpcError::Server(format!("block build task failed: {e}")))??;
 
-    // Single-writer: the block processor validates (requires Verified for
-    // opt-in), persists, and sets AccountInfo.verifier_opted_in_at.
-    submit_block(&block, state)?;
+    // The processor validates and persists the choice. Submission may still be
+    // queued, so opted_in in this response is the requested state, not confirmation.
+    submit_block(&block, state).await?;
 
     Ok(to_value(&VerifierOptResponse {
         block_hash: format!("{}", block.hash),
@@ -3993,400 +2665,29 @@ async fn verifier_opt(
     }))
 }
 
-// ── governance_propose_simple (create a parameter change proposal) ────
-
-#[derive(Debug, Deserialize)]
-pub struct GovernanceProposeSimpleRequest {
-    pub private_key: String,
-    pub param: String,
-    pub new_value: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct GovernanceProposeSimpleResponse {
-    pub block_hash: String,
-    pub proposal_hash: String,
-    pub account: String,
-    pub param: String,
-    pub new_value: String,
-}
-
-pub async fn handle_governance_propose_simple(
-    params: serde_json::Value,
-    state: &RpcState,
+/// Advisory review data; block admission checks authority in the ledger writer.
+pub async fn handle_bootstrap_status(
+    _params: serde_json::Value, state: &RpcState,
 ) -> Result<serde_json::Value, RpcError> {
-    require_faucet(state)?;
-
-    let req: GovernanceProposeSimpleRequest =
-        serde_json::from_value(params).map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
-    let private_key = parse_private_key(&req.private_key)?;
-    let public_key = burst_crypto::public_from_private(&private_key);
-    let address = burst_crypto::derive_address(&public_key);
-
-    let account = state
-        .account_store
-        .get_account(&address)
-        .map_err(|e| account_not_found(e, address.as_str()))?;
-
-    if account.head == BlockHash::ZERO {
-        return Err(RpcError::InvalidRequest(
-            "account has no blocks yet — burn BRN first".into(),
-        ));
-    }
-
-    let param = parse_governable_param(&req.param)?;
-    let new_value: u128 = req
-        .new_value
-        .parse()
-        .map_err(|e| RpcError::InvalidRequest(format!("invalid new_value: {e}")))?;
-
-    let content = burst_governance::ProposalContent::ParameterChange {
-        param: param.clone(),
-        new_value,
-    };
-    let link = BlockHash::new(
-        content
-            .encode_compact()
-            .map_err(|e| RpcError::InvalidRequest(e.to_string()))?,
-    );
-
-    let now = Timestamp::now();
-
-    let tx_hash = TxHash::new(burst_crypto::blake2b_256(
-        &[
-            address.as_str().as_bytes(),
-            &now.as_secs().to_be_bytes(),
-            b"governance_propose",
-        ]
-        .concat(),
-    ));
-
-    let spent_brn = prev_spent_brn(state, &account.head);
-    let pk_bytes = private_key.0;
-    let release_sources = state
-        .brn_engine
-        .lock()
-        .await
-        .get_wallet(&address)
-        .map_or_else(Vec::new, |wallet| {
-            wallet.release_sources(burst_ledger::state_block::MAX_RELEASE_SOURCES)
-        });
-    let signing_grant = prev_signing_grant(state, &account.head)?;
-    let block = tokio::task::spawn_blocking({
-        let address = address.clone();
-        let representative = account.representative.clone();
-        let previous = account.head;
-        let trst_balance = account.trst_balance;
-        let work_gen = state.work_generator.clone();
-        let min_diff = state.current_params()?.min_work_difficulty;
-        let (payment_epoch, ph) = (
-            state.meta_store.payment_epoch()?,
-            state.current_params()?.params_hash(),
-        );
-        move || {
-            let pk = burst_types::PrivateKey(pk_bytes);
-            build_and_sign_block(
-                signing_grant,
-                payment_epoch,
-                release_sources,
-                burst_ledger::BlockType::GovernanceProposal,
-                &address,
-                previous,
-                &representative,
-                spent_brn,
-                trst_balance,
-                link,
-                TxHash::ZERO,
-                tx_hash,
-                &pk,
-                &work_gen,
-                min_diff,
-                ph,
-                Vec::new(),
-            )
-        }
-    })
-    .await
-    .map_err(|e| RpcError::Server(format!("block build task failed: {e}")))??;
-
-    submit_and_confirm(&block, state).await?;
-
-    Ok(to_value(&GovernanceProposeSimpleResponse {
-        block_hash: format!("{}", block.hash),
-        proposal_hash: format!("{}", block.hash),
-        account: address.to_string(),
-        param: req.param,
-        new_value: req.new_value,
+    use burst_verification::bootstrap::{BootstrapPhase, MAX_BOOTSTRAP_HUMANS};
+    let creator = state.block_processor.bootstrap_creator().map_err(RpcError::Server)?;
+    let bytes = state.brn_store.get_meta(BootstrapPhase::KEY)?;
+    let phase = BootstrapPhase::decode(bytes.as_deref())
+        .map_err(|error| RpcError::Server(error.to_string()))?;
+    let count = state.account_store.verified_account_count()?;
+    let threshold = state.current_params()?.bootstrap_exit_threshold.min(MAX_BOOTSTRAP_HUMANS);
+    Ok(serde_json::json!({
+        "creator": creator.as_str(), "verified_count": count, "threshold": threshold,
+        "active": phase.permits_creator(count, threshold),
+        "veto_available": phase.permits_creator(count, threshold)
+            && burst_verification::checkpoint_selection_enabled(state.network),
     }))
 }
 
-// ── governance_propose_eviction (evict/reinstate an ORV representative) ──
-//
-// Opens a governance proposal to EVICT a representative from the ORV consensus
-// set (or REINSTATE one). Decided by the same one-verified-human-one-vote
-// process as every proposal — NOT by ORV weight — so a rep that amassed weight
-// cannot vote down its own eviction. On activation the target's `orv_evicted`
-// flag is set/cleared and it contributes zero consensus weight.
-//
-// Encoding: the target's 32-byte pubkey rides in the block `link`; the `origin`
-// field carries the evict/reinstate sentinel (the 32-byte link has no room for
-// both a target and a discriminant). `reason` is a UX/audit field only.
+mod accounts;
+pub use accounts::*;
 
-#[derive(Debug, Deserialize)]
-pub struct GovernanceProposeEvictionRequest {
-    pub private_key: String,
-    /// The representative address to evict or reinstate.
-    pub target: String,
-    /// `true` to evict, `false` to reinstate.
-    pub evict: bool,
-    #[serde(default)]
-    pub reason: String,
-}
+mod governance;
+pub use governance::*;
 
-#[derive(Debug, Serialize)]
-pub struct GovernanceProposeEvictionResponse {
-    pub block_hash: String,
-    pub proposal_hash: String,
-    pub account: String,
-    pub target: String,
-    pub evict: bool,
-}
-
-pub async fn handle_governance_propose_eviction(
-    params: serde_json::Value,
-    state: &RpcState,
-) -> Result<serde_json::Value, RpcError> {
-    require_faucet(state)?;
-
-    let req: GovernanceProposeEvictionRequest =
-        serde_json::from_value(params).map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
-    let private_key = parse_private_key(&req.private_key)?;
-    let public_key = burst_crypto::public_from_private(&private_key);
-    let address = burst_crypto::derive_address(&public_key);
-
-    let account = state
-        .account_store
-        .get_account(&address)
-        .map_err(|e| account_not_found(e, address.as_str()))?;
-    if account.head == BlockHash::ZERO {
-        return Err(RpcError::InvalidRequest(
-            "account has no blocks yet — burn BRN first".into(),
-        ));
-    }
-
-    // Target address → 32-byte pubkey carried in the block `link`.
-    let target_pubkey = burst_crypto::decode_address(&req.target).ok_or_else(|| {
-        RpcError::InvalidRequest(format!("invalid target address: {}", req.target))
-    })?;
-    let link = BlockHash::new(target_pubkey);
-    let origin = TxHash::new(if req.evict {
-        burst_governance::ORV_EVICT_MARKER
-    } else {
-        burst_governance::ORV_REINSTATE_MARKER
-    });
-
-    let now = Timestamp::now();
-
-    let tx_hash = TxHash::new(burst_crypto::blake2b_256(
-        &[
-            address.as_str().as_bytes(),
-            &now.as_secs().to_be_bytes(),
-            b"governance_propose_eviction",
-            req.target.as_bytes(),
-        ]
-        .concat(),
-    ));
-
-    let spent_brn = prev_spent_brn(state, &account.head);
-    let pk_bytes = private_key.0;
-    let release_sources = state
-        .brn_engine
-        .lock()
-        .await
-        .get_wallet(&address)
-        .map_or_else(Vec::new, |wallet| {
-            wallet.release_sources(burst_ledger::state_block::MAX_RELEASE_SOURCES)
-        });
-    let signing_grant = prev_signing_grant(state, &account.head)?;
-    let block = tokio::task::spawn_blocking({
-        let address = address.clone();
-        let representative = account.representative.clone();
-        let previous = account.head;
-        let trst_balance = account.trst_balance;
-        let work_gen = state.work_generator.clone();
-        let min_diff = state.current_params()?.min_work_difficulty;
-        let (payment_epoch, ph) = (
-            state.meta_store.payment_epoch()?,
-            state.current_params()?.params_hash(),
-        );
-        move || {
-            let pk = burst_types::PrivateKey(pk_bytes);
-            build_and_sign_block(
-                signing_grant,
-                payment_epoch,
-                release_sources,
-                burst_ledger::BlockType::GovernanceProposal,
-                &address,
-                previous,
-                &representative,
-                spent_brn,
-                trst_balance,
-                link,
-                origin,
-                tx_hash,
-                &pk,
-                &work_gen,
-                min_diff,
-                ph,
-                Vec::new(),
-            )
-        }
-    })
-    .await
-    .map_err(|e| RpcError::Server(format!("block build task failed: {e}")))??;
-
-    submit_and_confirm(&block, state).await?;
-
-    Ok(to_value(&GovernanceProposeEvictionResponse {
-        block_hash: format!("{}", block.hash),
-        proposal_hash: format!("{}", block.hash),
-        account: address.to_string(),
-        target: req.target,
-        evict: req.evict,
-    }))
-}
-
-// ── governance_vote_simple (vote on a governance proposal) ───────────
-
-#[derive(Debug, Deserialize)]
-pub struct GovernanceVoteSimpleRequest {
-    pub private_key: String,
-    pub proposal_hash: String,
-    pub vote: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct GovernanceVoteSimpleResponse {
-    pub block_hash: String,
-    pub account: String,
-    pub proposal_hash: String,
-    pub vote: String,
-}
-
-pub async fn handle_governance_vote_simple(
-    params: serde_json::Value,
-    state: &RpcState,
-) -> Result<serde_json::Value, RpcError> {
-    require_faucet(state)?;
-
-    let req: GovernanceVoteSimpleRequest =
-        serde_json::from_value(params).map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
-    let private_key = parse_private_key(&req.private_key)?;
-    let public_key = burst_crypto::public_from_private(&private_key);
-    let address = burst_crypto::derive_address(&public_key);
-
-    let account = state
-        .account_store
-        .get_account(&address)
-        .map_err(|e| account_not_found(e, address.as_str()))?;
-
-    if account.head == BlockHash::ZERO {
-        return Err(RpcError::InvalidRequest(
-            "account has no blocks yet — burn BRN first".into(),
-        ));
-    }
-
-    let vote_byte: u8 = match req.vote.to_lowercase().as_str() {
-        "yea" | "yes" | "y" => 0,
-        "nay" | "no" | "n" => 1,
-        "abstain" | "a" => 2,
-        _ => {
-            return Err(RpcError::InvalidRequest(
-                "vote must be 'yea', 'nay', or 'abstain'".into(),
-            ))
-        }
-    };
-
-    let proposal_hash_bytes = hex::decode(&req.proposal_hash)
-        .map_err(|e| RpcError::InvalidRequest(format!("invalid proposal_hash hex: {e}")))?;
-    if proposal_hash_bytes.len() != 32 {
-        return Err(RpcError::InvalidRequest(
-            "proposal_hash must be 32 bytes (64 hex chars)".into(),
-        ));
-    }
-    let mut ph = [0u8; 32];
-    ph.copy_from_slice(&proposal_hash_bytes);
-    let link = BlockHash::new(ph);
-
-    let mut tx_bytes = [0u8; 32];
-    tx_bytes[0] = vote_byte;
-    let transaction = TxHash::new(tx_bytes);
-
-    let spent_brn = prev_spent_brn(state, &account.head);
-    let pk_bytes = private_key.0;
-    let release_sources = state
-        .brn_engine
-        .lock()
-        .await
-        .get_wallet(&address)
-        .map_or_else(Vec::new, |wallet| {
-            wallet.release_sources(burst_ledger::state_block::MAX_RELEASE_SOURCES)
-        });
-    let signing_grant = prev_signing_grant(state, &account.head)?;
-    let block = tokio::task::spawn_blocking({
-        let address = address.clone();
-        let representative = account.representative.clone();
-        let previous = account.head;
-        let trst_balance = account.trst_balance;
-        let work_gen = state.work_generator.clone();
-        let min_diff = state.current_params()?.min_work_difficulty;
-        let (payment_epoch, ph) = (
-            state.meta_store.payment_epoch()?,
-            state.current_params()?.params_hash(),
-        );
-        move || {
-            let pk = burst_types::PrivateKey(pk_bytes);
-            build_and_sign_block(
-                signing_grant,
-                payment_epoch,
-                release_sources,
-                burst_ledger::BlockType::GovernanceVote,
-                &address,
-                previous,
-                &representative,
-                spent_brn,
-                trst_balance,
-                link,
-                TxHash::ZERO,
-                transaction,
-                &pk,
-                &work_gen,
-                min_diff,
-                ph,
-                Vec::new(),
-            )
-        }
-    })
-    .await
-    .map_err(|e| RpcError::Server(format!("block build task failed: {e}")))??;
-
-    submit_and_confirm(&block, state).await?;
-
-    let vote_name = match vote_byte {
-        0 => "yea",
-        1 => "nay",
-        _ => "abstain",
-    };
-
-    Ok(to_value(&GovernanceVoteSimpleResponse {
-        block_hash: format!("{}", block.hash),
-        account: address.to_string(),
-        proposal_hash: req.proposal_hash,
-        vote: vote_name.to_string(),
-    }))
-}
-
-fn parse_governable_param(name: &str) -> Result<burst_governance::GovernableParam, RpcError> {
-    burst_governance::GovernableParam::from_name(name)
-        .map_err(|error| RpcError::InvalidRequest(error.to_string()))
-}
+pub use crate::contracts::node::*;

@@ -1,3 +1,7 @@
+//! Returned stakes remain unavailable for spending until the account acknowledges
+//! complete outcome evidence. These helpers track that hold; they do not verify
+//! certificates, signatures or the settlement that returned the stake.
+
 use std::collections::BTreeSet;
 
 use burst_types::{BlockHash, Timestamp};
@@ -5,15 +9,22 @@ use serde::{Deserialize, Serialize};
 
 use crate::{BrnError, BrnWalletState, RateHistory};
 
+mod pending;
+pub use pending::PendingReleases;
+
+/// Returned amount held pending acknowledgment, keyed by outcome in the wallet.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StakeRelease {
     pub amount: u128,
-    /// Empty only for a gated deadline outcome that lacks agreed evidence.
+    /// Complete dependency set, including the outcome. Empty means no proof is
+    /// available for acknowledgment; the amount still reduces spendable BRN.
     pub sources: Vec<BlockHash>,
     pub completed_at: Timestamp,
 }
 
 impl BrnWalletState {
+    /// Hold a returned amount without claimable evidence. This does not settle
+    /// the stake or change burned/staked totals. Duplicate outcomes are rejected.
     pub fn record_unproven_release(
         &mut self,
         outcome: BlockHash,
@@ -36,6 +47,9 @@ impl BrnWalletState {
         Ok(())
     }
 
+    /// Add returned BRN under an outcome and its complete dependency set.
+    /// Matching repeated calls add amounts, so callers must prevent duplicate
+    /// settlement. Source hashes are normalized and checked, not authenticated.
     pub fn record_release(
         &mut self,
         outcome: BlockHash,
@@ -53,16 +67,24 @@ impl BrnWalletState {
         {
             return Err(BrnError::Other("invalid returned-stake evidence".into()));
         }
-        if let Some(release) = self.pending_releases.get_mut(&outcome) {
+        if let Some(release) = self.pending_releases.get(&outcome) {
             if release.sources != sources || release.completed_at != completed_at {
                 return Err(BrnError::Other(
                     "conflicting returned-stake evidence".into(),
                 ));
             }
-            release.amount = release
+            let amount = release
                 .amount
                 .checked_add(amount)
                 .ok_or(BrnError::Overflow)?;
+            self.pending_releases.insert(
+                outcome,
+                StakeRelease {
+                    amount,
+                    sources,
+                    completed_at,
+                },
+            );
         } else {
             self.pending_releases.insert(
                 outcome,
@@ -76,33 +98,23 @@ impl BrnWalletState {
         Ok(())
     }
 
-    /// Select complete proofs that fit one block. Remaining releases can be
-    /// acknowledged by later blocks without splitting a panel's evidence.
+    /// Greedily select complete proofs in outcome-key order, returning sorted
+    /// unique hashes up to `limit`. Skip proofs that do not fit; this does not
+    /// maximize the number of released stakes. Empty proofs are not selectable.
     pub fn release_sources(&self, limit: usize) -> Vec<BlockHash> {
-        let mut selected = BTreeSet::new();
-        for release in self.pending_releases.values() {
-            let extra = release
-                .sources
-                .iter()
-                .filter(|hash| !selected.contains(*hash))
-                .count();
-            if selected.len() + extra <= limit {
-                selected.extend(release.sources.iter().copied());
-            }
-        }
-        selected.into_iter().collect()
+        select_release_sources(self.pending_releases.selectable_values(), limit)
     }
 
+    /// Whether any nonempty proof has a source absent from the sorted selection.
+    /// False does not imply the absence of held amounts with empty proofs.
     pub fn has_more_releases(&self, selected: &[BlockHash]) -> bool {
-        self.pending_releases.values().any(|release| {
-            !release.sources.is_empty()
-                && release
-                    .sources
-                    .iter()
-                    .any(|hash| selected.binary_search(hash).is_err())
-        })
+        self.pending_releases.has_more_sources(selected)
     }
 
+    /// Remove holds fully covered by sorted, unique, nonzero source hashes.
+    /// Reject early, partial or unrelated evidence before changing the wallet.
+    /// The caller authenticates the signed acknowledgment and dependencies.
+    /// This only removes pending rows; it does not credit BRN a second time.
     pub fn acknowledge_releases(
         &mut self,
         sources: &[BlockHash],
@@ -121,7 +133,17 @@ impl BrnWalletState {
         let supplied: BTreeSet<_> = sources.iter().copied().collect();
         let mut covered = BTreeSet::new();
         let mut outcomes = Vec::new();
-        for (outcome, release) in &self.pending_releases {
+        // Every valid complete proof names its outcome, which is already a map key.
+        // Raw malformed rows without that invariant retain the legacy scan scope.
+        let candidates: BTreeSet<_> = sources
+            .iter()
+            .copied()
+            .chain(self.pending_releases.unindexed_outcomes())
+            .collect();
+        for outcome in candidates {
+            let Some(release) = self.pending_releases.get(&outcome) else {
+                continue;
+            };
             if !release.sources.is_empty()
                 && release.sources.iter().all(|hash| supplied.contains(hash))
             {
@@ -129,7 +151,7 @@ impl BrnWalletState {
                     return Err(BrnError::Other("stake release predates its outcome".into()));
                 }
                 covered.extend(release.sources.iter().copied());
-                outcomes.push(*outcome);
+                outcomes.push(outcome);
             }
         }
         if covered != supplied {
@@ -143,17 +165,39 @@ impl BrnWalletState {
         Ok(())
     }
 
-    /// Without a signed release dependency, admission must be identical before
-    /// and after an unrelated account's outcome arrives.
+    /// Subtract all unacknowledged returns, including those without proofs, from
+    /// available BRN. Return None on arithmetic failure. This keeps returned
+    /// stakes unavailable until the account records their release dependencies.
     pub fn spendable_balance_checked(&self, rates: &RateHistory, now: Timestamp) -> Option<u128> {
-        let unacknowledged = self
-            .pending_releases
-            .values()
-            .try_fold(0u128, |total, release| total.checked_add(release.amount))?;
+        let unacknowledged = self.pending_releases.total_checked()?;
         self.available_balance_checked(rates, now)?
             .checked_sub(unacknowledged)
     }
 }
+
+fn select_release_sources<'a>(
+    mut releases: impl Iterator<Item = &'a StakeRelease>,
+    limit: usize,
+) -> Vec<BlockHash> {
+    let mut selected = BTreeSet::new();
+    while selected.len() < limit {
+        let Some(release) = releases.next() else { break };
+        let remaining = limit - selected.len();
+        // Preserve whole-proof greedy selection. Once this proof exceeds the
+        // remaining space, its unseen sources cannot make it fit again.
+        let extra = release.sources.iter()
+            .filter(|hash| !selected.contains(*hash))
+            .take(remaining.saturating_add(1))
+            .count();
+        if extra <= remaining {
+            selected.extend(release.sources.iter().copied());
+        }
+    }
+    selected.into_iter().collect()
+}
+
+#[cfg(test)]
+mod indexed_tests;
 
 #[cfg(test)]
 mod tests {

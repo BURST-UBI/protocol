@@ -1,11 +1,10 @@
 //! Bootstrap protocol — ascending sync of historical blocks from peers.
 //!
-//! When a new node joins the network it has no ledger data. It catches up with
-//! a single ascending-pull protocol ([`BootstrapMessage`]): the [`Bootstrapper`]
-//! client keeps a priority queue of accounts to sync, discovers them via
-//! `Frontiers` pulls, issues parallel id-correlated `Blocks` pulls, advances
-//! each account's frontier as verified blocks arrive, and requeues on timeout.
-//! [`BootstrapServer`] serves each request from the ledger via injected closures.
+//! [`Bootstrapper`] discovers accounts through frontier pages and requests
+//! ascending block batches over existing peer connections. Responses are matched
+//! to their requests and checked for chain continuity before admission. Cursors
+//! advance from locally persisted state, not merely from received bytes.
+//! [`BootstrapServer`] can serve only the history available to its data providers.
 //!
 //! The protocol uses a request/response pattern over the existing P2P TCP
 //! connections with serialized messages.
@@ -13,7 +12,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use burst_types::{BlockHash, WalletAddress};
-use serde::{Deserialize, Serialize};
 
 pub(crate) fn stored_blocks_after(
     store: &burst_store_lmdb::LmdbStore,
@@ -48,74 +46,8 @@ pub(crate) fn stored_blocks_after(
 }
 
 /// Bootstrap protocol messages — the ascending-bootstrap request/response pair.
-///
-/// A single typed, id-correlated pull protocol (blocks / account-info /
-/// frontiers) replaces the old serial Frontier→BulkPull→Block scheme entirely.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum BootstrapMessage {
-    /// Ascending-bootstrap pull request: parallel, id-correlated, typed
-    /// (blocks / account-info / frontiers).
-    AscPullReq {
-        /// Correlates the [`BootstrapMessage::AscPullAck`] to this request.
-        id: u64,
-        /// What to pull.
-        payload: AscPullReqPayload,
-    },
-    /// Ascending-bootstrap pull response, echoing the request `id`.
-    AscPullAck {
-        /// Echoes the request id.
-        id: u64,
-        /// The pulled data.
-        payload: AscPullAckPayload,
-    },
-}
 
-/// What an [`BootstrapMessage::AscPullReq`] asks for.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum AscPullReqPayload {
-    /// Up to `count` blocks for `account`, starting at the block AFTER `start`
-    /// (`start` = the requester's current frontier for the account, or
-    /// `BlockHash::ZERO` to start from the open block). Returns a contiguous
-    /// ascending run.
-    Blocks {
-        /// Account whose chain to pull.
-        account: WalletAddress,
-        /// Requester's current frontier (pull begins at its successor).
-        start: BlockHash,
-        /// Max blocks to return (server also caps at `ASC_PULL_MAX_BLOCKS`).
-        count: u16,
-    },
-    /// The account's current frontier head and block count.
-    AccountInfo {
-        /// Account to describe.
-        account: WalletAddress,
-    },
-    /// A page of up to `count` account frontiers from `start_account`.
-    Frontiers {
-        /// First account to return (inclusive).
-        start_account: WalletAddress,
-        /// Max frontier entries to return.
-        count: u16,
-    },
-}
-
-/// The data returned in an [`BootstrapMessage::AscPullAck`].
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum AscPullAckPayload {
-    /// A contiguous, ascending run of serialized blocks (bincode-encoded).
-    Blocks(Vec<Vec<u8>>),
-    /// Account frontier head + height (`ZERO`/`0` if the account is unknown).
-    AccountInfo {
-        /// The account described.
-        account: WalletAddress,
-        /// Its frontier head (`BlockHash::ZERO` if unknown).
-        head: BlockHash,
-        /// Its block count (`0` if unknown).
-        block_count: u64,
-    },
-    /// A page of `(account, head)` frontiers.
-    Frontiers(Vec<(WalletAddress, BlockHash)>),
-}
+pub use burst_messages::bootstrap::{AscPullAckPayload, AscPullReqPayload, BootstrapMessage};
 
 /// Bootstrap server — responds to bootstrap requests from peers.
 ///
@@ -125,7 +57,7 @@ pub struct BootstrapServer;
 impl BootstrapServer {
     /// Serve an ascending-bootstrap pull request, producing the matching
     /// [`BootstrapMessage::AscPullAck`] (echoing `id`). Ledger access is
-    /// injected via closures so this stays pure/testable:
+    /// supplied through these callbacks:
     /// - `blocks_after(account, start, count)` → up to `count` serialized
     ///   blocks for `account`, contiguous & ascending, beginning at the
     ///   successor of `start` (or the open block if `start` is ZERO).
@@ -149,13 +81,13 @@ impl BootstrapServer {
                 start,
                 count,
             } => {
-                let c = (*count).min(ASC_PULL_MAX_BLOCKS);
+                let count = (*count).min(ASC_PULL_MAX_BLOCKS);
                 // Reserve the Protobuf envelope, nested message lengths and
                 // maximum-width request ID. Each block reserves its tag/length.
                 let mut remaining = burst_types::MAX_P2P_MESSAGE_BYTES - 32;
-                let blocks = blocks_after(account, start, c)
+                let blocks = blocks_after(account, start, count)
                     .into_iter()
-                    .take(c as usize)
+                    .take(count as usize)
                     .take_while(|bytes| {
                         let Some(size) = bytes.len().checked_add(8) else {
                             return false;
@@ -181,8 +113,8 @@ impl BootstrapServer {
                 start_account,
                 count,
             } => {
-                let c = (*count).min(ASC_PULL_MAX_FRONTIERS);
-                AscPullAckPayload::Frontiers(frontiers_from(start_account, c))
+                let count = (*count).min(ASC_PULL_MAX_FRONTIERS);
+                AscPullAckPayload::Frontiers(frontiers_from(start_account, count))
             }
         };
         BootstrapMessage::AscPullAck { id, payload }
@@ -241,19 +173,17 @@ struct RunningQuery {
 /// accounts we're behind on, from peers in parallel, with id-correlated
 /// requests and per-query timeouts.
 ///
-/// The ascending model (vs one serial frontier+bulk-pull): keep a priority
-/// queue of accounts to sync, issue up to `max_in_flight` concurrent
-/// `AscPullReq::Blocks`, advance each account's frontier as verified blocks
-/// arrive, and re-queue accounts that still have more to pull. Timed-out
-/// queries are re-queued so a slow/dead peer can't stall progress.
+/// Keep a round-robin queue of accounts and issue at most `max_in_flight`
+/// concurrent block requests. Refresh frontiers from persisted local blocks;
+/// requeue unfinished accounts and timed-out requests.
 pub struct Bootstrapper {
-    /// Accounts waiting to be pulled (round-robin priority).
+    /// Accounts waiting to be pulled in round-robin order.
     queue: VecDeque<WalletAddress>,
     /// Membership mirror of `queue` to avoid duplicate enqueues.
     queued: HashSet<WalletAddress>,
     /// Our current frontier per account — where the next pull starts.
     frontier: HashMap<WalletAddress, BlockHash>,
-    /// In-flight queries: `id -> (account, sent_at_secs)`.
+    /// In-flight queries keyed by request ID.
     in_flight: HashMap<u64, RunningQuery>,
     next_id: u64,
     max_in_flight: usize,
@@ -347,7 +277,7 @@ impl Bootstrapper {
         }
     }
 
-    /// Re-queue queries that exceeded the timeout (peer didn't answer).
+    /// Requeue expired queries, including replies that made no persisted progress.
     pub fn tick_timeouts(&mut self, now_secs: u64) {
         let timed_out: Vec<u64> = self
             .in_flight
@@ -457,7 +387,8 @@ impl Bootstrapper {
         self.queue.len()
     }
 
-    /// Whether there is no work left (nothing queued or in-flight).
+    /// Whether this coordinator has no queued or in-flight requests.
+    /// Does not prove that peer discovery found every account or history item.
     pub fn is_idle(&self) -> bool {
         self.queue.is_empty() && self.in_flight.is_empty()
     }
@@ -485,7 +416,6 @@ mod tests {
         )
     }
 
-    // ── Ascending-bootstrap responder tests ────────────────────────────
 
     fn encoded_block(
         account: WalletAddress,
@@ -500,7 +430,7 @@ mod tests {
             account: account.clone(),
             previous,
             representative: account,
-            brn_balance: 0,
+            brn_spent: 0,
             trst_balance: 0,
             link: BlockHash::ZERO,
             origin: burst_types::TxHash::ZERO,
@@ -672,48 +602,48 @@ mod tests {
 
     #[test]
     fn bootstrap_binds_response_to_peer_query_account_and_start() {
-        let mut bs = Bootstrapper::new(1, 20, 1);
+        let mut bootstrapper = Bootstrapper::new(1, 20, 1);
         let account = test_account_1();
-        bs.enqueue(account.clone(), BlockHash::ZERO);
-        let id = bs.next_requests(1)[0].0;
-        bs.bind_peer(id, "peer-a");
+        bootstrapper.enqueue(account.clone(), BlockHash::ZERO);
+        let id = bootstrapper.next_requests(1)[0].0;
+        bootstrapper.bind_peer(id, "peer-a");
         let (_, valid) = encoded_block(account.clone(), BlockHash::ZERO);
-        assert!(bs
+        assert!(bootstrapper
             .receive_blocks(id + 1, "peer-a", std::slice::from_ref(&valid))
             .is_err());
-        assert!(bs
+        assert!(bootstrapper
             .receive_blocks(id, "peer-b", std::slice::from_ref(&valid))
             .is_err());
         let (_, wrong_account) = encoded_block(test_account_2(), BlockHash::ZERO);
-        assert!(bs.receive_blocks(id, "peer-a", &[wrong_account]).is_err());
+        assert!(bootstrapper.receive_blocks(id, "peer-a", &[wrong_account]).is_err());
         let (_, wrong_start) = encoded_block(account, BlockHash::new([9; 32]));
-        assert!(bs.receive_blocks(id, "peer-a", &[wrong_start]).is_err());
-        assert!(bs
+        assert!(bootstrapper.receive_blocks(id, "peer-a", &[wrong_start]).is_err());
+        assert!(bootstrapper
             .receive_blocks(id, "peer-a", &[valid.clone(), valid.clone()])
             .is_err());
-        assert!(bs.receive_blocks(id, "peer-a", &[vec![0]]).is_err());
+        assert!(bootstrapper.receive_blocks(id, "peer-a", &[vec![0]]).is_err());
         assert_eq!(
-            bs.receive_blocks(id, "peer-a", std::slice::from_ref(&valid))
+            bootstrapper.receive_blocks(id, "peer-a", std::slice::from_ref(&valid))
                 .unwrap()
                 .len(),
             1
         );
-        assert!(bs.receive_blocks(id, "peer-a", &[valid]).is_err());
+        assert!(bootstrapper.receive_blocks(id, "peer-a", &[valid]).is_err());
     }
 
     #[test]
     fn bootstrap_cursor_only_advances_after_persistence() {
-        let mut bs = Bootstrapper::new(1, 20, 1);
+        let mut bootstrapper = Bootstrapper::new(1, 20, 1);
         let account = test_account_1();
         let (block, bytes) = encoded_block(account.clone(), BlockHash::ZERO);
-        bs.enqueue(account, BlockHash::ZERO);
-        let id = bs.next_requests(1)[0].0;
-        bs.bind_peer(id, "peer");
-        bs.receive_blocks(id, "peer", &[bytes]).unwrap();
-        bs.observe_persisted(|_| BlockHash::ZERO, |_| false);
-        assert!(bs.next_requests(2).is_empty());
-        bs.observe_persisted(|_| block.hash, |hash| *hash == block.hash);
-        let next = bs.next_requests(3);
+        bootstrapper.enqueue(account, BlockHash::ZERO);
+        let id = bootstrapper.next_requests(1)[0].0;
+        bootstrapper.bind_peer(id, "peer");
+        bootstrapper.receive_blocks(id, "peer", &[bytes]).unwrap();
+        bootstrapper.observe_persisted(|_| BlockHash::ZERO, |_| false);
+        assert!(bootstrapper.next_requests(2).is_empty());
+        bootstrapper.observe_persisted(|_| block.hash, |hash| *hash == block.hash);
+        let next = bootstrapper.next_requests(3);
         assert!(
             matches!(&next[0].1, AscPullReqPayload::Blocks { start, .. } if *start == block.hash)
         );
@@ -721,43 +651,43 @@ mod tests {
 
     #[test]
     fn partial_persistence_retries_the_remainder_without_waiting_for_timeout() {
-        let mut bs = Bootstrapper::new(1, 20, 128);
+        let mut bootstrapper = Bootstrapper::new(1, 20, 128);
         let account = test_account_1();
         let (first, first_bytes) = encoded_block(account.clone(), BlockHash::ZERO);
         let (second, second_bytes) = encoded_block(account.clone(), first.hash);
-        bs.enqueue(account, BlockHash::ZERO);
-        let id = bs.next_requests(1)[0].0;
-        bs.bind_peer(id, "peer");
-        bs.receive_blocks(id, "peer", &[first_bytes, second_bytes.clone()])
+        bootstrapper.enqueue(account, BlockHash::ZERO);
+        let id = bootstrapper.next_requests(1)[0].0;
+        bootstrapper.bind_peer(id, "peer");
+        bootstrapper.receive_blocks(id, "peer", &[first_bytes, second_bytes.clone()])
             .unwrap();
-        bs.observe_persisted(|_| first.hash, |hash| *hash == first.hash);
-        let next = bs.next_requests(2);
+        bootstrapper.observe_persisted(|_| first.hash, |hash| *hash == first.hash);
+        let next = bootstrapper.next_requests(2);
         assert_eq!(next.len(), 1);
         assert!(
             matches!(&next[0].1, AscPullReqPayload::Blocks { start, .. } if *start == first.hash)
         );
         let id = next[0].0;
-        bs.bind_peer(id, "peer");
-        bs.receive_blocks(id, "peer", &[second_bytes]).unwrap();
+        bootstrapper.bind_peer(id, "peer");
+        bootstrapper.receive_blocks(id, "peer", &[second_bytes]).unwrap();
         // No further persisted progress: retain the bounded timeout, not a spin.
-        bs.observe_persisted(|_| first.hash, |hash| *hash == first.hash);
-        assert!(bs.next_requests(3).is_empty());
-        bs.observe_persisted(|_| second.hash, |_| true);
-        assert!(bs.is_idle());
+        bootstrapper.observe_persisted(|_| first.hash, |hash| *hash == first.hash);
+        assert!(bootstrapper.next_requests(3).is_empty());
+        bootstrapper.observe_persisted(|_| second.hash, |_| true);
+        assert!(bootstrapper.is_idle());
     }
 
     #[test]
     fn rejected_or_dropped_bootstrap_data_retries_without_skipping() {
-        let mut bs = Bootstrapper::new(1, 20, 1);
+        let mut bootstrapper = Bootstrapper::new(1, 20, 1);
         let account = test_account_1();
         let (_, bytes) = encoded_block(account.clone(), BlockHash::ZERO);
-        bs.enqueue(account, BlockHash::ZERO);
-        let id = bs.next_requests(1)[0].0;
-        bs.bind_peer(id, "peer");
-        bs.receive_blocks(id, "peer", &[bytes]).unwrap();
-        bs.observe_persisted(|_| BlockHash::ZERO, |_| false);
-        bs.tick_timeouts(21);
-        let next = bs.next_requests(22);
+        bootstrapper.enqueue(account, BlockHash::ZERO);
+        let id = bootstrapper.next_requests(1)[0].0;
+        bootstrapper.bind_peer(id, "peer");
+        bootstrapper.receive_blocks(id, "peer", &[bytes]).unwrap();
+        bootstrapper.observe_persisted(|_| BlockHash::ZERO, |_| false);
+        bootstrapper.tick_timeouts(21);
+        let next = bootstrapper.next_requests(22);
         assert!(matches!(&next[0].1, AscPullReqPayload::Blocks { start, .. } if start.is_zero()));
     }
 
@@ -877,20 +807,19 @@ mod tests {
         }
     }
 
-    // ── Bootstrapper (client) tests ─────────────────────────────────────
 
     #[test]
     fn bootstrapper_respects_in_flight_budget_and_correlates() {
-        let mut bs = Bootstrapper::new(2, 30, 128);
-        bs.enqueue(test_account_1(), BlockHash::ZERO);
-        bs.enqueue(test_account_2(), BlockHash::new([9; 32]));
-        bs.enqueue(test_account_3(), BlockHash::ZERO);
+        let mut bootstrapper = Bootstrapper::new(2, 30, 128);
+        bootstrapper.enqueue(test_account_1(), BlockHash::ZERO);
+        bootstrapper.enqueue(test_account_2(), BlockHash::new([9; 32]));
+        bootstrapper.enqueue(test_account_3(), BlockHash::ZERO);
 
         // Only 2 may be in flight at once.
-        let reqs = bs.next_requests(100);
+        let reqs = bootstrapper.next_requests(100);
         assert_eq!(reqs.len(), 2);
-        assert_eq!(bs.in_flight_count(), 2);
-        assert_eq!(bs.queued_count(), 1);
+        assert_eq!(bootstrapper.in_flight_count(), 2);
+        assert_eq!(bootstrapper.queued_count(), 1);
         // ids are distinct; the start frontier is threaded through.
         assert_ne!(reqs[0].0, reqs[1].0);
         match &reqs[1].1 {
@@ -901,23 +830,23 @@ mod tests {
             other => panic!("expected Blocks req, got {:?}", other),
         }
 
-        // No more slots until an ack frees one.
-        assert!(bs.next_requests(100).is_empty());
+        // No more slots until persisted progress or a timeout frees one.
+        assert!(bootstrapper.next_requests(100).is_empty());
     }
 
     #[test]
     fn bootstrapper_advances_frontier_and_requeues_on_full_batch() {
-        let mut bs = Bootstrapper::new(4, 30, 128);
-        bs.enqueue(test_account_1(), BlockHash::ZERO);
-        let reqs = bs.next_requests(100);
+        let mut bootstrapper = Bootstrapper::new(4, 30, 128);
+        bootstrapper.enqueue(test_account_1(), BlockHash::ZERO);
+        let reqs = bootstrapper.next_requests(100);
         let id = reqs[0].0;
 
-        // Full batch → frontier advances AND the account is re-queued for more.
-        bs.on_blocks_ack(id, Some(BlockHash::new([5; 32])), true);
-        assert_eq!(bs.in_flight_count(), 0);
-        assert_eq!(bs.queued_count(), 1);
+        // Report a persisted full batch: advance the cursor and requeue the account.
+        bootstrapper.on_blocks_ack(id, Some(BlockHash::new([5; 32])), true);
+        assert_eq!(bootstrapper.in_flight_count(), 0);
+        assert_eq!(bootstrapper.queued_count(), 1);
         // Next request for it starts from the advanced frontier.
-        let reqs2 = bs.next_requests(101);
+        let reqs2 = bootstrapper.next_requests(101);
         match &reqs2[0].1 {
             AscPullReqPayload::Blocks { start, .. } => {
                 assert_eq!(*start, BlockHash::new([5; 32]))
@@ -927,24 +856,24 @@ mod tests {
 
         // A non-full batch (end of chain) → done, no re-queue.
         let id2 = reqs2[0].0;
-        bs.on_blocks_ack(id2, Some(BlockHash::new([6; 32])), false);
-        assert!(bs.is_idle());
+        bootstrapper.on_blocks_ack(id2, Some(BlockHash::new([6; 32])), false);
+        assert!(bootstrapper.is_idle());
     }
 
     #[test]
     fn bootstrapper_requeues_timed_out_queries() {
-        let mut bs = Bootstrapper::new(4, 30, 128);
-        bs.enqueue(test_account_1(), BlockHash::ZERO);
-        let _ = bs.next_requests(100);
-        assert_eq!(bs.in_flight_count(), 1);
+        let mut bootstrapper = Bootstrapper::new(4, 30, 128);
+        bootstrapper.enqueue(test_account_1(), BlockHash::ZERO);
+        let _ = bootstrapper.next_requests(100);
+        assert_eq!(bootstrapper.in_flight_count(), 1);
 
         // Not yet timed out.
-        bs.tick_timeouts(120);
-        assert_eq!(bs.in_flight_count(), 1);
+        bootstrapper.tick_timeouts(120);
+        assert_eq!(bootstrapper.in_flight_count(), 1);
 
         // Past the 30s timeout → re-queued.
-        bs.tick_timeouts(131);
-        assert_eq!(bs.in_flight_count(), 0);
-        assert_eq!(bs.queued_count(), 1);
+        bootstrapper.tick_timeouts(131);
+        assert_eq!(bootstrapper.in_flight_count(), 0);
+        assert_eq!(bootstrapper.queued_count(), 1);
     }
 }

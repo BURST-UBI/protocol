@@ -5,6 +5,9 @@ use burst_store_lmdb::write_batch::checkpoint_projection::CheckpointBlock;
 use std::borrow::Cow;
 
 impl CompactCutCoverage {
+    /// Fetch bodies in hash order and check their format, hash and account
+    /// against covered positions. The 64 MiB total is checked after each fetch;
+    /// the caller must bound individual fetches and abort installation on error.
     pub(in crate::confirmed_replay::snapshot) fn installation_blocks<'a>(
         &'a self,
         mut get: impl FnMut(&BlockHash) -> Result<Vec<u8>, StoreError> + 'a,

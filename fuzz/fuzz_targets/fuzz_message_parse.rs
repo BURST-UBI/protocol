@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use burst_node::wire_message::WireMessage;
+use burst_messages::WireMessage;
 
 fuzz_target!(|data: &[u8]| {
     let _ = WireMessage::decode_framed(data);

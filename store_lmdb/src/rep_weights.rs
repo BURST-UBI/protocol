@@ -61,7 +61,8 @@ impl RepWeightStore for LmdbRepWeightStore {
         Ok(())
     }
 
-    fn iter_rep_weights(&self) -> Result<Vec<(WalletAddress, u128)>, StoreError> {
+    /// Invalid weight lengths are skipped; invalid UTF-8 keys return an error.
+    fn all_rep_weights(&self) -> Result<Vec<(WalletAddress, u128)>, StoreError> {
         let rtxn = self.env.read_txn().map_err(LmdbError::from)?;
         let iter = self.rep_weights_db.iter(&rtxn).map_err(LmdbError::from)?;
         let mut results = Vec::new();
@@ -90,6 +91,7 @@ impl RepWeightStore for LmdbRepWeightStore {
         Ok(())
     }
 
+    /// Skips malformed rows. The limit bounds returned samples, not rows read.
     fn get_online_weight_samples(&self, limit: usize) -> Result<Vec<(u64, u128)>, StoreError> {
         let rtxn = self.env.read_txn().map_err(LmdbError::from)?;
         let iter = self
@@ -122,7 +124,7 @@ mod tests {
 
     fn open_test_env() -> crate::LmdbEnvironment {
         let dir = tempfile::tempdir().unwrap();
-        crate::LmdbEnvironment::open(dir.path(), 30, 1 << 20).unwrap()
+        crate::LmdbEnvironment::open(dir.path(), crate::REQUIRED_DATABASES, 1 << 20).unwrap()
     }
 
     #[test]
@@ -151,7 +153,7 @@ mod tests {
     }
 
     #[test]
-    fn iter_rep_weights_returns_all() {
+    fn all_rep_weights_returns_every_representative() {
         let env = open_test_env();
         let store = env.rep_weight_store();
 
@@ -165,7 +167,7 @@ mod tests {
             .put_rep_weight(&WalletAddress::new("brst_carol"), 3000)
             .unwrap();
 
-        let all = store.iter_rep_weights().unwrap();
+        let all = store.all_rep_weights().unwrap();
         assert_eq!(all.len(), 3);
 
         let total: u128 = all.iter().map(|(_, w)| w).sum();
@@ -194,7 +196,6 @@ mod tests {
 
         let samples = store.get_online_weight_samples(10).unwrap();
         assert_eq!(samples.len(), 3);
-        // Newest first (descending timestamp)
         assert_eq!(samples[0], (1040, 700_000));
         assert_eq!(samples[1], (1020, 600_000));
         assert_eq!(samples[2], (1000, 500_000));
@@ -227,7 +228,7 @@ mod tests {
                 .unwrap(),
             None
         );
-        assert!(store.iter_rep_weights().unwrap().is_empty());
+        assert!(store.all_rep_weights().unwrap().is_empty());
         assert!(store.get_online_weight_samples(10).unwrap().is_empty());
     }
 }

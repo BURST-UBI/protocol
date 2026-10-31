@@ -1,5 +1,7 @@
-//! Real-clock certified onboarding on the disposable private Test identity.
-//! Bootstrap helpers use explicit genesis endorsements; the subject never does.
+//! Certified onboarding with real elapsed time and a governed fixture BRN rate.
+//! Bootstrap helpers use genesis endorsements on the disposable private Test ledger;
+//! the subject uses paid endorsements and selected-verifier votes.
+//! `continue-selection` resumes saved ledger state; it does not test fresh onboarding.
 use burst_transactions::Transaction;
 use burst_types::{Timestamp, TxHash, BRN_UNIT};
 use burst_wallet_core::{signed_client::parse_hash, transaction_builder::*, NodeClient, Wallet};

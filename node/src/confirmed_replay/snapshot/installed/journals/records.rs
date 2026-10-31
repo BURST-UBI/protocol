@@ -10,10 +10,29 @@ fn number(bytes: &[u8]) -> Result<u64, StoreError> {
     ))
 }
 
+#[cfg(test)]
 pub(super) fn validate(
     batch: &LmdbWriteTransaction<'_>,
     anchors: impl IntoIterator<Item = Result<CheckpointAnchor, StoreError>>,
     installed: &CheckpointAnchor,
+) -> Result<(), StoreError> {
+    validate_view(&batch.read_view(), anchors, installed)
+}
+
+#[cfg(test)]
+pub(super) fn validate_view(
+    batch: &burst_store_lmdb::read_view::LedgerReadView<'_>,
+    anchors: impl IntoIterator<Item = Result<CheckpointAnchor, StoreError>>,
+    installed: &CheckpointAnchor,
+) -> Result<(), StoreError> {
+    validate_view_with_poll(batch, anchors, installed, &|_| Ok(()))
+}
+
+pub(super) fn validate_view_with_poll(
+    batch: &burst_store_lmdb::read_view::LedgerReadView<'_>,
+    anchors: impl IntoIterator<Item = Result<CheckpointAnchor, StoreError>>,
+    installed: &CheckpointAnchor,
+    poll: &dyn Fn(&'static str) -> Result<(), StoreError>,
 ) -> Result<(), StoreError> {
     if batch
         .checkpoint_metadata_entries(b"checkpoint_vote/")?
@@ -23,12 +42,13 @@ pub(super) fn validate(
     {
         return Err(invalid("legacy checkpoint vote requires explicit recovery"));
     }
-    super::sequences::visit(batch, |_, _| Ok(()))?;
+    super::sequences::visit_view(batch, |_, _| poll("journal:sequence-validate"))?;
     let mut counters = 0u64;
     for namespace in ["consensus_time", "consensus_governance"] {
         let prefix = format!("{namespace}/");
         for row in batch.checkpoint_metadata_entries(prefix.as_bytes())? {
             let (key, bytes) = row?;
+            poll("journal:record-row")?;
             let key = std::str::from_utf8(key).map_err(invalid)?;
             let value = number(bytes)?;
             let (epoch, signer) = key
@@ -60,6 +80,7 @@ pub(super) fn validate(
     let mut attestations = 0u64;
     for row in batch.checkpoint_metadata_entries(b"snapshot_attestation/")? {
         row?;
+        poll("journal:record-row")?;
         attestations = attestations
             .checked_add(1)
             .ok_or_else(|| invalid("snapshot promise count overflow"))?;
@@ -67,6 +88,7 @@ pub(super) fn validate(
     let mut previous_height = None;
     for anchor in anchors {
         let anchor = anchor?;
+        poll("journal:record-authority")?;
         if anchor.network() != installed.network()
             || anchor.genesis_hash() != installed.genesis_hash()
             || previous_height.is_some_and(|height| height >= anchor.height())
@@ -79,6 +101,7 @@ pub(super) fn validate(
                 let prefix = format!("{namespace}/v1/{}/", anchor.hash());
                 for row in batch.checkpoint_metadata_entries(prefix.as_bytes())? {
                     row?;
+        poll("journal:record-row")?;
                     counters = counters
                         .checked_sub(1)
                         .ok_or_else(|| invalid("duplicate journal authority"))?;
@@ -93,6 +116,7 @@ pub(super) fn validate(
         );
         for row in batch.checkpoint_metadata_entries(prefix.as_bytes())? {
             let (key, bytes) = row?;
+            poll("journal:record-row")?;
             let manifest: burst_consensus::snapshot::SnapshotManifest =
                 bincode::DefaultOptions::new()
                     .with_fixint_encoding()
@@ -124,6 +148,7 @@ pub(super) fn validate(
     }
     for row in batch.checkpoint_metadata_entries(b"consensus_final/v2/")? {
         let (key, _) = row?;
+        poll("journal:record-row")?;
         let key = std::str::from_utf8(key).map_err(invalid)?;
         let fields: Vec<_> = key.split('/').collect();
         if fields.len() != 6
@@ -198,6 +223,15 @@ mod tests {
             super::super::super::super::reconciliation::retained_promises(&batch, anchor.hash())
                 .is_err()
         );
+        let polls = std::cell::Cell::new(0);
+        assert!(validate_view_with_poll(&batch.read_view(), [Ok(anchor.clone())], &anchor, &|stage| {
+            if stage == "journal:record-row" {
+                polls.set(polls.get() + 1);
+                if polls.get() == 3 { return Err(StoreError::Backend("journal record sentinel".into())); }
+            }
+            Ok(())
+        }).unwrap_err().to_string().contains("journal record sentinel"));
+        assert_eq!(polls.get(), 3);
         let fingerprint = super::super::observe(&batch).unwrap();
         let sequences = super::super::sequences::SequenceGuard::capture(&batch).unwrap();
         super::super::validate(&batch, || std::iter::once(Ok(anchor.clone())), &anchor).unwrap();

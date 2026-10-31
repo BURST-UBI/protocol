@@ -1,28 +1,23 @@
-//! Vote generator — produces votes for blocks this node has validated.
+//! Vote signing and bounded response caches.
 //!
-//! When the node validates a block (e.g. confirms it passes all checks), the
-//! vote generator creates a signed vote that can be broadcast to the network.
-//! Only nodes that are configured as representatives (with delegated voting
-//! weight) should broadcast votes, but any node can generate them locally for
-//! testing or pre-staging.
+//! The caller validates blocks, checks representative eligibility, and reserves
+//! durable sequences and final choices before signing. This helper has no ledger
+//! access and does not enforce those rules or check that its key matches its address.
 
 use burst_crypto::sign_message;
 use burst_types::{BlockHash, PrivateKey, Signature, WalletAddress};
 use std::sync::Arc;
 
-/// Domain-separation tag for consensus vote signatures. Binding this (and the
-/// voter identity) into the signed payload prevents a vote signature from being
-/// reinterpreted in any other signing context and pins it to BURST consensus.
+/// Domain tag separating consensus votes from other signed message formats.
 pub const VOTE_DOMAIN: &[u8] = b"BURST_VOTE_V1";
 
 /// The canonical byte payload that a consensus vote signature covers. Used by
-/// BOTH the signer (this generator) and the verifier (the node's receive path)
-/// so they can never diverge:
+/// the signer and the node's receive path:
 ///
 /// `VOTE_DOMAIN ‖ voter ‖ is_final ‖ timestamp_le ‖ sequence_le ‖ block_hashes…`
 ///
-/// Binding `voter` means the signature is only valid under that account's key
-/// and cannot be replayed as another account's vote.
+/// The receiver derives the verification key from `voter`. Encoding the address
+/// also prevents substituting another voter without changing the signed bytes.
 pub fn vote_signing_payload(
     voter: &WalletAddress,
     is_final: bool,
@@ -45,16 +40,20 @@ pub fn vote_signing_payload(
     payload
 }
 
-/// Generates votes for blocks the node has validated.
+/// Signs caller-selected block hashes and caches responses.
 pub struct VoteGenerator {
     /// This node's representative account.
     pub representative: WalletAddress,
-    /// Whether this node is acting as a representative (has delegated weight).
+    /// Caller-managed voting flag. The signing methods do not enforce it.
     pub is_representative: bool,
     /// Signing key for vote generation.
     signing_key: Arc<PrivateKey>,
     /// Monotonically increasing sequence counter for vote ordering.
     sequence: u64,
+    final_responses: std::collections::BTreeMap<BlockHash, GeneratedVote>,
+    final_response_order: std::collections::VecDeque<BlockHash>,
+    soft_responses: std::collections::BTreeMap<(WalletAddress, BlockHash), GeneratedVote>,
+    soft_response_order: std::collections::BTreeMap<u64, (WalletAddress, BlockHash)>,
 }
 
 impl VoteGenerator {
@@ -68,6 +67,10 @@ impl VoteGenerator {
             is_representative: false,
             signing_key,
             sequence: 0,
+            final_responses: Default::default(),
+            final_response_order: Default::default(),
+            soft_responses: Default::default(),
+            soft_response_order: Default::default(),
         }
     }
 
@@ -98,9 +101,9 @@ impl VoteGenerator {
 
     /// Generate a final vote (cannot be changed).
     ///
-    /// Final votes signal that the representative has made its definitive
-    /// choice. Once broadcast, the representative cannot vote differently
-    /// for the same election root.
+    /// The caller must persist the final choice before calling this method.
+    /// This generator accepts hashes without roots and cannot prevent signing
+    /// conflicting choices itself.
     pub fn generate_final_vote(&mut self, block_hash: BlockHash) -> GeneratedVote {
         self.sequence += 1;
         let timestamp = current_timestamp_ms();
@@ -115,6 +118,50 @@ impl VoteGenerator {
             sequence: self.sequence,
             signature,
         }
+    }
+
+    /// A cached signature is not authority to send: callers must revalidate its
+    /// durable choice, epoch and current voting boundaries before reuse.
+    pub fn cached_final_response(&self, hash: &BlockHash) -> Option<&GeneratedVote> {
+        self.final_responses.get(hash).filter(|vote| vote.voter == self.representative)
+    }
+
+    pub fn remember_final_response(&mut self, vote: GeneratedVote) {
+        const CAPACITY: usize = 1024;
+        if !vote.is_final || vote.voter != self.representative { return; }
+        if !self.final_responses.contains_key(&vote.block_hash) {
+            if self.final_responses.len() == CAPACITY {
+                if let Some(oldest) = self.final_response_order.pop_front() {
+                    self.final_responses.remove(&oldest);
+                }
+            }
+            self.final_response_order.push_back(vote.block_hash);
+        }
+        self.final_responses.insert(vote.block_hash, vote);
+    }
+
+    pub fn cached_soft_response(&self, account: &WalletAddress, previous: BlockHash,
+        hash: BlockHash) -> Option<&GeneratedVote> {
+        self.soft_responses.get(&(account.clone(), previous))
+            .filter(|vote| vote.voter == self.representative && vote.block_hash == hash)
+    }
+
+    /// Remember only the latest signed choice for an account position. A later
+    /// conflicting choice or final vote must invalidate the earlier soft response.
+    pub fn remember_response_choice(&mut self, account: WalletAddress,
+        previous: BlockHash, vote: &GeneratedVote) {
+        let root = (account, previous);
+        if let Some(old) = self.soft_responses.remove(&root) {
+            self.soft_response_order.remove(&old.sequence);
+        }
+        if vote.is_final || vote.voter != self.representative { return; }
+        if self.soft_responses.len() == 1024 {
+            if let Some((_, oldest)) = self.soft_response_order.pop_first() {
+                self.soft_responses.remove(&oldest);
+            }
+        }
+        self.soft_response_order.insert(vote.sequence, root.clone());
+        self.soft_responses.insert(root, vote.clone());
     }
 
     /// Current sequence number.
@@ -148,7 +195,7 @@ impl VoteGenerator {
     }
 }
 
-/// A vote generated by this node, ready for broadcast.
+/// A signed vote. The caller must establish that it is eligible for broadcast.
 #[derive(Clone, Debug)]
 pub struct GeneratedVote {
     /// The representative account that generated this vote.
@@ -166,9 +213,9 @@ pub struct GeneratedVote {
 }
 
 impl GeneratedVote {
-    /// Serialize for network transmission.
+    /// Encode this single-vote container. The node transports `WireVote` instead.
     ///
-    /// Wire format: voter (variable) ‖ block_hash (32) ‖ is_final (1)
+    /// Wire format: voter_len (2 LE) ‖ voter (variable) ‖ block_hash (32) ‖ is_final (1)
     ///              ‖ timestamp (8 LE) ‖ sequence (8 LE) ‖ signature (64)
     pub fn to_bytes(&self) -> Vec<u8> {
         let voter_bytes = self.voter.as_str().as_bytes();
@@ -199,6 +246,64 @@ mod tests {
     use super::*;
     use burst_crypto::{generate_keypair, verify_signature};
     use burst_types::PublicKey;
+
+    #[test]
+    fn soft_response_reuse_tracks_latest_choice_and_bounded_positions() {
+        let (mut generator, _) = make_generator();
+        let account = make_rep();
+        let previous = make_hash(8);
+        let first = generator.generate_vote(make_hash(1));
+        generator.remember_response_choice(account.clone(), previous, &first);
+        assert_eq!(generator.cached_soft_response(&account, previous, first.block_hash).unwrap().signature,
+            first.signature);
+        let fork = generator.generate_vote(make_hash(2));
+        generator.remember_response_choice(account.clone(), previous, &fork);
+        assert!(generator.cached_soft_response(&account, previous, first.block_hash).is_none());
+        assert!(generator.cached_soft_response(&account, previous, fork.block_hash).is_some());
+        let final_vote = generator.generate_final_vote(fork.block_hash);
+        generator.remember_response_choice(account.clone(), previous, &final_vote);
+        assert!(generator.soft_responses.is_empty());
+        assert!(generator.soft_response_order.is_empty());
+        for n in 0u64..1025 {
+            let mut vote = first.clone();
+            vote.sequence = n + 10;
+            let mut root = [0; 32];
+            root[..8].copy_from_slice(&n.to_be_bytes());
+            generator.remember_response_choice(account.clone(), BlockHash::new(root), &vote);
+        }
+        assert_eq!(generator.soft_responses.len(), 1024);
+        assert_eq!(generator.soft_response_order.len(), 1024);
+        assert!(generator.cached_soft_response(&account, BlockHash::ZERO, first.block_hash).is_none());
+    }
+
+    #[test]
+    fn final_response_cache_is_bounded_and_keeps_original_signature() {
+        let (mut generator, _) = make_generator();
+        let vote = generator.generate_final_vote(make_hash(1));
+        generator.remember_final_response(vote.clone());
+        let cached = generator.cached_final_response(&vote.block_hash).unwrap();
+        assert_eq!(cached.signature, vote.signature);
+        assert_eq!(cached.sequence, vote.sequence);
+        let sequence = generator.sequence();
+        // Synthetic keys exercise eviction without generating 1024 signatures.
+        for i in 0u64..1024 {
+            let mut entry = vote.clone();
+            let mut key = [0; 32];
+            key[..8].copy_from_slice(&i.to_be_bytes());
+            entry.block_hash = BlockHash::new(key);
+            generator.remember_final_response(entry);
+        }
+        assert_eq!(generator.final_responses.len(), 1024);
+        assert_eq!(generator.final_response_order.len(), 1024);
+        assert!(generator.cached_final_response(&vote.block_hash).is_none());
+        assert_eq!(generator.sequence(), sequence);
+        let hash = *generator.final_response_order.front().unwrap();
+        let cached = generator.cached_final_response(&hash).unwrap().clone();
+        generator.remember_final_response(cached);
+        assert_eq!(generator.final_response_order.len(), 1024);
+        generator.representative = WalletAddress::new("brst_changed");
+        assert!(generator.cached_final_response(&hash).is_none());
+    }
 
     fn make_hash(byte: u8) -> BlockHash {
         BlockHash::new([byte; 32])
@@ -275,8 +380,7 @@ mod tests {
         );
         assert!(verify_signature(&payload, &vote.signature, &pubkey));
 
-        // A vote signed for a DIFFERENT voter identity must not verify — the
-        // voter binding (and domain tag) is what this fix adds.
+        // The signature must not verify for a different voter identity.
         let wrong = vote_signing_payload(
             &burst_types::WalletAddress::new("brst_someoneelse"),
             vote.is_final,

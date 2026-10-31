@@ -1,13 +1,23 @@
-//! Real signed wallet journey, without faucet shortcuts. Run only against a
-//! disposable Dev network. Optional RPC URLs enable cross-node assertions.
+//! Signed wallet operations on a disposable Dev network, with bootstrap endorsements.
+//! Supply one or more RPC URLs; multiple endpoints enable cross-node assertions.
+//! `--verify` compares saved state, while `--load` measures concurrent burn/receive pairs.
 use burst_wallet_core::signed_client::parse_hash;
 use burst_wallet_core::{NodeClient, Wallet};
 use serde_json::{json, Value};
 use std::time::Duration;
 
+#[path = "validate_network/load.rs"]
+mod load;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut urls: Vec<_> = std::env::args().skip(1).collect();
+    if urls.first().map(String::as_str) == Some("--load-preflight") {
+        return load::preflight(&urls[1..]).await.map_err(|error| error as Box<dyn std::error::Error>);
+    }
+    if urls.first().map(String::as_str) == Some("--load") {
+        return load::execute(&urls[1..]).await.map_err(|error| error as Box<dyn std::error::Error>);
+    }
     let experimental = urls.first().map(String::as_str) == Some("--experimental-testnet");
     if experimental {
         urls.remove(0);
@@ -85,7 +95,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("PASS durable balances, portfolios, confirmations and governance record after restart on all nodes");
         return Ok(());
     }
-    let seed = &nodes[0];
+    let primary_node = &nodes[0];
     for node in &nodes {
         if node.rpc_call("node_info", json!({})).await?["network"] != "dev" {
             return Err(
@@ -96,7 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let public_dev_key = burst_crypto::keypair_from_seed(&[0u8; 32]);
     let genesis_address = burst_crypto::derive_address(&public_dev_key.public);
-    let initial_reps = seed.rpc_call("representatives", json!({})).await?;
+    let initial_reps = primary_node.rpc_call("representatives", json!({})).await?;
     let initial_genesis = initial_reps["representatives"]
         .as_array()
         .ok_or("missing representatives")?
@@ -111,7 +121,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("missing weight")?
         .parse()?;
     assert_eq!(initial_weight, u128::from(initial_people) * 10_000);
-    let info = seed.rpc_call("node_info", json!({})).await?;
+    let info = primary_node.rpc_call("node_info", json!({})).await?;
     if info["verified_count"] == 1 {
         assert_eq!(
             initial_people, 1,
@@ -126,7 +136,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Public disposable test accounts: Alice={}, Bob={}",
         alice.address, bob.address
     );
-    let endorsement = seed
+    let endorsement = primary_node
         .rpc_call("genesis_endorse", json!({"account":alice.address.as_str()}))
         .await?;
     let hash = endorsement["block_hash"]
@@ -140,9 +150,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let info = node.account_info(alice.address.as_str()).await?;
         assert_eq!(info.verification_state, "verified");
     }
-    // The first account block is a receive-open (decision 10.7a). Fund it
-    // through a genuine genesis burn, NOT the local faucet's database shortcut.
-    let fund = seed
+    // Open Alice by receiving a signed genesis burn.
+    let fund = primary_node
         .pay_signed(&public_dev_key, &alice.address, 1_000_000_000_000_000)
         .await?;
     println!("Genesis burn confirmed: {}", fund.hash);
@@ -150,7 +159,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         node.wait_confirmed(&fund.hash, Duration::from_secs(40))
             .await?;
     }
-    let open = seed.receive_signed(&alice.primary_keys, &fund.hash).await?;
+    let open = primary_node.receive_signed(&alice.primary_keys, &fund.hash).await?;
     for node in &nodes {
         node.wait_confirmed(&open.hash, Duration::from_secs(40))
             .await?;
@@ -158,10 +167,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("PASS receive-open from real genesis burn");
     // Exercise delegation while Alice's independent representative is online.
     // Offline humans stay in the denominator; genesis has no extra weight.
-    // Prepare work on another peer before deciding the transaction contents.
+    // Prepare work before constructing the transaction, using a second peer if supplied.
     let prepared = nodes
         .get(1)
-        .unwrap_or(seed)
+        .unwrap_or(primary_node)
         .prepare_work(&alice.address)
         .await?;
     let change = burst_wallet_core::transaction_builder::build_change_rep_tx(
@@ -169,7 +178,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &genesis_address,
         burst_types::Timestamp::now(),
     )?;
-    let delegated = seed
+    let delegated = primary_node
         .submit_signed_with_prepared_work(
             &alice.primary_keys,
             &burst_transactions::Transaction::ChangeRepresentative(change),
@@ -212,7 +221,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     tokio::time::sleep(Duration::from_secs(2)).await;
     let amount = 100_000_000_000_000u128;
-    let pay = seed
+    let pay = primary_node
         .pay_signed(&alice.primary_keys, &bob.address, amount)
         .await?;
     for node in &nodes {
@@ -240,9 +249,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
     }
     println!("PASS unverified recipient explicitly accepts TRST");
-    let before = seed.account_info(bob.address.as_str()).await?;
+    let before = primary_node.account_info(bob.address.as_str()).await?;
     assert!(
-        seed.transfer_signed(
+        primary_node.transfer_signed(
             &bob.primary_keys,
             &alice.address,
             1,
@@ -253,22 +262,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "unverified TRST spending must fail"
     );
     assert_eq!(
-        seed.account_info(bob.address.as_str()).await?.head,
+        primary_node.account_info(bob.address.as_str()).await?.head,
         before.head
     );
     println!("PASS unverified TRST holder cannot spend");
     assert!(
-        seed.set_verifier_opt_in_signed(&bob.primary_keys, true)
+        primary_node.set_verifier_opt_in_signed(&bob.primary_keys, true)
             .await
             .is_err(),
         "unverified wallet must not opt in to verification"
     );
     assert_eq!(
-        seed.account_info(bob.address.as_str()).await?.head,
+        primary_node.account_info(bob.address.as_str()).await?.head,
         before.head
     );
     for opted_in in [true, false, true] {
-        let result = seed
+        let result = primary_node
             .set_verifier_opt_in_signed(&alice.primary_keys, opted_in)
             .await?;
         for node in &nodes {
@@ -282,7 +291,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("PASS client-signed verifier opt-in/out and rejection for an unverified wallet");
     // Bob may receive before verification but may not spend until verified.
-    let endorsement = seed
+    let endorsement = primary_node
         .rpc_call("genesis_endorse", json!({"account":bob.address.as_str()}))
         .await?;
     let hash = endorsement["block_hash"]
@@ -305,13 +314,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         node.wait_confirmed(&send.hash, Duration::from_secs(40))
             .await?;
     }
-    let receive = seed.receive_signed(&alice.primary_keys, &send.hash).await?;
+    let receive = primary_node.receive_signed(&alice.primary_keys, &send.hash).await?;
     for node in &nodes {
         node.wait_confirmed(&receive.hash, Duration::from_secs(40))
             .await?;
     }
     for wallet in [&alice, &bob] {
-        let expected = seed.account_info(wallet.address.as_str()).await?;
+        let expected = primary_node.account_info(wallet.address.as_str()).await?;
         for node in &nodes {
             let actual = node.account_info(wallet.address.as_str()).await?;
             assert_eq!(actual.head, expected.head);
@@ -325,7 +334,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "PASS signed transfer/receive, confirmations, frontiers and balances agree on every node"
     );
     // Merge exact holding IDs, retain provenance, then transfer the new origin.
-    let portfolio = seed
+    let portfolio = primary_node
         .rpc_call("trst_portfolio", json!({"account":alice.address.as_str()}))
         .await?;
     let sources = portfolio["batches"]
@@ -334,13 +343,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .map(|b| parse_hash(b["id"].as_str().unwrap()).map(|h| h.into_tx_hash()))
         .collect::<Result<Vec<_>, _>>()?;
-    let before_merge = snapshot(seed, alice.address.as_str()).await?;
+    let before_merge = snapshot(primary_node, alice.address.as_str()).await?;
     let invalid_merge = burst_wallet_core::transaction_builder::build_merge_tx(
         &alice.address,
         vec![sources[0], burst_types::TxHash::new([0xf3; 32])],
         burst_types::Timestamp::now(),
     )?;
-    let rejected = seed
+    let rejected = primary_node
         .submit_signed(
             &alice.primary_keys,
             &burst_transactions::Transaction::Merge(invalid_merge),
@@ -363,7 +372,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         sources,
         burst_types::Timestamp::now(),
     )?;
-    let merged = seed
+    let merged = primary_node
         .submit_signed(
             &alice.primary_keys,
             &burst_transactions::Transaction::Merge(merge),
@@ -374,7 +383,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         node.wait_confirmed(&merged.hash, Duration::from_secs(40))
             .await?;
     }
-    let merged_send = seed
+    let merged_send = primary_node
         .transfer_signed(
             &alice.primary_keys,
             &bob.address,
@@ -386,7 +395,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         node.wait_confirmed(&merged_send.hash, Duration::from_secs(40))
             .await?;
     }
-    let accepted = seed
+    let accepted = primary_node
         .receive_signed(&bob.primary_keys, &merged_send.hash)
         .await?;
     for node in &nodes {
@@ -395,9 +404,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("PASS provenance-preserving merge and transfer of merged TRST");
     let return_amount = 7u128;
-    let alice_before = seed.account_info(alice.address.as_str()).await?;
-    let bob_before = seed.account_info(bob.address.as_str()).await?;
-    let declined_send = seed
+    let alice_before = primary_node.account_info(alice.address.as_str()).await?;
+    let bob_before = primary_node.account_info(bob.address.as_str()).await?;
+    let declined_send = primary_node
         .transfer_signed(
             &alice.primary_keys,
             &bob.address,
@@ -414,7 +423,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         parse_hash(&declined_send.hash)?.into_tx_hash(),
         burst_types::Timestamp::now(),
     )?;
-    let rejected = seed
+    let rejected = primary_node
         .submit_signed(
             &bob.primary_keys,
             &burst_transactions::Transaction::RejectReceive(reject),
@@ -445,7 +454,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             bob_before.trst_balance
         );
     }
-    let returned = seed
+    let returned = primary_node
         .receive_signed(&alice.primary_keys, &rejected.hash)
         .await?;
     for node in &nodes {
@@ -472,7 +481,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &bob.address,
         burst_types::Timestamp::now(),
     )?;
-    let delegated = seed
+    let delegated = primary_node
         .submit_signed(
             &alice.primary_keys,
             &burst_transactions::Transaction::Delegate(delegate),
@@ -491,7 +500,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &alice.address,
         burst_types::Timestamp::now(),
     )?;
-    let revoked = seed
+    let revoked = primary_node
         .submit_signed(
             &alice.primary_keys,
             &burst_transactions::Transaction::RevokeDelegation(revoke),
@@ -508,7 +517,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("PASS signed delegation and revocation on all nodes");
 
-    let proposal_block = seed
+    let proposal_block = primary_node
         .propose_parameter_signed(
             &public_dev_key,
             burst_governance::GovernableParam::BrnRate,
@@ -520,20 +529,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
     }
     let proposal_id = parse_hash(&proposal_block.hash)?.into_tx_hash();
-    let params = seed.rpc_call("protocol_params", json!({})).await?;
+    let params = primary_node.rpc_call("protocol_params", json!({})).await?;
     let endorsement_cost: u128 = params["governance_endorsement_cost"]
         .as_str()
         .ok_or("missing governance endorsement cost")?
         .parse()?;
-    let supported = seed
+    let supported = primary_node
         .endorse_proposal_signed(&public_dev_key, proposal_id, endorsement_cost)
         .await?;
     for node in &nodes {
         node.wait_confirmed(&supported.hash, Duration::from_secs(40))
             .await?;
     }
-    let before = snapshot(seed, genesis_address.as_str()).await?;
-    let duplicate = seed
+    let before = snapshot(primary_node, genesis_address.as_str()).await?;
+    let duplicate = primary_node
         .endorse_proposal_signed(&public_dev_key, proposal_id, endorsement_cost)
         .await
         .unwrap_err();
@@ -541,9 +550,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         duplicate.to_string().contains("already endorsed"),
         "{duplicate}"
     );
-    assert_eq!(snapshot(seed, genesis_address.as_str()).await?, before);
-    let before_bob = snapshot(seed, bob.address.as_str()).await?;
-    let unauthorized = seed
+    assert_eq!(snapshot(primary_node, genesis_address.as_str()).await?, before);
+    let before_bob = snapshot(primary_node, bob.address.as_str()).await?;
+    let unauthorized = primary_node
         .withdraw_proposal_signed(&bob.primary_keys, proposal_id)
         .await
         .unwrap_err();
@@ -551,8 +560,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         unauthorized.to_string().contains("only the proposer"),
         "{unauthorized}"
     );
-    assert_eq!(snapshot(seed, bob.address.as_str()).await?, before_bob);
-    let withdrawn = seed
+    assert_eq!(snapshot(primary_node, bob.address.as_str()).await?, before_bob);
+    let withdrawn = primary_node
         .withdraw_proposal_signed(&public_dev_key, proposal_id)
         .await?;
     for node in &nodes {
@@ -632,14 +641,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut snapshots = Vec::new();
     for address in [alice.address.as_str(), bob.address.as_str()] {
-        let expected = snapshot(seed, address).await?;
+        let expected = snapshot(primary_node, address).await?;
         for node in &nodes {
             assert_eq!(snapshot(node, address).await?, expected);
         }
         snapshots.push(expected);
     }
     if let Ok(path) = std::env::var("BURST_VALIDATION_REPORT") {
-        let governance = seed
+        let governance = primary_node
             .rpc_call(
                 "governance_proposal_info",
                 json!({"hash":proposal_id.to_string()}),

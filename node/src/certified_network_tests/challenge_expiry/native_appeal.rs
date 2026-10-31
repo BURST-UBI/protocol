@@ -1,6 +1,6 @@
 use super::*;
 use burst_types::appeal::AppealReview;
-use burst_wallet_core::wallet::ProcessResult;
+use burst_wallet_core::wallet::ProcessResponse;
 
 pub(in crate::certified_network_tests) async fn offline_panel(
     client: &NodeClient,
@@ -38,7 +38,7 @@ pub(super) async fn submit(
     client: &NodeClient,
     review: &AppealReview,
     now: Timestamp,
-) -> ProcessResult {
+) -> ProcessResponse {
     let library = std::env::var("NATIVE_FAKETIME_LIBRARY")
         .expect("set NATIVE_FAKETIME_LIBRARY to a built libfaketimeMT.so.1");
     assert!(std::path::Path::new(&library).is_absolute());

@@ -19,7 +19,7 @@ fn selection_freezes_endorsements_before_its_beacon_or_first_vote() {
     fixture.push(3, BlockType::Endorse, CUTOFF + 1, |block| {
         block.payment_epoch = epoch;
         block.link = destination(20);
-        block.brn_balance += 1;
+        block.brn_spent += 1;
     });
     assert!(replay(&fixture, &[record])
         .err()
@@ -46,7 +46,7 @@ fn selection_closes_the_payment_context_even_without_a_verifier_vote() {
         fixture.push(0, BlockType::Burn, CUTOFF + 31, |block| {
             block.payment_epoch = context;
             block.link = destination(21);
-            block.brn_balance += 1;
+            block.brn_spent += 1;
         });
         let result = replay(&fixture, &records);
         if context == epoch {
@@ -59,7 +59,7 @@ fn selection_closes_the_payment_context_even_without_a_verifier_vote() {
     fixture.push(0, BlockType::Burn, CUTOFF - 1, |block| {
         block.payment_epoch = epoch;
         block.link = destination(21);
-        block.brn_balance += 1;
+        block.brn_spent += 1;
     });
     assert!(replay(&fixture, &records)
         .err()
@@ -74,7 +74,7 @@ fn selection_signer_fences_payment_votes_and_cannot_reseal_a_new_epoch_on_restar
     let old_heads = fixture.history(CUTOFF).heads().to_vec();
     let tail = fixture.push(0, BlockType::Burn, CUTOFF + 1, |block| {
         block.link = destination(21);
-        block.brn_balance += 1;
+        block.brn_spent += 1;
     });
     let (dir, store, heads) = fixture.store();
     let stale = CertifiedCheckpoint::prepare(
@@ -205,7 +205,7 @@ fn runtime_waits_for_selection_epoch_then_rechecks_it_without_a_new_certificate(
     for seed in [3, 4] {
         fixture.push(seed, BlockType::Endorse, CUTOFF - 1, |block| {
             block.link = destination(21);
-            block.brn_balance += 1;
+            block.brn_spent += 1;
         });
     }
     let (_dir, store, heads) = fixture.store();
@@ -285,7 +285,7 @@ fn minority_payment_voter_can_learn_and_recover_the_certified_selection() {
     for seed in [3, 4] {
         fixture.push(seed, BlockType::Endorse, CUTOFF - 1, |block| {
             block.link = destination(21);
-            block.brn_balance += 1;
+            block.brn_spent += 1;
         });
     }
     let first = certificate(&fixture, true);
@@ -295,7 +295,7 @@ fn minority_payment_voter_can_learn_and_recover_the_certified_selection() {
     let tail = fixture.push(0, BlockType::Burn, CUTOFF + 1, |block| {
         block.payment_epoch = epoch;
         block.link = destination(22);
-        block.brn_balance += 1;
+        block.brn_spent += 1;
     });
     CertifiedCheckpoint::accept(
         &store,

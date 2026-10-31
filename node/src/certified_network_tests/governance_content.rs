@@ -63,7 +63,7 @@ pub(super) async fn launch(
     (
         stop,
         tokio::spawn(async move {
-            node.start().await.unwrap();
+            node.start_with_services(burst_daemon::start_public_services).await.unwrap();
             node.stop().await.unwrap();
         }),
     )

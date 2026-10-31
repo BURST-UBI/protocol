@@ -1,5 +1,6 @@
-//! Verification orchestrator — connects endorsement, selection, voting, and outcomes
-//! into a single end-to-end verification workflow.
+//! Verification lifecycle state, panel selection, vote counting and outcome events.
+//! The node authenticates admissions and commits economic effects; changing this
+//! engine or emitting an event does not itself settle a ledger operation.
 
 use crate::attempts::AttemptContexts;
 use crate::challenge::{AppealContext, Challenge, ChallengeEngine};
@@ -18,6 +19,10 @@ use burst_vrf::RandomOutput;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+mod borrowed_snapshot;
+pub use borrowed_snapshot::{Snapshot as SnapshotView, SnapshotMap, ordered_prior_votes};
+mod activity;
+pub use activity::ActivitySnapshot;
 mod appeal;
 mod deadline;
 pub mod records;
@@ -26,7 +31,8 @@ pub(crate) mod snapshot_tests;
 pub(crate) mod snapshot_undo;
 pub use deadline::CommitteeActivation;
 
-/// Events emitted by the orchestrator for the node to process.
+/// Candidate lifecycle effects for the node to validate and commit.
+/// These events do not prove that account or economic state has been updated.
 #[derive(Clone, Debug)]
 pub enum VerificationEvent {
     /// Endorsement threshold reached — verification can begin.
@@ -36,7 +42,7 @@ pub enum VerificationEvent {
         wallet: WalletAddress,
         verifiers: Vec<WalletAddress>,
     },
-    /// Verification vote completed — wallet is now verified or rejected.
+    /// Verification tally completed; carries the proposed result and settlement.
     VerificationComplete {
         wallet: WalletAddress,
         result: VerificationResult,
@@ -47,15 +53,9 @@ pub enum VerificationEvent {
         wallet: WalletAddress,
         outcome: ChallengeOutcomeEvent,
     },
-    /// Wallet unverified (fraud confirmed). All TRST originating from the
-    /// wallet is revoked and BRN accrual stops.
+    /// Requests loss of verified rights and revocation of the wallet's TRST origins.
     WalletUnverified { wallet: WalletAddress },
-    /// Wallet deactivated for benign, non-fraud reasons — death, prolonged
-    /// inactivity, or other community-defined grounds (whitepaper
-    /// §Unverification Without Revocation; grounds are defined via the
-    /// Consti). BRN accrual stops and transaction rights are lost, but the
-    /// TRST it originated is NOT revoked — the holder was a real person who
-    /// legitimately earned it.
+    /// Requests deactivation without revoking the wallet's TRST origins.
     WalletDeactivated { wallet: WalletAddress },
     /// Verifier penalized for excessive Neither voting.
     VerifierPenalized {
@@ -65,24 +65,25 @@ pub enum VerificationEvent {
     },
 }
 
-/// The orchestrator ties together all verification subsystems.
+/// In-memory verification attempts and queued lifecycle effects.
 #[derive(Clone)]
 pub struct VerificationOrchestrator {
     pub endorsement: EndorsementEngine,
     pub voting: VerificationVoting,
     pub challenges: ChallengeEngine,
-    pub neither_tracker: NeitherVoteTracker,
-    states: HashMap<WalletAddress, VerificationState>,
-    active_challenges: HashMap<WalletAddress, Challenge>,
-    active_appeals: HashMap<WalletAddress, AppealContext>,
-    /// Earlier rounds stay locked until the entire attempt reaches an outcome.
-    prior_votes: HashMap<WalletAddress, Vec<VerifierVote>>,
-    selections: HashMap<WalletAddress, SelectionRound>,
+    pub(crate) neither_tracker: NeitherVoteTracker,
+    states: crate::tracked_map::TrackedMap<WalletAddress, VerificationState>,
+    active_challenges: crate::tracked_map::TrackedMap<WalletAddress, Challenge>,
+    active_appeals: crate::tracked_map::TrackedMap<WalletAddress, AppealContext>,
+    /// Retains earlier votes for stake settlement when the whole attempt ends.
+    prior_votes: crate::tracked_map::TrackedMap<WalletAddress, Vec<VerifierVote>>,
+    selections: crate::tracked_map::TrackedMap<WalletAddress, SelectionRound>,
     attempts: AttemptContexts,
     /// Verifiers under penalty cooldown: address -> cooldown_until timestamp (secs).
-    penalized_verifiers: HashMap<WalletAddress, u64>,
+    penalized_verifiers: crate::tracked_map::TrackedMap<WalletAddress, u64>,
     /// Pending events for the node to process.
     pending_events: Vec<VerificationEvent>,
+    record_change_rules: Option<(u32, u32)>,
 }
 
 impl Default for VerificationOrchestrator {
@@ -92,14 +93,15 @@ impl Default for VerificationOrchestrator {
             voting: VerificationVoting,
             challenges: ChallengeEngine,
             neither_tracker: NeitherVoteTracker::new(5000),
-            states: HashMap::new(),
-            active_challenges: HashMap::new(),
-            active_appeals: HashMap::new(),
-            prior_votes: HashMap::new(),
-            selections: HashMap::new(),
+            states: crate::tracked_map::TrackedMap::new(),
+            active_challenges: crate::tracked_map::TrackedMap::new(),
+            active_appeals: crate::tracked_map::TrackedMap::new(),
+            prior_votes: crate::tracked_map::TrackedMap::new(),
+            selections: crate::tracked_map::TrackedMap::new(),
             attempts: AttemptContexts::default(),
-            penalized_verifiers: HashMap::new(),
+            penalized_verifiers: crate::tracked_map::TrackedMap::new(),
             pending_events: Vec::new(),
+            record_change_rules: None,
         }
     }
 }
@@ -124,10 +126,10 @@ impl VerificationOrchestrator {
             .or_insert_with(|| VerificationState {
                 target: wallet.clone(),
                 phase: VerificationPhase::Verified,
-                endorsements: Vec::new(),
+                endorsements: Vec::new().into(),
                 endorser_set: Default::default(),
-                selected_verifiers: Vec::new(),
-                votes: Vec::new(),
+                selected_verifiers: Vec::new().into(),
+                votes: Default::default(),
                 revote_count: 0,
                 excluded_verifiers: Default::default(),
                 started_at: Timestamp::EPOCH,
@@ -135,7 +137,8 @@ impl VerificationOrchestrator {
     }
 
     /// Process an endorsement for a wallet.
-    /// If the threshold is met, emits EndorsementComplete.
+    /// If the threshold is met, emits EndorsementComplete. The caller authenticates
+    /// the endorser, checks ledger eligibility and applies the reported BRN burn.
     pub fn process_endorsement(
         &mut self,
         wallet: &WalletAddress,
@@ -199,12 +202,12 @@ impl VerificationOrchestrator {
             .or_insert_with(|| VerificationState {
                 target: wallet.clone(),
                 phase: VerificationPhase::Endorsing,
-                endorsements: Vec::new(),
-                endorser_set: std::collections::HashSet::new(),
-                selected_verifiers: Vec::new(),
-                votes: Vec::new(),
+                endorsements: Vec::new().into(),
+                endorser_set: std::collections::HashSet::new().into(),
+                selected_verifiers: Vec::new().into(),
+                votes: Default::default(),
                 revote_count: 0,
-                excluded_verifiers: std::collections::HashSet::new(),
+                excluded_verifiers: std::collections::HashSet::new().into(),
                 started_at: now,
             });
 
@@ -227,7 +230,9 @@ impl VerificationOrchestrator {
         Ok(())
     }
 
-    /// Select verifiers for a wallet that has completed endorsement (or is under challenge).
+    /// Select a local panel from supplied eligibility and randomness. This path
+    /// does not verify a beacon or checkpoint and cannot replace a frozen selection.
+    /// Certified selection uses `prepare_selection` and `install_selection`.
     pub fn select_verifiers(
         &mut self,
         wallet: &WalletAddress,
@@ -295,7 +300,7 @@ impl VerificationOrchestrator {
             .iter()
             .filter(|w| *w != wallet && !state.endorser_set.contains(*w))
             .filter(|w| !state.excluded_verifiers.contains(w))
-            .filter(|w| penalized.get(w).is_none_or(|&until| until <= now_secs))
+            .filter(|w| penalized.get(*w).is_none_or(|&until| until <= now_secs))
             .filter(|w| unique.insert((*w).clone()))
             .collect();
 
@@ -324,7 +329,7 @@ impl VerificationOrchestrator {
         let selected: Vec<WalletAddress> =
             scored.iter().map(|(i, _)| filtered[*i].clone()).collect();
 
-        state.selected_verifiers = selected.clone();
+        state.selected_verifiers = selected.clone().into();
         state.votes.clear();
         state.phase = VerificationPhase::Voting;
 
@@ -407,6 +412,7 @@ impl VerificationOrchestrator {
             SelectionRound {
                 request: request.clone(),
                 certified: None,
+                context: Default::default(),
             },
         );
         Ok(())
@@ -503,10 +509,11 @@ impl VerificationOrchestrator {
                 "verification is not awaiting its committee".into(),
             ));
         }
-        state.selected_verifiers = selected.clone();
+        state.selected_verifiers = selected.clone().into();
         state.phase = VerificationPhase::Voting;
-        self.selections.get_mut(wallet).unwrap().certified =
-            Some((certificate.checkpoint.clone(), beacon.clone()));
+        let selection = self.selections.get_mut(wallet).unwrap();
+        selection.certified = Some((certificate.checkpoint.clone(), beacon.clone()));
+        selection.context = std::sync::OnceLock::from(Some(context));
         self.pending_events
             .push(VerificationEvent::VerifiersSelected {
                 wallet: wallet.clone(),
@@ -522,9 +529,7 @@ impl VerificationOrchestrator {
     }
 
     pub fn selection_context(&self, wallet: &WalletAddress) -> Option<BlockHash> {
-        let selection = self.selections.get(wallet)?;
-        let (checkpoint, _) = selection.certified.as_ref()?;
-        selection.request.vote_context(checkpoint).ok()
+        self.selections.get(wallet)?.vote_context()
     }
 
     /// Only accepted signed votes bind these contexts. Synthetic timeout votes
@@ -685,6 +690,9 @@ impl VerificationOrchestrator {
         Ok(())
     }
 
+    /// Check phase, panel membership, duplicate voting, request context and
+    /// parameter hash, and reject timestamps before the beacon release. The node
+    /// separately authenticates the signer, activation and upper voting deadline.
     pub fn validate_certified_vote(
         &self,
         wallet: &WalletAddress,
@@ -720,7 +728,8 @@ impl VerificationOrchestrator {
         Ok(())
     }
 
-    /// Check eligibility without consuming a vote or changing stake state.
+    /// Check voting phase, selected membership and absence of an earlier vote.
+    /// Does not authenticate signatures, check BRN balance or enforce deadlines.
     pub fn validate_vote(
         &self,
         wallet: &WalletAddress,
@@ -737,7 +746,7 @@ impl VerificationOrchestrator {
         if !state.selected_verifiers.contains(voter) {
             return Err(VerificationError::NotSelected(voter.to_string()));
         }
-        if state.votes.iter().any(|vote| &vote.verifier == voter) {
+        if state.votes.contains_verifier(voter) {
             return Err(VerificationError::AlreadyVoted(voter.to_string()));
         }
         Ok(())
@@ -747,7 +756,8 @@ impl VerificationOrchestrator {
     ///
     /// For regular verification: auto-tallies when all verifiers have voted and
     /// returns the completion event. For challenge re-votes: just records the vote
-    /// (call `resolve_challenge` to finalize).
+    /// (resolve separately once settlement requirements are met). Completion
+    /// events are also queued; the caller must avoid applying the returned event twice.
     pub fn process_vote(
         &mut self,
         wallet: &WalletAddress,
@@ -774,6 +784,8 @@ impl VerificationOrchestrator {
         self.cast_vote_at(wallet, voter, vote, params, now)
     }
 
+    /// Record a context-bound vote using caller-supplied settlement parameters.
+    /// The caller authenticates the signed operation and applies its BRN stake.
     pub fn process_certified_vote_at(
         &mut self,
         wallet: &WalletAddress,
@@ -793,7 +805,9 @@ impl VerificationOrchestrator {
             .params_hash();
         self.validate_certified_vote(wallet, voter, context, selection_params, now)?;
         self.attempts.bind_vote(wallet, voter, context)?;
-        self.cast_vote_at(wallet, voter, vote, params, now)
+        // Certified validation already proved membership and no prior vote;
+        // binding its receipt context does not mutate the committee or votes.
+        self.cast_eligible_vote_at(wallet, voter, vote, params, now)
     }
 
     fn cast_vote_at(
@@ -805,6 +819,19 @@ impl VerificationOrchestrator {
         now: Timestamp,
     ) -> Result<Option<VerificationEvent>, VerificationError> {
         self.validate_vote(wallet, voter)?;
+        self.cast_eligible_vote_at(wallet, voter, vote, params, now)
+    }
+
+    /// Call only after proving selected membership and absence from this round's votes.
+    /// Deadline batches prove these once for their distinct, ordered missing voters.
+    fn cast_eligible_vote_at(
+        &mut self,
+        wallet: &WalletAddress,
+        voter: &WalletAddress,
+        vote: Vote,
+        params: &ProtocolParams,
+        now: Timestamp,
+    ) -> Result<Option<VerificationEvent>, VerificationError> {
         let is_challenge = self.active_challenges.contains_key(wallet);
 
         let state = self.states.get_mut(wallet).ok_or_else(|| {
@@ -823,15 +850,16 @@ impl VerificationOrchestrator {
             _ => params.verifier_stake_amount,
         };
 
-        self.voting
-            .cast_vote(state, voter.clone(), vote, stake, now)?;
+        state.votes.push(VerifierVote {
+            verifier: voter.clone(), vote, stake_amount: stake, timestamp: now,
+        });
         self.neither_tracker.configure(
             params.neither_penalty_threshold_bps,
             params.neither_window_assignments,
         );
         self.neither_tracker.record_vote(voter, vote);
 
-        if self.neither_tracker.is_penalized(voter) {
+        if self.neither_tracker.exceeds_penalty_threshold(voter) {
             let now_secs = now.as_secs();
             let penalty = self.neither_tracker.apply_neither_penalty(
                 voter,
@@ -846,7 +874,7 @@ impl VerificationOrchestrator {
                     reason: "excessive_neither_votes".into(),
                     cooldown_until: penalty.cooldown_until,
                 });
-            // The vote still counts as Illegitimate. Applying a penalty must
+            // The recorded vote keeps its original choice. A penalty must
             // not skip tallying when this was the last selected verifier.
         }
 
@@ -1013,18 +1041,7 @@ impl VerificationOrchestrator {
         Ok(())
     }
 
-    /// Resolve a challenge after re-verification votes are in.
-    ///
-    /// If fraud is confirmed the wallet is set to Unverified and a
-    /// `WalletUnverified` event is emitted (the node uses this to trigger
-    /// TRST revocation via the merger graph).
-    /// Deactivate a wallet for benign (non-fraud) reasons — distinct from
-    /// fraud revocation (whitepaper §Unverification Without Revocation).
-    ///
-    /// Emits `WalletDeactivated`: the node stops BRN accrual and removes
-    /// transaction rights, but does NOT revoke originated TRST. The wallet
-    /// can be re-verified later, resuming accrual without losing its earned
-    /// balance.
+    /// Queue a deactivation event for the node to apply without revoking TRST.
     pub fn deactivate_wallet(&mut self, wallet: &WalletAddress) {
         self.pending_events
             .push(VerificationEvent::WalletDeactivated {
@@ -1032,9 +1049,9 @@ impl VerificationOrchestrator {
             });
     }
 
-    /// Resolve a challenge if (and only if) one is active and every selected
-    /// verifier has voted. Called by the node after each processed vote so a
-    /// challenge finalizes the moment its last vote lands.
+    /// Evaluate a completed active challenge panel, or prepare a revote.
+    /// The caller must satisfy the settlement requirements before publishing
+    /// any resulting identity or economic changes.
     pub fn try_resolve_challenge(
         &mut self,
         target: &WalletAddress,
@@ -1140,15 +1157,15 @@ impl VerificationOrchestrator {
         let tally = self
             .voting
             .tally(state, params.verification_threshold_bps, params.max_revotes);
-        let fraud_confirmed = !matches!(tally, VotingOutcome::Verified);
+        let challenge_upheld = !matches!(tally, VotingOutcome::Verified);
 
-        let challenge_result = if fraud_confirmed {
+        let challenge_result = if challenge_upheld {
             ChallengeResult::FraudConfirmed
         } else {
             ChallengeResult::ChallengeRejected
         };
 
-        let outcome_was_legitimate = !fraud_confirmed;
+        let outcome_was_legitimate = !challenge_upheld;
         let prior_votes = self.prior_votes.remove(target).unwrap_or_default();
         let verifiers: Vec<(WalletAddress, u128, bool)> = state
             .votes
@@ -1174,13 +1191,10 @@ impl VerificationOrchestrator {
         self.attempts.annotate_challenge(target, &mut outcome_event);
         outcome_event.appeal = self.active_appeals.remove(target);
 
-        // "Upheld" means the wallet failed to re-clear the verification bar. What
-        // happens next depends on WHY it was challenged (same procedure, different
-        // consequence): Fraud → unverify + revoke TRST; Inactivity → deactivate
-        // (benign) with NO revocation. The challenger is rewarded in both upheld
-        // cases (compute_challenge_outcome returns the stake + pays correct
-        // verifiers); only Fraud additionally pays the revoked-TRST bounty.
-        if fraud_confirmed {
+        // An upheld fraud challenge requests revocation; inactivity requests
+        // deactivation only. Appeals carry their outcome to the separate appeal
+        // settlement path instead of emitting ordinary identity-change events.
+        if challenge_upheld {
             match challenge.reason {
                 crate::challenge::ChallengeReason::Fraud => {
                     state.phase = VerificationPhase::Unverified;
@@ -1214,9 +1228,9 @@ impl VerificationOrchestrator {
         Ok(event)
     }
 
-    /// During the genesis/bootstrap phase (verified_wallets < bootstrap_exit_threshold),
-    /// the genesis creator can directly endorse wallets without requiring the
-    /// endorser to be verified. This solves the chicken-and-egg problem.
+    /// Record a zero-burn creator endorsement below the capped bootstrap limit.
+    /// Compares supplied addresses; signer authentication and population counting
+    /// belong to the caller. Queues completion without selecting a panel.
     pub fn genesis_endorse(
         &mut self,
         endorser: &WalletAddress,
@@ -1225,7 +1239,7 @@ impl VerificationOrchestrator {
         verified_wallet_count: u64,
         bootstrap_threshold: u64,
     ) -> Result<(), VerificationError> {
-        if verified_wallet_count >= bootstrap_threshold {
+        if verified_wallet_count >= bootstrap_threshold.min(u64::from(crate::bootstrap::MAX_BOOTSTRAP_HUMANS)) {
             return Err(VerificationError::BootstrapPhaseEnded);
         }
 
@@ -1239,12 +1253,12 @@ impl VerificationOrchestrator {
             .or_insert_with(|| VerificationState {
                 target: target.clone(),
                 phase: VerificationPhase::Endorsing,
-                endorsements: Vec::new(),
-                endorser_set: std::collections::HashSet::new(),
-                selected_verifiers: Vec::new(),
-                votes: Vec::new(),
+                endorsements: Vec::new().into(),
+                endorser_set: std::collections::HashSet::new().into(),
+                selected_verifiers: Vec::new().into(),
+                votes: Default::default(),
                 revote_count: 0,
-                excluded_verifiers: std::collections::HashSet::new(),
+                excluded_verifiers: std::collections::HashSet::new().into(),
                 started_at: Timestamp::now(),
             });
 
@@ -1259,8 +1273,9 @@ impl VerificationOrchestrator {
         Ok(())
     }
 
-    /// During bootstrap phase, the genesis creator can directly verify wallets
-    /// (skipping the normal endorsement threshold + verifier vote process).
+    /// Mark a bootstrap wallet verified without an ordinary panel. The caller
+    /// must authorize this transition under bootstrap rules; the creator address
+    /// here only prevents self-verification, not unauthorized callers.
     pub fn genesis_verify(
         &mut self,
         wallet: &WalletAddress,
@@ -1285,7 +1300,7 @@ impl VerificationOrchestrator {
         bootstrap_threshold: u64,
         now: Timestamp,
     ) -> Result<(), VerificationError> {
-        if verified_wallet_count >= bootstrap_threshold {
+        if verified_wallet_count >= bootstrap_threshold.min(u64::from(crate::bootstrap::MAX_BOOTSTRAP_HUMANS)) {
             return Err(VerificationError::BootstrapPhaseEnded);
         }
 
@@ -1299,12 +1314,12 @@ impl VerificationOrchestrator {
             .or_insert_with(|| VerificationState {
                 target: wallet.clone(),
                 phase: VerificationPhase::Endorsing,
-                endorsements: Vec::new(),
-                endorser_set: std::collections::HashSet::new(),
-                selected_verifiers: Vec::new(),
-                votes: Vec::new(),
+                endorsements: Vec::new().into(),
+                endorser_set: std::collections::HashSet::new().into(),
+                selected_verifiers: Vec::new().into(),
+                votes: Default::default(),
                 revote_count: 0,
-                excluded_verifiers: std::collections::HashSet::new(),
+                excluded_verifiers: std::collections::HashSet::new().into(),
                 started_at: now,
             });
 
@@ -1401,8 +1416,8 @@ impl VerificationOrchestrator {
         Ok(())
     }
 
-    /// Legacy, gated expiry calculation on candidate state. This is not the
-    /// agreed missing-verifier completion required by decision 15.16.
+    /// Admission-window expiry calculation for legacy candidate state. Certified
+    /// panels instead complete missing votes from agreed activation deadlines.
     ///
     /// An incomplete challenge past `duration_secs` resolves in favor of the
     /// target. The challenger forfeits half the stake; cast-vote stakes return
@@ -1479,45 +1494,84 @@ impl VerificationOrchestrator {
         self.states.values()
     }
 
+    /// Read active challenges without cloning unrelated verification history.
+    pub fn active_challenges(&self) -> impl ExactSizeIterator<Item = &Challenge> {
+        self.active_challenges.values()
+    }
+
     /// Drain pending events for the node to process.
     pub fn drain_events(&mut self) -> Vec<VerificationEvent> {
         std::mem::take(&mut self.pending_events)
     }
 
-    /// Number of verifiers currently under penalty cooldown.
+    /// Number of stored penalty entries, including expired entries not yet cleaned up.
     pub fn penalized_count(&self) -> usize {
         self.penalized_verifiers.len()
     }
 
-    /// Serialize in-flight verification and challenge state for persistence.
+    /// Borrow the persisted snapshot representation without rebuilding its maps.
+    /// This grants no restoration or publication authority.
+    pub fn snapshot_view(&self) -> SnapshotView<'_> {
+        borrowed_snapshot::Snapshot::new(self)
+    }
+
+    /// Build an owned persistence snapshot, cloning its maps. Pending events
+    /// and change tracking are omitted; `snapshot_view` avoids rebuilding maps.
     pub fn snapshot(&self) -> OrchestratorSnapshot {
         OrchestratorSnapshot {
-            states: self.states.clone(),
-            active_challenges: self.active_challenges.clone(),
-            active_appeals: self.active_appeals.clone(),
-            prior_votes: self.prior_votes.clone(),
-            selections: self.selections.clone(),
+            states: self
+                .states
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            active_challenges: self
+                .active_challenges
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            active_appeals: self
+                .active_appeals
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            prior_votes: self
+                .prior_votes
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            selections: self
+                .selections
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
             attempts: self.attempts.clone(),
-            penalized_verifiers: self.penalized_verifiers.clone(),
+            penalized_verifiers: self
+                .penalized_verifiers
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
             neither_tracker: self.neither_tracker.clone(),
         }
     }
 
-    /// Restore in-flight verification state from a persisted snapshot.
+    /// Install a supplied snapshot with an empty event queue and tracking scope.
+    /// This does not validate the snapshot or authenticate its source. Use the
+    /// decoding/storage checks and trusted replay before installing it.
     pub fn restore(snapshot: OrchestratorSnapshot) -> Self {
         Self {
             endorsement: EndorsementEngine,
             voting: VerificationVoting,
             challenges: ChallengeEngine,
             neither_tracker: snapshot.neither_tracker,
-            states: snapshot.states,
-            active_challenges: snapshot.active_challenges,
-            active_appeals: snapshot.active_appeals,
-            prior_votes: snapshot.prior_votes,
-            selections: snapshot.selections,
+            states: snapshot.states.into_iter().collect(),
+            active_challenges: snapshot.active_challenges.into_iter().collect(),
+            active_appeals: snapshot.active_appeals.into_iter().collect(),
+            prior_votes: snapshot.prior_votes.into_iter().collect(),
+            selections: snapshot.selections.into_iter().collect(),
             attempts: snapshot.attempts,
-            penalized_verifiers: snapshot.penalized_verifiers,
+            penalized_verifiers: snapshot.penalized_verifiers.into_iter().collect(),
             pending_events: Vec::new(),
+            record_change_rules: None,
         }
     }
 }
@@ -1547,6 +1601,22 @@ struct SelectionRound {
     // Authorization is checked before installation. Signer subsets and agreement
     // rounds are not economic state and must not change its canonical hash.
     certified: Option<(Checkpoint, RandomOutput)>,
+    #[serde(skip)]
+    context: std::sync::OnceLock<Option<BlockHash>>,
+}
+
+impl SelectionRound {
+    fn vote_context(&self) -> Option<BlockHash> {
+        *self.context.get_or_init(|| {
+            let (checkpoint, _) = self.certified.as_ref()?;
+            self.request.vote_context(checkpoint).ok()
+        })
+    }
+
+    fn replace_storage_pool(&mut self, pool: Vec<WalletAddress>) -> Vec<WalletAddress> {
+        self.context.take();
+        self.request.replace_storage_pool(pool)
+    }
 }
 
 #[derive(Deserialize)]
@@ -1565,6 +1635,7 @@ fn restore_legacy_selections(
                 wallet,
                 SelectionRound {
                     request: selection.request,
+                    context: Default::default(),
                     certified: selection
                         .certified
                         .map(|(certificate, beacon)| (certificate.checkpoint, beacon)),
@@ -1575,7 +1646,28 @@ fn restore_legacy_selections(
 }
 
 impl OrchestratorSnapshot {
+    /// Read a persisted committee context without rebuilding the orchestrator.
+    /// This is a state hint, not proof of certified installation.
+    pub fn selection_context(&self, wallet: &WalletAddress) -> Option<BlockHash> {
+        self.selections.get(wallet)?.vote_context()
+    }
+
+    /// Borrow persisted fields for streaming canonical encoding without restoration.
+    pub fn snapshot_view(&self) -> SnapshotView<'_> {
+        borrowed_snapshot::Snapshot::from_owned(self)
+    }
+
     const FORMAT: &'static [u8] = b"BURST-VERIFICATION\x08";
+
+    pub fn encoded_size(&self) -> Result<u64, bincode::Error> {
+        bincode::serialized_size(self)?
+            .checked_add(Self::FORMAT.len() as u64)
+            .ok_or_else(|| {
+                Box::new(bincode::ErrorKind::Custom(
+                    "verification snapshot size overflow".into(),
+                ))
+            })
+    }
 
     pub fn encode(&self) -> Result<Vec<u8>, bincode::Error> {
         let mut bytes = Self::FORMAT.to_vec();
@@ -1583,6 +1675,9 @@ impl OrchestratorSnapshot {
         Ok(bytes)
     }
 
+    /// Decode a supported version, rejecting trailing bytes and checking appeal
+    /// relationships and retained Neither history. Caller-owned input limits and
+    /// source authentication are still required; no signature replay occurs here.
     pub fn decode(bytes: &[u8]) -> Result<Self, bincode::Error> {
         use bincode::Options;
         let options = bincode::DefaultOptions::new()
@@ -1989,12 +2084,12 @@ mod tests {
         let params = test_params();
         let target = test_addr("target");
         let challenger = test_addr("challenger");
-        let mut orch = VerificationOrchestrator::new();
-        orch.genesis_verify_at(&target, &test_addr("creator"), 1, 50, Timestamp::new(0))
+        let mut verification = VerificationOrchestrator::new();
+        verification.genesis_verify_at(&target, &test_addr("creator"), 1, 50, Timestamp::new(0))
             .unwrap();
-        orch.drain_events();
+        verification.drain_events();
         let context = BlockHash::new([17; 32]);
-        orch.initiate_signed_challenge_at(
+        verification.initiate_signed_challenge_at(
             &target,
             &challenger,
             true,
@@ -2006,18 +2101,18 @@ mod tests {
         let mut old = b"BURST-VERIFICATION\x04".to_vec();
         old.extend(
             bincode::serialize(&(
-                &orch.states,
-                &orch.active_challenges,
-                &orch.penalized_verifiers,
+                &verification.states,
+                &verification.active_challenges,
+                &verification.penalized_verifiers,
                 &crate::voting::LegacyNeitherVoteTracker::empty(),
-                &orch.prior_votes,
-                &orch.selections,
+                &verification.prior_votes,
+                &verification.selections,
             ))
             .unwrap(),
         );
         for (bytes, expected) in [
             (old, None),
-            (orch.snapshot().encode().unwrap(), Some(context)),
+            (verification.snapshot().encode().unwrap(), Some(context)),
         ] {
             let mut restored =
                 VerificationOrchestrator::restore(OrchestratorSnapshot::decode(&bytes).unwrap());
@@ -2039,20 +2134,20 @@ mod tests {
 
     #[test]
     fn normal_endorsements_require_the_governed_burn_before_creating_state() {
-        let mut orch = VerificationOrchestrator::new();
+        let mut verification = VerificationOrchestrator::new();
         let mut params = ProtocolParams::default();
         let target = test_addr("target");
         let first = test_addr("first");
         let second = test_addr("second");
         for amount in [0, 1, params.endorsement_burn_amount - 1] {
             assert!(matches!(
-                orch.process_endorsement_at(&target, &first, amount, &params, Timestamp::new(10)),
+                verification.process_endorsement_at(&target, &first, amount, &params, Timestamp::new(10)),
                 Err(VerificationError::InsufficientEndorsementBurn { .. })
             ));
-            assert!(orch.get_state(&target).is_none());
-            assert!(orch.drain_events().is_empty());
+            assert!(verification.get_state(&target).is_none());
+            assert!(verification.drain_events().is_empty());
         }
-        orch.process_endorsement_at(
+        verification.process_endorsement_at(
             &target,
             &first,
             params.endorsement_burn_amount,
@@ -2061,7 +2156,7 @@ mod tests {
         )
         .unwrap();
         params.endorsement_burn_amount += 1;
-        assert!(orch
+        assert!(verification
             .process_endorsement_at(
                 &target,
                 &second,
@@ -2070,8 +2165,8 @@ mod tests {
                 Timestamp::new(11)
             )
             .is_err());
-        assert_eq!(orch.get_state(&target).unwrap().endorsements.len(), 1);
-        orch.process_endorsement_at(
+        assert_eq!(verification.get_state(&target).unwrap().endorsements.len(), 1);
+        verification.process_endorsement_at(
             &target,
             &second,
             params.endorsement_burn_amount + 1,
@@ -2080,7 +2175,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            orch.get_state(&target).unwrap().endorsements.len(),
+            verification.get_state(&target).unwrap().endorsements.len(),
             2,
             "extra burn does not buy extra endorsements"
         );
@@ -2090,13 +2185,13 @@ mod tests {
     fn signed_time_drives_penalties_and_challenges_without_wall_clock_reads() {
         let params = test_params();
         let target = test_addr("target");
-        let mut orch = VerificationOrchestrator::new();
-        endorse_wallet(&mut orch, &target, &params);
+        let mut verification = VerificationOrchestrator::new();
+        endorse_wallet(&mut verification, &target, &params);
         let pool = [test_addr("v1"), test_addr("v2"), test_addr("v3")];
-        let selected = orch
+        let selected = verification
             .select_verifiers_at(&target, &pool, &[1; 32], &params, Timestamp::new(100))
             .unwrap();
-        orch.process_vote_at(
+        verification.process_vote_at(
             &target,
             &selected[0],
             Vote::Neither,
@@ -2105,15 +2200,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            orch.get_state(&target).unwrap().votes[0].timestamp,
+            verification.get_state(&target).unwrap().votes[0].timestamp,
             Timestamp::new(123)
         );
         assert_eq!(
-            orch.snapshot().penalized_verifiers[&selected[0]],
+            verification.snapshot().penalized_verifiers[&selected[0]],
             123 + params.neither_penalty_cooldown_secs
         );
         let challenged = test_addr("other");
-        orch.genesis_verify_at(
+        verification.genesis_verify_at(
             &challenged,
             &test_addr("creator"),
             1,
@@ -2121,7 +2216,7 @@ mod tests {
             Timestamp::new(10),
         )
         .unwrap();
-        orch.initiate_challenge_at(
+        verification.initiate_challenge_at(
             &challenged,
             &test_addr("challenger"),
             true,
@@ -2131,11 +2226,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            orch.snapshot().active_challenges[&challenged].initiated_at,
+            verification.snapshot().active_challenges[&challenged].initiated_at,
             Timestamp::new(200)
         );
-        assert!(orch.resolve_challenge(&challenged, &params).is_err());
-        assert!(orch.snapshot().active_challenges.contains_key(&challenged));
+        assert!(verification.resolve_challenge(&challenged, &params).is_err());
+        assert!(verification.snapshot().active_challenges.contains_key(&challenged));
     }
 
     #[test]
@@ -2143,10 +2238,10 @@ mod tests {
         let mut params = test_params();
         params.verification_threshold_bps = 9000;
         let target = test_addr("target");
-        let mut orch = VerificationOrchestrator::new();
-        orch.genesis_verify_at(&target, &test_addr("creator"), 1, 50, Timestamp::new(0))
+        let mut verification = VerificationOrchestrator::new();
+        verification.genesis_verify_at(&target, &test_addr("creator"), 1, 50, Timestamp::new(0))
             .unwrap();
-        orch.initiate_challenge_at(
+        verification.initiate_challenge_at(
             &target,
             &test_addr("challenger"),
             true,
@@ -2156,7 +2251,7 @@ mod tests {
         )
         .unwrap();
         let pool = [test_addr("v1"), test_addr("v2"), test_addr("v3")];
-        let selected = orch
+        let selected = verification
             .select_verifiers_at(&target, &pool, &[1; 32], &params, Timestamp::new(101))
             .unwrap();
         for (i, voter) in selected.iter().enumerate() {
@@ -2165,28 +2260,28 @@ mod tests {
             } else {
                 Vote::Illegitimate
             };
-            orch.process_vote_at(&target, voter, vote, &params, Timestamp::new(102))
+            verification.process_vote_at(&target, voter, vote, &params, Timestamp::new(102))
                 .unwrap();
         }
-        assert!(orch.resolve_challenge(&target, &params).is_err());
-        assert!(orch
+        assert!(verification.resolve_challenge(&target, &params).is_err());
+        assert!(verification
             .try_resolve_challenge(&target, &params)
             .unwrap()
             .is_none());
-        let encoded = orch.snapshot().encode().unwrap();
-        let mut orch =
+        let encoded = verification.snapshot().encode().unwrap();
+        let mut verification =
             VerificationOrchestrator::restore(OrchestratorSnapshot::decode(&encoded).unwrap());
-        assert_eq!(orch.snapshot().prior_votes[&target].len(), 3);
-        assert_eq!(orch.get_state(&target).unwrap().revote_count, 1);
-        assert!(orch
+        assert_eq!(verification.snapshot().prior_votes[&target].len(), 3);
+        assert_eq!(verification.get_state(&target).unwrap().revote_count, 1);
+        assert!(verification
             .select_verifiers_at(&target, &pool, &[2; 32], &params, Timestamp::new(103))
             .is_err());
         let pool = [test_addr("v4"), test_addr("v5"), test_addr("v6")];
-        let selected = orch
+        let selected = verification
             .select_verifiers_at(&target, &pool, &[2; 32], &params, Timestamp::new(103))
             .unwrap();
         for voter in &selected {
-            orch.process_vote_at(
+            verification.process_vote_at(
                 &target,
                 voter,
                 Vote::Legitimate,
@@ -2196,7 +2291,7 @@ mod tests {
             .unwrap();
         }
         let Some(VerificationEvent::ChallengeResolved { outcome, .. }) =
-            orch.try_resolve_challenge(&target, &params).unwrap()
+            verification.try_resolve_challenge(&target, &params).unwrap()
         else {
             panic!("missing resolution")
         };
@@ -2224,29 +2319,29 @@ mod tests {
     fn old_snapshots_cannot_silently_drop_unsettled_revote_stakes() {
         let params = test_params();
         let target = test_addr("target");
-        let mut orch = VerificationOrchestrator::new();
-        endorse_wallet(&mut orch, &target, &params);
+        let mut verification = VerificationOrchestrator::new();
+        endorse_wallet(&mut verification, &target, &params);
         let pool = [test_addr("v1"), test_addr("v2"), test_addr("v3")];
-        let selected = orch
+        let selected = verification
             .select_verifiers(&target, &pool, &[1; 32], &params)
             .unwrap();
         for voter in &selected {
-            orch.process_vote(&target, voter, Vote::Illegitimate, &params)
+            verification.process_vote(&target, voter, Vote::Illegitimate, &params)
                 .unwrap();
         }
         let mut old = b"BURST-VERIFICATION\x02".to_vec();
         old.extend(
             bincode::serialize(&(
-                &orch.states,
-                &orch.active_challenges,
-                &orch.penalized_verifiers,
-                &orch.neither_tracker,
+                &verification.states,
+                &verification.active_challenges,
+                &verification.penalized_verifiers,
+                &verification.neither_tracker,
             ))
             .unwrap(),
         );
         assert!(OrchestratorSnapshot::decode(&old).is_err());
         assert_eq!(
-            OrchestratorSnapshot::decode(&orch.snapshot().encode().unwrap())
+            OrchestratorSnapshot::decode(&verification.snapshot().encode().unwrap())
                 .unwrap()
                 .prior_votes[&target]
                 .len(),
@@ -2258,23 +2353,23 @@ mod tests {
     fn persistence_retains_neither_history_and_active_votes() {
         let params = test_params();
         let target = test_addr("target");
-        let mut orch = VerificationOrchestrator::new();
-        endorse_wallet(&mut orch, &target, &params);
+        let mut verification = VerificationOrchestrator::new();
+        endorse_wallet(&mut verification, &target, &params);
         let pool: Vec<_> = (1..=3).map(|i| test_addr(&format!("v{i}"))).collect();
-        let selected = orch
+        let selected = verification
             .select_verifiers(&target, &pool, &[1; 32], &params)
             .unwrap();
-        orch.neither_tracker
+        verification.neither_tracker
             .record_vote(&selected[0], Vote::Neither);
-        orch.process_vote(&target, &selected[0], Vote::Legitimate, &params)
+        verification.process_vote(&target, &selected[0], Vote::Legitimate, &params)
             .unwrap();
-        let bytes = orch.snapshot().encode().unwrap();
+        let bytes = verification.snapshot().encode().unwrap();
         let restored =
             VerificationOrchestrator::restore(OrchestratorSnapshot::decode(&bytes).unwrap());
-        assert_eq!(restored.neither_tracker.total_assignments(&selected[0]), 2);
+        assert_eq!(restored.neither_tracker.retained_assignments(&selected[0]), 2);
         assert_eq!(restored.neither_tracker.neither_count(&selected[0]), 1);
         assert_eq!(
-            restored.get_state(&target).unwrap().selected_verifiers,
+            *restored.get_state(&target).unwrap().selected_verifiers,
             selected
         );
         assert_eq!(restored.get_state(&target).unwrap().votes.len(), 1);
@@ -2295,15 +2390,15 @@ mod tests {
     fn legacy_persistence_preserves_verification_and_cooldowns() {
         let params = test_params();
         let target = test_addr("target");
-        let mut orch = VerificationOrchestrator::new();
-        verify_wallet(&mut orch, &target, &params);
-        orch.penalized_verifiers
+        let mut verification = VerificationOrchestrator::new();
+        verify_wallet(&mut verification, &target, &params);
+        verification.penalized_verifiers
             .insert(test_addr("penalized"), u64::MAX);
         // Bincode encodes a tuple and a struct with these three fields identically.
         let bytes = bincode::serialize(&(
-            &orch.states,
-            &orch.active_challenges,
-            &orch.penalized_verifiers,
+            &verification.states,
+            &verification.active_challenges,
+            &verification.penalized_verifiers,
         ))
         .unwrap();
         let restored =
@@ -2318,18 +2413,18 @@ mod tests {
 
     #[test]
     fn selection_requires_completed_endorsement_and_an_independent_full_pool() {
-        let mut orch = VerificationOrchestrator::new();
+        let mut verification = VerificationOrchestrator::new();
         let params = test_params();
         let target = test_addr("target");
         let pool: Vec<_> = (1..=3).map(|i| test_addr(&format!("v{i}"))).collect();
-        orch.process_endorsement(&target, &test_addr("e1"), 1000, &params)
+        verification.process_endorsement(&target, &test_addr("e1"), 1000, &params)
             .unwrap();
         assert!(matches!(
-            orch.select_verifiers(&target, &pool, &[0; 32], &params),
+            verification.select_verifiers(&target, &pool, &[0; 32], &params),
             Err(VerificationError::ThresholdNotMet { .. })
         ));
         for endorser in ["e2", "e3"] {
-            orch.process_endorsement(&target, &test_addr(endorser), 1000, &params)
+            verification.process_endorsement(&target, &test_addr(endorser), 1000, &params)
                 .unwrap();
         }
         let mut contaminated = vec![
@@ -2338,15 +2433,15 @@ mod tests {
             pool[0].clone(),
             pool[0].clone(),
         ];
-        assert!(orch
+        assert!(verification
             .select_verifiers(&target, &contaminated, &[0; 32], &params)
             .is_err());
         assert_eq!(
-            orch.get_state(&target).unwrap().phase,
+            verification.get_state(&target).unwrap().phase,
             VerificationPhase::Endorsing
         );
         contaminated.extend(pool.clone());
-        let selected = orch
+        let selected = verification
             .select_verifiers(&target, &contaminated, &[0; 32], &params)
             .unwrap();
         assert_eq!(selected.len(), 3);
@@ -2377,7 +2472,7 @@ mod tests {
             .select_verifiers(&target, &pool, &[2; 32], &params)
             .is_err());
         let state = a.get_state(&target).unwrap();
-        assert_eq!(state.selected_verifiers, selected);
+        assert_eq!(*state.selected_verifiers, selected);
         assert_eq!(state.votes.len(), 1);
     }
 
@@ -2385,19 +2480,19 @@ mod tests {
     fn penalized_final_neither_vote_still_resolves_verification() {
         let params = test_params();
         let target = test_addr("target");
-        let mut orch = VerificationOrchestrator::new();
-        endorse_wallet(&mut orch, &target, &params);
+        let mut verification = VerificationOrchestrator::new();
+        endorse_wallet(&mut verification, &target, &params);
         let pool: Vec<_> = (1..=3).map(|i| test_addr(&format!("v{i}"))).collect();
-        let selected = orch
+        let selected = verification
             .select_verifiers(&target, &pool, &[1; 32], &params)
             .unwrap();
         for voter in &selected[..2] {
-            assert!(orch
+            assert!(verification
                 .process_vote(&target, voter, Vote::Legitimate, &params)
                 .unwrap()
                 .is_none());
         }
-        let event = orch
+        let event = verification
             .process_vote(&target, &selected[2], Vote::Neither, &params)
             .unwrap();
         assert!(matches!(
@@ -2407,79 +2502,76 @@ mod tests {
                 ..
             })
         ));
-        assert_eq!(orch.penalized_count(), 1);
-        assert_eq!(orch.get_state(&target).unwrap().votes.len(), 3);
+        assert_eq!(verification.penalized_count(), 1);
+        assert_eq!(verification.get_state(&target).unwrap().votes.len(), 3);
     }
 
-    /// Helper: run full endorsement phase, returning the orchestrator ready for verifier selection.
+    /// Complete endorsements so verifiers can be selected.
     fn endorse_wallet(
-        orch: &mut VerificationOrchestrator,
+        verification: &mut VerificationOrchestrator,
         wallet: &WalletAddress,
         params: &ProtocolParams,
     ) {
         let endorsers: Vec<WalletAddress> = (1..=3).map(|i| test_addr(&format!("e{i}"))).collect();
         for e in &endorsers {
-            orch.process_endorsement(wallet, e, 1000, params).unwrap();
+            verification.process_endorsement(wallet, e, 1000, params).unwrap();
         }
     }
 
-    /// Helper: verify a wallet end-to-end so it can be challenged.
+    /// Complete component verification so the wallet can be challenged.
     fn verify_wallet(
-        orch: &mut VerificationOrchestrator,
+        verification: &mut VerificationOrchestrator,
         wallet: &WalletAddress,
         params: &ProtocolParams,
     ) {
-        endorse_wallet(orch, wallet, params);
+        endorse_wallet(verification, wallet, params);
 
         let verifiers: Vec<WalletAddress> = (1..=5).map(|i| test_addr(&format!("v{i}"))).collect();
         let randomness = [42u8; 32];
-        let selected = orch
+        let selected = verification
             .select_verifiers(wallet, &verifiers, &randomness, params)
             .unwrap();
 
         for v in &selected {
-            orch.process_vote(wallet, v, Vote::Legitimate, params)
+            verification.process_vote(wallet, v, Vote::Legitimate, params)
                 .unwrap();
         }
     }
 
-    // ── Full verification flow ──────────────────────────────────────────
 
     #[test]
+    // Local engine flow; no certified selection, signatures or ledger settlement.
     fn full_verification_flow_verified() {
-        let mut orch = VerificationOrchestrator::new();
+        let mut verification = VerificationOrchestrator::new();
         let params = test_params();
         let wallet = test_addr("target");
 
-        // Phase 1: Endorsement
-        endorse_wallet(&mut orch, &wallet, &params);
+        endorse_wallet(&mut verification, &wallet, &params);
 
-        let events = orch.drain_events();
+        let events = verification.drain_events();
         assert!(events.iter().any(|e| matches!(
             e,
             VerificationEvent::EndorsementComplete { wallet: w } if *w == wallet
         )));
 
-        let state = orch.get_state(&wallet).unwrap();
+        let state = verification.get_state(&wallet).unwrap();
         assert_eq!(state.endorsements.len(), 3);
 
-        // Phase 2: Verifier selection
         let verifiers: Vec<WalletAddress> = (1..=5).map(|i| test_addr(&format!("v{i}"))).collect();
         let randomness = [1u8; 32];
-        let selected = orch
+        let selected = verification
             .select_verifiers(&wallet, &verifiers, &randomness, &params)
             .unwrap();
         assert_eq!(selected.len(), 3);
 
-        let events = orch.drain_events();
+        let events = verification.drain_events();
         assert!(events.iter().any(|e| matches!(
             e,
             VerificationEvent::VerifiersSelected { wallet: w, .. } if *w == wallet
         )));
 
-        // Phase 3: Voting — all vote Legitimate
         for (i, v) in selected.iter().enumerate() {
-            let result = orch
+            let result = verification
                 .process_vote(&wallet, v, Vote::Legitimate, &params)
                 .unwrap();
             if i < selected.len() - 1 {
@@ -2505,47 +2597,47 @@ mod tests {
             }
         }
 
-        let state = orch.get_state(&wallet).unwrap();
+        let state = verification.get_state(&wallet).unwrap();
         assert_eq!(state.phase, VerificationPhase::Verified);
     }
 
     #[test]
     fn full_verification_flow_failed() {
-        let mut orch = VerificationOrchestrator::new();
+        let mut verification = VerificationOrchestrator::new();
         let mut params = test_params();
         params.max_revotes = 0;
         let wallet = test_addr("target");
 
-        endorse_wallet(&mut orch, &wallet, &params);
+        endorse_wallet(&mut verification, &wallet, &params);
 
         let verifiers: Vec<WalletAddress> = (1..=5).map(|i| test_addr(&format!("v{i}"))).collect();
-        let selected = orch
+        let selected = verification
             .select_verifiers(&wallet, &verifiers, &[2u8; 32], &params)
             .unwrap();
 
         // All vote Illegitimate with no revotes remaining → fails
         for v in &selected {
-            let _ = orch
+            let _ = verification
                 .process_vote(&wallet, v, Vote::Illegitimate, &params)
                 .unwrap();
         }
 
-        let state = orch.get_state(&wallet).unwrap();
+        let state = verification.get_state(&wallet).unwrap();
         assert_eq!(state.phase, VerificationPhase::Failed);
     }
 
     #[test]
     fn endorsement_below_threshold_no_event() {
-        let mut orch = VerificationOrchestrator::new();
+        let mut verification = VerificationOrchestrator::new();
         let params = test_params();
         let wallet = test_addr("target");
 
-        orch.process_endorsement(&wallet, &test_addr("e1"), 1000, &params)
+        verification.process_endorsement(&wallet, &test_addr("e1"), 1000, &params)
             .unwrap();
-        orch.process_endorsement(&wallet, &test_addr("e2"), 1000, &params)
+        verification.process_endorsement(&wallet, &test_addr("e2"), 1000, &params)
             .unwrap();
 
-        let events = orch.drain_events();
+        let events = verification.drain_events();
         assert!(
             !events
                 .iter()
@@ -2556,47 +2648,45 @@ mod tests {
 
     #[test]
     fn select_verifiers_wrong_phase_errors() {
-        let mut orch = VerificationOrchestrator::new();
+        let mut verification = VerificationOrchestrator::new();
         let params = test_params();
         let wallet = test_addr("target");
 
-        verify_wallet(&mut orch, &wallet, &params);
+        verify_wallet(&mut verification, &wallet, &params);
 
-        let result = orch.select_verifiers(&wallet, &[], &[0u8; 32], &params);
+        let result = verification.select_verifiers(&wallet, &[], &[0u8; 32], &params);
         assert!(result.is_err());
     }
 
     #[test]
     fn vote_from_non_selected_verifier_errors() {
-        let mut orch = VerificationOrchestrator::new();
+        let mut verification = VerificationOrchestrator::new();
         let params = test_params();
         let wallet = test_addr("target");
 
-        endorse_wallet(&mut orch, &wallet, &params);
+        endorse_wallet(&mut verification, &wallet, &params);
 
         let verifiers: Vec<WalletAddress> = (1..=5).map(|i| test_addr(&format!("v{i}"))).collect();
-        orch.select_verifiers(&wallet, &verifiers, &[0u8; 32], &params)
+        verification.select_verifiers(&wallet, &verifiers, &[0u8; 32], &params)
             .unwrap();
 
         let outsider = test_addr("outsider");
-        let result = orch.process_vote(&wallet, &outsider, Vote::Legitimate, &params);
+        let result = verification.process_vote(&wallet, &outsider, Vote::Legitimate, &params);
         assert!(result.is_err());
     }
 
-    // ── Challenge flow ──────────────────────────────────────────────────
 
     #[test]
     fn challenge_fraud_confirmed() {
-        let mut orch = VerificationOrchestrator::new();
+        let mut verification = VerificationOrchestrator::new();
         let params = test_params();
         let wallet = test_addr("target");
 
-        verify_wallet(&mut orch, &wallet, &params);
-        orch.drain_events();
+        verify_wallet(&mut verification, &wallet, &params);
+        verification.drain_events();
 
-        // Initiate challenge
         let challenger = test_addr("challenger");
-        orch.initiate_challenge(
+        verification.initiate_challenge(
             &wallet,
             &challenger,
             true,
@@ -2606,26 +2696,24 @@ mod tests {
         )
         .unwrap();
 
-        let state = orch.get_state(&wallet).unwrap();
+        let state = verification.get_state(&wallet).unwrap();
         assert_eq!(state.phase, VerificationPhase::Challenged);
 
-        // Select verifiers for re-verification
         let verifiers: Vec<WalletAddress> =
             (10..=15).map(|i| test_addr(&format!("rv{i}"))).collect();
-        let selected = orch
+        let selected = verification
             .select_verifiers(&wallet, &verifiers, &[99u8; 32], &params)
             .unwrap();
 
         // All vote Illegitimate → fraud confirmed
         for v in &selected {
-            let result = orch
+            let result = verification
                 .process_vote(&wallet, v, Vote::Illegitimate, &params)
                 .unwrap();
             assert!(result.is_none(), "challenge votes should not auto-resolve");
         }
 
-        // Resolve the challenge
-        let event = orch.resolve_challenge(&wallet, &params).unwrap();
+        let event = verification.resolve_challenge(&wallet, &params).unwrap();
         match &event {
             VerificationEvent::ChallengeResolved { wallet: w, outcome } => {
                 assert_eq!(w, &wallet);
@@ -2636,11 +2724,10 @@ mod tests {
             _ => panic!("expected ChallengeResolved"),
         }
 
-        let state = orch.get_state(&wallet).unwrap();
+        let state = verification.get_state(&wallet).unwrap();
         assert_eq!(state.phase, VerificationPhase::Unverified);
 
-        // Should have WalletUnverified in pending events
-        let events = orch.drain_events();
+        let events = verification.drain_events();
         assert!(events.iter().any(
             |e| matches!(e, VerificationEvent::WalletUnverified { wallet: w } if *w == wallet)
         ));
@@ -2648,15 +2735,15 @@ mod tests {
 
     #[test]
     fn challenge_rejected() {
-        let mut orch = VerificationOrchestrator::new();
+        let mut verification = VerificationOrchestrator::new();
         let params = test_params();
         let wallet = test_addr("target");
 
-        verify_wallet(&mut orch, &wallet, &params);
-        orch.drain_events();
+        verify_wallet(&mut verification, &wallet, &params);
+        verification.drain_events();
 
         let challenger = test_addr("challenger");
-        orch.initiate_challenge(
+        verification.initiate_challenge(
             &wallet,
             &challenger,
             true,
@@ -2668,32 +2755,29 @@ mod tests {
 
         let verifiers: Vec<WalletAddress> =
             (10..=15).map(|i| test_addr(&format!("rv{i}"))).collect();
-        let selected = orch
+        let selected = verification
             .select_verifiers(&wallet, &verifiers, &[88u8; 32], &params)
             .unwrap();
 
         // All vote Legitimate → challenge rejected
         for v in &selected {
-            orch.process_vote(&wallet, v, Vote::Legitimate, &params)
+            verification.process_vote(&wallet, v, Vote::Legitimate, &params)
                 .unwrap();
         }
 
-        let event = orch.resolve_challenge(&wallet, &params).unwrap();
+        let event = verification.resolve_challenge(&wallet, &params).unwrap();
         match &event {
             VerificationEvent::ChallengeResolved { wallet: w, outcome } => {
                 assert_eq!(w, &wallet);
-                assert_eq!(outcome.outcome, ChallengeResult::ChallengeRejected);
                 assert_eq!(outcome.outcome, ChallengeResult::ChallengeRejected);
             }
             _ => panic!("expected ChallengeResolved"),
         }
 
-        // Wallet should be back to Verified
-        let state = orch.get_state(&wallet).unwrap();
+        let state = verification.get_state(&wallet).unwrap();
         assert_eq!(state.phase, VerificationPhase::Verified);
 
-        // No WalletUnverified event
-        let events = orch.drain_events();
+        let events = verification.drain_events();
         assert!(!events
             .iter()
             .any(|e| matches!(e, VerificationEvent::WalletUnverified { .. })));
@@ -2701,13 +2785,13 @@ mod tests {
 
     #[test]
     fn challenge_non_verified_wallet_errors() {
-        let mut orch = VerificationOrchestrator::new();
+        let mut verification = VerificationOrchestrator::new();
         let params = test_params();
         let wallet = test_addr("target");
 
-        endorse_wallet(&mut orch, &wallet, &params);
+        endorse_wallet(&mut verification, &wallet, &params);
 
-        let result = orch.initiate_challenge(
+        let result = verification.initiate_challenge(
             &wallet,
             &test_addr("c"),
             true,
@@ -2720,68 +2804,67 @@ mod tests {
 
     #[test]
     fn resolve_without_challenge_errors() {
-        let mut orch = VerificationOrchestrator::new();
+        let mut verification = VerificationOrchestrator::new();
         let params = test_params();
         let wallet = test_addr("target");
 
-        let result = orch.resolve_challenge(&wallet, &params);
+        let result = verification.resolve_challenge(&wallet, &params);
         assert!(result.is_err());
     }
 
     #[test]
     fn neither_votes_tracked_across_verifications() {
-        let mut orch = VerificationOrchestrator::new();
+        let mut verification = VerificationOrchestrator::new();
         let params = test_params();
         let wallet = test_addr("target");
 
-        endorse_wallet(&mut orch, &wallet, &params);
+        endorse_wallet(&mut verification, &wallet, &params);
 
         let verifiers: Vec<WalletAddress> = (1..=5).map(|i| test_addr(&format!("v{i}"))).collect();
-        let selected = orch
+        let selected = verification
             .select_verifiers(&wallet, &verifiers, &[0u8; 32], &params)
             .unwrap();
 
         // Give verifier some Legitimate history so one Neither doesn't trigger penalty
-        orch.neither_tracker
+        verification.neither_tracker
             .record_vote(&selected[0], Vote::Legitimate);
-        orch.neither_tracker
+        verification.neither_tracker
             .record_vote(&selected[0], Vote::Legitimate);
 
         // Third vote is Neither — 1/3 = 3333 bps < 5000 threshold, no penalty
-        orch.process_vote(&wallet, &selected[0], Vote::Neither, &params)
+        verification.process_vote(&wallet, &selected[0], Vote::Neither, &params)
             .unwrap();
 
-        assert_eq!(orch.neither_tracker.neither_count(&selected[0]), 1);
-        assert_eq!(orch.neither_tracker.total_assignments(&selected[0]), 3);
+        assert_eq!(verification.neither_tracker.neither_count(&selected[0]), 1);
+        assert_eq!(verification.neither_tracker.retained_assignments(&selected[0]), 3);
     }
 
     #[test]
     fn drain_events_clears_buffer() {
-        let mut orch = VerificationOrchestrator::new();
+        let mut verification = VerificationOrchestrator::new();
         let params = test_params();
         let wallet = test_addr("target");
 
-        endorse_wallet(&mut orch, &wallet, &params);
+        endorse_wallet(&mut verification, &wallet, &params);
 
-        let events = orch.drain_events();
+        let events = verification.drain_events();
         assert!(!events.is_empty());
 
-        let events = orch.drain_events();
+        let events = verification.drain_events();
         assert!(events.is_empty());
     }
 
-    // ── Genesis bootstrapping ─────────────────────────────────────────
 
     #[test]
     fn genesis_creator_can_endorse_during_bootstrap() {
-        let mut orch = VerificationOrchestrator::new();
+        let mut verification = VerificationOrchestrator::new();
         let genesis = test_addr("genesis");
         let target = test_addr("target");
 
-        let result = orch.genesis_endorse(&genesis, &target, &genesis, 0, 10);
+        let result = verification.genesis_endorse(&genesis, &target, &genesis, 0, 10);
         assert!(result.is_ok());
 
-        let events = orch.drain_events();
+        let events = verification.drain_events();
         assert!(events.iter().any(|e| matches!(
             e,
             VerificationEvent::EndorsementComplete { wallet: w } if *w == target
@@ -2790,12 +2873,12 @@ mod tests {
 
     #[test]
     fn non_genesis_cannot_genesis_endorse() {
-        let mut orch = VerificationOrchestrator::new();
+        let mut verification = VerificationOrchestrator::new();
         let genesis = test_addr("genesis");
         let impostor = test_addr("impostor");
         let target = test_addr("target");
 
-        let result = orch.genesis_endorse(&impostor, &target, &genesis, 0, 10);
+        let result = verification.genesis_endorse(&impostor, &target, &genesis, 0, 10);
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -2805,11 +2888,11 @@ mod tests {
 
     #[test]
     fn genesis_endorse_fails_after_bootstrap_threshold() {
-        let mut orch = VerificationOrchestrator::new();
+        let mut verification = VerificationOrchestrator::new();
         let genesis = test_addr("genesis");
         let target = test_addr("target");
 
-        let result = orch.genesis_endorse(&genesis, &target, &genesis, 10, 10);
+        let result = verification.genesis_endorse(&genesis, &target, &genesis, 10, 10);
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -2819,17 +2902,17 @@ mod tests {
 
     #[test]
     fn genesis_verify_sets_wallet_verified() {
-        let mut orch = VerificationOrchestrator::new();
+        let mut verification = VerificationOrchestrator::new();
         let genesis = test_addr("genesis");
         let target = test_addr("target");
 
-        let result = orch.genesis_verify(&target, &genesis, 0, 10);
+        let result = verification.genesis_verify(&target, &genesis, 0, 10);
         assert!(result.is_ok());
 
-        let state = orch.get_state(&target).unwrap();
+        let state = verification.get_state(&target).unwrap();
         assert_eq!(state.phase, VerificationPhase::Verified);
 
-        let events = orch.drain_events();
+        let events = verification.drain_events();
         assert!(events.iter().any(|e| matches!(
             e,
             VerificationEvent::VerificationComplete {
@@ -2842,10 +2925,10 @@ mod tests {
 
     #[test]
     fn genesis_verify_rejects_self_verification() {
-        let mut orch = VerificationOrchestrator::new();
+        let mut verification = VerificationOrchestrator::new();
         let genesis = test_addr("genesis");
 
-        let result = orch.genesis_verify(&genesis, &genesis, 0, 10);
+        let result = verification.genesis_verify(&genesis, &genesis, 0, 10);
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -2855,11 +2938,11 @@ mod tests {
 
     #[test]
     fn genesis_verify_fails_after_bootstrap_threshold() {
-        let mut orch = VerificationOrchestrator::new();
+        let mut verification = VerificationOrchestrator::new();
         let genesis = test_addr("genesis");
         let target = test_addr("target");
 
-        let result = orch.genesis_verify(&target, &genesis, 50, 50);
+        let result = verification.genesis_verify(&target, &genesis, 50, 50);
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -2867,34 +2950,33 @@ mod tests {
         ));
     }
 
-    // ── Revote exclusion tests ────────────────────────────────────────
 
     #[test]
     fn revote_verifiers_do_not_overlap_with_previous_round() {
-        let mut orch = VerificationOrchestrator::new();
+        let mut verification = VerificationOrchestrator::new();
         let mut params = test_params();
         params.num_verifiers = 2;
         params.max_revotes = 2;
         let wallet = test_addr("target");
 
-        endorse_wallet(&mut orch, &wallet, &params);
+        endorse_wallet(&mut verification, &wallet, &params);
 
         let pool: Vec<WalletAddress> = (1..=6).map(|i| test_addr(&format!("v{i}"))).collect();
         let randomness = [7u8; 32];
 
-        let round1 = orch
+        let round1 = verification
             .select_verifiers(&wallet, &pool, &randomness, &params)
             .unwrap();
         assert_eq!(round1.len(), 2);
 
         // Force a revote
         for v in &round1 {
-            orch.process_vote(&wallet, v, Vote::Illegitimate, &params)
+            verification.process_vote(&wallet, v, Vote::Illegitimate, &params)
                 .unwrap();
         }
 
         // After tally triggers revote internally, select new verifiers
-        let round2 = orch
+        let round2 = verification
             .select_verifiers(&wallet, &pool, &[8u8; 32], &params)
             .unwrap();
         assert_eq!(round2.len(), 2);
@@ -2909,38 +2991,36 @@ mod tests {
 
     #[test]
     fn excluded_verifiers_accumulate_across_multiple_revotes() {
-        let mut orch = VerificationOrchestrator::new();
+        let mut verification = VerificationOrchestrator::new();
         let mut params = test_params();
         params.num_verifiers = 2;
         params.max_revotes = 3;
         let wallet = test_addr("target");
 
-        endorse_wallet(&mut orch, &wallet, &params);
+        endorse_wallet(&mut verification, &wallet, &params);
 
         let pool: Vec<WalletAddress> = (1..=8).map(|i| test_addr(&format!("v{i}"))).collect();
 
-        // Round 1
-        let round1 = orch
+        let round1 = verification
             .select_verifiers(&wallet, &pool, &[10u8; 32], &params)
             .unwrap();
 
         for v in &round1 {
-            orch.process_vote(&wallet, v, Vote::Illegitimate, &params)
+            verification.process_vote(&wallet, v, Vote::Illegitimate, &params)
                 .unwrap();
         }
 
-        // Round 2
-        let round2 = orch
+        let round2 = verification
             .select_verifiers(&wallet, &pool, &[20u8; 32], &params)
             .unwrap();
 
         for v in &round2 {
-            orch.process_vote(&wallet, v, Vote::Illegitimate, &params)
+            verification.process_vote(&wallet, v, Vote::Illegitimate, &params)
                 .unwrap();
         }
 
         // Round 3 — excluded list should contain round1 + round2
-        let round3 = orch
+        let round3 = verification
             .select_verifiers(&wallet, &pool, &[30u8; 32], &params)
             .unwrap();
 
@@ -2953,22 +3033,21 @@ mod tests {
             );
         }
 
-        let state = orch.get_state(&wallet).unwrap();
+        let state = verification.get_state(&wallet).unwrap();
         assert_eq!(state.excluded_verifiers.len(), 4); // 2 from each of 2 rounds
     }
 
-    // ── Challenger verification check ─────────────────────────────────
 
     #[test]
     fn challenge_fails_if_challenger_not_verified() {
-        let mut orch = VerificationOrchestrator::new();
+        let mut verification = VerificationOrchestrator::new();
         let params = test_params();
         let wallet = test_addr("target");
 
-        verify_wallet(&mut orch, &wallet, &params);
+        verify_wallet(&mut verification, &wallet, &params);
 
         let unverified_challenger = test_addr("unverified");
-        let result = orch.initiate_challenge(
+        let result = verification.initiate_challenge(
             &wallet,
             &unverified_challenger,
             false,
@@ -2983,21 +3062,19 @@ mod tests {
         ));
     }
 
-    // ── Neither penalty enforcement ──────────────────────────────────
 
     #[test]
     fn penalized_verifier_excluded_from_selection() {
-        let mut orch = VerificationOrchestrator::new();
+        let mut verification = VerificationOrchestrator::new();
         let params = test_params();
         let wallet = test_addr("target");
 
         let v1 = test_addr("v1");
 
-        // Manually penalize v1
         let future = Timestamp::now().as_secs() + 999_999;
-        orch.penalized_verifiers.insert(v1.clone(), future);
+        verification.penalized_verifiers.insert(v1.clone(), future);
 
-        endorse_wallet(&mut orch, &wallet, &params);
+        endorse_wallet(&mut verification, &wallet, &params);
 
         let pool: Vec<WalletAddress> = vec![
             v1.clone(),
@@ -3007,7 +3084,7 @@ mod tests {
             test_addr("v5"),
         ];
 
-        let selected = orch
+        let selected = verification
             .select_verifiers(&wallet, &pool, &[42u8; 32], &params)
             .unwrap();
 
@@ -3019,46 +3096,43 @@ mod tests {
 
     #[test]
     fn penalty_expires_verifier_eligible_again() {
-        let mut orch = VerificationOrchestrator::new();
+        let mut verification = VerificationOrchestrator::new();
         let v1 = test_addr("v1");
 
-        // Penalty already expired
-        orch.penalized_verifiers.insert(v1.clone(), 0);
+        verification.penalized_verifiers.insert(v1.clone(), 0);
 
         assert!(
-            !orch.is_penalized(&v1, 1),
+            !verification.is_penalized(&v1, 1),
             "verifier with expired cooldown should not be penalized"
         );
 
-        // Cleanup should remove it
-        orch.cleanup_expired_penalties(1);
-        assert_eq!(orch.penalized_count(), 0);
+        verification.cleanup_expired_penalties(1);
+        assert_eq!(verification.penalized_count(), 0);
     }
 
     #[test]
     fn excessive_neither_voting_triggers_penalty_event() {
-        let mut orch = VerificationOrchestrator::new();
+        let mut verification = VerificationOrchestrator::new();
         let mut params = test_params();
         params.neither_penalty_cooldown_secs = 604800;
         let wallet = test_addr("target");
 
-        endorse_wallet(&mut orch, &wallet, &params);
+        endorse_wallet(&mut verification, &wallet, &params);
 
         let verifiers: Vec<WalletAddress> = (1..=5).map(|i| test_addr(&format!("v{i}"))).collect();
-        let selected = orch
+        let selected = verification
             .select_verifiers(&wallet, &verifiers, &[0u8; 32], &params)
             .unwrap();
 
         // Pre-load one verifier with 100% Neither history so next Neither triggers penalty
-        orch.neither_tracker
+        verification.neither_tracker
             .record_vote(&selected[0], Vote::Neither);
 
-        // This Neither vote should push ratio over 50% and trigger penalty
-        let result = orch.process_vote(&wallet, &selected[0], Vote::Neither, &params);
+        // The ratio stays at 100%; recording the vote applies the penalty.
+        let result = verification.process_vote(&wallet, &selected[0], Vote::Neither, &params);
         assert!(result.is_ok(), "a penalized Neither vote must still count");
 
-        // A VerifierPenalized event should be in pending events
-        let events = orch.drain_events();
+        let events = verification.drain_events();
         let penalty_events: Vec<_> = events
             .iter()
             .filter(|e| matches!(e, VerificationEvent::VerifierPenalized { .. }))
@@ -3075,21 +3149,19 @@ mod tests {
             _ => unreachable!(),
         }
 
-        // Verifier should be in penalized map
-        assert!(orch.penalized_count() > 0);
+        assert!(verification.penalized_count() > 0);
     }
 
-    // ── Endorser reward outcome tests ────────────────────────────────
 
     #[test]
-    fn verification_complete_includes_endorser_rewards() {
-        let mut orch = VerificationOrchestrator::new();
+    fn verification_complete_records_endorser_burns() {
+        let mut verification = VerificationOrchestrator::new();
         let params = test_params();
         let wallet = test_addr("target");
 
-        verify_wallet(&mut orch, &wallet, &params);
+        verify_wallet(&mut verification, &wallet, &params);
 
-        let events = orch.drain_events();
+        let events = verification.drain_events();
         let complete_event = events.iter().find(|e| {
             matches!(
                 e,
@@ -3109,18 +3181,16 @@ mod tests {
             assert_eq!(outcomes.endorsers.len(), 3);
             for eo in &outcomes.endorsers {
                 assert_eq!(eo.brn_burned, 1000);
-                // 10% of 1000 = 100
-                assert_eq!(eo.brn_burned, 1000);
             }
         }
     }
 
     #[test]
     fn deactivate_wallet_emits_event_without_revocation() {
-        let mut orch = VerificationOrchestrator::new();
+        let mut verification = VerificationOrchestrator::new();
         let wallet = WalletAddress::new("brst_deactivate_me");
-        orch.deactivate_wallet(&wallet);
-        let events = orch.drain_events();
+        verification.deactivate_wallet(&wallet);
+        let events = verification.drain_events();
         assert!(matches!(
             &events[..],
             [VerificationEvent::WalletDeactivated { wallet: w }] if *w == wallet
@@ -3130,13 +3200,12 @@ mod tests {
     #[test]
     fn try_resolve_challenge_waits_for_all_votes() {
         let params = test_params();
-        let mut orch = VerificationOrchestrator::new();
+        let mut verification = VerificationOrchestrator::new();
         let target = test_addr("challenged");
         let challenger = test_addr("challenger");
 
-        // Set up a verified wallet, then challenge it.
-        verify_wallet(&mut orch, &target, &params);
-        orch.initiate_challenge(
+        verify_wallet(&mut verification, &target, &params);
+        verification.initiate_challenge(
             &target,
             &challenger,
             true,
@@ -3149,34 +3218,34 @@ mod tests {
             .map(|i| test_addr(&format!("cv{i}")))
             .collect();
         let rand = [7u8; 32];
-        orch.select_verifiers(&target, &verifiers, &rand, &params)
+        verification.select_verifiers(&target, &verifiers, &rand, &params)
             .unwrap();
-        orch.drain_events();
+        verification.drain_events();
 
-        let selected = orch.get_state(&target).unwrap().selected_verifiers.clone();
+        let selected = verification.get_state(&target).unwrap().selected_verifiers.clone();
 
         // Not all votes in — must NOT resolve.
-        orch.process_vote(&target, &selected[0], Vote::Illegitimate, &params)
+        verification.process_vote(&target, &selected[0], Vote::Illegitimate, &params)
             .unwrap();
-        assert!(orch
+        assert!(verification
             .try_resolve_challenge(&target, &params)
             .unwrap()
             .is_none());
 
-        // Remaining votes land — resolves on the last one.
+        // A complete panel can now be resolved by the separate resolution call.
         for v in selected.iter().skip(1) {
-            orch.process_vote(&target, v, Vote::Illegitimate, &params)
+            verification.process_vote(&target, v, Vote::Illegitimate, &params)
                 .unwrap();
         }
-        let resolved = orch.try_resolve_challenge(&target, &params).unwrap();
+        let resolved = verification.try_resolve_challenge(&target, &params).unwrap();
         assert!(resolved.is_some());
         // Unanimous Illegitimate → fraud confirmed → WalletUnverified queued.
-        let events = orch.drain_events();
+        let events = verification.drain_events();
         assert!(events.iter().any(
             |e| matches!(e, VerificationEvent::WalletUnverified { wallet } if *wallet == target)
         ));
         // Second call is a no-op (challenge consumed).
-        assert!(orch
+        assert!(verification
             .try_resolve_challenge(&target, &params)
             .unwrap()
             .is_none());
@@ -3184,14 +3253,13 @@ mod tests {
 
     #[test]
     fn inactivity_challenge_deactivates_without_revoking() {
-        let mut orch = VerificationOrchestrator::new();
+        let mut verification = VerificationOrchestrator::new();
         let params = test_params();
         let target = test_addr("inactive");
         let challenger = test_addr("hunter");
 
-        verify_wallet(&mut orch, &target, &params);
-        // Same procedure, but the reason is benign Inactivity, not Fraud.
-        orch.initiate_challenge(
+        verify_wallet(&mut verification, &target, &params);
+        verification.initiate_challenge(
             &target,
             &challenger,
             true,
@@ -3203,23 +3271,23 @@ mod tests {
         let verifiers: Vec<WalletAddress> = (0..params.num_verifiers)
             .map(|i| test_addr(&format!("iv{i}")))
             .collect();
-        orch.select_verifiers(&target, &verifiers, &[9u8; 32], &params)
+        verification.select_verifiers(&target, &verifiers, &[9u8; 32], &params)
             .unwrap();
-        orch.drain_events();
-        let selected = orch.get_state(&target).unwrap().selected_verifiers.clone();
+        verification.drain_events();
+        let selected = verification.get_state(&target).unwrap().selected_verifiers.clone();
 
-        // Verifiers agree the wallet is no longer an active human → challenge
-        // upheld → benign DEACTIVATION (not fraud revocation).
+        // An upheld inactivity vote queues deactivation. This component test
+        // checks events and phase, not the node's BRN/TRST settlement.
         for v in &selected {
-            orch.process_vote(&target, v, Vote::Illegitimate, &params)
+            verification.process_vote(&target, v, Vote::Illegitimate, &params)
                 .unwrap();
         }
-        assert!(orch
+        assert!(verification
             .try_resolve_challenge(&target, &params)
             .unwrap()
             .is_some());
 
-        let events = orch.drain_events();
+        let events = verification.drain_events();
         // Upheld inactivity challenge → WalletDeactivated, NOT WalletUnverified.
         assert!(events.iter().any(
             |e| matches!(e, VerificationEvent::WalletDeactivated { wallet } if *wallet == target)
@@ -3228,8 +3296,43 @@ mod tests {
             .iter()
             .any(|e| matches!(e, VerificationEvent::WalletUnverified { .. })));
         assert_eq!(
-            orch.get_state(&target).unwrap().phase,
+            verification.get_state(&target).unwrap().phase,
             VerificationPhase::Deactivated
         );
     }
+}
+
+#[cfg(test)]
+mod governed_threshold_regression {
+#[test]
+fn verification_component_round_uses_governed_threshold() {
+    use super::*;
+    let make_address = |seed: u8| WalletAddress::new(format!("brst_regression_{seed}"));
+    let params = ProtocolParams {
+        endorsement_threshold: 2, num_verifiers: 3,
+        verification_threshold_bps: 9000, max_revotes: 0,
+        ..ProtocolParams::burst_defaults()
+    };
+    for legitimate_votes in [2, 3] {
+        let mut orchestrator = VerificationOrchestrator::new();
+        let target = make_address(180);
+        let pool: Vec<_> = (190..193).map(make_address).collect();
+        orchestrator.process_endorsement(&target, &make_address(181), params.endorsement_burn_amount, &params).unwrap();
+        assert!(orchestrator.select_verifiers(&target, &pool, &[1; 32], &params).is_err());
+        orchestrator.process_endorsement(&target, &make_address(182), params.endorsement_burn_amount, &params).unwrap();
+        let selected = orchestrator.select_verifiers(&target, &pool, &[1; 32], &params).unwrap();
+        assert_eq!(selected.len(), 3);
+        let mut outcome = None;
+        for (index, verifier) in selected.iter().enumerate() {
+            outcome = orchestrator.process_vote(&target, verifier,
+                if index < legitimate_votes { Vote::Legitimate } else { Vote::Illegitimate }, &params).unwrap();
+            if index < 2 { assert!(outcome.is_none()); }
+        }
+        let Some(VerificationEvent::VerificationComplete { result, .. }) = outcome else {
+            panic!("expected a completed verification round");
+        };
+        assert_eq!(result, if legitimate_votes == 3 { VerificationResult::Verified } else { VerificationResult::Failed });
+    }
+}
+
 }

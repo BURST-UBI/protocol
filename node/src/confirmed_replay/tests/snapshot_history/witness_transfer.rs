@@ -53,6 +53,28 @@ async fn consumer_history_lookup_proves_membership_without_installing_blocks() {
             &bytes,
         )
         .unwrap();
+    {
+        use crate::historical_lookup::preparation::{Cache, Request};
+        let mut cache = Cache::default();
+        let request = Request::Account(fixture.blocks[1].account.clone());
+        let first = cache.prepare(&local, NetworkId::Dev, &fixture.params, request.clone()).unwrap();
+        let warm = cache.prepare(&local, NetworkId::Dev, &fixture.params, request.clone()).unwrap();
+        assert!(Arc::ptr_eq(&first, &warm));
+        let mut batch = local.tx_begin_write().unwrap();
+        batch.put_meta("history-cache-unrelated", b"tracked").unwrap();
+        batch.commit().unwrap();
+        assert!(Arc::ptr_eq(&first, &cache.prepare(&local, NetworkId::Dev,
+            &fixture.params, request.clone()).unwrap()));
+        let mut batch = local.tx_begin_write().unwrap();
+        batch.delete_meta("history-cache-unrelated").unwrap();
+        batch.commit().unwrap();
+        let mut changed = fixture.params.clone();
+        changed.brn_rate += 1;
+        assert!(cache.prepare(&local, NetworkId::Dev, &changed, request.clone()).is_err());
+        assert!(cache.prepare(&local, NetworkId::Test, &fixture.params, request.clone()).is_err());
+        let rebuilt = cache.prepare(&local, NetworkId::Dev, &fixture.params, request).unwrap();
+        assert!(!Arc::ptr_eq(&first, &rebuilt));
+    }
     let before = local
         .tx_begin_write()
         .unwrap()
@@ -60,8 +82,9 @@ async fn consumer_history_lookup_proves_membership_without_installing_blocks() {
         .unwrap();
     let local = Arc::new(local);
     let service =
-        super::installed_recovery::Service::start(Arc::new(source), local.clone(), 0).await;
+        super::installed_recovery::WitnessService::start(Arc::new(source), local.clone(), 0).await;
     let mut reader = crate::historical_lookup::Reader {
+        preparation: Default::default(),
         store: local.clone(),
         registry: service.registry.clone(),
         network: NetworkId::Dev,
@@ -75,6 +98,31 @@ async fn consumer_history_lookup_proves_membership_without_installing_blocks() {
         bincode::serialize(&recovered).unwrap(),
         bincode::serialize(expected).unwrap()
     );
+    let wanted: Vec<_> = fixture
+        .blocks
+        .iter()
+        .take(4)
+        .map(|block| block.hash)
+        .collect();
+    let batch = reader.read_many(wanted.clone()).await.unwrap();
+    assert_eq!(batch.len(), wanted.len());
+    for block in batch {
+        let expected = fixture
+            .blocks
+            .iter()
+            .find(|expected| expected.hash == block.hash)
+            .unwrap();
+        assert_eq!(
+            bincode::serialize(&block).unwrap(),
+            bincode::serialize(expected).unwrap()
+        );
+    }
+    assert!(reader
+        .read_many(vec![expected.hash, expected.hash])
+        .await
+        .is_err());
+    assert!(reader.read_many(vec![BlockHash::ZERO]).await.is_err());
+    assert!(reader.read_many(Vec::new()).await.unwrap().is_empty());
     let head = snapshot
         .history_cursor(&expected.account)
         .unwrap()
@@ -93,6 +141,13 @@ async fn consumer_history_lookup_proves_membership_without_installing_blocks() {
             .account_page(expected.account.clone(), offset as u64 + 1, 1)
             .await
             .unwrap();
+        assert_eq!(
+            reader
+                .successor(expected.account.clone(), block.previous)
+                .await
+                .unwrap(),
+            Some(block.hash),
+        );
         assert_eq!(page.len(), 1);
         assert_eq!(page[0].0, offset as u64 + 1);
         assert_eq!(
@@ -121,7 +176,20 @@ async fn consumer_history_lookup_proves_membership_without_installing_blocks() {
         .account_page(expected.account.clone(), 1, 1001)
         .await
         .is_err());
+    for previous in [head.hash, BlockHash::new([255; 32])] {
+        assert_eq!(
+            reader
+                .successor(expected.account.clone(), previous)
+                .await
+                .unwrap(),
+            None
+        );
+    }
     reader.network = NetworkId::Test;
+    assert!(reader
+        .successor(expected.account.clone(), BlockHash::ZERO)
+        .await
+        .is_err());
     assert!(reader.read(expected.hash).await.is_err());
     assert!(reader
         .account_page(expected.account.clone(), 1, 1)
@@ -155,6 +223,11 @@ async fn consumer_history_lookup_proves_membership_without_installing_blocks() {
         .err()
         .unwrap()
         .contains("busy"));
+    assert!(reader
+        .successor(expected.account.clone(), BlockHash::ZERO)
+        .await
+        .unwrap_err()
+        .contains("busy"));
     drop(guard);
     local
         .meta_store()
@@ -184,8 +257,61 @@ async fn consumer_history_lookup_proves_membership_without_installing_blocks() {
             .unwrap(),
         before
     );
-    drop(reader);
+    // Install only the retained frontier/index; older confirmed indexes remain
+    // absent as after physical retirement. Exercise the RPC callback's reader.
+    let mut info = burst_store::account::AccountInfo::unopened(expected.account.clone());
+    info.head = head.hash;
+    info.block_count = head.height;
+    info.confirmation_height = head.height;
+    let last = expected_chain.last().unwrap();
+    let mut batch = local.tx_begin_write().unwrap();
+    batch.put_account_info(&info, false).unwrap();
+    batch
+        .put_block_with_account(
+            &head.hash,
+            &bincode::serialize(last).unwrap(),
+            &expected.account,
+            head.height,
+        )
+        .unwrap();
+    batch.commit().unwrap();
+    for block in &expected_chain {
+        let review = reader
+            .confirmed_slot(burst_types::payment_recovery::SlotQuery {
+                account: expected.account.to_string(),
+                previous: block.previous.to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(review.successor, Some(block.hash.to_string()));
+    }
+    assert_eq!(local.block_store().block_count().unwrap(), 1);
+    reader.registry = Arc::new(tokio::sync::RwLock::new(
+        crate::connection_registry::ConnectionRegistry::new(),
+    ));
     assert!(service.stop().await > 0);
+    // No peer can supply the pruned opening. Unavailability is an error, never
+    // an empty slot. The retained frontier still answers without a peer.
+    assert!(head.height > 1);
+    assert!(reader
+        .confirmed_slot(burst_types::payment_recovery::SlotQuery {
+            account: expected.account.to_string(),
+            previous: BlockHash::ZERO.to_string(),
+        })
+        .await
+        .is_err());
+    assert_eq!(
+        reader
+            .confirmed_slot(burst_types::payment_recovery::SlotQuery {
+                account: expected.account.to_string(),
+                previous: head.hash.to_string(),
+            })
+            .await
+            .unwrap()
+            .successor,
+        None
+    );
+    assert_eq!(local.block_store().block_count().unwrap(), 1);
 }
 
 #[test]
@@ -241,7 +367,7 @@ async fn exact_witness_batch_splits_committed_inventory_into_bounded_requests() 
     let wanted: Vec<_> = heads.iter().map(|head| head.hash).collect();
     let local = std::sync::Arc::new(local);
     let service =
-        super::installed_recovery::Service::start(std::sync::Arc::new(source), local.clone(), 0)
+        super::installed_recovery::WitnessService::start(std::sync::Arc::new(source), local.clone(), 0)
             .await;
     let proofs = crate::checkpoint_sync::witness::request_with_committed(
         &service.registry,
@@ -503,7 +629,7 @@ async fn suffix_fetch_resumes_bounded_batches_without_installing_blocks() {
     let (_local_directory, local) = suffix_store(&[]);
     let local = std::sync::Arc::new(local);
     let service =
-        super::installed_recovery::Service::start(std::sync::Arc::new(source), local.clone(), 0)
+        super::installed_recovery::WitnessService::start(std::sync::Arc::new(source), local.clone(), 0)
             .await;
     let head_cursors = crate::confirmed_replay::snapshot::history::HistoryCursor::certified_cut(
         &parent,
@@ -753,41 +879,34 @@ fn witness_plan_recovers_only_requested_heads_without_older_bodies() {
             .unwrap();
     }
     assert!(missing_ancestor);
-    let roots = Roots::Plan(
-        heads
-            .iter()
-            .map(|head| snapshot.history_cursor(&head.account).unwrap().unwrap())
-            .collect(),
-    );
-    let now = Instant::now();
-    let mut client = Transfer::new(now);
-    let (result, mut received) = oneshot::channel();
-    client.start(
-        Command {
-            roots,
-            wanted: wanted.clone(),
-            result,
-        },
-        now,
-    );
-    for _ in 0..100 {
-        assert!(client.local_progress(&local, now));
-        if let Ok(proofs) = received.try_recv() {
-            let proofs = proofs.unwrap();
-            assert_eq!(proofs.len(), wanted.len());
-            for proof in proofs {
-                assert!(wanted.contains(&proof.block().hash));
-                snapshot
-                    .history_cursor(&proof.block().account)
-                    .unwrap()
-                    .unwrap()
-                    .accept(&[bincode::serialize(proof.block()).unwrap()])
-                    .unwrap();
+    let snapshot = snapshot.into_continuation();
+    let directory = tempfile::tempdir().unwrap();
+    let stored = std::sync::Arc::new(snapshot.stored_history_roots(directory.path()).unwrap());
+    for on_disk in [false, true] {
+        let roots = if on_disk { Roots::Stored(stored.clone()) } else {
+            Roots::Plan(heads.iter().map(|head| snapshot.history_cursor(&head.account).unwrap().unwrap()).collect())
+        };
+        let now = Instant::now();
+        let mut client = Transfer::new(now);
+        let (result, mut received) = oneshot::channel();
+        client.start(Command { roots, wanted: wanted.clone(), result }, now);
+        let mut complete = false;
+        for _ in 0..100 {
+            assert!(client.local_progress(&local, now));
+            if let Ok(proofs) = received.try_recv() {
+                let proofs = proofs.unwrap();
+                assert_eq!(proofs.len(), wanted.len());
+                for proof in proofs {
+                    assert!(wanted.contains(&proof.block().hash));
+                    snapshot.history_cursor(&proof.block().account).unwrap().unwrap()
+                        .accept(&[bincode::serialize(proof.block()).unwrap()]).unwrap();
+                }
+                complete = true;
+                break;
             }
-            return;
         }
+        assert!(complete, "head-only witness recovery did not finish; stored={on_disk}");
     }
-    panic!("head-only witness recovery did not finish");
 }
 
 #[tokio::test]
@@ -1118,6 +1237,9 @@ fn local_witness_reads_do_not_evict_peer_recovery_proofs() {
 fn witness_cache_reuses_only_matching_authenticated_prefixes_without_peers() {
     let fixture = Fixture::selection();
     let (_dir, source, snapshot) = snapshot(&fixture);
+    let snapshot = snapshot.into_continuation();
+    let root_directory = tempfile::tempdir().unwrap();
+    let stored = std::sync::Arc::new(snapshot.stored_history_roots(root_directory.path()).unwrap());
     let (_dir, local) = suffix_store(&[]);
     let now = Instant::now();
     let mut client = Transfer::new(now);
@@ -1141,6 +1263,63 @@ fn witness_cache_reuses_only_matching_authenticated_prefixes_without_peers() {
         now,
     );
     assert_eq!(received.try_recv().unwrap().unwrap()[0].block().hash, hash);
+    assert!(client.poll(Vec::new(), now).is_none());
+    // One account may contribute distinct authenticated heads to an exact
+    // request. Keep requested order even when cache insertion order differs.
+    let head_cursor = snapshot.history_cursor(&address(0)).unwrap().unwrap();
+    let mut older_cursor = head_cursor.clone();
+    older_cursor
+        .accept(&read_chunk(&source, hash, 1).unwrap())
+        .unwrap();
+    let older_hash = older_cursor.next().unwrap().hash;
+    // The first head exchange also authenticated and retained its ancestors.
+    // A second exchange helper would incorrectly require a cache miss here.
+    for wanted in [vec![hash, older_hash], vec![older_hash, hash]] {
+        for kind in 0..3 {
+            let roots = if kind == 2 {
+                Roots::Stored(stored.clone())
+            } else if kind == 1 {
+                Roots::Exact(vec![head_cursor.clone(), older_cursor.clone()])
+            } else {
+                Roots::Plan(vec![head_cursor.clone()])
+            };
+            let (result, mut received) = oneshot::channel();
+            client.start(
+                Command {
+                    roots,
+                    wanted: wanted.clone(),
+                    result,
+                },
+                now,
+            );
+            let proofs = received.try_recv().unwrap().unwrap();
+            assert_eq!(
+                proofs
+                    .iter()
+                    .map(|proof| proof.block().hash)
+                    .collect::<Vec<_>>(),
+                wanted
+            );
+            assert!(proofs
+                .iter()
+                .all(|proof| proof.context() == head_cursor.context()));
+            assert!(client.poll(Vec::new(), now).is_none());
+        }
+    }
+    let (result, mut received) = oneshot::channel();
+    client.start(
+        Command {
+            roots: Roots::Account(older_cursor),
+            wanted: vec![hash],
+            result,
+        },
+        now,
+    );
+    assert!(
+        received.try_recv().is_err(),
+        "a cached later head cannot satisfy an older prefix"
+    );
+    drop(received);
     assert!(client.poll(Vec::new(), now).is_none());
     for wanted in [vec![], vec![hash, hash], vec![BlockHash::ZERO]] {
         let (result, mut received) = oneshot::channel();
@@ -1173,6 +1352,11 @@ fn witness_cache_reuses_only_matching_authenticated_prefixes_without_peers() {
         drop(received);
         assert!(client.poll(Vec::new(), now).is_none());
     }
+    stored.truncate_for_test();
+    let (result, mut received) = oneshot::channel();
+    client.start(Command { roots: Roots::Stored(stored), wanted: vec![hash], result }, now);
+    assert!(received.try_recv().unwrap().is_err());
+    assert!(client.poll(Vec::new(), now).is_none());
     assert_eq!(local.block_store().block_count().unwrap(), 0);
 }
 
@@ -1450,7 +1634,7 @@ async fn witness_plan_discovers_accounts_and_authenticates_every_requested_body(
         &registry,
         &base,
         &plan,
-        proofs.iter().take(1).cloned().collect(),
+        proofs.iter().take(1).cloned().collect::<Vec<_>>(),
     )
     .await
     .is_err());
@@ -1485,13 +1669,13 @@ async fn witness_plan_discovers_accounts_and_authenticates_every_requested_body(
     .is_err());
     let local = std::sync::Arc::new(local);
     let service =
-        super::installed_recovery::Service::start(std::sync::Arc::new(source), local.clone(), 0)
+        super::installed_recovery::WitnessService::start(std::sync::Arc::new(source), local.clone(), 0)
             .await;
     let combined = crate::checkpoint_sync::witness::fetch_plan_reusing(
         &service.registry,
         &base,
         &plan,
-        proofs.iter().take(1).cloned().collect(),
+        proofs.iter().take(1).cloned().collect::<Vec<_>>(),
     )
     .await
     .unwrap();
@@ -1802,4 +1986,90 @@ fn witness_transfer_times_out_a_peer_and_rejects_busy_or_invalid_local_requests(
             .peer,
         "b"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn durable_suffix_pages_resume_download_and_replay_without_peers() {
+    use crate::confirmed_replay::snapshot::history::DurableHistoryInputs;
+    let mut fixture = Fixture::selection();
+    for _ in 0..260 {
+        fixture.push(0, BlockType::ChangeRepresentative, 1_595_434_041, |_| {});
+    }
+    let (_directory, source, mut heads) = fixture.store_with_map_size(128 << 20);
+    heads.sort_by(|left, right| left.account.as_str().cmp(right.account.as_str()));
+    let candidate = CertifiedCheckpoint::prepare(
+        &source,
+        NetworkId::Dev,
+        &fixture.params,
+        1_595_434_050,
+        &heads,
+        &address(20),
+    )
+    .unwrap();
+    let certificate = certified_votes::certify(candidate.checkpoint(), &[0]);
+    let parent = crate::checkpoint_replay::ReplayedCheckpoint::genesis_anchor(
+        NetworkId::Dev,
+        &fixture.params,
+    )
+    .unwrap();
+    let cursor = crate::confirmed_replay::snapshot::history::HistoryCursor::certified_cut(
+        &parent,
+        &certificate,
+        &heads,
+    )
+    .unwrap()
+    .into_iter()
+    .find(|cursor| cursor.next().unwrap().account == address(0))
+    .unwrap();
+    let (_local_directory, local) = suffix_store(&[]);
+    let local = std::sync::Arc::new(local);
+    let service =
+        super::installed_recovery::WitnessService::start(std::sync::Arc::new(source), local.clone(), 0)
+            .await;
+    let cache = tempfile::tempdir().unwrap();
+    let shutdown = crate::shutdown::ShutdownController::new();
+    let initial = cursor.next().unwrap();
+    let inputs = DurableHistoryInputs::open(cache.path(), cursor.clone(), 1, 8 << 20, 4 << 20).unwrap();
+    let (inputs, page) = inputs.next_page(&service.registry, &shutdown).await.unwrap();
+    let first: Vec<_> = page.unwrap().iter().map(|proof| proof.block().hash).collect();
+    assert_eq!(first.len(), MAX_WITNESS_BLOCKS);
+    assert_eq!(inputs.cursor().next().unwrap().height, initial.height - MAX_WITNESS_BLOCKS as u64);
+    drop(inputs);
+    let mut inputs = DurableHistoryInputs::open(cache.path(), cursor.clone(), 1, 8 << 20, 4 << 20).unwrap();
+    let mut actual = Vec::new();
+    loop {
+        let (next, page) = inputs.next_page(&service.registry, &shutdown).await.unwrap();
+        inputs = next;
+        let page = page.unwrap();
+        if page.is_empty() { break; }
+        assert!(page.len() <= MAX_WITNESS_BLOCKS);
+        actual.extend(page.iter().map(|proof| proof.block().hash));
+    }
+    let expected: Vec<_> = fixture.blocks.iter().rev()
+        .filter(|block| block.account == address(0) && block.hash != fixture.blocks[0].hash)
+        .map(|block| block.hash).collect();
+    assert_eq!(actual, expected);
+    assert_eq!(&actual[..first.len()], first.as_slice());
+    assert_eq!(local.block_store().block_count().unwrap(), 0);
+    drop(inputs);
+    assert!(service.stop().await > 0);
+    let registry = std::sync::Arc::new(tokio::sync::RwLock::new(crate::connection_registry::ConnectionRegistry::new()));
+    let mut inputs = DurableHistoryInputs::open(cache.path(), cursor.clone(), 1, 8 << 20, 4 << 20).unwrap();
+    let cancelled = crate::shutdown::ShutdownController::new();
+    cancelled.shutdown();
+    let (next, page) = inputs.next_page(&registry, &cancelled).await.unwrap();
+    inputs = next;
+    assert!(page.is_none());
+    assert_eq!(inputs.cursor().next(), Some(initial));
+    let mut replayed = Vec::new();
+    loop {
+        let (next, page) = inputs.next_page(&registry, &shutdown).await.unwrap();
+        inputs = next;
+        let page = page.unwrap();
+        if page.is_empty() { break; }
+        replayed.extend(page.iter().map(|proof| proof.block().hash));
+    }
+    assert_eq!(replayed, expected);
+    assert_eq!(inputs.cursor().next().unwrap().height, 1);
+    assert_eq!(local.block_store().block_count().unwrap(), 0);
 }

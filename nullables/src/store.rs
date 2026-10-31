@@ -1,15 +1,15 @@
-//! Nullable store — thread-safe in-memory storage for testing.
+//! In-memory account and block maps for tests that need no persistence.
 
 use burst_store::account::{AccountInfo, AccountStore};
 use burst_store::block::BlockStore;
-use burst_store::delegation::{DelegationRecord, DelegationStore};
 use burst_store::StoreError;
 use burst_types::{BlockHash, WalletAddress};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-/// An in-memory account + block store for testing.
-/// Thread-safe for use with tokio's multi-threaded runtime.
+/// Partial AccountStore/BlockStore implementation. Each map has its own mutex;
+/// writes across maps are not transactional. Height lookups always return None.
+/// Block insertion/deletion does not maintain the separate account-chain list.
 pub struct NullStore {
     accounts: Mutex<HashMap<String, AccountInfo>>,
     blocks: Mutex<HashMap<[u8; 32], Vec<u8>>>,
@@ -25,7 +25,8 @@ impl NullStore {
         }
     }
 
-    /// Add a block hash to an account's chain.
+    /// Append to the fixture's account-chain list, without storing block bytes or
+    /// updating the account record.
     pub fn add_account_block(&self, address: &WalletAddress, hash: BlockHash) {
         self.account_blocks
             .lock()
@@ -86,11 +87,11 @@ impl AccountStore for NullStore {
         Ok(self.accounts.lock().unwrap().len() as u64)
     }
 
-    fn iter_accounts(&self) -> Result<Vec<AccountInfo>, StoreError> {
+    fn all_accounts(&self) -> Result<Vec<AccountInfo>, StoreError> {
         Ok(self.accounts.lock().unwrap().values().cloned().collect())
     }
 
-    fn iter_verified_accounts(&self) -> Result<Vec<AccountInfo>, StoreError> {
+    fn all_verified_accounts(&self) -> Result<Vec<AccountInfo>, StoreError> {
         Ok(self
             .accounts
             .lock()
@@ -153,78 +154,6 @@ impl BlockStore for NullStore {
 
     fn height_of_block(&self, _block_hash: &BlockHash) -> Result<Option<u64>, StoreError> {
         Ok(None)
-    }
-}
-
-/// An in-memory delegation store for testing.
-pub struct NullDelegationStore {
-    by_delegator: Mutex<HashMap<String, DelegationRecord>>,
-    pubkey_index: Mutex<HashMap<[u8; 32], String>>,
-}
-
-impl NullDelegationStore {
-    pub fn new() -> Self {
-        Self {
-            by_delegator: Mutex::new(HashMap::new()),
-            pubkey_index: Mutex::new(HashMap::new()),
-        }
-    }
-}
-
-impl Default for NullDelegationStore {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl DelegationStore for NullDelegationStore {
-    fn put_delegation(&self, record: &DelegationRecord) -> Result<(), StoreError> {
-        let key = record.delegator.to_string();
-        self.pubkey_index
-            .lock()
-            .unwrap()
-            .insert(record.delegation_public_key, key.clone());
-        self.by_delegator
-            .lock()
-            .unwrap()
-            .insert(key, record.clone());
-        Ok(())
-    }
-
-    fn get_delegation_by_delegator(
-        &self,
-        delegator: &WalletAddress,
-    ) -> Result<Option<DelegationRecord>, StoreError> {
-        Ok(self
-            .by_delegator
-            .lock()
-            .unwrap()
-            .get(delegator.as_str())
-            .cloned())
-    }
-
-    fn get_delegation_by_pubkey(
-        &self,
-        pubkey: &[u8; 32],
-    ) -> Result<Option<DelegationRecord>, StoreError> {
-        let index = self.pubkey_index.lock().unwrap();
-        match index.get(pubkey) {
-            Some(delegator_key) => {
-                let records = self.by_delegator.lock().unwrap();
-                Ok(records.get(delegator_key).cloned())
-            }
-            None => Ok(None),
-        }
-    }
-
-    fn revoke_delegation(&self, delegator: &WalletAddress) -> Result<(), StoreError> {
-        let mut records = self.by_delegator.lock().unwrap();
-        if let Some(record) = records.get_mut(delegator.as_str()) {
-            record.revoked = true;
-            Ok(())
-        } else {
-            Err(StoreError::NotFound(delegator.to_string()))
-        }
     }
 }
 

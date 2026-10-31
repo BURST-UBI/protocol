@@ -5,6 +5,16 @@ use ciborium::value::Value;
 use serde::Serialize;
 use std::io::Write;
 mod sorted;
+mod verification;
+mod governance;
+mod constitution;
+mod rates;
+pub(super) use rates::RateHistory as RateHistoryField;
+pub(super) use constitution::{Constitution, equivalent_constitution};
+pub(super) use governance::{encode_governance_with_poll, equivalent_governance, CandidateGovernance as GovernanceField};
+pub(super) use verification::{equivalent_verification, validate_verification_with_poll, Verification as VerificationField};
+#[cfg(test)]
+pub(super) use verification::encode_verification_into;
 
 pub(super) trait Field {
     fn encode_field(&self, output: &mut dyn Write) -> Result<(), ReplayError>;
@@ -16,17 +26,50 @@ pub(super) trait Field {
     ) -> Result<(), ReplayError> {
         self.encode_field(output)
     }
+
+    fn encode_field_at(
+        &self, output: &mut dyn Write, directory: Option<&std::path::Path>, depth: usize,
+    ) -> Result<(), ReplayError> {
+        check_depth(depth)?;
+        if depth != 1 { return Err(invalid("snapshot field adapter does not support nested encoding")); }
+        self.encode_field_in(output, directory)
+    }
 }
 
 impl<T: Serialize> Field for T {
     fn encode_field(&self, mut output: &mut dyn Write) -> Result<(), ReplayError> {
         encode_at_depth(self, &mut output, 1)
     }
+    fn encode_field_at(&self, mut output: &mut dyn Write, _: Option<&std::path::Path>, depth: usize)
+        -> Result<(), ReplayError> {
+        encode_at_depth(self, &mut output, depth)
+    }
 }
 
-pub(super) struct Map<'a, K, V>(pub &'a std::collections::HashMap<K, V>);
+/// Entries must contain exactly len() rows and stay stable across encoding passes.
+pub(super) trait MapSource {
+    type Key: Serialize;
+    type Value: Serialize;
+    fn len(&self) -> usize;
+    fn entries(&self) -> impl Iterator<Item = (&Self::Key, &Self::Value)>;
+}
 
-impl<K: Serialize + Eq + std::hash::Hash, V: Serialize> Field for Map<'_, K, V> {
+impl<K: Serialize + Eq + std::hash::Hash, V: Serialize> MapSource
+    for std::collections::HashMap<K, V>
+{
+    type Key = K;
+    type Value = V;
+    fn len(&self) -> usize {
+        self.len()
+    }
+    fn entries(&self) -> impl Iterator<Item = (&K, &V)> {
+        self.iter()
+    }
+}
+
+pub(super) struct Map<'a, M>(pub &'a M);
+
+impl<M: MapSource> Field for Map<'_, M> {
     fn encode_field(&self, output: &mut dyn Write) -> Result<(), ReplayError> {
         self.encode_field_in(output, None)
     }
@@ -36,8 +79,12 @@ impl<K: Serialize + Eq + std::hash::Hash, V: Serialize> Field for Map<'_, K, V> 
         output: &mut dyn Write,
         directory: Option<&std::path::Path>,
     ) -> Result<(), ReplayError> {
-        encode_map(self.0, output, directory, |value, mut output| {
-            encode_at_depth(value, &mut output, 2)
+        self.encode_field_at(output, directory, 1)
+    }
+    fn encode_field_at(&self, output: &mut dyn Write, directory: Option<&std::path::Path>, depth: usize)
+        -> Result<(), ReplayError> {
+        encode_map(self.0, output, directory, depth, |value, mut output, child_depth| {
+            encode_at_depth(value, &mut output, child_depth)
         })
     }
 }
@@ -54,8 +101,12 @@ impl<K: Serialize + Eq + std::hash::Hash> Field for BlobMap<'_, '_, K> {
         output: &mut dyn Write,
         directory: Option<&std::path::Path>,
     ) -> Result<(), ReplayError> {
-        encode_map(self.0, output, directory, |value, output| {
-            Bytes(&value.0).encode_field(output)
+        self.encode_field_at(output, directory, 1)
+    }
+    fn encode_field_at(&self, output: &mut dyn Write, directory: Option<&std::path::Path>, depth: usize)
+        -> Result<(), ReplayError> {
+        encode_map(self.0, output, directory, depth, |value, output, child_depth| {
+            Bytes(&value.0).encode_field_at(output, directory, child_depth)
         })
     }
 }
@@ -67,15 +118,20 @@ pub(super) struct OrderedSequence<'a, T>(
 );
 
 impl<T: Clone + Serialize + serde::de::DeserializeOwned> Field for OrderedSequence<'_, T> {
-    fn encode_field(&self, mut output: &mut dyn Write) -> Result<(), ReplayError> {
-        let mut output = Bounded {
+    fn encode_field(&self, output: &mut dyn Write) -> Result<(), ReplayError> {
+        self.encode_field_at(output, None, 1)
+    }
+    fn encode_field_at(&self, mut output: &mut dyn Write, _: Option<&std::path::Path>, depth: usize)
+        -> Result<(), ReplayError> {
+        check_depth(depth)?;
+        let mut output = BoundedWriter {
             output: &mut output,
             written: 0,
             limit: MAX_SNAPSHOT_BYTES as usize,
         };
         collection_header(0x80, self.0.len(), &mut output)?;
         for receipt in self.0.iter() {
-            encode_at_depth(receipt?.as_ref(), &mut output, 2)?;
+            encode_at_depth(receipt?.as_ref(), &mut output, depth + 1)?;
         }
         Ok(())
     }
@@ -88,14 +144,14 @@ impl Field for BinaryField<'_, '_> {
         if self.0.is_records() {
             return self.0.write_records(output);
         }
-        let mut counter = Bounded {
+        let mut counter = BoundedWriter {
             output: std::io::sink(),
             written: 0,
             limit: MAX_SNAPSHOT_BYTES as usize,
         };
         self.0.write(&mut counter)?;
         let length = counter.written;
-        let mut output = Bounded {
+        let mut output = BoundedWriter {
             output,
             written: 0,
             limit: MAX_SNAPSHOT_BYTES as usize,
@@ -112,7 +168,12 @@ impl Field for BinaryField<'_, '_> {
 
 impl Field for Bytes<'_> {
     fn encode_field(&self, output: &mut dyn Write) -> Result<(), ReplayError> {
-        let mut output = Bounded {
+        self.encode_field_at(output, None, 1)
+    }
+    fn encode_field_at(&self, output: &mut dyn Write, _: Option<&std::path::Path>, depth: usize)
+        -> Result<(), ReplayError> {
+        check_depth(depth)?;
+        let mut output = BoundedWriter {
             output,
             written: 0,
             limit: MAX_SNAPSHOT_BYTES as usize,
@@ -122,21 +183,38 @@ impl Field for Bytes<'_> {
     }
 }
 
-fn encode_map<K: Serialize + Eq + std::hash::Hash, V: Serialize>(
-    map: &std::collections::HashMap<K, V>,
+fn encode_map<M: MapSource>(
+    map: &M,
+    output: &mut dyn Write,
+    directory: Option<&std::path::Path>,
+    depth: usize,
+    encode_value: impl Fn(&M::Value, &mut dyn Write, usize) -> Result<(), ReplayError>,
+) -> Result<(), ReplayError> {
+    encode_map_with_keys(map, output, directory, depth,
+        |key, output, depth| encode_at_depth(key, output, depth), encode_value)
+}
+
+pub(super) fn encode_map_with_keys<M: MapSource>(
+    map: &M,
     mut output: &mut dyn Write,
     directory: Option<&std::path::Path>,
-    encode_value: impl Fn(&V, &mut dyn Write) -> Result<(), ReplayError>,
+    depth: usize,
+    encode_key: impl Fn(&M::Key, &mut Vec<u8>, usize) -> Result<(), ReplayError>,
+    encode_value: impl Fn(&M::Value, &mut dyn Write, usize) -> Result<(), ReplayError>,
 ) -> Result<(), ReplayError> {
+    check_depth(depth)?;
+    let child_depth = depth + 1;
     if map.len() > 4096 {
-        return sorted::encode(map, output, directory, encode_value);
+        return sorted::encode(map, output, directory,
+            |key, output| encode_key(key, output, child_depth),
+            |value, output| encode_value(value, output, child_depth));
     }
     let mut key_bytes = map.len();
     let mut entries = map
-        .iter()
+        .entries()
         .map(|(key, value)| {
             let mut encoded = Vec::new();
-            encode_at_depth(key, &mut encoded, 2)?;
+            encode_key(key, &mut encoded, child_depth)?;
             key_bytes = key_bytes
                 .checked_add(encoded.len())
                 .filter(|bytes| *bytes <= MAX_SNAPSHOT_BYTES as usize)
@@ -145,7 +223,7 @@ fn encode_map<K: Serialize + Eq + std::hash::Hash, V: Serialize>(
         })
         .collect::<Result<Vec<_>, ReplayError>>()?;
     sort_entries(&mut entries)?;
-    let mut output = Bounded {
+    let mut output = BoundedWriter {
         output: &mut output,
         written: 0,
         limit: MAX_SNAPSHOT_BYTES as usize,
@@ -153,7 +231,7 @@ fn encode_map<K: Serialize + Eq + std::hash::Hash, V: Serialize>(
     collection_header(0xa0, entries.len(), &mut output)?;
     for (key, value) in entries {
         output.write_all(&key).map_err(|e| invalid(e.to_string()))?;
-        encode_value(value, &mut output)?;
+        encode_value(value, &mut output, child_depth)?;
     }
     Ok(())
 }
@@ -161,15 +239,20 @@ fn encode_map<K: Serialize + Eq + std::hash::Hash, V: Serialize>(
 pub(super) struct Sequence<'a, T>(pub &'a [T]);
 
 impl<T: Serialize> Field for Sequence<'_, T> {
-    fn encode_field(&self, mut output: &mut dyn Write) -> Result<(), ReplayError> {
-        let mut output = Bounded {
+    fn encode_field(&self, output: &mut dyn Write) -> Result<(), ReplayError> {
+        self.encode_field_at(output, None, 1)
+    }
+    fn encode_field_at(&self, mut output: &mut dyn Write, _: Option<&std::path::Path>, depth: usize)
+        -> Result<(), ReplayError> {
+        check_depth(depth)?;
+        let mut output = BoundedWriter {
             output: &mut output,
             written: 0,
             limit: MAX_SNAPSHOT_BYTES as usize,
         };
         collection_header(0x80, self.0.len(), &mut output)?;
         for value in self.0 {
-            encode_at_depth(value, &mut output, 2)?;
+            encode_at_depth(value, &mut output, depth + 1)?;
         }
         Ok(())
     }
@@ -210,37 +293,77 @@ pub(super) fn encode_record_in(
     output: &mut impl Write,
     directory: Option<&std::path::Path>,
 ) -> Result<(), ReplayError> {
+    encode_record_at_depth(fields, output, directory, 0)
+}
+
+fn encode_record_at_depth(
+    fields: &[(&str, &dyn Field)], output: &mut impl Write,
+    directory: Option<&std::path::Path>, depth: usize,
+) -> Result<(), ReplayError> {
+    record_at_depth(fields, output, directory, depth, true)
+}
+
+// Nested records participate in their enclosing record's complete preflight.
+// Avoid preflighting every descendant again on each outer traversal.
+fn write_record_at_depth(
+    fields: &[(&str, &dyn Field)], output: &mut impl Write,
+    directory: Option<&std::path::Path>, depth: usize,
+) -> Result<(), ReplayError> {
+    record_at_depth(fields, output, directory, depth, false)
+}
+
+fn record_at_depth(
+    fields: &[(&str, &dyn Field)], output: &mut impl Write,
+    directory: Option<&std::path::Path>, depth: usize, preflight: bool,
+) -> Result<(), ReplayError> {
+    check_depth(depth)?;
     let mut fields = fields
         .iter()
-        .map(|(name, field)| Ok((encode(name)?, *field)))
+        .map(|(name, field)| {
+            let mut key = Vec::new();
+            encode_at_depth(name, &mut key, depth + 1)?;
+            Ok((key, (*name, *field)))
+        })
         .collect::<Result<Vec<_>, ReplayError>>()?;
     sort_entries(&mut fields)?;
     let write_fields = |output: &mut dyn Write| {
-        let mut output = Bounded {
+        let mut output = BoundedWriter {
             output,
             written: 0,
             limit: MAX_SNAPSHOT_BYTES as usize,
         };
         collection_header(0xa0, fields.len(), &mut output)?;
-        for (key, field) in &fields {
+        for (key, (_name, field)) in &fields {
             output.write_all(key).map_err(|e| invalid(e.to_string()))?;
-            field.encode_field_in(&mut output, directory)?;
+            #[cfg(test)]
+            let before = output.written;
+            let result = field.encode_field_at(&mut output, directory, depth + 1);
+            #[cfg(test)]
+            if std::env::var_os("BURST_SNAPSHOT_FIELD_LOG").is_some() {
+                eprintln!(
+                    "snapshot field={_name} depth={depth} bytes={} record_bytes={} result={}",
+                    output.written - before,
+                    output.written,
+                    if result.is_ok() { "ok" } else { "error" },
+                );
+            }
+            result?;
         }
         Ok(())
     };
-    // Preflight the streaming representation, including its complete size and
-    // canonical validation, without invoking byte-buffer serde adapters.
-    write_fields(&mut std::io::sink())?;
+    // Check the complete representation before output. The second pass can
+    // still fail on I/O, cancellation or changed input; output is not atomic.
+    if preflight { write_fields(&mut std::io::sink())?; }
     write_fields(output)
 }
 
-struct Bounded<W> {
+struct BoundedWriter<W> {
     output: W,
     written: usize,
     limit: usize,
 }
 
-impl<W: Write> Write for Bounded<W> {
+impl<W: Write> Write for BoundedWriter<W> {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         if bytes.len() > self.limit.saturating_sub(self.written) {
             return Err(std::io::Error::other("snapshot exceeds byte limit"));
@@ -269,12 +392,14 @@ pub(super) fn encode_into<T: Serialize>(
     encode_at_depth(state, output, 0)
 }
 
-fn encode_at_depth<T: Serialize>(
+pub(super) fn encode_at_depth<T: Serialize>(
     state: &T,
     output: &mut impl Write,
     depth: usize,
 ) -> Result<(), ReplayError> {
-    // Bound the encoded source before expanding it into a sortable value tree.
+    check_depth(depth)?;
+    // Bound source bytes before allocating the value tree. The tree and sorting
+    // buffers can occupy more memory than the encoded representation.
     write_bounded(state, &mut std::io::sink(), MAX_SNAPSHOT_BYTES as usize)?;
     let mut value = Value::serialized(state).map_err(|e| invalid(e.to_string()))?;
     normalize(&mut value, depth)?;
@@ -296,7 +421,7 @@ fn write_bounded<T: Serialize>(
     output: &mut impl std::io::Write,
     limit: usize,
 ) -> Result<(), ReplayError> {
-    let mut writer = Bounded {
+    let mut writer = BoundedWriter {
         output,
         written: 0,
         limit,
@@ -305,10 +430,13 @@ fn write_bounded<T: Serialize>(
     Ok(())
 }
 
+fn check_depth(depth: usize) -> Result<(), ReplayError> {
+    if depth > 64 { return Err(invalid("snapshot nesting exceeds limit")); }
+    Ok(())
+}
+
 fn normalize(value: &mut Value, depth: usize) -> Result<(), ReplayError> {
-    if depth > 64 {
-        return Err(invalid("snapshot nesting exceeds limit"));
-    }
+    check_depth(depth)?;
     match value {
         Value::Map(entries) => {
             let mut sorted = Vec::with_capacity(entries.len());
@@ -372,6 +500,88 @@ mod tests {
             assert_eq!(decoded.bytes.0.as_ref(), payload.as_slice());
             assert_eq!(decoded.metadata[&24].0.as_ref(), payload.as_slice());
         }
+    }
+
+    struct Nested<'a>(&'a dyn Field);
+    impl Field for Nested<'_> {
+        fn encode_field(&self, output: &mut dyn Write) -> Result<(), ReplayError> {
+            self.encode_field_at(output, None, 1)
+        }
+        fn encode_field_at(&self, mut output: &mut dyn Write,
+            directory: Option<&std::path::Path>, depth: usize) -> Result<(), ReplayError> {
+            encode_record_at_depth(&[("inner", self.0)], &mut output, directory, depth)
+        }
+    }
+
+    #[derive(Serialize)]
+    struct Outer<'a, T> { outer: Inner<'a, T> }
+    #[derive(Serialize)]
+    struct Inner<'a, T> { inner: &'a T }
+
+    fn nested(depth: usize) -> Value {
+        (0..depth).fold(Value::Null, |value, _| Value::Array(vec![value]))
+    }
+
+    #[test]
+    fn nested_maps_preserve_key_and_value_depth_in_memory_and_spill() {
+        #[derive(Eq, PartialEq, Hash)]
+        struct Key { id: u32, depth: usize }
+        impl Serialize for Key {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                let value = (0..self.depth).fold(Value::from(self.id), |value, _| Value::Array(vec![value]));
+                value.serialize(serializer)
+            }
+        }
+        for count in [0, 1, 4097] {
+            for key_boundary in [false, true] {
+                for depth in [61, 62] {
+                    let map: std::collections::HashMap<_, _> = (0..count).map(|id| {
+                        (Key { id, depth: if id == 0 && key_boundary { depth } else { 0 } },
+                            nested(if id == 0 && !key_boundary { depth } else { 0 }))
+                    }).collect();
+                    let expected = encode(&Outer { outer: Inner { inner: &map } });
+                    let directory = tempfile::tempdir().unwrap();
+                    let mut actual = Vec::new();
+                    let result = encode_record_in(&[("outer", &Nested(&Map(&map)))],
+                        &mut actual, Some(directory.path()));
+                    assert_eq!(result.is_ok(), expected.is_ok(), "count={count},key={key_boundary},depth={depth}");
+                    assert_eq!(result.is_ok(), count == 0 || depth == 61);
+                    if let Ok(expected) = expected { assert_eq!(actual, expected); }
+                    else { assert!(actual.is_empty(), "preflight failure must not publish bytes"); }
+                    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nested_sequences_and_empty_collections_keep_exact_depth_boundary() {
+        for depth in [61, 62] {
+            let values = vec![nested(depth)];
+            let expected = encode(&Outer { outer: Inner { inner: &values } });
+            let mut actual = Vec::new();
+            let result = encode_record(&[("outer", &Nested(&Sequence(&values)))], &mut actual);
+            assert_eq!(result.is_ok(), expected.is_ok());
+            assert_eq!(result.is_ok(), depth == 61);
+            if let Ok(expected) = expected { assert_eq!(actual, expected); }
+            else { assert!(actual.is_empty()); }
+        }
+        let empty_map = std::collections::HashMap::<u8, u8>::new();
+        let empty_sequence = Vec::<u8>::new();
+        for depth in [64, 65, usize::MAX] {
+            let mut expected = Vec::new();
+            let oracle = encode_at_depth(&empty_map, &mut expected, depth);
+            let mut actual = Vec::new();
+            let streamed = Map(&empty_map).encode_field_at(&mut actual, None, depth);
+            assert_eq!(streamed.is_ok(), oracle.is_ok());
+            assert_eq!(streamed.is_ok(), depth == 64);
+            assert_eq!(actual, expected);
+            assert_eq!(Sequence(&empty_sequence).encode_field_at(&mut Vec::new(), None, depth).is_ok(), depth == 64);
+            assert_eq!(encode_record_at_depth(&[], &mut Vec::new(), None, depth).is_ok(), depth == 64);
+        }
+        assert!(Map(&std::collections::HashMap::from([(1u8, 2u8)]))
+            .encode_field_at(&mut Vec::new(), None, 64).is_err());
+        assert!(Sequence(&[1u8]).encode_field_at(&mut Vec::new(), None, 64).is_err());
     }
 
     #[test]

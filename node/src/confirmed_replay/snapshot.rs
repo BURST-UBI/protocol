@@ -17,7 +17,10 @@ mod account_inventory;
 pub mod archive;
 mod binary;
 mod body;
+mod brn_wallets;
+mod verification_state;
 mod canonical;
+mod compact;
 mod continuation;
 pub mod export;
 pub mod history;
@@ -30,6 +33,15 @@ pub use continuation::{
     CompactOutcomeCoverage, CompactRosterCoverage, CompactSelectionCoverage, SelectionSource,
     SnapshotContinuation,
 };
+
+fn body_version(format: u16) -> Result<u8, ReplayError> {
+    match format {
+        burst_consensus::snapshot::LEGACY_STATE_FORMAT => Ok(5),
+        burst_consensus::snapshot::PREVIOUS_STATE_FORMAT => Ok(7),
+        burst_consensus::snapshot::STATE_FORMAT => Ok(8),
+        _ => Err(invalid("unsupported snapshot state format")),
+    }
+}
 
 struct Blob<'a>(Cow<'a, [u8]>);
 
@@ -61,6 +73,14 @@ impl<'de> Deserialize<'de> for Blob<'_> {
 }
 
 macro_rules! snapshot_state {
+    (@versioned $version:expr, $value:expr, accounts) => { &compact::WalletMap { map: $value.as_ref(), compact: $version >= 8 } as &dyn canonical::Field };
+    (@versioned $version:expr, $value:expr, wallets) => { &compact::WalletMap { map: &$value, compact: $version >= 8 } as &dyn canonical::Field };
+    (@versioned $version:expr, $value:expr, lifecycle) => { &compact::Metadata { map: &$value, compact: $version >= 8 } as &dyn canonical::Field };
+    (@versioned $version:expr, $value:expr, verification) => { &compact::Verification { state: &$value, compact: $version >= 8 } as &dyn canonical::Field };
+    (@versioned $version:expr, $value:expr $(, $encoding:ident)?) => { snapshot_state!(@field $value $(, $encoding)?) };
+    (@field $value:expr, rates) => { &canonical::RateHistoryField($value.as_ref()) as &dyn canonical::Field };
+    (@field $value:expr, governance) => { &canonical::GovernanceField($value.as_ref()) as &dyn canonical::Field };
+    (@field $value:expr, verification) => { &canonical::VerificationField($value.snapshot_view(), &|| Ok(())) as &dyn canonical::Field };
     (@field $value:expr, binary) => { &canonical::BinaryField(&$value) as &dyn canonical::Field };
     (@field $value:expr, bytes) => { &canonical::Bytes(&$value.0) as &dyn canonical::Field };
     (@field $value:expr, blob_map) => { &canonical::BlobMap(&$value) as &dyn canonical::Field };
@@ -69,9 +89,12 @@ macro_rules! snapshot_state {
     (@field $value:expr, borrowed_map) => { &canonical::Map($value.as_ref()) as &dyn canonical::Field };
     (@field $value:expr, sequence) => { &canonical::Sequence($value.as_ref()) as &dyn canonical::Field };
     (@field $value:expr, ordered) => { &canonical::OrderedSequence($value.as_ref()) as &dyn canonical::Field };
-    ($lifetime:lifetime; $($field:ident: $kind:ty $(=> $encoding:ident)?),* $(,)?) => {
-        #[derive(Serialize, Deserialize)]
-        struct State<$lifetime> { $($field: $kind),* }
+    ($lifetime:lifetime; $($(#[$attribute:meta])* $field:ident: $kind:ty $(=> $encoding:ident)?),* $(,)?) => {
+        // Serde serialization is the legacy-format oracle in tests. Production
+        // encoding uses the versioned field writers below for every format.
+        #[derive(Deserialize)]
+        #[cfg_attr(test, derive(Serialize))]
+        struct State<$lifetime> { $($(#[$attribute])* $field: $kind),* }
 
         impl State<'_> {
             fn encode_into(&self, output: &mut impl std::io::Write) -> Result<(), ReplayError> {
@@ -80,7 +103,7 @@ macro_rules! snapshot_state {
 
             fn encode_into_in(&self, output: &mut impl std::io::Write, directory: Option<&std::path::Path>) -> Result<(), ReplayError> {
                 canonical::encode_record_in(&[
-                    $((stringify!($field), snapshot_state!(@field self.$field $(, $encoding)?))),*
+                    $((stringify!($field), snapshot_state!(@versioned self.version, self.$field $(, $encoding)?))),*
                 ], output, directory)
             }
         }
@@ -90,24 +113,26 @@ macro_rules! snapshot_state {
 snapshot_state! {
     'a;
     version: u8,
-    accounts: Cow<'a, HashMap<WalletAddress, AccountInfo>> => borrowed_map,
+    #[serde(deserialize_with = "compact::read_accounts")]
+    accounts: Cow<'a, HashMap<WalletAddress, AccountInfo>> => accounts,
     pending: Cow<'a, HashMap<(WalletAddress, TxHash), PendingInfo>> => borrowed_map,
-    brn_wallets: Cow<'a, HashMap<WalletAddress, BrnWalletState>> => borrowed_map,
-    brn_rates: Cow<'a, burst_brn::RateHistory>,
+    brn_wallets: brn_wallets::Wallets<'a> => wallets,
+    brn_rates: Cow<'a, burst_brn::RateHistory> => rates,
     next_stake_id: u64,
     trst_wallets: binary::Binary<'a> => binary,
     merger_graph: binary::Binary<'a> => binary,
     cutoff: Timestamp,
     payment_epoch: BlockHash,
-    verification: burst_verification::OrchestratorSnapshot,
+    verification: verification_state::Verification<'a> => verification,
     bootstrap_phase: burst_verification::bootstrap::BootstrapPhase,
-    lifecycle_metadata: HashMap<String, Blob<'a>> => blob_map,
+    #[serde(deserialize_with = "compact::read_metadata")]
+    lifecycle_metadata: HashMap<String, Blob<'a>> => lifecycle,
     params: Cow<'a, ProtocolParams>,
     endorsement_blocks: Cow<'a, HashMap<WalletAddress, Vec<(Timestamp, BlockHash)>>> => borrowed_map,
     completed_endorsements: Vec<(WalletAddress, BlockHash)> => sequence,
     verification_triggers: Cow<'a, HashMap<WalletAddress, (Timestamp, BlockHash)>> => borrowed_map,
     counterparties: HashMap<WalletAddress, Vec<WalletAddress>> => map,
-    governance: Cow<'a, Option<crate::governance_commit::CandidateGovernance>>,
+    governance: Cow<'a, Option<crate::governance_commit::CandidateGovernance>> => governance,
     proposal_contents: HashMap<BlockHash, Blob<'a>> => blob_map,
     closed_governance: Vec<TxHash> => sequence,
     selection_checkpoints: Cow<'a, super::receipts::CheckpointHistory> => ordered,
@@ -116,8 +141,9 @@ snapshot_state! {
     minted_burns: Cow<'a, HashMap<TxHash, Timestamp>> => borrowed_map,
 }
 
-/// Only independently replayed state can construct a signing request. Callers
-/// cannot substitute a peer's body or manifest before asking this type to sign.
+/// Snapshot bytes and their manifest prepared from replay state or an
+/// authenticated snapshot. Both fields are private, so callers cannot replace
+/// the body or manifest before signing.
 pub struct PreparedSnapshot<B = Vec<u8>> {
     manifest: SnapshotManifest,
     bytes: B,
@@ -251,9 +277,9 @@ impl ConfirmedReplay {
     }
 
     #[cfg(test)]
-    pub(super) fn legacy_snapshot_bytes(&self) -> Result<Vec<u8>, ReplayError> {
+    pub(super) fn legacy_snapshot_bytes(&self, format: u16) -> Result<Vec<u8>, ReplayError> {
         let mut bytes = Vec::new();
-        self.snapshot_state_version(5).encode_into(&mut bytes)?;
+        self.snapshot_state_version(body_version(format)?).encode_into(&mut bytes)?;
         Ok(bytes)
     }
 
@@ -262,11 +288,23 @@ impl ConfirmedReplay {
         anchor: &CheckpointAnchor,
         directory: &std::path::Path,
     ) -> Result<PreparedSnapshot<body::StagedBody>, ReplayError> {
+        self.prepare_snapshot_format_in(anchor, directory, burst_consensus::snapshot::STATE_FORMAT)
+    }
+
+    pub(super) fn prepare_snapshot_format_in(
+        &self,
+        anchor: &CheckpointAnchor,
+        directory: &std::path::Path,
+        format: u16,
+    ) -> Result<PreparedSnapshot<body::StagedBody>, ReplayError> {
+        let version = body_version(format)?;
         self.validate_snapshot_context(anchor)?;
-        let (bytes, manifest) = body::StagedBody::prepare(anchor, directory, |writer| {
-            self.snapshot_state()
+        let (bytes, mut manifest) = body::StagedBody::prepare(anchor, directory, |writer| {
+            self.snapshot_state_version(version)
                 .encode_into_in(writer, Some(directory))
         })?;
+        manifest.state_format = format;
+        manifest.validate(anchor).map_err(|error| invalid(error.to_string()))?;
         Ok(PreparedSnapshot { manifest, bytes })
     }
 
@@ -312,7 +350,10 @@ impl ConfirmedReplay {
         assert!(matches!(state.trst_wallets, binary::Binary::Wallets(_)));
         assert!(matches!(state.merger_graph, binary::Binary::Graph(_)));
         assert!(matches!(state.accounts, Cow::Borrowed(_)));
-        assert!(matches!(state.brn_wallets, Cow::Borrowed(_)));
+        assert!(matches!(
+            state.brn_wallets,
+            brn_wallets::Wallets::Borrowed(_)
+        ));
         assert!(matches!(state.selection_receipts, Cow::Borrowed(_)));
         assert!(state
             .lifecycle_metadata
@@ -322,14 +363,24 @@ impl ConfirmedReplay {
             .proposal_contents
             .values()
             .all(|blob| matches!(blob.0, Cow::Borrowed(_))));
-        let legacy = canonical::encode(&state).unwrap();
-        let mut streamed = Vec::new();
-        state.encode_into(&mut streamed).unwrap();
-        assert_eq!(streamed, legacy);
+        for version in [5, 7] {
+            let mut state = self.snapshot_state_version(version);
+            let verification_state::Verification::Borrowed(borrowed) = &state.verification else {
+                panic!("checkpoint encoding cloned verification state");
+            };
+            assert!(std::ptr::eq(*borrowed, &self.verification));
+            let borrowed_bytes = canonical::encode(&state).unwrap();
+            let mut streamed = Vec::new();
+            state.encode_into(&mut streamed).unwrap();
+            state.verification = verification_state::Verification::Owned(self.verification.snapshot());
+            let legacy = canonical::encode(&state).unwrap();
+            assert_eq!(borrowed_bytes, legacy);
+            assert_eq!(streamed, legacy);
+        }
     }
 
     fn snapshot_state(&self) -> State<'_> {
-        self.snapshot_state_version(7)
+        self.snapshot_state_version(8)
     }
 
     fn snapshot_state_version(&self, version: u8) -> State<'_> {
@@ -361,7 +412,7 @@ impl ConfirmedReplay {
             replay_dependencies,
             accounts: Cow::Borrowed(&self.accounts),
             pending: Cow::Borrowed(&self.pending),
-            brn_wallets: Cow::Borrowed(&self.brn.wallets),
+            brn_wallets: brn_wallets::Wallets::Borrowed(&self.brn.wallets),
             brn_rates: Cow::Borrowed(&self.brn.rate_history),
             next_stake_id: self.brn.next_stake_id(),
             trst_wallets: if version == 5 {
@@ -376,7 +427,7 @@ impl ConfirmedReplay {
             },
             cutoff: self.cutoff,
             payment_epoch: self.payment_epoch,
-            verification: self.verification.snapshot(),
+            verification: verification_state::Verification::Borrowed(&self.verification),
             bootstrap_phase: self.bootstrap_phase,
             lifecycle_metadata: self
                 .lifecycle_metadata
@@ -411,21 +462,25 @@ impl ConfirmedReplay {
 
     fn from_verified_snapshot_body(
         anchor: &CheckpointAnchor,
-        mut reader: body::VerifiedBody<'_>,
+        reader: body::VerifiedBody<'_>,
     ) -> Result<Self, ReplayError> {
-        let state: State =
-            ciborium::from_reader(&mut reader).map_err(|e| invalid(e.to_string()))?;
-        let expected_version = match reader.state_format() {
-            burst_consensus::snapshot::LEGACY_STATE_FORMAT => 5,
-            burst_consensus::snapshot::STATE_FORMAT => 7,
-            _ => return Err(invalid("unsupported snapshot state format")),
-        };
-        if !reader.consumed_all()
-            || state.version != expected_version
-            || !reader.matches_state(&state)?
-        {
+        Self::from_verified_snapshot_body_until(anchor, reader, &|_| Ok(()))
+    }
+
+    fn from_verified_snapshot_body_until(
+        anchor: &CheckpointAnchor,
+        mut reader: body::VerifiedBody<'_>,
+        check: &dyn Fn(&'static str) -> Result<(), ReplayError>,
+    ) -> Result<Self, ReplayError> {
+        let state: State = ciborium::from_reader(body::PollingReader {
+            inner: &mut reader, poll: check, bytes_until_poll: 0,
+        }).map_err(|e| invalid(e.to_string()))?;
+        check("snapshot:decoded-state")?;
+        let expected_version = body_version(reader.state_format())?;
+        if !reader.consumed_all() || state.version != expected_version {
             return Err(invalid("unsupported or noncanonical economic snapshot"));
         }
+        check("snapshot:restore-brn")?;
         let brn = BrnEngine::from_state(
             state.next_stake_id,
             state.brn_rates.into_owned(),
@@ -433,11 +488,15 @@ impl ConfirmedReplay {
         )
         .map_err(|e| invalid(e.to_string()))?;
         let version = state.version;
+        check("snapshot:restore-wallets")?;
         let mut trst = state
             .trst_wallets
             .into_wallets(state.params.trst_expiry_secs, version == 5)?;
+        check("snapshot:restore-graph")?;
         trst.merger_graph = state.merger_graph.into_graph(version == 5)?;
-        trst.validate_bases().map_err(invalid)?;
+        trst.validate_bases_with_poll(&|stage| check(stage).map_err(|error| error.to_string()))
+            .map_err(invalid)?;
+        check("snapshot:restore-continuation")?;
         let replay = Self {
             mutations: None,
             network: anchor.network(),
@@ -451,7 +510,7 @@ impl ConfirmedReplay {
             trst,
             cutoff: state.cutoff,
             payment_epoch: state.payment_epoch,
-            verification: VerificationOrchestrator::restore(state.verification),
+            verification: VerificationOrchestrator::restore(state.verification.into_owned()),
             bootstrap_phase: state.bootstrap_phase,
             lifecycle_metadata: state
                 .lifecycle_metadata
@@ -475,27 +534,38 @@ impl ConfirmedReplay {
                 .collect(),
             closed_governance: state.closed_governance.into_iter().collect(),
         };
-        replay.validate_snapshot_context(anchor)?;
-        if !reader.matches_state(&replay.snapshot_state_version(version))? {
+        replay.validate_snapshot_context_until(anchor, check)?;
+        check("snapshot:canonical-state")?;
+        // Comparing the reconstructed canonical state with the original signed
+        // bytes checks both canonical encoding and lossless reconstruction in
+        // one pass. Comparing the decoded State separately repeats that work.
+        if !reader.matches_state_with_poll(&replay.snapshot_state_version(version), check)? {
             return Err(invalid(
                 "snapshot contains duplicate or inconsistent continuation state",
             ));
         }
+        check("snapshot:canonical-finished")?;
         Ok(replay)
     }
 
     fn validate_snapshot_context(&self, anchor: &CheckpointAnchor) -> Result<(), ReplayError> {
-        if self
-            .minted_burns
-            .iter()
-            .any(|(hash, at)| hash.is_zero() || *at > self.cutoff)
-            || self.lifecycle_metadata.keys().any(|key| {
-                !burst_store_lmdb::write_batch::checkpoint_projection::is_lifecycle_key(key)
-            })
-        {
-            return Err(invalid(
-                "snapshot contains invalid mint records or non-lifecycle metadata",
-            ));
+        self.validate_snapshot_context_until(anchor, &|_| Ok(()))
+    }
+
+    fn validate_snapshot_context_until(&self, anchor: &CheckpointAnchor,
+        check: &dyn Fn(&'static str) -> Result<(), ReplayError>,
+    ) -> Result<(), ReplayError> {
+        for (hash, at) in &self.minted_burns {
+            check("snapshot:mint-context")?;
+            if hash.is_zero() || *at > self.cutoff {
+                return Err(invalid("snapshot contains invalid mint records or non-lifecycle metadata"));
+            }
+        }
+        for key in self.lifecycle_metadata.keys() {
+            check("snapshot:lifecycle-context")?;
+            if !burst_store_lmdb::write_batch::checkpoint_projection::is_lifecycle_key(key) {
+                return Err(invalid("snapshot contains invalid mint records or non-lifecycle metadata"));
+            }
         }
         if self.selection_receipts.len() != self.selection_checkpoints.len() {
             return Err(invalid(
@@ -508,6 +578,7 @@ impl ConfirmedReplay {
             .iter()
             .zip(self.selection_checkpoints.iter())
         {
+            check("snapshot:receipt-context")?;
             let receipt = receipt?;
             receipt
                 .validate_at(anchor)
@@ -521,6 +592,7 @@ impl ConfirmedReplay {
             }
             previous_height = receipt.checkpoint().height;
         }
+        check("snapshot:roster-context")?;
         if self.network != anchor.network()
             || self.payment_epoch != anchor.hash()
             || self.cutoff.as_secs() != anchor.cutoff()
@@ -528,6 +600,7 @@ impl ConfirmedReplay {
         {
             return Err(invalid("snapshot state differs from certified epoch"));
         }
+        check("snapshot:governance-context")?;
         let governance = self
             .governance
             .as_ref()

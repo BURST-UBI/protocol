@@ -6,6 +6,7 @@
 
 use burst_types::WalletAddress;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 /// Fixed-point units per verified human, preserving quorum arithmetic precision.
 pub const WEIGHT_PER_HUMAN: u128 = 10_000;
@@ -13,25 +14,50 @@ pub const WEIGHT_PER_HUMAN: u128 = 10_000;
 /// Cached representative weights, derived only from verified-person delegation.
 pub struct RepWeightCache {
     /// Derived aggregates per representative (cleared and rebuilt from accounts).
-    reps: HashMap<WalletAddress, u128>,
-    /// Representatives EVICTED from the ORV set by governance. An evicted rep
-    /// reports ZERO weight, so its votes stop counting
-    /// toward quorum. Set by [`RepWeightCache::set_evicted`] from the on-chain
-    /// `orv_evicted` flags each rebuild.
-    evicted: HashSet<WalletAddress>,
+    reps: Arc<HashMap<WalletAddress, u128>>,
+    publication_identity: Option<usize>,
+    /// Representatives excluded from current weight lookups and snapshots.
+    /// Updating this set does not rewrite an election's frozen authority.
+    evicted: Arc<HashSet<WalletAddress>>,
+}
+
+/// Immutable publication roots for reads outside the live cache lock.
+#[derive(Clone)]
+pub struct RepWeightSnapshot {
+    reps: Arc<HashMap<WalletAddress, u128>>,
+    evicted: Arc<HashSet<WalletAddress>>,
+}
+
+impl RepWeightSnapshot {
+    pub fn weights(&self) -> impl Iterator<Item = (&WalletAddress, u128)> {
+        self.reps.iter().filter(|(rep, _)| !self.evicted.contains(*rep))
+            .map(|(rep, weight)| (rep, *weight))
+    }
 }
 
 impl RepWeightCache {
+    pub fn snapshot(&self) -> RepWeightSnapshot {
+        RepWeightSnapshot { reps: self.reps.clone(), evicted: self.evicted.clone() }
+    }
+
+    /// Caller-supplied publication identity; this cache does not validate authority.
+    pub fn publication_identity(&self) -> Option<usize> { self.publication_identity }
+
+    pub fn mark_publication(&mut self, identity: Option<usize>) {
+        self.publication_identity = identity;
+    }
+
     /// Create an empty cache.
     pub fn new() -> Self {
         Self {
-            reps: HashMap::new(),
-            evicted: HashSet::new(),
+            reps: Arc::new(HashMap::new()),
+            publication_identity: None,
+            evicted: Arc::new(HashSet::new()),
         }
     }
 
     /// A representative's delegated verified-person weight.
-    /// Returns 0 for an unknown OR evicted representative.
+    /// Returns zero for an unknown or evicted representative.
     pub fn weight(&self, rep: &WalletAddress) -> u128 {
         if self.evicted.contains(rep) {
             return 0;
@@ -40,10 +66,10 @@ impl RepWeightCache {
     }
 
     /// Materialize every representative's weight as a map (used by the online
-    /// weight sampler and the `representatives` RPC). Evicted reps are omitted.
+    /// weight sampler). RPC uses shared snapshots. Evicted reps are omitted.
     pub fn all_weights(&self) -> HashMap<WalletAddress, u128> {
         let mut out: HashMap<WalletAddress, u128> = HashMap::with_capacity(self.reps.len());
-        for (rep, e) in &self.reps {
+        for (rep, e) in self.reps.iter() {
             if self.evicted.contains(rep) {
                 continue;
             }
@@ -55,7 +81,8 @@ impl RepWeightCache {
     /// Replace the set of representatives evicted from the ORV consensus set.
     /// Called from the rebuild with the current on-chain `orv_evicted` flags.
     pub fn set_evicted(&mut self, evicted: HashSet<WalletAddress>) {
-        self.evicted = evicted;
+        self.publication_identity = None;
+        self.evicted = Arc::new(evicted);
     }
 
     /// Whether a representative is currently evicted.
@@ -65,25 +92,32 @@ impl RepWeightCache {
 
     /// Total consensus weight across all representatives.
     pub fn total_weight(&self) -> u128 {
-        self.all_weights()
-            .values()
-            .fold(0u128, |acc, w| acc.saturating_add(*w))
+        self.reps.iter().filter(|(rep, _)| !self.evicted.contains(*rep))
+            .fold(0u128, |acc, (_, weight)| acc.saturating_add(*weight))
     }
 
     /// Number of representatives with active delegated weight.
     pub fn rep_count(&self) -> usize {
-        self.all_weights().len()
+        self.reps.keys().filter(|rep| !self.evicted.contains(*rep)).count()
     }
 
-    /// Rebuild from each unique account's verification status and representative.
+    /// Rebuild from verification status and delegation. The caller must supply
+    /// each account once; this iterator carries no account IDs for deduplication.
     /// Monetary/reputation fields are deliberately absent from this interface.
     pub fn rebuild_from_accounts(&mut self, accounts: impl Iterator<Item = (bool, WalletAddress)>) {
-        self.reps.clear();
+        self.publication_identity = None;
+        // A rebuild replaces every weight. If a reader retains the old map,
+        // start empty instead of copying values that would immediately be cleared.
+        if Arc::get_mut(&mut self.reps).is_none() {
+            self.reps = Arc::new(HashMap::with_capacity(self.reps.len()));
+        }
+        let reps = Arc::get_mut(&mut self.reps).expect("unique rebuild root");
+        reps.clear();
         for (verified, rep) in accounts {
             if !verified {
                 continue;
             }
-            let e = self.reps.entry(rep).or_default();
+            let e = reps.entry(rep).or_default();
             *e = e.saturating_add(WEIGHT_PER_HUMAN);
         }
     }
@@ -100,6 +134,30 @@ mod tests {
     use super::*;
     fn rep(name: &str) -> WalletAddress {
         WalletAddress::new(format!("brst_{name}"))
+    }
+
+    #[test]
+    fn snapshots_share_roots_and_preserve_weights_through_rebuild_and_eviction() {
+        let mut cache = RepWeightCache::new();
+        cache.rebuild_from_accounts([(true, rep("a")), (true, rep("a")), (true, rep("b"))].into_iter());
+        cache.mark_publication(Some(7));
+        let before = cache.snapshot();
+        assert!(Arc::ptr_eq(&before.reps, &cache.reps));
+        assert!(Arc::ptr_eq(&before.evicted, &cache.evicted));
+        let expected: HashMap<_, _> = before.weights().map(|(a,w)| (a.clone(),w)).collect();
+        assert_eq!(expected, cache.all_weights());
+        cache.set_evicted(HashSet::from([rep("a")]));
+        assert_eq!(cache.publication_identity(), None);
+        let evicted = cache.snapshot();
+        assert_eq!(evicted.weights().count(), 1);
+        cache.rebuild_from_accounts([(true, rep("c"))].into_iter());
+        assert_eq!(before.weights().map(|(a,w)| (a.clone(),w)).collect::<HashMap<_,_>>(), expected);
+        assert_eq!(evicted.weights().collect::<Vec<_>>(), vec![(&rep("b"), WEIGHT_PER_HUMAN)]);
+        assert_eq!(cache.weight(&rep("c")), WEIGHT_PER_HUMAN);
+        assert_eq!(cache.total_weight(), WEIGHT_PER_HUMAN);
+        assert_eq!(cache.rep_count(), 1);
+        cache.set_evicted(HashSet::new());
+        assert_eq!(before.weights().count(), 2);
     }
 
     #[test]

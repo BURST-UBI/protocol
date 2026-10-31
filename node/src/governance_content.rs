@@ -21,6 +21,8 @@ pub(crate) fn key(hash: BlockHash) -> String {
     format!("governance_content/v1/{hash}")
 }
 
+/// Authenticate the block and extract its content commitment. Call
+/// `decode_verified` on the returned manifest to validate the content bytes.
 pub fn authenticate(block: &StateBlock) -> Result<ContentManifest, String> {
     block.validate_format().map_err(str::to_owned)?;
     if block.block_type != BlockType::GovernanceProposal
@@ -45,6 +47,7 @@ pub fn authenticate(block: &StateBlock) -> Result<ContentManifest, String> {
 /// Called inside the same writer as the account block and governance state.
 /// Never persist unbound chunks through this entry point. A block-specific key
 /// avoids rollback of one proposal deleting content needed by another proposal.
+/// This stages writes only; the caller commits or aborts the transaction.
 pub fn stage(
     batch: &mut LmdbWriteTransaction<'_>,
     block: &StateBlock,
@@ -78,6 +81,13 @@ pub fn stage(
 
 pub(crate) fn load(
     batch: &LmdbWriteTransaction<'_>,
+    block: &StateBlock,
+) -> Result<ProposalContent, String> {
+        load_view(&batch.read_view(), block)
+    }
+
+    pub(crate) fn load_view(
+    batch: &burst_store_lmdb::read_view::LedgerReadView<'_>,
     block: &StateBlock,
 ) -> Result<ProposalContent, String> {
     let manifest = authenticate(block)?;

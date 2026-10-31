@@ -1,7 +1,7 @@
 use super::*;
-use burst_wallet_core::wallet::ProcessResult;
+use burst_wallet_core::wallet::ProcessResponse;
 
-pub(super) async fn claim(client: &NodeClient, source: &str, now: Timestamp) -> ProcessResult {
+pub(super) async fn claim(client: &NodeClient, source: &str, now: Timestamp) -> ProcessResponse {
     let library = std::env::var("NATIVE_FAKETIME_LIBRARY")
         .expect("set NATIVE_FAKETIME_LIBRARY to a built libfaketimeMT.so.1");
     assert!(std::path::Path::new(&library).is_absolute());

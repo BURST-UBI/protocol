@@ -84,6 +84,66 @@ fn snapshot_beacon_supplements_are_verified_without_changing_economic_state() {
     .unwrap();
     let restored = AuthenticatedSnapshot::read(&genesis, &mut bytes.as_slice()).unwrap();
     restored.validate_selections().unwrap();
+    let selection_passes = std::cell::Cell::new(0);
+    let validated = AuthenticatedSnapshot::read_validated_in_until(
+        &genesis, &mut bytes.as_slice(), store.env().path(), &|stage| {
+            if stage == "snapshot:selections-finished" {
+                selection_passes.set(selection_passes.get() + 1);
+            }
+            Ok(())
+        },
+    ).unwrap();
+    assert_eq!(selection_passes.get(), 1, "installed archives validate selections once");
+    assert_eq!(validated.anchor().hash(), restored.anchor().hash());
+    let streamed = AuthenticatedSnapshot::read_seekable_validated_in_until(
+        &genesis, &mut std::io::Cursor::new(&bytes), store.env().path(), &|_| Ok(()),
+    ).unwrap();
+    assert_eq!(streamed.anchor().hash(), restored.anchor().hash());
+    let error = AuthenticatedSnapshot::read_seekable_validated_in_until(
+        &genesis, &mut std::io::Cursor::new(&bytes), store.env().path(), &|stage| {
+            if stage == "snapshot:seek" { Err(invalid("cancel archive seek")) } else { Ok(()) }
+        },
+    ).err().expect("seek cancellation must reject the snapshot");
+    assert!(error.to_string().contains("cancel archive seek"));
+    for case in 0..3 {
+        let mut damaged = bytes.clone();
+        match case {
+            0 => { damaged.pop(); }
+            1 => damaged.push(0),
+            _ => { *damaged.last_mut().unwrap() ^= 1; }
+        }
+        let decoded = std::cell::Cell::new(false);
+        assert!(AuthenticatedSnapshot::read_seekable_validated_in_until(
+            &genesis, &mut std::io::Cursor::new(damaged), store.env().path(), &|stage| {
+                if stage == "snapshot:restore-state" { decoded.set(true); }
+                Ok(())
+            },
+        ).is_err(), "streamed body corruption case {case}");
+        assert!(!decoded.get(), "invalid bodies must fail before state decoding");
+    }
+
+    for stop_at in ["snapshot:read", "snapshot:authority-step", "snapshot:certificate",
+        "snapshot:restore-state", "snapshot:state-restored", "snapshot:selection-step",
+        "snapshot:selections-finished",
+        "snapshot:decode-bytes", "snapshot:decoded-state", "snapshot:restore-brn",
+            "snapshot:restore-wallets", "snapshot:restore-graph", "snapshot:restore-continuation",
+            "snapshot:receipt-context", "snapshot:roster-context", "snapshot:governance-context",
+            "snapshot:canonical-state", "snapshot:canonical-bytes", "snapshot:canonical-finished",
+    ] {
+        let error = AuthenticatedSnapshot::read_validated_in_until(
+            &genesis, &mut bytes.as_slice(), store.env().path(), &|stage| {
+                if stage == stop_at { Err(invalid("cancel archive authentication")) } else { Ok(()) }
+            },
+        ).err().expect("cancellation must not produce a snapshot");
+        assert!(error.to_string().contains("cancel archive authentication"), "{stop_at}: {error}");
+        let error = AuthenticatedSnapshot::read_seekable_validated_in_until(
+            &genesis, &mut std::io::Cursor::new(&bytes), store.env().path(), &|stage| {
+                if stage == stop_at { Err(invalid("cancel archive authentication")) } else { Ok(()) }
+            },
+        ).err().expect("streamed cancellation must not produce a snapshot");
+        assert!(error.to_string().contains("cancel archive authentication"), "{stop_at}: {error}");
+
+    }
     assert_eq!(
         bincode::serialize(&restored.recover_selections().unwrap()[0].beacon()).unwrap(),
         bincode::serialize(&record.beacon()).unwrap()
@@ -94,7 +154,12 @@ fn snapshot_beacon_supplements_are_verified_without_changing_economic_state() {
         Vec<(BlockHash, burst_vrf::RandomOutput)>,
     );
     let end = 24 + u64::from_be_bytes(bytes[16..24].try_into().unwrap()) as usize;
-    let original: Header = bincode::deserialize(&bytes[24..end]).unwrap();
+    let original: Header = bincode::deserialize(&restored.legacy_header_bytes().unwrap()).unwrap();
+    let encoded = bincode::serialize(&original).unwrap();
+    let mut legacy = b"BURST-SNAPSHOT\0\x02".to_vec();
+    legacy.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
+    legacy.extend_from_slice(&encoded); legacy.extend_from_slice(&bytes[end..]);
+    assert_eq!(AuthenticatedSnapshot::read(&genesis, &mut legacy.as_slice()).unwrap().anchor().hash(), restored.anchor().hash());
     assert_eq!(original.2.len(), 1);
     for case in 0..6 {
         let mut header = original.clone();
@@ -110,7 +175,7 @@ fn snapshot_beacon_supplements_are_verified_without_changing_economic_state() {
             _ => header.2[0].1.proof = vec![0; 4097],
         }
         let encoded = bincode::serialize(&header).unwrap();
-        let mut damaged = bytes[..16].to_vec();
+        let mut damaged = b"BURST-SNAPSHOT\0\x02".to_vec();
         damaged.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
         damaged.extend_from_slice(&encoded);
         damaged.extend_from_slice(&bytes[end..]);
@@ -118,6 +183,9 @@ fn snapshot_beacon_supplements_are_verified_without_changing_economic_state() {
             AuthenticatedSnapshot::read(&genesis, &mut damaged.as_slice()).is_err(),
             "case {case}"
         );
+        assert!(AuthenticatedSnapshot::read_validated_in_until(
+            &genesis, &mut damaged.as_slice(), store.env().path(), &|_| Ok(()),
+        ).is_err(), "installed invalid beacon case {case}");
     }
 }
 
@@ -146,6 +214,14 @@ fn snapshot_recovers_selection_inputs_after_the_source_ledger_is_gone() {
     drop(original);
     drop(store);
     drop(dir);
+    let epoch = certificate.checkpoint.hash();
+    assert!(snapshot.recover_selections_for(&Default::default()).unwrap().is_empty());
+    assert!(snapshot.recover_selections_for(&[BlockHash::ZERO].into()).unwrap().is_empty());
+    let requested = snapshot.recover_selections_for(&[epoch, BlockHash::ZERO].into()).unwrap();
+    assert_eq!(requested.len(), 1);
+    assert_eq!(requested[&epoch].certificate(), &certificate);
+    assert_eq!(requested[&epoch].replayed().manifest(), manifest);
+    assert_eq!(requested[&epoch].replayed().request(), &expected_request);
     let mut recovered = snapshot.recover_selections().unwrap();
     assert_eq!(recovered.len(), 1);
     let selected = snapshot
@@ -438,6 +514,9 @@ fn snapshot_selection_recovery_requires_its_actual_historical_parent_authority()
     let mut state = snapshot.into_state();
     // A locally pinned tip can authenticate a body without supplying old parents.
     let bytes = archive(&state, &anchor, &anchor, &[]);
+    assert!(AuthenticatedSnapshot::read_validated_in_until(
+        &anchor, &mut bytes.as_slice(), store.env().path(), &|_| Ok(()),
+    ).is_err(), "installed read must validate selections without beacons");
     let short = AuthenticatedSnapshot::read(&anchor, &mut bytes.as_slice()).unwrap();
     assert!(short
         .recover_selection(certificate.checkpoint.height)

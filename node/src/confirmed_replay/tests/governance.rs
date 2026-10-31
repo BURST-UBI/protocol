@@ -57,7 +57,7 @@ fn fixture_with_settings(
     fixture.blocks[0] = crate::genesis_state::block(NetworkId::Dev, &fixture.params);
     for seed in [1, 2] {
         fixture.push(0, BlockType::Endorse, 90 + u64::from(seed), |block| {
-            block.brn_balance += 1;
+            block.brn_spent += 1;
             block.link = destination(seed);
         });
         fixture.push(seed, BlockType::Open, 94, |_| {});
@@ -75,7 +75,7 @@ fn fixture_with_settings(
     for proposal in &proposals {
         fixture.push(0, BlockType::GovernanceEndorse, 111, |block| {
             block.link = BlockHash::new(*proposal.as_bytes());
-            block.brn_balance += 1;
+            block.brn_spent += 1;
         });
     }
     for proposal in &proposals {
@@ -87,6 +87,76 @@ fn fixture_with_settings(
                 block.transaction = TxHash::new(vote);
             });
         }
+    }
+    (fixture, proposals)
+}
+
+pub(super) fn fixture_with_key_ballots(count: usize) -> (Fixture, Vec<TxHash>) {
+    use burst_governance::signing_delegation::{
+        operation::DelegationOperation, DelegatedBallot, Grant, KeyScope,
+    };
+    assert!((1..=64).contains(&count));
+    let (mut fixture, proposals) = fixture_with_settings(
+        10,
+        1,
+        |_| {},
+        (0..count)
+            .map(|index| ProposalContent::ParameterChange {
+                param: GovernableParam::BrnRate,
+                new_value: index as u128 + 2,
+            })
+            .collect(),
+    );
+    let delegation_index = fixture
+        .blocks
+        .iter()
+        .position(|block| {
+            block.block_type == BlockType::Delegate
+                && block.account == address(1)
+                && block.delegation_payload.is_empty()
+        })
+        .unwrap();
+    let removed = fixture.blocks.remove(delegation_index);
+    assert!(!fixture
+        .blocks
+        .iter()
+        .any(|block| block.previous == removed.hash));
+    let owner = burst_crypto::keypair_from_seed(&[1; 32]);
+    let recipient = burst_crypto::keypair_from_seed(&[0; 32]);
+    let grant = Grant::create(
+        &owner,
+        recipient.public.clone(),
+        KeyScope::Parameter(burst_governance::GovernableParam::BrnRate),
+        1,
+        NetworkId::Dev,
+        fixture.blocks[0].hash,
+    )
+    .unwrap();
+    let payload = DelegationOperation::Grant(grant.clone()).encode().unwrap();
+    let grant_block = fixture.push(1, BlockType::Delegate, 123, |block| {
+        block.link = destination(0);
+        block.delegation_payload = payload;
+    });
+    let secondary = grant.decrypt(&recipient.private).unwrap();
+    for proposal in &proposals {
+        let ballot = DelegatedBallot::sign(
+            &grant,
+            &secondary,
+            *proposal,
+            burst_transactions::governance::GovernanceVote::Yea,
+        )
+        .unwrap();
+        let payload = DelegationOperation::Ballot {
+            ballot,
+            grant_block,
+        }
+        .encode()
+        .unwrap();
+        fixture.push(0, BlockType::GovernanceVote, 124, |block| {
+            block.link = BlockHash::new(*proposal.as_bytes());
+            block.transaction = TxHash::ZERO;
+            block.delegation_payload = payload;
+        });
     }
     (fixture, proposals)
 }
@@ -345,6 +415,15 @@ fn governance_certificate_binds_all_due_ballots_and_previous_roster() {
 
 #[test]
 fn governance_certificate_installs_restores_and_transfers_frozen_ballots() {
+    certificate_installation_case(false);
+}
+
+#[test]
+fn keyed_governance_certificate_repairs_corrupt_rows_and_transfers_frozen_ballots() {
+    certificate_installation_case(true);
+}
+
+fn certificate_installation_case(keyed: bool) {
     let (mut fixture, proposals) = fixture();
     let (dir, store, _) = fixture.store();
     let prepared = prepare(&fixture, CUT).unwrap();
@@ -359,7 +438,18 @@ fn governance_certificate_installs_restores_and_transfers_frozen_ballots() {
     .unwrap();
     // Corrupt local projections cannot override the certified signed history.
     let mut batch = store.tx_begin_write().unwrap();
-    batch.put_brn_meta(b"governance_engine", b"broken").unwrap();
+    if keyed {
+        batch
+            .put_brn_meta(
+                b"governance_engine",
+                &bincode::serialize(&GovernanceEngine::new()).unwrap(),
+            )
+            .unwrap();
+        batch.migrate_governance_records().unwrap();
+        batch.put_meta("governance_state/v1/0", b"broken").unwrap();
+    } else {
+        batch.put_brn_meta(b"governance_engine", b"broken").unwrap();
+    }
     batch
         .put_meta("governance_endorsement/stale", b"stale")
         .unwrap();
@@ -370,6 +460,14 @@ fn governance_certificate_installs_restores_and_transfers_frozen_ballots() {
         .commit(&store)
         .unwrap();
     assert_eq!(installed.anchor.hash(), epoch);
+    assert_eq!(
+        store
+            .tx_begin_write()
+            .unwrap()
+            .uses_governance_records()
+            .unwrap(),
+        keyed
+    );
     assert_eq!(installed.anchor.roster().total_humans(), 3);
     assert_ballots(&installed.governance.governance, &proposals);
     assert!(store
@@ -384,14 +482,10 @@ fn governance_certificate_installs_restores_and_transfers_frozen_ballots() {
     }
     drop(store);
     let store = LmdbStore::open(dir.path(), 32, 32 << 20).unwrap();
-    let restored: GovernanceEngine = bincode::deserialize(
-        &store
-            .brn_store()
-            .get_meta(b"governance_engine")
+    let restored: GovernanceEngine =
+        crate::governance_storage::load(&store.tx_begin_write().unwrap())
             .unwrap()
-            .unwrap(),
-    )
-    .unwrap();
+            .unwrap();
     assert_ballots(&restored, &proposals);
     assert!(
         PreparedInstallation::next(&store, NetworkId::Dev, &fixture.params)
@@ -455,22 +549,14 @@ fn governance_certificate_installs_restores_and_transfers_frozen_ballots() {
         fresh.meta_store().payment_epoch().unwrap(),
         store.meta_store().payment_epoch().unwrap()
     );
-    let fresh_governance: GovernanceEngine = bincode::deserialize(
-        &fresh
-            .brn_store()
-            .get_meta(b"governance_engine")
+    let fresh_governance: GovernanceEngine =
+        crate::governance_storage::load(&fresh.tx_begin_write().unwrap())
             .unwrap()
-            .unwrap(),
-    )
-    .unwrap();
-    let source_governance: GovernanceEngine = bincode::deserialize(
-        &store
-            .brn_store()
-            .get_meta(b"governance_engine")
+            .unwrap();
+    let source_governance: GovernanceEngine =
+        crate::governance_storage::load(&store.tx_begin_write().unwrap())
             .unwrap()
-            .unwrap(),
-    )
-    .unwrap();
+            .unwrap();
     for id in &proposals {
         assert_eq!(
             bincode::serialize(fresh_governance.get_proposal(id).unwrap()).unwrap(),
@@ -500,7 +586,7 @@ fn governance_certificate_installs_restores_and_transfers_frozen_ballots() {
     });
     fixture.push(0, BlockType::GovernanceEndorse, 151, |block| {
         block.link = later;
-        block.brn_balance += 1;
+        block.brn_spent += 1;
     });
     let events = chain::load(&store, NetworkId::Dev, &fixture.params).unwrap();
     assert!(ConfirmedReplay::replay_with_events(
@@ -659,7 +745,7 @@ fn governance_activations_order_competing_changes_and_replay_governed_payments()
         installed
             .brn
             .rate_history
-            .segments
+            .segments()
             .last()
             .unwrap()
             .start
@@ -681,7 +767,7 @@ fn governance_activations_order_competing_changes_and_replay_governed_payments()
     fixture.push(0, BlockType::Burn, at + 1, |block| {
         block.payment_epoch = epoch;
         block.params_hash = governed.params_hash();
-        block.brn_balance += 1;
+        block.brn_spent += 1;
         block.link = destination(1);
     });
     fixture.push(2, BlockType::ChangeRepresentative, at + 2, |block| {
@@ -790,7 +876,7 @@ fn certified_constitution_diff_uses_authenticated_body_and_rejects_invalid_effec
         });
         fixture.push(0, BlockType::GovernanceEndorse, 111, |block| {
             block.link = proposal;
-            block.brn_balance += 1;
+            block.brn_spent += 1;
         });
         fixture.push(0, BlockType::GovernanceVote, 122, |block| {
             block.link = proposal
@@ -923,5 +1009,176 @@ fn certified_constitution_diff_uses_authenticated_body_and_rejects_invalid_effec
                 .unwrap(),
             serde_json::to_value(amendment).unwrap()
         );
+    }
+}
+
+#[test]
+fn ballots_in_one_immutable_cut_reuse_electorate_and_match_individual_receipts() {
+    let (fixture, proposals) = fixture_with_cooldown(10);
+    let history = fixture.history(CUT);
+    let replay = ConfirmedReplay::replay_with_selection_refs(
+        &history,
+        NetworkId::Dev,
+        &fixture.params,
+        &[],
+        false,
+        true,
+    )
+    .unwrap();
+    let electorate = std::cell::OnceCell::new();
+    let mut voters_pointer = None;
+    for id in proposals {
+        let individual = replay.ballot_at(&history, id).unwrap();
+        let shared = replay
+            .ballot_at_with_electorate(&history, id, &electorate)
+            .unwrap();
+        assert_eq!(
+            individual.commitment().unwrap(),
+            shared.commitment().unwrap()
+        );
+        assert_eq!(individual.next_proposal(), shared.next_proposal());
+        let voters = electorate.get().unwrap().verified();
+        assert!(!voters.is_empty());
+        if let Some(pointer) = voters_pointer {
+            assert_eq!(voters.as_ptr(), pointer);
+        }
+        voters_pointer = Some(voters.as_ptr());
+    }
+}
+
+fn authenticated_due_batch(count: usize) {
+    use crate::governance_commit::key_delegation::measure_projection_work;
+    use std::time::Instant;
+    let setup = Instant::now();
+    let (fixture, proposals) = fixture_with_key_ballots(count);
+    let history = fixture.history(CUT);
+    let replay = ConfirmedReplay::replay_with_selection_refs(
+        &history,
+        NetworkId::Dev,
+        &fixture.params,
+        &[],
+        false,
+        true,
+    )
+    .unwrap();
+    let setup_ms = setup.elapsed().as_secs_f64() * 1000.0;
+    let expected: Vec<_> = proposals
+        .iter()
+        .map(|id| replay.ballot_at(&history, *id).unwrap())
+        .collect();
+    let electorate = std::cell::OnceCell::new();
+    let start = Instant::now();
+    let (shared, calls, nanos) = measure_projection_work(|| {
+        proposals
+            .iter()
+            .map(|id| {
+                replay
+                    .ballot_at_with_electorate(&history, *id, &electorate)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>()
+    });
+    let batch_ms = start.elapsed().as_secs_f64() * 1000.0;
+    assert_eq!(electorate.get().unwrap().verified().len(), 3);
+    assert_eq!(
+        calls,
+        [
+            count * 6,
+            count,
+            count,
+            count,
+            count,
+            count * 3,
+            count * 6,
+            count
+        ]
+    );
+    for (actual, expected) in shared.iter().zip(&expected) {
+        assert_eq!(actual.commitment().unwrap(), expected.commitment().unwrap());
+        assert_eq!(actual.next_proposal(), expected.next_proposal());
+        assert_eq!(actual.next_proposal().exploration_votes_yea, 2);
+        assert_eq!(actual.next_proposal().exploration_votes_nay, 1);
+    }
+    let indexed_scopes = count > 1 && replay.lifecycle_metadata.len() <= 3;
+    let mut committed = replay;
+    let start = Instant::now();
+    let (result, cut_calls, cut_nanos) =
+        measure_projection_work(|| committed.apply_governance_cut(&history));
+    let cut_ms = start.elapsed().as_secs_f64() * 1000.0;
+    assert_eq!(result.unwrap().0.len(), count);
+    assert_eq!(
+        cut_calls,
+        [
+            3 * count + 3,
+            1,
+            count,
+            count,
+            count,
+            3,
+            if indexed_scopes { 0 } else { 3 * count + 3 },
+            1
+        ]
+    );
+    for ballot in expected {
+        let proposal = ballot.next_proposal();
+        assert_eq!(
+            committed
+                .governance
+                .as_ref()
+                .unwrap()
+                .governance
+                .get_proposal(&proposal.hash),
+            Some(proposal)
+        );
+    }
+    println!(
+        "authenticated_due_batch {}",
+        serde_json::json!({
+            "proposals":count, "eligible":3, "shared_parameter_grants":1,
+            "setup_ms":setup_ms, "batch_ms":batch_ms, "cut_ms":cut_ms,
+            "calls":calls, "nanos":nanos, "cut_calls":cut_calls, "cut_nanos":cut_nanos,
+            "indexed_scopes":indexed_scopes,
+        })
+    );
+}
+
+#[test]
+fn due_key_ballots_match_individual_receipts_and_measure_repeated_authentication() {
+    for count in [1, 2, 8] {
+        authenticated_due_batch(count);
+    }
+}
+
+#[test]
+#[ignore = "explicit capped-host signed due-proposal diagnostic"]
+fn authenticated_due_batch_scaling() {
+    let count: usize = std::env::var("BURST_GOV_PROBE_PROPOSALS")
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!([1, 8, 32].contains(&count));
+    authenticated_due_batch(count);
+}
+
+#[test]
+fn governance_dependency_scan_matches_both_input_orders() {
+    let (fixture, _) = fixture();
+    let expected =
+        crate::confirmed_replay::governance::block_dependencies(&fixture.blocks).unwrap();
+    assert!(!expected.is_empty());
+    let directory = tempfile::tempdir().unwrap();
+    for reverse in [false, true] {
+        let mut blocks = fixture.blocks.clone();
+        if reverse {
+            blocks.reverse();
+        }
+        for path in [None, Some(directory.path())] {
+            let source =
+                crate::confirmed_replay::blocks::source::Source::new(&blocks, path).unwrap();
+            assert_eq!(
+                crate::confirmed_replay::governance::streamed_dependencies(&source).unwrap(),
+                expected
+            );
+        }
     }
 }

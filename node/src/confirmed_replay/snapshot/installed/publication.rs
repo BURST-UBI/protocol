@@ -1,6 +1,6 @@
 use super::*;
 use crate::confirmed_replay::{snapshot::SelectionSource, ConfirmedReplay};
-use burst_verification::{OrchestratorSnapshot, VerificationEvent, VerificationOrchestrator};
+use burst_verification::{OrchestratorSnapshot, VerificationEvent};
 
 /// A local snapshot may name a published committee before certified activation.
 /// Its context is only a hint: derive the committee again, then compare all fields.
@@ -8,17 +8,17 @@ pub(in crate::confirmed_replay) fn materialize(
     actual: OrchestratorSnapshot,
     state: &mut ConfirmedReplay,
     selections: &(impl SelectionSource + ?Sized),
+    directory: &std::path::Path,
 ) -> Result<(), StoreError> {
-    let observed = VerificationOrchestrator::restore(actual.clone());
     let mut expected = state.verification.clone();
-    for selection in selections.read_all() {
+    for selection in selections.iter_selections() {
         let selection = selection.map_err(invalid)?;
         let request = selection.replayed().request();
         let target = request.target();
         let context = request
             .vote_context(&selection.certificate().checkpoint)
             .map_err(invalid)?;
-        if observed.selection_context(target) != Some(context)
+        if actual.selection_context(target) != Some(context)
             || expected.selection_context(target) == Some(context)
         {
             continue;
@@ -42,8 +42,9 @@ pub(in crate::confirmed_replay) fn materialize(
             return Err(invalid("unexpected recovered committee effects"));
         }
     }
-    if super::super::canonical::encode(&actual).map_err(invalid)?
-        != super::super::canonical::encode(&expected.snapshot()).map_err(invalid)?
+    if !super::super::canonical::equivalent_verification(
+        actual.snapshot_view(), expected.snapshot_view(), directory,
+    ).map_err(invalid)?
     {
         return Err(invalid(
             "published verification state differs from certified replay",

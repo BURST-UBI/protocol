@@ -1,0 +1,6 @@
+{
+  "scope": "Pre-cleanup evidence documents; coverage.json and original source baseline unchanged.",
+  "files": {
+    "spec/COMPLETION_LEDGER.md": "fbeec7f1a2813ef51f3c8da8e0a2c6f81390fbf7f4a1153998614236a55738d7"
+  }
+}

@@ -34,8 +34,8 @@ async fn signed_network_vote_installs_encrypted_key_fork_and_recovers() {
 
 async fn signed_fork_and_recovery(kind: BlockType, encrypted: bool) {
     use super::governance::{saved_grant, scope};
-    use burst_governance::key_delegation::{operation::DelegationOperation, Grant, Revocation};
-    for endorsement_wins in [false, true] {
+    use burst_governance::signing_delegation::{operation::DelegationOperation, Grant, Revocation};
+    for candidate_wins in [false, true] {
         let directory = tempfile::tempdir().unwrap();
         let ports = [port(), port()];
         assert_ne!(ports[0], ports[1]);
@@ -78,7 +78,7 @@ async fn signed_fork_and_recovery(kind: BlockType, encrypted: bool) {
             nodes.push((
                 shutdown,
                 tokio::spawn(async move {
-                    node.start().await.unwrap();
+                    node.start_with_services(burst_daemon::start_public_services).await.unwrap();
                     node.stop().await.unwrap();
                 }),
             ));
@@ -92,14 +92,14 @@ async fn signed_fork_and_recovery(kind: BlockType, encrypted: bool) {
             .get_account(&creator)
             .unwrap()
             .head;
-        let mut endorse: StateBlock =
+        let mut candidate: StateBlock =
             bincode::deserialize(&stores[0].block_store().get_block(&genesis).unwrap()).unwrap();
-        endorse.previous = genesis;
-        endorse.payment_epoch = stores[0].meta_store().payment_epoch().unwrap();
-        endorse.block_type = kind.clone();
-        endorse.timestamp = Timestamp::now();
-        endorse.brn_balance = u128::from(kind == BlockType::Endorse);
-        endorse.link = BlockHash::new(target_keys.public.0);
+        candidate.previous = genesis;
+        candidate.payment_epoch = stores[0].meta_store().payment_epoch().unwrap();
+        candidate.block_type = kind.clone();
+        candidate.timestamp = Timestamp::now();
+        candidate.brn_spent = u128::from(kind == BlockType::Endorse);
+        candidate.link = BlockHash::new(target_keys.public.0);
         let grant = encrypted.then(|| {
             Grant::create(
                 &creator_keys,
@@ -112,7 +112,7 @@ async fn signed_fork_and_recovery(kind: BlockType, encrypted: bool) {
             .unwrap()
         });
         if let Some(grant) = &grant {
-            endorse.delegation_payload =
+            candidate.delegation_payload =
                 DelegationOperation::Grant(grant.clone()).encode().unwrap();
         }
         let content = (kind == BlockType::GovernanceProposal).then(|| {
@@ -129,23 +129,23 @@ async fn signed_fork_and_recovery(kind: BlockType, encrypted: bool) {
         });
         if let Some(content) = &content {
             assert!(content.bytes().len() > burst_types::MAX_P2P_MESSAGE_BYTES);
-            (endorse.link, endorse.origin, endorse.transaction) =
+            (candidate.link, candidate.origin, candidate.transaction) =
                 content.manifest().block_fields().unwrap();
         }
-        sign(&mut endorse, 0);
-        let proposal = endorse.clone();
-        let mut preference = endorse.clone();
+        sign(&mut candidate, 0);
+        let proposal = candidate.clone();
+        let mut preference = candidate.clone();
         preference.block_type = BlockType::ChangeRepresentative;
-        preference.brn_balance = 0;
+        preference.brn_spent = 0;
         preference.link = BlockHash::ZERO;
         preference.origin = burst_types::TxHash::ZERO;
         preference.transaction = burst_types::TxHash::ZERO;
         preference.delegation_payload.clear();
         sign(&mut preference, 0);
-        let (loser, winner) = if endorsement_wins {
-            (preference, endorse)
+        let (loser, winner) = if candidate_wins {
+            (preference, candidate)
         } else {
-            (endorse, preference)
+            (candidate, preference)
         };
         let result = tokio::time::timeout(Duration::from_secs(90), async {
             for registry in &registries {
@@ -156,14 +156,14 @@ async fn signed_fork_and_recovery(kind: BlockType, encrypted: bool) {
                     tokio::time::sleep(Duration::from_millis(25)).await;
                 }
             }
-            if let Some(content) = content.as_ref().filter(|_| !endorsement_wins) {
+            if let Some(content) = content.as_ref().filter(|_| !candidate_wins) {
                 transfers[0].offer(&proposal, content.bytes()).unwrap();
             }
             assert!(queues[0].push(loser.clone()).await);
             for store in &stores {
                 until(|| store.block_store().exists(&loser.hash).unwrap()).await;
             }
-            if let Some(content) = content.as_ref().filter(|_| endorsement_wins) {
+            if let Some(content) = content.as_ref().filter(|_| candidate_wins) {
                 transfers[1].offer(&proposal, content.bytes()).unwrap();
             }
             assert!(queues[1].push(winner.clone()).await);
@@ -221,21 +221,19 @@ async fn signed_fork_and_recovery(kind: BlockType, encrypted: bool) {
                 assert!(!store.block_store().exists(&loser.hash).unwrap());
                 assert_eq!(
                     verification.lock().await.get_state(&target).is_some(),
-                    endorsement_wins && kind == BlockType::Endorse
+                    candidate_wins && kind == BlockType::Endorse
                 );
                 assert_eq!(
                     verification.lock().await.snapshot().encode().unwrap(),
-                    store
-                        .meta_store()
-                        .get_meta(crate::endorsement_commit::SNAPSHOT_KEY)
-                        .unwrap()
+                    crate::verification_storage::load(&store.tx_begin_write().unwrap())
+                        .unwrap().snapshot().encode().unwrap()
                 );
                 assert!(queues[0].push(loser.clone()).await);
             }
             for delegation in &delegations {
                 assert_eq!(
                     delegation.lock().await.get_delegate(&creator),
-                    (endorsement_wins && kind == BlockType::Delegate && !encrypted)
+                    (candidate_wins && kind == BlockType::Delegate && !encrypted)
                         .then_some(&target)
                 );
             }
@@ -243,7 +241,7 @@ async fn signed_fork_and_recovery(kind: BlockType, encrypted: bool) {
                 for governance in &governances {
                     let live = governance.lock().await;
                     let saved = live.get_proposal(&proposal.hash.into_tx_hash());
-                    assert_eq!(saved.is_some(), endorsement_wins);
+                    assert_eq!(saved.is_some(), candidate_wins);
                     if let Some(saved) = saved {
                         assert_eq!(
                             saved.content,
@@ -256,7 +254,7 @@ async fn signed_fork_and_recovery(kind: BlockType, encrypted: bool) {
                 for store in &stores {
                     assert_eq!(
                         saved_grant(store, genesis, &creator),
-                        endorsement_wins.then_some(grant.id().unwrap())
+                        candidate_wins.then_some(grant.id().unwrap())
                     );
                 }
             }
@@ -283,7 +281,7 @@ async fn signed_fork_and_recovery(kind: BlockType, encrypted: bool) {
             let transfers = restarted.governance_transfers.clone();
             let shutdown = restarted.shutdown.clone();
             let task = tokio::spawn(async move {
-                restarted.start().await.unwrap();
+                restarted.start_with_services(burst_daemon::start_public_services).await.unwrap();
                 restarted.stop().await.unwrap();
             });
             let checked = tokio::time::timeout(Duration::from_secs(20), async {
@@ -292,10 +290,8 @@ async fn signed_fork_and_recovery(kind: BlockType, encrypted: bool) {
                 loop {
                     let live = verification.lock().await.snapshot().encode().unwrap();
                     if live
-                        == store
-                            .meta_store()
-                            .get_meta(crate::endorsement_commit::SNAPSHOT_KEY)
-                            .unwrap()
+                        == crate::verification_storage::load(&store.tx_begin_write().unwrap())
+                        .unwrap().snapshot().encode().unwrap()
                     {
                         break;
                     }
@@ -303,18 +299,18 @@ async fn signed_fork_and_recovery(kind: BlockType, encrypted: bool) {
                 }
                 assert_eq!(
                     verification.lock().await.get_state(&target).is_some(),
-                    endorsement_wins && kind == BlockType::Endorse
+                    candidate_wins && kind == BlockType::Endorse
                 );
                 assert_eq!(
                     delegation.lock().await.get_delegate(&creator),
-                    (endorsement_wins && kind == BlockType::Delegate && !encrypted)
+                    (candidate_wins && kind == BlockType::Delegate && !encrypted)
                         .then_some(&target)
                 );
                 let mut followup = winner.clone();
                 followup.previous = winner.hash;
                 followup.timestamp = Timestamp::now();
-                followup.brn_balance = u128::from(kind == BlockType::Endorse);
-                followup.block_type = if endorsement_wins {
+                followup.brn_spent = u128::from(kind == BlockType::Endorse);
+                followup.block_type = if candidate_wins {
                     if kind == BlockType::Delegate {
                         BlockType::RevokeDelegation
                     } else {
@@ -323,7 +319,7 @@ async fn signed_fork_and_recovery(kind: BlockType, encrypted: bool) {
                 } else {
                     kind.clone()
                 };
-                followup.link = if endorsement_wins {
+                followup.link = if candidate_wins {
                     BlockHash::ZERO
                 } else {
                     BlockHash::new(target_keys.public.0)
@@ -332,9 +328,9 @@ async fn signed_fork_and_recovery(kind: BlockType, encrypted: bool) {
                 if let Some(grant) = &grant {
                     assert_eq!(
                         saved_grant(&store, genesis, &creator),
-                        endorsement_wins.then_some(grant.id().unwrap())
+                        candidate_wins.then_some(grant.id().unwrap())
                     );
-                    followup.delegation_payload = if endorsement_wins {
+                    followup.delegation_payload = if candidate_wins {
                         DelegationOperation::Revoke(
                             Revocation::create(&creator_keys, scope(), 2, NetworkId::Dev, genesis)
                                 .unwrap(),
@@ -349,7 +345,7 @@ async fn signed_fork_and_recovery(kind: BlockType, encrypted: bool) {
                 if let Some(content) = &content {
                     let live = governance.lock().await;
                     let saved = live.get_proposal(&proposal.hash.into_tx_hash());
-                    assert_eq!(saved.is_some(), endorsement_wins);
+                    assert_eq!(saved.is_some(), candidate_wins);
                     if let Some(saved) = saved {
                         assert_eq!(
                             saved.content,
@@ -359,7 +355,7 @@ async fn signed_fork_and_recovery(kind: BlockType, encrypted: bool) {
                     drop(live);
                     followup.origin = burst_types::TxHash::ZERO;
                     followup.transaction = burst_types::TxHash::ZERO;
-                    if endorsement_wins {
+                    if candidate_wins {
                         followup.block_type = BlockType::GovernanceWithdraw;
                         followup.link = proposal.hash;
                     } else {
@@ -367,7 +363,7 @@ async fn signed_fork_and_recovery(kind: BlockType, encrypted: bool) {
                             content.manifest().block_fields().unwrap();
                     }
                     sign(&mut followup, 0);
-                    if !endorsement_wins {
+                    if !candidate_wins {
                         transfers.offer(&followup, content.bytes()).unwrap();
                     }
                 }
@@ -379,9 +375,9 @@ async fn signed_fork_and_recovery(kind: BlockType, encrypted: bool) {
                 if let Some(grant) = &grant {
                     assert_eq!(
                         saved_grant(&store, genesis, &creator),
-                        (!endorsement_wins).then_some(grant.id().unwrap())
+                        (!candidate_wins).then_some(grant.id().unwrap())
                     );
-                    use burst_governance::key_delegation::{
+                    use burst_governance::signing_delegation::{
                         scoped,
                         view::{index_key, Direction},
                     };
@@ -395,7 +391,7 @@ async fn signed_fork_and_recovery(kind: BlockType, encrypted: bool) {
                     );
                     assert_eq!(
                         store.meta_store().get_meta(&incoming).unwrap(),
-                        if endorsement_wins {
+                        if candidate_wins {
                             BlockHash::ZERO
                         } else {
                             followup.hash
@@ -405,7 +401,7 @@ async fn signed_fork_and_recovery(kind: BlockType, encrypted: bool) {
                 }
                 if content.is_some() {
                     let live = governance.lock().await;
-                    let id = if endorsement_wins {
+                    let id = if candidate_wins {
                         proposal.hash
                     } else {
                         followup.hash
@@ -413,7 +409,7 @@ async fn signed_fork_and_recovery(kind: BlockType, encrypted: bool) {
                     let saved = live.get_proposal(&id.into_tx_hash()).unwrap();
                     assert_eq!(
                         saved.phase,
-                        if endorsement_wins {
+                        if candidate_wins {
                             burst_governance::GovernancePhase::Withdrawn
                         } else {
                             burst_governance::GovernancePhase::Proposal
@@ -426,7 +422,7 @@ async fn signed_fork_and_recovery(kind: BlockType, encrypted: bool) {
                 );
                 assert_eq!(
                     delegation.lock().await.get_delegate(&creator),
-                    (!endorsement_wins && kind == BlockType::Delegate && !encrypted)
+                    (!candidate_wins && kind == BlockType::Delegate && !encrypted)
                         .then_some(&target)
                 );
             })

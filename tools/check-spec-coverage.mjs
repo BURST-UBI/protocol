@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, resolve, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -11,13 +11,13 @@ export function sections(name, text) {
   const lines = text.split("\n");
   const starts = [];
   lines.forEach((line, i) => {
-    if (name === sourceNames[0] ? /^#{1,3} /.test(line) : /^### \d+\.\d+ /.test(line)) starts.push(i);
+    if (name === sourceNames[1] ? /^### \d+\.\d+ /.test(line) : /^#{1,3} /.test(line)) starts.push(i);
   });
   return starts.map((start, i) => {
     const title = lines[start].replace(/^#+ /, "");
     const decision = name === sourceNames[1] && title.match(/^(\d+\.\d+) /);
     return {
-      id: decision ? `D-${decision[1]}` : `W-${String(i + 1).padStart(3, "0")}`,
+      id: decision ? `D-${decision[1]}` : `${name === sourceNames[0] ? "W" : `DOC-${name.replace(/^docs\//, "").replace(/\.md$/, "")}`}-${String(i + 1).padStart(3, "0")}`,
       source: name,
       line: start + 1,
       title,
@@ -26,11 +26,14 @@ export function sections(name, text) {
   });
 }
 
-export function checkCoverage(coverage, sourceTexts, fileExists = () => false) {
+export function checkCoverage(coverage, sourceTexts, fileExists = () => false, requiredSources = sourceNames) {
   const errors = [];
   if (coverage.version !== 1) errors.push("unsupported coverage version");
   const expected = new Map();
-  for (const name of sourceNames) {
+  for (const name of Object.keys(coverage.sources ?? {})) {
+    if (!requiredSources.includes(name)) errors.push(`unknown source ${name}`);
+  }
+  for (const name of requiredSources) {
     const text = sourceTexts[name];
     if (typeof text !== "string") { errors.push(`missing source ${name}`); continue; }
     if (coverage.sources?.[name]?.sha256 !== sha256(text)) errors.push(`source changed: ${name}`);
@@ -76,22 +79,40 @@ function main() {
   if (args.some(arg => !["--release", "--list-open"].includes(arg))) throw new Error("usage: node tools/check-spec-coverage.mjs [--release] [--list-open]");
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const coverage = JSON.parse(readFileSync(resolve(root, "spec/coverage.json"), "utf8"));
-  const sources = Object.fromEntries(sourceNames.map(name => [name, readFileSync(resolve(root, name), "utf8")]));
+  const requiredSources = [sourceNames[1], ...readdirSync(resolve(root, "docs"), { recursive: true })
+    .filter(name => name.endsWith(".md")).sort().map(name => `docs/${name}`)];
+  const sources = Object.fromEntries(requiredSources.map(name => [name, readFileSync(resolve(root, name), "utf8")]));
   const fileExists = path => {
     const local = relative(root, resolve(root, path));
     if (!local || local.startsWith("..") || path.startsWith("/")) return false;
     try { return statSync(resolve(root, path)).isFile(); } catch { return false; }
   };
-  const { errors, open } = checkCoverage(coverage, sources, fileExists);
+  const { errors, open } = checkCoverage(coverage, sources, fileExists, requiredSources);
+  // The rewrite does not retire requirements or transfer their sign-offs.
+  const baseline = resolve(root, "spec/evidence/documentation-baseline");
+  const history = JSON.parse(readFileSync(resolve(baseline, "coverage.json"), "utf8"));
+  const historicalSources = Object.fromEntries(sourceNames.map(name => [name, readFileSync(resolve(baseline, name), "utf8")]));
+  const historical = checkCoverage(history, historicalSources, path => {
+    const local = relative(baseline, resolve(baseline, path));
+    if (!local || local.startsWith("..") || path.startsWith("/")) return false;
+    try { if (statSync(resolve(baseline, path)).isFile()) return true; } catch {}
+    return fileExists(path);
+  });
+  errors.push(...historical.errors.map(error => `historical: ${error}`));
   for (const error of errors) console.error(error);
   if (args.includes("--list-open")) for (const id of open) {
     const entry = coverage.requirements.find(item => item.id === id);
     console.log(`${id}\t${entry.status}\t${entry.title}\t${entry.note}`);
   }
+  if (args.includes("--list-open")) for (const id of historical.open) {
+    const entry = history.requirements.find(item => item.id === id);
+    console.log(`historical/${id}\t${entry.status}\t${entry.title}\t${entry.note}`);
+  }
   console.log(`${coverage.requirements.length} source sections indexed; ${open.length} not signed off; ${errors.length} coverage errors.`);
+  console.log(`${history.requirements.length} historical sections retained; ${historical.open.length} not signed off.`);
   console.log("Index coverage does not establish implementation completeness or security.");
   if (errors.length) process.exitCode = 1;
-  else if (args.includes("--release") && open.length) process.exitCode = 2;
+  else if (args.includes("--release") && (open.length || historical.open.length)) process.exitCode = 2;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) main();

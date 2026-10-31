@@ -40,7 +40,7 @@ fn a_settled_identity_starts_a_new_certified_lifecycle_from_new_endorsements() {
         fixture.push(1, BlockType::Endorse, cutoff - 1, |block| {
             block.payment_epoch = epoch;
             block.link = destination(20);
-            block.brn_balance += 1;
+            block.brn_spent += 1;
         });
         let partial = ConfirmedReplay::replay_with_events(
             &fixture.history(cutoff - 1),
@@ -72,7 +72,7 @@ fn a_settled_identity_starts_a_new_certified_lifecycle_from_new_endorsements() {
         let trigger = fixture.push(2, BlockType::Endorse, cutoff, |block| {
             block.payment_epoch = epoch;
             block.link = destination(20);
-            block.brn_balance += 1;
+            block.brn_spent += 1;
         });
         fixture.append_confirmed_prefix(&store, cutoff);
         let candidate =
@@ -127,7 +127,7 @@ fn a_settled_identity_starts_a_new_certified_lifecycle_from_new_endorsements() {
         fixture.push(20, BlockType::Burn, beacon_time + 2, |block| {
             block.payment_epoch = selection.certificate().checkpoint.hash();
             block.link = destination(8);
-            block.brn_balance += 1;
+            block.brn_spent += 1;
         });
         assert!(
             ConfirmedReplay::replay_with_events(
@@ -179,7 +179,7 @@ fn a_settled_identity_starts_a_new_certified_lifecycle_from_new_endorsements() {
         let new_payment = fixture.push(20, BlockType::Burn, beacon_time + 2, |block| {
             block.payment_epoch = selection.certificate().checkpoint.hash();
             block.link = destination(8);
-            block.brn_balance += 1;
+            block.brn_spent += 1;
         });
         let spent = ConfirmedReplay::replay_with_events(
             &fixture.history(beacon_time + 2),

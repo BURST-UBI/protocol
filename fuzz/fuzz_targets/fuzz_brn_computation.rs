@@ -5,8 +5,7 @@ use libfuzzer_sys::fuzz_target;
 use burst_brn::state::RateHistory;
 use burst_types::Timestamp;
 
-// Fuzz BRN balance computation with arbitrary rate segments and timestamps.
-// Ensures the computation never panics regardless of input.
+// Look for accrual panics using u64 rates and nondecreasing rate-change times.
 fuzz_target!(|data: &[u8]| {
     if data.len() < 16 {
         return;
@@ -51,7 +50,6 @@ fuzz_target!(|data: &[u8]| {
     let verified_at = Timestamp::new(0);
     let now = Timestamp::new(query_time);
 
-    // These must never panic
     let _ = rate_history.total_accrued(verified_at, now);
     let _ = rate_history.total_accrued_checked(verified_at, now);
 });

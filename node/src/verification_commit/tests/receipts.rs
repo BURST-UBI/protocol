@@ -21,7 +21,7 @@ fn latest(fixture: &Fixture) -> records::Receipt {
 #[test]
 fn appeal_reference_cannot_be_silently_processed_as_an_ordinary_challenge() {
     let mut f = Fixture::new();
-    f.verified_target();
+    f.verify_target();
     let original = latest(&f);
     let mut appeal = f.challenge(burst_types::ChallengeReason::Fraud);
     appeal.target_head = original.source;
@@ -46,7 +46,7 @@ fn appeal_context_requires_certified_latest_matching_challenge_history() {
     ] {
         for legitimate in [false, true] {
             let mut f = Fixture::new();
-            f.verified_target();
+            f.verify_target();
             let initial = latest(&f);
             let challenge = f.challenge(reason);
             f.apply(&challenge, true).unwrap();
@@ -118,7 +118,7 @@ fn appeal_context_requires_certified_latest_matching_challenge_history() {
 #[test]
 fn checkpoint_replacement_clears_outcome_history_atomically_only() {
     let mut f = Fixture::new();
-    f.verified_target();
+    f.verify_target();
     let receipt = latest(&f);
     let receipt_key = records::key(receipt.source);
     let latest_key = records::latest_key(&f.target);
@@ -193,7 +193,7 @@ fn pending_reward_invalidation_survives_recipient_reverification_and_restart() {
         revoke_pending(&mut batch, &effects, &mut f.trst).unwrap(),
         reward.amount
     );
-    f.trst.revoke_by_origin(&address(1));
+    f.trst.revoke_by_originator(&address(1));
     f.brn
         .deactivate_wallet(&address(1), test_time(1100))
         .unwrap();
@@ -205,7 +205,7 @@ fn pending_reward_invalidation_survives_recipient_reverification_and_restart() {
     f = f.reopen();
 
     let mut batch = f.store.tx_begin_write().unwrap();
-    verify_wallet(
+    mark_wallet_verified(
         &mut batch,
         &address(1),
         test_time(1200),
@@ -257,7 +257,7 @@ fn outcome_receipts_bind_rewards_preserve_history_and_commit_atomically() {
         burst_types::ChallengeReason::Inactivity,
     ] {
         let mut f = Fixture::new();
-        f.verified_target();
+        f.verify_target();
         let first = latest(&f);
         assert_eq!(first.verdict, records::Verdict::Verified);
         assert_eq!(first.previous, None);

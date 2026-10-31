@@ -167,7 +167,7 @@ fn mixed_historical_transfer_authenticates_outcomes_without_installing_peer_stat
     merged_payments(&mut fixture);
     pending_successor(&mut fixture);
     let (_source_dir, source, heads) = restore_chain(&fixture, &selections);
-    install_outcome(&fixture, &source, &heads);
+    persist_outcome(&fixture, &source, &heads);
     let next = CertifiedCheckpoint::prepare(
         &source,
         NetworkId::Dev,

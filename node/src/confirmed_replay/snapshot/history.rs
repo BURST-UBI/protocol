@@ -9,9 +9,14 @@ use burst_store::{account::AccountInfo, StoreError};
 use burst_store_lmdb::LmdbStore;
 use burst_types::{BlockHash, NetworkId, Signature, WalletAddress};
 
-pub const MAX_WITNESS_BLOCKS: usize = 128;
-pub const MAX_WITNESS_BYTES: usize = 1024 * 1024;
+pub use burst_messages::checkpoint_sync::MAX_WITNESS_BLOCKS;
+pub use burst_messages::checkpoint_sync::MAX_WITNESS_BYTES;
 
+mod durable;
+pub(crate) use durable::{DurableHistoryInputs, DurableHistorySession, DurableInventoryInputs};
+
+mod roots;
+pub(crate) use roots::StoredHistoryRoots;
 mod staged;
 pub(crate) use staged::HistoricalBlocks;
 
@@ -19,8 +24,9 @@ fn invalid(error: impl ToString) -> ReplayError {
     ReplayError::Invalid(error.to_string())
 }
 
-/// Every recovered reference remains bound to the snapshot that authenticated
-/// its account head. This context is not itself a serializable trust token.
+/// Recovery context for an authenticated account head. state_hash names the
+/// snapshot body commitment, or the ledger-root commitment for a certified cut.
+/// Possessing these identifiers alone does not prove membership.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HistoryContext {
     pub network: NetworkId,
@@ -30,7 +36,7 @@ pub struct HistoryContext {
 }
 
 /// Signable block contents proven to occur in one snapshot's account prefix.
-/// Work is excluded from the block hash (decision 4.9), so membership does not
+/// Work is excluded from the block hash, so membership does not
 /// authenticate the received work nonce or recheck historical work thresholds.
 /// New admission must still use its normal work and economic checks.
 #[derive(Clone)]
@@ -278,7 +284,7 @@ impl HistoryCursor {
 /// Serve a bounded raw ancestry chunk. These bytes are not authenticated by the
 /// serving node's indexes; the receiver must pass them through its own cursor.
 /// A pruned server may return an available prefix for continuation on another
-/// peer. No bytes are returned when the initial hash is unavailable.
+/// peer. An unavailable initial hash returns an error.
 pub fn read_chunk(
     store: &LmdbStore,
     start: BlockHash,
@@ -294,10 +300,10 @@ pub fn read_chunk(
     let mut used = 0usize;
     let mut result = Vec::new();
     while !hash.is_zero() && result.len() < limit {
-        let bytes = match blocks.get_block_txn(&txn, &hash) {
+        let bytes = match blocks.get_block_txn_bounded(&txn, &hash, burst_types::MAX_P2P_MESSAGE_BYTES) {
             Ok(bytes) => Some(bytes),
             Err(StoreError::NotFound(_)) => metadata
-                .get_meta_txn(&txn, &format!("checkpoint_history/v1/{hash}"))
+                .get_meta_txn_bounded(&txn, &format!("checkpoint_history/v1/{hash}"), burst_types::MAX_P2P_MESSAGE_BYTES)
                 .map_err(invalid)?,
             Err(error) => return Err(invalid(error)),
         };

@@ -48,7 +48,7 @@ impl FrontierStore for LmdbFrontierStore {
         Ok(())
     }
 
-    fn iter_frontiers(&self) -> Result<Vec<(WalletAddress, BlockHash)>, StoreError> {
+    fn all_frontiers(&self) -> Result<Vec<(WalletAddress, BlockHash)>, StoreError> {
         let rtxn = self.env.read_txn().map_err(LmdbError::from)?;
         let mut frontiers = Vec::new();
         let iter = self.frontiers_db.iter(&rtxn).map_err(LmdbError::from)?;

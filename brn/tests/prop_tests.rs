@@ -1,3 +1,6 @@
+//! Arithmetic properties over bounded generated inputs. These exercise local
+//! accounting helpers, not signed admission or certified stake settlement.
+
 use proptest::prelude::*;
 
 use burst_brn::state::BrnWalletState;
@@ -5,7 +8,7 @@ use burst_brn::BrnEngine;
 use burst_types::Timestamp;
 
 proptest! {
-    /// BRN balance must monotonically increase with time (no burns/stakes).
+    /// Constant positive-rate accrual is nondecreasing within these non-overflow bounds.
     #[test]
     fn brn_accrual_monotonic(
         rate in 1u128..1_000_000,
@@ -19,7 +22,7 @@ proptest! {
         prop_assert!(b2 >= b1, "balance must not decrease: b1={}, b2={}", b1, b2);
     }
 
-    /// After a valid burn, balance must remain non-negative.
+    /// A positive burn smaller than the balance does not increase that balance.
     #[test]
     fn brn_burn_never_exceeds_balance(
         rate in 1u128..1_000_000,
@@ -38,7 +41,7 @@ proptest! {
         }
     }
 
-    /// Accrued BRN is always >= burned + staked (no negative balance).
+    /// For generated states whose burns and stakes fit accrued BRN, subtract both exactly.
     #[test]
     fn accrued_gte_burned_plus_staked(
         rate in 1u128..10_000,
@@ -131,7 +134,8 @@ proptest! {
         prop_assert_eq!(checked, unchecked);
     }
 
-    /// Staking and returning stake restores original balance.
+    /// Returning a stake restores available balance. This fixture has no pending
+    /// release evidence and does not test when returned BRN becomes spendable.
     #[test]
     fn stake_return_restores_balance(
         rate in 1u128..10_000,

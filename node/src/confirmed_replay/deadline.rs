@@ -3,8 +3,9 @@ use crate::verification_commit::ledger::ReplayedLedger;
 use crate::{verification_activation, verification_deadline};
 
 impl ConfirmedReplay {
-    /// Replay every signed block in the old epoch before applying unsigned
-    /// deadline effects. The certificate closes that epoch against late claims.
+    /// Apply due panel completions and pending-payment returns to replayed state.
+    /// The caller must replay the signed history first and certify the resulting
+    /// checkpoint before installation. Discard this candidate on error.
     pub(crate) fn apply_agreed_deadlines(
         &mut self,
         history: &impl LifecycleHistory,
@@ -41,8 +42,8 @@ impl ConfirmedReplay {
                 &bytes,
             ]));
             let returned =
-                crate::ledger_bridge::create_returned_token(&destination, &hash, &pending);
-            crate::ledger_bridge::deliver_pending(&mut self.trst, &pending, returned, self.cutoff)
+                crate::block_economics::create_returned_token(&destination, &hash, &pending);
+            crate::block_economics::deliver_pending(&mut self.trst, &pending, returned, self.cutoff)
                 .map_err(invalid)?;
             self.pending.remove(&(destination, hash));
             pending.return_credit = true;
@@ -109,6 +110,8 @@ impl ConfirmedReplay {
                 .flat_map(|value| value.absent.iter().cloned())
                 .collect();
             let mut ledger = ReplayedLedger {
+                bootstrap: &mut self.bootstrap_phase,
+                bootstrap_threshold: self.params.bootstrap_exit_threshold,
                 mutations: self.mutations.as_mut(),
                 accounts: &mut self.accounts,
                 pending: &mut self.pending,

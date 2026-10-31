@@ -23,7 +23,7 @@ fn input_sources_preserve_order_and_reject_missing_or_duplicate_blocks() {
     let mut fixture = Fixture::new();
     let timestamp = fixture.blocks[0].timestamp.as_secs();
     fixture.push(0, BlockType::Burn, timestamp + 10, |block| {
-        block.brn_balance = 1;
+        block.brn_spent = 1;
         block.link = destination(30);
     });
     // Scans preserve supplied order; causal ordering belongs to the executor.
@@ -52,11 +52,64 @@ fn input_sources_preserve_order_and_reject_missing_or_duplicate_blocks() {
                     .collect::<Vec<_>>()
             );
         }
+        let mut scanned = std::collections::BTreeMap::new();
+        source
+            .visit_unordered(|block| {
+                assert!(scanned
+                    .insert(block.hash, bincode::serialize(block).unwrap())
+                    .is_none());
+                Ok::<_, StoreError>(())
+            })
+            .unwrap();
+        let expected = fixture
+            .blocks
+            .iter()
+            .map(|block| (block.hash, bincode::serialize(block).unwrap()))
+            .collect();
+        assert_eq!(scanned, expected);
+        let mut calls = 0;
+        let stopped = source.visit_unordered(|_| {
+            calls += 1;
+            Err::<(), _>(ReplayError::PendingExpiry)
+        });
+        assert!(matches!(stopped, Err(ReplayError::PendingExpiry)));
+        assert_eq!(calls, 1);
         assert!(matches!(
             source.get(&BlockHash::ZERO),
             Err(StoreError::NotFound(_))
         ));
     }
+    let certified = std::collections::HashSet::from([fixture.blocks[1].hash]);
+    for source in [&memory, &disk] {
+        let mut applied = crate::confirmed_replay::blocks::AppliedHistory::from_certified_input(
+            source,
+            &certified,
+            source.directory(),
+        )
+        .unwrap();
+        assert_eq!(applied.len(), 1);
+        assert!(applied.get(&fixture.blocks[0].hash).unwrap().is_none());
+        assert!(!applied.contains(&fixture.blocks[0].hash).unwrap());
+        assert!(applied.encoded(&fixture.blocks[0].hash).is_err());
+        assert_eq!(
+            applied.encoded(&fixture.blocks[1].hash).unwrap(),
+            bincode::serialize(&fixture.blocks[1]).unwrap()
+        );
+        assert!(applied.insert(&fixture.blocks[1]).is_err());
+        applied.insert(&fixture.blocks[0]).unwrap();
+        assert_eq!(applied.len(), 2);
+        assert!(applied.contains(&fixture.blocks[0].hash).unwrap());
+        assert!(applied.insert(&fixture.blocks[0]).is_err());
+    }
+    let missing = std::collections::HashSet::from([BlockHash::ZERO]);
+    assert!(
+        crate::confirmed_replay::blocks::AppliedHistory::from_certified_input(
+            &disk,
+            &missing,
+            disk.directory()
+        )
+        .is_err()
+    );
     let duplicates = vec![fixture.blocks[0].clone(), fixture.blocks[0].clone()];
     assert!(Source::new(&duplicates, None).is_err());
     assert!(Source::new(&duplicates, Some(directory.path())).is_err());
@@ -73,7 +126,7 @@ fn applied_block_readers_preserve_economics_and_propagate_storage_failures() {
         BlockType::Burn,
         genesis.timestamp.as_secs() + 10,
         |block| {
-            block.brn_balance = 1;
+            block.brn_spent = 1;
             block.link = destination(30);
         },
     );

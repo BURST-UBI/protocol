@@ -1,4 +1,7 @@
-//! Read-only NTS interoperability probe; never adjusts the host clock.
+//! Query the default public NTS sources without changing the host clock.
+//! Wait up to twenty seconds for one combined signing-time interval, then stop
+//! the workers. Success is one usable observation, not sustained availability
+//! or proof that every configured source responded.
 use burst_network::trusted_clock::NtsClock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 

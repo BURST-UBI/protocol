@@ -2,16 +2,15 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Identifies which BURST network a node is connected to.
+/// Network selection used for configuration and protocol identity.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum NetworkId {
     /// The production network.
     Live,
-    /// The public test network.
+    /// The Test network identity.
     Test,
-    /// Local development network. Default: an unspecified network is treated as
-    /// the isolated Dev network — never Live — so a missing/garbled network id
-    /// fails closed rather than leaking onto production.
+    /// Development network and default enum value. Parsers must still reject
+    /// invalid input; this default does not validate or isolate a deployment.
     #[default]
     Dev,
 }

@@ -1,0 +1,70 @@
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
+
+/// Arc-backed copy-on-write storage. Mutable access uses Arc::make_mut, cloning
+/// T only when another strong reference shares it. Interior mutability within T
+/// is not isolated by this wrapper. Serialization writes T without pointer metadata.
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
+pub struct Shared<T>(Arc<T>);
+
+impl<T> From<T> for Shared<T> {
+    fn from(value: T) -> Self {
+        Self(Arc::new(value))
+    }
+}
+
+impl<T: Serialize> Serialize for Shared<T> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.as_ref().serialize(serializer)
+    }
+}
+
+impl<T> Shared<T> {
+    pub fn downgrade(&self) -> std::sync::Weak<T> {
+        Arc::downgrade(&self.0)
+    }
+
+    pub fn shares_storage_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl<T> Deref for Shared<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<T: Clone> Shared<T> {
+    /// Recover ownership, cloning only when another snapshot still shares the value.
+    pub fn into_inner(self) -> T {
+        Arc::unwrap_or_clone(self.0)
+    }
+}
+
+impl<T: Clone> DerefMut for Shared<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        Arc::make_mut(&mut self.0)
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Shared<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        T::deserialize(deserializer).map(|value| Self(Arc::new(value)))
+    }
+}
+
+impl<'a, T> IntoIterator for &'a Shared<T>
+where
+    &'a T: IntoIterator,
+{
+    type Item = <&'a T as IntoIterator>::Item;
+    type IntoIter = <&'a T as IntoIterator>::IntoIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.as_ref().into_iter()
+    }
+}

@@ -1,8 +1,9 @@
 //! LMDB implementation of MergerGraphStore.
 //!
 //! `merger_origins_db` and `merger_downstream_db` use composite keys
-//! `(parent(32), child(32))` → empty, enabling O(1) put and prefix
-//! range-scan for listing.
+//! `(parent(32), child(32))` → empty. Each edge is a keyed write; listing
+//! children collects a prefix range into a vector. Writes commit separately
+//! from merge-node data and do not validate graph relationships.
 
 use crate::shared_env::SharedEnv;
 use std::ops::Bound;

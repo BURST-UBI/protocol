@@ -14,12 +14,21 @@ pub(crate) fn settle_panel_deadline_candidate(
     prior_defaults: &HashSet<WalletAddress>,
     network: burst_types::NetworkId,
 ) -> Result<Vec<WalletAddress>, String> {
-    let (mut candidate, absent) = if orchestrator.has_active_challenge(&activation.target) {
-        orchestrator.challenge_deadline_candidate(activation, params, cutoff)
+    #[cfg(test)]
+    let candidate_started = std::time::Instant::now();
+    let before = orchestrator.storage_clone();
+    let mut scoped = orchestrator.clone();
+    scoped.begin_record_changes();
+    let (mut candidate, absent) = if scoped.has_active_challenge(&activation.target) {
+        scoped.challenge_deadline_candidate(activation, params, cutoff)
     } else {
-        orchestrator.normal_deadline_candidate(activation, params, cutoff)
+        scoped.normal_deadline_candidate(activation, params, cutoff)
     }
     .map_err(|error| error.to_string())?;
+    #[cfg(test)]
+    stage_time("candidate", candidate_started);
+    #[cfg(test)]
+    let authority_started = std::time::Instant::now();
     let mut defaults = prior_defaults.clone();
     for address in &absent {
         if !defaults.insert(address.clone()) {
@@ -97,18 +106,36 @@ pub(crate) fn settle_panel_deadline_candidate(
             sources: Vec::new(),
             authority: SettlementAuthority::CertifiedDeadline { absent: defaults },
         };
+        #[cfg(test)]
+        stage_time("authority", authority_started);
+        #[cfg(test)]
+        let settlement_started = std::time::Instant::now();
         settle(batch, &context, events, params, engines)?;
         if !sources.is_empty() {
             let hashes: Vec<_> = sources.iter().map(|source| source.hash).collect();
             dependencies::persist(batch, context.hash, context.hash, &hashes)?;
         }
+        #[cfg(test)]
+        stage_time("settlement", settlement_started);
     } else if events
         .iter()
         .any(|event| !matches!(event, VerificationEvent::VerifierPenalized { .. }))
     {
         return Err("deadline has unrelated lifecycle effects".into());
     }
-    persist(batch, &candidate)?;
+    #[cfg(test)]
+    let persistence_started = std::time::Instant::now();
+    persist(batch, &before, &candidate)?;
+    #[cfg(test)]
+    stage_time("persistence", persistence_started);
     *orchestrator = candidate;
     Ok(absent)
+}
+
+
+#[cfg(test)]
+fn stage_time(stage: &str, started: std::time::Instant) {
+    if std::env::var_os("BURST_DEADLINE_STAGE_DIAGNOSTIC").is_some() {
+        println!("signed_deadline_stage stage={stage} elapsed_ns={}", started.elapsed().as_nanos());
+    }
 }

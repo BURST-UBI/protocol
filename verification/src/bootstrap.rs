@@ -1,12 +1,14 @@
 use crate::VerificationError;
 
-/// Creator authority ends once. A later revocation or threshold increase cannot
-/// restart launch privileges (decisions 27.1, 27.2 and 35.4).
+/// Persisted creator-authority phase. Once complete, lower account counts and
+/// higher thresholds cannot reopen it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BootstrapPhase {
     Active,
     Complete,
 }
+
+pub const MAX_BOOTSTRAP_HUMANS: u32 = 50;
 
 impl BootstrapPhase {
     pub const KEY: &'static [u8] = b"bootstrap_phase/v1";
@@ -18,9 +20,13 @@ impl BootstrapPhase {
     }
 
     pub fn observe(&mut self, verified_count: u64, threshold: u32) {
-        if verified_count >= u64::from(threshold) {
+        if verified_count >= u64::from(threshold.min(MAX_BOOTSTRAP_HUMANS)) {
             *self = Self::Complete;
         }
+    }
+
+    pub fn permits_creator(self, verified_count: u64, threshold: u32) -> bool {
+        self == Self::Active && verified_count < u64::from(threshold.min(MAX_BOOTSTRAP_HUMANS))
     }
 
     pub fn encoding(self) -> [u8; 2] {
@@ -54,6 +60,17 @@ mod tests {
         assert_eq!(restored, BootstrapPhase::Complete);
         assert_eq!(BootstrapPhase::at_genesis(0), BootstrapPhase::Complete);
         assert_eq!(BootstrapPhase::at_genesis(1), BootstrapPhase::Complete);
+    }
+
+    #[test]
+    fn raising_threshold_cannot_extend_authority_beyond_fifty() {
+        let mut phase = BootstrapPhase::at_genesis(200);
+        assert!(phase.permits_creator(49, 200));
+        assert!(!phase.permits_creator(50, 200));
+        phase.observe(50, 200);
+        assert_eq!(phase, BootstrapPhase::Complete);
+        assert!(!phase.permits_creator(1, 1000));
+        assert!(!BootstrapPhase::Active.permits_creator(20, 20));
     }
 
     #[test]

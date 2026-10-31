@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Requires the single-router lab topology. Installs a WAN-to-client P2P rule,
+# starts a client with reachout disabled and has the public node dial inward.
+# Mapping rules and processes remain in the container after this script exits.
 set -euo pipefail
 test "${BURST_ISOLATED_NAT_LAB:-}" = yes
 source /lab/common.sh

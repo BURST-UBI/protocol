@@ -57,6 +57,38 @@ fn keypair_generation_bench(c: &mut Criterion) {
     });
 }
 
+fn reference_blake2b_256(data: &[u8]) -> [u8; 32] {
+    use blake2::{Blake2b, Digest, digest::consts::U32};
+    Blake2b::<U32>::digest(data).into()
+}
+
+// Compare the SIMD backend with RustCrypto across record and page sizes.
+fn blake2b_backend_comparison(c: &mut Criterion) {
+    use criterion::{BenchmarkId, Throughput};
+    let mut group = c.benchmark_group("blake2b_backend");
+    for length in [0usize, 64, 84, 102, 127, 128, 129, 256, 1024, 4096, 16384] {
+        let data: Vec<u8> = (0..length).map(|i| (i % 251) as u8).collect();
+        let mut params = blake2b_simd::Params::new();
+        params.hash_length(32);
+        assert_eq!(params.hash(&data).as_bytes(), reference_blake2b_256(&data));
+        for chunk in [1, 31, 128, 129, 512] {
+            let mut streamed = params.to_state();
+            streamed.update(&[]);
+            for part in data.chunks(chunk) { streamed.update(part); }
+            streamed.update(&[]);
+            assert_eq!(streamed.finalize().as_bytes(), reference_blake2b_256(&data));
+        }
+        group.throughput(Throughput::Bytes(length as u64));
+        group.bench_with_input(BenchmarkId::new("rustcrypto_reference", length), &data, |b, data| {
+            b.iter(|| reference_blake2b_256(black_box(data)))
+        });
+        group.bench_with_input(BenchmarkId::new("simd_candidate", length), &data, |b, data| {
+            b.iter(|| blake2b_simd::Params::new().hash_length(32).hash(black_box(data)))
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     ed25519_sign_bench,
@@ -65,6 +97,7 @@ criterion_group!(
     blake2b_256_1kb_bench,
     blake2b_multi_bench,
     hash_block_bench,
+    blake2b_backend_comparison,
     keypair_generation_bench,
 );
 criterion_main!(benches);

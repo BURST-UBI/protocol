@@ -12,6 +12,18 @@ pub(crate) fn key(hash: &BlockHash) -> Vec<u8> {
     [PREFIX, hash.as_bytes()].concat()
 }
 
+pub(crate) fn decode(key: &[u8], value: &[u8]) -> Result<BlockHash, StoreError> {
+    let bytes: [u8; 32] = key.strip_prefix(crate::confirmation_queue::PREFIX)
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| StoreError::Corruption("invalid confirmation queue key".into()))?;
+    let hash = BlockHash::new(bytes);
+    if hash.is_zero() || value != [1] {
+        return Err(StoreError::Corruption("invalid confirmation queue record".into()));
+    }
+    Ok(hash)
+}
+
+
 impl LmdbMetaStore {
     pub fn confirmation_pending_txn(
         &self,
@@ -31,7 +43,9 @@ impl LmdbMetaStore {
         }
     }
 
-    /// Persist before retiring the election. Retrying the same choice is safe.
+    /// Persist a local choice without checking block presence or consensus.
+    /// Repeated hashes are idempotent; a new entry scans the capped queue.
+    /// Use the writer's `handoff_confirmation` to check block presence atomically.
     pub fn enqueue_confirmation(&self, hash: &BlockHash) -> Result<(), StoreError> {
         if hash.is_zero() {
             return Err(StoreError::Corruption("zero confirmation target".into()));
@@ -68,8 +82,8 @@ impl LmdbMetaStore {
         Ok(())
     }
 
-    /// A bounded snapshot. Callers rotate through it so one missing dependency
-    /// cannot starve unrelated accounts. Records survive retries and restart.
+    /// Return the complete capped queue in hash order, not arrival order.
+    /// Scheduling and rotation belong to the caller. Records survive restart.
     pub fn pending_confirmations(&self) -> Result<Vec<BlockHash>, StoreError> {
         let txn = self.env.read_txn().map_err(LmdbError::from)?;
         self.pending_confirmations_txn(&crate::LmdbReadTransaction::from_ro(txn))

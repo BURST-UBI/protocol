@@ -1,0 +1,104 @@
+[
+  {
+    "source": "spec/COMPLETION_LEDGER.md",
+    "archive": "spec/evidence/completion-ledger-20261031.txt",
+    "sha256": "fbeec7f1a2813ef51f3c8da8e0a2c6f81390fbf7f4a1153998614236a55738d7",
+    "lines": 58745
+  },
+  {
+    "source": "spec/RELEASE_STATUS.md",
+    "archive": "spec/evidence/release-status-20261031.txt",
+    "sha256": "b78ef552a97f0f51b98abc5fe438eebc71f800eadc401403fbe9c62c94a9c126",
+    "lines": 1658
+  },
+  {
+    "source": "spec/CX_REMAINING_WORK.md",
+    "archive": "spec/evidence/cx-remaining-work-20261031.txt",
+    "sha256": "e8f3899ea56ab79296d2139b8c77ee15202aa67f0c22a8a7afc3b49b698da0b6",
+    "lines": 829
+  },
+  {
+    "source": "spec/CI_REPAIR.md",
+    "archive": "spec/evidence/ci-repair-20261031.txt",
+    "sha256": "638569751ec2f8cedb2795af886abf4c0320dfb57e958a0a84e7c38bbdaff39f",
+    "lines": 280
+  },
+  {
+    "source": "spec/TESTNET_PILOT.md",
+    "archive": "spec/evidence/testnet-pilot-20261031.txt",
+    "sha256": "dc10b57c014994be6b48d92c23f57b6c756db5e57c26888ae037f4ea2c02f899",
+    "lines": 854
+  },
+  {
+    "source": "spec/SHARED_ARCHIVE_MIGRATION.md",
+    "archive": "spec/evidence/shared-archive-migration-20261031.txt",
+    "sha256": "f14aff9d34a4c0073a0ed5cb440365eb7a67df1ab51ca12b5e97adb7ec47079b",
+    "lines": 116
+  },
+  {
+    "source": "spec/VERIFICATION_RECORD_NORMALIZATION.md",
+    "archive": "spec/evidence/verification-record-normalization-20261031.txt",
+    "sha256": "bee8f3149aab9ace52e2a1581b8fb0b788b58819b805193b8122e2c34956a383",
+    "lines": 336
+  },
+  {
+    "source": "spec/SNAPSHOT_ARCHIVE.md",
+    "archive": "spec/evidence/snapshot-archive-20261031.txt",
+    "sha256": "e01961fc2cfc5aeb8f45d0ac891de4abd893c31dc1f6e8a1d75f668af77bd422",
+    "lines": 935
+  },
+  {
+    "source": "spec/FINAL_CODE_RECONCILIATION_20261030.md",
+    "archive": "spec/evidence/final-code-reconciliation-20261030.txt",
+    "sha256": "cd44b749b27c446340205a61a1b5200a3a59cbe895e4b6211c510652bdac9cd0",
+    "lines": 273
+  },
+  {
+    "source": "spec/FOLDER_STRUCTURE_AUDIT_20261030.md",
+    "archive": "spec/evidence/folder-structure-audit-20261030.txt",
+    "sha256": "f80e7d4289af4c587ca81e032ea597a5bc9b4da161c15188462414096fdaf498",
+    "lines": 340
+  },
+  {
+    "source": "spec/FULL_AUDIT_20261030.md",
+    "archive": "spec/evidence/full-audit-20261030.txt",
+    "sha256": "135b975baec421b5b508027bb62c3008426672016eecfc588fa3d07c1c314f54",
+    "lines": 336
+  },
+  {
+    "source": "spec/IMPLEMENTATION_SIMPLICITY_REVIEW_20261030.md",
+    "archive": "spec/evidence/implementation-simplicity-review-20261030.txt",
+    "sha256": "4246708cdccbe42c2b10df3beb056b10833dadaa2e3acb9c5a93392425d9c751",
+    "lines": 541
+  },
+  {
+    "source": "spec/PROTOCOL_CONSISTENCY_AUDIT_20261030.md",
+    "archive": "spec/evidence/protocol-consistency-audit-20261030.txt",
+    "sha256": "4dd5a55d39f687850881738ce991004dd43f78123aa60a5277e4dbf2e561ca65",
+    "lines": 394
+  },
+  {
+    "source": "spec/RSNANO_AUDIT_CROSSCHECK_20261030.md",
+    "archive": "spec/evidence/rsnano-audit-crosscheck-20261030.txt",
+    "sha256": "c7148c5fbb61f4a855d007766fe7dcb5f11156017bfb2fdd78ed12ba48c8cdfd",
+    "lines": 145
+  },
+  {
+    "source": "spec/RSNANO_DIVERGENCE_JUSTIFICATION_20261030.md",
+    "archive": "spec/evidence/rsnano-divergence-justification-20261030.txt",
+    "sha256": "e5e19eeca831fc820977c47a32f7798be63cccb039c4136cba6a25a07201f3cd",
+    "lines": 104
+  },
+  {
+    "source": "spec/STRUCTURE_REAUDIT_20261030.md",
+    "archive": "spec/evidence/structure-reaudit-20261030.txt",
+    "sha256": "2b07ad709d4a7763c8f68ba994c2bce81e135f3804a20826163ecc570629804e",
+    "lines": 533
+  },
+  {
+    "source": "spec/FINAL_CODE_FIXES_20261031.md",
+    "archive": "spec/evidence/final-code-fixes-20261031.txt",
+    "sha256": "181da9003a45198fad38396b501e60e5912c480f498a7d1cc7a1271eea9b9a83",
+    "lines": 144
+  }
+]

@@ -3,14 +3,14 @@ use proptest::prelude::*;
 use burst_types::{BlockHash, BrnAmount, Timestamp, TrstAmount, TxHash};
 
 proptest! {
-    /// BlockHash roundtrip: new -> as_bytes -> new produces identical hash.
+    /// BlockHash preserves its constructor bytes.
     #[test]
     fn block_hash_roundtrip(bytes in prop::array::uniform32(0u8..)) {
         let hash = BlockHash::new(bytes);
         prop_assert_eq!(hash.as_bytes(), &bytes);
     }
 
-    /// TxHash roundtrip: new -> as_bytes -> new produces identical hash.
+    /// TxHash preserves its constructor bytes.
     #[test]
     fn tx_hash_roundtrip(bytes in prop::array::uniform32(0u8..)) {
         let hash = TxHash::new(bytes);
@@ -58,23 +58,23 @@ proptest! {
         prop_assert_eq!(ta == tb, a == b);
     }
 
-    /// Timestamp elapsed_since: elapsed_since(now) = now - self (saturating).
+    /// Timestamp elapsed_secs_until: elapsed_secs_until(now) = now - self (saturating).
     #[test]
-    fn timestamp_elapsed_since(base in 0u64..1_000_000, offset in 0u64..1_000_000) {
+    fn timestamp_elapsed_secs_until(base in 0u64..1_000_000, offset in 0u64..1_000_000) {
         let t = Timestamp::new(base);
         let now = Timestamp::new(base + offset);
-        prop_assert_eq!(t.elapsed_since(now), offset);
+        prop_assert_eq!(t.elapsed_secs_until(now), offset);
     }
 
-    /// Timestamp elapsed_since saturates to 0 when now < self.
+    /// Timestamp elapsed_secs_until saturates to 0 when now < self.
     #[test]
-    fn timestamp_elapsed_since_saturates(
+    fn timestamp_elapsed_secs_until_saturates(
         base in 1u64..1_000_000,
         deficit in 1u64..1_000_000,
     ) {
         let later = Timestamp::new(base + deficit);
         let earlier = Timestamp::new(base);
-        prop_assert_eq!(later.elapsed_since(earlier), 0);
+        prop_assert_eq!(later.elapsed_secs_until(earlier), 0);
     }
 
     /// Timestamp has_expired agrees with manual arithmetic.

@@ -12,6 +12,16 @@ static ENVIRONMENTS: LazyLock<Mutex<HashMap<PathBuf, Weak<Env>>>> =
 pub(crate) struct SharedEnv(Option<Arc<Env>>);
 
 impl SharedEnv {
+    /// Default LMDB commits flush data before synchronously writing metadata.
+    /// Do not flush them a second time. Any non-default flag combination keeps
+    /// the explicit barrier, including relaxed durability modes used by callers.
+    pub(crate) fn sync_after_commit(&self) -> heed::Result<()> {
+        if self.get_flags()? != 0 {
+            self.force_sync()?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn open(path: &Path, options: EnvOpenOptions) -> heed::Result<Self> {
         let mut environments = ENVIRONMENTS.lock().unwrap();
         // Heed validates matching options and canonicalizes aliases for existing environments.
@@ -47,7 +57,50 @@ impl Drop for SharedEnv {
             // This releases that reference, never force-closing live transactions.
             env.as_ref().clone().prepare_for_closing();
         }
-        // Finish closing before another opener can acquire this path.
+        // Drop this reference before releasing the opener lock. Any remaining
+        // raw Env clones keep the environment in its closing state.
         drop(env);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use heed::{types::Bytes, EnvFlags, FlagSetMode};
+
+    #[test]
+    fn post_commit_barrier_preserves_default_and_relaxed_durability() {
+        fn marker(name: &str, phase: &str) {
+            use std::io::Write;
+            std::io::stderr().write_all(format!("BURST_DURABILITY {name} {phase}\n").as_bytes()).unwrap();
+        }
+        for (name, flags) in [
+            ("default", EnvFlags::empty()),
+            ("no_sync", EnvFlags::NO_SYNC),
+            ("no_meta_sync", EnvFlags::NO_META_SYNC),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut options = EnvOpenOptions::new();
+            options.max_dbs(1).map_size(1 << 20);
+            let env = SharedEnv::open(dir.path(), options.clone()).unwrap();
+            let mut txn = env.write_txn().unwrap();
+            let db = env.create_database::<Bytes, Bytes>(&mut txn, Some("intent")).unwrap();
+            txn.commit().unwrap();
+            // Isolated environment, no concurrent flag changes or transactions.
+            if !flags.is_empty() { unsafe { env.set_flags(flags, FlagSetMode::Enable).unwrap(); } }
+            assert_eq!(env.get_flags().unwrap(), flags.bits());
+            let mut txn = env.write_txn().unwrap();
+            db.put(&mut txn, b"final", b"choice").unwrap();
+            marker(name, "commit_start");
+            txn.commit().unwrap();
+            marker(name, "barrier_start");
+            env.sync_after_commit().unwrap();
+            marker(name, "durable_return");
+            drop(env);
+            let reopened = SharedEnv::open(dir.path(), options).unwrap();
+            let txn = reopened.read_txn().unwrap();
+            let db = reopened.open_database::<Bytes, Bytes>(&txn, Some("intent")).unwrap().unwrap();
+            assert_eq!(db.get(&txn, b"final").unwrap(), Some(b"choice".as_slice()));
+        }
     }
 }

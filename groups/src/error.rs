@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Clone, Debug, Error)]
 pub enum GroupError {
     #[error("group {0} not found")]
     GroupNotFound(String),

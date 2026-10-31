@@ -16,10 +16,13 @@ fn position(key: &[u8]) -> Result<(WalletAddress, u64), StoreError> {
     ))
 }
 
-/// Physical retention and logical ledger size are different after fast sync.
+/// Physical block inventory and logical history after staging a compact projection.
 pub struct CompactProjection {
+    /// Bodies moved from the block table to the orphan archive, sorted by hash.
     pub retired_blocks: Vec<BlockHash>,
+    /// Bodies remaining in the block table, including existing cemented bodies.
     pub retained_blocks: u64,
+    /// Sum of projected account heights, including history without local bodies.
     pub ledger_blocks: u64,
 }
 
@@ -60,12 +63,15 @@ impl AccountTargets<'_> {
 }
 
 impl LmdbWriteTransaction<'_> {
-    /// Project authenticated snapshot accounts and a sparse set of membership
-    /// witnesses. The node must first reconcile authority and local finality in
-    /// THIS writer, then install economics, the authenticated base and epoch in
-    /// the same transaction. This storage operation grants no consensus trust.
-    /// Existing cemented bodies stay; unproven provisional bodies are archived,
-    /// not classified as excluded by the snapshot. No missing height is invented.
+    /// Install caller-authenticated accounts and sparse block membership witnesses.
+    /// The node must reconcile authority and local finality using this writer, then
+    /// install economics, the authenticated base and epoch in the same transaction.
+    /// Existing cemented bodies stay; unproven provisional bodies move to the orphan
+    /// archive. Missing intermediate heights remain absent. Any error prevents commit.
+    ///
+    /// Accounts, supplied blocks and archived blocks each have a 131,072-row limit.
+    /// Supplied and archived bodies each have a separate 64 MiB limit. Existing
+    /// physical indexes and bodies are scanned in full, regardless of those limits.
     pub fn replace_compact_checkpoint_ledger(
         &mut self,
         expected_epoch: BlockHash,
@@ -81,8 +87,9 @@ impl LmdbWriteTransaction<'_> {
         )
     }
 
-    /// Consume authenticated rows once. Bodies are staged inside this exclusive
-    /// transaction; a late source error poisons it and forbids partial commit.
+    /// Consume caller-authenticated block rows once, retaining their positions and
+    /// hashes in memory. Build an account lookup from the slice. A late source error
+    /// prevents commit, including bodies already staged in this transaction.
     pub fn replace_compact_checkpoint_ledger_rows<'a>(
         &mut self,
         expected_epoch: BlockHash,
@@ -103,6 +110,7 @@ impl LmdbWriteTransaction<'_> {
                 expected_epoch,
                 blocks,
                 AccountTargets::Slice(targets),
+                None,
             )
         })();
         if result.is_err() {
@@ -112,17 +120,21 @@ impl LmdbWriteTransaction<'_> {
     }
 
     /// Borrow the replay owner's existing account index without cloning accounts
-    /// or allocating a second index. The same projection checks and budget apply.
+    /// or allocating a second index. Supplied authenticated BRN wallets are reconciled
+    /// without rewriting identical rows; omission clears them for later publication.
+    /// The same projection checks and budget apply.
     pub fn replace_compact_checkpoint_ledger_account_map<'a>(
         &mut self,
         expected_epoch: BlockHash,
         blocks: impl IntoIterator<Item = Result<std::borrow::Cow<'a, CheckpointBlock>, StoreError>>,
         accounts: &HashMap<WalletAddress, AccountInfo>,
+        brn_wallets: Option<&burst_brn::wallet_states::WalletStates>,
     ) -> Result<CompactProjection, StoreError> {
         let result = self.replace_compact_checkpoint_ledger_inner(
             expected_epoch,
             blocks,
             AccountTargets::Indexed(accounts),
+            brn_wallets,
         );
         if result.is_err() {
             self.failed = true;
@@ -135,6 +147,7 @@ impl LmdbWriteTransaction<'_> {
         expected_epoch: BlockHash,
         blocks: impl IntoIterator<Item = Result<std::borrow::Cow<'a, CheckpointBlock>, StoreError>>,
         accounts: AccountTargets<'_>,
+        brn_wallets: Option<&burst_brn::wallet_states::WalletStates>,
     ) -> Result<CompactProjection, StoreError> {
         self.require_clean_checkpoint_boundary()?;
         if self.payment_epoch()? != expected_epoch || accounts.len() > MAX_ROWS {
@@ -302,7 +315,7 @@ impl LmdbWriteTransaction<'_> {
             );
             if hash.is_zero()
                 || value != [1]
-                || (!retained.contains_key(&hash) && !self.compact_cemented(&hash)?)
+                || (!retained.contains_key(&hash) && !self.is_compact_cemented(&hash)?)
             {
                 return Err(invalid(
                     "compact projection excludes durable confirmation work",
@@ -350,7 +363,7 @@ impl LmdbWriteTransaction<'_> {
             }
             cursor = keys.last().map(|hash| hash.as_bytes().to_vec());
             for hash in keys {
-                if retained.contains_key(&hash) || self.compact_cemented(&hash)? {
+                if retained.contains_key(&hash) || self.is_compact_cemented(&hash)? {
                     continue;
                 }
                 let value = self.get_block(&hash)?;
@@ -380,11 +393,13 @@ impl LmdbWriteTransaction<'_> {
                 retired_blocks.push(hash);
             }
         }
+        self.reconcile_compact_account_rows(&accounts)?;
+        match brn_wallets {
+            Some(wallets) => self.reconcile_checkpoint_brn_wallets(wallets)?,
+            None => self.clear_checkpoint_rows(UndoTable::BrnWallets, None)?,
+        }
         for table in [
-            UndoTable::Accounts,
-            UndoTable::Frontiers,
             UndoTable::Pending,
-            UndoTable::BrnWallets,
             UndoTable::TrstOrigins,
             UndoTable::TrstExpiry,
             UndoTable::TrstReverse,
@@ -429,7 +444,44 @@ impl LmdbWriteTransaction<'_> {
         })
     }
 
-    fn compact_cemented(&self, hash: &BlockHash) -> Result<bool, StoreError> {
+    fn reconcile_compact_account_rows(&mut self, accounts: &AccountTargets<'_>) -> Result<(), StoreError> {
+        // Rebuild the verified-account index and invalidate derived caches.
+        // Later account writes skip byte-identical primary values.
+        self.invalidate_body_changes();
+        let cache = self.auxiliary_cache.get_mut();
+        cache.invalidate_projection();
+        cache.clear_electorate(UndoTable::Accounts);
+        cache.clear_counter_accounts(UndoTable::Accounts);
+        self.dirty = true;
+        crate::verified_index::rebuild(
+            &mut self.txn, self.env.accounts_db, self.env.verified_accounts_db,
+        ).map_err(LmdbError::from)?;
+        for table in [UndoTable::Accounts, UndoTable::Frontiers] {
+            let db = table.database(self.env);
+            let mut cursor: Option<Vec<u8>> = None;
+            loop {
+                let bounds = (cursor.as_deref().map_or(Bound::Unbounded, Bound::Excluded),
+                    Bound::<&[u8]>::Unbounded);
+                let rows = db.range(&self.txn, &bounds).map_err(LmdbError::from)?
+                    .take(256).map(|row| {
+                        let (key, _) = row.map_err(LmdbError::from)?;
+                        let keep = std::str::from_utf8(key).ok()
+                            .filter(|address| address.starts_with(WalletAddress::PREFIX))
+                            .and_then(|address| accounts.get(&WalletAddress::new(address)))
+                            .is_some_and(|account| table == UndoTable::Accounts || account.block_count > 0);
+                        Ok((key.to_vec(), keep))
+                    }).collect::<Result<Vec<_>, StoreError>>()?;
+                if rows.is_empty() { break; }
+                cursor = rows.last().map(|(key, _)| key.clone());
+                for (key, keep) in rows {
+                    if !keep { self.delete_raw(table, &key)?; }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn is_compact_cemented(&self, hash: &BlockHash) -> Result<bool, StoreError> {
         let Some(key) = self
             .env
             .block_height_db

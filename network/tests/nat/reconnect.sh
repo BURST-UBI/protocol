@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Requires the live one-client lab and its saved success marker. Temporarily
+# rejects P2P with TCP resets, checks disconnect/reconnect and runs the transport
+# journey again. The EXIT trap removes the injected firewall rule.
 set -euo pipefail
 test "${BURST_ISOLATED_NAT_LAB:-}" = yes
 test -f /evidence/one-client-passed

@@ -1,14 +1,12 @@
-//! Peer discovery, keepalive, connection tracking, and peer scoring/banning.
+//! Peer metadata, discovery candidates, keepalive scheduling and score helpers.
+//! The transport owns sockets and authentication. Stored flags and advertisements
+//! do not independently prove a peer is live, reachable or trustworthy.
 
-use burst_messages::PeerAddress;
+use burst_types::PeerAddress;
 use rand::seq::SliceRandom;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::net::SocketAddrV4;
-
-// ---------------------------------------------------------------------------
-// Penalty / scoring types
-// ---------------------------------------------------------------------------
 
 /// Reasons a peer can be penalized. Each carries a fixed penalty value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,10 +31,6 @@ impl PenaltyReason {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Peer state
-// ---------------------------------------------------------------------------
-
 /// Telemetry data received from a peer.
 #[derive(Clone, Debug)]
 pub struct PeerTelemetry {
@@ -58,12 +52,12 @@ pub struct PeerState {
     /// Live routing key (handshake identity); discovered candidates use ip:port.
     pub peer_id: String,
     pub address: PeerAddress,
-    /// Whether the transport address was successfully dialed. Inbound TCP
-    /// source ports are never dial targets or gossip/cache entries.
+    /// Whether `address` may be used as a dial target. Discovery candidates set
+    /// this before a successful dial; inbound source ports leave it false.
     pub address_is_dialable: bool,
     pub connected: bool,
     pub last_seen_secs: u64,
-    /// Reputation score. Starts at 0, clamped to [`SCORE_MIN`]..=[`SCORE_MAX`].
+    /// Local score, initially zero. Penalty and reward helpers apply separate caps.
     pub score: i32,
     /// Whether the peer is currently banned.
     pub banned: bool,
@@ -71,10 +65,8 @@ pub struct PeerState {
     pub ban_until_secs: Option<u64>,
     /// Most recent telemetry data received from this peer.
     pub telemetry: Option<PeerTelemetry>,
-    /// The address other nodes should use to connect to this peer.
-    /// Learned from the peer's self-address in keepalive slot 0.
-    /// Differs from `address` when the peer is behind NAT (the TCP
-    /// `peer_addr` may use an ephemeral port).
+    /// Advertised listening endpoint from keepalive slot zero. Its IP must match
+    /// the transport record, but this does not prove the port is reachable.
     pub peering_addr: Option<PeerAddress>,
 }
 
@@ -95,10 +87,6 @@ const SCORE_MIN: i32 = -1000;
 /// Maximum reputation score.
 const SCORE_MAX: i32 = 100;
 
-// ---------------------------------------------------------------------------
-// Peer manager
-// ---------------------------------------------------------------------------
-
 /// Maximum number of recent keepalive payloads to buffer for the reachout loop.
 const LATEST_KEEPALIVES_CAPACITY: usize = 32;
 
@@ -109,18 +97,17 @@ pub struct PeerManager {
     peers: HashMap<String, PeerState>,
     /// Upper bound on the number of peers we track.
     max_peers: usize,
-    /// Hardcoded bootstrap peers to connect to on startup.
+    /// Configured bootstrap endpoints for initial discovery.
     bootstrap_peers: Vec<String>,
     /// How often (in seconds) we send keepalive messages.
     keepalive_interval_secs: u64,
     /// Timestamp (seconds) of the last keepalive round, or `None` if no
     /// keepalive has been sent yet (triggers an immediate first keepalive).
     last_keepalive_secs: Option<u64>,
-    /// Incrementally tracked count of connected peers — O(1) queries.
+    /// Bookkeeping count; public queries use the live peer map.
     num_connected: usize,
-    /// External (public) address discovered via UPnP, if available.
-    /// When set, keepalive messages advertise this address so peers behind
-    /// NAT can be reached by others.
+    /// Caller-supplied external address advertised in keepalives. Mapping
+    /// lifecycle and reachability checks belong to the caller.
     external_address: Option<SocketAddrV4>,
     /// Ring buffer of recently received keepalive peer lists. The reachout
     /// loop pops random entries and attempts connections to discovered peers.
@@ -174,9 +161,9 @@ impl PeerManager {
         format!("{}:{}", address.ip, address.port)
     }
 
-    /// Add a discovered peer. If at capacity, evicts the lowest-scoring
-    /// peer when the new peer would score higher (new peers start at 0).
-    /// Banned peers are never added.
+    /// Add an unconnected candidate at score zero. At capacity, only a lower-
+    /// scoring disconnected entry can be evicted. A retained ban for this key
+    /// prevents insertion; removing the record also removes that ban.
     pub fn add_peer(&mut self, address: PeerAddress) {
         let key = Self::peer_key(&address);
 
@@ -291,7 +278,7 @@ impl PeerManager {
         true
     }
 
-    /// Find the peer with the lowest reputation score.
+    /// Find the lowest-scoring disconnected record, including banned records.
     fn find_worst_peer(&self) -> Option<(String, i32)> {
         self.peers
             .iter()
@@ -330,8 +317,7 @@ impl PeerManager {
         }
     }
 
-    /// Update a peer's `last_seen_secs` timestamp. Called on every inbound
-    /// message so idle detection works correctly.
+    /// Replace last-seen time for an existing peer; the caller chooses when.
     pub fn touch(&mut self, peer_id: &str, now_secs: u64) {
         if let Some(peer) = self.peers.get_mut(peer_id) {
             peer.last_seen_secs = now_secs;
@@ -351,8 +337,7 @@ impl PeerManager {
     // -- Queries ---------------------------------------------------------------
 
     /// Number of currently connected peers.
-    /// Uses actual count from iter_connected to stay consistent with peers list
-    /// (num_connected can drift due to races).
+    /// Counts the live map, excluding banned peers.
     pub fn connected_count(&self) -> usize {
         self.iter_connected().count()
     }
@@ -399,30 +384,29 @@ impl PeerManager {
     /// each peer's advertised listening address (`peering_addr`) over its raw
     /// socket address, and excluding our own external address.
     ///
-    /// The reachout loop uses this to actively connect to peers learned via
-    /// keepalive gossip, so the mesh self-forms from a single seed instead of
-    /// staying a star around whatever is in `bootstrap_peers`.
+    /// The reachout loop attempts these endpoints. Returning an address does
+    /// not establish reachability or guarantee a particular mesh topology.
     pub fn reachout_candidates(&self) -> Vec<String> {
         let self_ip_port = self
             .external_address
-            .map(|a| (a.ip().to_string(), a.port()));
+            .map(|address| (address.ip().to_string(), address.port()));
         self.peers
             .values()
-            .filter(|p| !p.connected && !p.banned)
-            .filter_map(|p| {
-                let a = p.dialable_address()?;
-                if self.is_connected(&Self::peer_key(a)) {
+            .filter(|peer| !peer.connected && !peer.banned)
+            .filter_map(|peer| {
+                let address = peer.dialable_address()?;
+                if self.is_connected(&Self::peer_key(address)) {
                     return None;
                 }
-                if a.ip.is_empty() || a.ip == "0.0.0.0" || a.ip == "::" {
+                if address.ip.is_empty() || address.ip == "0.0.0.0" || address.ip == "::" {
                     return None;
                 }
-                if let Some((sip, sport)) = &self_ip_port {
-                    if &a.ip == sip && a.port == *sport {
+                if let Some((self_ip, self_port)) = &self_ip_port {
+                    if &address.ip == self_ip && address.port == *self_port {
                         return None;
                     }
                 }
-                Some(format!("{}:{}", a.ip, a.port))
+                Some(format!("{}:{}", address.ip, address.port))
             })
             .collect()
     }
@@ -430,8 +414,8 @@ impl PeerManager {
     /// Return up to `count` random *connected* peer addresses, suitable for
     /// inclusion in a keepalive message.
     ///
-    /// Prefers `peering_addr` over the raw TCP address so that peers behind
-    /// NAT advertise their externally reachable address.
+    /// Prefers the advertised listening address over a dialable transport
+    /// address. Reachability is not checked here.
     pub fn random_peers(&self, count: usize) -> Vec<PeerAddress> {
         let mut result = Vec::with_capacity(count);
 
@@ -460,10 +444,8 @@ impl PeerManager {
 
     /// Return up to `count` random *known* (connected or not) peer addresses.
     ///
-    /// Used in keepalive messages so that nodes can advertise peers they know
-    /// about even if they haven't connected to all of them yet. This breaks
-    /// the chicken-and-egg problem where peers can't discover each other
-    /// because keepalives only advertised connected peers.
+    /// Includes unconnected discovery candidates with dialable addresses;
+    /// excludes banned records. Entries are sampled without checking reachability.
     pub fn random_known_peers(&self, count: usize) -> Vec<PeerAddress> {
         let mut result = Vec::with_capacity(count);
 
@@ -518,7 +500,7 @@ impl PeerManager {
         self.external_address = None;
     }
 
-    /// Returns the external address if UPnP mapping is active.
+    /// Return the stored advertisement without checking router mapping state.
     pub fn external_address(&self) -> Option<SocketAddrV4> {
         self.external_address
     }
@@ -574,7 +556,7 @@ impl PeerManager {
         self.latest_keepalives.remove(idx)
     }
 
-    /// Set a peer's reachable address (learned from keepalive self-advertisement).
+    /// Store a nonzero advertised port only when its IP matches the peer record.
     pub fn set_peering_addr(&mut self, peer_id: &str, addr: PeerAddress) {
         if let Some(peer) = self.peers.get_mut(peer_id) {
             // Slot zero may withdraw a mapping. Never reinterpret a NAT source
@@ -601,8 +583,9 @@ impl PeerManager {
 
     // -- Scoring / banning -----------------------------------------------------
 
-    /// Penalize a peer for bad behaviour. Returns `true` if the peer was
-    /// banned as a result.
+    /// Apply a caller-reported penalty; returns true when it marks a ban.
+    /// ProtocolViolation bans immediately. This helper does not detect offenses
+    /// or close sockets, and current node code does not call it.
     pub fn penalize(&mut self, peer_id: &str, reason: PenaltyReason, now_secs: u64) -> bool {
         let Some(peer) = self.peers.get_mut(peer_id) else {
             return false;
@@ -626,14 +609,15 @@ impl PeerManager {
         false
     }
 
-    /// Reward a peer for good behaviour (e.g. delivering a valid block).
+    /// Add caller-supplied score, capped above at SCORE_MAX. Current transport
+    /// calls this after enqueueing block traffic, before block validation.
     pub fn reward(&mut self, peer_id: &str, amount: i32) {
         if let Some(peer) = self.peers.get_mut(peer_id) {
             peer.score = (peer.score + amount).min(SCORE_MAX);
         }
     }
 
-    /// Check whether a peer is currently banned.
+    /// Read the stored ban flag; expiry is applied only by `check_bans`.
     pub fn is_banned(&self, peer_id: &str) -> bool {
         self.peers.get(peer_id).is_some_and(|p| p.banned)
     }
@@ -685,10 +669,6 @@ impl PeerManager {
         peer.ban_until_secs = Some(now_secs + BAN_DURATION_SECS);
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -976,7 +956,7 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_idle_decrements_num_connected() {
+    fn cleanup_idle_disconnects_peers() {
         let mut pm = PeerManager::new(10);
         pm.add_peer(addr("1.0.0.1", 1));
         pm.add_peer(addr("1.0.0.2", 2));

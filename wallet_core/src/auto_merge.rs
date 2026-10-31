@@ -1,25 +1,22 @@
 //! Auto-merge logic for TRST tokens in the wallet.
-//!
-//! The whitepaper specifies: "The wallet software handles [merging] automatically
-//! by default, grouping tokens with similar expiry dates to maximize retained value."
-//! Implementation decisions say: "Auto merge with user-set limits, slider from 0 to 100."
 
 use crate::portfolio::TrstHolding;
 use burst_types::TrstState;
 
 /// Configuration for the auto-merge behavior.
 ///
-/// The `similarity_pct` controls how aggressive merging is:
+/// The `max_lifetime_loss_pct` controls how aggressive merging is:
 /// - 0 = never auto-merge
-/// - 100 = merge everything into one token (earliest expiry wins)
+/// - 100 = group all eligible tokens, subject to the input limit
 /// - 50 = merge tokens whose expiry dates are within 50% of each other
 #[derive(Clone, Debug)]
 pub struct AutoMergeConfig {
-    /// Similarity threshold for expiry grouping (0..=100).
+    /// Maximum lifetime loss allowed when grouping tokens (0..=100).
     /// Tokens are merged if the difference between their expiry times
     /// is within this percentage of the longer remaining lifetime.
-    pub similarity_pct: u8,
-    /// Maximum number of tokens to merge at once (protocol max is 256).
+    pub max_lifetime_loss_pct: u8,
+    /// Per-group input limit, defaulting to the protocol maximum of 256.
+    /// This public field is not clamped here; callers must keep it within bounds.
     pub max_merge_inputs: usize,
     /// Whether auto-merge is enabled.
     pub enabled: bool,
@@ -28,7 +25,7 @@ pub struct AutoMergeConfig {
 impl Default for AutoMergeConfig {
     fn default() -> Self {
         Self {
-            similarity_pct: 10,
+            max_lifetime_loss_pct: 10,
             max_merge_inputs: 256,
             enabled: true,
         }
@@ -40,22 +37,20 @@ impl Default for AutoMergeConfig {
 pub struct MergeGroup {
     /// Token IDs in this group.
     pub token_ids: Vec<String>,
-    /// Total amount of all tokens in this group.
-    pub total_amount: u128,
-    /// The earliest expiry in this group (seconds remaining).
-    pub earliest_expiry_secs: u64,
+    /// Remaining lifetime of the merged output, in seconds.
+    pub remaining_lifetime_secs: u64,
 }
 
 /// Analyze a portfolio of TRST holdings and return merge groups.
 ///
-/// Only considers active (transferable) tokens. Tokens are grouped by
-/// expiry similarity based on the configured threshold.
+/// Selects holdings reported Active with a known remaining lifetime, sorts by
+/// that lifetime, and groups against each group's earliest expiry. Does not
+/// validate identifiers, deduplicate inputs, sum amounts or submit a merge.
 pub fn compute_merge_groups(holdings: &[TrstHolding], config: &AutoMergeConfig) -> Vec<MergeGroup> {
-    if !config.enabled || config.similarity_pct == 0 {
+    if !config.enabled || config.max_lifetime_loss_pct == 0 {
         return Vec::new();
     }
 
-    // Filter to active tokens with known expiry
     let mut active: Vec<&TrstHolding> = holdings
         .iter()
         .filter(|h| h.state == TrstState::Active && h.time_to_expiry_secs.is_some())
@@ -65,10 +60,9 @@ pub fn compute_merge_groups(holdings: &[TrstHolding], config: &AutoMergeConfig) 
         return Vec::new();
     }
 
-    // Sort by time-to-expiry ascending
     active.sort_by_key(|h| h.time_to_expiry_secs.unwrap_or(u64::MAX));
 
-    let merge_all = config.similarity_pct >= 100;
+    let merge_all = config.max_lifetime_loss_pct >= 100;
     let mut groups: Vec<MergeGroup> = Vec::new();
     let mut current_group: Vec<&TrstHolding> = vec![active[0]];
     let mut group_anchor_expiry = active[0].time_to_expiry_secs.unwrap_or(0);
@@ -79,7 +73,7 @@ pub fn compute_merge_groups(holdings: &[TrstHolding], config: &AutoMergeConfig) 
         } else {
             let expiry = holding.time_to_expiry_secs.unwrap_or(0);
             let diff = expiry.abs_diff(group_anchor_expiry);
-            let max_diff = (expiry as u128 * config.similarity_pct as u128 / 100) as u64;
+            let max_diff = (expiry as u128 * config.max_lifetime_loss_pct as u128 / 100) as u64;
             diff <= max_diff
         };
 
@@ -94,7 +88,6 @@ pub fn compute_merge_groups(holdings: &[TrstHolding], config: &AutoMergeConfig) 
         }
     }
 
-    // Don't forget the last group
     if current_group.len() >= 2 {
         groups.push(make_group(&current_group));
     }
@@ -104,16 +97,14 @@ pub fn compute_merge_groups(holdings: &[TrstHolding], config: &AutoMergeConfig) 
 
 fn make_group(holdings: &[&TrstHolding]) -> MergeGroup {
     let token_ids = holdings.iter().map(|h| h.token_id.clone()).collect();
-    let total_amount = holdings.iter().map(|h| h.amount).sum();
-    let earliest_expiry_secs = holdings
+    let remaining_lifetime_secs = holdings
         .iter()
         .filter_map(|h| h.time_to_expiry_secs)
         .min()
         .unwrap_or(0);
     MergeGroup {
         token_ids,
-        total_amount,
-        earliest_expiry_secs,
+        remaining_lifetime_secs,
     }
 }
 
@@ -146,7 +137,7 @@ mod tests {
     #[test]
     fn default_matches_ten_percent_requirement_and_handles_unlimited_expiry() {
         let config = AutoMergeConfig::default();
-        assert_eq!(config.similarity_pct, 10);
+        assert_eq!(config.max_lifetime_loss_pct, 10);
         assert_eq!(
             compute_merge_groups(
                 &[
@@ -170,7 +161,7 @@ mod tests {
     }
 
     #[test]
-    fn decision_31_2_includes_ninety_to_one_hundred_days_without_chaining() {
+    fn groups_ninety_to_one_hundred_days_without_chaining() {
         let day = 86_400;
         let groups = compute_merge_groups(
             &[
@@ -182,8 +173,7 @@ mod tests {
             &AutoMergeConfig::default(),
         );
         assert_eq!(groups[0].token_ids, vec!["earliest", "latest"]);
-        assert_eq!(groups[0].earliest_expiry_secs, 90 * day);
-        assert_eq!(groups[0].total_amount, 5);
+        assert_eq!(groups[0].remaining_lifetime_secs, 90 * day);
         assert_eq!(groups[1].token_ids, vec!["too_late", "chained"]);
         assert!(compute_merge_groups(
             &[holding("a", 1, 90 * day - 1), holding("b", 1, 100 * day),],
@@ -193,9 +183,18 @@ mod tests {
     }
 
     #[test]
-    fn zero_similarity_returns_empty() {
+    fn grouping_does_not_sum_untrusted_amounts() {
+        let groups = compute_merge_groups(
+            &[holding("a", u128::MAX, 1000), holding("b", 1, 1000)],
+            &AutoMergeConfig::default(),
+        );
+        assert_eq!(groups[0].token_ids, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn zero_lifetime_loss_returns_empty() {
         let config = AutoMergeConfig {
-            similarity_pct: 0,
+            max_lifetime_loss_pct: 0,
             ..Default::default()
         };
         let holdings = vec![holding("a", 100, 1000), holding("b", 200, 1100)];
@@ -212,22 +211,21 @@ mod tests {
     #[test]
     fn similar_expiry_tokens_grouped() {
         let config = AutoMergeConfig {
-            similarity_pct: 50,
+            max_lifetime_loss_pct: 50,
             ..Default::default()
         };
         // The earliest lifetime retains more than half of the latest.
         let holdings = vec![holding("a", 100, 1000), holding("b", 200, 1200)];
         let groups = compute_merge_groups(&holdings, &config);
         assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].token_ids.len(), 2);
-        assert_eq!(groups[0].total_amount, 300);
-        assert_eq!(groups[0].earliest_expiry_secs, 1000);
+        assert_eq!(groups[0].token_ids, vec!["a", "b"]);
+        assert_eq!(groups[0].remaining_lifetime_secs, 1000);
     }
 
     #[test]
     fn dissimilar_expiry_tokens_separate() {
         let config = AutoMergeConfig {
-            similarity_pct: 10,
+            max_lifetime_loss_pct: 10,
             ..Default::default()
         };
         // The lifetime loss is 80%, above the 10% threshold.
@@ -239,7 +237,7 @@ mod tests {
     #[test]
     fn full_merge_groups_everything() {
         let config = AutoMergeConfig {
-            similarity_pct: 100,
+            max_lifetime_loss_pct: 100,
             ..Default::default()
         };
         let holdings = vec![
@@ -249,8 +247,7 @@ mod tests {
         ];
         let groups = compute_merge_groups(&holdings, &config);
         assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].token_ids.len(), 3);
-        assert_eq!(groups[0].total_amount, 600);
+        assert_eq!(groups[0].token_ids, vec!["a", "b", "c"]);
     }
 
     #[test]

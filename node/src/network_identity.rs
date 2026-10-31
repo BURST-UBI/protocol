@@ -10,8 +10,9 @@ use crate::{genesis_key, NodeError};
 const NETWORK_KEY: &str = "ledger_network";
 const GENESIS_PARAMS_KEY: &str = "genesis_params/v1";
 
-/// Governance changes the active rules, not the inputs from which history is
-/// replayed. Old ledgers can acquire this record only from a matching genesis.
+/// Load or pin the original parameters used to derive genesis. On a nonempty
+/// ledger they must reproduce its indexed genesis hash; active governance
+/// parameters may differ. An empty ledger must match the supplied configuration.
 pub(crate) fn genesis_params(
     store: &LmdbStore,
     network: NetworkId,
@@ -109,10 +110,8 @@ pub(crate) fn verify_network(store: &LmdbStore, network: NetworkId) -> Result<()
         .block_count()
         .map_err(|e| NodeError::Other(format!("cannot read ledger block count: {e}")))?;
     if count > 0 {
-        // Older ledgers have no marker. Authenticate their network identity
-        // from the actual genesis account, not from the requested CLI flag.
-        // Do not compare today's params hash: governance can legitimately have
-        // changed the active parameters since this genesis was created.
+        // Validate genesis even when a network marker exists. Its original
+        // parameter hash is checked separately by genesis_params.
         let address = genesis_key::genesis_address(network);
         let hash = blocks
             .block_at_height(&address, 1)
@@ -147,7 +146,7 @@ pub(crate) fn verify_network(store: &LmdbStore, network: NetworkId) -> Result<()
             || !block.origin.is_zero()
             || !block.transaction.is_zero()
             || !block.target_head.is_zero()
-            || block.brn_balance != 0
+            || block.brn_spent != 0
             || block.trst_balance != 0
             || !block.merge_sources.is_empty()
             || block.hash != hash
@@ -173,7 +172,7 @@ mod tests {
     #[test]
     fn genesis_parameters_survive_governed_rule_changes_and_are_bound_to_genesis() {
         let dir = tempfile::tempdir().unwrap();
-        let store = LmdbStore::open(dir.path(), 30, 64 << 20).unwrap();
+        let store = LmdbStore::open(dir.path(), burst_store_lmdb::REQUIRED_DATABASES, 64 << 20).unwrap();
         let params = ProtocolParams::default();
         let initial = genesis_params(&store, NetworkId::Dev, &params).unwrap();
         let block = crate::genesis_state::block(NetworkId::Dev, &params);
@@ -201,7 +200,7 @@ mod tests {
     #[test]
     fn legacy_genesis_parameter_pin_requires_exact_inputs_without_rewriting_history() {
         let dir = tempfile::tempdir().unwrap();
-        let store = LmdbStore::open(dir.path(), 30, 64 << 20).unwrap();
+        let store = LmdbStore::open(dir.path(), burst_store_lmdb::REQUIRED_DATABASES, 64 << 20).unwrap();
         let params = ProtocolParams::default();
         let block = crate::genesis_state::block(NetworkId::Dev, &params);
         let bytes = bincode::serialize(&block).unwrap();
@@ -227,7 +226,7 @@ mod tests {
     #[test]
     fn empty_ledger_cannot_switch_pinned_genesis_configuration() {
         let dir = tempfile::tempdir().unwrap();
-        let store = LmdbStore::open(dir.path(), 30, 64 << 20).unwrap();
+        let store = LmdbStore::open(dir.path(), burst_store_lmdb::REQUIRED_DATABASES, 64 << 20).unwrap();
         let params = ProtocolParams::default();
         genesis_params(&store, NetworkId::Dev, &params).unwrap();
         let mut other = params.clone();
@@ -243,11 +242,11 @@ mod tests {
 
     fn legacy_genesis(store: &LmdbStore, network: NetworkId) -> StateBlock {
         let mut block =
-            burst_ledger::genesis::create_genesis_block(&burst_ledger::genesis::GenesisConfig {
+            burst_ledger::genesis::legacy_genesis_fixture(&burst_ledger::genesis::GenesisConfig {
                 network,
                 creator: genesis_key::genesis_address(network),
             });
-        // The running node's genesis format, distinct from the older ledger helper.
+        // Give the legacy fixture the node's epoch timestamp and empty link.
         block.timestamp = Timestamp::EPOCH;
         block.link = BlockHash::ZERO;
         block.hash = block.compute_hash();
@@ -265,7 +264,7 @@ mod tests {
     #[test]
     fn fresh_directory_is_pinned_and_cannot_switch_networks() {
         let dir = tempfile::tempdir().unwrap();
-        let store = LmdbStore::open(dir.path(), 30, 64 << 20).unwrap();
+        let store = LmdbStore::open(dir.path(), burst_store_lmdb::REQUIRED_DATABASES, 64 << 20).unwrap();
         verify_network(&store, NetworkId::Dev).unwrap();
         verify_network(&store, NetworkId::Dev).unwrap();
         assert!(verify_network(&store, NetworkId::Live).is_err());
@@ -275,9 +274,9 @@ mod tests {
     #[test]
     fn old_work_rules_require_a_separate_ledger_without_deleting_data() {
         let dir = tempfile::tempdir().unwrap();
-        let store = LmdbStore::open(dir.path(), 30, 64 << 20).unwrap();
+        let store = LmdbStore::open(dir.path(), burst_store_lmdb::REQUIRED_DATABASES, 64 << 20).unwrap();
         let mut block =
-            burst_ledger::genesis::create_genesis_block(&burst_ledger::genesis::GenesisConfig {
+            burst_ledger::genesis::legacy_genesis_fixture(&burst_ledger::genesis::GenesisConfig {
                 network: NetworkId::Dev,
                 creator: genesis_key::genesis_address(NetworkId::Dev),
             });
@@ -305,9 +304,9 @@ mod tests {
     #[test]
     fn version_two_encoding_is_rejected_before_decoding_or_writing() {
         let dir = tempfile::tempdir().unwrap();
-        let store = LmdbStore::open(dir.path(), 30, 64 << 20).unwrap();
+        let store = LmdbStore::open(dir.path(), burst_store_lmdb::REQUIRED_DATABASES, 64 << 20).unwrap();
         let mut block =
-            burst_ledger::genesis::create_genesis_block(&burst_ledger::genesis::GenesisConfig {
+            burst_ledger::genesis::legacy_genesis_fixture(&burst_ledger::genesis::GenesisConfig {
                 network: NetworkId::Dev,
                 creator: genesis_key::genesis_address(NetworkId::Dev),
             });
@@ -318,7 +317,7 @@ mod tests {
             &block.account,
             block.previous,
             &block.representative,
-            block.brn_balance,
+            block.brn_spent,
             block.trst_balance,
             block.link,
             block.origin,
@@ -344,7 +343,7 @@ mod tests {
     #[test]
     fn version_four_ledger_is_rejected_without_migration_or_relabelling() {
         let dir = tempfile::tempdir().unwrap();
-        let store = LmdbStore::open(dir.path(), 30, 64 << 20).unwrap();
+        let store = LmdbStore::open(dir.path(), burst_store_lmdb::REQUIRED_DATABASES, 64 << 20).unwrap();
         let block = crate::genesis_state::block(NetworkId::Dev, &ProtocolParams::default());
         let mut bytes = bincode::serialize(&block).unwrap();
         bytes[0] = 4;
@@ -370,7 +369,7 @@ mod tests {
     fn legacy_test_genesis_cannot_be_opened_as_live_and_is_not_relabelled() {
         for network in [NetworkId::Dev, NetworkId::Test] {
             let dir = tempfile::tempdir().unwrap();
-            let store = LmdbStore::open(dir.path(), 30, 64 << 20).unwrap();
+            let store = LmdbStore::open(dir.path(), burst_store_lmdb::REQUIRED_DATABASES, 64 << 20).unwrap();
             let block = legacy_genesis(&store, network);
             assert!(verify_network(&store, NetworkId::Live).is_err());
             assert!(store.meta_store().get_meta(NETWORK_KEY).is_err());
@@ -383,7 +382,7 @@ mod tests {
     #[test]
     fn metadata_does_not_override_a_foreign_genesis() {
         let dir = tempfile::tempdir().unwrap();
-        let store = LmdbStore::open(dir.path(), 30, 64 << 20).unwrap();
+        let store = LmdbStore::open(dir.path(), burst_store_lmdb::REQUIRED_DATABASES, 64 << 20).unwrap();
         legacy_genesis(&store, NetworkId::Dev);
         store.meta_store().put_meta(NETWORK_KEY, b"live").unwrap();
         assert!(verify_network(&store, NetworkId::Live).is_err());
@@ -392,7 +391,7 @@ mod tests {
     #[test]
     fn invalid_genesis_is_not_adopted_as_a_legacy_network() {
         let dir = tempfile::tempdir().unwrap();
-        let store = LmdbStore::open(dir.path(), 30, 64 << 20).unwrap();
+        let store = LmdbStore::open(dir.path(), burst_store_lmdb::REQUIRED_DATABASES, 64 << 20).unwrap();
         let block = legacy_genesis(&store, NetworkId::Live);
         let mut corrupt = block.clone();
         corrupt.trst_balance = 1;

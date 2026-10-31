@@ -1,7 +1,7 @@
 use super::*;
 use crate::{checkpoint_store::chain, payment_authority::PaymentAuthority};
 
-async fn installed(
+async fn wait_for_installation(
     stores: &[Arc<burst_store_lmdb::LmdbStore>],
     height: u64,
     params: &ProtocolParams,
@@ -47,7 +47,6 @@ async fn roster_updates_without_a_committee_and_recovers_on_a_fresh_node() {
         bootstrap_exit_threshold: 3,
         endorsement_burn_amount: 1,
         new_wallet_spending_limit: 0,
-        new_wallet_tx_limit_per_day: 0,
         trst_expiry_secs: u64::MAX,
         ..ProtocolParams::burst_defaults()
     };
@@ -84,7 +83,7 @@ async fn roster_updates_without_a_committee_and_recovers_on_a_fresh_node() {
         workers.push((
             node.shutdown.clone(),
             tokio::spawn(async move {
-                node.start().await.unwrap();
+                node.start_with_services(burst_daemon::start_public_services).await.unwrap();
                 node.stop().await.unwrap();
             }),
         ));
@@ -137,7 +136,7 @@ async fn roster_updates_without_a_committee_and_recovers_on_a_fresh_node() {
             Transaction::Burn(build_burn_tx(&addresses[0], &addresses[1], 1, time(20)).unwrap());
         let old_payment = signed_block(&clients[0], &keys[0], tx, &params).await;
         first_clock.store(time(20).as_secs(), Ordering::SeqCst);
-        let epoch = installed(&stores, 1, &params).await;
+        let epoch = wait_for_installation(&stores, 1, &params).await;
         for (store, client) in stores.iter().zip(&clients) {
             let authority = PaymentAuthority::read(store).unwrap().unwrap();
             assert_eq!(authority.roster.total_humans(), 2);
@@ -157,7 +156,7 @@ async fn roster_updates_without_a_committee_and_recovers_on_a_fresh_node() {
         assert_eq!(change.payment_epoch, epoch);
         submit(&clients, &change).await;
         first_clock.store(time(30).as_secs(), Ordering::SeqCst);
-        let next_epoch = installed(&stores, 2, &params).await;
+        let next_epoch = wait_for_installation(&stores, 2, &params).await;
         assert_ne!(epoch, next_epoch);
         for store in &stores {
             let authority = PaymentAuthority::read(store).unwrap().unwrap();
@@ -207,13 +206,13 @@ async fn roster_updates_without_a_committee_and_recovers_on_a_fresh_node() {
         workers.push((
             node.shutdown.clone(),
             tokio::spawn(async move {
-                node.start().await.unwrap();
+                node.start_with_services(burst_daemon::start_public_services).await.unwrap();
                 node.stop().await.unwrap();
             }),
         ));
     }
     let result = tokio::time::timeout(Duration::from_secs(120), async {
-        assert_eq!(installed(&stores, 2, &params).await, epoch);
+        assert_eq!(wait_for_installation(&stores, 2, &params).await, epoch);
         for client in &clients {
             client
                 .wait_confirmed(&payment.hash.to_string(), Duration::from_secs(40))
@@ -222,7 +221,7 @@ async fn roster_updates_without_a_committee_and_recovers_on_a_fresh_node() {
             let state = client.signing_state(&addresses[1]).await.unwrap();
             assert_eq!(state.payment_epoch, epoch);
             assert_eq!(state.head, payment.hash);
-            assert_eq!(state.brn_balance, payment.brn_balance);
+            assert_eq!(state.brn_spent, payment.brn_spent);
         }
     })
     .await;

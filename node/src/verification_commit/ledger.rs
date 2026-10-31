@@ -4,10 +4,21 @@ use burst_ledger::StateBlock;
 use burst_store::{account::AccountInfo, pending::PendingInfo, StoreError};
 use burst_store_lmdb::LmdbWriteTransaction;
 use burst_types::{BlockHash, TxHash, WalletAddress};
+use burst_verification::VerificationOrchestrator;
 
 /// Writes belong to an uncommitted candidate. A failed transition must discard
 /// both this candidate and its BRN/TRST/orchestrator state.
 pub(crate) trait Ledger {
+    fn persist_verification(
+        &mut self,
+        _before: &VerificationOrchestrator,
+        after: &VerificationOrchestrator,
+    ) -> Result<(), StoreError> {
+        let bytes = after.snapshot().encode()
+            .map_err(|error| StoreError::Serialization(error.to_string()))?;
+        self.put_meta(crate::endorsement_commit::SNAPSHOT_KEY, &bytes)
+    }
+
     fn get_account(&self, address: &WalletAddress) -> Result<AccountInfo, StoreError>;
     fn put_account(&mut self, account: &AccountInfo) -> Result<(), StoreError>;
     fn get_block(&self, hash: &BlockHash) -> Result<Vec<u8>, StoreError>;
@@ -30,9 +41,24 @@ pub(crate) trait Ledger {
         source: &TxHash,
     ) -> Result<PendingInfo, StoreError>;
     fn all_pending(&self) -> Result<Vec<(WalletAddress, TxHash, PendingInfo)>, StoreError>;
+    fn pending_for_revocation(&mut self, _origins: &[TxHash], _graph: &burst_trst::MergerGraph) -> Result<Vec<(WalletAddress, TxHash, PendingInfo)>, StoreError> {
+        self.all_pending()
+    }
+    fn pending_for_restoration(&mut self, _graph: &burst_trst::MergerGraph) -> Result<Vec<(WalletAddress, TxHash, PendingInfo)>, StoreError> {
+        self.all_pending()
+    }
+
 }
 
 impl Ledger for LmdbWriteTransaction<'_> {
+    fn persist_verification(
+        &mut self,
+        before: &VerificationOrchestrator,
+        after: &VerificationOrchestrator,
+    ) -> Result<(), StoreError> {
+        crate::verification_storage::persist(self, before, after)
+    }
+
     fn get_account(&self, address: &WalletAddress) -> Result<AccountInfo, StoreError> {
         LmdbWriteTransaction::get_account(self, address)
     }
@@ -79,6 +105,15 @@ impl Ledger for LmdbWriteTransaction<'_> {
         LmdbWriteTransaction::all_pending(self)
     }
 
+    fn pending_for_revocation(&mut self, origins: &[TxHash], graph: &burst_trst::MergerGraph) -> Result<Vec<(WalletAddress, TxHash, PendingInfo)>, StoreError> {
+        LmdbWriteTransaction::pending_for_revocation(self, origins, graph)
+    }
+
+    fn pending_for_restoration(&mut self, graph: &burst_trst::MergerGraph) -> Result<Vec<(WalletAddress, TxHash, PendingInfo)>, StoreError> {
+        LmdbWriteTransaction::pending_for_restoration(self, graph)
+    }
+
+
     fn take_pending(
         &mut self,
         address: &WalletAddress,
@@ -93,6 +128,8 @@ impl Ledger for LmdbWriteTransaction<'_> {
 /// Only replay-derived maps and already applied signed blocks are visible here.
 /// There is deliberately no access to the live store's snapshots or afterimages.
 pub(crate) struct ReplayedLedger<'a> {
+    pub bootstrap: &'a mut burst_verification::bootstrap::BootstrapPhase,
+    pub bootstrap_threshold: u32,
     pub mutations: Option<&'a mut crate::confirmed_replay::mutations::Mutations>,
     pub accounts: &'a mut HashMap<WalletAddress, AccountInfo>,
     pub pending: &'a mut HashMap<(WalletAddress, TxHash), PendingInfo>,
@@ -138,6 +175,8 @@ impl Ledger for ReplayedLedger<'_> {
     }
 
     fn put_account(&mut self, account: &AccountInfo) -> Result<(), StoreError> {
+        let newly_verified = account.state.is_verified()
+            && self.accounts.get(&account.address).is_none_or(|old| !old.state.is_verified());
         if let Some(mutations) = &mut self.mutations {
             let encode = |value| {
                 bincode::serialize(value).map_err(|e| StoreError::Serialization(e.to_string()))
@@ -154,6 +193,12 @@ impl Ledger for ReplayedLedger<'_> {
         }
         self.accounts
             .insert(account.address.clone(), account.clone());
+        if newly_verified && *self.bootstrap == burst_verification::bootstrap::BootstrapPhase::Active {
+            self.bootstrap.observe(
+                self.accounts.values().filter(|account| account.state.is_verified()).count() as u64,
+                self.bootstrap_threshold,
+            );
+        }
         Ok(())
     }
 

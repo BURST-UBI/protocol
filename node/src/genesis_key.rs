@@ -1,26 +1,14 @@
-//! Genesis identity — the creator's key that bootstraps a network.
+//! Per-network genesis identity and optional signing seed.
 //!
-//! Security model (whitepaper §Genesis): the genesis account endorses the
-//! first wallets and authors governance-activation blocks. Its authority is
-//! only meaningful if the *private* key is held solely by the creator.
+//! Public identity is fixed by the build. The genesis hash also commits the
+//! configured protocol parameters; nodes need no private key to derive it.
+//! Bootstrap authority ends permanently at the configured threshold, capped at
+//! 50 verified people. Holding the key does not bypass that ledger rule.
 //!
-//! This module splits the identity in two:
-//!
-//! - **Public identity** (address, verifying key) — baked per network, known
-//!   to every node. Genesis block *identity* (its hash) derives from this
-//!   alone, because `StateBlock::compute_hash` excludes the signature — so
-//!   every node agrees on the same genesis block without holding the key.
-//!
-//! - **Private seed** — loaded at runtime, only on the creator's node, from
-//!   `BURST_GENESIS_SEED` (64-hex-char = 32 bytes) or the file named by
-//!   `BURST_GENESIS_SEED_FILE`. A node without it (every non-creator node,
-//!   e.g. cloud peers) runs normally but cannot author genesis authority
-//!   blocks — which is exactly the intended restriction.
-//!
-//! Disposable Dev/Test builds retain published fixture seeds. A
-//! `private-testnet` build pins BURST_TEST_GENESIS_PUBLIC_KEY at compile time
-//! and requires the creator's runtime seed, just like Live. It is a separate
-//! Test ledger, not an upgrade of the published-seed network.
+//! Dev and ordinary Test use published fixture seeds. Live and `private-testnet`
+//! load a matching seed from `BURST_GENESIS_SEED` or `BURST_GENESIS_SEED_FILE`.
+//! A private Test build pins `BURST_TEST_GENESIS_PUBLIC_KEY` at compile time and
+//! uses a separate ledger from ordinary Test. Peers need only the public key.
 
 use burst_types::{KeyPair, NetworkId, PublicKey, Signature, WalletAddress};
 use std::sync::OnceLock;
@@ -40,10 +28,7 @@ const PRIVATE_TEST_PUBLIC_KEY: [u8; 32] = match decode_hex32(env!(
     None => panic!("BURST_TEST_GENESIS_PUBLIC_KEY must be 64 hexadecimal characters"),
 };
 
-/// Baked genesis PUBLIC key for the live network (32-byte Ed25519 verifying
-/// key, hex). Generated once by the creator with `genesis_keygen` and pasted
-/// here before launch. Until then it is all-zeros, and live authority actions
-/// are refused (see [`live_identity_configured`]).
+/// Live genesis Ed25519 public key, encoded as 64 hexadecimal characters.
 const LIVE_GENESIS_PUBLIC_KEY_HEX: &str =
     "d481ea12094da14808a783c74cbabc28561c50c0348eaf419718d6080359ca4a";
 
@@ -101,7 +86,7 @@ pub(crate) fn validate_identity(network: NetworkId) -> Result<(), &'static str> 
 }
 
 fn validate_private_test_key(public: PublicKey) -> Result<(), &'static str> {
-    // The existing conversion rejects malformed and weak Ed25519 points.
+    // Conversion rejects malformed and weak Ed25519 points.
     if burst_crypto::ed25519_public_to_x25519(&public.0).is_none()
         || public == burst_crypto::keypair_from_seed(&DEV_GENESIS_SEED).public
         || public == burst_crypto::keypair_from_seed(&TEST_GENESIS_SEED).public
@@ -114,11 +99,22 @@ fn validate_private_test_key(public: PublicKey) -> Result<(), &'static str> {
 
 /// The genesis account address for a network.
 pub fn genesis_address(network: NetworkId) -> WalletAddress {
-    burst_crypto::derive_address(&genesis_public_key(network))
+    // Public identity is fixed by the network/build, independently of runtime
+    // signing-key configuration. Avoid deriving it for every verified block.
+    static DEV: OnceLock<WalletAddress> = OnceLock::new();
+    static TEST: OnceLock<WalletAddress> = OnceLock::new();
+    static LIVE: OnceLock<WalletAddress> = OnceLock::new();
+    let address = match network {
+        NetworkId::Dev => &DEV,
+        NetworkId::Test => &TEST,
+        NetworkId::Live => &LIVE,
+    };
+    address.get_or_init(|| burst_crypto::derive_address(&genesis_public_key(network))).clone()
 }
 
-/// Load a raw 32-byte seed from the runtime environment, if provided.
-/// `BURST_GENESIS_SEED` (hex) takes precedence over `BURST_GENESIS_SEED_FILE`.
+/// Decode a 32-byte hex seed from the environment or a text file.
+/// An invalid environment value returns `None` without falling back to the file;
+/// unreadable files and invalid file contents also return `None`.
 fn seed_from_env() -> Option<[u8; 32]> {
     if let Ok(hex) = std::env::var("BURST_GENESIS_SEED") {
         return decode_hex32(hex.trim());
@@ -134,18 +130,12 @@ static DEV_SEED: OnceLock<Option<[u8; 32]>> = OnceLock::new();
 static TEST_SEED: OnceLock<Option<[u8; 32]>> = OnceLock::new();
 static LIVE_SEED: OnceLock<Option<[u8; 32]>> = OnceLock::new();
 
-/// The genesis SIGNING keypair for this node, if it holds the private seed.
-///
-/// - Disposable Dev/Test: derived from the published seed (always available).
-/// - Live/private Test: derived from the runtime seed (`BURST_GENESIS_SEED[_FILE]`), and
-///   only returned if it matches the baked live public key — a mismatched
-///   seed yields `None` (with a warning) rather than a silently-wrong key.
-///
-/// `None` means this node cannot author genesis authority blocks. That is the
-/// normal, correct state for every non-creator node. The validated seed is
-/// memoized per network (env/file read and any warning logged once); the
-/// keypair is reconstructed per call (cheap, and the secret is zeroized on
-/// drop rather than lingering in a static).
+/// Reconstruct the signing keypair from the cached seed, if available.
+/// Dev and ordinary Test use published seeds. Live and private Test require a
+/// runtime seed matching that network's public key; mismatches return `None`.
+/// The first lookup caches the seed (or its absence) for the process lifetime;
+/// subsequent environment or file changes are not reloaded. Dropping a returned
+/// keypair does not erase the cached seed.
 pub fn genesis_signing_key(network: NetworkId) -> Option<KeyPair> {
     let cell = match network {
         NetworkId::Dev => &DEV_SEED,
@@ -180,15 +170,13 @@ fn resolve_seed(network: NetworkId) -> Option<[u8; 32]> {
     Some(seed)
 }
 
-/// True if this node can act as the genesis authority (holds the private seed).
+/// Whether a matching signing seed is available. Does not check bootstrap phase.
 pub fn has_genesis_authority(network: NetworkId) -> bool {
     genesis_signing_key(network).is_some()
 }
 
-/// The validated genesis seed for this node, if held. Used to hand the
-/// signing material to the RPC layer (decoupled from this crate) so the
-/// authority node can author bootstrap endorsement blocks. `None` on every
-/// non-creator node.
+/// Copy the cached signing seed for RPC authoring. Available on every ordinary
+/// Dev/Test node and on Live/private Test nodes configured with a matching seed.
 pub fn genesis_seed(network: NetworkId) -> Option<[u8; 32]> {
     let cell = match network {
         NetworkId::Dev => &DEV_SEED,
@@ -198,11 +186,9 @@ pub fn genesis_seed(network: NetworkId) -> Option<[u8; 32]> {
     *cell.get_or_init(|| resolve_seed(network))
 }
 
-/// Sign the genesis block hash with the genesis key if this node holds it,
-/// otherwise return a zero signature. Genesis validity is established by hash
-/// (well-known per network), not by signature re-verification, so a zero
-/// signature on a non-creator node is safe; the creator's node produces the
-/// authoritative signed copy.
+/// Sign the supplied hash if a genesis seed is available; otherwise return zero.
+/// Node startup constructs its anchor through `genesis_state::block`, which
+/// uses a zero signature and authenticates the configured hash independently.
 pub fn sign_genesis(network: NetworkId, genesis_hash: &[u8]) -> Signature {
     match genesis_signing_key(network) {
         Some(kp) => burst_crypto::sign_message(genesis_hash, &kp.private),
@@ -243,10 +229,11 @@ mod tests {
 
     #[test]
     fn genesis_address_is_deterministic_per_network() {
-        assert_eq!(
-            genesis_address(NetworkId::Dev),
-            genesis_address(NetworkId::Dev)
-        );
+        for network in [NetworkId::Dev, NetworkId::Test, NetworkId::Live] {
+            let expected = burst_crypto::derive_address(&genesis_public_key(network));
+            assert_eq!(genesis_address(network), expected);
+            assert_eq!(genesis_address(network), expected);
+        }
         assert_ne!(
             genesis_address(NetworkId::Dev),
             genesis_address(NetworkId::Test)

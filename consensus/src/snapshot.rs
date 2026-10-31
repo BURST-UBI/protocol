@@ -11,13 +11,14 @@ use serde::{Deserialize, Serialize};
 
 pub const MAX_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
 pub const LEGACY_STATE_FORMAT: u16 = 1;
-pub const STATE_FORMAT: u16 = 3;
+pub const PREVIOUS_STATE_FORMAT: u16 = 3;
+pub const STATE_FORMAT: u16 = 4;
 
 pub mod authority;
 
 /// A roster witness has authority only when the preceding trusted electorate
-/// certified its commitment. This is the quorum-trust snapshot path from
-/// implementation decision 11.2, not independent semantic ledger replay.
+/// certified its commitment. This authenticates the roster through quorum trust;
+/// it does not independently replay the ledger that produced the roster.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotAuthorityStep {
     pub certificate: CheckpointCertificate,
@@ -84,6 +85,8 @@ impl SnapshotManifest {
         Ok(manifest)
     }
 
+    /// Check manifest context, supported format, length bounds and nonzero hash.
+    /// Does not inspect state bytes or verify signatures.
     pub fn validate(&self, anchor: &CheckpointAnchor) -> Result<(), CheckpointError> {
         if self.network != anchor.network()
             || self.genesis != anchor.genesis_hash()
@@ -95,7 +98,7 @@ impl SnapshotManifest {
         {
             return Err(CheckpointError::WrongParent);
         }
-        if !matches!(self.state_format, LEGACY_STATE_FORMAT | STATE_FORMAT)
+        if !matches!(self.state_format, LEGACY_STATE_FORMAT | PREVIOUS_STATE_FORMAT | STATE_FORMAT)
             || self.state_bytes == 0
             || self.state_bytes > MAX_SNAPSHOT_BYTES
             || self.state_hash.is_zero()
@@ -124,8 +127,10 @@ impl SnapshotManifest {
         bytes
     }
 
+    /// Check format, byte length and hash. Does not decode economic state or
+    /// establish that the manifest was certified.
     pub fn verify_state(&self, state: &[u8]) -> Result<(), CheckpointError> {
-        if !matches!(self.state_format, LEGACY_STATE_FORMAT | STATE_FORMAT)
+        if !matches!(self.state_format, LEGACY_STATE_FORMAT | PREVIOUS_STATE_FORMAT | STATE_FORMAT)
             || self.state_bytes == 0
             || self.state_bytes > MAX_SNAPSHOT_BYTES
             || self.state_bytes != state.len() as u64
@@ -151,6 +156,8 @@ impl SnapshotCertificate {
         anchor.verify_signatures(&self.manifest.signing_payload(), &self.signatures)
     }
 
+    /// Authenticate the manifest and check its bytes. State decoding and economic
+    /// invariant checks remain the installer's responsibility.
     pub fn verify_state(
         &self,
         anchor: &CheckpointAnchor,

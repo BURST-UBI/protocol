@@ -1,9 +1,7 @@
-//! Prometheus metrics for the BURST node.
+//! Prometheus metric definitions for the RPC /metrics endpoint.
 //!
-//! Exposes counters, gauges, and histograms covering block processing,
-//! consensus, networking, and verification activity.  The [`NodeMetrics`]
-//! struct owns a dedicated [`Registry`] that the RPC `/metrics` endpoint
-//! can encode into the Prometheus text exposition format.
+//! Registration does not imply an update path. Field comments describe current
+//! instrumentation; counters reset when a new NodeMetrics instance is created.
 
 use prometheus::{
     register_histogram_with_registry, register_int_counter_with_registry,
@@ -16,34 +14,34 @@ pub struct NodeMetrics {
     /// The Prometheus registry that owns every metric below.
     pub registry: Registry,
 
-    // ── Counters ────────────────────────────────────────────────────────
     /// Total number of blocks that entered the processing pipeline.
     pub blocks_processed: IntCounter,
     /// Total number of blocks accepted by the block processor (persisted to ledger).
     pub blocks_accepted: IntCounter,
     /// Total number of blocks that reached confirmed (cemented) status via consensus.
     pub blocks_confirmed: IntCounter,
-    /// Total number of transactions received from the network or RPC.
+    /// Transactions passing structural validation in submit_transaction.
+    /// Does not count all network/RPC blocks or guarantee queue admission.
     pub transactions_received: IntCounter,
-    /// Total number of consensus votes received from representatives.
+    /// Reserved vote counter; the running node has no increment call.
     pub votes_received: IntCounter,
 
-    // ── Gauges ──────────────────────────────────────────────────────────
-    /// Current number of blocks in the ledger.
+    /// Retained block-body count sampled at startup and shutdown.
     pub block_count: IntGauge,
-    /// Current number of accounts with at least one block.
+    /// Frontier-cache account count sampled at startup and shutdown.
     pub account_count: IntGauge,
     /// Current number of connected peers.
     pub peer_count: IntGauge,
     /// Current number of active elections (conflict resolution rounds).
     pub election_count: IntGauge,
-    /// Current number of blocks in the unchecked map (awaiting dependencies).
+    /// Unchecked-map count sampled at startup and shutdown.
     pub unchecked_count: IntGauge,
 
-    // ── Histograms ──────────────────────────────────────────────────────
-    /// Time from block reception to confirmation, in milliseconds.
+    /// Election duration recorded after durable confirmation handoff.
+    /// Excludes time before the election and subsequent cementation.
     pub confirmation_latency_ms: Histogram,
-    /// Time spent in the block-processing pipeline, in milliseconds.
+    /// Admission/publication elapsed time plus authentication worker time.
+    /// Excludes time waiting in ingress queues; grouped work shares a sample.
     pub block_process_time_ms: Histogram,
 }
 
@@ -136,7 +134,7 @@ impl NodeMetrics {
         )
         .expect("failed to register unchecked_count gauge");
 
-        // Histograms – use exponential buckets covering 1 ms → ~16 s.
+        // Confirmation buckets span 1–16,384 ms; processing spans 0.1–1,638.4 ms.
         let confirmation_latency_ms = register_histogram_with_registry!(
             HistogramOpts::new(
                 "burst_confirmation_latency_ms",

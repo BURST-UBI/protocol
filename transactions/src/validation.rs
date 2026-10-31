@@ -1,19 +1,19 @@
-//! Transaction validation logic.
+//! Stateless payload checks used before transaction-to-block conversion.
 
 use crate::error::TransactionError;
 use crate::Transaction;
 use burst_types::Timestamp;
 
-/// Validate a transaction's basic structure (signature, timestamp, amounts).
+/// Validate a transaction's timestamp and basic structure.
 ///
-/// This performs stateless validation only. Stateful checks (balance sufficiency,
-/// wallet verification status, etc.) are done by the ledger/node.
-pub fn validate_transaction(
+/// Timestamp tolerance is symmetric and inclusive. Variant checks cover only
+/// the cases below; this does not validate every field, signature, hash or work
+/// nonce. Node admission checks state, eligibility and the resulting block.
+pub fn validate_transaction_structure(
     tx: &Transaction,
     now: Timestamp,
     time_tolerance_secs: u64,
 ) -> Result<(), TransactionError> {
-    // Check timestamp is within tolerance
     let tx_timestamp = tx.timestamp();
     let tx_secs = tx_timestamp.as_secs();
     let now_secs = now.as_secs();
@@ -32,7 +32,6 @@ pub fn validate_transaction(
         });
     }
 
-    // Check amounts and call type-specific validators
     match tx {
         Transaction::Burn(burn_tx) => {
             if burn_tx.amount == 0 {
@@ -63,13 +62,13 @@ pub fn validate_transaction(
     Ok(())
 }
 
-/// Validate a burn transaction specifically.
+/// Require a positive amount and different sender and recipient.
+/// The time argument is unused; timestamp checks belong to the outer validator.
 pub fn validate_burn(tx: &crate::burn::BurnTx, _now: Timestamp) -> Result<(), TransactionError> {
     if tx.amount == 0 {
         return Err(TransactionError::ZeroAmount);
     }
 
-    // Sender must not equal receiver
     if tx.sender == tx.receiver {
         return Err(TransactionError::Other(
             "burn transaction sender and receiver must be different".into(),
@@ -79,20 +78,19 @@ pub fn validate_burn(tx: &crate::burn::BurnTx, _now: Timestamp) -> Result<(), Tr
     Ok(())
 }
 
-/// Validate a send transaction specifically.
+/// Require a positive amount and nonzero provenance references. Self-sends are
+/// allowed. This does not resolve those references or check available TRST.
 pub fn validate_send(tx: &crate::send::SendTx, _now: Timestamp) -> Result<(), TransactionError> {
     if tx.amount == 0 {
         return Err(TransactionError::ZeroAmount);
     }
 
-    // Origin hash must not be zero
     if tx.origin.is_zero() {
         return Err(TransactionError::Other(
             "send transaction origin hash must not be zero".into(),
         ));
     }
 
-    // Link hash must not be zero
     if tx.link.is_zero() {
         return Err(TransactionError::Other(
             "send transaction link hash must not be zero".into(),
@@ -102,7 +100,8 @@ pub fn validate_send(tx: &crate::send::SendTx, _now: Timestamp) -> Result<(), Tr
     Ok(())
 }
 
-/// Validate a merge transaction.
+/// Require 2–MAX_MERGE_SOURCES distinct references. This does not resolve them,
+/// reject a zero reference or check ownership, expiry and spendability.
 pub fn validate_merge(tx: &crate::merge::MergeTx, _now: Timestamp) -> Result<(), TransactionError> {
     if tx.source_hashes.len() < 2 {
         return Err(TransactionError::Other(
@@ -110,7 +109,6 @@ pub fn validate_merge(tx: &crate::merge::MergeTx, _now: Timestamp) -> Result<(),
         ));
     }
 
-    // IMPLEMENTATION_DECISIONS 6.12(b): at most 256 tokens per merge.
     if tx.source_hashes.len() > burst_trst::MAX_MERGE_SOURCES {
         return Err(TransactionError::Other(format!(
             "merge cannot have more than {} sources, got {}",
@@ -119,7 +117,6 @@ pub fn validate_merge(tx: &crate::merge::MergeTx, _now: Timestamp) -> Result<(),
         )));
     }
 
-    // All source hashes must be unique (no duplicates)
     let mut seen = std::collections::HashSet::new();
     for hash in &tx.source_hashes {
         if !seen.insert(hash) {
@@ -171,7 +168,7 @@ mod tests {
             signature: dummy_signature(),
         });
 
-        let result = validate_transaction(&tx, now, 100);
+        let result = validate_transaction_structure(&tx, now, 100);
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -192,7 +189,7 @@ mod tests {
             signature: dummy_signature(),
         });
 
-        let result = validate_transaction(&tx, now, 100);
+        let result = validate_transaction_structure(&tx, now, 100);
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -213,7 +210,7 @@ mod tests {
             signature: dummy_signature(),
         });
 
-        let result = validate_transaction(&tx, now, 100);
+        let result = validate_transaction_structure(&tx, now, 100);
         assert!(result.is_ok());
     }
 

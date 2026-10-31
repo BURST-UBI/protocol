@@ -12,33 +12,12 @@ fn invalid(reason: impl ToString) -> StoreError {
     StoreError::Corruption(reason.to_string())
 }
 
-pub(crate) fn row_format(batch: &LmdbWriteTransaction<'_>) -> Result<bool, StoreError> {
-    match batch.get_meta(FORMAT_KEY)?.as_deref() {
-        None => {
-            if let Some(row) = batch
-                .checkpoint_metadata_entries(WalletRecord::STORAGE_PREFIX.as_bytes())?
-                .next()
-            {
-                row?;
-                return Err(invalid("TRST rows exist without a format marker"));
-            }
-            Ok(false)
-        }
-        Some([1]) => {
-            if batch
-                .undo_value_ref(UndoTable::Meta, TrstEngine::meta_key().as_bytes())?
-                .is_some()
-            {
-                return Err(invalid("mixed aggregate and row TRST state"));
-            }
-            Ok(true)
-        }
-        Some(_) => Err(invalid("unsupported TRST storage format")),
-    }
+pub(crate) fn uses_row_storage(batch: &LmdbWriteTransaction<'_>) -> Result<bool, StoreError> {
+    if batch.uses_stable_trst_records()? { Ok(true) } else { batch.uses_trst_records() }
 }
 
 pub(crate) fn present(batch: &LmdbWriteTransaction<'_>) -> Result<bool, StoreError> {
-    Ok(row_format(batch)?
+    Ok(uses_row_storage(batch)?
         || batch
             .undo_value_ref(UndoTable::Meta, TrstEngine::meta_key().as_bytes())?
             .is_some())
@@ -48,29 +27,17 @@ pub(crate) fn load(
     batch: &LmdbWriteTransaction<'_>,
     expiry_secs: u64,
 ) -> Result<TrstEngine, StoreError> {
-    if !row_format(batch)? {
-        let bytes = batch
-            .undo_value_ref(UndoTable::Meta, TrstEngine::meta_key().as_bytes())?
-            .ok_or_else(|| invalid("missing persisted TRST holdings"))?;
-        return TrstEngine::load_wallets(bytes, expiry_secs).map_err(invalid);
-    }
-    let rows = batch.checkpoint_metadata_entries(WalletRecord::STORAGE_PREFIX.as_bytes())?;
-    TrstEngine::from_wallet_records(
-        rows.map(|row| {
-            let (key, bytes) = row.map_err(|error| error.to_string())?;
-            let key = std::str::from_utf8(key).map_err(|error| error.to_string())?;
-            WalletRecord::from_storage_entry(key, bytes)
-        }),
-        expiry_secs,
-    )
-    .map_err(invalid)
+    batch.read_trst_holdings(expiry_secs)
 }
 
 pub(crate) fn persist(
     batch: &mut LmdbWriteTransaction<'_>,
     engine: &TrstEngine,
 ) -> Result<(), StoreError> {
-    if !row_format(batch)? {
+    if batch.uses_stable_trst_records()? {
+        return batch.replace_stable_trst_holdings(engine);
+    }
+    if !uses_row_storage(batch)? {
         return batch.put_meta(TrstEngine::meta_key(), &engine.save_wallets());
     }
     replace_rows(batch, engine)
@@ -82,7 +49,10 @@ pub(crate) fn persist_delta(
     before: &TrstEngine,
     after: &TrstEngine,
 ) -> Result<(), StoreError> {
-    if !row_format(batch)? {
+    if batch.uses_stable_trst_records()? {
+        return batch.persist_stable_trst_delta(before, after);
+    }
+    if !uses_row_storage(batch)? {
         return persist(batch, after);
     }
     after.visit_wallet_record_delta(before, |old, new| {
@@ -118,23 +88,31 @@ pub(crate) fn persist_delta(
     })
 }
 
-/// Upgrade holdings and every provisional journal together, after startup has
-/// authenticated/recovered the ledger. No runtime engine or finality is changed.
+/// Upgrade holdings after startup has authenticated/recovered the ledger.
+/// Complete aggregate journals convert directly to stable rows; positional partial
+/// journals still need historical cuts. Finality is unchanged.
+/// Returns false if already stable or provisional positional journals prevent
+/// conversion. A sync failure after commit does not undo the conversion.
 pub(crate) fn migrate(
     store: &burst_store_lmdb::LmdbStore,
     expiry_secs: u64,
 ) -> Result<bool, StoreError> {
     let mut batch = store.tx_begin_write()?;
-    if row_format(&batch)? {
+    if batch.uses_stable_trst_records()? {
         return Ok(false);
     }
-    let engine = load(&batch, expiry_secs)?;
+    let positional = uses_row_storage(&batch)?;
     let mut records = Vec::new();
     let mut bytes = 0u64;
     for account in batch.account_entries()? {
         let account = account?;
         if account.confirmation_height > account.block_count {
             return Err(invalid("TRST migration has invalid confirmation height"));
+        }
+        // Positional partial images require historical portfolio cuts. Do not
+        // infer their cross-account order from matching after-images.
+        if positional && account.confirmation_height < account.block_count {
+            return Ok(false);
         }
         for previous_height in account.confirmation_height..account.block_count {
             if records.len() >= 131_072 {
@@ -146,7 +124,7 @@ pub(crate) fn migrate(
             let record = batch
                 .block_undo(&hash)?
                 .ok_or_else(|| invalid("TRST migration requires recovered provisional journals"))?;
-            let converted = convert_undo(record)?;
+            let converted = convert_undo_format(record, true)?;
             bytes = bytes
                 .checked_add(bincode::serialized_size(&converted).map_err(invalid)?)
                 .filter(|bytes| *bytes <= 64 << 20)
@@ -154,20 +132,24 @@ pub(crate) fn migrate(
             records.push(converted);
         }
     }
-    // The existing installer checks completeness, ledger identity and immutable
-    // metadata. Its failure aborts this entire transaction, including the rows.
-    replace_rows(&mut batch, &engine)?;
-    batch.delete_meta(TrstEngine::meta_key())?;
-    batch.put_meta(FORMAT_KEY, &[1])?;
-    batch.replace_checkpoint_undo(&records)?;
+    let engine = load(&batch, expiry_secs)?;
+    if records.is_empty() {
+        // Every account is confirmed, so no surviving provisional cut needs
+        // conversion. Preserve finalized journals byte-for-byte; the rewind
+        // guard excludes them before interpreting their economic images.
+        batch.verify_checkpoint_undo_encoding()?;
+        stage_replayed_stable(&mut batch, &engine)?;
+    } else {
+        // The installer checks complete provisional inventory and ledger identity.
+        stage_replayed_stable(&mut batch, &engine)?;
+        batch.replace_checkpoint_undo(&records)?;
+    }
     batch.commit()?;
     store.force_sync().map_err(invalid)?;
     Ok(true)
 }
 
-// Full replacement is used by replay/installation as well as the initial
-// integration. Only changed rows reach the undo journal. Account-scoped
-// preparation is a separate requirement; this still visits the whole engine.
+// Visits every stored key and engine record; journals only changed rows.
 fn replace_rows(
     batch: &mut LmdbWriteTransaction<'_>,
     engine: &TrstEngine,
@@ -175,13 +157,16 @@ fn replace_rows(
     replace_records(batch, |visit| engine.visit_wallet_records(visit))
 }
 
-/// Certified recovery replaces holdings and all provisional journals in one
-/// transaction. Ordinary publication must preserve surviving journal promises.
+/// Stage replacement holdings. The caller must also replace provisional journals
+/// in this transaction and abort on error; this helper does neither.
 pub(crate) fn stage_replayed(
     batch: &mut LmdbWriteTransaction<'_>,
     engine: &TrstEngine,
 ) -> Result<(), StoreError> {
-    row_format(batch)?;
+    if batch.uses_stable_trst_records()? {
+        return stage_replayed_stable(batch, engine);
+    }
+    uses_row_storage(batch)?;
     for row in batch.checkpoint_metadata_entries(WalletRecord::STORAGE_PREFIX.as_bytes())? {
         let (key, _) = row?;
         std::str::from_utf8(key).map_err(invalid)?;
@@ -193,6 +178,22 @@ pub(crate) fn stage_replayed(
     })?;
     batch.delete_meta(TrstEngine::meta_key())?;
     batch.put_meta(FORMAT_KEY, &[1])
+}
+
+/// Used with no provisional journals (fresh or fully confirmed), or certified staging
+/// that replaces every provisional journal in this transaction. Never use this
+/// to relabel an existing ledger without matching journal conversion.
+/// The caller must abort on any later installation error.
+pub(crate) fn stage_replayed_stable(
+    batch: &mut LmdbWriteTransaction<'_>,
+    engine: &TrstEngine,
+) -> Result<(), StoreError> {
+    uses_row_storage(batch)?;
+    batch.clear_checkpoint_token_rows(WalletRecord::STORAGE_PREFIX.as_bytes())?;
+    batch.clear_checkpoint_token_rows(burst_trst::engine::holding_rows::PREFIX.as_bytes())?;
+    batch.delete_meta(TrstEngine::meta_key())?;
+    batch.put_meta(FORMAT_KEY, &[2])?;
+    batch.replace_stable_trst_holdings(engine)
 }
 
 fn replace_records(
@@ -221,30 +222,49 @@ fn replace_records(
 /// Translate only the aggregate holdings images. Ledger identity, graph,
 /// lifecycle and finality fields are preserved and validated by the installer.
 pub(crate) fn convert_undo(
+    record: burst_store_lmdb::block_undo::BlockUndo,
+) -> Result<burst_store_lmdb::block_undo::BlockUndo, StoreError> {
+    convert_undo_format(record, false)
+}
+
+fn convert_undo_format(
     mut record: burst_store_lmdb::block_undo::BlockUndo,
+    stable: bool,
 ) -> Result<burst_store_lmdb::block_undo::BlockUndo, StoreError> {
     use burst_store_lmdb::block_undo::UndoChange;
     use std::collections::BTreeMap;
-    fn entries(bytes: Option<&[u8]>) -> Result<BTreeMap<String, Vec<u8>>, StoreError> {
+    fn entries(bytes: Option<&[u8]>, stable: bool) -> Result<BTreeMap<String, Vec<u8>>, StoreError> {
         let mut entries = BTreeMap::new();
         if let Some(bytes) = bytes {
-            TrstEngine::visit_wallet_snapshot_records(bytes, |record| {
-                let (key, value) = record.storage_entry()?;
+            let mut insert = |key, value| {
                 if entries.insert(key, value).is_some() {
                     return Err("duplicate TRST migration key".into());
                 }
                 Ok(())
-            })
-            .map_err(invalid)?;
+            };
+            if stable {
+                TrstEngine::visit_wallet_snapshot_stable_entries(bytes, &mut insert).map_err(invalid)?;
+            } else {
+                TrstEngine::visit_wallet_snapshot_records(bytes, |record| {
+                    let (key, value) = record.storage_entry()?;
+                    insert(key, value)
+                }).map_err(invalid)?;
+            }
         }
         Ok(entries)
     }
     let mut changes = BTreeMap::new();
     for change in record.changes {
+        if stable && change.table == UndoTable::Meta
+            && (change.key.starts_with(WalletRecord::STORAGE_PREFIX.as_bytes())
+                || change.key.starts_with(burst_trst::engine::holding_rows::PREFIX.as_bytes()))
+        {
+            return Err(invalid("aggregate migration contains mixed holding row images"));
+        }
         let expanded =
             if change.table == UndoTable::Meta && change.key == TrstEngine::meta_key().as_bytes() {
-                let mut before = entries(change.before.as_deref())?;
-                let after = entries(change.after.as_deref())?;
+                let mut before = entries(change.before.as_deref(), stable)?;
+                let after = entries(change.after.as_deref(), stable)?;
                 let mut expanded = Vec::new();
                 for (key, value) in after {
                     let previous = before.remove(&key);
@@ -291,6 +311,14 @@ pub(crate) fn stage_rows_for_test(
 }
 
 #[cfg(test)]
+pub(crate) fn stage_stable_rows_for_test(
+    batch: &mut LmdbWriteTransaction<'_>,
+    engine: &TrstEngine,
+) -> Result<(), StoreError> {
+    stage_replayed_stable(batch, engine)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use burst_store_lmdb::LmdbStore;
@@ -312,8 +340,7 @@ mod tests {
         engine
     }
 
-    // Not a production migration: historical aggregate undo images still need
-    // conversion before row-format activation can be exposed to operators.
+    // Fixture conversion only; does not convert existing undo journals.
     fn stage_fixture_conversion(
         batch: &mut LmdbWriteTransaction<'_>,
         engine: &TrstEngine,
@@ -335,7 +362,7 @@ mod tests {
         assert_eq!(load(&batch, 100).unwrap().save_wallets(), expected);
         drop(batch);
         let mut batch = store.tx_begin_write().unwrap();
-        assert!(!row_format(&batch).unwrap());
+        assert!(!uses_row_storage(&batch).unwrap());
         stage_fixture_conversion(&mut batch, &engine).unwrap();
         batch.commit().unwrap();
         let mut batch = store.tx_begin_write().unwrap();
@@ -441,7 +468,7 @@ mod tests {
         let unrelated = WalletAddress::new("brst_unrelated");
         before
             .wallets
-            .insert(unrelated.clone(), burst_trst::Shared::default());
+            .insert(unrelated.clone(), burst_utils::Shared::default());
         let (key, original) = WalletRecord::Portfolio {
             holder: unrelated,
             cached_transferable: 0,
@@ -451,8 +478,8 @@ mod tests {
         .unwrap();
         let mut batch = store.tx_begin_write().unwrap();
         stage_rows_for_test(&mut batch, &before).unwrap();
-        // A sentinel proves the delta neither reads nor rewrites an untouched
-        // portfolio. Restore it before validating the whole stored state.
+        // Invalid bytes detect decoding or overwriting an untouched portfolio.
+        // Restore them before validating the whole stored state.
         batch.put_meta(&key, b"untouched").unwrap();
         batch.commit().unwrap();
         let mut after = before.clone();
@@ -483,6 +510,116 @@ mod tests {
     }
 
     #[test]
+    fn confirmed_legacy_histories_activate_stable_rows_without_rewriting_finalized_journals() {
+        for (positional, starts_provisional) in [(false, false), (true, false), (false, true), (true, true)] {
+            let directory = tempfile::tempdir().unwrap();
+            let store = LmdbStore::open(directory.path(), 32, 16 << 20).unwrap();
+            let before = fixture();
+            let mut batch = store.tx_begin_write().unwrap();
+            if positional { stage_fixture_conversion(&mut batch, &before).unwrap(); }
+            else { persist(&mut batch, &before).unwrap(); }
+            batch.commit().unwrap();
+            let owner = WalletAddress::new("brst_owner");
+            let hash = BlockHash::new([21; 32]);
+            let mut account = burst_store::account::AccountInfo::unopened(owner.clone());
+            account.head = hash;
+            account.block_count = 1;
+            let mut after = before.clone();
+            after.set_expiry_period(200, Timestamp::new(150)).unwrap();
+            let mut batch = store.tx_begin_write().unwrap();
+            batch.begin_block_undo(hash, owner.clone(), 1).unwrap();
+            batch.put_block_with_account(&hash, b"first fixture block", &owner, 1).unwrap();
+            batch.put_frontier(&owner, &hash).unwrap();
+            batch.put_account_info(&account, false).unwrap();
+            persist(&mut batch, &after).unwrap();
+            batch.commit().unwrap();
+            if starts_provisional {
+                assert_eq!(migrate(&store, 200).unwrap(), !positional);
+                assert_eq!(store.tx_begin_write().unwrap().uses_stable_trst_records().unwrap(),
+                    !positional, "only complete aggregate cuts can convert provisional history");
+            }
+            let mut batch = store.tx_begin_write().unwrap();
+            account.confirmation_height = 1;
+            batch.put_account_info(&account, false).unwrap();
+            let journal = batch.block_undo(&hash).unwrap().unwrap();
+            batch.commit().unwrap();
+            assert_eq!(migrate(&store, 200).unwrap(), positional || !starts_provisional);
+            assert!(!migrate(&store, 200).unwrap());
+            drop(store);
+            let store = LmdbStore::open(directory.path(), 32, 16 << 20).unwrap();
+            let batch = store.tx_begin_write().unwrap();
+            assert!(batch.uses_stable_trst_records().unwrap());
+            assert_eq!(batch.block_undo(&hash).unwrap().unwrap(), journal);
+            assert_eq!(load(&batch, 200).unwrap().save_wallets(), after.save_wallets());
+            drop(batch);
+            let mut batch = store.tx_begin_write().unwrap();
+            assert!(batch.rewind_block(&hash).unwrap_err().to_string().contains("unconfirmed"));
+            drop(batch);
+            // New stable journals remain reversible while old finalized evidence survives.
+            let next = BlockHash::new([22; 32]);
+            let mut later = after.clone();
+            later.set_expiry_period(300, Timestamp::new(160)).unwrap();
+            let mut batch = store.tx_begin_write().unwrap();
+            batch.begin_block_undo(next, owner.clone(), 2).unwrap();
+            account.head = next;
+            account.block_count = 2;
+            batch.put_block_with_account(&next, b"second fixture block", &owner, 2).unwrap();
+            batch.put_frontier(&owner, &next).unwrap();
+            batch.put_account_info(&account, false).unwrap();
+            persist(&mut batch, &later).unwrap();
+            batch.commit().unwrap();
+            let mut batch = store.tx_begin_write().unwrap();
+            batch.rewind_block(&next).unwrap();
+            assert_eq!(load(&batch, 200).unwrap().save_wallets(), after.save_wallets());
+            assert_eq!(batch.block_undo(&hash).unwrap().unwrap(), journal);
+            batch.commit().unwrap();
+        }
+    }
+
+    #[test]
+    fn aggregate_journal_conversion_uses_recorded_cuts_across_account_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = LmdbStore::open(directory.path(), 32, 16 << 20).unwrap();
+        let baseline = fixture();
+        let mut engine = baseline.clone();
+        let mut batch = store.tx_begin_write().unwrap();
+        persist(&mut batch, &engine).unwrap();
+        batch.commit().unwrap();
+        let mut cuts = Vec::new();
+        // Ledger iteration sees a before z, opposite the mutation order. Both
+        // actions change the same portfolio, so independent-wallet commutation
+        // cannot justify choosing that order for conversion.
+        for (name, byte, period) in [("brst_z", 31, 200), ("brst_a", 32, 300)] {
+            let actor = WalletAddress::new(name);
+            let hash = BlockHash::new([byte; 32]);
+            let before = engine.save_wallets();
+            engine.set_expiry_period(period, Timestamp::new(150)).unwrap();
+            let mut batch = store.tx_begin_write().unwrap();
+            batch.begin_block_undo(hash, actor.clone(), 1).unwrap();
+            let mut account = burst_store::account::AccountInfo::unopened(actor.clone());
+            account.head = hash;
+            account.block_count = 1;
+            batch.put_block_with_account(&hash, b"fixture action", &actor, 1).unwrap();
+            batch.put_frontier(&actor, &hash).unwrap();
+            batch.put_account_info(&account, false).unwrap();
+            persist(&mut batch, &engine).unwrap();
+            batch.commit().unwrap();
+            cuts.push((hash, before));
+        }
+        assert!(migrate(&store, 300).unwrap());
+        drop(store);
+        let store = LmdbStore::open(directory.path(), 32, 16 << 20).unwrap();
+        for ((hash, expected), period) in cuts.into_iter().rev().zip([200, 100]) {
+            let mut batch = store.tx_begin_write().unwrap();
+            assert!(batch.uses_stable_trst_records().unwrap());
+            batch.rewind_block(&hash).unwrap();
+            assert_eq!(load(&batch, period).unwrap().save_wallets(), expected);
+            batch.commit().unwrap();
+        }
+        assert_eq!(load(&store.tx_begin_write().unwrap(), 100).unwrap().save_wallets(), baseline.save_wallets());
+    }
+
+    #[test]
     fn legacy_journal_conversion_preserves_rollback_across_governed_expiry() {
         let directory = tempfile::tempdir().unwrap();
         let store = LmdbStore::open(directory.path(), 32, 16 << 20).unwrap();
@@ -503,12 +640,19 @@ mod tests {
         batch.put_frontier(&account.address, &hash).unwrap();
         batch.put_account_info(&account, false).unwrap();
         let mut after = before.clone();
-        after.set_expiry_period(200, Timestamp::new(150));
+        after.set_expiry_period(200, Timestamp::new(150)).unwrap();
         persist(&mut batch, &after).unwrap();
         batch.commit().unwrap();
         let batch = store.tx_begin_write().unwrap();
         let original = batch.block_undo(&hash).unwrap().unwrap();
         let converted = convert_undo(original.clone()).unwrap();
+        let stable = convert_undo_format(original.clone(), true).unwrap();
+        assert!(stable.changes.iter().any(|change|
+            change.key.starts_with(burst_trst::engine::holding_rows::PREFIX.as_bytes())));
+        let mut mixed = original.clone();
+        mixed.changes.push(converted.changes.iter().find(|change|
+            change.key.starts_with(WalletRecord::STORAGE_PREFIX.as_bytes())).unwrap().clone());
+        assert!(convert_undo_format(mixed, true).is_err());
         let unchanged = |record: &burst_store_lmdb::block_undo::BlockUndo| {
             record
                 .changes
@@ -518,6 +662,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(unchanged(&original), unchanged(&converted));
+        assert_eq!(unchanged(&original), unchanged(&stable));
         assert!(!converted
             .changes
             .iter()
@@ -525,7 +670,7 @@ mod tests {
         drop(batch);
         {
             let mut batch = store.tx_begin_write().unwrap();
-            assert!(!row_format(&batch).unwrap());
+            assert!(!uses_row_storage(&batch).unwrap());
             stage_fixture_conversion(&mut batch, &after).unwrap();
             batch
                 .replace_checkpoint_undo(std::slice::from_ref(&converted))

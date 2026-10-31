@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Requires the isolated lab after manual-forward.sh, with no IGD emulator yet.
+# Checks probe state and emulator logs, then runs lifecycle and daemon cases.
+# The EXIT trap stops the emulator; it does not stop every scenario process.
 set -euo pipefail
 test "${BURST_ISOLATED_NAT_LAB:-}" = yes
 failures=0

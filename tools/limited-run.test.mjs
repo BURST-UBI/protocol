@@ -13,7 +13,7 @@ function run(command, status = 0, available = '8388608') {
   try {
     const mock = join(directory, 'systemd-run');
     const log = join(directory, 'args.json');
-    copyFileSync(new URL('./fixtures/limited-systemd-run.mjs', import.meta.url), mock);
+    copyFileSync(new URL('./fixtures/mock-system-commands.mjs', import.meta.url), mock);
     chmodSync(mock, 0o700);
     copyFileSync(mock, join(directory, 'awk'));
     chmodSync(join(directory, 'awk'), 0o700);

@@ -13,7 +13,7 @@ mod record_crash;
 mod replacement_crash;
 mod sparse_source;
 
-fn assert_economics(source: &LmdbStore, target: &LmdbStore, expiry: u64) {
+fn assert_trst_state(source: &LmdbStore, target: &LmdbStore, expiry: u64) {
     let source = source.tx_begin_write().unwrap();
     let target = target.tx_begin_write().unwrap();
     assert_eq!(
@@ -158,7 +158,7 @@ async fn compact_live_bootstrap_settled_panel_preserves_verification_and_rewards
             let mut choice = [0; 32];
             choice[0] = 1;
             block.transaction = TxHash::new(choice);
-            block.brn_balance += prepared.params.verifier_stake_amount;
+            block.brn_spent += prepared.params.verifier_stake_amount;
         });
     }
     fixture.append_confirmed_prefix(&source, prepared.now + 1);
@@ -501,7 +501,7 @@ async fn run_bootstrap_via(prepared: Prepared, mode: BootstrapMode) {
         );
     }
     assert_retained(&target.store, &retained);
-    assert_economics(
+    assert_trst_state(
         &source.store,
         &target.store,
         effective_params.trst_expiry_secs,
@@ -564,15 +564,7 @@ fn assert_retained(store: &LmdbStore, retained: &[(Vec<u8>, Vec<u8>)]) {
 }
 
 fn restore_lifecycle(store: &LmdbStore) -> burst_verification::VerificationOrchestrator {
-    burst_verification::VerificationOrchestrator::restore(
-        burst_verification::OrchestratorSnapshot::decode(
-            &store
-                .meta_store()
-                .get_meta(crate::endorsement_commit::SNAPSHOT_KEY)
-                .unwrap(),
-        )
-        .unwrap(),
-    )
+    crate::verification_storage::load(&store.tx_begin_write().unwrap()).unwrap()
 }
 
 fn assert_lifecycle(source: &LmdbStore, target: &LmdbStore, payment: Option<TxHash>) {

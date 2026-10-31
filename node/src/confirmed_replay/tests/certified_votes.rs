@@ -127,7 +127,7 @@ fn vote_choice_in_epoch(
         let mut bytes = [0; 32];
         bytes[0] = choice;
         block.transaction = TxHash::new(bytes);
-        block.brn_balance += stake;
+        block.brn_spent += stake;
     })
 }
 
@@ -272,7 +272,7 @@ fn certified_votes_reconstruct_verification_and_unlock_from_signed_history() {
     }
     fixture.push(20, BlockType::Open, CUTOFF + 33, |_| {});
     let burn = fixture.push(20, BlockType::Burn, CUTOFF + 45, |block| {
-        block.brn_balance = 10;
+        block.brn_spent = 10;
         block.link = destination(21);
     });
     fixture.push(21, BlockType::Open, CUTOFF + 46, |block| {
@@ -328,7 +328,7 @@ fn staged_panels_preserve_vote_and_verified_spending_dependencies() {
         vote(&mut fixture, &record, seed, CUTOFF + 31 + index as u64);
     }
     fixture.push(20, BlockType::Burn, CUTOFF + 60, |block| {
-        block.brn_balance = 10;
+        block.brn_spent = 10;
         block.link = destination(21);
     });
     let directory = tempfile::tempdir().unwrap();
@@ -417,7 +417,7 @@ fn partial_panel_locks_only_its_signed_vote_and_cannot_authorize_target_spending
     );
     fixture.push(20, BlockType::Open, CUTOFF + 33, |_| {});
     fixture.push(20, BlockType::Burn, CUTOFF + 45, |block| {
-        block.brn_balance = 10;
+        block.brn_spent = 10;
         block.link = destination(21);
     });
     assert!(replay(&fixture, &[record])
@@ -455,7 +455,7 @@ fn certified_vote_replay_rejects_missing_beacon_wrong_context_and_duplicate_vote
             }
             "signature" => block.signature = Signature([0; 64]),
             "stake" => {
-                block.brn_balance -= 1;
+                block.brn_spent -= 1;
                 sign(selected[0], block);
             }
             "pre-beacon" => {
@@ -493,7 +493,7 @@ fn successor_replays_completed_panel_and_recovers_new_human_roster_after_restart
     }
     for seed in [1, 2] {
         fixture.push(seed, BlockType::Endorse, CUTOFF + 35, |block| {
-            block.brn_balance += 1;
+            block.brn_spent += 1;
             block.link = destination(21);
         });
     }

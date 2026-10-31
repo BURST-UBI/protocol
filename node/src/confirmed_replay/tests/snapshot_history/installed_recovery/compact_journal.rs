@@ -167,7 +167,7 @@ async fn compact_journal_recovers_from_peer_proofs_and_rejects_concurrent_change
             .checkpoint_metadata(b"")
             .unwrap();
         let local = Arc::new(local);
-        let service = Service::start(
+        let service = WitnessService::start(
             Arc::clone(&source),
             Arc::clone(&local),
             if case == 3 { 5 } else { 0 },

@@ -108,6 +108,9 @@ impl OrchestratorSnapshot {
 
     /// Restore disjoint wallet/attempt entries and verifier windows. Overlapping
     /// progress must be included in the caller's rollback closure or rejected.
+    /// Changing Neither rules requires the whole current snapshot to match `after`.
+    /// Returns replacement bytes without mutating the inputs; the caller must
+    /// separately undo ledger effects such as BRN debits and TRST revocation.
     pub fn rewind(before: &[u8], after: &[u8], current: &[u8]) -> Result<Vec<u8>, String> {
         const MAX_BYTES: usize = 64 << 20;
         if [before, after, current]

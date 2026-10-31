@@ -3,8 +3,8 @@ import { appendFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 export function needsRuntime(paths) {
-  // Only known documentation paths can skip runtime checks. Unknown inputs
-  // (including workflows, toolchains, fixtures and scripts) run the full suite.
+  // Only these paths are classified as documentation-only. Workflows,
+  // toolchains, fixtures and scripts require runtime-check selection.
   return paths.some(path => !(
     path === 'spec/coverage.json' ||
     (path.endsWith('.md') && (path.startsWith('docs/') || path.startsWith('spec/') || !path.includes('/')))

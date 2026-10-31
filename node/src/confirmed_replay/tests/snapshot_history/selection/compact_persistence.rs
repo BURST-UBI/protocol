@@ -219,11 +219,25 @@ async fn snapshot_receipt_refreshes_beacon_without_pruned_record_or_peers() {
         )
         .unwrap();
     let height = manifest.checkpoint.height;
-    assert_eq!(
-        crate::checkpoint_store::selection_refresh_heights(&local, NetworkId::Dev, &fixture.params)
-            .unwrap(),
-        vec![height]
-    );
+    let recovered = crate::confirmed_replay::snapshot::installed::load_base(
+        &local, NetworkId::Dev, &fixture.params,
+    ).unwrap().unwrap().recover_stored_successors(&local, |_, _, _| {
+        panic!("snapshot-only selection hints need no successor witnesses")
+    }).unwrap();
+    let mut refresh = recovered.selections.refresh_cursor().unwrap();
+    drop(recovered);
+    assert!(refresh.at_cycle_start());
+    assert_eq!(refresh.next(&local).unwrap(), Some(height));
+    assert!(!refresh.at_cycle_start(), "a newer epoch must not reset an unfinished cycle");
+    assert_eq!(refresh.next(&local).unwrap(), None);
+    assert!(refresh.at_cycle_start(), "new history can be adopted after the cycle finishes");
+    // The cursor owns only shared selection rows and survives unrelated commits.
+    local.meta_store().put_meta("test/refresh-unrelated", b"changed").unwrap();
+    assert_eq!(refresh.next(&local).unwrap(), Some(height));
+    assert_eq!(refresh.next(&local).unwrap(), None);
+    assert!(crate::checkpoint_store::selection_refresh_heights(
+        &local, NetworkId::Dev, &fixture.params,
+    ).unwrap().is_empty());
     assert!(local
         .tx_begin_write()
         .unwrap()
@@ -298,6 +312,13 @@ async fn snapshot_receipt_refreshes_beacon_without_pruned_record_or_peers() {
             );
         }
     }
+    assert_eq!(refresh.next(&local).unwrap(), None, "new stored proof suppresses old hint");
+    assert_eq!(refresh.next(&local).unwrap(), None, "cursor wraps");
+    let proof_key = format!("snapshot_selection_beacon/v1/{}", manifest.checkpoint.hash());
+    let proof = local.meta_store().get_meta(&proof_key).unwrap();
+    local.meta_store().delete_meta(&proof_key).unwrap();
+    assert_eq!(refresh.next(&local).unwrap(), Some(height));
+    local.meta_store().put_meta(&proof_key, &proof).unwrap();
     let after = CertifiedCheckpoint::export_record(&local, NetworkId::Dev, &fixture.params, height)
         .unwrap()
         .unwrap();
@@ -406,7 +427,7 @@ fn compact_recovery_derives_only_the_certified_published_committee() {
         .unwrap();
     published.drain_events();
     let selections = vec![*selection];
-    for case in 0..5 {
+    for case in 0..6 {
         let mut candidate = state.clone();
         let mut actual = if case == 0 {
             state.verification.snapshot()
@@ -422,7 +443,17 @@ fn compact_recovery_derives_only_the_certified_published_committee() {
                     .selected_verifiers[0] = address(99)
             }
             3 => actual.states.get_mut(&manifest.target).unwrap().started_at = Timestamp::new(1),
+            5 => {
+                let template = actual.states[&manifest.target].clone();
+                for index in 0..4097 {
+                    actual.states.insert(WalletAddress::new(format!("brst_publication_{index}")), template.clone());
+                }
+            }
             _ => (),
+        }
+        let restored = burst_verification::VerificationOrchestrator::restore(actual.clone());
+        for target in [&manifest.target, &address(99)] {
+            assert_eq!(actual.selection_context(target), restored.selection_context(target));
         }
         let before = candidate.verification.snapshot().encode().unwrap();
         let expected = actual.encode().unwrap();
@@ -431,11 +462,18 @@ fn compact_recovery_derives_only_the_certified_published_committee() {
         } else {
             selections.as_slice()
         };
+        let scratch = (case == 5).then(||
+            crate::confirmed_replay::scratch_file::ScratchLimit::acquire(_source_dir.path(), 1).unwrap());
         let result = crate::confirmed_replay::snapshot::installed::publication::materialize(
             actual,
             &mut candidate,
             supplied,
+            _source_dir.path(),
         );
+        if let Some(scratch) = &scratch {
+            assert!(result.as_ref().unwrap_err().to_string().contains("scratch byte budget exceeded"));
+            assert_eq!(scratch.used_temporary_bytes().unwrap(), 0);
+        }
         if case < 2 {
             result.unwrap();
             assert_eq!(
@@ -451,7 +489,7 @@ fn compact_recovery_derives_only_the_certified_published_committee() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn compact_transfer_replays_legacy_and_sparse_exports_with_a_beacon() {
-    use crate::confirmed_replay::tests::snapshot_history::installed_recovery::{archive, Service};
+    use crate::confirmed_replay::tests::snapshot_history::installed_recovery::{archive, WitnessService};
     use std::sync::Arc;
     let (fixture, _source_dir, source, manifest, _) = setup();
     let beacons: Vec<burst_vrf::DrandBeacon> = serde_json::from_str(include_str!(
@@ -500,7 +538,7 @@ async fn compact_transfer_replays_legacy_and_sparse_exports_with_a_beacon() {
             )
             .unwrap();
         let local = Arc::new(local);
-        let service = Service::start(source.clone(), local.clone(), 0).await;
+        let service = WitnessService::start(source.clone(), local.clone(), 0).await;
         let before = local
             .tx_begin_write()
             .unwrap()

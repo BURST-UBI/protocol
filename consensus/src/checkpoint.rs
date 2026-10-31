@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use burst_crypto::{blake2b_256, decode_address};
+use burst_crypto::{blake2b_256, decode_address, Blake2b256Hasher};
 use burst_types::{BlockHash, NetworkId, Signature, WalletAddress};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -38,8 +38,9 @@ pub struct HumanDelegation {
     pub representative: WalletAddress,
 }
 
-/// Construct from a trusted genesis or a replay-validated, certified state cut.
-/// This type validates representation, not whether a wallet is a unique human.
+/// A canonical roster whose authority must be established by the caller, through
+/// configured genesis, certified replay, or a certified snapshot roster witness.
+/// Construction validates addresses and uniqueness of entries, not humanity.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HumanRoster {
     data: Arc<RosterData>,
@@ -59,8 +60,9 @@ impl HumanRoster {
         }
         humans.sort_by(|a, b| a.human.as_str().cmp(b.human.as_str()));
         let mut weights = HashMap::new();
-        let mut bytes = b"BURST/human-roster/v1\0".to_vec();
-        bytes.extend_from_slice(&(humans.len() as u64).to_be_bytes());
+        let mut commitment = Blake2b256Hasher::default();
+        commitment.update(b"BURST/human-roster/v1\0");
+        commitment.update(&(humans.len() as u64).to_be_bytes());
         let mut previous = None;
         for entry in &humans {
             if previous == Some(&entry.human) {
@@ -68,12 +70,12 @@ impl HumanRoster {
             }
             for address in [&entry.human, &entry.representative] {
                 let key = decode_address(address.as_str()).ok_or(CheckpointError::InvalidRoster)?;
-                bytes.extend_from_slice(&key);
+                commitment.update(&key);
             }
             *weights.entry(entry.representative.clone()).or_insert(0) += 1;
             previous = Some(&entry.human);
         }
-        let commitment = BlockHash::new(blake2b_256(&bytes));
+        let commitment = BlockHash::new(commitment.finalize());
         Ok(Self {
             data: Arc::new(RosterData {
                 humans,
@@ -95,7 +97,7 @@ impl HumanRoster {
     pub fn weight(&self, representative: &WalletAddress) -> u64 {
         self.data.weights.get(representative).copied().unwrap_or(0)
     }
-    /// Distinct representatives in this authenticated roster, in unspecified order.
+    /// Distinct representatives in this roster, in unspecified order.
     pub fn representatives(&self) -> impl Iterator<Item = &WalletAddress> {
         self.data.weights.keys()
     }
@@ -128,7 +130,8 @@ pub struct Checkpoint {
 }
 
 impl Checkpoint {
-    /// Stable, fixed-width encoding independent of serde/bincode configuration.
+    /// Stable, fixed-width checkpoint encoding used for its hash. Certificate
+    /// signatures cover the round's precommit ballot, which includes this hash.
     pub fn signing_payload(&self) -> Vec<u8> {
         let mut bytes = DOMAIN.to_vec();
         bytes.push(match self.network {
@@ -172,7 +175,8 @@ pub struct CheckpointCertificate {
 }
 
 /// Never deserialize this from a peer. Initialize only from locally configured
-/// genesis, then advance through validated certificates and replayed rosters.
+/// genesis, then advance through certificates and either replayed rosters or
+/// authenticated snapshot roster witnesses.
 #[derive(Clone, Debug)]
 pub struct CheckpointAnchor {
     network: NetworkId,
@@ -228,6 +232,8 @@ impl CheckpointAnchor {
     pub fn quorum_bps(&self) -> u16 {
         self.quorum_bps
     }
+    /// Rotate through the human-sorted roster at the next height plus round.
+    /// A representative occupies one slot for each human delegated to it.
     pub fn proposer(&self, round: u64) -> &WalletAddress {
         let index =
             (u128::from(self.height) + 1 + u128::from(round)) % self.roster.humans().len() as u128;
@@ -237,6 +243,8 @@ impl CheckpointAnchor {
         (self.roster.total_humans() * u64::from(self.quorum_bps)).div_ceil(10_000)
     }
 
+    /// Check parent linkage, increasing cutoff, quorum range and nonzero hashes.
+    /// Does not authenticate signatures or recompute committed ledger contents.
     pub fn validate_successor(&self, checkpoint: &Checkpoint) -> Result<(), CheckpointError> {
         if checkpoint.network != self.network
             || checkpoint.genesis != self.genesis
@@ -314,7 +322,7 @@ impl CheckpointAnchor {
 
     /// Shared signature/commitment checks for semantic replay and the explicit
     /// quorum-trust snapshot route. Only the latter may use a roster witness
-    /// without independently replaying its ledger history (decision 11.2).
+    /// without independently replaying its ledger history.
     pub(crate) fn advance_certified_roster(
         &self,
         certificate: &CheckpointCertificate,
@@ -490,6 +498,45 @@ mod tests {
         assert!(next
             .verify_certificate(&certify(candidate(&next), &[1, 2, 3]))
             .is_err());
+    }
+
+    #[test]
+    fn streamed_roster_commitment_matches_legacy_bytes_and_rejects_invalid_addresses() {
+        for count in [1usize, 2, 128, 1025] {
+            let mut humans: Vec<_> = (0..count)
+                .rev()
+                .map(|index| {
+                    let mut seed = [0u8; 32];
+                    seed[..8].copy_from_slice(&(index as u64).to_be_bytes());
+                    HumanDelegation {
+                        human: derive_address(&keypair_from_seed(&seed).public),
+                        representative: address((index % 7 + 1) as u8),
+                    }
+                })
+                .collect();
+            let roster = HumanRoster::new(humans.clone()).unwrap();
+            humans.sort_by(|a, b| a.human.as_str().cmp(b.human.as_str()));
+            let mut legacy = b"BURST/human-roster/v1\0".to_vec();
+            legacy.extend_from_slice(&(count as u64).to_be_bytes());
+            for entry in &humans {
+                legacy.extend_from_slice(&decode_address(entry.human.as_str()).unwrap());
+                legacy.extend_from_slice(&decode_address(entry.representative.as_str()).unwrap());
+            }
+            assert_eq!(roster.commitment(), BlockHash::new(blake2b_256(&legacy)));
+            assert_eq!(roster.humans(), humans);
+            for representative in 1..=7 {
+                let representative = address(representative);
+                assert_eq!(roster.weight(&representative), humans.iter()
+                    .filter(|entry| entry.representative == representative).count() as u64);
+            }
+            for invalid_human in [false, true] {
+                let mut invalid = humans.clone();
+                let last = invalid.last_mut().unwrap();
+                if invalid_human { last.human = WalletAddress::new("brst_invalid"); }
+                else { last.representative = WalletAddress::new("brst_invalid"); }
+                assert_eq!(HumanRoster::new(invalid).unwrap_err(), CheckpointError::InvalidRoster);
+            }
+        }
     }
 
     #[test]

@@ -78,7 +78,7 @@ fn challenge_arrival_order_preserves_rewards_penalties_and_revocation() {
         let mut expected = None;
         for order in ORDERS {
             let mut fixture = Fixture::new();
-            fixture.verified_target();
+            fixture.verify_target();
             fixture.seed_target_origin_at_holder();
             fixture
                 .apply(

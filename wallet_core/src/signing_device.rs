@@ -7,8 +7,9 @@ use std::{
     path::Path,
 };
 
-/// Missing binding denotes an unenrolled profile, not ownership of the network's
-/// current grant. Corrupt or mismatched state must not become an unenrolled one.
+/// Load the locally saved handoff hash after checking its format, signature and account.
+/// A missing file returns zero; malformed or mismatched bindings return an error.
+/// This does not query whether the saved grant is still current on the network.
 pub fn load(path: &Path, account: &WalletAddress) -> Result<BlockHash, WalletError> {
     let mut file = match std::fs::File::open(path) {
         Ok(file) => file,
@@ -29,8 +30,10 @@ pub fn load(path: &Path, account: &WalletAddress) -> Result<BlockHash, WalletErr
     Ok(block.hash)
 }
 
-/// Caller has verified this exact handoff is confirmed. Publish the binding
-/// before releasing the pending action, so restart can finish either step.
+/// Replace the local binding with a signed handoff already confirmed by the caller.
+/// This function checks the handoff but does not establish network confirmation.
+/// Publish the binding before releasing the pending action so restart can finish
+/// either step. The parent directory must exist.
 pub fn activate(
     path: &Path,
     account: &WalletAddress,
@@ -88,7 +91,7 @@ mod tests {
             head: BlockHash::new([2; 32]),
             block_count: 1,
             representative: account.clone(),
-            brn_balance: 3,
+            brn_spent: 3,
             trst_balance: 4,
             release_sources: vec![],
         };

@@ -1,6 +1,6 @@
 //! Optional backward origin inspection. No group rules enter node validation.
 
-use super::{deserialize_block, is_block_confirmed, parse_tx_hash};
+use super::{is_block_confirmed_in, origin_history, parse_tx_hash};
 use crate::{error::RpcError, RpcState};
 use burst_ledger::BlockType;
 use burst_trst::MergerGraph;
@@ -19,45 +19,58 @@ pub(crate) async fn handle_trst_origins(
             .as_str()
             .ok_or_else(|| RpcError::InvalidRequest("origin hash required".into()))?,
     )?;
-    let root_hash = BlockHash::new(*origin.as_bytes());
-    let root = deserialize_block(&state.block_store.get_block(&root_hash)?)?;
-    if root.hash != root_hash || root.compute_hash() != root_hash {
-        return Err(RpcError::Server("origin block hash is inconsistent".into()));
-    }
-    if !matches!(root.block_type, BlockType::Burn | BlockType::Merge) {
-        return Err(RpcError::InvalidRequest(
-            "expected a burn or merge origin, not a transfer hash".into(),
-        ));
-    }
-    let trst = state.trst_engine.lock().await;
-    if (root.block_type == BlockType::Merge) != trst.merger_graph.contains_merge(&origin) {
-        return Err(RpcError::Server(
-            "origin block and merge index disagree".into(),
-        ));
-    }
-    let leaves = origin_leaves(&trst.merger_graph, origin, MAX_WALK_STEPS)?;
-    let mut origins = Vec::with_capacity(leaves.len());
-    for leaf in leaves {
-        let hash = BlockHash::new(*leaf.as_bytes());
-        let block = deserialize_block(&state.block_store.get_block(&hash)?)?;
-        if block.block_type != BlockType::Burn || block.hash != hash || block.compute_hash() != hash
-        {
-            return Err(RpcError::Server(
-                "origin history contains an invalid burn".into(),
+    let mut history = origin_history::Reader::new(state);
+    let blocks = state.block_store.clone();
+    let accounts = state.account_store.clone();
+    let engine = state.trst_engine.clone();
+    state.read_executor.run(move || {
+        let root_hash = BlockHash::new(*origin.as_bytes());
+        let root_entry = history.get(root_hash)?;
+        let root_historical = root_entry.historical;
+        let root = root_entry.block.clone();
+        if root.hash != root_hash || root.compute_hash() != root_hash {
+            return Err(RpcError::Server("origin block hash is inconsistent".into()));
+        }
+        if !matches!(root.block_type, BlockType::Burn | BlockType::Merge) {
+            return Err(RpcError::InvalidRequest(
+                "expected a burn or merge origin, not a transfer hash".into(),
             ));
         }
-        origins.push(json!({
-            "hash":leaf.to_string(), "originator":block.account.as_str(),
-            "timestamp":block.timestamp.as_secs(),
-            "confirmed":is_block_confirmed(&hash, &block.account, state),
-            "revoked":trst.merger_graph.is_origin_revoked(&leaf),
-        }));
-    }
-    // Identity inspection is not a contribution-weight or spendability quote.
-    Ok(json!({"origin":origin.to_string(), "complete":true,
-        "confirmed":is_block_confirmed(&root_hash, &root.account, state), "origins":origins}))
+        let graph = engine.blocking_lock().merger_graph.clone();
+        if (root.block_type == BlockType::Merge) != graph.contains_merge(&origin) {
+            return Err(RpcError::Server(
+                "origin block and merge index disagree".into(),
+            ));
+        }
+        let leaves = origin_leaves(&graph, origin, MAX_WALK_STEPS)?;
+        history.prefetch(leaves.iter().map(|leaf| BlockHash::new(*leaf.as_bytes())).collect())?;
+        let mut origins = Vec::with_capacity(leaves.len());
+        for leaf in leaves {
+            let hash = BlockHash::new(*leaf.as_bytes());
+            let entry = history.get(hash)?;
+            let block = &entry.block;
+            if block.block_type != BlockType::Burn || block.hash != hash || block.compute_hash() != hash
+            {
+                return Err(RpcError::Server(
+                    "origin history contains an invalid burn".into(),
+                ));
+            }
+            origins.push(json!({
+                "hash":leaf.to_string(), "originator":block.account.as_str(),
+                "timestamp":block.timestamp.as_secs(),
+                "confirmed":entry.historical || is_block_confirmed_in(&hash, &block.account, accounts.as_ref(), blocks.as_ref()),
+                "revoked":graph.is_origin_revoked(&leaf),
+            }));
+        }
+        // Identity inspection is not a contribution-weight or spendability quote.
+        Ok(json!({"origin":origin.to_string(), "complete":true,
+            "confirmed":root_historical || is_block_confirmed_in(&root_hash, &root.account, accounts.as_ref(), blocks.as_ref()), "origins":origins}))
+    }).await
 }
 
+// Walk backward to distinct burn IDs in hash order, including revoked origins.
+// The budget counts scheduled entries, including merge exits and repeated edges,
+// rather than unique leaves. Input sums and cycles are checked, not spendability.
 fn origin_leaves(
     graph: &MergerGraph,
     origin: TxHash,
@@ -86,6 +99,15 @@ fn origin_leaves(
             return Err(RpcError::Server("cyclic TRST origin graph".into()));
         }
         if let Some(merge) = graph.get_merge(&hash) {
+            let next = merge
+                .source_origins
+                .len()
+                .checked_add(1)
+                .and_then(|count| scheduled.checked_add(count))
+                .filter(|count| *count <= max_steps)
+                .ok_or_else(|| {
+                    RpcError::Server("origin inspection limit exceeded; no complete result".into())
+                })?;
             if merge.source_origins.is_empty()
                 || merge.source_origins.iter().any(|source| source.amount == 0)
                 || merge
@@ -96,15 +118,6 @@ fn origin_leaves(
             {
                 return Err(RpcError::Server("inconsistent TRST merge inputs".into()));
             }
-            let next = merge
-                .source_origins
-                .len()
-                .checked_add(1)
-                .and_then(|count| scheduled.checked_add(count))
-                .filter(|count| *count <= max_steps)
-                .ok_or_else(|| {
-                    RpcError::Server("origin inspection limit exceeded; no complete result".into())
-                })?;
             scheduled = next;
             stack.push((hash, true));
             stack.extend(
@@ -190,7 +203,14 @@ mod tests {
         merge(&mut graph, 10, &[1, 2]);
         merge(&mut graph, 11, &[10, 3]);
         merge(&mut graph, 12, &[10, 11]);
+        let snapshot = graph.clone();
         graph.apply_revocation(hash(1));
+        assert!(!snapshot.is_origin_revoked(&hash(1)));
+        assert!(graph.is_origin_revoked(&hash(1)));
+        assert_eq!(
+            origin_leaves(&snapshot, hash(12), MAX_WALK_STEPS).unwrap(),
+            vec![hash(1), hash(2), hash(3)]
+        );
         assert_eq!(
             origin_leaves(&graph, hash(12), MAX_WALK_STEPS).unwrap(),
             vec![hash(1), hash(2), hash(3)]

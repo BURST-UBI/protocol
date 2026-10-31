@@ -1,6 +1,7 @@
 //! Conservative in-process signing time, separate from diagnostic clock offsets.
-//! At least three distinct configured sources must supply fresh authenticated
-//! observations. Bounds tolerate at most one incorrect source; no host clock is set.
+//! Readings require at least three fresh authenticated source intervals. The
+//! bound assumes at most one source is incorrect, the others' intervals contain
+//! UTC, and elapsed-clock drift stays within the allowance. No host clock is set.
 
 use std::{
     sync::RwLock,
@@ -30,6 +31,9 @@ struct Observation {
     wall: SystemTime,
 }
 
+/// One observation slot per configured source. Source authentication and
+/// operator configuration belong to the NTS client; slots alone do not prove
+/// independent operators. Repeated samples replace a slot rather than add votes.
 pub struct TrustedClock {
     observations: RwLock<Vec<Option<Observation>>>,
 }
@@ -47,6 +51,7 @@ pub enum ClockError {
 }
 
 impl TrustedClock {
+    /// Allocate three to eight empty slots; no time is available until populated.
     pub fn new(source_count: usize) -> Result<Self, ClockError> {
         if !(3..=8).contains(&source_count) {
             return Err(ClockError::SourceCount);
@@ -56,6 +61,9 @@ impl TrustedClock {
         })
     }
 
+    /// Combine fresh intervals, allowing one faulty source. Samples older than
+    /// 90 seconds or with wall/monotonic divergence above 250 ms are ignored.
+    /// Reject a resulting window wider than ten seconds before outward rounding.
     pub fn reading(&self) -> Result<SigningTime, ClockError> {
         self.reading_at(Instant::now(), SystemTime::now())
     }
@@ -77,9 +85,9 @@ impl TrustedClock {
                 continue;
             }
             let elapsed_ns = elapsed.as_nanos() as i128;
-            // Allow one percent monotonic-clock drift, far wider than normal
-            // hardware error or operating-system clock discipline. The wall
-            // comparison separately detects suspend gaps and time steps.
+            // Widen each interval by one percent of elapsed monotonic time.
+            // The separate wall comparison rejects divergent elapsed readings;
+            // it cannot detect every common error in both clocks.
             let drift_ns = (elapsed_ns + 99) / 100;
             intervals.push((
                 observation.lower_ns + elapsed_ns - drift_ns,

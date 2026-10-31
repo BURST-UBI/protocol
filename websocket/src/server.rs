@@ -1,9 +1,8 @@
 //! WebSocket server implementation.
 //!
-//! Accepts WebSocket connections at `/ws` and allows clients to subscribe
-//! to real-time event topics (confirmations, account updates, governance,
-//! verification). Events are delivered via broadcast channels and filtered
-//! per-client based on subscription filters.
+//! Accepts subscriptions at `/ws` and forwards matching broadcast events.
+//! Delivery is transient: lag drops events without a client gap notification.
+//! See the crate documentation for which topics the node actually publishes.
 
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
@@ -21,101 +20,7 @@ use crate::subscriptions::{
     ClientMessage, ClientSubscriptions, ServerMessage, SubscriptionEvent, SubscriptionTopic,
 };
 
-/// Shared state for the WebSocket server, holding broadcast channels
-/// for each event topic.
-pub struct WsState {
-    /// Broadcast channel for confirmation events.
-    pub confirmation_tx: broadcast::Sender<String>,
-    /// Broadcast channel for account update events.
-    pub account_update_tx: broadcast::Sender<String>,
-    /// Broadcast channel for governance events.
-    pub governance_tx: broadcast::Sender<String>,
-    /// Broadcast channel for verification events.
-    pub verification_tx: broadcast::Sender<String>,
-}
-
-impl WsState {
-    /// Create a new `WsState` with the given channel capacity for each topic.
-    pub fn new(channel_capacity: usize) -> Self {
-        let (confirmation_tx, _) = broadcast::channel(channel_capacity);
-        let (account_update_tx, _) = broadcast::channel(channel_capacity);
-        let (governance_tx, _) = broadcast::channel(channel_capacity);
-        let (verification_tx, _) = broadcast::channel(channel_capacity);
-
-        Self {
-            confirmation_tx,
-            account_update_tx,
-            governance_tx,
-            verification_tx,
-        }
-    }
-
-    /// Get the broadcast sender for a given topic.
-    pub fn sender_for(&self, topic: &SubscriptionTopic) -> &broadcast::Sender<String> {
-        match topic {
-            SubscriptionTopic::Confirmation => &self.confirmation_tx,
-            SubscriptionTopic::AccountUpdate => &self.account_update_tx,
-            SubscriptionTopic::Governance => &self.governance_tx,
-            SubscriptionTopic::Verification => &self.verification_tx,
-        }
-    }
-
-    /// Publish a block confirmation event.
-    pub fn publish_confirmation(&self, account: &str, block_hash: &str, amount: &str) {
-        let event = serde_json::json!({
-            "topic": "confirmation",
-            "data": {
-                "account": account,
-                "block_hash": block_hash,
-                "amount": amount,
-            },
-            "timestamp": unix_timestamp_secs(),
-        });
-        let _ = self.confirmation_tx.send(event.to_string());
-    }
-
-    /// Publish an account update event.
-    pub fn publish_account_update(&self, account: &str, balance: &str, change_type: &str) {
-        let event = serde_json::json!({
-            "topic": "account_update",
-            "data": {
-                "account": account,
-                "balance": balance,
-                "change_type": change_type,
-            },
-            "timestamp": unix_timestamp_secs(),
-        });
-        let _ = self.account_update_tx.send(event.to_string());
-    }
-
-    /// Publish a governance event.
-    pub fn publish_governance(&self, event_type: &str, proposal_id: &str, account: &str) {
-        let event = serde_json::json!({
-            "topic": "governance",
-            "data": {
-                "event_type": event_type,
-                "proposal_id": proposal_id,
-                "account": account,
-            },
-            "timestamp": unix_timestamp_secs(),
-        });
-        let _ = self.governance_tx.send(event.to_string());
-    }
-
-    /// Publish a verification event.
-    pub fn publish_verification(&self, event_type: &str, subject: &str, account: &str) {
-        let event = serde_json::json!({
-            "topic": "verification",
-            "data": {
-                "event_type": event_type,
-                "subject": subject,
-                "account": account,
-            },
-            "timestamp": unix_timestamp_secs(),
-        });
-        let _ = self.verification_tx.send(event.to_string());
-    }
-}
+pub use crate::state::WsState;
 
 /// The WebSocket server, configured with a port and shared state.
 pub struct WebSocketServer {
@@ -128,6 +33,7 @@ struct Sessions {
     events: Arc<WsState>,
     stopping: watch::Receiver<bool>,
     active: watch::Sender<()>,
+    slots: Arc<tokio::sync::Semaphore>,
 }
 
 impl WebSocketServer {
@@ -162,6 +68,7 @@ impl WebSocketServer {
             events: self.state.clone(),
             stopping,
             active,
+            slots: Arc::new(tokio::sync::Semaphore::new(64)),
         });
         let app = Router::new()
             .route("/ws", get(ws_handler))
@@ -186,11 +93,15 @@ async fn ws_handler(
     ws: WebSocketUpgrade,
     State(sessions): State<Arc<Sessions>>,
 ) -> impl IntoResponse {
+    let Ok(permit) = sessions.slots.clone().try_acquire_owned() else {
+        return (axum::http::StatusCode::SERVICE_UNAVAILABLE, "WebSocket capacity reached").into_response();
+    };
     let active = sessions.active.subscribe();
-    ws.on_upgrade(move |socket| async move {
+    ws.max_message_size(64 * 1024).max_frame_size(64 * 1024).on_upgrade(move |socket| async move {
+        let _permit = permit;
         let _active = active;
         handle_socket(socket, sessions.events.clone(), sessions.stopping.clone()).await;
-    })
+    }).into_response()
 }
 
 async fn handle_socket(
@@ -200,7 +111,6 @@ async fn handle_socket(
 ) {
     let (ws_sender, mut ws_receiver) = socket.split();
 
-    // Wrap the sender in an Arc<Mutex> so forwarder tasks can share it.
     let ws_sender = Arc::new(tokio::sync::Mutex::new(ws_sender));
 
     let mut client_subs = ClientSubscriptions::new();
@@ -252,7 +162,7 @@ async fn handle_socket(
         () = receive => {},
     }
 
-    // Client disconnected — abort all forwarder tasks.
+    // Disconnect and server shutdown both cancel and join topic forwarders.
     for (topic, handle) in forwarder_handles.drain() {
         debug!("Aborting forwarder for topic: {}", topic);
         handle.abort();
@@ -311,7 +221,7 @@ async fn handle_text_message(
             });
             forwarder_handles.insert(topic.clone(), handle);
 
-            // Send ack.
+            // The forwarder is already running, so an event can precede this ack.
             let ack = ServerMessage::Ack {
                 action: "subscribe".to_string(),
                 topic: topic.clone(),
@@ -357,10 +267,10 @@ async fn handle_text_message(
     }
 }
 
-/// Forwarder task: reads events from a broadcast receiver and sends matching
-/// ones to the WebSocket client.
+/// Forward matching events as bare SubscriptionEvent JSON, without a `type` tag.
+/// Lag is logged locally; the client receives no gap notification.
 async fn forward_events(
-    mut rx: broadcast::Receiver<String>,
+    mut rx: broadcast::Receiver<Arc<SubscriptionEvent>>,
     ws_sender: Arc<tokio::sync::Mutex<futures_util::stream::SplitSink<WebSocket, Message>>>,
     topic: SubscriptionTopic,
     filter: Option<crate::subscriptions::SubscriptionFilter>,
@@ -371,14 +281,15 @@ async fn forward_events(
 
     loop {
         match rx.recv().await {
-            Ok(event_str) => {
-                // Parse the event to check the filter.
-                let should_send = match serde_json::from_str::<SubscriptionEvent>(&event_str) {
-                    Ok(event) => matcher.matches_filter(&topic, &event),
-                    Err(_) => true, // If we can't parse, send it anyway.
-                };
-
-                if should_send {
+            Ok(event) => {
+                if matcher.matches_filter(&topic, &event) {
+                    let event_str = match serde_json::to_string(event.as_ref()) {
+                        Ok(encoded) => encoded,
+                        Err(error) => {
+                            warn!(%error, "cannot serialize subscription event");
+                            continue;
+                        }
+                    };
                     let mut sender = ws_sender.lock().await;
                     if sender.send(Message::Text(event_str)).await.is_err() {
                         break;
@@ -396,19 +307,50 @@ async fn forward_events(
     }
 }
 
-/// Helper to get the current UNIX timestamp in seconds.
-fn unix_timestamp_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
     use tokio_tungstenite::{connect_async, tungstenite::Message as ClientFrame};
+
+    #[tokio::test]
+    async fn connection_capacity_recovers_and_oversized_messages_disconnect() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/ws", listener.local_addr().unwrap());
+        let (stop, stopping) = watch::channel(false);
+        let (active, initial) = watch::channel(());
+        drop(initial);
+        let slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let sessions = Arc::new(Sessions {
+            events: Arc::new(WsState::new(8)), stopping: stopping.clone(), active,
+            slots: slots.clone(),
+        });
+        let app = Router::new().route("/ws", get(ws_handler)).with_state(sessions);
+        let worker = tokio::spawn(async move {
+            let mut stopping = stopping;
+            axum::serve(listener, app).with_graceful_shutdown(async move {
+                let _ = stopping.wait_for(|value| *value).await;
+            }).await.unwrap();
+        });
+        let (mut first, _) = connect_async(&url).await.unwrap();
+        let rejected = connect_async(&url).await.unwrap_err();
+        match rejected {
+            tokio_tungstenite::tungstenite::Error::Http(response) => assert_eq!(response.status().as_u16(), 503),
+            error => panic!("unexpected admission failure: {error}"),
+        }
+        first.close(None).await.unwrap();
+        drop(first);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while slots.available_permits() == 0 { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        let (mut second, _) = connect_async(&url).await.unwrap();
+        second.send(ClientFrame::Text("x".repeat(64 * 1024 + 1).into())).await.unwrap();
+        let reply = tokio::time::timeout(Duration::from_secs(3), second.next()).await.unwrap();
+        assert!(matches!(reply, None | Some(Err(_)) | Some(Ok(ClientFrame::Close(_)))));
+        drop(second);
+        stop.send_replace(true);
+        tokio::time::timeout(Duration::from_secs(3), worker).await.unwrap().unwrap();
+    }
 
     #[test]
     fn external_event_access_requires_explicit_opt_in() {

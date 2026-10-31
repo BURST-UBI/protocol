@@ -1,4 +1,6 @@
 //! Post-restart liveness probe for disposable Dev or explicitly selected private Test.
+//! The runner restarts nodes; this probe submits a new payment and checks confirmation.
+//! `--protocol-epoch` instead submits a marker or successor and checks its account head.
 //! Uses public fixture keys; never use for networks carrying real assets.
 use burst_wallet_core::{NodeClient, Wallet};
 use serde_json::json;
@@ -121,7 +123,7 @@ async fn protocol_epoch(mode: &str, url: &str) -> Result<(), Box<dyn std::error:
             .ok_or("missing signed predecessor")?,
     )?;
     assert_eq!(previous.account, account);
-    assert_eq!((previous.brn_balance, previous.trst_balance), (0, 0));
+    assert_eq!((previous.brn_spent, previous.trst_balance), (0, 0));
     let kind = match mode {
         "marker" => {
             assert_eq!(previous.block_type, BlockType::Open);

@@ -1,4 +1,4 @@
-//! Flood-based message broadcasting (Nano-style).
+//! Best-effort queueing for all eligible peers or a random subset.
 //!
 //! The [`Broadcaster`] does not write directly to TCP streams. Instead it
 //! pushes `(peer_id, message_bytes)` tuples onto an `mpsc` channel that the
@@ -12,16 +12,16 @@ use tokio::sync::mpsc;
 #[derive(Clone, Debug, Default)]
 pub struct BroadcastResult {
     /// Number of peers the message was successfully queued for.
-    pub sent: usize,
+    pub queued: usize,
     /// Number of peers for which queueing failed (channel full / closed).
     pub failed: usize,
 }
 
 /// Queue-based broadcaster.
 ///
-/// Each call places one `(peer_id, message_bytes)` entry per target peer onto
-/// the outbound channel. The connection layer is responsible for actually
-/// writing to the wire.
+/// Attempts one nonblocking channel send per selected peer entry. A full or
+/// closed channel increments the failure count; this helper does not retry.
+/// Queue acceptance does not establish wire delivery or peer acknowledgment.
 #[derive(Clone)]
 pub struct Broadcaster {
     outbound_tx: mpsc::Sender<(String, Vec<u8>)>,
@@ -33,16 +33,14 @@ impl Broadcaster {
         Self { outbound_tx }
     }
 
-    /// Broadcast a serialised message to **all** connected peers.
-    ///
-    /// Uses flood-based propagation: every connected peer receives the message.
+    /// Attempt queueing for every connected, non-banned peer entry.
     pub async fn broadcast_to_all(&self, message: &[u8], peers: &[PeerState]) -> BroadcastResult {
         let mut result = BroadcastResult::default();
 
         for peer in peers.iter().filter(|p| p.connected && !p.banned) {
             let peer_id = peer.peer_id.clone();
             match self.outbound_tx.try_send((peer_id, message.to_vec())) {
-                Ok(()) => result.sent += 1,
+                Ok(()) => result.queued += 1,
                 Err(_) => result.failed += 1,
             }
         }
@@ -73,7 +71,7 @@ impl Broadcaster {
             let peer = eligible[i];
             let peer_id = peer.peer_id.clone();
             match self.outbound_tx.try_send((peer_id, message.to_vec())) {
-                Ok(()) => result.sent += 1,
+                Ok(()) => result.queued += 1,
                 Err(_) => result.failed += 1,
             }
         }
@@ -81,50 +79,27 @@ impl Broadcaster {
         result
     }
 
-    /// Broadcast using sqrt-fanout: select `max(sqrt(n), min_fanout)` of the
-    /// highest-scoring connected peers. Reduces O(n) flood to O(sqrt(n)) while
-    /// maintaining reliable propagation through high-reputation nodes.
+    /// Sample max(ceil(sqrt(eligible)), min_fanout), capped by eligible entries.
+    /// Selection scans and shuffles in O(n) time with O(n) temporary storage.
+    /// With a fixed minimum, message copies grow as O(sqrt(n)); their byte cost
+    /// also depends on message size.
     pub async fn broadcast_with_fanout(
         &self,
         message: &[u8],
         peers: &[PeerState],
         min_fanout: usize,
     ) -> BroadcastResult {
-        let mut eligible: Vec<&PeerState> =
-            peers.iter().filter(|p| p.connected && !p.banned).collect();
-
-        if eligible.is_empty() {
-            return BroadcastResult::default();
-        }
-
-        // Sort by score descending — prefer high-reputation peers for propagation
-        eligible.sort_unstable_by_key(|p| std::cmp::Reverse(p.score));
-
-        let fanout = (eligible.len() as f64).sqrt().ceil() as usize;
-        let count = fanout.max(min_fanout).min(eligible.len());
-
-        let mut result = BroadcastResult::default();
-
-        for peer in eligible.into_iter().take(count) {
-            let peer_id = peer.peer_id.clone();
-            match self.outbound_tx.try_send((peer_id, message.to_vec())) {
-                Ok(()) => result.sent += 1,
-                Err(_) => result.failed += 1,
-            }
-        }
-
-        result
+        let eligible = peers.iter().filter(|p| p.connected && !p.banned).count();
+        let count = ((eligible as f64).sqrt().ceil() as usize).max(min_fanout);
+        self.broadcast_to_subset(message, peers, count).await
     }
-}
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burst_messages::PeerAddress;
+    use burst_types::PeerAddress;
 
     fn make_peer(ip: &str, port: u16, connected: bool) -> PeerState {
         PeerState {
@@ -159,7 +134,7 @@ mod tests {
                 1 => broadcaster.broadcast_to_subset(b"hello", &peers, 2).await,
                 _ => broadcaster.broadcast_with_fanout(b"hello", &peers, 2).await,
             };
-            assert_eq!(result.sent, 2);
+            assert_eq!(result.queued, 2);
             let mut ids = vec![rx.recv().await.unwrap().0, rx.recv().await.unwrap().0];
             ids.sort();
             assert_eq!(ids, ["node-a", "node-b"]);
@@ -167,7 +142,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn broadcast_to_all_sends_to_connected() {
+    async fn broadcast_to_all_queues_for_connected() {
         let (tx, mut rx) = mpsc::channel(64);
         let broadcaster = Broadcaster::new(tx);
 
@@ -178,7 +153,7 @@ mod tests {
         ];
 
         let result = broadcaster.broadcast_to_all(b"hello", &peers).await;
-        assert_eq!(result.sent, 2);
+        assert_eq!(result.queued, 2);
         assert_eq!(result.failed, 0);
 
         let (id1, msg1) = rx.recv().await.unwrap();
@@ -199,7 +174,7 @@ mod tests {
             .collect();
 
         let result = broadcaster.broadcast_to_subset(b"vote", &peers, 3).await;
-        assert_eq!(result.sent, 3);
+        assert_eq!(result.queued, 3);
         assert_eq!(result.failed, 0);
 
         let mut received = Vec::new();
@@ -220,7 +195,7 @@ mod tests {
         let peers = vec![banned_peer, make_peer("1.0.0.2", 2, true)];
 
         let result = broadcaster.broadcast_to_all(b"block", &peers).await;
-        assert_eq!(result.sent, 1);
+        assert_eq!(result.queued, 1);
 
         let (id, _) = rx.recv().await.unwrap();
         assert_eq!(id, "1.0.0.2:2");
@@ -241,16 +216,16 @@ mod tests {
 
         let result = broadcaster.broadcast_with_fanout(b"block", &peers, 2).await;
         // sqrt(16) = 4, min_fanout = 2, so fanout = max(4, 2) = 4
-        assert_eq!(result.sent, 4);
+        assert_eq!(result.queued, 4);
 
         let mut received = Vec::new();
         while let Ok(item) = rx.try_recv() {
             received.push(item.0);
         }
         assert_eq!(received.len(), 4);
-        // Should prefer highest-scoring peers (IPs .15, .14, .13, .12)
-        assert!(received.contains(&"10.0.0.15:7075".to_string()));
-        assert!(received.contains(&"10.0.0.14:7075".to_string()));
+        let unique: std::collections::HashSet<_> = received.iter().collect();
+        assert_eq!(unique.len(), 4);
+        assert!(received.iter().all(|id| peers.iter().any(|peer| &peer.peer_id == id)));
     }
 
     #[tokio::test]
@@ -264,7 +239,7 @@ mod tests {
             .collect();
 
         let result = broadcaster.broadcast_with_fanout(b"block", &peers, 3).await;
-        assert_eq!(result.sent, 3);
+        assert_eq!(result.queued, 3);
 
         let mut received = Vec::new();
         while let Ok(item) = rx.try_recv() {
@@ -285,7 +260,7 @@ mod tests {
         ];
 
         let result = broadcaster.broadcast_to_all(b"data", &peers).await;
-        assert_eq!(result.sent + result.failed, 3);
+        assert_eq!(result.queued + result.failed, 3);
         assert!(result.failed > 0);
     }
 }

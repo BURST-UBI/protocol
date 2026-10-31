@@ -1,0 +1,144 @@
+# Final audit fixes — 2026-10-31
+
+No publication. Baseline: local review 76d408384a31d2bcc4f0bc1d0f970cab28951a43.
+User authorized resolving A1–A5 after intent review. Existing unrelated edits stay.
+
+| Changed dependency | Affected check | Previous evidence | Action / reason |
+|---|---|---|---|
+| Node recovery future, catalogue visibility, private test helper gates | Production node/RPC/daemon/wallet compilation; strict warning qualification | /tmp/burst-structure-20261030/boundary-receipt4.json | Compile changed inputs first; old pass does not qualify edits. Keep recovery boxing and cancellation. |
+| GraphRecord shared edge helpers and consumers | TRST record identity/ordering and store graph tests | Earlier structure checks | Run focused regression; edge slot must never change its key. Full/delta/replay algorithms remain separate. |
+| Test-only helper visibility | Node unit test compilation | Previous node library compilation exceeded desktop budget | Validation host required; do not repeat local full node libtest build. |
+| Heed lifetime/docs/atomic API spelling | Dependency compilation under pinned nightly | Saved warnings in boundary-check4.log | No database semantics changed; strict check required. |
+| Genesis and RPC descriptions | Source review | Historical fixture bytes retained | No standalone runtime rerun needed for descriptions. |
+| Shared RPC contract and browser/app boundaries | Prior bounded coverage only | Prior contract/browser receipts | No protocol wire change in this batch; no claim these qualify changed daemon release binaries. |
+
+## Completed handoff
+
+A1–A5 are implemented and the affected focused checks pass. Nothing was published.
+The final node test executable and its dependencies compiled with `-Dwarnings` on
+VM1; all 18 selected runtime tests passed. The local TRST graph run passed 67 tests
+(2 explicitly ignored). This is 85 focused tests, not a full protocol suite or
+end-to-end release qualification. No test assertions were removed or weakened.
+
+| Latest evidence | Proven scope | Invalidation / next action |
+|---|---|---|
+| Local boundary-receipt9.json | Strict production node/RPC/daemon/wallet compile before final cfg(test)-only cleanup | Superseded for final node inputs by host strict build 3; retain historical result |
+| Local graph-receipt.json + graph-reuse-review.json | 67 TRST graph tests including slot/key identity | All 22 subsequently changed declared files are in unrelated node crate; dependency-tree/hash review confirms TRST inputs unchanged. Broad original receipt is not claimed to match current node inputs |
+| VM1 final-audit-20261031/build-receipt3.json | Final node unit-test executable and dependencies compile under CI -Dwarnings (4m18s) | Final 1057 input files match local source; changed build inputs require review |
+| VM1 final-audit-20261031/focused-receipt.json | 18 graph journal/delta, catalogue, startup and private recovery checks | Exact compiled artifact, driver and fixture assertions; full E2E remains separate |
+| VM1 final-audit-20261031/artifact-preservation.json | Exact test executable preserved as node-tests with SHA256 | Reuse matching executable; do not rebuild to rerun unchanged questions |
+
+Evidence is archived at
+`/home/nitesh/.local/state/burst/audits/final-fixes-20261031`.
+The Azure evidence archive was hash-verified locally against
+`9ed9b7e398cd1a5146d9a0f281b1f5d9b6829b2c1cfbb1799fa7e5f6cc74a624`.
+Remote evidence/source backups and preserved executable remain at
+`/mnt/burst-validation-data/final-audit-20261031` on VM1. Its original daemon was
+not replaced. Temporary audit SSH authorization was removed after evidence capture;
+VM1 is confirmed deallocated, matching its original state.
+
+The two boxed recovery boundaries retain allocation/cancellation semantics and
+now use dyn Future + Send. Full/delta/replay write algorithms remain separate.
+Catalogue proof fields remain private. Historical genesis bytes remain unchanged.
+The shutdown convenience wrapper has test callers and is retained under cfg(test).
+Only wrappers proven unused even in the node test build were removed; checked
+implementations and test assertions remain. No need for external-user migration
+was assumed, as the owner confirmed there are no users yet.
+
+Next independent task: private full end-to-end qualification of the selected
+protocol/wallet/dashboard candidate. These development-profile results do not
+qualify a distributable release binary, and no release gate is opened here.
+
+## Implementation and validation history
+
+
+Compile attempt 5 failed (receipt boundary-receipt5.json): the edge-helper move
+missed two undo normalization callers; the ScratchSequenceBuilder len gate also
+matched live ScratchSequence len. Both are corrected without changing checks.
+The Send-depth diagnostic moved to checkpoint installation, identifying the shared
+recover_metadata stage as the required erased-future boundary. Its existing box
+now provides that boundary; callers no longer add a redundant box. Next check
+answers these concrete compiler findings, not an unchanged acceptance retry.
+
+
+Attempt 6 production compilation passed (boundary-receipt6.json), with one unused
+reexport and a remaining Send-depth warning in snapshot transfer. The diagnostic
+traces through recover_records_from_peers_until, whose existing Pin<Box<impl
+Future>> still exposes the concrete nested future. Change that existing boundary
+to dyn Future + Send as well; no additional allocation or recursion-limit change.
+The next production check must establish that no Rust warnings remain.
+
+
+Attempt 7 passed without Rust warnings in the production packages. Cargo emits
+only unused workspace package metadata notices, distinct from Rust lints. Latest
+receipt: boundary-receipt7.json. Next: explicit RUSTFLAGS=-Dwarnings qualification
+of the same inputs (one attempt budget), then focused graph regressions. Node
+unit-test compilation must use a host with the established 6GiB job cap; the
+existing Azure Linux hosts are currently deallocated at 4GiB sizes, so host
+capacity must be resolved before that stage. No test pass is inferred here.
+
+
+Strict production compilation passed (boundary-receipt8.json, 1m48s); all selected
+packages and their compiled dependencies accepted RUSTFLAGS=-Dwarnings. Final
+comment/indentation corrections follow; no algorithm changes. Graph-record unit
+regressions are the next unresolved assertion. Azure resize attempts for D2as_v5
+and D2s_v5 both failed regional capacity checks before boot; SKU inventory is being
+queried before another attempt. No build was started remotely.
+
+
+Capacity correction: Azure resize-options reports the existing Standard_B2s_v2
+as 8192MiB/2CPU, not 4GiB. The two attempted v5 resizes failed without changing
+its size. Start the existing VM unchanged; it already fits the established 6GiB
+job cap. Preserve target/source paths and scheduled shutdown. SKU enumeration
+is not a reason to keep retrying sizes.
+
+
+Graph record regressions passed: 67 passed, 2 ignored, 195 filtered
+(graph-receipt.json). Ignored scaling checks were not run or counted. This includes
+the new durable-slot/storage-key roundtrip and existing revision/undo proofs.
+Next: refresh strict production receipt for the final comment/indentation edits,
+then compile node tests on VM1 and run focused graph/recovery checks there.
+
+
+Node test compilation found a correction to the earlier caller audit:
+recover_metadata_until_shutdown has three unit-test callers in publication_crash.rs.
+Retain it and its reexport under cfg(test), forwarding to the unchanged durable
+recovery implementation. AsyncWriteExt also belongs in connection_registry's
+unit-test module. No production behavior change is needed for either correction.
+The failed compilation is preserved; do not count it as a passing test build.
+
+
+VM1 first build failed with 13 diagnostics from two missing test dependencies
+(the shutdown wrapper and socket-write trait); peak memory 3.61GiB, not a resource
+failure. Build receipt/log preserved. Eight unused test imports were also resolved.
+Second compile uses build-plan2.json and the first failed receipt, same profile,
+source path and target. Only changed files were replaced; prior copies retained.
+
+
+The second node compile passed type checking far enough to expose the remaining
+test-only warning inventory: ten forwarding conveniences and two aliases have no
+callers even in tests; two explicit drop calls operate on Copy closures. Remove
+these verified unused conveniences (checked/view-based algorithms remain), aliases
+and no-op drops. This is test-build cleanup only: each removed function was already
+cfg(test) in the passing production candidate. No test assertion is removed.
+
+
+Node test build 2 passed in 1m32s (build-receipt2.json), with 13 warning groups
+identified above. Build 3 applies the CI -Dwarnings policy to final test sources
+and all compiled dependencies; same validation profile, source and target, same
+6GiB/one CPU/zero swap/20-minute cap. Prepared from the latest passing receipt,
+not an earlier failed branch. Focused runtime tests wait for this final artifact.
+
+
+Runtime selection: 18 exact tests (seven graph journal/delta cases, four catalogue
+lookup/corruption cases, four startup lifecycle cases, three recovery cancellation/
+concurrent-write cases). The unchanged 180229-row catalogue memory-headroom test
+is deliberately excluded: visibility edits do not justify another memory/scaling
+qualification. No broader or release-binary claim follows from this selection.
+
+
+Strict node build 3 passed (4m18s), with no Rust warnings/errors. Final remote
+manifest matches all 1057 local declared input files. Focused runtime stage is
+active in burst-final-audit-focused-20261031.service, after verifying build receipt,
+pass outcome, exit code and all 18 exact test names. Same resource caps; temporary
+fixtures use the data disk. No daemon rebuild or broad end-to-end run was started.

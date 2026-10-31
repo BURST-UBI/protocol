@@ -194,7 +194,7 @@ fn proposal(owner: u8, at: u64, large: bool) -> (StateBlock, EncodedContent) {
         payment_epoch: BlockHash::new([2; 32]),
         block_count: 1,
         representative: burst_crypto::derive_address(&keys.public),
-        brn_balance: 0,
+        brn_spent: 0,
         trst_balance: 0,
         release_sources: vec![],
     };
@@ -225,10 +225,10 @@ fn staging_enforces_global_owner_and_lifetime_budgets() {
     assert!(transfers.offer(&third, content.bytes()).is_err());
     transfers.remove(block.hash);
     transfers.offer(&third, content.bytes()).unwrap();
-    let original = transfers.entries.lock().unwrap()[&third.hash].created;
+    let original = transfers.entries.lock().unwrap()[&third.hash].created_at;
     transfers.offer(&third, content.bytes()).unwrap();
     assert_eq!(
-        transfers.entries.lock().unwrap()[&third.hash].created,
+        transfers.entries.lock().unwrap()[&third.hash].created_at,
         original
     );
 }

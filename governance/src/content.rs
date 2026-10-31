@@ -7,7 +7,7 @@ use bincode::Options;
 use burst_types::{BlockHash, TxHash};
 use serde::{Deserialize, Serialize};
 
-/// Decision 21.1 counts Unicode characters, not UTF-8 bytes.
+/// Amendment body limit in Unicode scalar values, not UTF-8 bytes or graphemes.
 pub const MAX_AMENDMENT_CHARS: usize = 50_000;
 /// Keep ordinary nodes gated until live submission, catch-up and recovery pass.
 pub const FULL_CONTENT_ENABLED: bool = false;
@@ -30,6 +30,15 @@ pub enum ContentError {
 
 impl ProposalContent {
     pub fn validate_content(&self) -> Result<(), ContentError> {
+        match self {
+            Self::ParameterChange { param, new_value }
+            | Self::Emergency { param, new_value, .. }
+                if *new_value > param.maximum_value() =>
+            {
+                return Err(ContentError::Invalid("parameter value exceeds storage width"));
+            }
+            _ => {}
+        }
         if let Self::ConstitutionalAmendment { text, .. } = self {
             if text.chars().take(MAX_AMENDMENT_CHARS + 1).count() > MAX_AMENDMENT_CHARS {
                 return Err(ContentError::Invalid("amendment exceeds 50000 characters"));

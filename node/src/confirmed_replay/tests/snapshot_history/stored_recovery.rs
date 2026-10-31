@@ -34,7 +34,7 @@ fn recovery_reads_selection_history_once_and_keeps_beacon_and_trailing_guards() 
             self.reads.set(self.reads.get() + 1);
             self.rows.read_selection(position)
         }
-        fn read_all(
+        fn iter_selections(
             &self,
         ) -> impl Iterator<Item = Result<Cow<'_, CertifiedCheckpoint>, ReplayError>> {
             (0..self.len())
@@ -398,7 +398,7 @@ pub(super) fn assert_stored_chain(fixture: &Fixture, source: &LmdbStore, start: 
             );
         }
     }
-    for selection in recovered.selections.read_all() {
+    for selection in recovered.selections.iter_selections() {
         let selection = selection.unwrap();
         assert!(selection.replayed().history_hashes().is_err());
     }

@@ -29,6 +29,9 @@ pub(crate) fn key(context: BlockHash) -> String {
     format!("verification_activation/v1/{context}")
 }
 
+/// Enforce an existing activation's target, context and exclusive deadline.
+/// Missing activation imposes no deadline here; committee authorization and
+/// the lower timestamp bound are checked separately.
 pub(crate) fn validate_vote(ledger: &impl Ledger, block: &StateBlock) -> Result<(), String> {
     let context = BlockHash::new(*block.origin.as_bytes());
     let Some(bytes) = ledger
@@ -41,7 +44,7 @@ pub(crate) fn validate_vote(ledger: &impl Ledger, block: &StateBlock) -> Result<
     };
     let activation = decode(&bytes)?;
     if activation.context != context
-        || crate::ledger_bridge::extract_receiver_from_link(&block.link).as_ref()
+        || crate::block_economics::wallet_from_link(&block.link).as_ref()
             != Some(&activation.target)
     {
         return Err("invalid certified activation metadata".into());

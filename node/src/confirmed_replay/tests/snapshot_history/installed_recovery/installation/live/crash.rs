@@ -51,7 +51,7 @@ async fn compact_live_crash_child() {
     node.block_processor.lock().await.test_time = Some(Arc::new(AtomicU64::new(now)));
     node.verification_fixture_clock = Some(Arc::new(|| None));
     node.checkpoint_publication_probe = Some(pause);
-    let result = node.start().await;
+    let result = node.start_with_services(burst_daemon::start_public_services).await;
     panic!(
         "compact crash child exited before its boundary: {result:?}; {:?}",
         node.shutdown.failure()
@@ -152,7 +152,7 @@ async fn compact_live_second_successor_crashes_recover_and_admit_payments() {
         assert!(
             crate::checkpoint_store::chain::load(&local, NetworkId::Dev, &prepared.params).is_err()
         );
-        let service = Service::start(source.store.clone(), local.clone(), 0).await;
+        let service = WitnessService::start(source.store.clone(), local.clone(), 0).await;
         let recovered = installed::recover_metadata_from_peers(
             local.clone(),
             NetworkId::Dev,

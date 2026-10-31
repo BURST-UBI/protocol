@@ -8,6 +8,9 @@ pub struct MergeSelection {
     pub status: String,
 }
 
+/// Compare 2–256 selected batches with the supplied current list. Reject duplicate
+/// IDs, changed fields, mixed active/expired status and invalid amount sums.
+/// The caller supplies the list; this does not authenticate ownership or freshness.
 pub fn reviewed_merge_sources(
     batches: &[serde_json::Value],
     selected: &[MergeSelection],
@@ -23,6 +26,14 @@ pub fn reviewed_merge_sources(
             "Combine active or expired batches separately. Revoked TRST cannot be combined.".into(),
         );
     }
+    // Keep duplicate IDs distinguishable from a unique match without rescanning
+    // the node's entire response for each selected batch.
+    let mut by_id = std::collections::HashMap::new();
+    for batch in batches {
+        if let Some(id) = batch["id"].as_str() {
+            by_id.entry(id).and_modify(|value| *value = None).or_insert(Some(batch));
+        }
+    }
     let mut seen = std::collections::HashSet::new();
     let mut total = 0u128;
     selected
@@ -34,14 +45,9 @@ pub fn reviewed_merge_sources(
             if !seen.insert(id) {
                 return Err("A batch was selected more than once.".into());
             }
-            let matches = batches
-                .iter()
-                .filter(|batch| batch["id"].as_str() == Some(selection.id.as_str()))
-                .collect::<Vec<_>>();
-            if matches.len() != 1 {
-                return Err("Selected batches changed. Refresh and review again.".into());
-            }
-            let current: MergeSelection = serde_json::from_value(matches[0].clone())
+            let current = by_id.get(selection.id.as_str()).copied().flatten()
+                .ok_or("Selected batches changed. Refresh and review again.")?;
+            let current: MergeSelection = serde_json::from_value(current.clone())
                 .map_err(|_| "The node returned an invalid batch.".to_string())?;
             if current != *selection {
                 return Err(
@@ -63,6 +69,9 @@ pub fn reviewed_merge_sources(
         .collect()
 }
 
+/// Sum active batches by origin and choose one that covers the whole transfer.
+/// Without an explicit origin, choose the first sufficient origin in string order,
+/// not expiry order. Different origins are never combined implicitly.
 pub fn select_transfer_origin(
     batches: &[serde_json::Value],
     amount: u128,
@@ -98,6 +107,28 @@ pub fn select_transfer_origin(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn merge_review_rejects_duplicate_changed_and_overflowing_batches() {
+        let selected: Vec<MergeSelection> = (1..=2).map(|byte| MergeSelection {
+            id: TxHash::new([byte; 32]).to_string(), amount: "1".into(),
+            expiry_at: Some(100), status: "active".into(),
+        }).collect();
+        let batches: Vec<_> = selected.iter().map(|s| serde_json::to_value(s).unwrap()).collect();
+        assert_eq!(reviewed_merge_sources(&batches, &selected).unwrap().len(), 2);
+        let mut duplicate = batches.clone();
+        duplicate.push(batches[0].clone());
+        assert!(reviewed_merge_sources(&duplicate, &selected).is_err());
+        let mut changed = batches.clone();
+        changed[0]["amount"] = serde_json::json!("2");
+        assert!(reviewed_merge_sources(&changed, &selected).is_err());
+        assert!(reviewed_merge_sources(&batches[1..], &selected).is_err());
+        assert!(reviewed_merge_sources(&batches, &[selected[0].clone(), selected[0].clone()]).is_err());
+        let mut overflow = selected;
+        overflow[0].amount = u128::MAX.to_string();
+        let batches: Vec<_> = overflow.iter().map(|s| serde_json::to_value(s).unwrap()).collect();
+        assert!(reviewed_merge_sources(&batches, &overflow).is_err());
+    }
+
     #[test]
     fn offline_trst_selection_preserves_active_origin_and_rejects_implicit_merge() {
         let origin = TxHash::new([1; 32]);

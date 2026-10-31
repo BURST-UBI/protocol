@@ -8,13 +8,18 @@ use burst_types::{NetworkId, ProtocolParams};
 
 mod caches;
 mod current;
-pub(crate) use current::recover_current_tip_with_cache;
+pub(crate) use current::{recover_current_tip_with_cache, recover_current_tip_until_shutdown};
 mod changes;
 mod economics;
 mod projection_cache;
 pub(crate) use projection_cache::{CommittedProjection, ProjectionCache};
 mod journals;
 mod metadata;
+#[cfg(test)]
+pub(crate) use metadata::recover_metadata_until_shutdown;
+pub(crate) use metadata::OwnedRetirement;
+#[cfg(test)]
+pub(crate) use metadata::{SignerRecord, PaymentPromise, BodyOrigin};
 mod order;
 mod pages;
 #[cfg(test)]
@@ -25,16 +30,22 @@ pub(in crate::confirmed_replay) mod publication;
 mod recovery;
 mod selection_history;
 pub use selection_history::SelectionHistory;
+pub(crate) use selection_history::SelectionRefresh;
 mod retained;
+pub(crate) use retained::{BodyObservations, BodyObservationPages};
 mod runtime;
 pub use changes::ReplayedEconomicChange;
 pub use metadata::{
     recover_metadata_from_peers, PreparedCompactInstallation, RecoveredIndexProjection,
     RecoveredInstalledMetadata, RecoveredUndoProjection,
+    RecoveredTrstReferences,
 };
-pub(crate) use metadata::{recover_metadata_retaining_progress, CompactPreparation};
+pub(crate) use metadata::{
+    recover_checkpoint_authority, recover_retirement_catalogue, recover_metadata_retaining_progress, recover_metadata_with_durable_inputs, CompactPreparation,
+    StartupRecovery,
+};
 pub use recovery::RecoveredSnapshot;
-pub(crate) use recovery::ReplayCache;
+pub(crate) use recovery::{ReplayCache, CandidateDiscovery};
 pub use runtime::RecoveredRuntime;
 
 pub(crate) const BASE_KEY: &str = "checkpoint_snapshot/v1/base";
@@ -47,11 +58,26 @@ pub(super) fn persist(
     snapshot: &AuthenticatedSnapshot,
     batch: &mut LmdbWriteTransaction<'_>,
 ) -> Result<(), StoreError> {
+    #[cfg(test)]
+    let started = std::time::Instant::now();
+    #[cfg(test)]
+    let report = |stage: &str| {
+        if std::env::var_os("BURST_SNAPSHOT_INSTALL_STAGE_LOG").is_some() {
+            eprintln!("snapshot-persist stage={stage} elapsed_ms={}", started.elapsed().as_millis());
+        }
+    };
+    #[cfg(test)]
+    report("prepare-body");
     let body = snapshot
         .state
-        .prepare_snapshot_in(snapshot.anchor(), batch.storage_directory())
+        .prepare_snapshot_format_in(snapshot.anchor(), batch.storage_directory(),
+            snapshot.certificate().manifest.state_format)
         .map_err(invalid)?;
+    #[cfg(test)]
+    report("open-writer");
     let mut writer = pages::Writer::new(batch)?;
+    #[cfg(test)]
+    report("stream-archive");
     body.write_archive_with_beacons(
         &snapshot.authority_base,
         &snapshot.authority,
@@ -59,7 +85,9 @@ pub(super) fn persist(
         &snapshot.beacons,
         &mut writer,
     )
-    .map_err(invalid)?;
+    .map_err(|error| writer.take_storage_error().unwrap_or_else(|| invalid(error)))?;
+    #[cfg(test)]
+    report("finish-writer");
     writer.finish()
 }
 
@@ -103,12 +131,22 @@ pub(crate) fn read_base_at(
     genesis: &burst_consensus::checkpoint::CheckpointAnchor,
     directory: &std::path::Path,
 ) -> Result<Option<(AuthenticatedSnapshot, BaseCommitment)>, StoreError> {
+    read_base_at_until(get, genesis, directory, &|_| Ok(()))
+}
+
+pub(super) fn read_base_at_until(
+    get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StoreError>,
+    genesis: &burst_consensus::checkpoint::CheckpointAnchor,
+    directory: &std::path::Path,
+    check: &dyn Fn(&'static str) -> Result<(), StoreError>,
+) -> Result<Option<(AuthenticatedSnapshot, BaseCommitment)>, StoreError> {
     let Some(mut input) = pages::Reader::open(get)? else {
         return Ok(None);
     };
-    let snapshot =
-        AuthenticatedSnapshot::read_in(genesis, &mut input, directory).map_err(invalid)?;
+    let snapshot = AuthenticatedSnapshot::read_seekable_validated_in_until(
+        genesis, &mut input, directory,
+        &|stage| check(stage).map_err(|error| super::ReplayError::Invalid(error.to_string())),
+    ).map_err(invalid)?;
     let commitment = input.commitment()?;
-    snapshot.validate_selections().map_err(invalid)?;
     Ok(Some((snapshot, commitment)))
 }

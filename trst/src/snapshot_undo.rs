@@ -1,13 +1,85 @@
 //! Three-way restoration for disjoint local snapshot entries. No peer input or
 //! consensus authorization is implied by a before/after pair.
+//! Each helper checks conflicts before changing its destination. A sequence of
+//! helper calls is not atomic: stage the combined result before publishing it.
+//! These generic comparisons scan snapshot entries, not only changed tree paths.
 
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
+pub(crate) trait SnapshotMap<K, V> {
+    fn get(&self, key: &K) -> Option<&V>;
+    fn keys<'a>(&'a self) -> impl Iterator<Item = &'a K>
+    where
+        K: 'a;
+    fn contains_key(&self, key: &K) -> bool {
+        self.get(key).is_some()
+    }
+    fn put(&mut self, key: K, value: V);
+    fn delete(&mut self, key: &K);
+}
+
+impl<K: Eq + Hash, V> SnapshotMap<K, V> for HashMap<K, V> {
+    fn get(&self, key: &K) -> Option<&V> {
+        self.get(key)
+    }
+    fn keys<'a>(&'a self) -> impl Iterator<Item = &'a K>
+    where
+        K: 'a,
+    {
+        self.keys()
+    }
+    fn put(&mut self, key: K, value: V) {
+        self.insert(key, value);
+    }
+    fn delete(&mut self, key: &K) {
+        self.remove(key);
+    }
+}
+
+impl<K: Ord + Clone, V: Clone> SnapshotMap<K, V> for crate::SharedMap<K, V> {
+    fn get(&self, key: &K) -> Option<&V> {
+        self.get(key)
+    }
+    fn keys<'a>(&'a self) -> impl Iterator<Item = &'a K>
+    where
+        K: 'a,
+    {
+        self.keys()
+    }
+    fn put(&mut self, key: K, value: V) {
+        self.insert(key, value);
+    }
+    fn delete(&mut self, key: &K) {
+        self.remove(key);
+    }
+}
+
+impl<K, V, T: SnapshotMap<K, V> + Clone> SnapshotMap<K, V> for crate::Shared<T> {
+    fn get(&self, key: &K) -> Option<&V> {
+        (**self).get(key)
+    }
+    fn keys<'a>(&'a self) -> impl Iterator<Item = &'a K>
+    where
+        K: 'a,
+    {
+        (**self).keys()
+    }
+    fn put(&mut self, key: K, value: V) {
+        (**self).put(key, value);
+    }
+    fn delete(&mut self, key: &K) {
+        (**self).delete(key);
+    }
+}
+
+/// Restore entries changed between before and after only if current still matches
+/// after at those keys. Unrelated keys retain their current values. This compares
+/// whole values; it does not merge concurrent edits inside one value.
 pub(crate) fn rewind_map<K: Clone + Eq + Hash, V: Clone + Eq>(
-    before: &HashMap<K, V>,
-    after: &HashMap<K, V>,
-    current: &mut HashMap<K, V>,
+    before: &impl SnapshotMap<K, V>,
+    after: &impl SnapshotMap<K, V>,
+    current: &mut impl SnapshotMap<K, V>,
 ) -> Result<(), String> {
     let changed: HashSet<_> = before
         .keys()
@@ -23,45 +95,99 @@ pub(crate) fn rewind_map<K: Clone + Eq + Hash, V: Clone + Eq>(
     for key in changed {
         match before.get(key) {
             Some(value) => {
-                current.insert(key.clone(), value.clone());
+                current.put(key.clone(), value.clone());
             }
             None => {
-                current.remove(key);
+                current.delete(key);
             }
         }
     }
     Ok(())
 }
 
+pub(crate) trait SnapshotSet<K> {
+    fn members<'a>(&'a self) -> impl Iterator<Item = &'a K>
+    where
+        K: 'a;
+    fn contains(&self, key: &K) -> bool;
+    fn add(&mut self, key: K);
+    fn discard(&mut self, key: &K);
+}
+impl<K: Eq + Hash> SnapshotSet<K> for HashSet<K> {
+    fn members<'a>(&'a self) -> impl Iterator<Item = &'a K>
+    where
+        K: 'a,
+    {
+        self.iter()
+    }
+    fn contains(&self, key: &K) -> bool {
+        self.contains(key)
+    }
+    fn add(&mut self, key: K) {
+        self.insert(key);
+    }
+    fn discard(&mut self, key: &K) {
+        self.remove(key);
+    }
+}
+impl<K: Ord + Clone> SnapshotSet<K> for crate::SharedSet<K> {
+    fn members<'a>(&'a self) -> impl Iterator<Item = &'a K>
+    where
+        K: 'a,
+    {
+        self.iter()
+    }
+    fn contains(&self, key: &K) -> bool {
+        self.contains(key)
+    }
+    fn add(&mut self, key: K) {
+        self.insert(key);
+    }
+    fn discard(&mut self, key: &K) {
+        self.remove(key);
+    }
+}
+
+/// Undo changed memberships after checking that current agrees with after for
+/// every affected member. Memberships untouched by the transition are preserved.
 pub(crate) fn rewind_set<K: Clone + Eq + Hash>(
-    before: &HashSet<K>,
-    after: &HashSet<K>,
-    current: &mut HashSet<K>,
+    before: &impl SnapshotSet<K>,
+    after: &impl SnapshotSet<K>,
+    current: &mut impl SnapshotSet<K>,
 ) -> Result<(), String> {
-    if before
-        .symmetric_difference(after)
+    let changed: HashSet<_> = before
+        .members()
+        .chain(after.members())
+        .filter(|key| before.contains(key) != after.contains(key))
+        .collect();
+    if changed
+        .iter()
         .any(|key| current.contains(key) != after.contains(key))
     {
         return Err("snapshot undo conflicts with changed membership".into());
     }
-    for key in before.symmetric_difference(after) {
+    for key in changed {
         if before.contains(key) {
-            current.insert(key.clone());
+            current.add(key.clone());
         } else {
-            current.remove(key);
+            current.discard(key);
         }
     }
     Ok(())
 }
 
-/// Origins owned by one creator are separate journal entries, even though
-/// persistence groups them in a set. Preserve unrelated origins for that owner.
-pub(crate) fn rewind_owned_sets<K: Clone + Eq + Hash, V: Clone + Eq + Hash>(
-    before: &HashMap<K, HashSet<V>>,
-    after: &HashMap<K, HashSet<V>>,
-    current: &mut HashMap<K, HashSet<V>>,
-) -> Result<(), String> {
-    let empty = HashSet::new();
+/// Undo origin membership per owner, preserving unrelated origins of the same
+/// owner. Stage all replacements before changing current. Empty owners that
+/// existed in before remain represented; newly created empty owners are removed.
+pub(crate) fn rewind_owned_sets<K: Clone + Eq + Hash, V: Clone + Eq + Hash, S>(
+    before: &impl SnapshotMap<K, S>,
+    after: &impl SnapshotMap<K, S>,
+    current: &mut impl SnapshotMap<K, S>,
+) -> Result<(), String>
+where
+    S: SnapshotSet<V> + Clone + Default + PartialEq,
+{
+    let empty = S::default();
     let mut replacements = Vec::new();
     for key in before.keys().chain(after.keys()).collect::<HashSet<_>>() {
         if before.get(key) == after.get(key) {
@@ -71,7 +197,7 @@ pub(crate) fn rewind_owned_sets<K: Clone + Eq + Hash, V: Clone + Eq + Hash>(
         let next = after.get(key).unwrap_or(&empty);
         let mut live = current.get(key).cloned().unwrap_or_default();
         rewind_set(previous, next, &mut live)?;
-        let restored = if live.is_empty() && !before.contains_key(key) {
+        let restored = if live.members().next().is_none() && !before.contains_key(key) {
             None
         } else {
             Some(live)
@@ -81,39 +207,68 @@ pub(crate) fn rewind_owned_sets<K: Clone + Eq + Hash, V: Clone + Eq + Hash>(
     for (key, restored) in replacements {
         match restored {
             Some(value) => {
-                current.insert(key, value);
+                current.put(key, value);
             }
             None => {
-                current.remove(&key);
+                current.delete(&key);
             }
         }
     }
     Ok(())
 }
 
-/// Merge insertion appends reverse edges. Independent merges may append to
-/// the same origin without consuming one another. Remove only this insertion's
-/// edges, retaining the order and multiplicity of all unrelated consumers.
-pub(crate) fn rewind_appended_edges<K: Clone + Eq + Hash>(
-    before: &HashMap<K, Vec<K>>,
-    after: &HashMap<K, Vec<K>>,
-    current: &mut HashMap<K, Vec<K>>,
+/// Ordered child sequence used by reverse-edge undo. Duplicates are significant.
+pub(crate) trait SnapshotSequence<K>: Clone + PartialEq + From<Vec<K>> {
+    fn sequence_len(&self) -> usize;
+    fn sequence<'a>(&'a self) -> impl Iterator<Item = &'a K>
+    where
+        K: 'a;
+}
+impl<K: Clone + PartialEq> SnapshotSequence<K> for Vec<K> {
+    fn sequence_len(&self) -> usize {
+        self.len()
+    }
+    fn sequence<'a>(&'a self) -> impl Iterator<Item = &'a K>
+    where
+        K: 'a,
+    {
+        self.iter()
+    }
+}
+
+/// Remove this transition's appended consumers while preserving the order and
+/// multiplicity of other current edges. Before must be a prefix of after, and
+/// appended consumers must not already occur in that prefix. Their occurrence
+/// counts in current must still match the appended counts.
+///
+/// All replacements are staged before mutation. This does not validate graph
+/// references or prove that removing a merge leaves no dependent holdings.
+pub(crate) fn rewind_appended_edges<K: Clone + Eq + Hash, V: SnapshotSequence<K>>(
+    before: &impl SnapshotMap<K, V>,
+    after: &impl SnapshotMap<K, V>,
+    current: &mut impl SnapshotMap<K, V>,
 ) -> Result<(), String> {
     let mut replacements = Vec::new();
     for key in before.keys().chain(after.keys()).collect::<HashSet<_>>() {
         if before.get(key) == after.get(key) {
             continue;
         }
-        let previous = before.get(key).map_or(&[][..], Vec::as_slice);
+        let previous = before.get(key);
+        let previous_len = previous.map_or(0, |v| v.sequence_len());
         let next = after
             .get(key)
             .ok_or("snapshot undo removed reverse edges")?;
-        if !next.starts_with(previous) {
+        if next.sequence_len() < previous_len
+            || !next
+                .sequence()
+                .take(previous_len)
+                .eq(previous.into_iter().flat_map(|v| v.sequence()))
+        {
             return Err("snapshot undo changed existing reverse edges".into());
         }
         let mut added = HashMap::<&K, usize>::new();
-        for edge in &next[previous.len()..] {
-            if previous.contains(edge) {
+        for edge in next.sequence().skip(previous_len) {
+            if previous.is_some_and(|v| v.sequence().any(|old| old == edge)) {
                 return Err("snapshot undo appended an existing consumer".into());
             }
             *added.entry(edge).or_default() += 1;
@@ -122,7 +277,7 @@ pub(crate) fn rewind_appended_edges<K: Clone + Eq + Hash>(
             .get(key)
             .ok_or("snapshot undo is missing reverse edges")?;
         let mut observed = HashMap::<&K, usize>::new();
-        for edge in live {
+        for edge in live.sequence() {
             if added.contains_key(edge) {
                 *observed.entry(edge).or_default() += 1;
             }
@@ -131,21 +286,24 @@ pub(crate) fn rewind_appended_edges<K: Clone + Eq + Hash>(
             return Err("snapshot undo conflicts with changed reverse edges".into());
         }
         let remaining: Vec<_> = live
-            .iter()
+            .sequence()
             .filter(|edge| !added.contains_key(edge))
             .cloned()
             .collect();
         replacements.push((
             key.clone(),
-            remaining.is_empty() && !before.get(key).is_some_and(Vec::is_empty),
+            remaining.is_empty()
+                && !before
+                    .get(key)
+                    .is_some_and(|v| v.sequence().next().is_none()),
             remaining,
         ));
     }
     for (key, remove, edges) in replacements {
         if remove {
-            current.remove(&key);
+            current.delete(&key);
         } else {
-            current.insert(key, edges);
+            current.put(key, V::from(edges));
         }
     }
     Ok(())
@@ -255,7 +413,7 @@ mod tests {
         assert_eq!(result.save_wallets(), expected.save_wallets());
         assert_eq!(
             result.wallet_origins[&wallet(1)],
-            HashSet::from([hash(10), hash(12)])
+            [hash(10), hash(12)].into_iter().collect::<crate::SharedSet<_>>()
         );
         assert!(result.get_portfolio(&wallet(11)).is_none());
     }
@@ -313,7 +471,7 @@ mod tests {
         let restored = TrstEngine::load_wallets(&bytes, 100).unwrap();
         let mut expected = before.clone();
         expected.debit_wallet_with_provenance(&wallet(2), &hash(2), 30);
-        expected.set_expiry_period(100, Timestamp::new(250));
+        expected.set_expiry_period(100, Timestamp::new(250)).unwrap();
         assert_eq!(bytes, expected.save_wallets());
         assert_eq!(
             restored
@@ -334,14 +492,14 @@ mod tests {
         let mut before = TrstEngine::with_expiry(100);
         mint(&mut before, 1);
         mint(&mut before, 2);
-        before.revoke_by_origin(&wallet(2));
+        before.revoke_by_originator(&wallet(2));
         let mut after = before.clone();
         after.debit_wallet_with_provenance(&wallet(1), &hash(1), 40);
         let mut current = after.clone();
         current.flush_all_expired(Timestamp::new(250));
         let original = current.save_wallets();
 
-        // Decision 6.9 applies the governed period to existing holdings too.
+        // The supplied period also applies to restored holdings.
         for (period, transferable) in [(100, 0), (10_000, 100), (u64::MAX, 100)] {
             let bytes = TrstEngine::rewind_wallet_snapshot_at(
                 &before.save_wallets(),
@@ -353,7 +511,7 @@ mod tests {
             .unwrap();
             let result = TrstEngine::load_wallets(&bytes, period).unwrap();
             let mut expected = before.clone();
-            expected.set_expiry_period(period, Timestamp::new(250));
+            expected.set_expiry_period(period, Timestamp::new(250)).unwrap();
             assert_eq!(bytes, expected.save_wallets());
             assert_eq!(
                 result
@@ -415,7 +573,7 @@ mod tests {
                     current.debit_wallet_with_provenance(&wallet(1), &hash(1), 10);
                 }
                 1 => {
-                    current.revoke_by_origin(&wallet(1));
+                    current.revoke_by_originator(&wallet(1));
                 }
                 2 => current.get_portfolio_mut(&wallet(1)).unwrap().tokens[0].holder = wallet(2),
                 _ => {
@@ -447,7 +605,7 @@ mod tests {
         for revoke in [false, true] {
             let mut current = after.clone();
             if revoke {
-                current.revoke_by_origin(&wallet(1));
+                current.revoke_by_originator(&wallet(1));
             } else {
                 current.debit_wallet_with_provenance(&wallet(1), &hash(1), 10);
             }

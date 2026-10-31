@@ -1,0 +1,829 @@
+# Remaining complexity and qualification work
+
+October 30 source follow-up: network hardening differs from the frozen candidate.
+See [NETWORK_HARDENING_REVIEW.md](NETWORK_HARDENING_REVIEW.md) for current changes,
+validation status and retained limits. October 29 statements below describe that
+frozen review; they do not qualify the subsequently modified source.
+
+## Limited-release scope — current handoff, 2026-10-29
+
+Owner deferred the unproven100+TPS/subsecond target to later updates. Further RAM
+optimization and Pi4 performance claims are also outside this initial release scope.
+SignPath is on hold. These are deferrals, not passing results. No publication or
+Live-network launch is authorized. The frozen artifacts remain Test candidates.
+
+Active plan: [LIMITED_RELEASE_READINESS.md](LIMITED_RELEASE_READINESS.md).
+Archived-source review confirms retirement defaults off and production startup
+rejects enabling it. Both source archive hashes and all five dependency lockfile
+entries verified; no binary rebuild. Review: `limited-release-readiness-20261029/frozen-source-review.json`.
+Physical power-loss proof remains absent; process-crash passes retain their scope.
+All12 platform dependency graphs resolved;31 Cargo manifests match frozen inputs.
+Notice review covers692 graph/runtime dependencies, including nested vendor notices
+and both patched local dependencies. Five declaration-based notices are explicitly
+identified; no copyright ownership invented. Bundle: `limited-release-readiness-20261029/notice-bundle/`.
+Preparation review completed: pinned installer notices and eight MPL source archives
+added; notice sidecar delivered and checksummed. Retained safety scopes reconciled,
+five saved logs match receipt hashes, no product-source change or demonstrated
+product defect requiring another build. See LIMITED_RELEASE_READINESS.md for exact
+limits: physical power-loss remains unproven, Windows signing held, first-install
+WebView download and every funded final pairing are not newly claimed. No publication.
+
+
+## macOS qualification — current handoff, 2026-10-29
+
+Approved hosts: GitHub macos-15 ARM3CPU7GiB and macos-15-intel4CPU14GiB;
+at most two hosts, one Cargo worker each, command1200s plus10s cleanup.
+No Azure. Frozen daemon1093 files and desktop candidate bytes unchanged.
+User approved Apple credential transfer; four secrets now reside in the protected
+macos-signing GitHub environment. No public release is authorized by these results.
+
+| Stage / latest evidence | Proven scope | Remaining action / invalidation |
+| --- | --- | --- |
+| ARM daemon40845222714 | Build511.437s, helper147.715s and identity/Dev epoch/two durable restarts48.451s PASS | Reuse native scopes; ARM signed daemon DMG40876029916 now notarized/stapled/validated/Gatekeeper PASS, downloaded and SHA256 verified |
+| ARM apps40852402087 / packages40857749588 | Wallet/dashboard native PASS; unsigned .app packaging1.767s/1.355s PASS, embedded binary hashes unchanged | Developer ID/notarization/stapling/Gatekeeper PASS; installed wallet native creation/backup guards and dashboard live Dev RPC now PASS in scopes below |
+| Intel desktop40860046055 | Wallet304.886s/dashboard934.350s native PASS; downloaded raw binary hashes verified | Intel packaging40863899997 PASS; exact qualified binaries preserved. Signing/notarization/Gatekeeper PASS; installed wallet native creation/backup guards and dashboard live Dev RPC now PASS in scopes below. Previous wallet timeout40852402087 retained and chained; read-only cache diagnostic40856902628 justified this bounded completion |
+| Intel daemon40864042513 | Daemon237.412s/helper179.476s/runtime48.419s PASS; downloaded binary hashes verified. Cargo confirms cached node Fresh | Reuse exact artifact scopes. Earlier40852824231 timeout/invalidated input retained; recovery40861278555 preserved latest receipt and corrected attempt chained it |
+| Failure recording and cleanup | Receipt-tool21checks PASS; explicit finish-invalidated preserves failed input inventories and can never qualify reuse. Actual Intel timeout still hit SIGKILL EPERM despite disposable-child checks | Latest daemon start/result/log retained; finish rejected changed cached-node input. Latest invalidated receipt recovered40861278555 without branching from older attempt; new whole-group grace helper passes3local checks; real Mac cleanup remains unproven |
+| Mac signing ARM40866759808 / Intel40867048365 | All4 apps signed with selected Developer ID; strict signatures and leaf certificate fingerprint verified; all4 submitted once and Apple Accepted in collection40867797950 | Collection40867797950: both ARM apps and Intel wallet PASS stapling/strict signature/Gatekeeper. Intel dashboard Apple ticket-download lost connection; focused retry40868658486 PASS using original accepted submission. All4 signing/notarization/Gatekeeper scopes complete; All4 final signed ZIPs downloaded and SHA256 verified in Downloads/Burst-macOS-signed-20261029; delivery39221 terminal0. Original transfer failures remain retained. These transfer issues do not invalidate remote signing/verification passes. No private signing key in collection jobs; no rebuild, re-sign, resubmission or public release |
+
+Installed signed-app qualification PASS on ARM and Intel: environment40873905683;
+wallet navigation40875049539, native keypair creation and unacknowledged-backup
+guards40878447687; dashboard live Dev RPC telemetry/network identity40877693027
+and connection dialog40875609741. Exact final ZIPs, fresh profiles and native AX
+controls; no test-only app bridge or product rebuild. Recovery words were not
+captured. Funded wallet/payment lifecycle is outside these case scopes. Reviews:
+`gui-navigation-review.json`, `gui-live-rpc-review.json`, `gui-wallet-native-review.json`.
+All4 signed app ZIPs and ARM daemon DMG are in Downloads/Burst-macOS-signed-20261029,
+with SHA256SUMS. Original driver/launcher failures stay retained, not passing.
+
+Standalone ARM daemon40876029916 PASS signed CLI startup, Apple notarization,
+stapling/validation and Gatekeeper; local DMG SHA256 c7652ac7 verified. Intel daemon
+is signed, Apple Accepted/stapled and native Intel Gatekeeper40878120775 PASS.
+Its two online-validation failures were NSURLErrorDomain -1005/error68 from the
+macos-15-intel CloudKit route, matching actions/runner-images issue14924.
+A real host/egress change, using the already approved ARM runner, resolved it:
+40882337980 validates the exact unchanged Intel DMG SHA2569976823d. This check
+reads the ticket without executing the Intel payload; native Intel runtime and
+Gatekeeper evidence remain separate. Latest failed receipt chained through prepare;
+no unchanged Intel retry, re-signing, restapling or resubmission. All6 Mac archives
+are now downloaded and SHA256SUMS verified. Review: `intel-daemon-final-delivery.json`.
+Original network failures and interrupted transfers remain retained. No native Mac
+jobs active; public release still requires the separate production gates.
+
+Windows SignPath prerequisites: owner-approved MIT changes merged as wallet#1 and
+node-gui#1. Public signing/privacy/download documentation merged as protocol#17,
+with documentation checks passing. Original code licensed MIT; dependency entries
+and licenses unchanged. Lockfile-union inventory covers1034packages and preserves
+locally available notices; it is not a precise distribution SBOM, and missing
+cached manifests/notices still need closure for the signed package. GitHub reports
+no current org members with MFA disabled; SignPath-account MFA remains separate.
+The owner authorized submission and required provider consents. Submit was clicked
+once with optional marketing unchecked, but no provider confirmation appeared;
+all visible fields report valid. Keep the Brave form and check confirmation/email
+before resubmitting. Receipt: application-submission-observation.json. Windows
+binaries are not yet signed; provider acceptance remains unconfirmed.
+No product rebuild for these source license/documentation changes.
+
+All49 frontend assets exactly match earlier qualified hashes; reuse archived bytes.
+The earlier Tailwind scan-footprint, source-layout, workspace-metadata and compiler
+selection failures remain preserved. No Vite rebuild or ARM native rebuild needed.
+Evidence root: target/validation-evidence/macos-host-preflight-20261029.
+Current reviews: intel-daemon-final-review.json, invalidated-receipt-test-review.json,
+signing-safeguards-test.log; ARM package receipts under arm-package-encrypted.
+The evidence transport key is separate from Apple signing credentials.
+Original signing failures40865127794/40865714619/40866192333 remain retained: PKCS12
+transport, search-list registration and certificate-extraction syntax. Signed wallet
+was reused after the last failure; successful work was not re-signed.
+Submission IDs and signed hashes: macos-signing-submission-review.json (private evidence).
+Protocol performance, physical-power and Pi4 requirements below remain open.
+
+## Current qualification handoff — 2026-10-29, 07:39 UTC
+
+Windows package qualification is complete for the recorded scopes: both NSIS/MSI
+installations pass; both installed dashboard and wallet native suites pass.
+Latest wallet MSI runtime PASS4.870s, receipt529657cf, peak331042816bytes under
+1CPU3GiB/no paging; task Ready/lastResult0, execution terminal. Evidence:
+`windows-wallet-msi-runtime-20261029/{completion-instance,review}.json`.
+Prior owned wallet profiles retained; hidden-AppData setup failure preserved and
+corrected with `Get-Item -Force`. No product rebuild, reinstall or assertion change.
+Windows validation is terminal; Mac run status is recorded in the current section above. Earlier dated progress below
+is historical where superseded by this table; failures retain their original scope.
+
+| Requirement | Current proof / reuse | Remaining action and invalidation |
+| --- | --- | --- |
+| Main CX complexity fixes and defined sustained mixed scenarios | Existing scoped passes, including301.871s controlled-clock and88.223s real-clock mixed runs | Reuse; additional tests need a named uncovered assertion or affected input change |
+| Windows dashboard packages | NSIS install6fe0cd99/runtime2b7f2687; MSI install7e594787/runtime4b614805 | Reuse exact package/runtime scopes; relevant binary, driver or platform changes require impact review |
+| Windows wallet packages | NSIS installf53fb31a/runtime01ef4bc7; MSI installa54de737/runtime529657cf | Reuse core/signer/Dev RPC scopes; these do not prove funded full lifecycle or public acceptance |
+| Production100+TPS/subsecond finality | Unproven; owner deferred target | Not an initial-release capacity claim; preserve preflight and evidence for later qualification |
+| Physical power-loss/safe retirement | Existing process-crash recovery only | Actual storage power-loss evidence and safe-enablement qualification required |
+| macOS native and Pi4 performance | ARM daemon/helper/runtime PASS; Intel daemon/helper/runtime40864042513 PASS with verified downloaded hashes; historical timeout retained. ARM wallet/dashboard builds PASS; Intel wallet/dashboard40860046055 native builds PASS. ARM unsigned packages PASS. Pi4 hardware unavailable | All4 GUI archive transfers and scoped installed Mac UI/native-RPC checks complete. Both standalone daemon distributions complete, including Intel ticket validation40882337980 and verified local delivery. Mac or ARM cloud does not qualify Pi4 performance |
+| RAM | Earlier measured limitation retained | Explicitly excluded from further investigation |
+
+Remaining-prerequisite review: `remaining-prerequisite-audit-20261029/review.json`.
+Existing load prerequisites and workflow scope rechecked; no eligible fixture or
+required hardware evidence is established. No new validation was scheduled.
+
+The previous broad qualification target is superseded by the limited-release scope
+above. Public release gates remain closed pending safety and distribution review.
+Windows scoped packaging and Mac scoped qualification are complete; reuse their
+recorded evidence rather than scheduling another broad suite.
+
+### Windows dashboard native runtime — verified pass, 2026-10-29
+
+The existing three native suites passed in 7.966s: RPC, navigation/focus, and
+15 concurrent governance reads. Task is terminal (Ready, lastResult 0). Receipt
+input/log verification passed, fingerprint 91bd3b9195fccada17f28552dff101c13f4b9f0c9afe5c370a70c30a8648e0cd.
+Normal isolated user profile; 1 CPU, 3 GiB, no paging; peak commit 303722496 bytes.
+Evidence: windows-dashboard-runtime-20261029/{inspection,review}.json and retained
+remote receipt/logs. This qualifies the named dashboard assertions on disposable
+Dev, not installers or public-network acceptance. No product change or rebuild.
+
+| Latest evidence | Proven scope | Invalidation | Next action |
+| --- | --- | --- | --- |
+| Dashboard NSIS install6fe0cd99 and installed runtime2b7f2687 | Exact installed payload/registration; RPC/UI and15concurrent reads | Relevant package, app, daemon, driver or environment changes | Reuse; dashboard MSI installation/runtime also pass (4b614805) |
+| Dashboard build, browser readiness, Windows daemon receipts audited by setup | Their recorded artifact/environment scopes | Relevant declared inputs change | Reuse; no repeat build |
+| Wallet build1c0cec65, signer53fb3091, NSIS installf53fb31a and runtime01ef4bc7 | Frozen binary, signer guards, exact installed payload and wallet-core/RPC suite | Relevant package/artifact/driver/platform change | Reuse; wallet MSI installation/runtime also pass (529657cf) |
+
+Windows wallet release build PASS538.024s, terminal04:53:04UTC, exit0.
+Artifact SHA25607473ade8e3b5d4c8e5569bb3eb5c87a119f7660c180f4302113eaa32cbac00e,
+19795968bytes; peak commit2698887168bytes under1CPU6GiB/no paging/20min.
+All388frozen wallet/protocol entries checked before compilation; frontend not
+regenerated. Shared toolchain/dashboard receipt audited and target cache reused.
+Evidence: windows-wallet-build-20261029/{instance,review}.json; remote build receipt
+retained. Build and local control handles16264/13678 are terminal. Delayed progress
+output is an earlier compiler snapshot, not current activity.
+Native wallet launcher now supports the fresh embedded Windows signer journey:
+requires the dedicated normal-user profile and absent wallet app-data directories,
+uses direct Edge/Tauri drivers and owned process-tree cleanup. Existing 11-command
+assertions and 180s deadline unchanged; other Windows fixtures explicitly remain
+unsupported pending their profile handling. Local capped syntax check and diff
+whitespace check passed. Windows wallet native signer PASS4.677s: all11commands reject missing, changed
+and locked signers before RPC; locking cancels automation and fixture restore
+creates a fresh automation session. Receipt verified, fingerprint
+53fb309151fa6f68aa26f44e17f7b17caf89d603969e5b329aa479906fa15f61.
+Peak commit271708160bytes under1CPU3GiB/no paging. Task Ready,lastResult0;
+setup98229 and inspection55653 terminal. Evidence:
+windows-wallet-runtime-20261029/{setup-instance,inspection,review}.json.
+Build/browser/daemon receipts audited and reused. No signed-payment/full-lifecycle
+or installer claim. Windows app installers are next; no product rebuild required.
+Local CLI-help was deferred by memory guard(exit75,less than4GiB available); do
+not retry locally or raise limits. Host CLI inspection subsequently passed below.
+Packaging review is staged in windows-app-packaging-20261029/run-plan.json.
+Pinned CLI inspection PASS, terminal04:56:46UTC; handle26227 terminal.
+CLI2.10.0 supports MSI/NSIS bundle-only commands but no no-binary-patching flag.
+Official pinned source confirms bundle uses existing output via Cargo metadata;
+no compile needed. Prepared separate app/format stages; first dashboard NSIS
+ran as dashboard-nsis-package-20261029 and failed4.213s at bundling, exit1.
+Terminal04:59:29UTC; handle48412 terminal. Earlier build/runtime receipts audited
+and reusable; no installer produced or Rust compile attempted. Diagnostic log
+retrieval completed: NSIS3.11/plugin downloads passed built-in hash checks, then
+makensis child launch failed with error0x2/file-not-found. Failed receipt verified
+(fingerprintd474aa276c578f7c), no leftover compiler reported. Next inspect extracted
+tool paths/launcher dependencies: both makensis stub and Bin child exist in
+System32 SYSTEM-profile cache. This matches WOW64 redirection; pinned schema
+explicitly recommends bundle.useLocalToolsDir for SYSTEM packaging. Configuration-
+only retry PASS8.335s at05:07:22UTC, using prepare chained to original failed
+receipt; first failure/logs preserved. Peak commit240390144bytes,1CPU3GiB unchanged.
+Dashboard NSIS installer3783228bytes, SHA256
+bcc79b55360a4e9ee4198d8a4b56558b55ecadf0df542005577fb1aacf0bf19e.
+Original and staged executable remain241a2a79; actual installed payload still needs
+verification. Evidence: dashboard-nsis/local-tools/{instance,review}.json and
+remote receipt. Build handle51844 terminal; status handle43591 may collect output.
+Wallet NSIS PASS8.737s at05:10:00UTC, handle33267 terminal. Installer4798075bytes,
+SHA256869e2d3b3f85c0dca9f5c727f505ec04f7b75225a9082ffe0c07a2775190da40;
+peak commit207749120bytes. Original/staged wallet executable remains07473ade.
+Evidence wallet-nsis/{instance,review}.json; installed payload remains unqualified.
+Dashboard MSI PASS11.617s at05:13:16UTC; handle54106 terminal. .NET/VBScript
+preflight passed; installer5357568bytes,SHA256
+6dcdeb17898cd1b04dfc383d3a7c8209c300c5c402d4aa2cdf0752d8cb16a972;
+peak commit188170240bytes under unchanged1CPU3GiB limits. Original executable
+unchanged. Evidence dashboard-msi/{instance,review}.json; no installation pass.
+Wallet MSI PASS8.945s at05:16:03UTC; handle86681 terminal. Installer6918144bytes,
+SHA2566f108cf401abb7a5a8312221acead4ee6eb44e5f4f9d3c99334138aa396897b4;
+peak commit132030464bytes; original/staged wallet binary unchanged. Evidence
+wallet-msi/{instance,review}.json. All four installer-generation stages now pass;
+installation/runtime qualification remains separate.
+Installation plan reuses normal-account JobObject bounds for NSIS, then existing
+whole-guest1CPU/max3GiB/no-paging mechanism for MSI's external Windows Installer
+service. Complete NSIS install/runtime before guest resizing; preserve
+all artifacts and successful stages. No new resource runner or privilege changes.
+Dashboard NSIS setup rejected before guest execution: Azure managed Run Command
+resource cap25/25. Local handle23545 terminal; no task/install/receipt started.
+Evidence windows-dashboard-nsis-install-20261029/setup-capacity-rejection.err.
+Archived confirmed Succeeded/exit0 app-packaging-inspection-20261029 command
+resource, then deleted only that control record (delete handle50082 terminal0).
+All guest files/receipts retained; command-capacity-review.json records this.
+Resubmitted unchanged setup PASS05:23:14UTC; handle66141 terminal. Dashboard
+NSIS package receipt audited (0251727ed0c388fd), normal-account installation task
+finished FAIL3.192s at installed-executable identity assertion (installer exit0).
+Task Ready,lastResult1; inspection95080 terminal. Failed receipt verified
+(e4f26796feac50f9). Preserve installation; do not reinstall. Bounded byte comparison completed: identical lengths and exactly three changed
+bytes, the expected Tauri UNK-to-NSS bundle marker; installed SHA256
+7af3526122e7ead25ca4ebf50192754625fbebe6718f7122d1cb01b56ce3cd9c.
+Registration identifies Burst Node0.1.0 at the owned path. Evidence:
+windows-dashboard-nsis-install-20261029/payload-diagnosis.json. Original failure
+is a raw-hash verifier error, not an unexplained payload change. Corrected normal-user verification PASS1.409s; task Ready,lastResult0.
+Receipt input/log check passed, fingerprint
+6fe0cd99b920b16efe3a7e7b2aa92da3d8d38045ffa5ac6a0bb6ec4b8ec65813.
+Peak commit88956928bytes under1CPU3GiB/no paging. Evidence:
+payload-verification/distinct-inspection.json; inspection91676 terminal.
+Original failed receipt and installer exit0 retained; no reinstall or rebuild.
+Azure control-cap and stale-name diagnostics preserved separately; distinct
+verification setup terminal05:39:16UTC, handle73073 terminal0. Retained install
+now qualifies exact marker-only payload identity and normal-user registration;
+installed native runtime remains separate. Wallet first-install verifier uses
+same exact marker comparison, not yet run.
+Installed dashboard NSIS runtime PASS6.745s: all three original suites,
+including15concurrent governance reads, RPC and navigation/focus. Task Ready,
+lastResult0; receipt input/log verification passed, fingerprint
+2b7f268798eb3cfe352c792e1b2033298ab594488c9bad958db5196712ac742b.
+Peak commit305758208bytes,1CPU3GiB/no paging. Evidence:
+windows-dashboard-nsis-runtime-20261029/inspection.json; handles21813/36075
+terminal. Reused installation/browser/daemon receipts; no rebuild. This closes
+NSIS dashboard installation and scoped native runtime, not MSI or public acceptance.
+Wallet installed-core runtime now PASS as recorded below; original native-wallet
+assertions and180s bound retained.
+Wallet NSIS installation PASS2.869s: installer exit0, exact unique UNK-to-NSS
+marker-only payload comparison and normal-user registration. Task Ready,lastResult0;
+receipt verified, fingerprint f53fb31aa2a297d2e2d14a60772f7ff4eb26ee9c1e1fc7381443bc7635fe7423.
+Installed SHA256fd5cb4152ab94eb9084e7b6611e679bc3e945b4fd63bfe31db32a3c52a019ccf;
+peak commit121884672bytes under1CPU3GiB/no paging. Evidence:
+windows-wallet-nsis-install-20261029/inspection.json; setup86101 and inspection94325
+terminal. Earlier prelaunch inspection retained separately; not a test failure.
+Installed wallet-core setup stopped before task/receipt creation at profile
+preflight: prior burst-gui-val Roaming/com.burst.wallet contains offline-payments.
+Installation/browser/daemon audits passed; no runtime failure or app launch.
+Evidence windows-wallet-nsis-runtime-20261029/current-setup-instance.json,
+terminal05:53:52UTC, handle28702 terminal. Preserve prior profile and installation.
+Prepared separate ordinary burst-wallet-val account and the existing batch-only
+logon-right procedure; no admin/RDP/autologon permission. Same installed binary,
+wallet assertions and180s bound; account identity/profile remain asserted.
+Fresh-profile setup terminal FAIL before user/task creation: New-LocalUser
+rejected54-character description (maximum48). Evidence current-fresh-instance.json,
+terminal05:59:41UTC; control78887 terminal. No runtime or receipt started. Two
+setup failures reconciled: retained signer app data required a fresh account;
+new-account parameter validation failed before provisioning. Shortened description,
+retained original setup scripts/results, and allow only the known empty account
+workspace after inspection. Do not repeat the scenario without inspecting state.
+Smallest discriminating read: user/task/runtime-root absence and empty account
+workspace confirmed: no fresh user/task/runtime root, empty owned account directory.
+Capped MSI query exited0 (peak42876928bytes,1CPU3GiB/no paging), but later
+readback exposed empty record fields: metadata is UNVERIFIED, not a passing
+preflight. Original worker/result retained; corrected explicit COM property
+access and nonempty-field assertion subsequently returned usable metadata below.
+handle75394 terminal0, evidence windows-msi-preflight-20261029/inspection.json.
+Metadata-output retrieval31526 and archived failed-control deletion95915 terminal0.
+Corrected account setup uses shorter description and accepts only this empty
+workspace; corrected setup resubmitted as wallet-installed-profile-runtime-20261029,
+handle25124 terminal. terminal-profile-instance.json shows setup FAIL06:06:18UTC
+at exact batch-right comparison after account creation; no runtime root/task yet.
+Preserve account and policy exports; do not reprovision or reapply policy. Task
+inspection90293 terminal confirms no runtime task. Next read saved before/after/requested rights and owned
+SID; corrected MSI field read combined with this diagnosis. First control request
+rejected Conflict because90293 still executing; no guest query started, saved
+fields-control-conflict.json. After inspection completed, read-only diagnosis
+48549 terminal0. Corrected MSI record fields now populated, package hashes match;
+both ALLUSERS=1 and INSTALLDIR under ProgramFiles64Folder, separate product/upgrade
+GUIDs. Full metadata-fields.json retained on host. Mixed output truncated policy
+details, so compact policy text/execute-sequence/machine-registration read20102
+completed, handle20102 terminal0; policy-output.json confirms intended SID1001
+was exported as burst-wallet-val. All listed identities match; discrepancy is
+text serialization, not an extra privilege. Prepared continuation resolves policy
+names to SIDs and checks exact membership plus unchanged other rights; no policy
+reapplication or account recreation. Prior failed control deletion82116 terminal0.
+Submitted wallet-installed-account-runtime-20261029 on existing fresh account,
+handle98441 terminal. Installed wallet runtime PASS5.886s, task Ready,lastResult0.
+Existing mnemonic/backup/non-overwrite/lock/wrong-password/watch-only/real-Dev-RPC
+suite executed under fresh burst-wallet-val profile; peak330989568bytes,1CPU3GiB,
+no paging. Receipt input/log verification passed, fingerprint
+01ef4bc7c708ac67c220f985628b392d8762a807aba449379df7a7565506447a.
+Evidence windows-wallet-nsis-runtime-20261029/runtime-inspection.json; inspection44766
+terminal. Prior setup failures remain retained; account-policy normalization
+verified exact identities without reapplying rights. Both NSIS installations and
+scoped native-runtime suites now pass; MSI installations remain separate.
+Reuse candidate binaries, original signer/browser/daemon and NSIS receipts.
+No funded-payment, full lifecycle, throughput or public-release claim.
+MSI execute conditions: LaunchApplication requires AUTOLAUNCHAPP and not Installed;
+bootstrapper requires not REMOVE/WVRTINSTALLED. Machine Burst registrations=0.
+MSI AppSearch/RegLocator and auto-launch property query submitted under existing
+1CPU3GiB cap completed, handle61420 terminal0. runtime-search-output.json
+shows both installers resolve machine WebView2=156.0.4314.50 through their actual
+32-bit registry search; no default AUTOLAUNCHAPP property. No dependency download
+or auto launch expected for quiet installation. Both MSI installation plans
+prepared at windows-{dashboard,wallet}-msi-install-20261029: reuse whole-guest
+controller, exact-marker verifier and receipt tool; require installer service
+initially stopped and clean it up within the existing10s grace. NSIS directory
+identity is an input invariant. MSI driver/environment preflight PASS3.091s,
+four PowerShell scripts and two JS verifiers parsed, tasks and installer service
+idle, disk headroom sufficient. Receipt verified, fingerprint
+e4451715a14a09816e21f96b573eaccacf91ab2381d1ec9afbe850341706e311; peak78131200bytes
+under1CPU3GiB/no paging. Evidence windows-msi-stage-20261029/stage-output.json;
+handle71743 terminal. Original VM size rechecked Standard_D4as_v7, then resize
+to prior proven Standard_F1als_v7 completed (87960 terminal0, Succeeded). Evidence:
+windows-msi-boundary-20261029/{original-size,resize-output}.json. Dashboard MSI
+installation PASS4.730s, four assertions; receipt verified, fingerprint
+7e594787f36408e8b2465139e900fe5456e6c06dd8bc708276183c780f6df148.
+Installed SHA25637e6611bf63893bf7edc12b81656b8319c5b9c4595314932e6bfcabfe9686c8b;
+exact MSI marker, machine registration, quiet no-auto-launch, NSIS directory
+unchanged. Installer service stopped, zero installer processes; handle71374
+terminal. Evidence windows-dashboard-msi-install-20261029/install-output.json.
+Stage/package receipts audited; actual guest caps checked before installation.
+Wallet MSI installation PASS2.025s under same whole-guest cap; receipt verified,
+fingerprint a54de737375fdd23675b24063e4ec663a0c5a829c0ed7f36fef634fc3a80aa86.
+Installed SHA2567ee6a1b53bd270be8dc9e9b12e9fea4506a5e89ad07af434c7883b17b8b1a09f;
+four assertions, no auto launch, preserved NSIS directory, service stopped and
+zero installer processes. Evidence windows-wallet-msi-install-20261029/install-output.json;
+handle21515 terminal. Both MSI installations now pass; native MSI connection remains.
+Original Standard_D4as_v7 restored successfully (92917 terminal0), evidence
+windows-msi-boundary-20261029/restore-output.json. Dashboard MSI native setup
+setup terminal before runtime: Set-ScheduledTask action-only update rejected
+missing credentials for password-logon task (0x8007052e), handle63353 terminal.
+Evidence windows-dashboard-msi-runtime-20261029/setup-output.json. Prior receipts,
+PowerShell parsing and exact NSIS assertion-module bytes passed before this step.
+No runtime start/receipt. Use proven protected-credential Register-ScheduledTask
+workflow for a separate MSI task on the same existing account; preserve old NSIS
+task and prior XML. Completion verifies staged hashes and original task state,
+reaudits dependencies and prepare still chains latest NSIS runtime. No new account
+or policy. Archived completed wallet control (prior-control.json); deletion9344
+terminal0. Protected-credential completion dashboard-msi-runtime-completion-20261029 is terminal: execution Succeeded, exit0, task Ready/lastResult0. Dashboard MSI runtime PASS16.684s: three existing suites, RPC/navigation/focus and15concurrent reads. Receipt verification passed, fingerprint4b614805f0e74a27d94041c4396ffeab6abca115ab9aa6cf43e625cc843420a2; peak298876928bytes under1CPU3GiB/no paging. Evidence windows-dashboard-msi-runtime-20261029/completion-instance.json. No rebuild/reinstall or public acceptance. Wallet MSI native runtime now passes; preparation history: windows-wallet-msi-runtime-20261029/run-plan.json: reuse MSI installation a54de737, NSIS core01ef4bc7, browser/daemon and unchanged assertion modules; archive prior owned AppData without deletion; preserve fresh-state guards and180s deadline. No rebuild/reinstall. Completed dashboard control archived and deletion terminal0 (handle46318). Wallet MSI setup is terminal before runtime: profile archival failed, execution exit1, handle92506 terminal. Evidence windows-wallet-msi-runtime-20261029/setup-instance.json. Read-only archive diagnosis terminal0 (handle16959): both active profiles remain, neither archive exists, no start/receipt/task XML. Wrapper exit1 lacks child error text. Capped read-only precheck terminal (handle33765): Get-Item failed on hidden AppData without -Force. Corrected hidden-directory lookups and explicit child error capture, preserving archive-original.ps1/logs; no binary or assertion change. Failed managed control archived; deletion65440 terminal0. Corrected protected continuation wallet-msi-runtime-completion-20261029 terminal Succeeded/exit0 (handle43700). Wallet MSI runtime PASS4.870s, receipt529657cf71e96654335bf9ffe2a0b8930200fcb9d54679bea64498f2bd5be3c7 verified; task Ready/lastResult0, peak331042816bytes under1CPU3GiB/no paging. Evidence completion-instance.json and review.json. Prior profile preserved. Windows scoped package/runtime gates now pass. No native runtime pass or rebuild.
+Inspect new setup/task result before metadata retry; no app rebuild/reinstall.
+MSI metadata worker reads install directories, upgrade rules and custom actions;
+no installation or resize. Prior whole-guest cap uses Standard_F1als_v7 (1CPU2GiB),
+restored to Standard_D4as_v7; no resize until NSIS work is terminal.
+ Retain installed paths for receipt verification. Workflow release scope
+requires installation/connection; no added uninstall gate or unsupported claim.
+Existing native-wallet.mjs covers encrypted backup, restore, lock and real RPC;
+added explicit --wallet-only selection in existing session driver for installed
+Windows qualification. Assertions unchanged; host syntax/runtime verification is
+pending (local validation remains deferred). No product code or daemon rebuild.
+Receipt checks and installed validation remain separate.
+Packaging copies verified originals to stable desktop-apps-packaging-target;
+original desktop-apps-target binaries and runtime receipts remain untouched.
+Each stage retains its installer and original-binary hashes/receipt. Dashboard
+NSIS installation and scoped runtime now pass; other installations remain open. Evidence: windows-app-packaging-20261029/{instance,
+inspection-review}.json and dashboard-nsis/. Next inspect this stage before
+other packaging; do not rerun earlier successful build/runtime checks.
+
+Windows app installers and any uncovered platform assertions, production-parameter performance,
+physical power-loss/safe retirement, and Pi/macOS qualification remain open.
+RAM investigation stays excluded.
+
+### Windows dashboard release build — completed, 2026-10-29
+
+App preflight PASS16.550s (pinned CLI2.10.0integrities,both Cargo manifests); reused
+before dashboard compilation. Native dashboard release build PASS484.438s under
+1CPU6GiB,no paging;peak commit2761633792bytes. Frozen frontend reused,not regenerated.
+Binary C:\burst-validation\desktop-apps-target\release\burst-node-gui.exe,
+14804480bytes,SHA256241a2a79ed7f2fe45a685fd8c30f4f8c26eaafebd773be8b1a7a9c0232b7aa55.
+Native runtime now passes as recorded above; installers remain open. Build handles69709/96198 terminal;
+no compiler remains. Evidence: windows-dashboard-build-20261029/{instance,
+verified-observations,launcher-review}.json;remote receipt/logs/cache retained.
+
+Shared node-gui native-session now supports Windows direct drivers,dedicated-profile
+assertion and owned-tree cleanup; screenshot path is portable. Restored exact
+15-concurrent-read test from receipt-bound Linux evidence to repository and runner;
+RPC/navigation/focus assertions unchanged. All3changed/new JSfiles passed syntax
+checks through local limited-run; whitespace check clean. No runtime pass claimed.
+Dashboard receipt audited and native assertions passed above. Wallet build and
+native signer checks also now pass above; platform packaging remains. No rebuild for test-only edits. Production
+performance,physical-power,Pi/macOS gates remain open; RAM excluded.
+
+
+### Frozen Windows app inputs — staging pass, 2026-10-29
+
+Original candidate archive receipt verified on VM1. Direct private-storage transfer
+completed2.344s with exact archive/manifest hashes; Windows staging PASS5.365s.
+All533manifest entries match frozen bytes:388wallet/protocol and145dashboard,
+including frontend dist assets. Stable workspace C:\burst-validation\desktop-apps;
+existing daemon source/target untouched. No frontend regeneration or app compilation.
+Cap1CPU3GiB,no paging;Windows peak commit130170880 bytes. Evidence:
+windows-app-inputs-20261029/{transfer.log,instance.json,verified-observations.json,
+review.json};remote source-verification receipt retained. Transfer and staging terminal.
+VM1 booted only for retained artifacts; baseline daemon PID764 on7076/7077 found and
+left untouched,no compiler/validation unit active; daily shutdown remains enabled.
+Next audit source receipt then Windows native-app build with frozen assets and stable
+external target; adapt existing session launchers and run actual app assertions.
+Profile/browser/driver proofs reused. Windows app qualification,production performance,
+physical-power/Pi/macOS gates remain open; RAM investigation excluded.
+
+
+### Windows browser readiness — verified pass, 2026-10-29
+
+Edge WebDriver readiness PASS10.158s,4assertions. Ordinary burst-gui-val account,
+correct profile,session0; normal browser window,DOM click/title readback and session
+deletion succeeded. No headless or sandbox bypass flags. Existing1CPU3GiB/no-paging
+cap retained;peak commit328388608 bytes. Task Ready,lastResult0; receipt input/log
+verification passed on host,fingerprinta4fd2b1b14afa510. No validation remains active.
+Evidence: windows-browser-readiness-20261029/{inspection,verified-observations,review}.json.
+This proves Edge browser readiness only,not WebView2/Tauri or wallet/dashboard.
+Profile/window and driver receipts audited/reused; no compiler or product change.
+Frozen frontend assets and Windows source layout now verified above; next native
+app build and existing session-launcher adaptation,then actual app qualification. Do not repeat healthy browser smoke
+without changed dependencies/new launch failure. Other production gates remain open;
+RAM investigation excluded.
+
+
+### Windows Tauri driver — compiled and verified, 2026-10-29
+
+Pinned tauri-driver2.1.0 debug compilation/install completed in72s under1CPU6GiB;
+peak commit525225984 bytes,zero paging. Initial preflight symlink issue corrected
+before compilation. Composite build record remains FAIL because verifier mistakenly
+called unsupported --version. Source CLI and installation record established cause;
+no recompile. Corrected artifact verification PASS1.197s under1CPU3GiB: pinned package
+identity,exact artifact hash and documented --help. Latest prepare chained the failed
+receipt; prior inputs/logs audited. No browser/app execution or product rebuild.
+Artifact SHA256dc67820c44c8641f4829f14009963930ce23a2a7167e7a24f7c8c5ca81eac010;
+C:\burst-validation\desktop-tools\bin\tauri-driver.exe. Stable target retained.
+Evidence: windows-driver-build-20261029/{instance,version-inspection}.json and
+windows-driver-artifact-20261029/{setup-output,verified-observations,review}.json;
+remote receipts retained. All command handles terminal; no compiler job remains.
+Browser readiness now passes above; next actual Windows app qualification using
+existing assertion modules. Matching signed
+EdgeDriver/profile/window/product proofs reused; no repeated tool build needed.
+Production-parameter performance,physical power-loss,Pi/macOS remain open;RAM excluded.
+
+
+### Windows WebDriver inputs — acquired, 2026-10-29
+
+Tool acquisition PASS2.862s,4assertions under existing1CPU3GiB/no-paging cap.
+EdgeDriver156.0.4314.50 exactly matches installed Edge; Microsoft Authenticode
+signature Valid. Driver SHA256dd728c934e491abe7e8a07fa366aad135ea15d934cbba99192ad872da59c39d3.
+Pinned tauri-driver2.1.0 source matches registry SHA256
+2f2e29bd6900fb718dfdc06f2e7a371d6087c085daaf83709847ef3e6b0c1953;Cargo.lock present.
+Evidence: windows-driver-inputs-20261029/setup-output.json,verified-observations.json;
+remote receipt/source/driver retained in C:\burst-validation\driver-inputs-20261029.
+Acquisition ran no browser/app/compiler. Subsequent driver build and corrected
+artifact verification completed above; browser readiness is next under the
+already-qualified ordinary-user launch.
+Reuse profile/window pass and production artifacts; no new test framework or daemon
+rebuild. Windows apps and other production gates remain open; RAM excluded.
+
+
+### Windows ordinary-user environment — verified pass, 2026-10-29
+
+Profile/window probe PASS1.818s,4assertions; scheduled task terminal result0.
+Identity burstwin148\burst-gui-val is neither SYSTEM nor admin; LocalApplicationData
+is C:\Users\burst-gui-val\AppData\Local; native WinForms window created. Remains
+session0/noninteractive: this does not prove WebView2,Tauri or app behavior.
+
+Security4625 proved missing batch-logon right. Added only the owned account SID to
+SeBatchLogonRight; no deny entry,all other rights compared unchanged,no admin grant.
+Windows exported the account by name; resolved names to SIDs for exact verification
+before starting. Earlier failures and never-run task evidence remain preserved.
+Same capped runner:1CPU3GiB,zero paging,20min/10s,peak commit34635776 bytes.
+Latest receipt input/log verification passed on host; fingerprint80045f3b9bfc43cb.
+No app/daemon/compiler build or production source edit. Task has no recurring trigger.
+
+| Evidence / reusable scope | Invalidation | Next action |
+| --- | --- | --- |
+| windows-desktop-profile-20261029/verified-start-output.json,verified-observations.json,review.json; remote receipt.json | User/profile,launcher or resource-runner change | Reuse profile/native-window proof; matching drivers and actual browser-engine readiness next |
+| Prior GNU,musl,ARM,Windows daemon and Linux app receipts | Relevant artifact/dependency change | Preserve original scopes; no daemon rebuild for test launcher work |
+
+Windows desktop apps,production-parameter100TPS/subsecond,physical-power/safe
+retirement,Pi/macOS remain open. RAM investigation remains excluded.
+
+
+### Windows child diagnostic — terminal failure, 2026-10-29
+
+Logging-only probe completed FAIL1.584s,zero assertions. Captured error proves the
+profile assertion fails: identity is burstwin148\burst-gui-val, but UserProfile and
+LocalApplicationData both resolve to SYSTEM profile. No Forms/window operation ran.
+Failed receipt integrity verified; no compiler/daemon listed; inspection terminal.
+Native resource guard passed;1CPU3GiB unchanged,peak commit36712448 bytes.
+Reuse existing account,runner and production artifacts. Latest receipt:
+windows-desktop-diagnostic-20261029 (inspection.json,terminal-review.json).
+Next: supported profile-loading launch for this account; review scheduled-task
+password-logon route. Do not spoof APPDATA,remove profile assertion or widen rights.
+Resource wrapper and current receipt chain remain required. No app build needed
+until native context works. Windows app qualification remains open.
+
+
+### Windows desktop probe diagnosis checkpoint, 2026-10-29
+
+Second ordinary-user probe terminal FAIL (1.739s, zero assertions). Native resource
+queries now succeed: no pagefiles,15199338496 available bytes; capped child launched
+and exited1,peak commit33398784 bytes. This resolves the first WMI-query permission
+failure but does not establish native-window readiness. Child stderr was not saved,
+so the second cause remains unknown; Azure generic RunAs error is insufficient.
+Remote inspection verified the failed receipt integrity; no compiler/daemon was
+listed. Expected user-profile directory was absent; actual profile-stage failure
+is not yet established. After two failures, stop scenario retries and diagnose. Next smallest check is
+stage/exception capture in the existing probe with identical user,limits and
+assertions; use latest failed receipt for prepare. No app or daemon rebuild.
+Evidence: windows-desktop-native-query-20261029/probe-instance.json and diagnosis.json.
+Prior account setup and daemon/Linux/ARM proofs remain reusable in original scopes.
+Windows apps,production-parameter performance,physical-power/Pi/macOS gates remain
+open. RAM investigation remains excluded.
+
+
+Windows desktop preflight: Edge/WebView2 installed, but command context is SYSTEM/
+session0,no logged-in user, and Tauri/Edge drivers absent from checked locations.
+Existing app launchers are Linux-specific. Next is bounded normal-user context,
+matching drivers and profile/launcher adaptation before compiling apps. No app or
+protocol test ran; current daemon/Linux app proofs remain valid in their scopes.
+Source inputs match frozen app receipts locally; generated dist differences recorded.
+Evidence: windows-app-preflight-20261029/review.json. External fixture/hardware
+availability has been requested; production performance/power-loss gates stay open.
+
+Current ARM64 daemona1042437 qualifies static architecture/linkage and exact public
+identity/Dev epoch/two-restart recovery. Build PASS11m59.156s; static PASS1.334s;
+existing native helper PASS2m1.275s; runtime PASS15.219s. Six terminal evidence files
+hash-verified and receipts audited; no job remains. Dedicated VM deallocation verified
+with target cache/evidence preserved. No Pi performance or physical-power claim.
+Evidence: linux-arm-candidate/helper/runtime-20261029. Production-parameter performance,
+physical power-loss/safe retirement, Pi/macOS and Windows desktop apps remain open.
+
+Remaining-platform review: dedicated native ARM64 validation VM now provisioned
+and guest identity/resources verified;8GiB,zero swap,restricted SSH,02UTCshutdown.
+ARM build/static/runtime checks are now completed above. Existing x86 proofs retained;
+no publishing workflow dispatched.
+ARM cloud is not Pi4 performance or physical power-loss proof. macOS and Windows
+apps remain unqualified; actual-parameter performance needs an eligible mature Dev
+fixture. Evidence: platform-remainder-20261029/review.json and host preflight.
+
+Current Windows qualification: MSVC daemoncfe3721b build PASS6m20s; exact native
+Dev SCM lifecycle PASS6.313s under1CPU2GiB. Two clean service cycles, telemetry,
+disabled faucet and invalid-config refusal; receipts verified, terminal evidence
+downloaded/hash-checked. VM restored to original4CPU16GiB,no paging or leftover
+validation process/service. No Windows desktop-app/public-identity/all-action claim.
+Evidence: windows-msvc-candidate-20261029 and windows-native-current-20261029.
+Remaining target scope requires platform/host review; production-parameter performance
+and physical power-loss/safe retirement still open. No product changes this turn.
+
+Current musl qualification: daemon92af7a2b built PASS5m55.180s; static linkage
+and exact public identity/Dev epoch/two-restart checks PASS (combined job16.820s).
+Receipts audited and downloaded terminal evidence SHA256 verified; no job active.
+Separate artifact; GNU bundle3b55f1c1 unchanged. Windows current-source compilation/native lifecycle now passes as recorded above;
+Windows desktop apps and ARM/Pi/macOS remain unqualified. No throughput or physical-power claim.
+Evidence: linux-musl-candidate-20261029 and linux-musl-runtime-20261029.
+
+Current release integration: GNU daemon9aeff84b built PASS5m51.584s and exact-binary
+identity/epoch/two-restart smoke PASS15.087s. Frozen wallet7742e538 and dashboard
+e456c91a package/install/runtime receipts verified for original scopes; no app
+rebuild. Initial audit directory mismatch and older dashboard diagnostic selection
+were reconciled against receipts. Current bundle3b55f1c1 assembly/archive verification passes; independent Ubuntu
+payload checks, daemon identity/restart and native signer checks PASS18.421s.
+No full new consumer/NAT/payment claim. Terminal evidence verified; no job active.
+
+Completed functional evidence: real-clock mixed governance PASS88.223s after bounded transport
+first-announcement priority fix. Six transport checks PASS0.02s; new approved votes
+use the next existing announcement slot before old rebroadcasts, without changing
+cadence/cache bounds or signing/quorum rules. Over67s continuous genesis payment
+and independent query traffic; all four phases progress. Original tally, counting,
+activation, restart/fresh catch-up and25s payment assertions pass; two certified
+exclusions resolved. Terminal evidence verified and no job active.
+
+Scope: three humans, shortened governance, zero work, validation executable. Actual
+production-parameter100TPS/subsecond finality, physical power-loss/safe retirement,
+and current bundle/platform qualification remain open. Do not add mixed variants
+without a named uncovered requirement. Latest receipt:
+`mixed-lifecycle-20261028/fresh-announcement/mixed/tests/001/receipt.json`.
+
+Completed scoped evidence: controlled-clock mixed lifecycle PASS301.871s for both Fraud and
+Inactivity, over60s continuous payment/query traffic per branch, exact expiry
+settlement, restart and fresh observer. Retained diagnosis identified confirmed
+current-second heads beyond the frozen activation cutoff; test-only traffic now
+uses the closed second, floored at the installed cutoff. Original deadlines and
+phase assertions remain. Runtime promised-extension fallback and accepted-successor
+reuse were exercised. No job active; terminal evidence downloaded/hash-verified.
+
+This closes the controlled-clock scenario only. The later real-clock ballot/payment
+scenario above has its own passing evidence and limits. Actual-parameter100TPS/
+subsecond finality, physical power-loss/safe retirement and remaining platform gates
+stay open. RAM optimization remains excluded. Evidence:
+`mixed-lifecycle-20261028/closed-second/mixed/tests/001/receipt.json`.
+
+Historical installation-timing evidence (superseded by guarded successor reuse):
+Consistent authority recovery remains fixed. Diagnostic-only instrumentation and
+an existing publication check pass. Latest mixed diagnostic FAIL106.842s at the
+unchanged cumulative25s payment bound: installed-state recovery costs5.9–8.2s
+for selection and2.7–4.3s for activation, exceeding successor preparation cost.
+Code review identifies repeated accepted-successor replay between journal recovery
+and installation; exact guarded reuse is the next implementation review, not a
+completed fix. No job active, profile change, relaxed deadline or public release
+claim. Latest evidence: `installation-timing/mixed/tests/001/receipt.json` and
+`installation-timing/mixed/diagnosis.json`; see completion handoff for scope.
+
+Earlier unsigned lifecycle evidence (historical): compact refresh implemented using existing discovery
+and signed-choice guards. Build and13focused checks PASS81.75s. Mixed integration
+FAIL150.833s at activation: all four nodes installed selection/beacon, but then
+authority recovery retried without further discovery. The new refresh path is not
+qualified by that scenario. No job active. Next diagnose recovery handoff using
+retained evidence; public qualification remains closed. See the current completion
+handoff and activation-refresh/mixed/diagnosis.json.
+
+Bounded preparation follow-up, 2026-10-28: soft-vote expiry/final draining and
+idle-cut retry correction implemented. Three store and sixteen node checks passed;
+five affected discovery checks passed after the correction. Latest mixed run
+FAIL133.838s: selection/beacon now reaches all four nodes, but activation stalls
+on a candidate that no longer covers current finality. Investigate unsigned
+activation refresh and post-rotation recovery before another scenario. No job
+active; no sustained-workload pass or new release qualification. See the current
+completion handoff and mixed-lifecycle-20261028/idle-cut/mixed/diagnosis.json.
+
+Discovery follow-up, 2026-10-28: confirmed-cut validation now tolerates provisional
+account extensions while retaining confirmed-head/body/index/authority/governance
+checks. Strict startup/publication validation is unchanged. Ten focused checks
+PASS80.41s, including11corrupt-boundary cases and six manifest/signing/recovery
+oracles. Continuous advancement of confirmed payments still requires coordination;
+no new sustained-workload pass or release qualification. Evidence: mixed-lifecycle-20261028/confirmed-cut.
+
+Historical mixed-workload diagnosis (2026-10-28): stage-timed run failed121.329s
+at the unchanged selection wait. During signed traffic, replay averaged5.023s
+and every measured replay saw ledger changes. Duplicate replay of an identical
+safe cut is now removed; six existing manifest-oracle/signing/recovery cases
+PASS87.94s. Finality and corruption guards remain. Sustained liveness is still
+unresolved, and the new source change is not integrated into frozen release
+artifacts. See the current completion-plan handoff and
+mixed-lifecycle-20261028/{timing,replay-reuse} evidence.
+
+
+Current scope, 2026-10-28: finish unresolved complexity fixes and production
+qualification. RAM investigation is explicitly excluded by the user; the last
+2.27 GB peak and unmet under-1 GB target remain documented limitations. Completed
+owned-mutation work is not a new task. Historical audit prescriptions are not a
+current implementation backlog.
+
+This table reconciles the per-finding audit with current source and the latest
+handoff. “Implemented” means the named mechanism exists with recorded scoped
+validation, not that all operation-wide production requirements pass. Receipt
+identity and dependency coverage must be checked before reusing a pass in a run.
+
+| Finding | Current implementation position | Remaining action |
+| --- | --- | --- |
+| CX01 fragmented sends | Linear/scoped debit and counter work implemented | Actual-parameter end-to-end throughput/finality; admission, commit and consensus costs |
+| CX02 BRN mutation copies | Persistent wallet preparation and structural deltas implemented | Sustained live payment workload; verify unrelated-wallet scaling at the candidate boundary |
+| CX03 TRST map detachment | Persistent engine/graph state and scoped deltas implemented | Mixed payment/lifecycle workload and affected-state scaling |
+| CX04 governance writes | Transactional scoped records, undo and recovery implemented | Concurrent governance/payment operation costs, including cold restoration |
+| CX05 governance reads | Selected-proposal snapshots AND bounded projection cache implemented | Cold/warm request costs and invalidation under concurrent mutations; do not add a second cache |
+| CX06 delegation counting | Snapshot ballot resolver implemented with functional evidence | Request-level electorate/depth scaling and concurrent lifecycle changes |
+| CX07 expiry scans | Due-work scheduling and pending indexes implemented | Deadline/expiry bursts during signed traffic and durable commit latency |
+| CX08 wallet token work | Retained token indexes and normalized persistence implemented | Fragment/token/creator-history scaling across full operations |
+| CX09 graph append scans | Append validation and graph indexes implemented | Operation-wide scaling; exclude further RAM-layout work |
+| CX10 revocation | Indexed affected-work implementation and scoped signed lifecycle evidence | Reconcile remaining overlapping-origin/fanout costs against current code, then qualify sustained affected work |
+| CX11 BRN histories/releases | Rate/pause and release indexes implemented; has_more uses indexed sources | Reconcile greedy whole-proof selection costs; preserve proof ordering and release semantics |
+| CX12 fork recovery | Scoped economic staging, restoration/cache and continuation sharing implemented | Cold/replacement costs under mixed traffic; atomicity and replay evidence scoped to changed dependencies |
+| CX13 verification | Keyed records, normalized persistence and snapshot accounting implemented | Submission/deadline contention at larger signed populations |
+| CX14 queries | Targeted pages, captured reads, read executor and streaming query paths implemented | Concurrent RPC/payment latency and per-request work; check current paths before calling old scans missing |
+| CX15 activation/history | Indexed activation work, bounded capture/cancellation and retirement machinery implemented in scoped paths | Reconcile full activation and sustained retention behavior; durability and safe enablement remain separate gates |
+
+## Completed scenarios that must not remain on a generic backlog
+
+The following saved terminal results were inspected on2026-10-28. For attempts
+262,391,475,478,493,496,507 and509, local execution-log contents were checked against
+their saved receipt hashes. This verifies preserved execution evidence, not current
+source dependency coverage. Reuse on a new candidate still needs the existing
+change-impact review; a changed binary hash alone is not a reason to rerun.
+
+| Completed scope | Evidence | Scope boundary |
+| --- | --- | --- |
+| Governance queries with32771humans, one proposal, three loopback nodes;48assertions and bounded shutdown |262runtime PASS174.3s | Not sustained mixed payment traffic or100k query load |
+|64-origin Fraud AND Inactivity: signed burns/receives, settlement, expiry/revocation, late-receive rejection, restart and fresh observer |391runtime PASS251.9s | Controlled Dev; not arbitrary fanout or actual-parameter sustained throughput |
+| Continuous two-signer payment/query traffic across Fraud AND Inactivity, exact expiry, restart and fresh observer | closed-second mixed PASS301.871s; over60s per branch | Frozen node clock, closed-second signing; not real-clock throughput or proposal voting/counting |
+| Real-clock proposal/ballot/counting/activation with sustained payment/query traffic and original tally/recovery assertions | fresh-announcement mixed PASS88.223s;67784ms traffic | Three humans, genesis payment chain, zero work, short governance; not production throughput |
+|4096-head background migration with2575concurrent metadata writes and bounded shutdown |475contention PASS | Metadata contention, not signed payment/governance load |
+| Actual daemon snapshot attest/export/verify and oversized framed-header tamper rejection |478two runtime PASS results |477candidate and fixture scope |
+|100k retained-state authentication and recovery |493PASS;509actual daemon initialized/identity/cleanstop assertions PASS |509overall FAIL for readiness/RAM; does not negate successful recovery assertions |
+| Publication crash/cancellation/shutdown and fork sharing/economic equivalence/tip guards |496nine cases;507ten cases PASS | Process crash and scoped recovery, not physical power removal |
+| Snapshot install, SIGKILL recovery, reconnection, new payment and governance recovery |recovery-cut-20261017/snapshot-result.json PASS | Earlier identified candidate and retained fixture |
+| Independent-host recovery/payment and retained in-flight exclusion/payment followthrough |recovery-cut-20261017 independent-result.json and followthrough-result.json PASS | Saved original scopes; followthrough is resumed, not fresh uninterrupted acceptance |
+| Independent bundle checksums, installed payloads, public identity/restart and native wallet signer startup |current-independent-candidate-20261029/result.json PASS18.421s; prior receipt audited on VM2 | Current archive3b55f1c1 on Ubuntu24.04 amd64; not other platforms or full consumer/NAT/payment replay |
+
+The two earlier recovery rows retain their original scope; their full remote
+stage dependencies were not re-audited in this reconciliation. The final independent
+installation row is a new exact-candidate pass with its receipt checked on VM2.
+
+## Concrete boundaries still open
+
+1. Payment throughput/finality under production-like parameters. Existing driver
+   is wallet_core/examples/validate_network/load.rs plus load/run.rs. It needs
+   2–32 public-fixture non-genesis accounts, initialized matching payment epochs,
+   positive online representative weight, confirmed consistent account state,
+   nonzero governed work, sufficient BRN and actual maturity. Default maturity
+   is 30 days. This is a fixture prerequisite, not a reason to weaken guards.
+2. The defined additional mixed scenarios now pass: continuous two-signer traffic
+   through64-origin exact-expiry Fraud/Inactivity, and real-clock payment/query
+   overlap through ballot/counting/activation with recovery. Retain their explicit
+   parameter/artifact limits. Production-parameter performance remains item1;
+   any further workload needs a named missing assertion, not an unbounded expansion.
+3. Recovery/retirement durability and production enablement: preserve atomic
+   recovery and retained rights; process-kill evidence alone is not physical
+   power-loss evidence. No blanket enablement of disabled paths.
+4. Change-impact review for the latest distributable identity, installation and
+   supported-platform acceptance, preserving earlier completed package checks.
+   Current public daemon9aeff84b, unchanged wallet7742e538 and dashboarde456c91a
+   are assembled as archive3b55f1c1 with independent Ubuntu payload/startup/signer PASS.
+   Current static musl daemon92af7a2b passes build/linkage/identity/epoch/restart.
+   Current Windows MSVC daemoncfe3721b passes release compilation6m20s and native
+   SCM lifecycle6.313s under1CPU2GiB; receipts and terminal evidence verified.
+   Original VM size restored with no leftover service/daemon. Old53677283 passes,
+   original enclosing timeout and failed resource preflight retain their scopes.
+   Current ARM64 static daemona1042437 passes architecture/linkage, public identity
+   and Dev epoch/two-restart checks. Windows dashboard native RPC/navigation/focus
+   and 15 concurrent reads now pass (7.966s, receipt91bd3b9195fccada). Wallet build
+   now passes (538.024s, artifact07473ade); native11-command signer guards pass
+   (4.677s, receipt53fb3091). Both Windows NSIS/MSI installations pass; NSIS wallet/dashboard runtime and MSI dashboard runtime pass. MSI wallet runtime also passes (4.870s, receipt529657cf); the recorded Windows package checks are complete. Pi4 performance and macOS remain unqualified. These scoped passes do not permit public release.
+
+## Evidence and current next action
+
+Current frozen public candidate: archive3b55f1c1, daemon9aeff84b, wallet7742e538
+and dashboard e456c91a. Performance baseline remains attempt508, SHA256
+2f16cf24ff7d25e4341625577b10b138eb8fc771aa5df38d7cda81de1d6366aa.
+507: ten continuation isolation/economic equivalence/tip tests passed.
+509: retained100k initialization, identity and clean exit passed;71.8s startup
+and2.27GB peak failed the respective driver/resource gates. No repeat scheduled.
+
+Host inventory found356 ledger files in91 workspace roots within the explicitly
+bounded search (home/burst depth5, excluding hidden/source/build trees). This is
+not an exhaustive host search and does not prove any ledger eligible. Reviewed
+public-testnet identity captures report Test, outside the existing Dev load
+scope. fresh-candidate-network governance evidence records min_verification_age_secs
+as1. Other reviewed reference files contain account/head references, not maturity
+or work proof. No eligible fixture has been established; no load was submitted.
+
+CX10/CX11 source review is completed below; do not repeat it as an open item.
+Native ARM source/build/runtime qualification is completed above.
+Independently establish an eligible payment fixture using existing tooling. Do not
+spend another build discovering a known fixture rejection. RAM work is excluded.
+
+### Residual source review completed in this reconciliation
+
+CX11: release_sources already stops when the selected hash limit is full and
+short-circuits proof inspection after remaining+1 unseen sources. It must preserve
+whole-proof, outcome-ordered greedy semantics; a large non-fitting backlog can
+still require visiting many proofs. has_more_sources uses counts and outcome
+lookups for well-formed proofs, with an explicit malformed-proof fallback. This
+is not the old unconditional full retained-history scan. Further indexing requires
+a demonstrated relevant workload and equivalence coverage, not a new selection policy.
+
+CX10: PendingRevocationIndex indexes effects by affected/revoked origin and keeps
+positions to preserve effect order. PendingRevocationBatch caches repeated revision
+answers under an exclusive graph borrow. Existing tests cover unrelated effects,
+chunks and basis validation. Do not reimplement an overlap index. Remaining work
+is qualifying affected graph/history growth and signed mixed-workload integration.
+
+These inspections establish existing mechanisms, not a new runtime pass. No compiler
+or expensive test was started during reconciliation. The next qualification plan
+must map an actual changed dependency or uncovered assertion to existing evidence.
+
+### Current wallet compatibility result, 2026-10-28
+
+Fixed the stale native Cargo.lock with eight required dependencies, preserving
+existing versions. Current native compilation and four exact-amount/merge adapter
+tests PASS; see latest-wallet-native-20261028-v3 receipts. Dashboard package is
+source-identical and reusable. Current wallet release packaging and affected
+installed IPC remain unqualified; these development-profile passes do not close
+that gate. Both validation jobs finished; no build is active.
+
+### Current wallet package and installed journey qualified, 2026-10-28
+
+Wallet Debian7742e538 now embeds current sources. Separate frontend, release
+build, exact installation and offline endorsement/two-restart/accepted-response-loss
+recovery with daemon508 PASS. Reuse these scoped receipts in latest-wallet-*-20261028;
+do not keep this journey on the backlog. Public daemon identity/dashboard combination,
+other supported targets and final bundle provenance remain separate. No active job.
+
+### Public daemon and dashboard evidence, 2026-10-28
+
+Public-key daemon d5896c79 build and identity/authority/rate/restart checks PASS.
+It differs from508by the Test public key; unchanged source verified before build.
+Dashboard first combined run FAIL at Consti display after native RPC passed;
+navigation-only diagnostic PASS with unchanged assertions/timeouts. Root cause
+is unresolved; separate passes do not qualify an uninterrupted combined run.
+Current summary and exact receipts are in COMPLETION_LEDGER.md. No active job.
+
+### Dashboard admission compatibility defect, 2026-10-28
+
+Five of fifteen concurrent governance-page native reads were rate-limited by the
+one-worker read executor, including Consti requests. Added bounded retries in the
+dashboard read helper only; daemon limits unchanged. Three regression tests added;
+compilation active (dashboard-read-retry-20261028-v2), not yet a passing fix. Old
+dashboard package no longer represents this pending source. See current ledger.
+
+### Dashboard correction qualified, 2026-10-28
+
+Dashboard e456c91a exact installation and combined RPC/navigation/Consti/focus
+plus15/15concurrent native reads PASS with public daemon d5896c79. Three focused
+retry regressions PASS. Old94f3ea4e package is superseded because native read
+handling changed. Original failures retained. Current runtime receipt verified;
+no active job. Freeze these artifacts for provenance assembly, not further rebuilds.
+
+### Windows evidence reuse review, 2026-10-28
+
+Recovered authenticated original source archive04cea991 on the existing Windows VM.
+Installer, checksum/runner contracts and service.rs match current files. Retain the
+Windows148 historical contract passes; do not rebuild to repeat them. Added service
+smoke failure diagnostics leave passing-path assertions unchanged. Current daemon
+build inputs changed; only the old development executable exists, so current native
+artifact/service qualification remains open. See platform-review-20261028/
+verified-reuse-review.json. No active job; no new runtime pass claimed.
+
+### Linux amd64 musl candidate, 2026-10-28
+
+Unchanged public source compiled as musl artifact ca301984. Build PASS11m22s;
+static-link inspection PASS; exact identity/authority and signed Dev epoch/owner
+successor through two history-preserving restarts PASS14.481s. All three receipts
+verified on VM1 and downloaded evidence hashes checked. Reuse these stages from
+linux-musl-candidate-20261028 and linux-musl-runtime-20261028. This separate daemon
+artifact does not replace glibc archive9f379a2e or qualify other platforms/load/
+power-loss. No validation job is active.

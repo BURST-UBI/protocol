@@ -14,6 +14,8 @@ crate-type = ["cdylib"]
 required-features = ["browser-test"]
 
 [dependencies]
+futures-util = { workspace = true }
+burst-rpc-messages = { workspace = true }
 burst-types = { workspace = true }
 burst-crypto = { workspace = true }
 burst-brn = { workspace = true }
@@ -30,15 +32,16 @@ thiserror = { workspace = true }
 argon2 = { workspace = true }
 aes-gcm = { workspace = true }
 rand = { workspace = true }
-reqwest = { workspace = true }
 x25519-dalek = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reqwest = { workspace = true }
+burst-http-client = { path = "../http_client" }
 tokio = { workspace = true }
 tempfile = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-burst-browser = { workspace = true }
+burst-web-runtime = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen = { workspace = true }

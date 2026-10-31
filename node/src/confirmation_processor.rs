@@ -1,11 +1,8 @@
-//! Confirmation height processor — cements blocks in causal order.
+//! Standalone account-chain confirmation processor.
 //!
-//! When a block is confirmed by consensus (e.g. ORV), this processor walks
-//! the account chain from the current confirmation height up to the confirmed
-//! block and marks all intermediate blocks as cemented (final). Once cemented,
-//! blocks cannot be rolled back.
-//!
-//! Inspired by rsnano-node's `confirmation_height_processor`.
+//! Advances one account's confirmation height through the supplied ChainWalker.
+//! The running node uses causal_cementation to handle cross-account dependencies
+//! and confirmed shared state in the same transaction.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -37,8 +34,8 @@ pub enum CementResult {
 
 /// Walks an account chain and cements blocks up to a confirmed block hash.
 ///
-/// This processor is stateless — it receives the chain data it needs via the
-/// `ChainWalker` trait, making it testable without a real store.
+/// The caller must establish consensus finality and stable chain inputs. This
+/// helper checks neither votes nor cross-account dependencies.
 pub struct ConfirmationProcessor;
 
 /// Trait abstracting the ability to walk an account's block chain.
@@ -53,8 +50,8 @@ pub trait ChainWalker {
     /// Height 1 is the open block.
     fn block_at_height(&self, account: &AccountInfo, height: u64) -> Option<BlockHash>;
 
-    /// Get the height of a specific block in an account's chain.
-    /// Returns `None` if the block doesn't belong to this account.
+    /// Look up the block height. The store adapter uses the global hash index
+    /// and does not independently verify ownership against the supplied account.
     fn height_of_block(&self, account: &AccountInfo, hash: &BlockHash) -> Option<u64>;
 
     /// Persist the updated confirmation height for an account.
@@ -65,19 +62,19 @@ impl ConfirmationProcessor {
     /// Cement all blocks from the account's current confirmation height up to
     /// (and including) the block identified by `confirmed_hash`.
     ///
-    /// Returns a list of block hashes cemented in causal order (oldest first).
+    /// Collects the entire height interval before writing, with no batch or
+    /// memory limit. Returns hashes in account-height order after the walker
+    /// reports a successful height update.
     pub fn process<W: ChainWalker>(
         &self,
         confirmed_hash: &BlockHash,
         walker: &mut W,
     ) -> (CementResult, Vec<BlockHash>) {
-        // Look up which account owns this block.
         let mut account = match walker.account_for_block(confirmed_hash) {
             Some(a) => a,
             None => return (CementResult::AccountNotFound, vec![]),
         };
 
-        // Determine the height of the confirmed block.
         let confirmed_height = match walker.height_of_block(&account, confirmed_hash) {
             Some(h) => h,
             None => return (CementResult::BlockNotFound, vec![]),
@@ -85,13 +82,11 @@ impl ConfirmationProcessor {
 
         let current_height = account.confirmation_height;
 
-        // Already cemented?
         if confirmed_height <= current_height {
             return (CementResult::AlreadyCemented, vec![]);
         }
 
-        // Walk from current_height + 1 up to confirmed_height, collecting
-        // block hashes in causal order.
+        // Collect the complete account interval before advancing its height.
         let mut cemented: VecDeque<BlockHash> = VecDeque::new();
         for h in (current_height + 1)..=confirmed_height {
             match walker.block_at_height(&account, h) {
@@ -103,7 +98,6 @@ impl ConfirmationProcessor {
         let blocks_cemented = cemented.len() as u64;
         let new_height = confirmed_height;
 
-        // Persist the new confirmation height.
         if !walker.set_confirmation_height(&mut account, new_height) {
             return (CementResult::StoreFailed, vec![]);
         }
@@ -118,16 +112,15 @@ impl ConfirmationProcessor {
     }
 }
 
-// ── LmdbChainWalker — real store-backed ChainWalker ─────────────────────
-
-/// A [`ChainWalker`] backed by real LMDB stores via the abstract
-/// [`AccountStore`] and [`BlockStore`] traits.
-pub struct LmdbChainWalker {
+/// Adapter over AccountStore and BlockStore with separate reads and writes.
+/// It does not pin a shared snapshot. Read/decode failures become None, so
+/// missing data and storage errors share the processor's lookup-error results.
+pub struct StoreChainWalker {
     account_store: Arc<dyn AccountStore + Send + Sync>,
     block_store: Arc<dyn BlockStore + Send + Sync>,
 }
 
-impl LmdbChainWalker {
+impl StoreChainWalker {
     pub fn new(
         account_store: Arc<dyn AccountStore + Send + Sync>,
         block_store: Arc<dyn BlockStore + Send + Sync>,
@@ -139,7 +132,7 @@ impl LmdbChainWalker {
     }
 }
 
-impl ChainWalker for LmdbChainWalker {
+impl ChainWalker for StoreChainWalker {
     fn account_for_block(&self, hash: &BlockHash) -> Option<AccountInfo> {
         let block_bytes = self.block_store.get_block(hash).ok()?;
         let block: StateBlock = bincode::deserialize(&block_bytes).ok()?;

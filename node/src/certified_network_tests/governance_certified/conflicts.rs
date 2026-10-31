@@ -75,7 +75,7 @@ pub(super) async fn activate(
         let mut support = signed_block(&clients[0], &keys[0], tx, governed).await;
         support.block_type = BlockType::GovernanceEndorse;
         support.link = proposal.hash;
-        support.brn_balance += governed.governance_proposal_cost;
+        support.brn_spent += governed.governance_proposal_cost;
         support.hash = support.compute_hash();
         submit(clients, &sign_state_block(support, &keys[0].private)).await;
         proposals.push(proposal.hash);
@@ -97,9 +97,9 @@ pub(super) async fn activate(
         }
     }
     clock.store(base + 97, Ordering::SeqCst);
-    installed(stores, 4, initial).await;
+    wait_for_installation(stores, 4, initial).await;
     clock.store(base + 108, Ordering::SeqCst);
-    let epoch = installed(stores, 5, initial).await;
+    let epoch = wait_for_installation(stores, 5, initial).await;
     let winner = if proposals[0].as_bytes() < proposals[1].as_bytes() {
         0
     } else {

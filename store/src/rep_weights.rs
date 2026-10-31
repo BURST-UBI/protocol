@@ -15,7 +15,7 @@ pub trait RepWeightStore {
     fn delete_rep_weight(&self, rep: &WalletAddress) -> Result<(), StoreError>;
 
     /// Get all representative weights.
-    fn iter_rep_weights(&self) -> Result<Vec<(WalletAddress, u128)>, StoreError>;
+    fn all_rep_weights(&self) -> Result<Vec<(WalletAddress, u128)>, StoreError>;
 
     /// Store an online weight sample at the given timestamp.
     fn put_online_weight_sample(&self, timestamp: u64, weight: u128) -> Result<(), StoreError>;

@@ -11,6 +11,8 @@ pub struct PreparedCompactInstallation {
     cut: CompactCutCoverage,
     observations: compact::RecordObservations,
     witnesses: Arc<super::super::super::history::HistoricalBlocks>,
+    #[cfg(test)]
+    reused_accepted: bool,
 }
 
 pub(crate) enum CompactPreparation {
@@ -19,6 +21,9 @@ pub(crate) enum CompactPreparation {
 }
 
 impl PreparedCompactInstallation {
+    #[cfg(test)]
+    pub(crate) fn reused_accepted_successor(&self) -> bool { self.reused_accepted }
+
     pub fn anchor(&self) -> &burst_consensus::checkpoint::CheckpointAnchor {
         self.next.continuation.anchor()
     }
@@ -46,6 +51,8 @@ impl PreparedCompactInstallation {
             .map(|(installed, _, _)| installed)
     }
 
+    /// Commit and force-sync before returning runtime state and cache entries.
+    /// A sync error does not roll back the database commit.
     pub(crate) fn commit_with_recovery(
         self,
         store: &LmdbStore,
@@ -94,6 +101,7 @@ impl PreparedCompactInstallation {
             parent,
             blocks,
             &state.accounts,
+            Some(&state.brn.wallets),
         )?;
         drop(read);
         crate::confirmed_replay::installation::validate_retired(
@@ -207,6 +215,7 @@ impl RecoveredInstalledMetadata {
         store: Arc<LmdbStore>,
         registry: Arc<RwLock<ConnectionRegistry>>,
     ) -> Result<CompactPreparation, StoreError> {
+        let started = std::time::Instant::now();
         let source = store.clone();
         let planned = tokio::task::spawn_blocking(move || {
             let records = compact::read_after(
@@ -255,6 +264,8 @@ impl RecoveredInstalledMetadata {
         })
         .await
         .map_err(invalid)??;
+        tracing::debug!(elapsed_ms = started.elapsed().as_millis(), stage = "plan",
+            "checkpoint successor preparation timing");
         let (installed, next) = planned;
         let Some((record, observations, plan, available)) = next else {
             return Ok(CompactPreparation::CaughtUp(Box::new(ReplayCache {
@@ -262,6 +273,7 @@ impl RecoveredInstalledMetadata {
                 recovered: installed.recovered,
             })));
         };
+        let started = std::time::Instant::now();
         let retained = witness::fetch_plan_reusing(
             &registry,
             &installed.recovered.continuation,
@@ -269,27 +281,37 @@ impl RecoveredInstalledMetadata {
             available,
         )
         .await?;
+        tracing::debug!(elapsed_ms = started.elapsed().as_millis(), stage = "witness",
+            "checkpoint successor preparation timing");
+        let started = std::time::Instant::now();
         let source = store.clone();
-        let (installed, next, cut, observations, witness_plan) =
+        let (installed, next, cut, observations, witness_plan, reused_accepted) =
             tokio::task::spawn_blocking(move || {
                 let tail = plan.finish(retained).map_err(invalid)?;
-                let (next, cut) = installed.recovered.installation_successor(
+                let (next, cut, reused_accepted) = installed.recovered.installation_successor(
                     &source,
                     record,
                     &observations,
                     tail,
+                    installed.journals.accepted(),
                 )?;
                 let witness_plan = super::super::super::tail::cemented::plan_installed(
                     &next.continuation,
                     source.env().path(),
                 )
                 .map_err(invalid)?;
-                Ok::<_, StoreError>((installed, next, cut, observations, witness_plan))
+                Ok::<_, StoreError>((installed, next, cut, observations, witness_plan, reused_accepted))
             })
             .await
             .map_err(invalid)??;
+        tracing::debug!(elapsed_ms = started.elapsed().as_millis(), stage = "replay", reused_accepted,
+            "checkpoint successor preparation timing");
+        let started = std::time::Instant::now();
         let witnesses = witness::fetch_plan(&registry, &next.continuation, &witness_plan).await?;
-        tokio::task::spawn_blocking(move || {
+        tracing::debug!(elapsed_ms = started.elapsed().as_millis(), stage = "installed-witness",
+            "checkpoint successor preparation timing");
+        let started = std::time::Instant::now();
+        let result = tokio::task::spawn_blocking(move || {
             let witnesses = Arc::new(super::super::super::history::HistoricalBlocks::stage(
                 store.env().path(),
                 witnesses,
@@ -300,12 +322,17 @@ impl RecoveredInstalledMetadata {
                 cut,
                 observations,
                 witnesses,
+                #[cfg(test)]
+                reused_accepted,
             };
             let transaction = store.tx_begin_write()?;
             prepared.verify_unchanged(&transaction)?;
             Ok(CompactPreparation::Ready(Box::new(prepared)))
         })
         .await
-        .map_err(invalid)?
+        .map_err(invalid)?;
+        tracing::debug!(elapsed_ms = started.elapsed().as_millis(), stage = "verify",
+            "checkpoint successor preparation timing");
+        result
     }
 }

@@ -28,7 +28,7 @@ fn compact_snapshot_preserves_device_grant_without_retaining_the_handoff_block()
     fixture.push(0, BlockType::Burn, cutoff, |block| {
         block.payment_epoch = base.anchor().hash();
         block.link = destination(21);
-        block.brn_balance += 1;
+        block.brn_spent += 1;
     });
     let valid = fixture.blocks.last().unwrap().clone();
     assert_eq!(valid.signing_grant, grant);
@@ -155,7 +155,7 @@ fn compact_snapshot_replays_payments_and_governance_with_identical_complete_stat
     let epoch = snapshot.anchor().hash();
     let burn = fixture.push(0, BlockType::Burn, cutoff - 10, |block| {
         block.payment_epoch = epoch;
-        block.brn_balance += 5;
+        block.brn_spent += 5;
         block.link = destination(30);
     });
     fixture.push(30, BlockType::Open, cutoff - 9, |block| {
@@ -172,7 +172,7 @@ fn compact_snapshot_replays_payments_and_governance_with_identical_complete_stat
     });
     fixture.push(1, BlockType::GovernanceEndorse, cutoff - 7, |block| {
         block.link = proposal;
-        block.brn_balance += cost;
+        block.brn_spent += cost;
     });
     let full_history = fixture.history(cutoff);
     let (_tail_dir, tail_store) = suffix_store(&fixture.blocks[start..]);
@@ -226,7 +226,7 @@ fn compact_snapshot_replays_certified_votes_then_newly_verified_spending() {
     }
     fixture.push(20, BlockType::Open, cutoff - 10, |_| {});
     let burn = fixture.push(20, BlockType::Burn, cutoff - 5, |block| {
-        block.brn_balance = 1;
+        block.brn_spent = 1;
         block.link = destination(30);
     });
     fixture.push(30, BlockType::Open, cutoff, |block| {
@@ -264,7 +264,7 @@ fn compact_snapshot_rejects_missing_certificates_witnesses_and_semantic_double_c
         let epoch = snapshot.anchor().hash();
         let burn = fixture.push(0, BlockType::Burn, cutoff, |block| {
             block.payment_epoch = epoch;
-            block.brn_balance += 1;
+            block.brn_spent += 1;
             block.link = destination(0);
         });
         fixture.push(0, BlockType::Receive, cutoff, |block| {
@@ -323,7 +323,7 @@ fn compact_snapshot_requires_earlier_governance_ordering_witnesses() {
         let cost = fixture.params.governance_proposal_cost;
         let support = fixture.push(1, BlockType::GovernanceEndorse, 1_595_434_041, |block| {
             block.link = proposal;
-            block.brn_balance += cost;
+            block.brn_spent += cost;
         });
         let (_dir, store, snapshot) = snapshot(&fixture);
         assert_eq!(snapshot.ordering_dependencies(), vec![support]);

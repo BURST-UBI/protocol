@@ -20,6 +20,10 @@ impl RecoveryBase {
     }
 
     pub(super) fn verify(&self, batch: &LmdbWriteTransaction<'_>) -> Result<(), StoreError> {
+        self.verify_view(&batch.read_view())
+    }
+
+    pub(super) fn verify_view(&self, batch: &burst_store_lmdb::read_view::LedgerReadView<'_>) -> Result<(), StoreError> {
         match self {
             Self::Archive(commitment) => commitment.verify(|key| batch.get_meta(key)),
             Self::Genesis if batch.get_meta(BASE_KEY)?.is_none() => Ok(()),
@@ -34,8 +38,10 @@ impl RecoverySource {
         network: NetworkId,
         params: &ProtocolParams,
         directory: &std::path::Path,
+        check: &dyn Fn(&'static str) -> Result<(), StoreError>,
     ) -> Result<(Self, RecoveryBase), StoreError> {
-        match read_base(get, network, params, directory)? {
+        let genesis = crate::checkpoint_replay::ReplayedCheckpoint::genesis_anchor(network, params)?;
+        match super::super::read_base_at_until(get, &genesis, directory, check)? {
             Some((snapshot, commitment)) => Ok((
                 Self::Archive(Box::new(snapshot)),
                 RecoveryBase::Archive(commitment),
@@ -54,8 +60,7 @@ impl RecoverySource {
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<RecoveredSnapshot, StoreError>> + Send>,
     > {
-        // Choose before constructing the future, so polling does not move a
-        // second recovery state machine onto the caller's stack.
+        // Box only the selected recovery future, keeping its state off the caller's stack.
         match self {
             Self::Archive(snapshot) => {
                 Box::pin(snapshot.recover_stored_epoch_from_peers(store, registry, target))

@@ -1,4 +1,6 @@
-//! Hard-crash recovery probe for the isolated Dev cluster in run-validation.sh.
+//! Stage and inspect an unconfirmed payment chain on a minority representative.
+//! `run-validation.sh` controls isolation, hard restart and reconnection between
+//! invocations; this example checks the resulting RPC state.
 use burst_types::{Timestamp, TxHash};
 use burst_wallet_core::{
     signed_client::parse_hash,

@@ -1,5 +1,6 @@
-//! Local block re-broadcaster — ensures locally created blocks reach consensus.
-//! Re-broadcasts with exponential backoff until confirmed.
+//! Retry local submissions and rediscovered ledger blocks with exponential backoff.
+//! Scheduling consumes attempts regardless of delivery; this is not an outbox
+//! receipt log. Exhausted entries can be rediscovered and tracked again.
 
 use burst_types::BlockHash;
 use std::collections::HashMap;
@@ -10,11 +11,11 @@ const MAX_LOCAL_BLOCKS: usize = 1024;
 const INITIAL_INTERVAL_MS: u64 = 1_000;
 /// Maximum re-broadcast interval (ms).
 const MAX_INTERVAL_MS: u64 = 60_000;
-/// Maximum re-broadcasts per block.
-const MAX_REBROADCASTS: u32 = 15;
+/// Attempt budget per tracking cycle, counting the assumed initial broadcast.
+const MAX_BROADCAST_ATTEMPTS: u32 = 15;
 
 pub struct LocalBroadcaster {
-    /// Blocks created locally that haven't been confirmed yet.
+    /// Serialized messages awaiting confirmation or retry exhaustion.
     blocks: HashMap<BlockHash, LocalBlockEntry>,
     /// Maximum tracked blocks.
     max_entries: usize,
@@ -51,7 +52,10 @@ impl LocalBroadcaster {
         self.track(hash, block_bytes, now_ms);
     }
 
-    /// Track a locally created block for re-broadcasting.
+    /// Start or reset a retry cycle, assuming one broadcast has already occurred.
+    /// At capacity, scan for and evict the oldest entry before insertion, even
+    /// for a duplicate hash. Payload sizes are not bounded here. Zero capacity
+    /// still permits one entry through this method; track_pending admits none.
     pub fn track(&mut self, hash: BlockHash, block_bytes: Vec<u8>, now_ms: u64) {
         if self.blocks.len() >= self.max_entries {
             // Evict oldest
@@ -76,12 +80,13 @@ impl LocalBroadcaster {
         );
     }
 
-    /// Get blocks that need re-broadcasting now.
-    /// Returns (hash, block_bytes) for each block needing re-broadcast.
-    pub fn blocks_needing_rebroadcast(&mut self, now_ms: u64) -> Vec<(BlockHash, Vec<u8>)> {
+    /// Scan all entries, clone due payloads and advance their attempt counts.
+    /// Counts advance before any send; the caller owns network delivery. Retry
+    /// delay doubles from 1 to 60 seconds, measured from the scheduling call.
+    pub fn schedule_rebroadcasts(&mut self, now_ms: u64) -> Vec<(BlockHash, Vec<u8>)> {
         let mut result = Vec::new();
         for (hash, entry) in &mut self.blocks {
-            if entry.broadcast_count >= MAX_REBROADCASTS {
+            if entry.broadcast_count >= MAX_BROADCAST_ATTEMPTS {
                 continue;
             }
             if now_ms.saturating_sub(entry.last_broadcast_ms) >= entry.interval_ms {
@@ -110,10 +115,10 @@ impl LocalBroadcaster {
         self.blocks.is_empty()
     }
 
-    /// Cleanup blocks that exceeded max retries.
-    pub fn cleanup_expired(&mut self) {
+    /// Remove entries whose scheduled attempts have reached the cycle budget.
+    pub fn remove_exhausted(&mut self) {
         self.blocks
-            .retain(|_, entry| entry.broadcast_count < MAX_REBROADCASTS);
+            .retain(|_, entry| entry.broadcast_count < MAX_BROADCAST_ATTEMPTS);
     }
 }
 
@@ -134,18 +139,18 @@ mod tests {
         broadcaster.track_pending(hash(1), vec![1], 900);
         broadcaster.track_pending(hash(2), vec![2], 900);
         assert_eq!(
-            broadcaster.blocks_needing_rebroadcast(1000),
+            broadcaster.schedule_rebroadcasts(1000),
             vec![(hash(1), vec![1])]
         );
         broadcaster.track_pending(hash(1), vec![1], 2900);
         assert_eq!(
-            broadcaster.blocks_needing_rebroadcast(3000),
+            broadcaster.schedule_rebroadcasts(3000),
             vec![(hash(1), vec![1])]
         );
         broadcaster.confirmed(&hash(1));
         broadcaster.track_pending(hash(2), vec![2], 3000);
         assert_eq!(
-            broadcaster.blocks_needing_rebroadcast(4000),
+            broadcaster.schedule_rebroadcasts(4000),
             vec![(hash(2), vec![2])]
         );
     }
@@ -171,7 +176,7 @@ mod tests {
         broadcaster.track(h, vec![1, 2, 3], 1000);
 
         // Only 500ms later — too soon for the 1000ms initial interval
-        let result = broadcaster.blocks_needing_rebroadcast(1500);
+        let result = broadcaster.schedule_rebroadcasts(1500);
         assert!(result.is_empty());
     }
 
@@ -182,7 +187,7 @@ mod tests {
         broadcaster.track(h, vec![1, 2, 3], 1000);
 
         // 1000ms later — interval met
-        let result = broadcaster.blocks_needing_rebroadcast(2000);
+        let result = broadcaster.schedule_rebroadcasts(2000);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0, h);
         assert_eq!(result[0].1, vec![1, 2, 3]);
@@ -195,19 +200,19 @@ mod tests {
         broadcaster.track(h, vec![42], 0);
 
         // First rebroadcast at 1000ms (initial interval)
-        let result = broadcaster.blocks_needing_rebroadcast(1000);
+        let result = broadcaster.schedule_rebroadcasts(1000);
         assert_eq!(result.len(), 1);
 
         // Next interval should be 2000ms (doubled)
-        let result = broadcaster.blocks_needing_rebroadcast(2000);
+        let result = broadcaster.schedule_rebroadcasts(2000);
         assert!(result.is_empty()); // only 1000ms since last
 
-        let result = broadcaster.blocks_needing_rebroadcast(3000);
+        let result = broadcaster.schedule_rebroadcasts(3000);
         assert_eq!(result.len(), 1); // 2000ms since last
     }
 
     #[test]
-    fn max_rebroadcasts_honored() {
+    fn max_broadcast_attempts_honored() {
         let mut broadcaster = LocalBroadcaster::with_default();
         let h = hash(1);
         broadcaster.track(h, vec![42], 0);
@@ -217,12 +222,12 @@ mod tests {
         let mut count = 0;
         for _ in 0..100 {
             time += 100_000; // large jumps to always exceed interval
-            let result = broadcaster.blocks_needing_rebroadcast(time);
+            let result = broadcaster.schedule_rebroadcasts(time);
             count += result.len();
         }
 
-        // track() sets broadcast_count = 1, then MAX_REBROADCASTS - 1 more
-        assert_eq!(count, (MAX_REBROADCASTS - 1) as usize);
+        // track() sets broadcast_count = 1, then MAX_BROADCAST_ATTEMPTS - 1 more
+        assert_eq!(count, (MAX_BROADCAST_ATTEMPTS - 1) as usize);
     }
 
     #[test]
@@ -250,7 +255,7 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_expired_removes_exhausted_blocks() {
+    fn remove_exhausted_removes_exhausted_blocks() {
         let mut broadcaster = LocalBroadcaster::with_default();
         let h = hash(1);
         broadcaster.track(h, vec![42], 0);
@@ -259,11 +264,11 @@ mod tests {
         let mut time = 0u64;
         for _ in 0..100 {
             time += 100_000;
-            broadcaster.blocks_needing_rebroadcast(time);
+            broadcaster.schedule_rebroadcasts(time);
         }
 
         assert_eq!(broadcaster.len(), 1);
-        broadcaster.cleanup_expired();
+        broadcaster.remove_exhausted();
         assert_eq!(broadcaster.len(), 0);
     }
 
@@ -274,12 +279,12 @@ mod tests {
         broadcaster.track(hash(2), vec![2], 2000);
 
         // At 2000ms: hash(1) interval met, hash(2) just created
-        let result = broadcaster.blocks_needing_rebroadcast(2000);
+        let result = broadcaster.schedule_rebroadcasts(2000);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0, hash(1));
 
         // At 3000ms: hash(2) interval met
-        let result = broadcaster.blocks_needing_rebroadcast(3000);
+        let result = broadcaster.schedule_rebroadcasts(3000);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0, hash(2));
     }

@@ -7,9 +7,11 @@ use burst_ledger::{BlockType, StateBlock};
 use burst_store::{account::AccountInfo, StoreError};
 use burst_store_lmdb::{
     block_undo::{BlockUndo, UndoTable},
-    LmdbWriteTransaction,
 };
 use burst_types::{BlockHash, WalletAddress};
+
+pub(crate) mod view;
+use view::DependencyView;
 
 const MAX_SOURCES: usize = 131_072;
 const MAX_BYTES: u64 = 8 + 32 * MAX_SOURCES as u64;
@@ -61,7 +63,7 @@ pub(crate) fn bind_identity(batch: &mut impl Ledger, block: &StateBlock) -> Resu
     Ok(())
 }
 
-fn decode_source(bytes: &[u8]) -> Result<BlockHash, StoreError> {
+pub(super) fn decode_source(bytes: &[u8]) -> Result<BlockHash, StoreError> {
     let hash = BlockHash::new(
         bytes
             .try_into()
@@ -77,7 +79,7 @@ fn invalid(message: impl ToString) -> StoreError {
     StoreError::Corruption(message.to_string())
 }
 
-fn decode(bytes: &[u8]) -> Result<Vec<BlockHash>, StoreError> {
+pub(super) fn decode(bytes: &[u8]) -> Result<Vec<BlockHash>, StoreError> {
     if bytes.len() as u64 > MAX_BYTES {
         return Err(invalid("verification dependencies exceed byte limit"));
     }
@@ -131,7 +133,7 @@ pub(super) fn persist(
 }
 
 fn identity_sources(
-    batch: &LmdbWriteTransaction<'_>,
+    batch: &impl DependencyView,
     account: &WalletAddress,
     bytes: &[u8],
 ) -> Result<Vec<BlockHash>, StoreError> {
@@ -139,7 +141,7 @@ fn identity_sources(
     let source: StateBlock = bincode::deserialize(&batch.get_block(&hash)?).map_err(invalid)?;
     if source.hash != hash
         || source.compute_hash() != hash
-        || crate::ledger_bridge::extract_receiver_from_link(&source.link).as_ref() != Some(account)
+        || crate::block_economics::wallet_from_link(&source.link).as_ref() != Some(account)
     {
         return Err(invalid("verification identity source mismatch"));
     }
@@ -161,7 +163,7 @@ fn identity_sources(
 
 /// Cached replacements have signed payloads, but no committed block journal.
 pub(crate) fn voting_sources(
-    batch: &LmdbWriteTransaction<'_>,
+    batch: &impl DependencyView,
     block: &StateBlock,
 ) -> Result<Vec<BlockHash>, StoreError> {
     let mut sources = read(batch, block)?;
@@ -180,7 +182,7 @@ pub(crate) fn voting_sources(
 /// A lifecycle write must not pin another account's provisional branch. These
 /// local read dependencies require independent finality, not the outcome's vote.
 fn changed_account_sources(
-    batch: &LmdbWriteTransaction<'_>,
+    batch: &impl DependencyView,
     journal: &BlockUndo,
 ) -> Result<Vec<BlockHash>, StoreError> {
     let mut sources = Vec::new();
@@ -232,7 +234,7 @@ fn changed_account_sources(
 }
 
 pub(crate) fn read(
-    batch: &LmdbWriteTransaction<'_>,
+    batch: &impl DependencyView,
     block: &StateBlock,
 ) -> Result<Vec<BlockHash>, StoreError> {
     let key = transition_key(block.hash);

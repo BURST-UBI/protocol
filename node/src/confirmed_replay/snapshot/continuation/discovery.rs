@@ -11,14 +11,25 @@ use crate::{
 use burst_types::Timestamp;
 
 impl SnapshotContinuation {
-    /// Follow the archival runtime's priority order using only a checked local
-    /// suffix. The caller must recheck its store observations before signing.
+    /// Discover from a checked local suffix: due lifecycle effects before the
+    /// next governance cut, then governance, selection, and roster recovery.
+    /// The caller must recheck store observations and promises before signing.
     pub fn prepare_next_cemented_candidate(
         &self,
         store: &LmdbStore,
         cemented: &super::super::tail::cemented::CementedTail,
         selections: &(impl SelectionSource + ?Sized),
         clock: SigningClock,
+    ) -> Result<Option<CompactReplayCandidate>, ReplayError> {
+        self.prepare_next_replayed_candidate(store, cemented.tail(), selections, clock)
+    }
+
+    /// Build a candidate from authenticated signed history. An applied suffix is
+    /// only proposal input: callers must independently verify the cemented floor,
+    /// current observations and promises. This does not install or confirm it.
+    pub(in crate::confirmed_replay::snapshot) fn prepare_next_replayed_candidate(
+        &self, store: &LmdbStore, history: &SnapshotTail,
+        selections: &(impl SelectionSource + ?Sized), clock: SigningClock,
     ) -> Result<Option<CompactReplayCandidate>, ReplayError> {
         self.check_selection_receipts(selections)?;
         let Some(safe_cut) = clock
@@ -32,11 +43,11 @@ impl SnapshotContinuation {
             return Ok(None);
         }
         let tail_at = |cutoff| {
-            let heads = self.cemented_heads_at(cemented, cutoff)?;
-            self.read_tail_retaining(store, cutoff, &heads, cemented.tail())
+            let heads = self.replayed_heads_at(history, cutoff)?;
+            self.read_tail_retaining(store, cutoff, &heads, history)
         };
         let safe_tail = tail_at(safe_cut)?;
-        let (discovery, _) = self.discovery_state(&safe_tail, selections)?;
+        let (discovery, safe_blocks) = self.discovery_state(&safe_tail, selections)?;
         let governance_cut = discovery
             .state
             .next_governance_cut(Timestamp::new(safe_cut))?;
@@ -50,8 +61,19 @@ impl SnapshotContinuation {
             .unwrap_or(safe_cut);
         let mut result = None;
         if lifecycle_cut > self.anchor.cutoff() {
-            let tail = tail_at(lifecycle_cut)?;
-            result = self.discover_lifecycle(&tail, selections)?;
+            if lifecycle_cut == safe_cut {
+                let candidate = Self {
+                    anchor: discovery.anchor.clone(),
+                    context: discovery.context,
+                    state: discovery.state.clone(),
+                };
+                result = self.discover_lifecycle_from_replay(
+                    &safe_tail, selections, candidate, &safe_blocks,
+                )?;
+            } else {
+                let tail = tail_at(lifecycle_cut)?;
+                result = self.discover_lifecycle(&tail, selections)?;
+            }
         }
         if result.is_none() {
             if let Some(cutoff) = governance_cut {
@@ -150,14 +172,24 @@ impl SnapshotContinuation {
         tail: &SnapshotTail,
         selections: &(impl SelectionSource + ?Sized),
     ) -> Result<Option<CompactReplayCandidate>, ReplayError> {
-        let (mut candidate, blocks) = self.discovery_state(tail, selections)?;
+        let (candidate, blocks) = self.discovery_state(tail, selections)?;
+        self.discover_lifecycle_from_replay(tail, selections, candidate, &blocks)
+    }
+
+    fn discover_lifecycle_from_replay(
+        &self,
+        tail: &SnapshotTail,
+        selections: &(impl SelectionSource + ?Sized),
+        mut candidate: Self,
+        blocks: &Source<'static>,
+    ) -> Result<Option<CompactReplayCandidate>, ReplayError> {
         candidate
             .state
             .require_closed_governance(Timestamp::new(tail.cutoff()))?;
         let cut = CompactCut {
             cutoff: tail.cutoff(),
             commitment: tail.commitment(),
-            blocks: &blocks,
+            blocks,
         };
         let params = candidate.state.params().clone();
         if let Some(root) = candidate.state.apply_agreed_deadlines(&cut, &params)? {
@@ -199,7 +231,7 @@ impl SnapshotContinuation {
                 },
             ))));
         }
-        for selection in selections.read_all() {
+        for selection in selections.iter_selections() {
             let selection = selection?;
             let Some(proof) = ActivationProof::from_selection(&selection) else {
                 continue;

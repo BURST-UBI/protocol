@@ -4,12 +4,13 @@
 //! installer publishes the projection under the runtime's engine locks.
 
 use super::{archive::AuthenticatedSnapshot, history::HistoricalBlock};
-use crate::confirmed_replay::installation::{authority_bytes, CUTOFF_KEY, INSTALLED_KEY};
+use crate::confirmed_replay::installation::{authority_bytes, CUTOFF_KEY};
 use burst_store::StoreError;
 use burst_store_lmdb::LmdbWriteTransaction;
 use burst_types::{BlockHash, NetworkId, ProtocolParams};
 use std::collections::HashSet;
 
+pub(in crate::confirmed_replay::snapshot) mod promises;
 mod projection;
 mod rows;
 pub use projection::{PreparedSnapshotState, ProjectedSnapshot};
@@ -189,7 +190,7 @@ impl AuthenticatedSnapshot {
         {
             return Err(invalid("snapshot belongs to a different local network"));
         }
-        let authority = transaction.get_meta(INSTALLED_KEY)?;
+        let authority = crate::payment_authority::storage::read_at(|key| transaction.get_meta(key))?;
         let cutoff = transaction.get_meta(CUTOFF_KEY)?;
         let installed_cutoff = if local.height() == 0 {
             genesis.timestamp.as_secs()
@@ -197,6 +198,9 @@ impl AuthenticatedSnapshot {
             local.cutoff()
         };
         if local.height() == 0 && authority.is_none() {
+            if transaction.has_confirmed_governance_storage()? {
+                return Err(invalid("genesis epoch has orphaned governance metadata"));
+            }
             for key in [
                 CUTOFF_KEY,
                 burst_store::meta::PAYMENT_VOTE_LIMIT_KEY,
@@ -371,6 +375,14 @@ pub(in crate::confirmed_replay::snapshot) fn retained_promises(
 pub(in crate::confirmed_replay::snapshot) fn visit_retained_promises(
     transaction: &LmdbWriteTransaction<'_>,
     epoch: BlockHash,
+    visit: impl FnMut(Option<BlockHash>, usize) -> Result<(), StoreError>,
+) -> Result<(), StoreError> {
+    visit_retained_promises_view(&transaction.read_view(), epoch, visit)
+}
+
+pub(in crate::confirmed_replay::snapshot) fn visit_retained_promises_view(
+    transaction: &burst_store_lmdb::read_view::LedgerReadView<'_>,
+    epoch: BlockHash,
     mut visit: impl FnMut(Option<BlockHash>, usize) -> Result<(), StoreError>,
 ) -> Result<(), StoreError> {
     for prefix in [b"consensus_final/v1/".as_slice(), b"consensus_fence/v1/"] {
@@ -383,35 +395,17 @@ pub(in crate::confirmed_replay::snapshot) fn visit_retained_promises(
             return Err(invalid("legacy signing promises require reconstruction"));
         }
     }
-    let prefix = format!("consensus_final/v2/{epoch}/");
-    for row in transaction.checkpoint_metadata_entries(prefix.as_bytes())? {
-        let (key, value) = row?;
-        let suffix = std::str::from_utf8(&key[prefix.len()..]).map_err(invalid)?;
-        let fields: Vec<_> = suffix.split('/').collect();
-        if fields.len() != 3
-            || burst_crypto::decode_address(fields[0]).is_none()
-            || burst_crypto::decode_address(fields[1]).is_none()
-            || fields[2].len() != 64
-            || !fields[2]
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            return Err(invalid("invalid durable promise key"));
+    for namespace in ["consensus_final", "consensus_fence"] {
+        let prefix = format!("{namespace}/v2/{epoch}/");
+        for row in transaction.checkpoint_metadata_entries(prefix.as_bytes())? {
+            let (key, value) = row?;
+            let promise = promises::decode(std::str::from_utf8(key).map_err(invalid)?, value)?;
+            let block = match promise {
+                promises::PaymentPromise::Final { block, .. } => Some(block),
+                promises::PaymentPromise::Fence { .. } => None,
+            };
+            visit(block, key.len() + value.len())?;
         }
-        let hash = BlockHash::new(value.try_into().map_err(invalid)?);
-        if hash.is_zero() {
-            return Err(invalid("zero durable promise"));
-        }
-        visit(Some(hash), key.len() + value.len())?;
-    }
-    let prefix = format!("consensus_fence/v2/{epoch}/");
-    for row in transaction.checkpoint_metadata_entries(prefix.as_bytes())? {
-        let (key, value) = row?;
-        let representative = std::str::from_utf8(&key[prefix.len()..]).map_err(invalid)?;
-        if burst_crypto::decode_address(representative).is_none() || value != epoch.as_bytes() {
-            return Err(invalid("snapshot cannot reinterpret a local signing fence"));
-        }
-        visit(None, key.len() + value.len())?;
     }
     Ok(())
 }

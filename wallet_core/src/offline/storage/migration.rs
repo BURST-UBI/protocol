@@ -6,6 +6,7 @@ use std::path::Path;
 /// The caller must own the profile signing lease and guarantee that active drafts
 /// use `<account>.json` names. Unknown names and active drafts are never migrated.
 /// Interrupted publication is retried by checking the complete existing receipt.
+/// An error can leave earlier receipts migrated; rerun under the same lease.
 pub fn migrate_account_named_journal(directory: &Path) -> Result<usize, WalletError> {
     let io = |error: std::io::Error| WalletError::Other(format!("receipt migration: {error}"));
     let mut migrated = 0;

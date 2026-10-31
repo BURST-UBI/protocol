@@ -26,7 +26,7 @@ fn snapshot_reconciliation_accepts_started_genesis_authority_but_rejects_damaged
                 .unwrap(),
             4 => local
                 .meta_store()
-                .delete_meta(crate::confirmed_governance::KEY)
+                .delete_meta(crate::confirmed_governance::HEADER)
                 .unwrap(),
             _ => (),
         }
@@ -140,7 +140,9 @@ fn compact_economic_projection_matches_full_installation_without_a_prefix() {
         let Ok(key) = std::str::from_utf8(&key) else {
             continue;
         };
-        if burst_store_lmdb::write_batch::checkpoint_projection::is_lifecycle_key(key)
+        if key.starts_with("confirmed_authority/")
+            || key.starts_with("confirmed_governance/")
+            || burst_store_lmdb::write_batch::checkpoint_projection::is_lifecycle_key(key)
             || [
                 INSTALLED_KEY,
                 CUTOFF_KEY,
@@ -181,6 +183,15 @@ fn compact_economic_projection_matches_full_installation_without_a_prefix() {
         .unwrap()
     };
     assert_eq!(decode_governance(txn), decode_governance(&full));
+    let expected_electorate: Vec<_> = full.account_entries().unwrap()
+        .map(Result::unwrap)
+        .filter(|account| account.state.is_verified())
+        .map(|account| account.address)
+        .collect();
+    assert!(!expected_electorate.is_empty());
+    assert_eq!(full.verified_accounts().unwrap(), expected_electorate);
+    assert_eq!(txn.verified_accounts().unwrap(), expected_electorate);
+
     let decode_consti = |batch: &burst_store_lmdb::LmdbWriteTransaction<'_>| {
         serde_json::to_value(
             bincode::deserialize::<burst_consti::ConstiEngine>(

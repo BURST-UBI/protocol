@@ -1,6 +1,6 @@
-//! Bounded snapshot file/stream format. Authenticate the authority chain and
-//! snapshot certificate before reading the economic body. Import is read-only;
-//! callers must separately coordinate durable installation and cache publication.
+//! Snapshot archive formats. Authenticate the authority chain and snapshot
+//! certificate before reading the economic body. Import may write scratch files
+//! but does not install ledger state or publish live caches.
 
 use super::{ConfirmedReplay, PreparedSnapshot, ReplayError};
 use bincode::Options;
@@ -9,19 +9,73 @@ use burst_consensus::{
     snapshot::{SnapshotAuthorityStep, SnapshotCertificate},
 };
 use serde::{Deserialize, Serialize};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 mod framed;
 mod source;
 mod staged;
 use source::{AuthoritySource, Sequence};
 pub(super) use staged::Authority;
 
+struct PollingSeekReader<'a, R> {
+    inner: &'a mut R,
+    check: &'a dyn Fn(&'static str) -> Result<(), ReplayError>,
+}
+
+impl<R: Read> Read for PollingSeekReader<'_, R> {
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        (self.check)("snapshot:read").map_err(std::io::Error::other)?;
+        self.inner.read(output)
+    }
+}
+
+impl<R: Seek> Seek for PollingSeekReader<'_, R> {
+    fn seek(&mut self, from: SeekFrom) -> std::io::Result<u64> {
+        (self.check)("snapshot:seek").map_err(std::io::Error::other)?;
+        self.inner.seek(from)
+    }
+}
+
+// Body-relative offsets let the existing verifier rewind without rereading the
+// archive header. The full suffix length retains trailing-byte rejection.
+struct ArchiveBody<'a, R> {
+    inner: &'a mut R,
+    start: u64,
+    length: u64,
+    position: u64,
+}
+
+impl<R: Read> Read for ArchiveBody<'_, R> {
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        let count = output.len().min((self.length - self.position).min(usize::MAX as u64) as usize);
+        let count = self.inner.read(&mut output[..count])?;
+        self.position += count as u64;
+        Ok(count)
+    }
+}
+
+impl<R: Seek> Seek for ArchiveBody<'_, R> {
+    fn seek(&mut self, from: SeekFrom) -> std::io::Result<u64> {
+        let position = match from {
+            SeekFrom::Start(position) => i128::from(position),
+            SeekFrom::Current(delta) => i128::from(self.position) + i128::from(delta),
+            SeekFrom::End(delta) => i128::from(self.length) + i128::from(delta),
+        };
+        if position < 0 || position > i128::from(self.length) {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "snapshot body seek out of bounds"));
+        }
+        self.inner.seek(SeekFrom::Start(self.start + position as u64))?;
+        self.position = position as u64;
+        Ok(self.position)
+    }
+}
+
 const MAGIC: &[u8; 16] = b"BURST-SNAPSHOT\0\x02";
 pub(super) const MAX_HEADER_BYTES: u64 = 16 * 1024 * 1024;
 const HEADER_BUFFER_BYTES: usize = 16 * 1024;
 
-/// A transfer can authenticate a completed header before requesting more body
-/// chunks. At most one chunk's body bytes can accompany the header.
+/// Authenticate a complete header without reading the body. Return None while
+/// the reported prefix is incomplete. The caller positions the reader at the
+/// archive start and bounds download size, chunking and I/O time.
 pub(crate) fn authenticate_prefix(
     base: &CheckpointAnchor,
     reader: &mut impl Read,
@@ -35,7 +89,7 @@ pub(crate) fn authenticate_prefix(
     }
     let mut prefix = [0; 24];
     reader.read_exact(&mut prefix).map_err(invalid)?;
-    if &prefix[..16] != MAGIC && &prefix[..16] != framed::MAGIC {
+    if &prefix[..16] != MAGIC && &prefix[..16] != framed::MAGIC && &prefix[..16] != framed::COMPACT_MAGIC {
         return Err(invalid("unsupported snapshot archive format"));
     }
     let length = u64::from_be_bytes(prefix[16..24].try_into().map_err(invalid)?);
@@ -54,6 +108,8 @@ pub(crate) fn authenticate_prefix(
     }
     let (authority, certificate, beacons) = if &prefix[..16] == MAGIC {
         staged::read_header(base, reader, length, directory)?
+    } else if &prefix[..16] == framed::COMPACT_MAGIC {
+        framed::read_compact(base, reader, length, directory)?
     } else {
         framed::read(base, reader, length, directory)?
     };
@@ -116,10 +172,24 @@ fn authenticate<A: AuthoritySource + ?Sized>(
     authority: &A,
     certificate: &SnapshotCertificate,
 ) -> Result<CheckpointAnchor, ReplayError> {
+    authenticate_until(base, authority, certificate, &|_| Ok(()))
+}
+
+fn authenticate_until<A: AuthoritySource + ?Sized>(
+    base: &CheckpointAnchor,
+    authority: &A,
+    certificate: &SnapshotCertificate,
+    check: &dyn Fn(&'static str) -> Result<(), ReplayError>,
+) -> Result<CheckpointAnchor, ReplayError> {
     let mut anchor = base.clone();
-    for step in authority.steps() {
-        anchor = step?.authenticate(&anchor).map_err(invalid)?;
+    for step in authority.authenticated_steps(base) {
+        check("snapshot:authority-step")?;
+        let (certificate, next) = step?;
+        // Same complete witness bound, including for compact on-disk entries.
+        framed::frame_size(&(&certificate, next.roster().humans()))?;
+        anchor = next;
     }
+    check("snapshot:certificate")?;
     certificate.verify(&anchor).map_err(invalid)?;
     Ok(anchor)
 }
@@ -142,7 +212,7 @@ fn authority_path<'a, A: AuthoritySource + ?Sized>(
     certificate: &'a SnapshotCertificate,
 ) -> impl Iterator<Item = Result<CheckpointAnchor, ReplayError>> + 'a {
     let mut current = base.clone();
-    let mut steps = authority.steps();
+    let mut steps = authority.authenticated_steps(base);
     let mut first = true;
     let mut finished = false;
     std::iter::from_fn(move || {
@@ -155,8 +225,8 @@ fn authority_path<'a, A: AuthoritySource + ?Sized>(
         }
         match steps.next() {
             Some(step) => {
-                match step.and_then(|step| step.authenticate(&current).map_err(invalid)) {
-                    Ok(next) => {
+                match step {
+                    Ok((_, next)) => {
                         current = next;
                         Some(Ok(current.clone()))
                     }
@@ -178,6 +248,11 @@ fn authority_path<'a, A: AuthoritySource + ?Sized>(
 }
 
 impl AuthenticatedSnapshot {
+    #[cfg(test)]
+    pub(in crate::confirmed_replay) fn legacy_header_bytes(&self) -> Result<Vec<u8>, ReplayError> {
+        bincode::serialize(&(Sequence(&self.authority), &self.certificate, &self.beacons)).map_err(invalid)
+    }
+
     pub(in crate::confirmed_replay::snapshot) fn authority_path(
         &self,
     ) -> impl Iterator<Item = Result<CheckpointAnchor, ReplayError>> + '_ {
@@ -258,6 +333,26 @@ impl AuthenticatedSnapshot {
         Ok(selections)
     }
 
+    /// Authenticate the complete path, retaining only the selections referenced
+    /// by staged records. Even an empty request must validate trailing proofs.
+    pub(crate) fn recover_selections_for(
+        &self,
+        required: &std::collections::HashSet<burst_types::BlockHash>,
+    ) -> Result<
+        std::collections::HashMap<burst_types::BlockHash, crate::checkpoint_store::CertifiedCheckpoint>,
+        ReplayError,
+    > {
+        let mut selections = std::collections::HashMap::new();
+        self.try_visit_selections(|selection| {
+            let epoch = selection.certificate().checkpoint.hash();
+            if required.contains(&epoch) {
+                selections.insert(epoch, selection);
+            }
+            Ok(())
+        })?;
+        Ok(selections)
+    }
+
     /// Stream authenticated selections into private staging. Callers must not
     /// publish staged rows until this returns success: a later receipt, beacon
     /// or storage failure invalidates the whole traversal.
@@ -271,6 +366,7 @@ impl AuthenticatedSnapshot {
             &self.state,
             &self.beacons,
             visit,
+            &|_| Ok(()),
         )
     }
 
@@ -300,24 +396,25 @@ impl AuthenticatedSnapshot {
         state: &ConfirmedReplay,
         beacons: &[(burst_types::BlockHash, burst_vrf::RandomOutput)],
         mut visit: impl FnMut(crate::checkpoint_store::CertifiedCheckpoint) -> Result<(), ReplayError>,
+        check: &dyn Fn(&'static str) -> Result<(), ReplayError>,
     ) -> Result<(), ReplayError> {
         let mut parent = base.clone();
         let mut restored = 0;
         let mut next_beacon = 0;
-        for step in authority.steps() {
-            let step = step?;
-            let next_parent = step.authenticate(&parent).map_err(invalid)?;
+        for step in authority.authenticated_steps(base) {
+            check("snapshot:selection-step")?;
+            let (certificate, next_parent) = step?;
             if let Some(receipt) = state.selection_receipts.get(restored)? {
-                if receipt.checkpoint().hash() == step.certificate.checkpoint.hash() {
+                if receipt.checkpoint().hash() == certificate.checkpoint.hash() {
                     let replay = receipt.restore(&parent).map_err(invalid)?;
                     let mut selection = crate::checkpoint_store::CertifiedCheckpoint::from_compact(
                         parent.clone(),
-                        step.certificate.clone(),
+                        certificate.clone(),
                         replay,
                     )
                     .map_err(invalid)?;
                     if let Some((hash, beacon)) = beacons.get(next_beacon) {
-                        if *hash == step.certificate.checkpoint.hash() {
+                        if *hash == certificate.checkpoint.hash() {
                             selection
                                 .attach_compact_beacon(beacon.clone())
                                 .map_err(invalid)?;
@@ -330,6 +427,7 @@ impl AuthenticatedSnapshot {
             }
             parent = next_parent;
         }
+        check("snapshot:selections-finished")?;
         if restored != state.selection_receipts.len() {
             return Err(invalid(
                 "archive authority path omits historical selection parents",
@@ -341,20 +439,46 @@ impl AuthenticatedSnapshot {
         Ok(())
     }
 
-    /// Read one framed archive, rejecting truncation and appended data. Network
-    /// callers must supply a length-delimited stream and enforce an I/O timeout.
+    /// Read a v2 or compact v4 archive, rejecting truncation and appended data.
+    /// Framed v3 archives require read_in. Network callers must bound the stream
+    /// and enforce an I/O timeout. Without beacons, historical selection receipts
+    /// are checked separately by validate_selections or selection recovery.
     pub fn read(base: &CheckpointAnchor, reader: &mut impl Read) -> Result<Self, ReplayError> {
-        Self::read_with_staging(base, reader, None)
+        Self::read_with_staging(base, reader, None, false, &|_| Ok(()))
     }
 
-    /// Decode authority one certificate at a time into anonymous storage in the
-    /// caller's directory. The directory must already exist; no ledger is created.
+    /// Read any supported archive format, staging authority in the existing
+    /// directory. This does not install ledger state. Selection validation follows
+    /// the same rules as read.
     pub fn read_in(
         base: &CheckpointAnchor,
         reader: &mut impl Read,
         directory: &std::path::Path,
     ) -> Result<Self, ReplayError> {
-        Self::read_with_staging(base, reader, Some(directory))
+        Self::read_with_staging(base, reader, Some(directory), false, &|_| Ok(()))
+    }
+
+    /// Installed recovery requires every selection checked, even without beacons.
+    /// Cancellation rejects the whole private result; it never skips proof work.
+    #[cfg(test)]
+    pub(in crate::confirmed_replay) fn read_validated_in_until(
+        base: &CheckpointAnchor,
+        reader: &mut impl Read,
+        directory: &std::path::Path,
+        check: &dyn Fn(&'static str) -> Result<(), ReplayError>,
+    ) -> Result<Self, ReplayError> {
+        struct PollingReader<'a, R> {
+            inner: &'a mut R,
+            check: &'a dyn Fn(&'static str) -> Result<(), ReplayError>,
+        }
+        impl<R: Read> Read for PollingReader<'_, R> {
+            fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+                (self.check)("snapshot:read").map_err(std::io::Error::other)?;
+                self.inner.read(output)
+            }
+        }
+        let mut reader = PollingReader { inner: reader, check };
+        Self::read_with_staging(base, &mut reader, Some(directory), true, check)
     }
 
     pub(crate) fn read_file_with_budget(
@@ -386,16 +510,66 @@ impl AuthenticatedSnapshot {
         base: &CheckpointAnchor,
         reader: &mut impl Read,
         directory: Option<&std::path::Path>,
+        validate_all_selections: bool,
+        check: &dyn Fn(&'static str) -> Result<(), ReplayError>,
+    ) -> Result<Self, ReplayError> {
+        Self::read_with_decoder(base, reader, directory, validate_all_selections, check,
+            |anchor, certificate, reader| {
+                let body = super::body::VerifiedBody::stage(anchor, certificate, reader, directory)?;
+                let mut trailing = [0];
+                if reader.read(&mut trailing).map_err(invalid)? != 0 {
+                    return Err(invalid("trailing snapshot archive data"));
+                }
+                check("snapshot:restore-state")?;
+                ConfirmedReplay::from_verified_snapshot_body_until(anchor, body, check)
+            })
+    }
+
+    /// The installed page reader must remain on one pinned transaction. Verify
+    /// its entire commitment before seeking, then authenticate the body in place.
+    pub(in crate::confirmed_replay) fn read_seekable_validated_in_until(
+        base: &CheckpointAnchor,
+        reader: &mut (impl Read + Seek),
+        directory: &std::path::Path,
+        check: &dyn Fn(&'static str) -> Result<(), ReplayError>,
+    ) -> Result<Self, ReplayError> {
+        let mut reader = PollingSeekReader { inner: reader, check };
+        std::io::copy(&mut reader, &mut std::io::sink()).map_err(invalid)?;
+        reader.rewind().map_err(invalid)?;
+        Self::read_with_decoder(base, &mut reader, Some(directory), true, check,
+            |anchor, certificate, reader| {
+                let start = reader.stream_position().map_err(invalid)?;
+                let end = reader.seek(SeekFrom::End(0)).map_err(invalid)?;
+                reader.seek(SeekFrom::Start(start)).map_err(invalid)?;
+                let mut body_reader = ArchiveBody { inner: reader, start, length: end - start, position: 0 };
+                let body = super::body::VerifiedBody::stream_in(
+                    anchor, certificate, &mut body_reader, Some(directory),
+                )?;
+                check("snapshot:restore-state")?;
+                ConfirmedReplay::from_verified_snapshot_body_until(anchor, body, check)
+            })
+    }
+
+    fn read_with_decoder<R: Read>(
+        base: &CheckpointAnchor,
+        reader: &mut R,
+        directory: Option<&std::path::Path>,
+        validate_all_selections: bool,
+        check: &dyn Fn(&'static str) -> Result<(), ReplayError>,
+        decode: impl FnOnce(&CheckpointAnchor, &SnapshotCertificate, &mut R) -> Result<ConfirmedReplay, ReplayError>,
     ) -> Result<Self, ReplayError> {
         let mut magic = [0; 16];
         reader.read_exact(&mut magic).map_err(invalid)?;
-        if &magic != MAGIC && &magic != framed::MAGIC {
+        if &magic != MAGIC && &magic != framed::MAGIC && &magic != framed::COMPACT_MAGIC {
             return Err(invalid("unsupported snapshot archive format"));
         }
         let mut length = [0; 8];
         reader.read_exact(&mut length).map_err(invalid)?;
         let length = u64::from_be_bytes(length);
-        let (authority, certificate, beacons) = if &magic == framed::MAGIC {
+        let (authority, certificate, beacons) = if &magic == framed::COMPACT_MAGIC {
+            let temporary = std::env::temp_dir();
+            framed::read_compact(base, reader, length, directory.unwrap_or(&temporary))?
+        } else if &magic == framed::MAGIC {
             framed::read(
                 base,
                 reader,
@@ -424,16 +598,12 @@ impl AuthenticatedSnapshot {
         {
             return Err(invalid("snapshot archive length overflow"));
         }
-        let anchor = authenticate(base, &authority, &certificate)?;
+        let anchor = authenticate_until(base, &authority, &certificate, check)?;
         validate_beacon_bounds(authority.count()?, &beacons)?;
         // Verification above bounds this authenticated length to 64 MiB. An
         // unsigned length cannot force allocation or consumption of a body.
-        let body = super::body::VerifiedBody::stage(&anchor, &certificate, reader, directory)?;
-        let mut trailing = [0];
-        if reader.read(&mut trailing).map_err(invalid)? != 0 {
-            return Err(invalid("trailing snapshot archive data"));
-        }
-        let state = ConfirmedReplay::from_verified_snapshot_body(&anchor, body)?;
+        let state = decode(&anchor, &certificate, reader)?;
+        check("snapshot:state-restored")?;
         let snapshot = Self {
             anchor,
             certificate,
@@ -442,14 +612,27 @@ impl AuthenticatedSnapshot {
             beacons,
             state,
         };
-        if !snapshot.beacons.is_empty() {
-            snapshot.validate_selections()?;
+        if validate_all_selections || !snapshot.beacons.is_empty() {
+            Self::visit_selection_path(
+                &snapshot.authority_base, &snapshot.authority, &snapshot.state,
+                &snapshot.beacons, |_| Ok(()), check,
+            )?;
         }
         Ok(snapshot)
     }
 }
 
 impl PreparedSnapshot {
+    #[cfg(test)]
+    pub(crate) fn write_legacy_archive(
+        &self, base: &CheckpointAnchor, authority: &[SnapshotAuthorityStep],
+        certificate: &SnapshotCertificate, beacons: &[(burst_types::BlockHash, burst_vrf::RandomOutput)],
+        writer: &mut impl Write,
+    ) -> Result<(), ReplayError> {
+        write_prepared_archive(&self.manifest, (&mut std::io::Cursor::new(&self.bytes), None),
+            base, authority, certificate, beacons, writer, false)
+    }
+
     /// Export only after collecting signatures over this independently replayed
     /// body. The writer owns file creation/atomic rename and error cleanup.
     pub fn write_archive(
@@ -478,6 +661,7 @@ impl PreparedSnapshot {
             certificate,
             beacons,
             writer,
+            true,
         )
     }
 }
@@ -491,15 +675,16 @@ impl PreparedSnapshot<super::body::StagedBody> {
         beacons: &[(burst_types::BlockHash, burst_vrf::RandomOutput)],
         writer: &mut impl Write,
     ) -> Result<(), ReplayError> {
-        let mut file = self.bytes.0.lock().map_err(invalid)?;
+        let mut file = self.bytes.file.lock().map_err(invalid)?;
         write_prepared_archive(
             &self.manifest,
-            (&mut *file, Some(&self.bytes.1)),
+            (&mut *file, Some(&self.bytes.directory)),
             base,
             authority,
             certificate,
             beacons,
             writer,
+            true,
         )
     }
 }
@@ -512,20 +697,20 @@ fn write_prepared_archive<A: AuthoritySource + ?Sized>(
     certificate: &SnapshotCertificate,
     beacons: &[(burst_types::BlockHash, burst_vrf::RandomOutput)],
     writer: &mut impl Write,
+    compact: bool,
 ) -> Result<(), ReplayError> {
     if certificate.manifest != *manifest {
         return Err(invalid("snapshot certificate does not attest this body"));
     }
-    // Bincode encodes these fields identically to Header, without cloning
-    // the caller's authority vector before its size has been checked.
-    let length =
-        bincode::serialized_size(&(Sequence(authority), certificate, beacons)).map_err(invalid)?;
-    let streamed = length > MAX_HEADER_BYTES;
-    let length = if streamed {
-        framed::size(authority, certificate, beacons)?
-    } else {
-        length
+    let length = if compact { 0 } else {
+        bincode::serialized_size(&(Sequence(authority), certificate, beacons)).map_err(invalid)?
     };
+    let streamed = !compact && length > MAX_HEADER_BYTES;
+    let length = if compact {
+        framed::compact_size(base, authority, certificate, beacons)?
+    } else if streamed {
+        framed::size(authority, certificate, beacons)?
+    } else { length };
     if length
         .checked_add(24)
         .and_then(|n| n.checked_add(manifest.state_bytes))
@@ -538,18 +723,20 @@ fn write_prepared_archive<A: AuthoritySource + ?Sized>(
     validate_beacon_bounds(authority.count()?, beacons)?;
     if !beacons.is_empty() {
         let state = ConfirmedReplay::from_verified_snapshot_body(&anchor, verified)?;
-        AuthenticatedSnapshot::visit_selection_path(base, authority, &state, beacons, |_| Ok(()))?;
+        AuthenticatedSnapshot::visit_selection_path(base, authority, &state, beacons, |_| Ok(()), &|_| Ok(()))?;
     } else {
         drop(verified);
     }
     writer
-        .write_all(if streamed { framed::MAGIC } else { MAGIC })
+        .write_all(if compact { framed::COMPACT_MAGIC } else if streamed { framed::MAGIC } else { MAGIC })
         .map_err(invalid)?;
     writer.write_all(&length.to_be_bytes()).map_err(invalid)?;
     {
         let mut header_writer =
             std::io::BufWriter::with_capacity(HEADER_BUFFER_BYTES, &mut *writer);
-        if streamed {
+        if compact {
+            framed::write_compact(base, authority, certificate, beacons, &mut header_writer)?;
+        } else if streamed {
             framed::write(authority, certificate, beacons, &mut header_writer)?;
         } else {
             bincode::serialize_into(
@@ -586,7 +773,20 @@ mod tests {
         let representative = burst_crypto::derive_address(&key.public);
         let mut anchor = base.clone();
         let mut authority = Vec::new();
-        for _ in 0..129 {
+        for index in 0..129u32 {
+            let mut humans = anchor.roster().humans().to_vec();
+            if index == 128 { humans = base.roster().humans().to_vec(); }
+            else if index % 3 == 0 {
+                for suffix in 0..2u32 {
+                    let mut seed = [91; 32];
+                    seed[..4].copy_from_slice(&(index * 2 + suffix).to_le_bytes());
+                    humans.push(burst_consensus::checkpoint::HumanDelegation {
+                        human: burst_crypto::derive_address(&burst_crypto::keypair_from_seed(&seed).public),
+                        representative: representative.clone(),
+                    });
+                }
+            }
+            let roster = burst_consensus::checkpoint::HumanRoster::new(humans).unwrap();
             let checkpoint = Checkpoint {
                 network: anchor.network(),
                 genesis: anchor.genesis_hash(),
@@ -595,14 +795,14 @@ mod tests {
                 cutoff: anchor.cutoff() + 1,
                 ledger_root: BlockHash::new([2; 32]),
                 params_hash: BlockHash::new([3; 32]),
-                next_roster: anchor.roster().commitment(),
+                next_roster: roster.commitment(),
                 selection_root: BlockHash::new([4; 32]),
                 next_quorum_bps: anchor.quorum_bps(),
             };
             let payload = burst_consensus::checkpoint_round::Ballot::precommit(&checkpoint, 0)
                 .signing_payload();
             let step = SnapshotAuthorityStep {
-                roster: anchor.roster().humans().to_vec(),
+                roster: roster.humans().to_vec(),
                 certificate: CheckpointCertificate {
                     checkpoint,
                     round: 0,
@@ -729,6 +929,61 @@ mod tests {
         )
         .unwrap();
         assert!(decode(&damaged).is_err());
+        let mut compact = Vec::new();
+        framed::write_compact(&base, &header.authority, &header.certificate, &header.beacons, &mut compact).unwrap();
+        assert_eq!(compact.len() as u64, framed::compact_size(&base, &header.authority, &header.certificate, &header.beacons).unwrap());
+        assert!(compact.len() < framed_bytes.len() / 2, "repeated rosters must not be serialized in full");
+        let decode_compact = |bytes: &[u8]| framed::read_compact(&base, &mut Fragmented(bytes), bytes.len() as u64, directory.path());
+        let (delta_authority, delta_certificate, delta_beacons) = decode_compact(&compact).unwrap();
+        assert_eq!(bincode::serialize(&(Sequence(&delta_authority), &delta_certificate, &delta_beacons)).unwrap(), encoded);
+        let mut from_scratch = Vec::new();
+        framed::write_compact(&base, &delta_authority, &delta_certificate, &delta_beacons, &mut from_scratch).unwrap();
+        assert_eq!(compact, from_scratch, "scratch entries retain the same authenticated proof encoding");
+        assert!(framed::compact_size(&anchor, &delta_authority, &delta_certificate, &delta_beacons).is_err());
+        for range in [0..8, 8..16] {
+            let mut bad = compact.clone(); bad[range].copy_from_slice(&u64::MAX.to_be_bytes());
+            assert!(decode_compact(&bad).is_err());
+        }
+        assert!(decode_compact(&compact[..compact.len()-1]).is_err());
+        let mut bad = compact.clone(); bad.push(0);
+        assert!(decode_compact(&bad).is_err());
+        let mut bad = compact.clone(); bad[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(decode_compact(&bad).is_err(), "unknown proof variant");
+        for case in 0..4 {
+            use super::super::installed::authority_history::Entry;
+            let mut entries = header.authority.entries(&base).collect::<Result<Vec<_>, _>>().unwrap();
+            match case {
+                0 => entries.swap(0, 1),
+                1 => {
+                    let mut certificate = entries[0].certificate().clone();
+                    certificate.signatures.clear(); entries[0] = Entry::Unchanged(certificate);
+                }
+                2 => {
+                    let changes = entries.iter_mut().find_map(|entry| match entry {
+                        Entry::Changed { changes, .. } if changes.len() > 1 => Some(changes), _ => None,
+                    }).unwrap();
+                    changes.reverse();
+                }
+                _ => { let certificate = entries[0].certificate().clone(); entries[0] = Entry::Unchanged(certificate); }
+            }
+            let mut bad = (entries.len() as u64).to_be_bytes().to_vec();
+            for entry in entries {
+                let bytes = bincode::serialize(&entry).unwrap();
+                bad.extend_from_slice(&(bytes.len() as u64).to_be_bytes()); bad.extend_from_slice(&bytes);
+            }
+            let final_frame = bincode::serialize(&(&header.certificate, &header.beacons)).unwrap();
+            bad.extend_from_slice(&(final_frame.len() as u64).to_be_bytes()); bad.extend_from_slice(&final_frame);
+            assert!(decode_compact(&bad).is_err(), "invalid delta proof case {case}");
+        }
+        let mut compact_archive = framed::COMPACT_MAGIC.to_vec();
+        compact_archive.extend_from_slice(&(compact.len() as u64).to_be_bytes());
+        compact_archive.extend_from_slice(&compact);
+        let end = compact_archive.len(); compact_archive.extend_from_slice(b"body");
+        let mut reader = std::io::Cursor::new(&compact_archive);
+        assert_eq!(authenticate_prefix(&base, &mut reader, end, anchor.hash(), compact_archive.len(), directory.path()).unwrap(), Some(129));
+        assert_eq!(reader.position(), end as u64, "delta proof authentication must not consume the body");
+        assert!(framed::read_compact(&anchor, &mut compact.as_slice(), compact.len() as u64, directory.path()).is_err());
+        drop(delta_authority);
         let header_length = framed_bytes.len() as u64;
         framed_bytes.extend_from_slice(b"unread body");
         let mut input = std::io::Cursor::new(framed_bytes);

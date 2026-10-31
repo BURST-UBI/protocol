@@ -1,18 +1,12 @@
-//! Vote-by-hash — a compact vote message that references blocks by hash.
-//!
-//! Instead of including full block data in every vote message, representatives
-//! send only the hashes of the blocks they're voting for. This reduces vote
-//! message bandwidth by ~95%. The receiving node must already have the block
-//! (or can request it separately).
+//! Standalone hash-list vote container. The node uses WireVote and the
+//! canonical vote_signing_payload instead; this helper's signing layout differs.
 
 use burst_types::{BlockHash, Signature, WalletAddress};
 use serde::{Deserialize, Serialize};
 
-/// A vote message that references blocks by hash instead of including full
-/// block data. This is the primary vote encoding on the wire.
-///
-/// The signature covers `voter || timestamp || sequence || is_final || block_hashes...`
-/// to prevent replay and tampering.
+/// Hash references and vote metadata. Construction does not validate hashes,
+/// signatures or replay ordering. Equality ignores the signature. See
+/// [`Self::signing_data`] for this container's layout.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VoteByHash {
     /// The voting representative's address.
@@ -71,7 +65,7 @@ impl VoteByHash {
         self.block_hashes.len()
     }
 
-    /// Whether the vote contains any block hashes.
+    /// Whether the vote contains no block hashes.
     pub fn is_empty(&self) -> bool {
         self.block_hashes.is_empty()
     }

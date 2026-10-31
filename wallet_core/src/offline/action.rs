@@ -1,6 +1,6 @@
 use super::OfflinePaymentContext;
 use crate::{transaction_builder::*, WalletError};
-use burst_governance::{key_delegation::view, ProposalContent};
+use burst_governance::{signing_delegation::view, ProposalContent};
 use burst_ledger::{BlockType, StateBlock};
 use burst_transactions::{governance::GovernanceVote, Transaction};
 use burst_types::{
@@ -68,6 +68,7 @@ pub enum OfflineAction {
         proposal: TxHash,
         vote: GovernanceVote,
     },
+    GovernanceVeto { proposal: TxHash },
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -111,7 +112,9 @@ impl OfflineActionContext {
         &self.review
     }
 
-    /// Pure construction: no clock, node client, work request or submission.
+    /// Sign using the saved review, prepared work and caller-supplied time.
+    /// This checks local consistency; the node must still validate current ledger
+    /// state and eligibility when the action is submitted.
     pub fn sign(&self, keys: &KeyPair, now: Timestamp) -> Result<SignedOfflineAction, WalletError> {
         let signing = &self.signing;
         super::validate_ancestry(&signing.account, signing.state.head, &signing.ancestry)?;
@@ -263,6 +266,7 @@ impl OfflineActionContext {
                     }
                     OfflineAction::GovernanceEndorse { .. }
                     | OfflineAction::GovernanceWithdraw { .. }
+                    | OfflineAction::GovernanceVeto { .. }
                     | OfflineAction::VerifierParticipation { .. } => {
                         Transaction::ChangeRepresentative(build_change_rep_tx(
                             account,
@@ -294,19 +298,19 @@ impl OfflineActionContext {
                         }
                         block.block_type = BlockType::GovernanceEndorse;
                         block.link = BlockHash::new(*proposal.as_bytes());
-                        block.brn_balance = signing
+                        block.brn_spent = signing
                             .state
-                            .brn_balance
+                            .brn_spent
                             .checked_add(*burn)
                             .ok_or_else(|| {
                                 WalletError::TransactionBuild("BRN spend overflow".into())
                             })?;
                     }
-                    OfflineAction::GovernanceWithdraw { proposal } => {
+                    OfflineAction::GovernanceWithdraw { proposal } | OfflineAction::GovernanceVeto { proposal } => {
                         if proposal.is_zero() {
                             return Err(WalletError::TransactionBuild("missing proposal".into()));
                         }
-                        block.block_type = BlockType::GovernanceWithdraw;
+                        block.block_type = if matches!(action, OfflineAction::GovernanceVeto { .. }) { BlockType::GovernanceVeto } else { BlockType::GovernanceWithdraw };
                         block.link = BlockHash::new(*proposal.as_bytes());
                     }
                     OfflineAction::VerifierParticipation { enabled } => {
@@ -399,7 +403,7 @@ mod tests {
             let signed = restored.sign(&keys, Timestamp::new(42)).unwrap();
             assert_eq!(signed.block.block_type, kind);
             assert_eq!(signed.block.trst_balance, balance);
-            assert_eq!(signed.block.brn_balance, 11);
+            assert_eq!(signed.block.brn_spent, 11);
             assert_eq!(signed.block.previous, restored.signing.state.head);
             match kind {
                 BlockType::Send => assert_eq!(signed.block.origin, origin),
@@ -431,7 +435,7 @@ mod tests {
 
     #[test]
     fn offline_delegation_creates_grant_revocation_and_secondary_ballot() {
-        use burst_governance::key_delegation::operation::DelegationOperation;
+        use burst_governance::signing_delegation::operation::DelegationOperation;
         let owner = burst_crypto::keypair_from_seed(&[1; 32]);
         let recipient = burst_crypto::keypair_from_seed(&[2; 32]);
         let delegate = burst_crypto::derive_address(&recipient.public);
@@ -514,7 +518,7 @@ mod tests {
             panic!("expected revocation")
         };
         assert_eq!(revocation.generation, 2);
-        DelegationOperation::Revoke(revocation).verify().unwrap();
+        DelegationOperation::Revoke(revocation).validate_envelope().unwrap();
     }
 
     #[test]
@@ -600,6 +604,11 @@ mod tests {
                 11,
             ),
             (
+                OfflineAction::GovernanceVeto { proposal },
+                BlockType::GovernanceVeto,
+                11,
+            ),
+            (
                 OfflineAction::VerifierParticipation { enabled: true },
                 BlockType::VerifierOptIn,
                 11,
@@ -622,7 +631,7 @@ mod tests {
             let signed = restored.sign(&keys, Timestamp::new(42)).unwrap();
             let block = signed.block();
             assert_eq!(block.block_type, kind);
-            assert_eq!(block.brn_balance, spent);
+            assert_eq!(block.brn_spent, spent);
             assert_eq!(block.trst_balance, 20);
             assert_eq!(block.previous, restored.signing.state.head);
             assert_eq!(block.payment_epoch, restored.signing.state.payment_epoch);
@@ -663,7 +672,7 @@ mod tests {
                 serde_json::to_string(block).unwrap()
             );
             assert_eq!(content, signed.content);
-            assert!(!super::super::payment_was_submitted(&path, &block.hash).unwrap());
+            assert!(!super::super::payment_may_have_been_submitted(&path, &block.hash).unwrap());
             assert!(restored.sign(&keys, Timestamp::new(100)).is_err());
             assert!(restored
                 .sign(

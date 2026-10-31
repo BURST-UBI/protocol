@@ -2,6 +2,8 @@ use super::governance_content::{launch, wait_phase};
 use super::*;
 use burst_transactions::governance::GovernanceVote;
 
+mod mixed;
+
 async fn confirmed(clients: &[NodeClient], hash: &str) {
     for client in clients {
         client
@@ -11,7 +13,8 @@ async fn confirmed(clients: &[NodeClient], hash: &str) {
     }
 }
 
-async fn transact(clients: &[NodeClient], signer: &KeyPair, tx: Transaction) -> String {
+async fn transact(clients: &[NodeClient], signing: &tokio::sync::Mutex<()>, signer: &KeyPair, tx: Transaction) -> String {
+    let _signing = signing.lock().await;
     let submitted = clients[0]
         .submit_signed(signer, &tx, TxHash::ZERO)
         .await
@@ -76,17 +79,24 @@ async fn check(clients: &[NodeClient], hash: &str) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn independent_humans_keep_delegated_tally_after_restart_and_fresh_catchup() {
-    governance_journey(true).await;
+    governance_journey(true, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn signed_multi_human_ballot_replays_at_its_cut_without_later_revocation() {
-    governance_journey(false).await;
+    governance_journey(false, false).await;
 }
 
-async fn governance_journey(check_catchup: bool) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "explicit capped real-clock mixed governance qualification"]
+async fn sustained_real_clock_payments_cross_ballot_counting_activation_and_recovery() {
+    governance_journey(true, true).await;
+}
+
+async fn governance_journey(check_catchup: bool, mixed: bool) {
     let _ = tracing_subscriber::fmt()
-        .with_env_filter("burst_node::node=debug,burst_node::bootstrap=debug,burst_node::checkpoint_service=debug,burst_node::checkpoint_sync=debug")
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_|
+            tracing_subscriber::EnvFilter::new("burst_node::node=debug,burst_node::bootstrap=debug,burst_node::checkpoint_service=debug,burst_node::checkpoint_sync=debug")))
         .with_test_writer()
         .try_init();
     let _permit = crate::verification_test_support::NETWORK_FIXTURE
@@ -148,7 +158,9 @@ async fn governance_journey(check_catchup: bool) {
     let counting_offset = configs[0].params.governance_proposal_duration_secs
         + configs[0].params.governance_exploration_duration_secs
         + configs[0].params.governance_propagation_buffer_secs;
+    let traffic_params = configs[0].params.clone();
     let mut journey = tokio::spawn(async move {
+        let signing = Arc::new(tokio::sync::Mutex::new(()));
         for client in &initial {
             loop {
                 if client
@@ -172,6 +184,7 @@ async fn governance_journey(check_catchup: bool) {
             let previous = initial[0].rpc_call("params_hash", json!({})).await.unwrap();
             transact(
                 &initial,
+                &signing,
                 &keys[0],
                 Transaction::Endorse(
                     build_endorse_tx(&addresses[0], &addresses[index], 1, Timestamp::now())
@@ -184,6 +197,7 @@ async fn governance_journey(check_catchup: bool) {
             wait_roster_epoch(&initial, previous["payment_epoch"].as_str().unwrap()).await;
             let source = transact(
                 &initial,
+                &signing,
                 &keys[0],
                 Transaction::Burn(
                     build_burn_tx(&addresses[0], &addresses[index], 1, Timestamp::now()).unwrap(),
@@ -192,6 +206,7 @@ async fn governance_journey(check_catchup: bool) {
             .await;
             transact(
                 &initial,
+                &signing,
                 &keys[index],
                 Transaction::Receive(
                     build_receive_tx(
@@ -208,6 +223,7 @@ async fn governance_journey(check_catchup: bool) {
             .await;
             transact(
                 &initial,
+                &signing,
                 &keys[index],
                 Transaction::Delegate(
                     build_delegate_tx(&addresses[index], &addresses[0], Timestamp::now()).unwrap(),
@@ -215,6 +231,9 @@ async fn governance_journey(check_catchup: bool) {
             )
             .await;
         }
+        let traffic = mixed.then(|| mixed::Traffic::start(&initial, traffic_params, signing.clone()));
+        if let Some(traffic) = &traffic { traffic.progress(0).await; traffic.phase(1); }
+        let proposal_guard = signing.lock().await;
         let proposal = initial[0]
             .propose_content_signed(
                 &keys[0],
@@ -225,6 +244,7 @@ async fn governance_journey(check_catchup: bool) {
             )
             .await
             .unwrap();
+        drop(proposal_guard);
         let id = burst_wallet_core::signed_client::parse_hash(&proposal.hash)
             .unwrap()
             .into_tx_hash();
@@ -233,11 +253,13 @@ async fn governance_journey(check_catchup: bool) {
             .await
             .unwrap();
         let counting_cut = details["created_at"].as_u64().unwrap() + counting_offset;
+        let endorsement_guard = signing.lock().await;
         let endorsement = initial[0]
             .endorse_proposal_signed(&keys[0], id, 5)
             .await
             .unwrap();
         confirmed(&initial, &endorsement.hash).await;
+        drop(endorsement_guard);
         wait_phase(&initial, &proposal.hash, "Exploration").await;
         for client in &initial {
             let view = client
@@ -249,9 +271,11 @@ async fn governance_journey(check_catchup: bool) {
                 "opening the voting window is a projection, not a ledger write"
             );
         }
+        if let Some(traffic) = &traffic { traffic.progress(1).await; traffic.phase(2); }
         for (index, vote) in [(0, GovernanceVote::Yea), (2, GovernanceVote::Nay)] {
             transact(
                 &initial,
+                &signing,
                 &keys[index],
                 Transaction::GovernanceVote(
                     build_governance_vote_tx(&addresses[index], id, vote, Timestamp::now())
@@ -260,10 +284,13 @@ async fn governance_journey(check_catchup: bool) {
             )
             .await;
         }
+        if let Some(traffic) = &traffic { traffic.progress(2).await; }
         check(&initial, &proposal.hash).await;
+        if let Some(traffic) = traffic { traffic.phase(3); traffic.finish().await; }
         // Revocation remains available, but cannot rewrite this closed ballot.
         transact(
             &initial,
+            &signing,
             &keys[1],
             Transaction::RevokeDelegation(
                 build_revoke_delegation_tx(&addresses[1], Timestamp::now()).unwrap(),
@@ -282,6 +309,8 @@ async fn governance_journey(check_catchup: bool) {
         for (_, task) in nodes {
             let _ = tokio::time::timeout(Duration::from_secs(20), task).await;
         }
+        let retained = directory.keep();
+        eprintln!("failed ballot fixture retained at {}", retained.display());
         panic!("multi-human ballot journey failed: {result:?}");
     }
     let (hash, counting_cut) = result.unwrap().unwrap();

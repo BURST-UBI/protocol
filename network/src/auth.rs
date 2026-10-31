@@ -1,20 +1,15 @@
-//! Connection authentication — tracks verified node IDs for connected peers.
-//!
-//! This provides node-ID-level authentication without full transport encryption.
-//! Peers prove ownership of their node key during the handshake; this module
-//! records which peers have been successfully authenticated.
+//! Caller-maintained peer/key registry. It performs no cryptographic checks.
+//! The running node authenticates handshakes in its transport layer; this
+//! standalone registry is not that authentication boundary.
 
 use std::collections::HashMap;
 
 use burst_types::PublicKey;
 
-/// Tracks authenticated node IDs for connected peers.
-///
-/// After a successful handshake, a peer's socket address is mapped to
-/// the `PublicKey` they proved ownership of. Messages from unauthenticated
-/// peers can be rejected.
+/// Records keys under caller-chosen peer identifiers. Callers must verify
+/// identity before insertion and remove entries when their session ends.
 pub struct PeerAuth {
-    /// Map of peer_id (socket address string) to their verified node ID.
+    /// Opaque peer identifier to recorded public key.
     authenticated_peers: HashMap<String, PublicKey>,
 }
 
@@ -26,17 +21,17 @@ impl PeerAuth {
         }
     }
 
-    /// Record a successful handshake authentication.
+    /// Insert or replace a key without verifying it.
     pub fn authenticate(&mut self, peer_id: &str, node_id: PublicKey) {
         self.authenticated_peers.insert(peer_id.to_owned(), node_id);
     }
 
-    /// Check if a peer has been authenticated.
+    /// Whether the caller has recorded this identifier.
     pub fn is_authenticated(&self, peer_id: &str) -> bool {
         self.authenticated_peers.contains_key(peer_id)
     }
 
-    /// Get a peer's verified node ID, if authenticated.
+    /// Return the key recorded for this identifier.
     pub fn get_node_id(&self, peer_id: &str) -> Option<&PublicKey> {
         self.authenticated_peers.get(peer_id)
     }
@@ -46,7 +41,7 @@ impl PeerAuth {
         self.authenticated_peers.remove(peer_id);
     }
 
-    /// Number of currently authenticated peers.
+    /// Number of recorded identifiers.
     pub fn count(&self) -> usize {
         self.authenticated_peers.len()
     }

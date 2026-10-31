@@ -1,19 +1,19 @@
-//! Wallet address type with `brst_` prefix.
+//! Wallet address storage; full encoding validation lives in burst-crypto.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// A BURST wallet address, always prefixed with `brst_`.
-///
-/// Derived from the wallet's public key via Blake2b hashing + base32 encoding.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Stored wallet address text. Construction checks only the `brst_` prefix;
+/// derived deserialization does not perform even that check.
+/// Validate untrusted values with `burst_crypto::decode_address` before use.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct WalletAddress(String);
 
 impl WalletAddress {
     /// The standard prefix for all BURST wallet addresses.
     pub const PREFIX: &'static str = "brst_";
 
-    /// Create a new wallet address from a raw string.
+    /// Store a string after checking its prefix, without checking the payload.
     ///
     /// # Panics
     /// Panics if the string does not start with `brst_`.
@@ -28,8 +28,8 @@ impl WalletAddress {
         &self.0
     }
 
-    /// Validate that this address is well-formed.
-    pub fn is_valid(&self) -> bool {
+    /// Check the prefix and presence of a payload; does not verify encoding or checksum.
+    pub fn has_prefix_and_payload(&self) -> bool {
         self.0.starts_with(Self::PREFIX) && self.0.len() > Self::PREFIX.len()
     }
 }

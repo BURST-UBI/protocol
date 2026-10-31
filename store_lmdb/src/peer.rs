@@ -25,6 +25,7 @@ impl PeerStore for LmdbPeerStore {
         Ok(())
     }
 
+    /// A timestamp with the wrong byte length is treated as absent.
     fn get_peer(&self, addr: &str) -> Result<Option<u64>, StoreError> {
         let rtxn = self.env.read_txn().map_err(LmdbError::from)?;
         let val = self
@@ -50,7 +51,7 @@ impl PeerStore for LmdbPeerStore {
         Ok(())
     }
 
-    fn iter_peers(&self) -> Result<Vec<(String, u64)>, StoreError> {
+    fn all_peers(&self) -> Result<Vec<(String, u64)>, StoreError> {
         let rtxn = self.env.read_txn().map_err(LmdbError::from)?;
         let iter = self.peers_db.iter(&rtxn).map_err(LmdbError::from)?;
         let mut result = Vec::new();
@@ -64,6 +65,9 @@ impl PeerStore for LmdbPeerStore {
         Ok(result)
     }
 
+    /// Collects stale keys in a read transaction, then deletes them in a write
+    /// transaction. Callers must serialize cache updates with this operation to
+    /// avoid deleting a peer refreshed between those transactions.
     fn purge_older_than(&self, cutoff_secs: u64) -> Result<usize, StoreError> {
         let rtxn = self.env.read_txn().map_err(LmdbError::from)?;
         let iter = self.peers_db.iter(&rtxn).map_err(LmdbError::from)?;

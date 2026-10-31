@@ -3,13 +3,19 @@
 # Usage:
 #   burst-daemon --config testnet.toml node run
 #
-# All values below can be overridden by CLI flags or BURST_* environment
-# variables (see `burst-daemon --help`).
+# Available CLI overrides are listed by `burst-daemon --help`.
+# Database map capacity is configured in this TOML file.
 
 network = "test"
 
 # Data directory for LMDB ledger, wallets, and state.
 data_dir = "./burst_data"
+
+# Database address-space limit; default 1 GiB. Stop the node before increasing it.
+# For a 4 GiB limit on a supported 64-bit host, uncomment:
+# database_map_size_bytes = 4294967296
+# This does not reserve 4 GiB of resident RAM or change recovery scratch limits.
+# Use this same config for offline snapshot commands.
 
 # P2P port — test network default is 17076.
 port = 17076

@@ -331,5 +331,10 @@ fn appeal_snapshot_rejects_missing_challenge_or_zero_reference_and_reads_v5() {
                 .reviewed_outcome = BlockHash::ZERO;
         }
         assert!(OrchestratorSnapshot::decode(&snapshot.encode().unwrap()).is_err());
+        let invalid = VerificationOrchestrator::restore(snapshot);
+        let mut callback = |_: &str, _: &OrchestratorSnapshot| Ok(());
+        let mut visitor = super::super::records::VerificationRecordVisitor::new(&mut callback);
+        let result = invalid.visit_records(|record| visitor.push_bounded(record, 64 << 20));
+        assert!(result.is_err() || visitor.finish().is_err());
     }
 }

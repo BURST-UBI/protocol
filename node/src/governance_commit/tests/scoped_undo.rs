@@ -4,20 +4,44 @@ use burst_wallet_core::transaction_builder::*;
 
 #[test]
 fn signed_proposal_undo_preserves_an_independent_proposal_across_abort_and_reopen() {
-    scoped_undo_case(BlockType::GovernanceProposal);
+    scoped_undo_case(BlockType::GovernanceProposal, false);
 }
 
 #[test]
 fn signed_delegation_undo_preserves_an_independent_owner_across_abort_and_reopen() {
-    scoped_undo_case(BlockType::Delegate);
+    scoped_undo_case(BlockType::Delegate, false);
 }
 
 #[test]
 fn signed_revocation_undo_preserves_an_independent_owner_across_abort_and_reopen() {
-    scoped_undo_case(BlockType::RevokeDelegation);
+    scoped_undo_case(BlockType::RevokeDelegation, false);
 }
 
-fn scoped_undo_case(kind: BlockType) {
+#[test]
+fn keyed_proposal_undo_preserves_an_independent_proposal_across_abort_and_reopen() {
+    scoped_undo_case(BlockType::GovernanceProposal, true);
+}
+
+#[test]
+fn keyed_delegation_undo_preserves_an_independent_owner_across_abort_and_reopen() {
+    scoped_undo_case(BlockType::Delegate, true);
+}
+
+#[test]
+fn keyed_revocation_undo_preserves_an_independent_owner_across_abort_and_reopen() {
+    scoped_undo_case(BlockType::RevokeDelegation, true);
+}
+
+#[test]
+fn recovered_keyed_proposal_undo_preserves_an_independent_proposal_across_abort_and_reopen() {
+    scoped_undo_recovery_case(BlockType::GovernanceProposal, true, true);
+}
+
+fn scoped_undo_case(kind: BlockType, keyed: bool) {
+    scoped_undo_recovery_case(kind, keyed, false);
+}
+
+fn scoped_undo_recovery_case(kind: BlockType, keyed: bool, recovered: bool) {
     let dir = tempfile::tempdir().unwrap();
     let mut store = LmdbStore::open(dir.path(), 32, 32 << 20).unwrap();
     let mut state = candidate();
@@ -32,6 +56,17 @@ fn scoped_undo_case(kind: BlockType) {
                         &burst_crypto::keypair_from_seed(&[seed; 32]).public,
                     ),
                     &target,
+                )
+                .unwrap();
+        }
+    }
+    if keyed && kind == BlockType::GovernanceProposal {
+        for index in 0..256 {
+            state
+                .delegation
+                .delegate(
+                    &burst_types::WalletAddress::new(format!("brst_unrelated_owner_{index}")),
+                    &burst_types::WalletAddress::new(format!("brst_unrelated_delegate_{index}")),
                 )
                 .unwrap();
         }
@@ -78,6 +113,11 @@ fn scoped_undo_case(kind: BlockType) {
             );
             openings.push(open);
         }
+        if keyed {
+            batch
+                .initialize_governance_records(&state.governance)
+                .unwrap();
+        }
         state.persist(&mut batch).unwrap();
         crate::ledger_updater::persist_economics(&mut batch, &brn, &trst).unwrap();
         batch.commit().unwrap();
@@ -91,7 +131,7 @@ fn scoped_undo_case(kind: BlockType) {
             head: open.hash,
             block_count: 1,
             representative: open.account.clone(),
-            brn_balance: 0,
+            brn_spent: 0,
             trst_balance: 0,
         };
         let tx = if kind == BlockType::Delegate {
@@ -124,6 +164,9 @@ fn scoped_undo_case(kind: BlockType) {
         let mut batch = store.tx_begin_write().unwrap();
         state = CandidateGovernance::restore(&batch, params.clone(), state.network, state.genesis)
             .unwrap();
+        let prior_governance = state.governance.clone();
+        let prior_delegation = batch.get_meta(DelegationEngine::meta_key()).unwrap();
+        let prior_constitution = batch.get_meta("consti_engine").unwrap();
         let economic = crate::economic_candidate::stage(
             &mut batch,
             &proposal,
@@ -136,6 +179,68 @@ fn scoped_undo_case(kind: BlockType) {
             .unwrap();
         crate::ledger_updater::persist_economics(&mut batch, &brn, &trst).unwrap();
         batch.commit().unwrap();
+        if recovered {
+            use burst_store_lmdb::block_undo::{UndoChange, UndoTable};
+            let mut batch = store.tx_begin_write().unwrap();
+            batch
+                .publish_recovered_governance(&state.governance)
+                .unwrap();
+            let mut replayed = batch.block_undo(&proposal.hash).unwrap().unwrap();
+            replayed.changes.retain(|row| {
+                !(row.table == UndoTable::Meta
+                    && (row.key.starts_with(b"governance_state/")
+                        || row.key.starts_with(b"governance_revision/")))
+            });
+            replayed.changes.push(UndoChange {
+                table: UndoTable::BrnMeta,
+                key: b"governance_engine".to_vec(),
+                before: Some(bincode::serialize(&prior_governance).unwrap()),
+                after: Some(bincode::serialize(&state.governance).unwrap()),
+            });
+            replayed
+                .changes
+                .sort_by(|a, b| (a.table, &a.key).cmp(&(b.table, &b.key)));
+            let projected = batch.project_recovered_governance_undo(replayed).unwrap();
+            let mut journals = proposals
+                .iter()
+                .map(|block: &StateBlock| batch.block_undo(&block.hash).unwrap().unwrap())
+                .collect::<Vec<_>>();
+            journals.push(projected);
+            batch.replace_checkpoint_undo(&journals).unwrap();
+            batch.commit().unwrap();
+        }
+        if keyed {
+            use burst_store_lmdb::block_undo::UndoTable;
+            let batch = store.tx_begin_write().unwrap();
+            let journal = batch.block_undo(&proposal.hash).unwrap().unwrap();
+            assert_eq!(batch.get_meta("consti_engine").unwrap(), prior_constitution);
+            assert!(!journal
+                .changes
+                .iter()
+                .any(|change| change.table == UndoTable::Meta && change.key == b"consti_engine"));
+            if kind == BlockType::GovernanceProposal {
+                assert_eq!(
+                    batch.get_meta(DelegationEngine::meta_key()).unwrap(),
+                    prior_delegation
+                );
+                assert!(!journal
+                    .changes
+                    .iter()
+                    .any(|change| change.table == UndoTable::Meta
+                        && change.key == DelegationEngine::meta_key().as_bytes()));
+            }
+            assert!(!journal.changes.iter().any(|change| {
+                change.table == UndoTable::BrnMeta && change.key == b"governance_engine"
+            }));
+            assert_eq!(batch.read_governance_records().unwrap(), state.governance);
+            assert_eq!(
+                journal.changes.iter().any(|change| {
+                    change.table == UndoTable::Meta
+                        && change.key.starts_with(b"governance_state/v1/")
+                }),
+                kind == BlockType::GovernanceProposal
+            );
+        }
         proposals.push(proposal);
     }
     for (index, losing) in proposals.iter().enumerate() {
@@ -151,7 +256,14 @@ fn scoped_undo_case(kind: BlockType) {
             replacement,
             &burst_crypto::keypair_from_seed(&[index as u8; 32]).private,
         );
-        let original = store.brn_store().get_meta(b"governance_engine").unwrap();
+        let original = store
+            .tx_begin_write()
+            .unwrap()
+            .undo_value(
+                burst_store_lmdb::block_undo::UndoTable::BrnMeta,
+                b"governance_engine",
+            )
+            .unwrap();
         let original_delegation = store
             .meta_store()
             .get_meta(DelegationEngine::meta_key())
@@ -170,7 +282,14 @@ fn scoped_undo_case(kind: BlockType) {
         )
         .is_err());
         assert_eq!(
-            store.brn_store().get_meta(b"governance_engine").unwrap(),
+            store
+                .tx_begin_write()
+                .unwrap()
+                .undo_value(
+                    burst_store_lmdb::block_undo::UndoTable::BrnMeta,
+                    b"governance_engine"
+                )
+                .unwrap(),
             original
         );
         assert_eq!(

@@ -1,0 +1,336 @@
+# System audit — 2026-10-30
+
+Status: system-wide risk-based source audit completed. PA06 and FA03 subsequently
+fixed in source; optional hardening and policy questions retain their dispositions. This review covers the current protocol, wallet, dashboard,
+release configuration and their trust boundaries. The frozen release artifacts
+are distinct candidates. This document does not certify security or substitute
+source inspection for hostile-network testing, formal proof or platform acceptance.
+
+The scope inventory is `target/validation-evidence/full-audit-20261030/source-inventory.json`.
+Inventory does not mean each line has been reviewed. Existing findings PA06, Q01,
+Q02, remaining dependency advisories and deferred release gates are carried forward.
+PA01/02/04/05 and PD01 are fixed in source, not retroactively in frozen packages.
+
+Cross-check: [Rsnano intent/defect comparison](RSNANO_AUDIT_CROSSCHECK_20261030.md).
+FA01 is now P3 local-input hardening (shared with Rsnano); FA02 remains defense
+in depth; FA03 is defensive invalid-state atomicity; FA04 is a transport-policy
+limitation, not an established spec violation. PA06 was a reproduced engine
+defect with persistence protection and is now fixed with FA03 below. The original observations remain valid.
+
+## Threat model and review plan
+
+Assets: private keys, exact signed user intent, BRN/TRST conservation and provenance,
+one-human authority, finality, deterministic replay, durable recovery, availability.
+Attackers: unauthenticated peers/HTTP clients, malicious valid account holders,
+Byzantine representatives below quorum, dishonest RPC/relays, hostile imported files,
+local users without wallet authority, compromised build dependencies. Compromised
+root keys and a malicious quorum are outside ordinary cryptographic guarantees;
+trust in a configured RPC and genesis/authority anchors must be explicit.
+
+| Area | Required review | Status |
+| --- | --- | --- |
+| Crypto, identities, wire encoding | Canonical signatures, domains, key lifecycle, decode/allocation bounds | Reviewed; details below |
+| BRN, TRST, all account operations | Conservation, overflow, replay, provenance, expiry, reversal, atomicity; PA06 | Reviewed; details below |
+| Consensus/checkpoints | Authenticated electorate, duplicate voting, thresholds, round locks, durable signing, authority changes | Reviewed; details below |
+| Verification/challenges/appeals | Selection randomness, eligibility, stakes, deadlines, reversals | Reviewed; details below |
+| Governance/constitution/delegation | Admission, tally, activation, conflicting amendments, scoped authority; Q01/Q02 | Reviewed; details below |
+| Storage/bootstrap/recovery | Snapshot trust, rollback, transactions, cache identity, retirement gate, allocation/disk bounds | Reviewed; details below |
+| P2P/RPC/WebSocket | Authentication, budgets, fairness, authorization, clock trust | Reviewed; details below |
+| Wallet/core/native/frontend | User intent, offline journal, device grants, keys, imports, IPC/navigation, RPC assumptions | Reviewed; details below |
+| Dashboard/deployment/release | Command boundaries, safe defaults, privileged keys, installer/provenance | Reviewed; details below |
+| Dependencies/test evidence | Current advisories and reachability, reuse review, missing assertions | Reviewed; details below |
+
+## Validation scheduling
+
+No production source change is needed merely to audit. Start with existing code,
+regressions and receipts. Before new expensive validation, read VALIDATION_WORKFLOW,
+name the missing assertion, record changed inputs and use the receipt preflight.
+Local checks must use limited-run; no full node-library test build or release build.
+
+| Changed dependency / question | Check | Existing evidence | Reuse / next action |
+| --- | --- | --- | --- |
+| No code change; system scope expands | Source/contract review | Earlier security and consistency reports | Historical findings retained; not a new runtime pass |
+| PA06 overflow failure semantics | Exact-maximum / overflow / unchanged-state regression | Expiry transition tests already cover a different operation | Executed focused raw/indexed characterization; see latest receipt |
+| Current dependencies | Lock identity and advisory database | Oct29 OSV/npm scans | Refreshed successfully; disposition below, no rebuild |
+| Recent source fixes | Previously recorded 645 unit + 3 schema tests, node check | protocol-consistency-fixes-20261030 receipts | Exact reuse check rejects two changed test files; historical passes retained, no broad rerun |
+
+Dependency scan terminal result: completed 741/741 Rust package/version queries and
+both npm queries without errors. Both npm reports have zero matches. Rust matches
+are recorded in `full-audit-20261030/dependencies/rust-advisories.json`; scan
+completion is not a clean vulnerability verdict. Reachability disposition and reproduction results follow below. No compiler or validation service remains active.
+
+PA06 attempt 1 terminal: compilation passed; test failed before its target path
+because the new fixture reversed mint receiver/origin arguments. Evidence:
+`full-audit-20261030/pa06-receipt.json`. Next is the same test with those arguments
+corrected, not a broad-suite retry. No production defect inferred from this failure.
+
+PA06 attempt 2 terminal: focused test passed, reproducing the open engine bug
+for raw and indexed portfolios and confirming stable-row/snapshot rejection.
+`pa06-receipt-2.json` supersedes attempt 1 for this assertion. No signed-ledger
+exploit is established. No further PA06 run is scheduled until implementation
+changes or a real signed predecessor fixture is available.
+
+
+Additional missing assertion: backup import resource bounds. `load_keystore` reads
+an entire user-selected file before parsing; unlike offline action import it has
+no byte limit. Extend the existing keystore tests with a 1-MiB harmless padding
+fixture, no secret and no KDF. This is an import-path characterization, not an OOM
+stress test. Test-only dependency change; no daemon rebuild required.
+
+Backup-import characterization terminal: 1 test passed; >1 MiB ignored JSON
+metadata was accepted by the native keystore reader. FA01 is open, not fixed.
+`backup-receipt.json` records the result. No expensive job remains active.
+
+## Outcome and evidence limits
+
+No new critical/high-severity exploit was demonstrated in this review. This is
+not a statement that none exists. The review followed security boundaries across
+all 21 block operations and the surrounding node, wallet and deployment systems.
+It is a system-wide risk-based audit, not an assertion that every source line,
+interleaving or adversarial history has been exhaustively examined. Inventory is
+separate from coverage. No formal consensus proof, fresh network penetration test,
+long fuzz campaign or physical power-loss campaign was performed this turn.
+
+Two focused characterization tests executed successfully. They deliberately
+confirm undesirable behavior, not remediation. The first PA06 fixture attempt
+failed before exercising its target; its corrected successor is the qualifying
+reproduction. The refreshed dependency scan completed. All three latest receipts
+pass input/evidence verification in `full-audit-20261030/stage-audit.json`.
+`source-changes.json` compares the initial source inventory to the finish: only
+the two files containing newly added audit tests changed. Production behavior and
+frozen release packages were not changed during this audit.
+
+Priority here: P2 = actionable bounded/local risk; P3 = hardening or invalid-state
+API behavior with no demonstrated valid-ledger attack. These are engineering
+priorities, not invented CVSS scores.
+
+The older consistency-fix small/node/schema receipts were also checked. All
+three reject exact-input reuse because `trst/src/engine/portfolio.rs` and
+`wallet_core/src/keystore.rs` gained the two tests. The mismatch inspection is
+`prior-changed-inputs.json`; checker decisions are `prior-stage-audit.json`.
+Their 645-unit/3-schema/type-check outcomes remain historical passes, not fresh
+passes for this exact tree. Test-only additions do not justify a daemon rebuild;
+no broader assertion is inferred from either characterization test.
+
+## Findings and minimal remediation
+
+### PA06 — reversal hides active-balance overflow (P3, reproduced; now fixed in source)
+
+`trst/src/engine.rs::restore_origins` updates revocation state and attempts an
+indexed restoration. An indexed validation error falls back to legacy mutation;
+active balance uses saturating addition. The method returns a successful-looking
+restoration list even when the restored token sum exceeds u128. Related receive
+paths should distinguish “index unavailable” from “index rejected this mutation”
+instead of using one boolean/fallback for both conditions.
+
+The test `engine/portfolio.rs::audit_pa06_reversal_overflow_reaches_persistence_guard`
+constructs a revoked maximum holding plus a live unit and restores the former.
+Both raw and indexed representations expose the overflow. Stable holding-row
+persistence and snapshot loading reject the result. Inspected node transitions
+use staged engines and durable validation before publication. Counter refresh
+alone is not the guard: the active-holding persistence validation is.
+
+No valid signed history reaching this synthetic state, durable corruption or theft
+was established. Fix by returning a checked Result and staging graph, holdings,
+indexes and outcome changes together; reuse the existing expiry transition's
+validate-before-publish approach. Regressions should cover maximum valid totals,
+overflow rejection and unchanged whole-engine state on failure. Do not merely
+replace saturation with a panic or return after mutating the revocation graph.
+
+### FA01 — wallet backup import lacks an allocation bound (P3 local hardening, reproduced)
+
+`wallet_core/src/keystore.rs::load_keystore` calls `read_to_string` on the entire
+selected file before JSON validation. Native `load_keystore_cmd` reaches it.
+Unknown JSON fields are ignored. The added
+`audit_backup_import_accepts_large_ignored_metadata` accepts over 1 MiB of harmless
+padding. This demonstrates no import-size limit; it does not simulate OOM.
+
+A user must open a hostile local backup. Larger files can exhaust memory or stall
+import before cryptographic profile checks. The earlier PA05 profile fix remains
+valid but does not bound file size or hex-decoded field sizes. No seed theft was
+shown. Reuse the bounded offline-import reader pattern; set a documented v1 file
+limit and exact/maximum salt, nonce and ciphertext lengths before decoding/KDF.
+Test at-limit/over-limit files, oversized fields and existing legitimate backups.
+A metadata size check alone is insufficient against a file changed while reading.
+
+### FA02 — decrypted key material is not consistently wiped (P3, source, open)
+
+In `wallet_core/src/keystore.rs`, `derive_key` returns a plain byte array and AES
+plaintext remains an ordinary Vec; native unlock/export paths also make seed and
+password copies. These buffers have no guaranteed wipe on drop. This increases
+residual secret lifetime if process memory is later exposed; no memory-read or
+exfiltration attack was demonstrated. Reuse the existing Zeroizing/key wrappers
+used by crypto delegation code for temporary keys and plaintext. Minimize copies;
+do not claim Rust zeroization can reliably erase JavaScript strings or OS dumps.
+
+### FA03 — BRN forfeiture has partial mutation on error (P3 defensive hardening; now fixed in source)
+
+`brn/src/engine.rs::forfeit_stake` subtracts total_staked before checked addition
+to total_burned. If the addition overflows, it returns an error after changing the
+wallet while leaving the stake unresolved. This requires inconsistent/extreme
+input state; no legitimate accrual history or durable node publication was shown.
+Compute both new totals before assigning either, preserving the existing API.
+Add one invalid-state atomicity regression and retain normal forfeiture coverage.
+This is a small local fix, not a reason to redesign the staking engine.
+
+### FA04 — plain-HTTP membership queries lack transport privacy (policy limitation, source)
+
+`groups/src/client.rs::endpoint_url_checked` accepts HTTP for any host, and
+`verify_member` includes the wallet identifier in the URL path. Registry and wallet
+policy validation reuse/allow that scheme. An on-path party can observe queries
+or alter informational membership responses when a selected endpoint uses HTTP.
+Scores are explicitly not consensus voting weight. No signature bypass follows.
+HTTP public-directory/IPFS retrieval is intentional and discloses no wallet ID;
+that does not make authenticated membership transport private.
+
+The subsequent design/reference check found simple REST and HTTP(S) acceptance
+consistent with current design, with no established HTTPS-only requirement.
+Explain membership disclosure and prefer HTTPS; making remote HTTP impossible
+is a policy change, not an automatic defect fix. Directory retrieval and
+membership queries disclose different information. Do not silently trust directory
+entries or describe plaintext queries as confidential.
+No network interception test was run; scheme acceptance and query construction
+are directly visible in source.
+
+### Additional bounded hardening (source observations)
+
+* Dashboard `src-tauri/src/commands.rs::read_logs(lines: u32)` buffers journalctl
+  output without a byte cap. Arguments are separate process arguments, not shell
+  interpolation. Bound line count, streamed bytes and duration. Requires trusted
+  local IPC use; no remote command injection was found.
+* Release actions include mutable version tags and toolchain action references.
+  Pin reviewed action commits and retain an update process. Installer SHA256SUMS
+  detect mismatched downloads but share the release publisher's trust boundary;
+  they do not authenticate against a compromised publisher. Signed provenance is
+  a separate release improvement, not something this audit silently enabled.
+
+## Operation-by-operation contract review
+
+Every row also depends on common canonical block hashing, strict signature/work
+validation, exact predecessor/signing grant, parameter identity, payment epoch,
+checked state transition and atomic durable publication. A signature authenticates
+bytes; eligibility and conservation still require the operation-specific checks.
+Rows describe source review, not 21 newly executed end-to-end scenarios.
+
+| Operation | Specific contract inspected | Result / residual question |
+| --- | --- | --- |
+| Open | First predecessor, initial balances, pending source and signing authority | No new bypass demonstrated; configured genesis is a separate trust anchor |
+| Burn | Computed available BRN, checked spend delta, matching TRST origin/provenance | No new mint-without-spend path found |
+| Send | Verified sender, exact debit, owned live provenance, pending transfer, dependency identity | Checked candidate validation rejects missing portfolio; remote RPC is not authority |
+| Receive | Pending source identity, single claim, exact credit and provenance | Normal staged path checked; review shared fallback semantics with PA06 |
+| RejectReceive | Authenticated pending rejection and returned credit lifecycle | No duplicate return demonstrated |
+| Merge | Unique owned inputs, checked sum, expiry/provenance preservation | 256 input cap; no merge rejuvenation or overflow bypass found |
+| Endorse | Eligibility, positive cost/stake, target dependencies, one atomic effect | No free endorsement path demonstrated |
+| Challenge | Verified challenger, stake minimum, target context and lifecycle | Origin restoration carries PA06; no valid-history exploit established |
+| VerificationVote | Authenticated selected voter, phase/context/deadline, duplicate prevention | No vote from a peer label alone; availability depends on selected participation |
+| GovernanceProposal | Verified submitter, typed bounded content, timing/parameter validation | Free submission is intentional; endorsers fund admission, PA01 fixed earlier |
+| GovernanceEndorse | Unique eligible endorsement and actual BRN burn | Cost/effect staged together |
+| GovernanceWithdraw | Proposal owner and pre-voting phase | No late or foreign withdrawal bypass found |
+| GovernanceVote | Typed vote, eligible certified electorate, delegation scope, duplicate guard | Malformed vote rejected by governance candidate despite economic no-op classification |
+| GovernanceActivation | Approved result, activation time, parameter hash and amendment consistency | Q01 constitutional quorum remains an explicit policy question |
+| Delegate | Owner-authenticated scoped payload, network/genesis, generations, bounded record | Delegated governance authority does not authorize payment signing |
+| RevokeDelegation | Scope/generation/tombstone and owner authority | Retained revocation identity prevents simple stale-grant reuse |
+| ChangeRepresentative | Authorized account predecessor and representative update | Representation changes do not create human weight |
+| ChangeSigner | Current grant/predecessor, replacement grant and unchanged economics | Rotation bound into signed block; native wallet serializes signing |
+| Epoch | Epoch/authority context, predecessor and unchanged balances/representative | Source wire37/block8 differs from frozen candidate; no migration inferred |
+| VerifierOptIn | Verified account and deterministic pool transition | Selection uses pinned certified pool, not a post-randomness refilter |
+| VerifierOptOut | Authorized pool exit and selection context | Existing selection contexts remain independently authenticated |
+
+Main cross-links: `ledger/src/state_block.rs`, `node/src/block_processor/authentication.rs`,
+`node/src/block_validation.rs`, `node/src/economic_candidate/{inputs,staging}.rs`,
+`node/src/payment_transition.rs`, `node/src/ledger_bridge.rs`,
+`node/src/{endorsement,verification,governance}_commit.rs`, their submodules,
+`trst/src/engine.rs`, `brn/src/engine.rs`, and governance typed content/ballot code.
+
+## Cross-system coverage and conclusions
+
+| Boundary | Inspected controls and representative sources | Limits / residual risk |
+| --- | --- | --- |
+| Cryptography/canonical identity | `crypto/src/{sign,address,encryption}.rs`: strict Ed25519 verification, address padding/checksum, contributory X25519, domain/context-bound AEAD; block hash includes grant/epoch/payload and bounded lists | Cryptographic primitives were not independently proven; FA02 temporary-buffer hygiene |
+| Wire/decoding | `protocol/src/codec.rs`, handshake, node wire protobuf: frame/decoded size limits; live embedded payloads reject trailing bytes | Legacy generic handshake decoder permits trailing bytes; no signed ambiguity demonstrated; no fresh fuzz campaign |
+| Finality/checkpoints | `consensus/src/checkpoint.rs`, checkpoint round state: sorted unique human roster, parent-authority quorum, signed network/genesis/height/round/phase, lock/proof validation | No formal model-check of every round/interleaving or Byzantine network campaign |
+| Durable signing | `node/src/checkpoint_agreement.rs`, `durable_votes.rs`: journal/CAS commit before signing; reservation binds account position, sequence and causal intent | Process-crash evidence is distinct from physical power-loss qualification |
+| Verification/randomness | selection_request, drand policy, verifier orchestrator and deadline/appeal commits: pinned round and certified pool, cutoff/error margin, independent voters, signed receipt context, bounded history | Trusted-clock and drand availability assumptions remain; PA06 reversal handling |
+| Governance/constitution | Typed content, certified ballots, scoped key delegation, activation and cloned constitution validation | Q01 threshold policy and Q02 custodianship authority/API model carried forward; no rule silently changed |
+| Economic arithmetic | Checked u128 conservation; proportional arithmetic avoids overflow; BRN rate changes append global history; provenance/expiry maintained | PA06 and FA03 error semantics; maximum supported state and throughput not newly benchmarked |
+| Storage/rollback | LMDB shared environment/write batches, stable holding validation, staged engine publication; bounded rollback plan with writer recheck and undo requirements | Unknown platform durability is not inferred from LMDB API use; unsafe FFI/open lifetime relies on library contracts |
+| Bootstrap/snapshots | Authenticated authority chain, private authenticated install handle, staged reconciliation, bounded framed records, publication gated across locks | Quorum authentication is not a proof of arbitrary snapshot semantics; configured anchor remains trusted |
+| Pruning/retirement | Retained provenance/finality dependencies; production startup rejects enabling physical body retirement | Bounded-total-storage claim withdrawn by PD01; indefinite history retention still has cost |
+| Peer/network scheduling | Admission global/IP/subnet caps and permit lifetime; bounded fair queues, frame/deadline/bandwidth separation | Sustained hostile traffic/fairness under real network loss not newly exercised |
+| RPC/WebSocket | Default-deny privileged RPC, hashed bearer, loopback restrictions, batch/body/handler/work limits, bounded read execution and response streams; WebSocket caps | Private RPC priority is intentional PA03; service bounds do not establish target throughput or perfect fairness |
+| Wallet intent/offline signing | BigInt/string amounts; native signing mutex/profile lease/current account; grant validation; bounded offline import; durable no-clobber signed-action journal | Dishonest RPC can mislead display/availability; ledger still validates signed transitions; FA01/FA02 |
+| App renderer/native IPC | CSP, bundled-origin navigation, limited capabilities, no inspected untrusted HTML/eval path; command arguments separated | Trusted renderer has powerful wallet/config IPC; no independent browser exploitation campaign |
+| Groups/privacy | Bounded responses/concurrency, redirects disabled, duplicate directory identity rejected, selected endpoints not auto-replaced | FA04; group scores informational; endpoints learn queries by design |
+| Deployment/release | Live genesis key configuration, development seeds distinguished, installer staging/checksum, manual release/conformance gates | Mutable action references and publisher trust; frozen packages do not contain current source fixes |
+
+## Complexity and resource review
+
+The earlier `OPERATION_COMPLEXITY_AUDIT.md` and decision tables remain the detailed
+algorithm inventory. This pass checked that security hardening does not bypass
+those mechanisms: fixed-size authentication work; bounded merge/release lists;
+indexed holdings and provenance dependencies; global BRN rate history rather than
+per-wallet rewrites; paged reads and bounded queues; staged rollback and replay.
+Work proportional to affected holdings/provenance, electorate tally, snapshot
+size or recovery history remains real work, not O(1) merely because it is indexed.
+Rate-history access, state retention and background recovery must be evaluated
+against their actual state dimensions. No new asymptotic production benchmark or
+100+ TPS/subsecond claim is made. FA01 and dashboard log buffering are concrete
+remaining allocation boundaries; PA06 shows why fast-path failure must not fall
+back into unchecked mutation. No generic caching or parallelism rewrite is justified
+by this audit alone.
+
+## Dependency dispositions
+
+Refreshed scan: 741/741 Rust package/version queries succeeded; both npm lock
+queries returned zero matches. Seven Rust package/version matches require
+interpretation; they are not seven demonstrated application vulnerabilities.
+
+| Match | Current disposition |
+| --- | --- |
+| bincode 1.3.3 / RUSTSEC-2025-0141 | Unmaintained dependency; bounded decoding remains necessary. Replacement affects stored/wire compatibility and needs a deliberate migration plan |
+| block-buffer 0.10.4 / GHSA-qwgh-2vcv-g2f7 | Disputed match: upstream lists >=0.11.0,<0.12.1. Locked 0.10.4 stores a separate position field rather than the affected inline cursor. Do not call this a confirmed vulnerable version or blindly upgrade digest's dependency |
+| glib 0.18.5 / RUSTSEC-2024-0429 | GTK/WebKit transitive dependency; no direct app VariantStrIter use found, but transitive reachability not disproved. Framework-compatible upgrade/reachability work remains |
+| proc-macro-error 1.0.4 / RUSTSEC-2024-0370 | Unmaintained build-time dependency via GTK/GLib macros; separate from remotely parsed runtime input |
+| protobuf 2.28.0 / RUSTSEC-2024-0437 | Prometheus dependency in protocol; inspected metrics path uses TextEncoder and peer messages use prost. No untrusted protobuf2 parse path found; do not infer universal unreachability |
+| quick-xml 0.38.4 and 0.39.2 / RUSTSEC-2026-0194/0195 | Via plist in app graphs; no direct untrusted network XML parse found. Full transitive build/runtime plist reachability remains unverified |
+
+Primary advisory references: [block-buffer affected range](https://github.com/RustCrypto/utils/security/advisories/GHSA-qwgh-2vcv-g2f7),
+[protobuf recursion](https://rustsec.org/advisories/RUSTSEC-2024-0437.html),
+[glib VariantStrIter](https://rustsec.org/advisories/RUSTSEC-2024-0429.html).
+Raw scan output is preserved; adjudication does not edit scanner evidence.
+
+## Subsequent authorized fixes
+
+PA06 and FA03 are fixed in current source. Restoration now returns a checked
+Result and uses existing shared engine snapshots to keep graph, holdings, holder
+indexes and outcome invalidations unchanged on failure. Indexed errors no longer
+fall back to raw mutation; raw active totals use checked arithmetic. Node
+re-verification propagates failure. BRN forfeiture computes both totals before
+assigning either. No new staging framework or whole-ledger scan was introduced.
+
+326 BRN/TRST unit tests passed; 16 existing tests were ignored. The restoration
+regression covers raw/indexed and wallet/outcome paths, overflow rejection with
+unchanged state, exact u128 maximum, expiry and successful retry. Node library
+type-check passed. Both receipts were verified in
+`target/validation-evidence/audit-needed-fixes-20261030/stage-audit.json`.
+Full node/store test crates and release packages were not built. Historical audit
+observations below/above are retained, not current claims of an unfixed PA06.
+The separate legacy receive-fallback observation is outside this reversal fix.
+
+## Remaining work and acceptance boundary
+
+1. PA06 atomic restoration is complete in source. FA01 remains optional local
+   import hardening; reuse bounded-reader patterns if undertaken.
+2. FA03 is complete in source. FA02 and dashboard output caps remain optional
+   hardening; document FA04 transport limitations without silently changing policy.
+3. Resolve Q01/Q02 explicitly and review dependency reachability/compatible updates.
+   They were not settled by this audit or by resemblance to rsnano/Tezos.
+4. Integrate and qualify a new candidate if distributing source wire37/block8.
+   Existing frozen artifacts, release signing holds and deferred performance gates
+   retain their recorded status. No publication or Live launch performed.
+5. Preserve external assurance gaps: long adversarial network/fuzz campaigns,
+   consensus model analysis and physical power-loss tests. Existing unit/process
+   tests cannot substitute for these claims.
+
+This audit ends with documented findings and evidence, not with an assertion that
+all findings are fixed or that the protocol has been independently certified.

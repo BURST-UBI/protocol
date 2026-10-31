@@ -13,12 +13,21 @@ const END: u64 = START + 5;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn compact_live_challenge_archive_continues_through_certified_deadline() {
+    assert_live_deadline(u64::MAX, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pruned_live_challenge_deadline_preserves_pending_returns_after_restart() {
+    assert_live_deadline(31, true).await;
+}
+
+async fn assert_live_deadline(expiry: u64, retire: bool) {
     let _permit = crate::verification_test_support::NETWORK_FIXTURE
         .acquire()
         .await
         .unwrap();
     for reason in [ChallengeReason::Fraud, ChallengeReason::Inactivity] {
-        let (mut fixture, directory, store, selection, _) = setup(reason, 0, 9000);
+        let (mut fixture, directory, store, selection, _) = setup_with_expiry(reason, 0, 9000, expiry);
         let epoch = store.meta_store().payment_epoch().unwrap();
         vote_choice_in_epoch(
             &mut fixture,
@@ -30,7 +39,18 @@ async fn compact_live_challenge_archive_continues_through_certified_deadline() {
         );
         fixture.append_confirmed_prefix(&store, START + 1);
         finish(&fixture, &store);
-        crate::confirmed_replay::tests::snapshot_history::installed_recovery::installation::live::bootstrap::progression::assert_successor(fixture, directory, store, 3).await;
+        if retire {
+            let state = state_at(&fixture, &store, END + 1);
+            assert_eq!(state.pending.len(), 2);
+            assert!(state.pending.values().all(|pending| pending.return_credit));
+            let target = state.account(&address(20)).unwrap();
+            let expected = if reason == ChallengeReason::Fraud { (1, 1) } else { (2, 0) };
+            assert_eq!((target.expired_trst, target.revoked_trst), expected);
+            assert_eq!(target.trst_balance, 0);
+            crate::confirmed_replay::tests::snapshot_history::installed_recovery::installation::live::bootstrap::progression::assert_successor_after_retirement(fixture, directory, store, 3).await;
+        } else {
+            crate::confirmed_replay::tests::snapshot_history::installed_recovery::installation::live::bootstrap::progression::assert_successor(fixture, directory, store, 3).await;
+        }
     }
 }
 

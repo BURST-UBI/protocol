@@ -68,7 +68,7 @@ impl Running {
         let installer = node.snapshot_installer();
         let registry = node.connection_registry.clone();
         let task = tokio::spawn(async move {
-            let result = node.start().await;
+            let result = node.start_with_services(burst_daemon::start_public_services).await;
             if let Err(error) = &result {
                 eprintln!("compact live node exited: {error}");
             }
@@ -138,7 +138,7 @@ impl Running {
     }
 }
 
-async fn submit(node: &Running, payload: &str) -> burst_wallet_core::wallet::ProcessResult {
+async fn submit(node: &Running, payload: &str) -> burst_wallet_core::wallet::ProcessResponse {
     for _ in 0..100 {
         match node.client.process(payload).await {
             Ok(result) => return result,
@@ -266,7 +266,7 @@ fn prepare_with_fixture() -> (Prepared, Fixture) {
     )
     .unwrap();
     let (target_dir, local) = cemented::sparse(&old, &source);
-    records(&local, &source, &fixture, &bytes);
+    copy_installed_records(&local, &source, &fixture, &bytes);
     let key = format!("checkpoint_chain/v1/dev/{}/3", old.anchor().genesis_hash());
     local
         .meta_store()
@@ -370,7 +370,7 @@ async fn compact_import_uses_committed_parent_without_installing_the_new_decisio
         .unwrap();
     batch.commit().unwrap();
     let service =
-        crate::confirmed_replay::tests::snapshot_history::installed_recovery::Service::start(
+        crate::confirmed_replay::tests::snapshot_history::installed_recovery::WitnessService::start(
             source.clone(),
             local.clone(),
             0,
@@ -474,7 +474,7 @@ async fn compact_live_nodes_install_two_epochs_fetch_proofs_and_restart_payment_
     target.ready(epoch).await;
     for store in [&source.store, &target.store] {
         let batch = store.tx_begin_write().unwrap();
-        assert!(crate::graph_storage::row_format(&batch).unwrap());
+        assert!(batch.uses_graph_records().unwrap());
         assert!(batch.get_meta("merger_graph").unwrap().is_none());
     }
     assert!(crate::checkpoint_store::chain::load(&target.store, NetworkId::Dev, &params).is_err());
@@ -491,7 +491,7 @@ async fn compact_live_nodes_install_two_epochs_fetch_proofs_and_restart_payment_
     target.ready(epoch).await;
     {
         let batch = target.store.tx_begin_write().unwrap();
-        assert!(crate::graph_storage::row_format(&batch).unwrap());
+        assert!(batch.uses_graph_records().unwrap());
     }
     assert!(target.store.block_store().exists(&first).unwrap());
     assert_eq!(

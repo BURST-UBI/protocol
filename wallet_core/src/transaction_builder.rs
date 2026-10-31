@@ -1,4 +1,7 @@
-//! Transaction building helpers.
+//! Unsigned transaction drafts and account-block construction.
+//!
+//! Builders do not query the ledger or submit operations. Transaction drafts have
+//! zero work and signatures; their hashes are distinct from the resulting block hash.
 
 use burst_ledger::state_block::{BlockType, StateBlock, CURRENT_BLOCK_VERSION};
 use burst_types::{BlockHash, Signature, Timestamp, TxHash, WalletAddress};
@@ -6,20 +9,12 @@ use burst_types::{BlockHash, Signature, Timestamp, TxHash, WalletAddress};
 use crate::error::WalletError;
 
 /// Encode a wallet address as a 32-byte public key for the `link` field.
-///
-/// The `link` field in `StateBlock` is `BlockHash` (32 bytes), but BURST
-/// addresses are 65-character strings. This helper decodes the address to
-/// its underlying 32-byte public key so it fits in the link field and can
-/// be losslessly reconstructed via `burst_crypto::derive_address`.
+
 fn address_to_link(address: &WalletAddress) -> Result<BlockHash, WalletError> {
     burst_crypto::decode_address(address.as_str())
         .map(BlockHash::new)
         .ok_or_else(|| WalletError::InvalidAddress(address.as_str().to_string()))
 }
-
-// ---------------------------------------------------------------------------
-// Existing builders
-// ---------------------------------------------------------------------------
 
 /// Build a burn transaction (BRN -> TRST).
 pub fn build_burn_tx(
@@ -116,13 +111,10 @@ pub fn build_governance_vote_tx(
     })
 }
 
-// ---------------------------------------------------------------------------
-// New builders (Items 1.7, 1.8)
-// ---------------------------------------------------------------------------
-
 /// Build a receive transaction to pocket a pending send.
 ///
-/// The `send_hash` is the TxHash of the corresponding send transaction.
+/// `send_hash` becomes the receive block's source link. Supply the pending send's
+/// block hash wrapped as `TxHash`, not an unrelated local draft identifier.
 pub fn build_receive_tx(
     receiver: &WalletAddress,
     send_hash: TxHash,
@@ -200,8 +192,8 @@ pub fn build_change_rep_tx(
 
 /// Build a merge transaction to combine multiple TRST tokens into one.
 ///
-/// The merged token's expiry is the earliest among all inputs.
-/// All source tokens must be owned by the sender.
+/// Checks only that there are at least two inputs. Ownership, duplicate inputs
+/// and expiry are checked when the node processes the block.
 pub fn build_merge_tx(
     sender: &WalletAddress,
     source_hashes: Vec<TxHash>,
@@ -232,7 +224,7 @@ pub fn build_merge_tx(
 
 /// Build a challenge transaction to contest another wallet's verification.
 ///
-/// The challenger stakes BRN which is lost if the challenge fails.
+/// Rejects a zero stake. This draft does not reserve BRN or check eligibility.
 pub fn build_challenge_tx(
     challenger: &WalletAddress,
     target: &WalletAddress,
@@ -334,8 +326,8 @@ pub fn build_governance_proposal_tx(
 
 /// Build a verification vote transaction.
 ///
-/// The voter stakes BRN and casts a vote on a target wallet's humanity.
-/// Vote values: 1 = Legitimate, 2 = Illegitimate, 3 = Neither.
+/// Requires a nonzero selection context and vote 1 (Legitimate), 2 (Illegitimate),
+/// or 3 (Neither). It does not authenticate the context or check voter selection.
 pub fn build_verification_vote_tx(
     voter: &WalletAddress,
     target_wallet: &WalletAddress,
@@ -375,7 +367,7 @@ pub fn build_verification_vote_tx(
 /// Build a reject-receive transaction to decline a pending TRST send.
 ///
 /// The `send_block_hash` is the hash of the send block being rejected.
-/// The TRST is logically returned to the sender.
+/// Building the draft does not change the pending send or either balance.
 pub fn build_reject_receive_tx(
     rejecter: &WalletAddress,
     send_block_hash: TxHash,
@@ -393,7 +385,8 @@ pub fn build_reject_receive_tx(
     })
 }
 
-/// Account state snapshot needed to build a StateBlock.
+/// Caller-supplied account fields for block construction. This record has no
+/// account address or proof binding it to the transaction's sender.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AccountState {
     pub signing_grant: BlockHash,
@@ -406,20 +399,21 @@ pub struct AccountState {
     pub block_count: u64,
     /// Current consensus representative.
     pub representative: WalletAddress,
-    /// Cumulative BRN spent (burned + staked) recorded on the most recent
-    /// block — an ascending odometer, NOT the available balance. Available
-    /// BRN is computed from verified_at, the rate history, and this spending
-    /// record; query the node (RPC returns the components, decision 5.11b).
-    pub brn_balance: u128,
+    /// BRN spending recorded on the account head, not the available balance.
+    /// The serialized field is named `brn_balance`.
+    #[serde(rename = "brn_balance")]
+    pub brn_spent: u128,
     /// TRST balance after the most recent block.
     pub trst_balance: u128,
 }
 
-/// Convert a high-level `Transaction` into a `StateBlock` that can be submitted to the node.
+/// Build an unsigned block from the supplied account snapshot and transaction.
 ///
-/// Takes the account's current state (head hash, balances) and a transaction,
-/// and produces a StateBlock with the computed block hash. The signature and work
-/// fields are left zeroed — the caller signs and attaches PoW separately.
+/// Computes the block hash; leaves signature and work zeroed. Local checks include
+/// a nonzero payment epoch and balance arithmetic, but do not establish that the
+/// snapshot is current, the account has enough BRN, or the operation is authorized.
+/// The block uses `previous_origin` for sends; it does not resolve holding provenance
+/// from the send draft. Higher-level callers must supply the correct origin.
 pub fn build_state_block(
     account_state: &AccountState,
     transaction: &burst_transactions::Transaction,
@@ -431,20 +425,20 @@ pub fn build_state_block(
             "missing payment epoch".into(),
         ));
     }
-    let (block_type, link, brn_balance, trst_balance, representative) = match transaction {
+    let (block_type, link, brn_spent, trst_balance, representative) = match transaction {
         // BRN-spending blocks: the odometer increases by the spend amount.
         // Availability is validated by nodes against the computed BRN(w).
         burst_transactions::Transaction::Burn(tx) => (
             BlockType::Burn,
             address_to_link(&tx.receiver)?,
-            checked_balance_add(account_state.brn_balance, tx.amount)?,
+            checked_balance_add(account_state.brn_spent, tx.amount)?,
             account_state.trst_balance,
             None,
         ),
         burst_transactions::Transaction::Send(tx) => (
             BlockType::Send,
             address_to_link(&tx.receiver)?,
-            account_state.brn_balance,
+            account_state.brn_spent,
             account_state.trst_balance.checked_sub(tx.amount).ok_or(
                 WalletError::InsufficientTrst {
                     needed: tx.amount,
@@ -456,77 +450,77 @@ pub fn build_state_block(
         burst_transactions::Transaction::Merge(tx) => (
             BlockType::Merge,
             BlockHash::new(*tx.hash.as_bytes()),
-            account_state.brn_balance,
+            account_state.brn_spent,
             account_state.trst_balance,
             None,
         ),
         burst_transactions::Transaction::Endorse(tx) => (
             BlockType::Endorse,
             address_to_link(&tx.target)?,
-            checked_balance_add(account_state.brn_balance, tx.burn_amount)?,
+            checked_balance_add(account_state.brn_spent, tx.burn_amount)?,
             account_state.trst_balance,
             None,
         ),
         burst_transactions::Transaction::Challenge(tx) => (
             BlockType::Challenge,
             address_to_link(&tx.target)?,
-            checked_balance_add(account_state.brn_balance, tx.stake_amount)?,
+            checked_balance_add(account_state.brn_spent, tx.stake_amount)?,
             account_state.trst_balance,
             None,
         ),
         burst_transactions::Transaction::GovernanceProposal(tx) => (
             BlockType::GovernanceProposal,
             compact_proposal_link(&tx.proposal)?,
-            account_state.brn_balance,
+            account_state.brn_spent,
             account_state.trst_balance,
             None,
         ),
         burst_transactions::Transaction::GovernanceVote(tx) => (
             BlockType::GovernanceVote,
             BlockHash::new(*tx.proposal_hash.as_bytes()),
-            account_state.brn_balance,
+            account_state.brn_spent,
             account_state.trst_balance,
             None,
         ),
         burst_transactions::Transaction::Delegate(tx) => (
             BlockType::Delegate,
             address_to_link(&tx.delegate)?,
-            account_state.brn_balance,
+            account_state.brn_spent,
             account_state.trst_balance,
             None,
         ),
         burst_transactions::Transaction::RevokeDelegation(tx) => (
             BlockType::RevokeDelegation,
             BlockHash::new(*tx.hash.as_bytes()),
-            account_state.brn_balance,
+            account_state.brn_spent,
             account_state.trst_balance,
             None,
         ),
         burst_transactions::Transaction::Receive(tx) => (
             BlockType::Receive,
             BlockHash::new(*tx.send_block_hash.as_bytes()),
-            account_state.brn_balance,
+            account_state.brn_spent,
             checked_balance_add(account_state.trst_balance, tx.amount)?,
             None,
         ),
         burst_transactions::Transaction::ChangeRepresentative(tx) => (
             BlockType::ChangeRepresentative,
             BlockHash::ZERO,
-            account_state.brn_balance,
+            account_state.brn_spent,
             account_state.trst_balance,
             Some(tx.new_representative.clone()),
         ),
         burst_transactions::Transaction::RejectReceive(tx) => (
             BlockType::RejectReceive,
             BlockHash::new(*tx.send_block_hash.as_bytes()),
-            account_state.brn_balance,
+            account_state.brn_spent,
             account_state.trst_balance,
             None,
         ),
         burst_transactions::Transaction::VerificationVote(tx) => (
             BlockType::VerificationVote,
             address_to_link(&tx.target_wallet)?,
-            checked_balance_add(account_state.brn_balance, tx.stake_amount)?,
+            checked_balance_add(account_state.brn_spent, tx.stake_amount)?,
             account_state.trst_balance,
             None,
         ),
@@ -536,7 +530,7 @@ pub fn build_state_block(
 
     let origin = match transaction {
         burst_transactions::Transaction::GovernanceProposal(_) => TxHash::ZERO,
-        // A burn's origin IS its own hash (it mints TRST).
+        // A burn starts a provenance chain at its transaction hash.
         _ if block_type == BlockType::Burn => *transaction.hash(),
         // A challenge encodes its reason (fraud vs benign inactivity) in origin.
         burst_transactions::Transaction::Challenge(tx) => TxHash::new(tx.reason.to_origin()),
@@ -546,8 +540,7 @@ pub fn build_state_block(
         _ => previous_origin,
     };
 
-    // The wallet's chosen merge inputs go on-chain (6.17b) so expiry
-    // grouping is in the wallet's hands and the input set is signed.
+    // The block signature commits to the selected merge inputs.
     let merge_sources = match transaction {
         burst_transactions::Transaction::Merge(tx) => tx.source_hashes.clone(),
         _ => Vec::new(),
@@ -562,7 +555,7 @@ pub fn build_state_block(
         account: transaction.sender().clone(),
         previous: account_state.head,
         representative,
-        brn_balance,
+        brn_spent,
         trst_balance,
         link,
         origin,
@@ -588,9 +581,7 @@ pub fn build_state_block(
         hash: BlockHash::ZERO,
     };
 
-    // These block types carry the vote byte, not a transaction digest, in
-    // `transaction`. The node decodes that byte; signing an arbitrary digest
-    // here would silently lose the intended vote (or cast a different one).
+    // Vote blocks encode the choice in `transaction` with zero padding.
     match transaction {
         burst_transactions::Transaction::GovernanceVote(tx) => {
             let mut encoded = [0u8; 32];
@@ -619,9 +610,11 @@ fn checked_balance_add(balance: u128, amount: u128) -> Result<u128, WalletError>
     })
 }
 
-/// Prepare a reviewed device handoff without changing identity or balances.
-/// The caller persists the signed draft before submission and adopts its hash
-/// as the local grant only after confirmation. `nonce` is fresh for each device.
+/// Build an unsigned device handoff without changing identity or balances.
+///
+/// The caller must supply a fresh nonce; this helper checks only that it is nonzero.
+/// Persist the signed draft before submission and adopt its hash as the local
+/// grant only after confirmation.
 pub fn build_signing_handoff(
     state: &AccountState,
     account: &WalletAddress,
@@ -645,7 +638,7 @@ pub fn build_signing_handoff(
     block.transaction = TxHash::ZERO;
     // Stake release is a separate action; takeover must leave the odometer intact.
     block.release_sources.clear();
-    block.brn_balance = state.brn_balance;
+    block.brn_spent = state.brn_spent;
     block
         .validate_format()
         .map_err(|error| WalletError::TransactionBuild(error.into()))?;
@@ -653,10 +646,10 @@ pub fn build_signing_handoff(
     Ok(block)
 }
 
-/// Sign a `StateBlock` with the given private key.
+/// Sign the block's stored hash with the supplied private key.
 ///
-/// Computes the Ed25519 signature over the block's hash and returns
-/// a new block with the signature field populated.
+/// Does not recompute the hash or check that the key controls the account. After
+/// editing hashed fields, update `block.hash` with `compute_hash()` before signing.
 pub fn sign_state_block(
     mut block: StateBlock,
     private_key: &burst_types::PrivateKey,
@@ -665,9 +658,7 @@ pub fn sign_state_block(
     block
 }
 
-/// Build AND sign a state block in one step.
-///
-/// Convenience function that calls `build_state_block` followed by `sign_state_block`.
+/// Build a block, compute its hash and sign it. Proof of work remains zero.
 pub fn build_and_sign_state_block(
     account_state: &AccountState,
     transaction: &burst_transactions::Transaction,
@@ -698,7 +689,7 @@ mod tests {
             head: BlockHash::ZERO,
             block_count: 0,
             representative: test_address("rep1"),
-            brn_balance: 10_000,
+            brn_spent: 10_000,
             trst_balance: 5_000,
         }
     }
@@ -724,8 +715,8 @@ mod tests {
         assert_eq!(handoff.account, account);
         assert_eq!(handoff.representative, state.representative);
         assert_eq!(
-            (handoff.brn_balance, handoff.trst_balance),
-            (state.brn_balance, state.trst_balance)
+            (handoff.brn_spent, handoff.trst_balance),
+            (state.brn_spent, state.trst_balance)
         );
         state.head = handoff.hash;
         state.signing_grant = handoff.active_signing_grant();
@@ -932,7 +923,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(block.target_head, appeal.appeal_of.unwrap());
-        assert_eq!(block.brn_balance, state.brn_balance + 1000);
+        assert_eq!(block.brn_spent, state.brn_spent + 1000);
         assert_eq!(block.trst_balance, state.trst_balance);
         assert!(burst_crypto::verify_signature(
             block.compute_hash().as_bytes(),
@@ -985,7 +976,7 @@ mod tests {
 
         assert_eq!(block.block_type, BlockType::Burn);
         // Ascending odometer: 10_000 previously spent + 100 burned now.
-        assert_eq!(block.brn_balance, 10_100);
+        assert_eq!(block.brn_spent, 10_100);
         assert_eq!(block.trst_balance, 5_000);
         assert_eq!(block.version, CURRENT_BLOCK_VERSION);
         assert!(!block.hash.is_zero());
@@ -1092,7 +1083,7 @@ mod tests {
     #[test]
     fn burn_cannot_silently_saturate_the_spent_odometer() {
         let mut state = test_account_state();
-        state.brn_balance = u128::MAX;
+        state.brn_spent = u128::MAX;
         let tx = build_burn_tx(
             &test_address("sender"),
             &test_address("receiver"),
@@ -1126,7 +1117,7 @@ mod tests {
         let block = build_state_block(&state, &tx, prev_origin, BlockHash::ZERO).unwrap();
 
         assert_eq!(block.block_type, BlockType::Send);
-        assert_eq!(block.brn_balance, 10_000);
+        assert_eq!(block.brn_spent, 10_000);
         assert_eq!(block.trst_balance, 4_800);
         assert_eq!(block.origin, prev_origin);
     }
@@ -1135,12 +1126,12 @@ mod tests {
     fn build_state_block_burn_increases_spent_odometer() {
         // The odometer is cumulative spending, not an available balance —
         // the wallet cannot check BRN sufficiency from it (nodes validate
-        // the spend against the computed BRN(w)). Building always succeeds
-        // and records the spend as the odometer delta.
+        // the spend against the computed BRN(w)). This records spending
+        // beyond the previous cumulative amount without interpreting it as funds.
         let state = AccountState {
             signing_grant: burst_types::BlockHash::ZERO,
             payment_epoch: burst_types::BlockHash::new([1; 32]),
-            brn_balance: 50,
+            brn_spent: 50,
             ..test_account_state()
         };
         let burn = build_burn_tx(
@@ -1152,7 +1143,7 @@ mod tests {
         .unwrap();
         let tx = burst_transactions::Transaction::Burn(burn);
         let block = build_state_block(&state, &tx, TxHash::ZERO, BlockHash::ZERO).unwrap();
-        assert_eq!(block.brn_balance, 150);
+        assert_eq!(block.brn_spent, 150);
     }
 
     #[test]
@@ -1185,7 +1176,7 @@ mod tests {
             head: BlockHash::ZERO,
             block_count: 0,
             representative: test_address("rep1"),
-            brn_balance: 10_000,
+            brn_spent: 10_000,
             trst_balance: 5_000,
         };
         let burn = build_burn_tx(

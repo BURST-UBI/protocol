@@ -6,7 +6,7 @@ async fn compact_deadline_journal_recovers_active_and_terminal_rounds_from_peers
     use crate::checkpoint_agreement::{self, Command, CompactReplayInput};
     use crate::checkpoint_replay::SigningClock;
     use crate::confirmed_replay::tests::snapshot_history::{
-        authenticate, cemented, compact, installed_recovery::Service,
+        authenticate, cemented, compact, installed_recovery::WitnessService,
     };
     use std::sync::Arc;
     let (fixture, _source_dir, source, _, _) = setup();
@@ -100,7 +100,7 @@ async fn compact_deadline_journal_recovers_active_and_terminal_rounds_from_peers
             .checkpoint_metadata(b"")
             .unwrap();
         let service =
-            Service::start(source.clone(), local.clone(), if case == 3 { 5 } else { 0 }).await;
+            WitnessService::start(source.clone(), local.clone(), if case == 3 { 5 } else { 0 }).await;
         let recovered = if case == 1 {
             let recovered = Arc::new(recovered);
             let unavailable = Arc::new(tokio::sync::RwLock::new(
@@ -228,7 +228,7 @@ async fn compact_deadline_journal_recovers_active_and_terminal_rounds_from_peers
             )
             .is_err());
         }
-        let service = Service::start(source.clone(), local.clone(), 0).await;
+        let service = WitnessService::start(source.clone(), local.clone(), 0).await;
         let started = crate::checkpoint_service::Session::resume_or_discover_compact(
             crate::checkpoint_service::Settings {
                 store: local.clone(),
@@ -268,7 +268,7 @@ async fn compact_deadline_journal_recovers_active_and_terminal_rounds_from_peers
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn compact_deadline_peer_replay_rejects_forged_effects_and_changed_authority() {
     use crate::confirmed_replay::tests::snapshot_history::{
-        authenticate, cemented, installed_recovery::Service,
+        authenticate, cemented, installed_recovery::WitnessService,
     };
     use std::sync::Arc;
     let (fixture, _dir, source, _, _) = setup();
@@ -311,7 +311,7 @@ async fn compact_deadline_peer_replay_rejects_forged_effects_and_changed_authori
             .checkpoint_metadata(b"")
             .unwrap();
         let local = Arc::new(local);
-        let service = Service::start(
+        let service = WitnessService::start(
             source.clone(),
             local.clone(),
             if change == 7 { 0 } else { change },
@@ -383,7 +383,7 @@ fn deadline_batch_returns_expired_pending_and_completes_a_panel_together() {
         params.trst_expiry_secs = 90;
     });
     let burn = fixture.push(0, BlockType::Burn, CUTOFF - 1, |block| {
-        block.brn_balance += 40;
+        block.brn_spent += 40;
         block.link = destination(21);
     });
     let (fixture, _dir, store, selection, _) = setup_fixture(fixture);
@@ -436,7 +436,7 @@ fn deadline_batch_completes_all_due_panels_at_one_boundary() {
     let mut fixture = Fixture::selection_with(|params| params.verification_timeout_secs = 60);
     for seed in [1, 2] {
         fixture.push(seed, BlockType::Endorse, 1_595_431_106, |block| {
-            block.brn_balance += 1;
+            block.brn_spent += 1;
             block.link = destination(21);
         });
     }
@@ -1005,7 +1005,7 @@ fn deadline_partial_success_verifies_at_the_certified_cut_and_preserves_refund_a
     });
     fixture.push(20, BlockType::Burn, CUTOFF + 93, |block| {
         block.payment_epoch = epoch;
-        block.brn_balance = 1;
+        block.brn_spent = 1;
     });
     let replay = ConfirmedReplay::replay_with_events(
         &fixture.history(CUTOFF + 93),

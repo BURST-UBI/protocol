@@ -20,4 +20,10 @@ futures-util = { workspace = true }
 tokio = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-burst-browser = { workspace = true }
+burst-web-runtime = { workspace = true }
+
+# Only synchronization primitives are needed on the browser target.
+[target.'cfg(target_arch = "wasm32")'.dependencies.tokio]
+version = "1"
+default-features = false
+features = ["sync"]

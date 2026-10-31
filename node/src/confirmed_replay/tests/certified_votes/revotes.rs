@@ -446,7 +446,7 @@ async fn certified_revote_worker_preserves_prior_votes_and_resumes_the_next_pane
         batch.delete_meta(&active).unwrap();
         batch.commit().unwrap();
     }
-    let service = super::super::snapshot_history::installed_recovery::Service::start(
+    let service = super::super::snapshot_history::installed_recovery::WitnessService::start(
         store.clone(),
         store.clone(),
         0,

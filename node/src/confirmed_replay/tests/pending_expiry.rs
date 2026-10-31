@@ -7,7 +7,7 @@ use crate::{
 fn pending_fixture() -> (Fixture, BlockHash) {
     let mut fixture = Fixture::new();
     let burn = fixture.push(0, BlockType::Burn, 100, |block| {
-        block.brn_balance = 40;
+        block.brn_spent = 40;
         block.link = destination(1);
     });
     (fixture, burn)
@@ -17,7 +17,7 @@ fn pending_fixture() -> (Fixture, BlockHash) {
 fn expired_self_payment_replaces_pending_with_one_return_credit() {
     let mut fixture = Fixture::new();
     let burn = fixture.push(0, BlockType::Burn, 100, |block| {
-        block.brn_balance = 40;
+        block.brn_spent = 40;
         block.link = destination(0);
     });
     let history = fixture.history(1100);
@@ -187,7 +187,7 @@ fn pending_expiry_honors_a_receive_before_expiry_and_rejects_one_at_expiry() {
 fn pending_expiry_commitment_is_independent_of_pending_map_order() {
     let (mut fixture, _) = pending_fixture();
     fixture.push(0, BlockType::Burn, 101, |block| {
-        block.brn_balance = 60;
+        block.brn_spent = 60;
         block.link = destination(2);
     });
     let history = fixture.history(1101);
@@ -218,11 +218,11 @@ fn pending_expiry_commitment_is_independent_of_pending_map_order() {
 fn pending_expiry_returns_a_send_to_its_sender_not_its_burn_originator() {
     let mut fixture = Fixture::new();
     fixture.push(0, BlockType::Endorse, 90, |block| {
-        block.brn_balance = 1;
+        block.brn_spent = 1;
         block.link = destination(1);
     });
     let burn = fixture.push(0, BlockType::Burn, 100, |block| {
-        block.brn_balance = 41;
+        block.brn_spent = 41;
         block.link = destination(1);
     });
     fixture.push(1, BlockType::Open, 101, |block| {
