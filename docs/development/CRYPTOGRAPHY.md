@@ -1,4 +1,4 @@
-# Cryptographic formats
+# Cryptography
 
 `burst-crypto` provides byte-level operations. Protocol callers decide which
 fields are signed, how those fields are encoded and which signer has authority.

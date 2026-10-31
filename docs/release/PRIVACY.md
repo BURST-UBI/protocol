@@ -1,4 +1,4 @@
-# Privacy and network behavior
+# Privacy
 
 BURST is network software. Its wallet, dashboard and protocol node communicate
 with different endpoints. This page describes the current source defaults. Configuration and older release

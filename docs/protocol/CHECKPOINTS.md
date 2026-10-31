@@ -1,13 +1,18 @@
-# Checkpoints and state transitions
+# Checkpoints
 
-A checkpoint agrees on a ledger cut and the shared state derived from it.
-It connects account-chain history to verifier selection, identity outcomes,
-governance decisions and changes in representative authority.
+A checkpoint records agreement on how far each account chain has advanced and
+the shared state calculated from those blocks. This boundary is called a
+**ledger cut**. It coordinates verifier selection, verification results,
+governance changes and the representatives allowed to vote.
 
-A certificate, a replayed candidate and installed state are different things.
-A certificate authenticates agreement. Replay checks the agreed history and its
-consequences. Installation commits those consequences and coordinates the running
-node before it accepts work under the new state.
+A node checks a checkpoint in three steps:
+
+1. **Verify the certificate:** check that enough authorized representatives signed
+   the same checkpoint.
+2. **Replay the blocks:** apply the agreed history and check that it produces the
+   claimed state.
+3. **Install the state:** persist the result and update the running node before
+   accepting operations under the new rules.
 
 ## Authority and replay
 

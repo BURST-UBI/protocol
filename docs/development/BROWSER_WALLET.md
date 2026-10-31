@@ -1,8 +1,8 @@
-# Browser wallet core
+# Browser wallet integration
 
 `burst-wallet-core` and `burst-crypto` target `wasm32-unknown-unknown` as well as
-native platforms. Shared APIs cover signing, RPC, governance, appeals, delegation
-and provenance. This library is not a published browser wallet or a ready-made
+native platforms. Shared APIs cover signing, node RPC calls, governance votes, appeals,
+delegated permissions and tracking where currency came from (provenance). This library is not a published browser wallet or a ready-made
 JavaScript SDK; an application supplies its bindings and interface.
 
 Native file-backed payment journals, offline-action persistence and signing-device

@@ -1,4 +1,4 @@
-# Preparing a network launch
+# Launching a network
 
 A network launch needs agreed public inputs, securely held signing keys and
 qualified software. Building a daemon or starting a server does not establish

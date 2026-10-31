@@ -1,4 +1,4 @@
-# Daemon service installation
+# Node installation
 
 The repository's installation scripts register a daemon as a background service.
 They download release artifacts, so their presence does not establish that a

@@ -12,12 +12,11 @@
   --ifm-font-family-base: 'Inter', 'Segoe UI', system-ui, sans-serif;
   --ifm-line-height-base: 1.75;
   --ifm-heading-font-weight: 600;
-  --ifm-navbar-height: 4.5rem;
+  --ifm-navbar-height: 4rem;
   --ifm-navbar-shadow: none;
   --ifm-toc-border-color: #e6e4dc;
   --ifm-menu-color: #64645d;
   --ifm-menu-color-background-active: #f0ede4;
-  --doc-sidebar-width: 260px;
   --reading-muted: #717168;
   --reading-panel: #f1efe8;
   --flow-brn: #36784c;
@@ -48,16 +47,16 @@
 .navbar__brand {margin-right: 2.5rem;}
 .navbar__link {font-size: .88rem; font-weight: 500;}
 .navbar__items--right {gap: .75rem;}
-.theme-doc-sidebar-menu {padding: 1.1rem .65rem; font-size: .84rem;}
+.theme-doc-sidebar-menu {padding: .65rem .5rem; font-size: .84rem;}
 .menu__link {line-height: 1.5; padding: .45rem .75rem; border-radius: 4px;}
 .menu__list-item-collapsible > .menu__link {color: var(--ifm-font-color-base); font-weight: 650;}
-.menu__list-item-collapsible {margin-top: 1.15rem;}
+.menu__list-item-collapsible {margin-top: .35rem;}
 .menu__link--active:not(.menu__link--sublist) {box-shadow: inset 2px 0 var(--ifm-color-primary);}
 .theme-doc-breadcrumbs {margin-bottom: 1.8rem; font-size: .8rem;}
 .theme-doc-markdown {font-size: 1.02rem;}
 .markdown > p, .markdown > ul, .markdown > ol {max-width: 65ch;}
 .markdown h1, .markdown h2, .markdown h3 {text-wrap: balance;}
-.markdown h1 {font-family: Georgia, 'Times New Roman', serif; font-size: clamp(2.6rem, 4.4vw, 4rem); font-weight: 400; line-height: 1.08; letter-spacing: -.045em; margin-bottom: 1.75rem;}
+.markdown h1 {font-family: var(--ifm-font-family-base); font-size: clamp(2rem, 3vw, 2.6rem); font-weight: 650; line-height: 1.08; letter-spacing: -.045em; margin-bottom: 1.75rem;}
 .markdown h2 {margin-top: 3rem; padding-top: 1.25rem; border-top: 1px solid var(--ifm-toc-border-color); font-size: 1.55rem; letter-spacing: -.035em;}
 .markdown h3 {font-size: 1.15rem; letter-spacing: -.015em;}
 .markdown > h1 + p {font-size: 1.16rem; line-height: 1.75; color: var(--reading-muted);}
@@ -68,7 +67,7 @@
 .markdown tr:nth-child(2n) {background: transparent;}
 .markdown th {text-align: left; color: var(--reading-muted); font-weight: 500;}
 .markdown img[src*='conversion'] {display: block; width: 100%; height: auto; border: 1px solid var(--ifm-toc-border-color); border-radius: 6px; background: white;}
-.markdown .mermaid {padding: 1.5rem .5rem; background: var(--reading-panel); border-radius: 6px; overflow-x: auto;}
+.markdown .docusaurus-mermaid-container {padding: 1.5rem .5rem; background: var(--reading-panel); border-radius: 6px; overflow-x: auto;}
 .table-of-contents {font-size: .78rem; line-height: 1.6;}
 .table-of-contents__link {color: var(--reading-muted);}
 .pagination-nav__link {border-radius: 4px; padding: 1.1rem;}
@@ -79,7 +78,6 @@
 .footer__copyright {color: var(--reading-muted); text-align: left;}
 .button {border-radius: 4px; font-weight: 500;}
 :focus-visible {outline: 2px solid var(--ifm-color-primary); outline-offset: 4px;}
-.docs-home .markdown h1 {font-family: var(--ifm-font-family-base); font-weight: 750; font-size: clamp(3.75rem, 7vw, 6.5rem); letter-spacing: -.07em; margin-bottom: 1rem;}
 .markdown header + p {font-size: 1.12rem; color: var(--reading-muted);}
 .payment-flow {display: block; margin: 1.25rem 0 0; padding: 2.5rem 2rem 1rem; background: var(--reading-panel); border-radius: 6px;}
 .payment-flow__drawing {display: grid; grid-template-columns: 1fr .8fr 1fr; align-items: start; gap: 1rem;}
@@ -112,7 +110,7 @@
 @media (max-width: 996px) {
   .navbar {padding-inline: 1rem;}
   main > .container {padding-block: 1.5rem;}
-  .markdown h1 {font-size: 2.8rem;}
+  .markdown h1 {font-size: 2rem;}
   .payment-flow {padding: 2rem 1.1rem .75rem;}
   .payment-flow__drawing {gap: .5rem;}
   .payment-flow__token {width: 57px; height: 57px; margin-bottom: 20px;}

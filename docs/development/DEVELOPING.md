@@ -1,4 +1,4 @@
-# Build, run and test
+# Build and test
 
 Run protocol commands from the protocol repository. Keep the wallet and
 node dashboard in sibling directories when using the examples below.

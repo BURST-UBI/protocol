@@ -1,4 +1,4 @@
-# Code signing policy
+# Code signing
 
 BURST distributes a protocol node, desktop wallet and node dashboard. A code
 signature identifies the publisher and protects the signed bytes against

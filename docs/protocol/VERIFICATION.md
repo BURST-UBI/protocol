@@ -1,4 +1,4 @@
-# Verification, challenges and restoration
+# Account verification
 
 Verification determines which accounts qualify for BRN accrual and human-based
 voting rights. It records endorsements, selected-panel votes and agreed outcomes.

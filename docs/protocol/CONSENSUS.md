@@ -1,4 +1,4 @@
-# Account chains, consensus and randomness
+# Consensus
 
 Each account has its own signed chain. A payment links the sender's operation to
 the recipient's receive, so independent account chains still have dependencies.

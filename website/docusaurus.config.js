@@ -43,11 +43,12 @@ module.exports = {
     };
   }],
   themeConfig: {
+    docs: {sidebar: {autoCollapseCategories: true}},
     colorMode: {defaultMode: 'light', respectPrefersColorScheme: false},
     navbar: {
       title: 'BURST',
       items: [
-        {to: '/introduction/QUICK_TOUR', label: 'Start here', position: 'left'},
+        {to: '/introduction/QUICK_TOUR', label: 'Getting started', position: 'left'},
         {to: '/introduction/WHITEPAPER', label: 'Whitepaper', position: 'left'},
         {href: 'https://github.com/BURST-UBI/protocol', label: 'GitHub', position: 'right'},
       ],

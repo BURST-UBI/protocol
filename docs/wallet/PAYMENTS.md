@@ -1,8 +1,10 @@
-# Payments and pending receipts
+# Sending and receiving
 
-A payment has a sender operation and a recipient claim. The sender signs either
-a BRN burn that creates TRST or a send that spends existing TRST. The value then
-belongs to a pending receipt; it is not simultaneously spendable by both accounts.
+A payment takes two signed operations: one from the sender and one from the
+recipient. The sender either burns BRN to create TRST or sends TRST they already
+hold. Once accepted by the node, the payment is **pending**: it has left the
+sender but the recipient has not yet received it. The stored pending entry is
+called a **pending receipt**.
 
 The recipient signs a receive operation to claim it. For a new account, that claim
 can also open its account chain. The node checks the receipt, amount, provenance

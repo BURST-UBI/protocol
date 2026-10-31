@@ -1,4 +1,4 @@
-# Code architecture
+# Architecture
 
 BURST separates economic rules, persistent state, peer communication and application
 interfaces. The node connects these layers. Wallets construct and sign operations;

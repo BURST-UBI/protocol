@@ -1,4 +1,4 @@
-# Performance and complexity
+# Performance
 
 Complexity describes how work grows with a named input. It does not measure
 latency or throughput. A fixed-size signature check can be constant in the number

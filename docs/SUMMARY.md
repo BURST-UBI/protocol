@@ -1,47 +1,47 @@
 # Summary
 
-* [Introduction](README.md)
+* [Documentation](README.md)
 
-## Understand BURST
+## Getting started
 
-* [Two-minute introduction](introduction/QUICK_TOUR.md)
-* [Terms and roles](introduction/GLOSSARY.md)
-* [BRN and TRST](introduction/ECONOMICS.md)
+* [What is BURST?](introduction/QUICK_TOUR.md)
+* [Balances and units](introduction/ECONOMICS.md)
+* [Glossary](introduction/GLOSSARY.md)
+* [Limitations](introduction/LIMITATIONS.md)
+
+## Running a node
+
+* [Overview](node/NODES.md)
+* [Installation](node/INSTALLATION.md)
+* [RPC and networking](node/SERVICES.md)
+* [Launching a network](node/NETWORK_LAUNCH.md)
+
+## Wallet integration
+
+* [Keys and signing](wallet/WALLETS.md)
+* [Sending and receiving](wallet/PAYMENTS.md)
+* [Browser integration](development/BROWSER_WALLET.md)
+* [Group services](node/GROUP_SERVICES.md)
+
+## Protocol
+
 * [Whitepaper](introduction/WHITEPAPER.md)
-* [Limits and assumptions](introduction/LIMITATIONS.md)
+* [Consensus](protocol/CONSENSUS.md)
+* [Checkpoints](protocol/CHECKPOINTS.md)
+* [Account verification](protocol/VERIFICATION.md)
+* [Governance](protocol/GOVERNANCE.md)
+* [Parameters](protocol/PARAMETERS.md)
+* [Bootstrap permissions](protocol/BOOTSTRAP.md)
 
-## Use a wallet
+## Development
 
-* [Keys, recovery and offline signing](wallet/WALLETS.md)
-* [Payments and pending receipts](wallet/PAYMENTS.md)
+* [Build and test](development/DEVELOPING.md)
+* [Architecture](development/ARCHITECTURE.md)
+* [Cryptography](development/CRYPTOGRAPHY.md)
+* [Performance](development/PERFORMANCE.md)
 
-## Protocol rules
-
-* [Verification and challenges](protocol/VERIFICATION.md)
-* [Consensus and randomness](protocol/CONSENSUS.md)
-* [Checkpoints and state transitions](protocol/CHECKPOINTS.md)
-* [Creator authority](protocol/BOOTSTRAP.md)
-* [Governance and the constitution](protocol/GOVERNANCE.md)
-* [Protocol parameters](protocol/PARAMETERS.md)
-
-## Operate
-
-* [Node operation and recovery](node/NODES.md)
-* [RPC and peer service limits](node/SERVICES.md)
-* [Daemon service installation](node/INSTALLATION.md)
-* [Running a group service](node/GROUP_SERVICES.md)
-* [Preparing a network launch](node/NETWORK_LAUNCH.md)
-
-## Develop
-
-* [Build, run and test](development/DEVELOPING.md)
-* [Browser wallet integration](development/BROWSER_WALLET.md)
-* [Code architecture](development/ARCHITECTURE.md)
-* [Cryptographic formats](development/CRYPTOGRAPHY.md)
-* [Performance and complexity](development/PERFORMANCE.md)
-
-## Downloads and privacy
+## Releases
 
 * [Downloads](release/DOWNLOADS.md)
-* [Code signing policy](release/CODE_SIGNING.md)
-* [Privacy and network behavior](release/PRIVACY.md)
+* [Code signing](release/CODE_SIGNING.md)
+* [Privacy](release/PRIVACY.md)

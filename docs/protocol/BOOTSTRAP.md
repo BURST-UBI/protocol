@@ -1,4 +1,4 @@
-# Creator authority during bootstrap
+# Bootstrap permissions
 
 The creator has temporary bootstrap permissions. Once bootstrap ends, the creator
 keeps an ordinary account without special verification or governance authority.

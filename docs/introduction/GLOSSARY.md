@@ -1,27 +1,27 @@
-# Terms and roles
+# Glossary
 
 | Term | Meaning |
 | --- | --- |
-| Person | The human whom verification aims to distinguish from other participants. An address alone does not establish uniqueness. |
-| Account | An address and its signed chain. It can exist before verification. |
-| Wallet | Software that manages keys, reviews and signs operations, and reads network state. It is not the ledger. |
-| Node | Software that stores and validates ledger state and communicates with peers. Running additional nodes does not create more voting weight. |
-| Representative | A transaction-consensus voter receiving equal-weight units delegated by verified accounts. |
-| Verifier | An eligible participant selected to assess an enrollment or challenge. This is separate from the representative role. |
-| Governance delegate | An authorized participant or key used to resolve governance ballots within a scope. |
-| BRN | An account's non-transferable allowance accrued over eligible time, reduced by burns and unavailable stakes or releases. |
-| TRST holding | An amount with ownership, origin, effective age and lifecycle state. Equal amounts can have different expiry and revocation exposure. |
-| Pending receipt | A sent payment awaiting a recipient claim or another valid settlement. |
-| Provenance | The origins and composition relationships needed to track value through transfers, splits and merges. |
-| Burn origin | The BRN burn from which a contribution of TRST was created. A holding can instead refer to a merge whose graph leads back to burns. |
-| Merger graph | Immediate input relationships between burns and merges, indexed so revocation can find downstream contributions. |
-| Composition basis | Which part of an origin a holding represents: its whole mixture, one separated origin, or a recorded remainder. |
-| Composition revision | A shared record of an origin's exclusion or restoration and the remaining amount at that step. Later merges retain the revision of the inputs they consumed. |
-| Expired holding | A holding too old to spend under the current expiry period. A longer governed period can make it active again. |
-| Revoked holding | Value invalidated through its provenance. Restoration and expiry checks determine whether it can become spendable again. |
-| Signing grant | The account's protocol context for its active signing device; distinct from governance delegation. |
-| Checkpoint | An agreed boundary or decision with the certificates and context required by its protocol path. |
+| Person | The human behind an account. Verification aims to prevent one person from enrolling more than once; an address alone cannot prove this. |
+| Account | An address and its chain of signed blocks. An account can exist before verification. |
+| Wallet | Software that manages keys, signs operations and reads account state from a node. |
+| Node | Software that validates blocks, stores the ledger and communicates with other nodes. Running more nodes does not give an account more votes. |
+| Representative | An account that votes to confirm blocks. Each verified account can delegate one unit of voting weight to a representative. |
+| Verifier | A participant selected to judge an account's verification request or a challenge against it. This is separate from confirming transactions. |
+| Governance delegate | An account or key authorized to cast governance votes for another account within a defined scope. |
+| BRN | A personal spending allowance earned while an account is eligible. It cannot be transferred. Burns spend it; locked stakes and unacknowledged stake returns reduce what is available. |
+| TRST holding | An amount of transferable currency owned by an account, with a recorded origin and age. Holdings can differ in expiry and exposure to revocation. |
+| Pending receipt | A payment sent but not yet claimed by the recipient, rejected or otherwise settled under the protocol rules. |
+| Provenance | The history of where TRST came from, including the inputs to splits and merges. |
+| Burn origin | The BRN burn that created a contribution of TRST. A merged holding can contain contributions from several burns. |
+| Merger graph | A graph recording the inputs to each merge. It lets the node trace which later holdings contain value from a revoked origin. |
+| Composition basis | The part of an origin represented by a holding: the original mixture, a separated contribution or the remainder after separation. |
+| Composition revision | A record of which contributions were excluded or restored at a particular step. Later merges keep the revision of the inputs they actually consumed. |
+| Expired holding | TRST too old to spend under the current expiry setting. Increasing that setting can make it spendable again. |
+| Revoked holding | TRST invalidated because of its origin. Restoration can reverse that invalidation, but expiry and other invalidation reasons still apply. |
+| Signing grant | The protocol record that identifies the account's active signing device. It does not grant governance voting authority. |
+| Checkpoint | An agreed boundary in account history and the shared state calculated from it. Nodes check both the agreement signatures and the resulting state. |
 
-Start with [the introduction](QUICK_TOUR.md), then follow
-[payments](../wallet/PAYMENTS.md), [verification](../protocol/VERIFICATION.md) or
-[node operation](../node/NODES.md).
+For examples, see [sending and receiving](../wallet/PAYMENTS.md),
+[account verification](../protocol/VERIFICATION.md) and
+[checkpoints](../protocol/CHECKPOINTS.md).

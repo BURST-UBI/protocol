@@ -1,4 +1,4 @@
-# BURST in two minutes
+# What is BURST?
 
 BURST starts with a question: what if access to a spending allowance depended on
 being a person, rather than owning money already?

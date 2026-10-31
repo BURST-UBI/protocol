@@ -1,4 +1,4 @@
-# BRN and TRST
+# Balances and units
 
 BRN is an allowance computed from eligible time. TRST is transferable currency
 created by burning BRN for a payment. Amounts use integer raw units; rates are raw

@@ -1,4 +1,4 @@
-# Wallet keys, recovery and offline signing
+# Keys and signing
 
 A wallet holds signing keys and constructs account operations. The node checks
 those operations against the ledger. A restored key controls the same identity;

@@ -5,37 +5,37 @@
       "sha256": "aad2d398d7ffe13b52c0fa8ba4df38e8e823895c875af57595a04213e81ac1fa"
     },
     "docs/README.md": {
-      "sha256": "40d064eb689211c7fc763fb78f1c9d29ca10e27674aa9a317f200a3f138e976d"
+      "sha256": "4c38c1d0e024f3af89df9423b9c376d2fc7b1cf7029806b945a7866382144bff"
     },
     "docs/SUMMARY.md": {
-      "sha256": "d620e16c9d376ad1d1d52e459e2fda8229131ee4253a622d768c265ae5ecbcc4"
+      "sha256": "bc7f3565f3ba8fde85a5a7d75661c3b6092fd2c68e8535f258cc6f655866f0bd"
     },
     "docs/development/ARCHITECTURE.md": {
-      "sha256": "a405ba201e3c1d8e2873cd7350afdda488ccc15e9d4c2290630ed7932c0c7f72"
+      "sha256": "4539036e01b5fab3793d3312f50f0e420081d1dad71f960362477b838c89134a"
     },
     "docs/development/BROWSER_WALLET.md": {
-      "sha256": "e704214843b549d3a62c98f2c0786306c53172c28119584e156b12b0ee12effb"
+      "sha256": "162abb1329ba2ab836eaf9831f3d3cdf527adb8381b23287547845b68ae6ed94"
     },
     "docs/development/CRYPTOGRAPHY.md": {
-      "sha256": "598fde0fcf45b0608ad24b6881d0deb8927cbc40ab689f1d01000263f552e321"
+      "sha256": "7077262a5ff8b2b231183a347cbda126be1dfa501e2869fc797b7cecc4c5b10b"
     },
     "docs/development/DEVELOPING.md": {
-      "sha256": "f555b4c7ef70e6047c1d6094a11b7d5ad555e0738fde08501bc144d3d30ba566"
+      "sha256": "928de8fbee737d67287af666eaa7ae80cd52d5499c57c685e1186d17ba7418b4"
     },
     "docs/development/PERFORMANCE.md": {
-      "sha256": "31a98317be425051ebdd59f31564b38daf2d4dfd0d91b049ad21b7a519cc4e3e"
+      "sha256": "52ae987391042b02d5f56c50bf979f60012ba7492252270a530f0909b5a67350"
     },
     "docs/introduction/ECONOMICS.md": {
-      "sha256": "2268f993176e6c988c43775ebb1e346c63d26d0e89aefdd14a11b58ba24c81f7"
+      "sha256": "28595ef6d949d366faebc2c7c7b898b6bc7db1f77ed31e301c2e91318d858948"
     },
     "docs/introduction/GLOSSARY.md": {
-      "sha256": "fdd4cbc9ed8a6b8dd35f622d4ea88a00d598fb5081d722b6fc251c3c6a4798bf"
+      "sha256": "6fb24d12e894830c09dd908bb6c6e526fd59896d745130d102d45a6562bd8a94"
     },
     "docs/introduction/LIMITATIONS.md": {
       "sha256": "a004fe3177d51161b5c7b376c02749209d25b5f1c361c4a4767adacc209369d6"
     },
     "docs/introduction/QUICK_TOUR.md": {
-      "sha256": "54695549b52b28468ec3b5211f9de29d64e4ef54810bb7ff3f2f122aad1a3606"
+      "sha256": "f2b117aba1a6cb76253aa8444009e5d4de2c445cc13492659e0544a8e32c5fe8"
     },
     "docs/introduction/WHITEPAPER.md": {
       "sha256": "f6c94f1840b2848d9b6f40018c2d722edca5e7056226297535ec598f802737ce"
@@ -44,49 +44,49 @@
       "sha256": "be29404af586234e8ad389039013d18acb38fa719f6c3f0f95865d23c6cdb34f"
     },
     "docs/node/INSTALLATION.md": {
-      "sha256": "39a958bc4fd44c08f88cf95833e162962622ca066b4658d975910dd2aed117c4"
+      "sha256": "7f688c4cdf0dc7db9713de8988d9c88b31d67b8321afd8f5a1ca7aaaa6e6f3a8"
     },
     "docs/node/NETWORK_LAUNCH.md": {
-      "sha256": "b9cc6185d3088e14321628856cd6568b60e36da8d700069c7ec4a1e13ebb480d"
+      "sha256": "795997b0fbe7425fc3c1652e4a82e620e25deb9e2d71187665b2c5f2e11d87e3"
     },
     "docs/node/NODES.md": {
       "sha256": "c917afc401cdfdb67f3c7155dd177fb51bbdffd54874cb285746af0835c21f42"
     },
     "docs/node/SERVICES.md": {
-      "sha256": "b91d6c558fd9f71e4cd8bf4457a051bcf08e8f9e838b4b6a3901fef4d1ceb580"
+      "sha256": "9bc9fa20af22e861561cbe199827f10c1e13514d54ae73af67d6521d4a1a2fc2"
     },
     "docs/protocol/BOOTSTRAP.md": {
-      "sha256": "cc5892d113742ccffca8931ed2453328b90dda97ac63d8c193647a891b584c8a"
+      "sha256": "d04d7fb7f9e07337decfaa972dc5727c1f1c85108f6d4e1f3d2c9a95a8cc031e"
     },
     "docs/protocol/CHECKPOINTS.md": {
-      "sha256": "4a92a48d758bef9144be9c8dd512f7a5672c68432edf22ff4b64257351a5e766"
+      "sha256": "99e193f4e0cc07f51d395ca5aea5499ea8e9d4f608ae967f7335386444a527c5"
     },
     "docs/protocol/CONSENSUS.md": {
-      "sha256": "b3c1ad5c1c373c86653a37e968f5dbcee84ecb51c4bd791dce149f363ac50a1e"
+      "sha256": "1d3a94d7b0dffee532880f8fb161c063f910ecc283e0b18f0eabc396d68b3855"
     },
     "docs/protocol/GOVERNANCE.md": {
-      "sha256": "cd4d0f4a2a6958c4c224b8f9c7e3f7e9edbcbd1ffd5d0ee615949cb336376001"
+      "sha256": "246a3bbd7ff8159b38f1652c070e6ddfbae9b80141beb0e846dabfe9d3d6d54a"
     },
     "docs/protocol/PARAMETERS.md": {
       "sha256": "8daf99fd1010566c2b670a1421f090dd3bd2b2101a412a30c62726fc8e8e0f4c"
     },
     "docs/protocol/VERIFICATION.md": {
-      "sha256": "27b99890bd25daec0228d81f8c3c7e416eba0cd981f84b1f7f9f0e5e6ca2db4f"
+      "sha256": "d0805a6713a4fc788f270eace397d793077c4fd344ad18e501cf7dbc9f82e583"
     },
     "docs/release/CODE_SIGNING.md": {
-      "sha256": "2a47c445867d1c38ddad4fd4d793a45afe000324ec3d23a3982266c7fe24f6b5"
+      "sha256": "a740303b685d1936f849feb8e3d0c399a7460f6719a01776b66f23923e908e54"
     },
     "docs/release/DOWNLOADS.md": {
       "sha256": "2db0a02933088f049921d24cf686b1356a4ee64f680e77f0ae72c06ad79a62ec"
     },
     "docs/release/PRIVACY.md": {
-      "sha256": "dd09dccec2bad842bb23dc5690b7faf9cfefca1387415a0f15fcfebb06713b63"
+      "sha256": "b5468f90a22fbf480793f2c30a6d50c32b40fa17cc800923837c8ae5ec8da8fe"
     },
     "docs/wallet/PAYMENTS.md": {
-      "sha256": "a47be0d791427966d5384d68403fe869018011271d8f10615bc6c8adbb5c2ebe"
+      "sha256": "29a260b22152840bbe543cdc5edcd92d16f104550e8f8a80aaf708bcaa1805fa"
     },
     "docs/wallet/WALLETS.md": {
-      "sha256": "1680c6976c714e9703eb1e602c85c07617c08f77630122072b77fa7b4721881d"
+      "sha256": "cec0fb3d5bc617091a3994bcb16a9e47225c657cb5b2ec5c04e5ec789004e360"
     }
   },
   "requirements": [
@@ -3004,8 +3004,8 @@
       "id": "DOC-README-001",
       "source": "docs/README.md",
       "line": 1,
-      "title": "BURST",
-      "sha256": "42eadc5dee1e99209d6ddc012b19630bde048661f6f367f95ab8bbcd4ed17870",
+      "title": "BURST documentation",
+      "sha256": "24b109c4e292db806f940432d46cbf34c4b99a2636fecd67c27e6ffb2126caf2",
       "status": "unverified",
       "evidence": [],
       "note": "Current documentation section. Indexing does not establish implementation or release qualification."
@@ -3018,7 +3018,7 @@
       "source": "docs/README.md",
       "line": 10,
       "title": "Start here",
-      "sha256": "45f5f360baa043c2d7377812e0135283cb615cb6df9b683707247534d0f540c3"
+      "sha256": "ebbb0e83df7e1d52221aba987b09d2619282063441e0fd85c2b6b89ac9e67ffa"
     },
     {
       "status": "unverified",
@@ -3026,16 +3026,16 @@
       "evidence": [],
       "id": "DOC-README-003",
       "source": "docs/README.md",
-      "line": 16,
-      "title": "Choose a path",
-      "sha256": "63f15db80bf823b523be6573bc4faf08422d662650c09b337cd4b78268cf727b"
+      "line": 19,
+      "title": "Reference",
+      "sha256": "e86c03db14fce14a8df0f7f2b840f4ab199a186f9682cb9b9713fa71270aaff4"
     },
     {
       "id": "DOC-SUMMARY-001",
       "source": "docs/SUMMARY.md",
       "line": 1,
       "title": "Summary",
-      "sha256": "02b35f777e60dbb005d95cedc0166874273502bd2c9e99d23c1289a50cd504e4",
+      "sha256": "395337241a8f34483b28b6f403588bb8b9a98f7e8147b694d439950c2a8d9209",
       "status": "unverified",
       "evidence": [],
       "note": "Current documentation section. Indexing does not establish implementation or release qualification."
@@ -3047,15 +3047,15 @@
       "id": "DOC-SUMMARY-002",
       "source": "docs/SUMMARY.md",
       "line": 5,
-      "title": "Understand BURST",
-      "sha256": "9fe350d53f109dacf68a1b0b63203401988fa39d8ce32375a4c063bae105e35f"
+      "title": "Getting started",
+      "sha256": "911d06d77a38f1baffa44cac8f33d657ecc4a453c3fd4ea354d14950e1004dcf"
     },
     {
       "id": "DOC-SUMMARY-003",
       "source": "docs/SUMMARY.md",
-      "line": 13,
-      "title": "Use a wallet",
-      "sha256": "7ef4f1ec6078d09eac1422d187a04d135b16b879d52edd4cbea8a0509c7e6596",
+      "line": 12,
+      "title": "Running a node",
+      "sha256": "fdb2e366284268b4c3adb05d14a5a9004783ffef1f6cf9f70d4fa530183b6fe8",
       "status": "unverified",
       "evidence": [],
       "note": "Documentation paths updated; no new qualification."
@@ -3066,9 +3066,9 @@
       "evidence": [],
       "id": "DOC-SUMMARY-004",
       "source": "docs/SUMMARY.md",
-      "line": 18,
-      "title": "Protocol rules",
-      "sha256": "9bd64740ec94e35b2369248fdff878899a9e844c43d3cc2422b04645a1affb1e"
+      "line": 19,
+      "title": "Wallet integration",
+      "sha256": "95bcacf510eb884fd8af9e173501f3d900d148504706041c117f4c4f53fe9f69"
     },
     {
       "status": "unverified",
@@ -3076,16 +3076,16 @@
       "evidence": [],
       "id": "DOC-SUMMARY-005",
       "source": "docs/SUMMARY.md",
-      "line": 27,
-      "title": "Operate",
-      "sha256": "ab2352872952af1b87b5222314b0d2b62938a0a8c7137e86a1c98ae0d2268cf4"
+      "line": 26,
+      "title": "Protocol",
+      "sha256": "400a5d1ff21e6f6ddd0f5b68f0c419f256f428f97b8866c0cec90648e3b9f516"
     },
     {
       "id": "DOC-SUMMARY-006",
       "source": "docs/SUMMARY.md",
-      "line": 35,
-      "title": "Develop",
-      "sha256": "f0814a2628d415e3ed1e938e5ac77e039a699378dc744a697fe556ac11f038fc",
+      "line": 36,
+      "title": "Development",
+      "sha256": "bfd834eefd3a6e4ded8a7dd5eaa9f4746a655d9a916933b317af6c3646ffc13d",
       "status": "unverified",
       "evidence": [],
       "note": "Documentation paths updated; no new qualification."
@@ -3097,15 +3097,15 @@
       "id": "DOC-SUMMARY-007",
       "source": "docs/SUMMARY.md",
       "line": 43,
-      "title": "Downloads and privacy",
-      "sha256": "3a2e529d2935d17f5656c5977c162c5bda3067fcc66c8b1e5395bb2cc3b657c7"
+      "title": "Releases",
+      "sha256": "792c257c0116bdb75725ccdccecf6d4fd27696a08e028a3faf5d0b502c666624"
     },
     {
       "id": "DOC-development/ARCHITECTURE-001",
       "source": "docs/development/ARCHITECTURE.md",
       "line": 1,
-      "title": "Code architecture",
-      "sha256": "899ee5e49928db0cd78c319d6ca3bfe18b6a1898a8c3164324f5bc9654e57247",
+      "title": "Architecture",
+      "sha256": "1c1ed7047eb158dd95cf0cce379a61993b1c4c55174cfc9c46ba7ef495d943fe",
       "status": "unverified",
       "evidence": [],
       "note": "Current documentation section. Indexing does not establish implementation or release qualification."
@@ -3234,8 +3234,8 @@
       "id": "DOC-development/BROWSER_WALLET-001",
       "source": "docs/development/BROWSER_WALLET.md",
       "line": 1,
-      "title": "Browser wallet core",
-      "sha256": "81f336f8cb1faff86a378c656047d440e639080501a01bc395c4408bb4de6eec",
+      "title": "Browser wallet integration",
+      "sha256": "0422be1c144f70d99c601451928d4cc2992845fffd1f9420d14809ffad4c6bee",
       "status": "unverified",
       "evidence": [],
       "note": "Current documentation section. Indexing does not establish implementation or release qualification."
@@ -3274,8 +3274,8 @@
       "id": "DOC-development/CRYPTOGRAPHY-001",
       "source": "docs/development/CRYPTOGRAPHY.md",
       "line": 1,
-      "title": "Cryptographic formats",
-      "sha256": "e191504158ba1c70241b8f3886dffc90cd03a5f7d2d5468a1465ce06fd254a6d",
+      "title": "Cryptography",
+      "sha256": "c45e56f1dc31b2d0cb9bb534fb8bd490061964e1898c98e9b427cb6db1f644df",
       "status": "unverified",
       "evidence": [],
       "note": "Current documentation section. Indexing does not establish implementation or release qualification."
@@ -3374,8 +3374,8 @@
       "id": "DOC-development/DEVELOPING-001",
       "source": "docs/development/DEVELOPING.md",
       "line": 1,
-      "title": "Build, run and test",
-      "sha256": "1238759cfd07088713b57b8cd9f84d455097edff8470489835d2f19485cdf9fe",
+      "title": "Build and test",
+      "sha256": "7144f52cbc5deedd96c44764bffab2e42851c29e20b036d159a13a0cffb0b22b",
       "status": "unverified",
       "evidence": [],
       "note": "Current documentation section. Indexing does not establish implementation or release qualification."
@@ -3464,8 +3464,8 @@
       "id": "DOC-development/PERFORMANCE-001",
       "source": "docs/development/PERFORMANCE.md",
       "line": 1,
-      "title": "Performance and complexity",
-      "sha256": "2c0556a6fe3eb650da71619f21e39732c09713d89e8e98452a76709254eaf9c8",
+      "title": "Performance",
+      "sha256": "a72c1c558ade0d4013b20599238642cf24094a3f9d29ef554f07a10ac765c9e5",
       "status": "unverified",
       "evidence": [],
       "note": "Current documentation section. Indexing does not establish implementation or release qualification."
@@ -3564,8 +3564,8 @@
       "id": "DOC-introduction/ECONOMICS-001",
       "source": "docs/introduction/ECONOMICS.md",
       "line": 1,
-      "title": "BRN and TRST",
-      "sha256": "33ff75cc31277a3dba9dd35e74523a72cdcd739201f3c9105bdc71e092b404e7",
+      "title": "Balances and units",
+      "sha256": "ca394040ad89269871e38cd84124195ba2f720934a8fd73955eb8ade6f6a0e80",
       "status": "unverified",
       "evidence": [],
       "note": "Documentation paths updated; no new qualification."
@@ -3634,8 +3634,8 @@
       "id": "DOC-introduction/GLOSSARY-001",
       "source": "docs/introduction/GLOSSARY.md",
       "line": 1,
-      "title": "Terms and roles",
-      "sha256": "fdd4cbc9ed8a6b8dd35f622d4ea88a00d598fb5081d722b6fc251c3c6a4798bf",
+      "title": "Glossary",
+      "sha256": "6fb24d12e894830c09dd908bb6c6e526fd59896d745130d102d45a6562bd8a94",
       "status": "unverified",
       "evidence": [],
       "note": "Documentation paths updated; no new qualification."
@@ -3654,8 +3654,8 @@
       "id": "DOC-introduction/QUICK_TOUR-001",
       "source": "docs/introduction/QUICK_TOUR.md",
       "line": 1,
-      "title": "BURST in two minutes",
-      "sha256": "f893f69a6a4f0143ae4e0ec98f6bfd1f239b31bb1af40b50d523e5e281870ac3",
+      "title": "What is BURST?",
+      "sha256": "5410f6de0a2ed3c5961312037985c2ceef37c56170ddb56f3088c19bf785a60c",
       "status": "unverified",
       "evidence": [],
       "note": "Current documentation section. Indexing does not establish implementation or release qualification."
@@ -4057,8 +4057,8 @@
       "id": "DOC-node/INSTALLATION-001",
       "source": "docs/node/INSTALLATION.md",
       "line": 1,
-      "title": "Daemon service installation",
-      "sha256": "9bbf5f4bf7a25892482b35e15035f3201f029b51eda5522edf8886c8c0489488"
+      "title": "Node installation",
+      "sha256": "ed8d926e6f0fadede61f63af1328008231b01c98c6e64c922417e629f8594dee"
     },
     {
       "id": "DOC-node/INSTALLATION-002",
@@ -4117,8 +4117,8 @@
       "id": "DOC-node/NETWORK_LAUNCH-001",
       "source": "docs/node/NETWORK_LAUNCH.md",
       "line": 1,
-      "title": "Preparing a network launch",
-      "sha256": "ea10706a37bfebffc857d9c01ccae68020856d142fa1b789de7fd85d4535af5a"
+      "title": "Launching a network",
+      "sha256": "1245d9046fd490a8665afa12b3ed49a1dcde5c5f1c8a455d6db31424d724aa19"
     },
     {
       "status": "unverified",
@@ -4344,8 +4344,8 @@
       "id": "DOC-node/SERVICES-001",
       "source": "docs/node/SERVICES.md",
       "line": 1,
-      "title": "RPC and peer service limits",
-      "sha256": "60e7efbd38249c5283c3b43d84c304014a99dd56de899af9abb5668589b64168",
+      "title": "RPC and networking",
+      "sha256": "d9410c4b59464194890ac75ed9be59104c2f2a7a229579b63d06260c12ed69ca",
       "status": "unverified",
       "evidence": [],
       "note": "Current documentation section. Indexing does not establish implementation or release qualification."
@@ -4404,8 +4404,8 @@
       "id": "DOC-protocol/BOOTSTRAP-001",
       "source": "docs/protocol/BOOTSTRAP.md",
       "line": 1,
-      "title": "Creator authority during bootstrap",
-      "sha256": "07728466de2a826f11fabc39fbb67dce44016a64d3b78b51732a8cfeb2d11221",
+      "title": "Bootstrap permissions",
+      "sha256": "52d31591d6d16e30a08e2021bd8779254b6e797d32e7918eaa31b1e5c311624e",
       "status": "unverified",
       "evidence": [],
       "note": "Current documentation section. Indexing does not establish implementation or release qualification."
@@ -4464,8 +4464,8 @@
       "id": "DOC-protocol/CHECKPOINTS-001",
       "source": "docs/protocol/CHECKPOINTS.md",
       "line": 1,
-      "title": "Checkpoints and state transitions",
-      "sha256": "63adb45cff8cfad802a678e9cc1c055f5379162280614d2a27a2ca1e797b7e1f",
+      "title": "Checkpoints",
+      "sha256": "6bb6a6a6e7c69b3d956903b21660739fde6d146bbef7bbdb8decf3d0c63ff834",
       "status": "unverified",
       "evidence": [],
       "note": "Current documentation section. Indexing does not establish implementation or release qualification."
@@ -4473,7 +4473,7 @@
     {
       "id": "DOC-protocol/CHECKPOINTS-002",
       "source": "docs/protocol/CHECKPOINTS.md",
-      "line": 12,
+      "line": 17,
       "title": "Authority and replay",
       "sha256": "2d97425df0b7d364fd91e41bef05ecc3a8b4d9d5b417f41922db0b492f2eb567",
       "status": "unverified",
@@ -4483,7 +4483,7 @@
     {
       "id": "DOC-protocol/CHECKPOINTS-003",
       "source": "docs/protocol/CHECKPOINTS.md",
-      "line": 44,
+      "line": 49,
       "title": "How a checkpoint round works",
       "sha256": "3f9ca69d9f17cc196c2a31b1adcb8e3f8b289866beb64d590775d70647c4a078",
       "status": "unverified",
@@ -4493,7 +4493,7 @@
     {
       "id": "DOC-protocol/CHECKPOINTS-004",
       "source": "docs/protocol/CHECKPOINTS.md",
-      "line": 69,
+      "line": 74,
       "title": "Signing time and randomness",
       "sha256": "20ba13573ed643ef9dd404cff966dd86f041efd36401296b96411f60588781a1",
       "status": "unverified",
@@ -4503,7 +4503,7 @@
     {
       "id": "DOC-protocol/CHECKPOINTS-005",
       "source": "docs/protocol/CHECKPOINTS.md",
-      "line": 107,
+      "line": 112,
       "title": "Durable signing and recovery",
       "sha256": "0ede67cbbb95d469e124bfd9b7c8f19e1721c63e55d496fbf8b811d40f5f48ad",
       "status": "unverified",
@@ -4513,7 +4513,7 @@
     {
       "id": "DOC-protocol/CHECKPOINTS-006",
       "source": "docs/protocol/CHECKPOINTS.md",
-      "line": 131,
+      "line": 136,
       "title": "Payment-epoch handoff",
       "sha256": "aea0261d096aa6577a79bca503ce2e237f55a7ef78004a3ceec670e7f3b2b8c0",
       "status": "unverified",
@@ -4523,7 +4523,7 @@
     {
       "id": "DOC-protocol/CHECKPOINTS-007",
       "source": "docs/protocol/CHECKPOINTS.md",
-      "line": 148,
+      "line": 153,
       "title": "Installation",
       "sha256": "60ef62d750cd8d312c502f4ba46320e9f6f7fc0afa594f02b98771509117f731",
       "status": "unverified",
@@ -4533,7 +4533,7 @@
     {
       "id": "DOC-protocol/CHECKPOINTS-008",
       "source": "docs/protocol/CHECKPOINTS.md",
-      "line": 173,
+      "line": 178,
       "title": "History transfer",
       "sha256": "6db0428bdd90426b13cd4dba5cc48474781b31cceb961738a589dc1bfa3c5061",
       "status": "unverified",
@@ -4546,14 +4546,14 @@
       "evidence": [],
       "id": "DOC-protocol/CHECKPOINTS-009",
       "source": "docs/protocol/CHECKPOINTS.md",
-      "line": 214,
+      "line": 219,
       "title": "Qualification requirements",
       "sha256": "8bd3eb1c56f8396d98bd772a504f05cc104f125247882f1f8a9542af06c2b88f"
     },
     {
       "id": "DOC-protocol/CHECKPOINTS-010",
       "source": "docs/protocol/CHECKPOINTS.md",
-      "line": 239,
+      "line": 244,
       "title": "Implementation",
       "sha256": "32744afe1d7efd28476314c3cbb5a703fb641fd9de07d7974344a45e3a78fb2b",
       "status": "unverified",
@@ -4564,8 +4564,8 @@
       "id": "DOC-protocol/CONSENSUS-001",
       "source": "docs/protocol/CONSENSUS.md",
       "line": 1,
-      "title": "Account chains, consensus and randomness",
-      "sha256": "95891fea76a5a41c517aa311e5b8ce19c89f7c82cdc505b5139f923ac46dd2b8",
+      "title": "Consensus",
+      "sha256": "7e61f5738d86997e68287b19aeaa44486468f45a6f4f6fbd97b617b52c1cba4b",
       "status": "unverified",
       "evidence": [],
       "note": "Current documentation section. Indexing does not establish implementation or release qualification."
@@ -4684,8 +4684,8 @@
       "id": "DOC-protocol/GOVERNANCE-001",
       "source": "docs/protocol/GOVERNANCE.md",
       "line": 1,
-      "title": "Governance and the constitution",
-      "sha256": "7b99354442f86ceb1e817f01883bc73c8aa2edb132d491f74bd74e4f43f4e737",
+      "title": "Governance",
+      "sha256": "14958535c23bcc3beec2fd83e32b13bed004d9dd27f488e8017cfb65ee4d0777",
       "status": "unverified",
       "evidence": [],
       "note": "Current documentation section. Indexing does not establish implementation or release qualification."
@@ -4693,7 +4693,7 @@
     {
       "id": "DOC-protocol/GOVERNANCE-002",
       "source": "docs/protocol/GOVERNANCE.md",
-      "line": 7,
+      "line": 8,
       "title": "Ordinary proposals",
       "sha256": "58dc951c2fc5eab43ff98d442b73701b930abcb12b9976e91d4c383b40c24725",
       "status": "unverified",
@@ -4706,14 +4706,14 @@
       "evidence": [],
       "id": "DOC-protocol/GOVERNANCE-003",
       "source": "docs/protocol/GOVERNANCE.md",
-      "line": 18,
+      "line": 19,
       "title": "Participation and approval",
       "sha256": "17586f317ba382d82080dd176bf71850bfa69729ebaf66892686c99c104b4e3e"
     },
     {
       "id": "DOC-protocol/GOVERNANCE-004",
       "source": "docs/protocol/GOVERNANCE.md",
-      "line": 43,
+      "line": 44,
       "title": "Effects of a change",
       "sha256": "c87f30c05a80818e21545e7068f254fe38ec57b2a46bbdf095d87bf2d936a837",
       "status": "unverified",
@@ -4723,7 +4723,7 @@
     {
       "id": "DOC-protocol/GOVERNANCE-005",
       "source": "docs/protocol/GOVERNANCE.md",
-      "line": 57,
+      "line": 58,
       "title": "Constitutional text and content",
       "sha256": "c39f74e8ee97738c01b3f9d009c0cb65d880af10055e0b55404f75179888d994",
       "status": "unverified",
@@ -4733,7 +4733,7 @@
     {
       "id": "DOC-protocol/GOVERNANCE-006",
       "source": "docs/protocol/GOVERNANCE.md",
-      "line": 84,
+      "line": 85,
       "title": "Emergency proposals",
       "sha256": "334ced7d08bd8dd36d7377c710a7e03cfdd50140e9cdecff774a9e0288ddad07",
       "status": "unverified",
@@ -4743,7 +4743,7 @@
     {
       "id": "DOC-protocol/GOVERNANCE-007",
       "source": "docs/protocol/GOVERNANCE.md",
-      "line": 95,
+      "line": 96,
       "title": "Network availability",
       "sha256": "04db3a98babeadb9ba28a169cd655181590061b3f4f994d308be7895e0c4b817",
       "status": "unverified",
@@ -4756,7 +4756,7 @@
       "evidence": [],
       "id": "DOC-protocol/GOVERNANCE-008",
       "source": "docs/protocol/GOVERNANCE.md",
-      "line": 104,
+      "line": 105,
       "title": "Governance delegation",
       "sha256": "03f77242b181a6c161bd4d440d31814bd7eead2f903e40a980ee22fec5e8e54c"
     },
@@ -4766,7 +4766,7 @@
       "evidence": [],
       "id": "DOC-protocol/GOVERNANCE-009",
       "source": "docs/protocol/GOVERNANCE.md",
-      "line": 145,
+      "line": 146,
       "title": "Implementation",
       "sha256": "5bb0468a3488665283d4674454cbde7361618f648fbe8b38faa1752f1e7a6b69"
     },
@@ -4854,8 +4854,8 @@
       "id": "DOC-protocol/VERIFICATION-001",
       "source": "docs/protocol/VERIFICATION.md",
       "line": 1,
-      "title": "Verification, challenges and restoration",
-      "sha256": "b8845393d5702f28987bae0b49b3d6e947177018623fc68d840a399db61a257f",
+      "title": "Account verification",
+      "sha256": "1d5ba29633fbcd0e9ebd793436677408460a45cd402e20e9e53ca0ee5402d699",
       "status": "unverified",
       "evidence": [],
       "note": "Current documentation section. Indexing does not establish implementation or release qualification."
@@ -4954,8 +4954,8 @@
       "id": "DOC-release/CODE_SIGNING-001",
       "source": "docs/release/CODE_SIGNING.md",
       "line": 1,
-      "title": "Code signing policy",
-      "sha256": "8ca655512041b258ec62409484c5b3540e713ab431dfce9b9355af557983b3e8",
+      "title": "Code signing",
+      "sha256": "272706ae0ecefda1e374a53a7514bd8b4d9c28848e4afde187b752d67414cdf9",
       "status": "unverified",
       "evidence": [],
       "note": "Current documentation section. Indexing does not establish implementation or release qualification."
@@ -5044,8 +5044,8 @@
       "id": "DOC-release/PRIVACY-001",
       "source": "docs/release/PRIVACY.md",
       "line": 1,
-      "title": "Privacy and network behavior",
-      "sha256": "552f8d782256ec47da81490ddf40608bd545a63137c36287b4e6f395a20c7387",
+      "title": "Privacy",
+      "sha256": "ac56213d48aa4f7273a26909d23b8bf26f4f32d793eb3acfa97240ff02669189",
       "status": "unverified",
       "evidence": [],
       "note": "Current documentation section. Indexing does not establish implementation or release qualification."
@@ -5104,8 +5104,8 @@
       "id": "DOC-wallet/PAYMENTS-001",
       "source": "docs/wallet/PAYMENTS.md",
       "line": 1,
-      "title": "Payments and pending receipts",
-      "sha256": "06ac5dbdb7462ccfca2b38d4d43b2bc62e862090d36914b91c22cac615c36bb1",
+      "title": "Sending and receiving",
+      "sha256": "41acd112383a4ec2032fdce287fb4b9d3dc3e87fa3e6467306ef7cf25c9c36db",
       "status": "unverified",
       "evidence": [],
       "note": "Current documentation section. Indexing does not establish implementation or release qualification."
@@ -5113,7 +5113,7 @@
     {
       "id": "DOC-wallet/PAYMENTS-002",
       "source": "docs/wallet/PAYMENTS.md",
-      "line": 23,
+      "line": 25,
       "title": "Acceptance, rejection and expiry",
       "sha256": "c091a6fa491209d7e0c2705e7b9f7313c404ee129018b7bfb9eba8c51797a10c",
       "status": "unverified",
@@ -5123,7 +5123,7 @@
     {
       "id": "DOC-wallet/PAYMENTS-003",
       "source": "docs/wallet/PAYMENTS.md",
-      "line": 73,
+      "line": 75,
       "title": "There is no arbitrary refund timer",
       "sha256": "606304703112cc7ea2c850bc933e61f95c8d87040f55d1f67b19478de089fe1a",
       "status": "unverified",
@@ -5133,7 +5133,7 @@
     {
       "id": "DOC-wallet/PAYMENTS-004",
       "source": "docs/wallet/PAYMENTS.md",
-      "line": 89,
+      "line": 91,
       "title": "Wallet responsibilities",
       "sha256": "e2e9bbac04ba7204727d794b3e1e95b62b4446a6a80dd44a14c681732d38dcde",
       "status": "unverified",
@@ -5143,7 +5143,7 @@
     {
       "id": "DOC-wallet/PAYMENTS-005",
       "source": "docs/wallet/PAYMENTS.md",
-      "line": 104,
+      "line": 106,
       "title": "Implementation",
       "sha256": "6b1f32a81118bd65da88b96668e282a7add2eda33f29cfa0fc61d13f9f83dc4e",
       "status": "unverified",
@@ -5154,8 +5154,8 @@
       "id": "DOC-wallet/WALLETS-001",
       "source": "docs/wallet/WALLETS.md",
       "line": 1,
-      "title": "Wallet keys, recovery and offline signing",
-      "sha256": "662d3e837e4bdfbb07eeadab64aaeaed2b7745548bbbcd61898b55d8ec084a66",
+      "title": "Keys and signing",
+      "sha256": "2ff1c8c6e46b5bd69a2e3a588fd64fc2bda36ca48ac01055152759918810aaf6",
       "status": "unverified",
       "evidence": [],
       "note": "Current documentation section. Indexing does not establish implementation or release qualification."

@@ -1,4 +1,4 @@
-# RPC and peer service limits
+# RPC and networking
 
 ## RPC security boundaries
 

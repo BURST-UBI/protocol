@@ -1,8 +1,9 @@
-# Governance and the constitution
+# Governance
 
-Governance changes implemented protocol parameters and supported governance state.
-It does not install new executable code. A constitutional sentence cannot create
-behavior that the software does not implement.
+Verified accounts vote on changes to supported protocol settings, such as the
+BRN accrual rate and TRST expiry period. Votes cannot install new code; new
+behavior requires a software release. Constitutional text records community
+rules but cannot add behavior the software does not implement.
 
 ## Ordinary proposals
 
