@@ -40,6 +40,12 @@ Before expensive validation, follow the repository's
 [validation workflow](spec/VALIDATION_WORKFLOW.md). Current engineering evidence
 is indexed in [spec/README.md](spec/README.md).
 
+## Acknowledgments
+
+Thanks to [rsnano](https://github.com/rsnano-node/rsnano-node) and its contributors
+for their open-source work, which has been a valuable reference for BURST’s
+architecture and implementation.
+
 ## License
 
 [MIT](LICENSE). Copyright 2024–2026 Nitesh Gautam.
