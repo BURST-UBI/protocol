@@ -28,8 +28,8 @@ fn decode_pending_key(key: &[u8]) -> Result<(WalletAddress, TxHash), StoreError>
         return Err(StoreError::Corruption("invalid pending key".into()));
     }
     let (address, hash) = key.split_at(key.len() - 32);
-    let address = std::str::from_utf8(address)
-        .map_err(|e| StoreError::Corruption(e.to_string()))?;
+    let address =
+        std::str::from_utf8(address).map_err(|e| StoreError::Corruption(e.to_string()))?;
     if !address.starts_with("brst_") {
         return Err(StoreError::Corruption("invalid pending destination".into()));
     }
@@ -39,7 +39,8 @@ fn decode_pending_key(key: &[u8]) -> Result<(WalletAddress, TxHash), StoreError>
 }
 
 pub(crate) fn decode_pending_entry(
-    key: &[u8], bytes: &[u8],
+    key: &[u8],
+    bytes: &[u8],
 ) -> Result<(WalletAddress, TxHash, PendingInfo), StoreError> {
     let (address, source) = decode_pending_key(key)?;
     let info = bincode::deserialize(bytes).map_err(LmdbError::from)?;
@@ -49,13 +50,17 @@ pub(crate) fn decode_pending_entry(
 /// Limit bincode decoding to the stored byte length and reject trailing bytes.
 /// Does not validate provenance or impose a maximum record size.
 pub(crate) fn decode_pending_entry_bounded(
-    key: &[u8], bytes: &[u8],
+    key: &[u8],
+    bytes: &[u8],
 ) -> Result<(WalletAddress, TxHash, PendingInfo), StoreError> {
     use bincode::Options;
     let (address, source) = decode_pending_key(key)?;
-    let info = bincode::DefaultOptions::new().with_fixint_encoding()
-        .with_limit(bytes.len() as u64).reject_trailing_bytes()
-        .deserialize(bytes).map_err(LmdbError::from)?;
+    let info = bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .with_limit(bytes.len() as u64)
+        .reject_trailing_bytes()
+        .deserialize(bytes)
+        .map_err(LmdbError::from)?;
     Ok((address, source, info))
 }
 
@@ -68,10 +73,16 @@ pub struct LmdbPendingStore {
 
 impl LmdbPendingStore {
     pub fn get_pending_txn(
-        &self, view: &crate::LmdbReadTransaction<'_>, destination: &WalletAddress, source: &TxHash,
+        &self,
+        view: &crate::LmdbReadTransaction<'_>,
+        destination: &WalletAddress,
+        source: &TxHash,
     ) -> Result<PendingInfo, StoreError> {
         let key = pending_key_raw(destination, source.as_bytes());
-        let bytes = self.pending_db.get(&view.txn, &key).map_err(LmdbError::from)?
+        let bytes = self
+            .pending_db
+            .get(&view.txn, &key)
+            .map_err(LmdbError::from)?
             .ok_or_else(|| StoreError::NotFound(source.to_string()))?;
         decode_pending_entry_bounded(&key, bytes).map(|(_, _, pending)| pending)
     }
@@ -280,14 +291,18 @@ impl PendingStore for LmdbPendingStore {
     }
 
     fn get_pending_page_after(
-        &self, destination: &WalletAddress, threshold: u128,
-        after: Option<(u128, TxHash)>, count: u32,
+        &self,
+        destination: &WalletAddress,
+        threshold: u128,
+        after: Option<(u128, TxHash)>,
+        count: u32,
     ) -> Result<burst_store::pending::PendingPage, StoreError> {
         amount_index::page(self, destination, threshold, 0, after, count)
     }
 
     fn get_pending_from_account(
-        &self, source: &WalletAddress,
+        &self,
+        source: &WalletAddress,
     ) -> Result<Vec<(WalletAddress, TxHash, PendingInfo)>, StoreError> {
         self.capture_pending_from_account(source)?.into_entries()
     }
@@ -295,11 +310,13 @@ impl PendingStore for LmdbPendingStore {
     /// Pin the primary and sender index views without reading their rows yet.
     /// Enumeration checks index references and excludes return-credit receipts.
     fn capture_pending_from_account(
-        &self, source: &WalletAddress,
+        &self,
+        source: &WalletAddress,
     ) -> Result<Box<dyn burst_store::pending::PendingSourceSnapshot + '_>, StoreError> {
         Ok(Box::new(LmdbPendingSourceSnapshot {
             txn: self.env.read_txn().map_err(LmdbError::from)?,
-            pending_db: self.pending_db, pending_sender_db: self.pending_sender_db,
+            pending_db: self.pending_db,
+            pending_sender_db: self.pending_sender_db,
             source: source.clone(),
         }))
     }
@@ -343,13 +360,18 @@ struct LmdbPendingSourceSnapshot<'a> {
 impl burst_store::pending::PendingSourceSnapshot for LmdbPendingSourceSnapshot<'_> {
     /// Decode one indexed row at a time, using checked amount and count sums.
     /// Memory excludes a full backlog vector, but still includes each decoded row.
-    fn totals(self: Box<Self>, source: &WalletAddress) -> Result<burst_store::pending::PendingSourceTotals, StoreError> {
+    fn totals(
+        self: Box<Self>,
+        source: &WalletAddress,
+    ) -> Result<burst_store::pending::PendingSourceTotals, StoreError> {
         let mut totals = burst_store::pending::PendingSourceTotals::default();
         self.visit(&mut |_, _, pending| totals.include(source, &pending))?;
         Ok(totals)
     }
 
-    fn into_entries(self: Box<Self>) -> Result<Vec<(WalletAddress, TxHash, PendingInfo)>, StoreError> {
+    fn into_entries(
+        self: Box<Self>,
+    ) -> Result<Vec<(WalletAddress, TxHash, PendingInfo)>, StoreError> {
         let mut results = Vec::new();
         self.visit(&mut |destination, hash, pending| {
             results.push((destination, hash, pending));
@@ -360,7 +382,10 @@ impl burst_store::pending::PendingSourceSnapshot for LmdbPendingSourceSnapshot<'
 }
 
 impl LmdbPendingSourceSnapshot<'_> {
-    fn visit(&self, visitor: &mut dyn FnMut(WalletAddress, TxHash, PendingInfo) -> Result<(), StoreError>) -> Result<(), StoreError> {
+    fn visit(
+        &self,
+        visitor: &mut dyn FnMut(WalletAddress, TxHash, PendingInfo) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
         let prefix = sender_key(&self.source, &[]);
         for entry in self
             .pending_sender_db
@@ -392,7 +417,11 @@ impl LmdbPendingSourceSnapshot<'_> {
             let (destination, hash) = key.split_at(key.len() - 32);
             let destination = std::str::from_utf8(destination)
                 .map_err(|_| StoreError::Corruption("invalid pending destination".into()))?;
-            visitor(WalletAddress::new(destination), TxHash::new(hash.try_into().unwrap()), pending)?;
+            visitor(
+                WalletAddress::new(destination),
+                TxHash::new(hash.try_into().unwrap()),
+                pending,
+            )?;
         }
         Ok(())
     }

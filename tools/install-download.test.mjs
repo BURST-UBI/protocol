@@ -7,7 +7,8 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const installer = readFileSync(new URL("../install.sh", import.meta.url), "utf8");
-const helper = installer.slice(installer.indexOf("download_verified_binary()"), installer.indexOf("# ── Detect platform"));
+assert(installer.indexOf("# Detect platform") > installer.indexOf("download_verified_binary()"), "installer helper boundaries must exist");
+const helper = installer.slice(installer.indexOf("download_verified_binary()"), installer.indexOf("# Detect platform"));
 const asset = "burst-daemon-linux-amd64";
 const binary = "verified release bytes\n";
 const hash = createHash("sha256").update(binary).digest("hex");

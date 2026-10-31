@@ -88,9 +88,8 @@ impl GraphRecord {
     /// Panics for records other than OriginEdge and DownstreamEdge.
     pub fn set_edge_position(&mut self, value: u64) {
         match self {
-            GraphRecord::OriginEdge { position, .. } | GraphRecord::DownstreamEdge { position, .. } => {
-                *position = value
-            }
+            GraphRecord::OriginEdge { position, .. }
+            | GraphRecord::DownstreamEdge { position, .. } => *position = value,
             _ => unreachable!("position belongs to a reverse edge"),
         }
     }
@@ -177,7 +176,11 @@ struct EdgeReader(HashMap<TxHash, Box<PendingEdges>>);
 // A pointer-sized table value avoids enlarging every hash slot for the common
 // one-child case. Only parents with multiple positions allocate an ordered tree.
 enum PendingEdges {
-    Single { position: u64, child: TxHash, occurrence: u64 },
+    Single {
+        position: u64,
+        child: TxHash,
+        occurrence: u64,
+    },
     Multiple(BTreeMap<u64, (TxHash, u64)>),
 }
 
@@ -192,12 +195,20 @@ impl EdgeReader {
         use std::collections::hash_map::Entry;
         match self.0.entry(parent) {
             Entry::Vacant(entry) => {
-                entry.insert(Box::new(PendingEdges::Single { position, child, occurrence }));
+                entry.insert(Box::new(PendingEdges::Single {
+                    position,
+                    child,
+                    occurrence,
+                }));
             }
             Entry::Occupied(mut entry) => {
                 let pending = entry.get_mut().as_mut();
                 match pending {
-                    PendingEdges::Single { position: old_position, child: old_child, occurrence: old_occurrence } => {
+                    PendingEdges::Single {
+                        position: old_position,
+                        child: old_child,
+                        occurrence: old_occurrence,
+                    } => {
                         if *old_position == position {
                             return Err("duplicate merger graph edge position".into());
                         }
@@ -222,13 +233,18 @@ impl EdgeReader {
         self.finish_with_poll(&|_| Ok(()))
     }
 
-    fn finish_with_poll(self, poll: &dyn Fn(&'static str) -> Result<(), String>) -> Result<SharedMap<TxHash, EdgeList>, String> {
+    fn finish_with_poll(
+        self,
+        poll: &dyn Fn(&'static str) -> Result<(), String>,
+    ) -> Result<SharedMap<TxHash, EdgeList>, String> {
         self.0
             .into_iter()
             .map(|(parent, edges)| {
                 poll("trst:graph-build-parent")?;
                 let edges = match *edges {
-                    PendingEdges::Single { child, occurrence, .. } => {
+                    PendingEdges::Single {
+                        child, occurrence, ..
+                    } => {
                         if occurrence != 0 {
                             return Err("nonsequential merger graph edge occurrence".into());
                         }
@@ -404,7 +420,10 @@ impl GraphRecordReader {
     /// Assemble edges and validate graph structure and revision records. Errors,
     /// including cancellation, return no partial graph. Burn ownership, holding
     /// references and ledger authentication still require combined validation.
-    pub fn finish_with_poll(mut self, poll: &dyn Fn(&'static str) -> Result<(), String>) -> Result<MergerGraph, String> {
+    pub fn finish_with_poll(
+        mut self,
+        poll: &dyn Fn(&'static str) -> Result<(), String>,
+    ) -> Result<MergerGraph, String> {
         if self.failed {
             return Err("cannot publish failed merger graph reconstruction".into());
         }

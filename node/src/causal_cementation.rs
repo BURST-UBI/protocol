@@ -58,7 +58,9 @@ pub(crate) fn pending_dependencies(
     let mut pending = Vec::new();
     for dependency in dependencies {
         let (_, height, confirmed) = load(batch, &dependency)?;
-        if height > confirmed { pending.push(dependency); }
+        if height > confirmed {
+            pending.push(dependency);
+        }
     }
     Ok(pending)
 }
@@ -80,15 +82,20 @@ pub(crate) const MAX_HANDOFF_BATCH: usize = 256;
 pub(crate) mod handoff_worker;
 pub(crate) mod worker;
 
-
 /// Retire elections only for the returned targets: this returns after commit.
 /// A failed target aborts all writes; callers may isolate it with singleton retries.
-pub(crate) fn handoff_batch(store: &LmdbStore, targets: &[BlockHash])
-    -> Result<Vec<BlockHash>, StoreError> {
+pub(crate) fn handoff_batch(
+    store: &LmdbStore,
+    targets: &[BlockHash],
+) -> Result<Vec<BlockHash>, StoreError> {
     if targets.len() > MAX_HANDOFF_BATCH {
-        return Err(StoreError::Serialization("confirmation handoff batch exceeds bound".into()));
+        return Err(StoreError::Serialization(
+            "confirmation handoff batch exceeds bound".into(),
+        ));
     }
-    if targets.is_empty() { return Ok(Vec::new()); }
+    if targets.is_empty() {
+        return Ok(Vec::new());
+    }
     let mut batch = store.tx_begin_write()?;
     let mut accepted = Vec::new();
     let mut seen = HashSet::new();
@@ -97,27 +104,39 @@ pub(crate) fn handoff_batch(store: &LmdbStore, targets: &[BlockHash])
             accepted.push(target);
         }
     }
-    if !accepted.is_empty() { batch.commit()?; }
+    if !accepted.is_empty() {
+        batch.commit()?;
+    }
     Ok(accepted)
 }
 
 pub(crate) fn cement(store: &LmdbStore, target: BlockHash) -> Result<CementedBatch, StoreError> {
     Ok(match cement_group(store, &[target])? {
         Some(mut results) => results.remove(0).1,
-        None => CementedBatch { hashes: Vec::new(), complete: false },
+        None => CementedBatch {
+            hashes: Vec::new(),
+            complete: false,
+        },
     })
 }
 
 /// One bounded durable cut across pending targets. None means an implicit
 /// dependency still needs quorum: all staged writes were aborted, not published.
 /// Callers isolate failed/deferred groups with the existing singleton path.
-pub(crate) fn cement_group(store: &LmdbStore, targets: &[BlockHash])
-    -> Result<Option<Vec<(BlockHash, CementedBatch)>>, StoreError> {
+pub(crate) fn cement_group(
+    store: &LmdbStore,
+    targets: &[BlockHash],
+) -> Result<Option<Vec<(BlockHash, CementedBatch)>>, StoreError> {
     if targets.len() > MAX_HANDOFF_BATCH {
-        return Err(StoreError::Serialization("cementation target batch exceeds bound".into()));
+        return Err(StoreError::Serialization(
+            "cementation target batch exceeds bound".into(),
+        ));
     }
-    if targets.is_empty() { return Ok(Some(Vec::new())); }
-    let stage_started = std::env::var_os("BURST_FINALITY_STAGE_LOG").map(|_| std::time::Instant::now());
+    if targets.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+    let stage_started =
+        std::env::var_os("BURST_FINALITY_STAGE_LOG").map(|_| std::time::Instant::now());
     let stage = |phase: &str| {
         if let Some(started) = stage_started {
             tracing::debug!(receiver = ?store.env().path(), hash = %targets[0],
@@ -138,8 +157,10 @@ pub(crate) struct PendingCementation {
 
 /// Refresh durable work after acquiring the writer. A failed/deferred group
 /// returns the actual selected targets for the caller's existing serial fallback.
-pub(crate) fn cement_pending_group(store: &LmdbStore, after: Option<BlockHash>)
-    -> Result<PendingCementation, StoreError> {
+pub(crate) fn cement_pending_group(
+    store: &LmdbStore,
+    after: Option<BlockHash>,
+) -> Result<PendingCementation, StoreError> {
     let started = std::time::Instant::now();
     let log = std::env::var_os("BURST_FINALITY_STAGE_LOG").is_some();
     if log {
@@ -152,7 +173,9 @@ pub(crate) fn cement_pending_group(store: &LmdbStore, after: Option<BlockHash>)
         tracing::debug!(receiver = ?store.env().path(), ?after, count = targets.len(),
             elapsed_us = started.elapsed().as_micros(), "cementation selection refreshed");
     }
-    let outcome = if targets.is_empty() { Ok(Some(Vec::new())) } else {
+    let outcome = if targets.is_empty() {
+        Ok(Some(Vec::new()))
+    } else {
         let stage = |phase: &str| {
             if log {
                 tracing::debug!(receiver = ?store.env().path(), hash = %targets[0], count = targets.len(),
@@ -166,7 +189,9 @@ pub(crate) fn cement_pending_group(store: &LmdbStore, after: Option<BlockHash>)
 }
 
 fn cement_group_in(
-    mut batch: LmdbWriteTransaction<'_>, targets: &[BlockHash], stage: impl Fn(&str),
+    mut batch: LmdbWriteTransaction<'_>,
+    targets: &[BlockHash],
+    stage: impl Fn(&str),
 ) -> Result<Option<Vec<(BlockHash, CementedBatch)>>, StoreError> {
     let mut authority = crate::confirmed_authority::ConfirmedAuthority::load(&batch)?;
     let mut governance = None;
@@ -191,7 +216,8 @@ fn cement_group_in(
                 authority.promote(&batch, hash)?;
                 if crate::confirmed_governance::ConfirmedGovernance::applies_to(&block.block_type) {
                     if governance.is_none() {
-                        governance = crate::confirmed_governance::ConfirmedGovernance::load(&batch)?;
+                        governance =
+                            crate::confirmed_governance::ConfirmedGovernance::load(&batch)?;
                     }
                     if let Some(governance) = &mut governance {
                         governance.promote(&batch, &block)?;
@@ -221,7 +247,9 @@ fn cement_group_in(
                 }
             } else {
                 let (previous, previous_height, _) = load(&batch, &block.previous)?;
-                if previous.account != block.account || previous_height.checked_add(1) != Some(height) {
+                if previous.account != block.account
+                    || previous_height.checked_add(1) != Some(height)
+                {
                     return Err(StoreError::Corruption(
                         "cementation predecessor mismatch".into(),
                     ));
@@ -258,7 +286,9 @@ fn cement_group_in(
             batch.acknowledge_confirmation(&target)?;
         }
         results.push((target, CementedBatch { hashes, complete }));
-        if total_cemented == MAX_CEMENTED_PER_BATCH { break; }
+        if total_cemented == MAX_CEMENTED_PER_BATCH {
+            break;
+        }
     }
     stage("traversal_finished");
     authority.persist(&mut batch)?;
@@ -346,12 +376,31 @@ mod tests {
         handoff_batch(&store, &[alice.hash, bob.hash]).unwrap();
         let worker = worker::Worker::new(store.clone());
         let generation = store.env().info().last_txn_id;
-        assert!(worker.group(vec![alice.hash, BlockHash::new([77; 32])]).await.is_err());
+        assert!(worker
+            .group(vec![alice.hash, BlockHash::new([77; 32])])
+            .await
+            .is_err());
         assert_eq!(store.env().info().last_txn_id, generation);
-        assert_eq!(store.account_store().get_account(&alice.account).unwrap().confirmation_height, 0);
-        assert!(store.tx_begin_write().unwrap().block_undo(&alice.hash).unwrap().is_some());
+        assert_eq!(
+            store
+                .account_store()
+                .get_account(&alice.account)
+                .unwrap()
+                .confirmation_height,
+            0
+        );
+        assert!(store
+            .tx_begin_write()
+            .unwrap()
+            .block_undo(&alice.hash)
+            .unwrap()
+            .is_some());
         assert_eq!(store.meta_store().pending_confirmations().unwrap().len(), 2);
-        let results = worker.group(vec![alice.hash, bob.hash]).await.unwrap().unwrap();
+        let results = worker
+            .group(vec![alice.hash, bob.hash])
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].1.hashes, vec![alice.hash]);
         assert_eq!(results[1].1.hashes, vec![bob.hash]);
@@ -360,9 +409,20 @@ mod tests {
         drop(worker);
         drop(store);
         let store = LmdbStore::open(dir.path(), 32, 32 * 1024 * 1024).unwrap();
-        assert!(store.meta_store().pending_confirmations().unwrap().is_empty());
+        assert!(store
+            .meta_store()
+            .pending_confirmations()
+            .unwrap()
+            .is_empty());
         for account in [&alice.account, &bob.account] {
-            assert_eq!(store.account_store().get_account(account).unwrap().confirmation_height, 1);
+            assert_eq!(
+                store
+                    .account_store()
+                    .get_account(account)
+                    .unwrap()
+                    .confirmation_height,
+                1
+            );
         }
         assert!(cement_group(&store, &vec![alice.hash; MAX_HANDOFF_BATCH + 1]).is_err());
         assert!(cement_group(&store, &[]).unwrap().unwrap().is_empty());
@@ -389,14 +449,29 @@ mod tests {
         // Publish the new target only after the cementation attempt is waiting.
         writer.commit().unwrap();
         assert!(before_commit.is_err());
-        let attempt = tokio::time::timeout(Duration::from_secs(2), task).await.unwrap().unwrap().unwrap();
+        let attempt = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
         assert_eq!(attempt.targets.len(), 2);
         assert!(attempt.targets.contains(&alice.hash) && attempt.targets.contains(&bob.hash));
         assert_eq!(attempt.outcome.unwrap().unwrap().len(), 2);
         for account in [&alice.account, &bob.account] {
-            assert_eq!(store.account_store().get_account(account).unwrap().confirmation_height, 1);
+            assert_eq!(
+                store
+                    .account_store()
+                    .get_account(account)
+                    .unwrap()
+                    .confirmation_height,
+                1
+            );
         }
-        assert!(store.meta_store().pending_confirmations().unwrap().is_empty());
+        assert!(store
+            .meta_store()
+            .pending_confirmations()
+            .unwrap()
+            .is_empty());
         let generation = store.env().info().last_txn_id;
         assert!(worker.pending_group(None).await.unwrap().targets.is_empty());
         assert_eq!(store.env().info().last_txn_id, generation);
@@ -416,9 +491,24 @@ mod tests {
         assert_eq!(attempt.targets.len(), 2);
         assert!(attempt.outcome.is_err());
         assert_eq!(store.env().info().last_txn_id, generation);
-        assert_eq!(store.account_store().get_account(&carol.account).unwrap().confirmation_height, 0);
-        assert_eq!(store.meta_store().pending_confirmations().unwrap(), attempt.targets);
-        assert!(store.tx_begin_write().unwrap().block_undo(&carol.hash).unwrap().is_some());
+        assert_eq!(
+            store
+                .account_store()
+                .get_account(&carol.account)
+                .unwrap()
+                .confirmation_height,
+            0
+        );
+        assert_eq!(
+            store.meta_store().pending_confirmations().unwrap(),
+            attempt.targets
+        );
+        assert!(store
+            .tx_begin_write()
+            .unwrap()
+            .block_undo(&carol.hash)
+            .unwrap()
+            .is_some());
     }
 
     #[test]
@@ -430,13 +520,27 @@ mod tests {
         save(&store, &alice, 1);
         save(&store, &bob, 1);
         let generation = store.env().info().last_txn_id;
-        assert_eq!(handoff_batch(&store, &[alice.hash, bob.hash, alice.hash]).unwrap(),
-            vec![alice.hash, bob.hash]);
+        assert_eq!(
+            handoff_batch(&store, &[alice.hash, bob.hash, alice.hash]).unwrap(),
+            vec![alice.hash, bob.hash]
+        );
         assert_eq!(store.env().info().last_txn_id, generation + 1);
-        assert_eq!(store.account_store().get_account(&alice.account).unwrap().confirmation_height, 0);
+        assert_eq!(
+            store
+                .account_store()
+                .get_account(&alice.account)
+                .unwrap()
+                .confirmation_height,
+            0
+        );
         drop(store);
         let reopened = LmdbStore::open(dir.path(), 32, 32 * 1024 * 1024).unwrap();
-        let pending: HashSet<_> = reopened.meta_store().pending_confirmations().unwrap().into_iter().collect();
+        let pending: HashSet<_> = reopened
+            .meta_store()
+            .pending_confirmations()
+            .unwrap()
+            .into_iter()
+            .collect();
         assert_eq!(pending, [alice.hash, bob.hash].into_iter().collect());
         assert!(cement(&reopened, alice.hash).unwrap().complete);
         assert!(cement(&reopened, bob.hash).unwrap().complete);
@@ -453,22 +557,61 @@ mod tests {
         let ready = std::sync::Arc::new(tokio::sync::Notify::new());
         let worker = handoff_worker::Worker::new(store.clone(), ready.clone());
         let missing = BlockHash::new([77; 32]);
-        assert!(worker.handoff(vec![alice.hash; MAX_HANDOFF_BATCH + 1]).await.is_err());
-        assert!(store.meta_store().pending_confirmations().unwrap().is_empty());
+        assert!(worker
+            .handoff(vec![alice.hash; MAX_HANDOFF_BATCH + 1])
+            .await
+            .is_err());
+        assert!(store
+            .meta_store()
+            .pending_confirmations()
+            .unwrap()
+            .is_empty());
         assert!(worker.handoff(Vec::new()).await.unwrap().is_empty());
         assert!(worker.handoff(vec![missing]).await.unwrap().is_empty());
-        assert!(tokio::time::timeout(std::time::Duration::ZERO, ready.notified()).await.is_err());
-        let accepted = worker.handoff(vec![alice.hash, missing, bob.hash]).await.unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::ZERO, ready.notified())
+                .await
+                .is_err()
+        );
+        let accepted = worker
+            .handoff(vec![alice.hash, missing, bob.hash])
+            .await
+            .unwrap();
         assert_eq!(accepted, vec![alice.hash, bob.hash]);
-        tokio::time::timeout(std::time::Duration::ZERO, ready.notified()).await.unwrap();
-        assert_eq!(store.meta_store().pending_confirmations().unwrap().into_iter().collect::<HashSet<_>>(),
-            [alice.hash, bob.hash].into_iter().collect());
-        assert!(tokio::time::timeout(std::time::Duration::ZERO, ready.notified()).await.is_err());
-        assert_eq!(store.account_store().get_account(&alice.account).unwrap().confirmation_height, 0);
+        tokio::time::timeout(std::time::Duration::ZERO, ready.notified())
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .meta_store()
+                .pending_confirmations()
+                .unwrap()
+                .into_iter()
+                .collect::<HashSet<_>>(),
+            [alice.hash, bob.hash].into_iter().collect()
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::ZERO, ready.notified())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .account_store()
+                .get_account(&alice.account)
+                .unwrap()
+                .confirmation_height,
+            0
+        );
         drop(worker);
         drop(store);
         let reopened = LmdbStore::open(dir.path(), 32, 32 * 1024 * 1024).unwrap();
-        let pending: HashSet<_> = reopened.meta_store().pending_confirmations().unwrap().into_iter().collect();
+        let pending: HashSet<_> = reopened
+            .meta_store()
+            .pending_confirmations()
+            .unwrap()
+            .into_iter()
+            .collect();
         assert_eq!(pending, [alice.hash, bob.hash].into_iter().collect());
         assert!(cement(&reopened, alice.hash).unwrap().complete);
         assert!(cement(&reopened, bob.hash).unwrap().complete);
@@ -484,10 +627,20 @@ mod tests {
         let generation = store.env().info().last_txn_id;
         assert!(handoff_batch(&store, &[alice.hash, missing]).is_err());
         assert_eq!(store.env().info().last_txn_id, generation);
-        assert!(store.meta_store().pending_confirmations().unwrap().is_empty());
-        assert_eq!(handoff_batch(&store, &[alice.hash]).unwrap(), vec![alice.hash]);
+        assert!(store
+            .meta_store()
+            .pending_confirmations()
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            handoff_batch(&store, &[alice.hash]).unwrap(),
+            vec![alice.hash]
+        );
         assert!(handoff_batch(&store, &[missing]).is_err());
-        assert_eq!(store.meta_store().pending_confirmations().unwrap(), vec![alice.hash]);
+        assert_eq!(
+            store.meta_store().pending_confirmations().unwrap(),
+            vec![alice.hash]
+        );
         let generation = store.env().info().last_txn_id;
         assert!(handoff_batch(&store, &vec![alice.hash; MAX_HANDOFF_BATCH + 1]).is_err());
         assert!(handoff_batch(&store, &[]).unwrap().is_empty());
@@ -502,12 +655,18 @@ mod tests {
         let send = block("alice", BlockType::Send, open.hash, BlockHash::new([9; 32]));
         save(&store, &open, 1);
         save(&store, &send, 2);
-        assert_eq!(handoff_batch(&store, &[open.hash, send.hash]).unwrap(), vec![open.hash]);
+        assert_eq!(
+            handoff_batch(&store, &[open.hash, send.hash]).unwrap(),
+            vec![open.hash]
+        );
         let generation = store.env().info().last_txn_id;
         assert!(handoff_batch(&store, &[send.hash]).unwrap().is_empty());
         assert_eq!(store.env().info().last_txn_id, generation);
         cement(&store, open.hash).unwrap();
-        assert_eq!(handoff_batch(&store, &[send.hash]).unwrap(), vec![send.hash]);
+        assert_eq!(
+            handoff_batch(&store, &[send.hash]).unwrap(),
+            vec![send.hash]
+        );
     }
 
     #[test]
@@ -521,9 +680,15 @@ mod tests {
         let receive = block("bob", BlockType::Receive, previous.hash, source.hash);
         let pending = |store: &LmdbStore| {
             let batch = store.tx_begin_write().unwrap();
-            pending_dependencies(&batch, &receive).unwrap().into_iter().collect::<HashSet<_>>()
+            pending_dependencies(&batch, &receive)
+                .unwrap()
+                .into_iter()
+                .collect::<HashSet<_>>()
         };
-        assert_eq!(pending(&store), [source.hash, previous.hash].into_iter().collect());
+        assert_eq!(
+            pending(&store),
+            [source.hash, previous.hash].into_iter().collect()
+        );
         cement(&store, source.hash).unwrap();
         assert_eq!(pending(&store), [previous.hash].into_iter().collect());
         cement(&store, previous.hash).unwrap();
@@ -645,10 +810,23 @@ mod tests {
         save(&store, &independent, 1);
         handoff_batch(&store, &[independent.hash]).unwrap();
         let generation = store.env().info().last_txn_id;
-        assert!(cement_group(&store, &[independent.hash, claim.hash]).unwrap().is_none());
+        assert!(cement_group(&store, &[independent.hash, claim.hash])
+            .unwrap()
+            .is_none());
         assert_eq!(store.env().info().last_txn_id, generation);
-        assert_eq!(store.account_store().get_account(&independent.account).unwrap().confirmation_height, 0);
-        assert!(store.tx_begin_write().unwrap().confirmation_pending(&independent.hash).unwrap());
+        assert_eq!(
+            store
+                .account_store()
+                .get_account(&independent.account)
+                .unwrap()
+                .confirmation_height,
+            0
+        );
+        assert!(store
+            .tx_begin_write()
+            .unwrap()
+            .confirmation_pending(&independent.hash)
+            .unwrap());
         assert!(cement(&store, independent.hash).unwrap().complete);
         let waiting = cement(&store, claim.hash).unwrap();
         assert!(!waiting.complete);
@@ -897,8 +1075,13 @@ mod tests {
         store.meta_store().enqueue_confirmation(&last.hash).unwrap();
         let later = block("bob", BlockType::Open, BlockHash::ZERO, BlockHash::ZERO);
         save(&store, &later, 1);
-        store.meta_store().enqueue_confirmation(&later.hash).unwrap();
-        let mut group = cement_group(&store, &[last.hash, later.hash]).unwrap().unwrap();
+        store
+            .meta_store()
+            .enqueue_confirmation(&later.hash)
+            .unwrap();
+        let mut group = cement_group(&store, &[last.hash, later.hash])
+            .unwrap()
+            .unwrap();
         assert_eq!(group.len(), 1, "the global work bound defers later targets");
         let first = group.remove(0).1;
         assert_eq!(first.hashes.len(), MAX_CEMENTED_PER_BATCH);
@@ -906,10 +1089,17 @@ mod tests {
         drop(store);
         let store = LmdbStore::open(dir.path(), 32, 32 * 1024 * 1024).unwrap();
         assert_eq!(
-            store.meta_store().pending_confirmations().unwrap().into_iter().collect::<HashSet<_>>(),
+            store
+                .meta_store()
+                .pending_confirmations()
+                .unwrap()
+                .into_iter()
+                .collect::<HashSet<_>>(),
             [last.hash, later.hash].into_iter().collect()
         );
-        let mut group = cement_group(&store, &[last.hash, later.hash]).unwrap().unwrap();
+        let mut group = cement_group(&store, &[last.hash, later.hash])
+            .unwrap()
+            .unwrap();
         assert_eq!(group.len(), 2);
         assert_eq!(group[1].1.hashes, vec![later.hash]);
         let second = group.remove(0).1;

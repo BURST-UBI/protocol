@@ -114,14 +114,21 @@ impl UndoChange {
             return Ok(());
         }
         if self.table == UndoTable::Meta
-            && self.key.starts_with(burst_trst::engine::holding_rows::PREFIX.as_bytes())
+            && self
+                .key
+                .starts_with(burst_trst::engine::holding_rows::PREFIX.as_bytes())
         {
-            let (Some(before), Some(after), Some(live)) = (&self.before, &self.after, &current) else {
-                return Err(invalid("stable holding creation/deletion conflicts with current state"));
+            let (Some(before), Some(after), Some(live)) = (&self.before, &self.after, &current)
+            else {
+                return Err(invalid(
+                    "stable holding creation/deletion conflicts with current state",
+                ));
             };
-            let key = std::str::from_utf8(&self.key).map_err(|_| invalid("invalid stable holding undo key"))?;
-            let restored = burst_trst::engine::holding_rows::reconcile_undo(key, before, after, live)
-                .map_err(StoreError::Corruption)?;
+            let key = std::str::from_utf8(&self.key)
+                .map_err(|_| invalid("invalid stable holding undo key"))?;
+            let restored =
+                burst_trst::engine::holding_rows::reconcile_undo(key, before, after, live)
+                    .map_err(StoreError::Corruption)?;
             self.before = Some(restored);
             self.after = current;
             return Ok(());
@@ -236,7 +243,8 @@ impl BlockUndo {
             if previous.is_some_and(|old| old >= position)
                 || change.key.is_empty()
                 || change.before == change.after
-                || (change.table == UndoTable::BrnMeta && change.key == burst_brn::wallet_storage::FORMAT_KEY)
+                || (change.table == UndoTable::BrnMeta
+                    && change.key == burst_brn::wallet_storage::FORMAT_KEY)
                 || (change.table == UndoTable::Meta && irreversible_meta(&change.key))
             {
                 return Err(invalid("noncanonical block undo changes"));
@@ -289,8 +297,15 @@ impl UndoRecorder {
             key.len() + before.map_or(0, <[u8]>::len) + after.map_or(0, <[u8]>::len) + 64
         };
         let old_size = existing.map_or(0, |old| size(old.before.as_deref(), old.after.as_deref()));
-        let new_size = if original == after { 0 } else { size(original, after) };
-        let bytes = self.bytes.checked_sub(old_size).and_then(|b| b.checked_add(new_size))
+        let new_size = if original == after {
+            0
+        } else {
+            size(original, after)
+        };
+        let bytes = self
+            .bytes
+            .checked_sub(old_size)
+            .and_then(|b| b.checked_add(new_size))
             .ok_or_else(|| invalid("block undo size overflow"))?;
         if bytes > MAX_BYTES - 1024
             || (new_size != 0 && existing.is_none() && self.changes.len() >= MAX_CHANGES)
@@ -305,42 +320,73 @@ impl UndoRecorder {
             // rejection above leaves both images and accounting unchanged.
             change.after = after.map(<[u8]>::to_vec);
         } else {
-            self.changes.insert(position, UndoChange {
-                table, key: key.to_vec(), before: before.map(<[u8]>::to_vec),
-                after: after.map(<[u8]>::to_vec),
-            });
+            self.changes.insert(
+                position,
+                UndoChange {
+                    table,
+                    key: key.to_vec(),
+                    before: before.map(<[u8]>::to_vec),
+                    after: after.map(<[u8]>::to_vec),
+                },
+            );
         }
         Ok(())
     }
 
     pub(crate) fn has_verification_aggregate(&self) -> bool {
-        self.changes.contains_key(&(UndoTable::Meta, b"verification_orchestrator".to_vec()))
+        self.changes
+            .contains_key(&(UndoTable::Meta, b"verification_orchestrator".to_vec()))
     }
 
-    pub(crate) fn verification_before_images(&self) -> BTreeMap<(UndoTable, Vec<u8>), Option<Vec<u8>>> {
-        self.changes.iter().filter(|((table, key), _)|
-            *table == UndoTable::Meta && key.starts_with(b"verification_state/"))
-            .map(|(key, change)| (key.clone(), change.before.clone())).collect()
+    pub(crate) fn verification_before_images(
+        &self,
+    ) -> BTreeMap<(UndoTable, Vec<u8>), Option<Vec<u8>>> {
+        self.changes
+            .iter()
+            .filter(|((table, key), _)| {
+                *table == UndoTable::Meta && key.starts_with(b"verification_state/")
+            })
+            .map(|(key, change)| (key.clone(), change.before.clone()))
+            .collect()
     }
 
-    pub(crate) fn budget(&self) -> (usize, usize) { (self.bytes, self.changes.len()) }
+    pub(crate) fn budget(&self) -> (usize, usize) {
+        (self.bytes, self.changes.len())
+    }
 
     /// Preview distinct physical keys against this recorder without cloning its
     /// history. The caller must visit each key at most once in a prospective batch.
     pub(crate) fn preview_meta_change(
-        &self, budget: &mut (usize, usize), key: &str,
-        before: Option<&[u8]>, after: Option<&[u8]>,
+        &self,
+        budget: &mut (usize, usize),
+        key: &str,
+        before: Option<&[u8]>,
+        after: Option<&[u8]>,
     ) -> bool {
-        let existing = self.changes.get(&(UndoTable::Meta, key.as_bytes().to_vec()));
+        let existing = self
+            .changes
+            .get(&(UndoTable::Meta, key.as_bytes().to_vec()));
         let original = existing.map_or(before, |old| old.before.as_deref());
         let size = |before: Option<&[u8]>, after: Option<&[u8]>| {
             key.len() + before.map_or(0, <[u8]>::len) + after.map_or(0, <[u8]>::len) + 64
         };
         let old_size = existing.map_or(0, |old| size(old.before.as_deref(), old.after.as_deref()));
-        let new_size = if original == after { 0 } else { size(original, after) };
-        let Some(bytes) = budget.0.checked_sub(old_size).and_then(|n| n.checked_add(new_size)) else { return false; };
+        let new_size = if original == after {
+            0
+        } else {
+            size(original, after)
+        };
+        let Some(bytes) = budget
+            .0
+            .checked_sub(old_size)
+            .and_then(|n| n.checked_add(new_size))
+        else {
+            return false;
+        };
         let count = budget.1 - usize::from(existing.is_some()) + usize::from(new_size != 0);
-        if bytes > MAX_BYTES - 1024 || count > MAX_CHANGES { return false; }
+        if bytes > MAX_BYTES - 1024 || count > MAX_CHANGES {
+            return false;
+        }
         *budget = (bytes, count);
         true
     }
@@ -348,13 +394,29 @@ impl UndoRecorder {
     /// Replace physical verification ownership with one logical image. The caller
     /// supplies the writer-entry state reconstructed from physical before-images.
     pub(crate) fn promote_verification(
-        &mut self, before: Option<Vec<u8>>, after: Option<&[u8]>,
+        &mut self,
+        before: Option<Vec<u8>>,
+        after: Option<&[u8]>,
     ) -> Result<(), StoreError> {
-        self.changes.retain(|(table, key), _|
-            !(*table == UndoTable::Meta && key.starts_with(b"verification_state/")));
-        self.bytes = self.changes.values().map(|c|
-            c.key.len() + c.before.as_ref().map_or(0, Vec::len) + c.after.as_ref().map_or(0, Vec::len) + 64).sum();
-        self.record(UndoTable::Meta, b"verification_orchestrator", before.as_deref(), after)
+        self.changes.retain(|(table, key), _| {
+            !(*table == UndoTable::Meta && key.starts_with(b"verification_state/"))
+        });
+        self.bytes = self
+            .changes
+            .values()
+            .map(|c| {
+                c.key.len()
+                    + c.before.as_ref().map_or(0, Vec::len)
+                    + c.after.as_ref().map_or(0, Vec::len)
+                    + 64
+            })
+            .sum();
+        self.record(
+            UndoTable::Meta,
+            b"verification_orchestrator",
+            before.as_deref(),
+            after,
+        )
     }
 
     pub(crate) fn finish(self) -> Result<(Vec<u8>, Vec<u8>), StoreError> {
@@ -381,19 +443,39 @@ mod tests {
         use burst_trst::{engine::holding_rows::Row, TrstEngine};
         use burst_types::{Timestamp, TxHash};
         let holder = WalletAddress::new("brst_undo_fields");
-        let token = TrstEngine::with_expiry(100).mint(TxHash::new([1; 32]), holder.clone(),
-            10, holder.clone(), Timestamp::new(100)).unwrap();
+        let token = TrstEngine::with_expiry(100)
+            .mint(
+                TxHash::new([1; 32]),
+                holder.clone(),
+                10,
+                holder.clone(),
+                Timestamp::new(100),
+            )
+            .unwrap();
         let row = |amount, next| {
             let mut token = token.clone();
             token.amount = amount;
-            Row::Holding { holder: holder.clone(), next, token: Box::new(token) }.storage_entry().unwrap()
+            Row::Holding {
+                holder: holder.clone(),
+                next,
+                token: Box::new(token),
+            }
+            .storage_entry()
+            .unwrap()
         };
         let link = Some(TxHash::new([2; 32]));
-        let check = |old: (String, Vec<u8>), new: (String, Vec<u8>), live: (String, Vec<u8>), expected: Option<Vec<u8>>| {
+        let check = |old: (String, Vec<u8>),
+                     new: (String, Vec<u8>),
+                     live: (String, Vec<u8>),
+                     expected: Option<Vec<u8>>| {
             assert_eq!(old.0, new.0);
             assert_eq!(old.0, live.0);
-            let mut change = UndoChange { table: UndoTable::Meta, key: old.0.into_bytes(),
-                before: Some(old.1), after: Some(new.1) };
+            let mut change = UndoChange {
+                table: UndoTable::Meta,
+                key: old.0.into_bytes(),
+                before: Some(old.1),
+                after: Some(new.1),
+            };
             let unchanged = change.clone();
             let result = change.reconcile_current(Some(live.1.clone()));
             if let Some(expected) = expected {
@@ -405,21 +487,61 @@ mod tests {
                 assert_eq!(change, unchanged);
             }
         };
-        check(row(10, None), row(8, None), row(8, link), Some(row(10, link).1));
-        check(row(10, None), row(10, link), row(8, link), Some(row(8, None).1));
+        check(
+            row(10, None),
+            row(8, None),
+            row(8, link),
+            Some(row(10, link).1),
+        );
+        check(
+            row(10, None),
+            row(10, link),
+            row(8, link),
+            Some(row(8, None).1),
+        );
         check(row(10, None), row(8, None), row(7, link), None);
-        check(row(10, None), row(10, link), row(8, Some(TxHash::new([3; 32]))), None);
-        let header = |count, amount| Row::Header { holder: holder.clone(), count,
-            head: Some(token.id), cached_transferable: amount, earliest_expiry: Some(Timestamp::new(200)) }
-            .storage_entry().unwrap();
-        check(header(1, 10), header(1, 8), header(2, 8), Some(header(2, 10).1));
-        check(header(1, 10), header(2, 10), header(2, 8), Some(header(1, 8).1));
+        check(
+            row(10, None),
+            row(10, link),
+            row(8, Some(TxHash::new([3; 32]))),
+            None,
+        );
+        let header = |count, amount| {
+            Row::Header {
+                holder: holder.clone(),
+                count,
+                head: Some(token.id),
+                cached_transferable: amount,
+                earliest_expiry: Some(Timestamp::new(200)),
+            }
+            .storage_entry()
+            .unwrap()
+        };
+        check(
+            header(1, 10),
+            header(1, 8),
+            header(2, 8),
+            Some(header(2, 10).1),
+        );
+        check(
+            header(1, 10),
+            header(2, 10),
+            header(2, 8),
+            Some(header(1, 8).1),
+        );
         check(header(1, 10), header(1, 8), header(2, 7), None);
         check(header(1, 10), header(2, 10), header(3, 8), None);
-        for (before, after, current) in [(None, Some(row(10, None).1), Some(row(8, link).1)),
+        for (before, after, current) in [
+            (None, Some(row(10, None).1), Some(row(8, link).1)),
             (Some(row(10, None).1), None, Some(row(8, link).1)),
-            (Some(row(10, None).1), Some(row(8, None).1), None)] {
-            let mut change = UndoChange { table: UndoTable::Meta, key: row(10, None).0.into_bytes(), before, after };
+            (Some(row(10, None).1), Some(row(8, None).1), None),
+        ] {
+            let mut change = UndoChange {
+                table: UndoTable::Meta,
+                key: row(10, None).0.into_bytes(),
+                before,
+                after,
+            };
             let unchanged = change.clone();
             assert!(change.reconcile_current(current).is_err());
             assert_eq!(change, unchanged);
@@ -483,7 +605,9 @@ mod tests {
         }
         let mut candidate = change.clone();
         assert!(candidate
-            .reconcile_current_with_snapshots(Some(vec![3]), &mut |_, _, _, _| Err(invalid("overlap")))
+            .reconcile_current_with_snapshots(Some(vec![3]), &mut |_, _, _, _| Err(invalid(
+                "overlap"
+            )))
             .is_err());
         assert_eq!(candidate, change);
         candidate
@@ -572,25 +696,47 @@ mod tests {
 
     #[test]
     fn repeated_updates_retain_original_allocation_and_reject_before_copying() {
-        let mut recorder = UndoRecorder::new(BlockHash::new([1; 32]), WalletAddress::new("brst_test"), 1);
+        let mut recorder =
+            UndoRecorder::new(BlockHash::new([1; 32]), WalletAddress::new("brst_test"), 1);
         let original = vec![7; 1 << 20];
-        recorder.record(UndoTable::Meta, b"engine", Some(&original), Some(&[0])).unwrap();
-        let pointer = recorder.changes.values().next().unwrap().before.as_ref().unwrap().as_ptr();
+        recorder
+            .record(UndoTable::Meta, b"engine", Some(&original), Some(&[0]))
+            .unwrap();
+        let pointer = recorder
+            .changes
+            .values()
+            .next()
+            .unwrap()
+            .before
+            .as_ref()
+            .unwrap()
+            .as_ptr();
         for value in 1..=128 {
-            recorder.record(UndoTable::Meta, b"engine", Some(&[value - 1]), Some(&[value])).unwrap();
+            recorder
+                .record(
+                    UndoTable::Meta,
+                    b"engine",
+                    Some(&[value - 1]),
+                    Some(&[value]),
+                )
+                .unwrap();
             let row = recorder.changes.values().next().unwrap();
             assert_eq!(row.before.as_ref().unwrap().as_ptr(), pointer);
             assert_eq!(row.after.as_deref(), Some([value].as_slice()));
         }
         let budget = recorder.budget();
         let oversized = vec![0; MAX_BYTES];
-        assert!(recorder.record(UndoTable::Meta, b"engine", Some(&[128]), Some(&oversized)).is_err());
+        assert!(recorder
+            .record(UndoTable::Meta, b"engine", Some(&[128]), Some(&oversized))
+            .is_err());
         assert_eq!(recorder.budget(), budget);
         let row = recorder.changes.values().next().unwrap();
         assert_eq!(row.before.as_ref().unwrap().as_ptr(), pointer);
         assert_eq!(row.before.as_deref(), Some(original.as_slice()));
         assert_eq!(row.after.as_deref(), Some([128].as_slice()));
-        recorder.record(UndoTable::Meta, b"engine", Some(&[128]), Some(&original)).unwrap();
+        recorder
+            .record(UndoTable::Meta, b"engine", Some(&[128]), Some(&original))
+            .unwrap();
         assert_eq!(recorder.budget(), (0, 0));
     }
 
@@ -599,7 +745,7 @@ mod tests {
         for key in [
             b"trst_state_format".as_slice(),
             b"governance_records_format".as_slice(),
-        b"verification_records_format".as_slice(),
+            b"verification_records_format".as_slice(),
             b"schema_version".as_slice(),
             b"trst_graph_format".as_slice(),
             b"consensus_final/v1/a".as_slice(),

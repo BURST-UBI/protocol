@@ -175,10 +175,12 @@ async fn retired_history_catchup(from_genesis: bool) {
         // Compare rights at one time, as recovery's economic afterimage check does.
         expected
             .trst
-            .set_expiry_period(params.trst_expiry_secs, Timestamp::new(now)).unwrap();
+            .set_expiry_period(params.trst_expiry_secs, Timestamp::new(now))
+            .unwrap();
         actual
             .trst
-            .set_expiry_period(params.trst_expiry_secs, Timestamp::new(now)).unwrap();
+            .set_expiry_period(params.trst_expiry_secs, Timestamp::new(now))
+            .unwrap();
         for seed in [0, 1] {
             assert_eq!(
                 actual.trst.get_portfolio(&address(seed)),

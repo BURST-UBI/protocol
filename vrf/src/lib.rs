@@ -12,7 +12,6 @@ pub mod threshold;
 pub use drand::{ChainInfo, DrandBeacon, DrandClient, DrandPolicy, DrandScheme, DrandVerifier};
 pub use error::VrfError;
 
-
 /// Trait for providing verifiable randomness.
 pub trait VrfProvider: Send + Sync {
     /// Get randomness for a context, where supported by the provider.

@@ -211,7 +211,6 @@ mod tests {
         WalletAddress::new(format!("brst_{:0>60}", n))
     }
 
-
     #[test]
     fn verified_endorsers_receive_no_protocol_reward() {
         let wallet = test_address(1);
@@ -383,7 +382,6 @@ mod tests {
             compute_verification_outcomes(&wallet, VerificationResult::Failed, &[], &[]).unwrap();
         assert_eq!(outcome.wallet, wallet);
     }
-
 
     #[test]
     fn fraud_outcome_records_challenger_stake_and_verifier_rewards() {

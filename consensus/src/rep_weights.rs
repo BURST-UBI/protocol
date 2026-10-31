@@ -30,18 +30,25 @@ pub struct RepWeightSnapshot {
 
 impl RepWeightSnapshot {
     pub fn weights(&self) -> impl Iterator<Item = (&WalletAddress, u128)> {
-        self.reps.iter().filter(|(rep, _)| !self.evicted.contains(*rep))
+        self.reps
+            .iter()
+            .filter(|(rep, _)| !self.evicted.contains(*rep))
             .map(|(rep, weight)| (rep, *weight))
     }
 }
 
 impl RepWeightCache {
     pub fn snapshot(&self) -> RepWeightSnapshot {
-        RepWeightSnapshot { reps: self.reps.clone(), evicted: self.evicted.clone() }
+        RepWeightSnapshot {
+            reps: self.reps.clone(),
+            evicted: self.evicted.clone(),
+        }
     }
 
     /// Caller-supplied publication identity; this cache does not validate authority.
-    pub fn publication_identity(&self) -> Option<usize> { self.publication_identity }
+    pub fn publication_identity(&self) -> Option<usize> {
+        self.publication_identity
+    }
 
     pub fn mark_publication(&mut self, identity: Option<usize>) {
         self.publication_identity = identity;
@@ -92,13 +99,18 @@ impl RepWeightCache {
 
     /// Total consensus weight across all representatives.
     pub fn total_weight(&self) -> u128 {
-        self.reps.iter().filter(|(rep, _)| !self.evicted.contains(*rep))
+        self.reps
+            .iter()
+            .filter(|(rep, _)| !self.evicted.contains(*rep))
             .fold(0u128, |acc, (_, weight)| acc.saturating_add(*weight))
     }
 
     /// Number of representatives with active delegated weight.
     pub fn rep_count(&self) -> usize {
-        self.reps.keys().filter(|rep| !self.evicted.contains(*rep)).count()
+        self.reps
+            .keys()
+            .filter(|rep| !self.evicted.contains(*rep))
+            .count()
     }
 
     /// Rebuild from verification status and delegation. The caller must supply
@@ -139,20 +151,31 @@ mod tests {
     #[test]
     fn snapshots_share_roots_and_preserve_weights_through_rebuild_and_eviction() {
         let mut cache = RepWeightCache::new();
-        cache.rebuild_from_accounts([(true, rep("a")), (true, rep("a")), (true, rep("b"))].into_iter());
+        cache.rebuild_from_accounts(
+            [(true, rep("a")), (true, rep("a")), (true, rep("b"))].into_iter(),
+        );
         cache.mark_publication(Some(7));
         let before = cache.snapshot();
         assert!(Arc::ptr_eq(&before.reps, &cache.reps));
         assert!(Arc::ptr_eq(&before.evicted, &cache.evicted));
-        let expected: HashMap<_, _> = before.weights().map(|(a,w)| (a.clone(),w)).collect();
+        let expected: HashMap<_, _> = before.weights().map(|(a, w)| (a.clone(), w)).collect();
         assert_eq!(expected, cache.all_weights());
         cache.set_evicted(HashSet::from([rep("a")]));
         assert_eq!(cache.publication_identity(), None);
         let evicted = cache.snapshot();
         assert_eq!(evicted.weights().count(), 1);
         cache.rebuild_from_accounts([(true, rep("c"))].into_iter());
-        assert_eq!(before.weights().map(|(a,w)| (a.clone(),w)).collect::<HashMap<_,_>>(), expected);
-        assert_eq!(evicted.weights().collect::<Vec<_>>(), vec![(&rep("b"), WEIGHT_PER_HUMAN)]);
+        assert_eq!(
+            before
+                .weights()
+                .map(|(a, w)| (a.clone(), w))
+                .collect::<HashMap<_, _>>(),
+            expected
+        );
+        assert_eq!(
+            evicted.weights().collect::<Vec<_>>(),
+            vec![(&rep("b"), WEIGHT_PER_HUMAN)]
+        );
         assert_eq!(cache.weight(&rep("c")), WEIGHT_PER_HUMAN);
         assert_eq!(cache.total_weight(), WEIGHT_PER_HUMAN);
         assert_eq!(cache.rep_count(), 1);

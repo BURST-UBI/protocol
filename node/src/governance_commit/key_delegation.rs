@@ -1,6 +1,6 @@
+use super::*;
 #[cfg(test)]
 use burst_governance::signing_delegation::Grant;
-use super::*;
 use burst_governance::signing_delegation::{
     operation::DelegationOperation, scoped, DelegatedBallot, DelegationAuthority, KeyScope,
 };
@@ -185,25 +185,54 @@ impl CandidateGovernance {
     }
 
     #[cfg(test)]
-    fn scoped_grant(&self, owner: &WalletAddress, proposal: TxHash,
-        param: Option<&GovernableParam>, metadata: &HashMap<String, Vec<u8>>,
+    fn scoped_grant(
+        &self,
+        owner: &WalletAddress,
+        proposal: TxHash,
+        param: Option<&GovernableParam>,
+        metadata: &HashMap<String, Vec<u8>>,
     ) -> Result<grants::ScopedGrant, String> {
-        self.projection_cut(metadata).scoped_grant(owner, proposal, param)
+        self.projection_cut(metadata)
+            .scoped_grant(owner, proposal, param)
     }
 
-    pub(crate) fn projection_cut<'a>(&'a self, metadata: &'a HashMap<String, Vec<u8>>) -> ProjectionCut<'a> {
-        ProjectionCut { state: self, metadata, parameters: Some(grants::ParameterCache::default()), owners: Some(HashMap::new()), eligible: None, records: None }
+    pub(crate) fn projection_cut<'a>(
+        &'a self,
+        metadata: &'a HashMap<String, Vec<u8>>,
+    ) -> ProjectionCut<'a> {
+        ProjectionCut {
+            state: self,
+            metadata,
+            parameters: Some(grants::ParameterCache::default()),
+            owners: Some(HashMap::new()),
+            eligible: None,
+            records: None,
+        }
     }
 
-    pub(crate) fn single_projection<'a>(&'a self, metadata: &'a HashMap<String, Vec<u8>>) -> ProjectionCut<'a> {
-        ProjectionCut { state: self, metadata, parameters: None, owners: None, eligible: None, records: None }
+    pub(crate) fn single_projection<'a>(
+        &'a self,
+        metadata: &'a HashMap<String, Vec<u8>>,
+    ) -> ProjectionCut<'a> {
+        ProjectionCut {
+            state: self,
+            metadata,
+            parameters: None,
+            owners: None,
+            eligible: None,
+            records: None,
+        }
     }
 
     #[cfg(test)]
-    pub(crate) fn delegation_at_cut(&self, proposal: TxHash, verified: &[WalletAddress],
+    pub(crate) fn delegation_at_cut(
+        &self,
+        proposal: TxHash,
+        verified: &[WalletAddress],
         metadata: &HashMap<String, Vec<u8>>,
     ) -> Result<DelegationEngine, String> {
-        self.single_projection(metadata).delegation(proposal, verified)
+        self.single_projection(metadata)
+            .delegation(proposal, verified)
     }
 }
 
@@ -215,23 +244,33 @@ pub(crate) struct ProjectionCut<'a> {
     metadata: &'a HashMap<String, Vec<u8>>,
     parameters: Option<grants::ParameterCache>,
     owners: Option<HashMap<WalletAddress, scoped::OwnerKeys>>,
-    eligible: Option<(&'a [WalletAddress], std::sync::Arc<HashSet<&'a WalletAddress>>)>,
+    eligible: Option<(
+        &'a [WalletAddress],
+        std::sync::Arc<HashSet<&'a WalletAddress>>,
+    )>,
     records: Option<Option<scoped::RecordIndex<'a>>>,
 }
 
 impl<'a> ProjectionCut<'a> {
-    fn scoped_grant(&mut self, owner: &WalletAddress, proposal: TxHash,
+    fn scoped_grant(
+        &mut self,
+        owner: &WalletAddress,
+        proposal: TxHash,
         param: Option<&GovernableParam>,
     ) -> Result<grants::ScopedGrant, String> {
         let keys = std::cell::OnceCell::new();
         for scope in std::iter::once(KeyScope::Proposal(proposal))
-            .chain(param.cloned().map(KeyScope::Parameter)) {
+            .chain(param.cloned().map(KeyScope::Parameter))
+        {
             let cache_param = match (&self.parameters, &scope) {
                 (Some(_), KeyScope::Parameter(param)) => Some(param),
                 _ => None,
             };
-            if let Some(known) = self.parameters.as_ref().and_then(|parameters|
-                cache_param.and_then(|param| parameters.get(owner, param))) {
+            if let Some(known) = self
+                .parameters
+                .as_ref()
+                .and_then(|parameters| cache_param.and_then(|param| parameters.get(owner, param)))
+            {
                 return Ok(known);
             }
             let bytes = {
@@ -266,12 +305,24 @@ impl<'a> ProjectionCut<'a> {
                 let grant = {
                     #[cfg(test)]
                     let _span = tests::projection_span(1);
-                    scoped::restore_authenticated_grant(self.state.network, self.state.genesis, owner, &scope, bytes)?
+                    scoped::restore_authenticated_grant(
+                        self.state.network,
+                        self.state.genesis,
+                        owner,
+                        &scope,
+                        bytes,
+                    )?
                 };
                 Some(grant.map(|grant| grants::CutGrant::Authenticated(std::sync::Arc::new(grant))))
-            } else { None };
-            if let (Some(parameters), Some(param)) = (&mut self.parameters, cache_param) { parameters.insert(owner, param, result.clone()); }
-            if result.is_some() { return Ok(result) }
+            } else {
+                None
+            };
+            if let (Some(parameters), Some(param)) = (&mut self.parameters, cache_param) {
+                parameters.insert(owner, param, result.clone());
+            }
+            if result.is_some() {
+                return Ok(result);
+            }
         }
         Ok(None)
     }
@@ -288,17 +339,30 @@ impl<'a> ProjectionCut<'a> {
             .ok_or("ballot proposal missing")?;
         let param = parameter(&target.content);
         if self.records.is_none() {
-            self.records = Some(if self.parameters.is_some()
-                && self.metadata.len() <= verified.len()
-                && self.metadata.len() <= scoped::RecordIndex::MAX_ROWS
-            {
-                scoped::RecordIndex::build(state.network, state.genesis,
-                    self.metadata.iter().map(|(key, bytes)| (key.as_str(), bytes.as_slice())))
-            } else { None });
+            self.records = Some(
+                if self.parameters.is_some()
+                    && self.metadata.len() <= verified.len()
+                    && self.metadata.len() <= scoped::RecordIndex::MAX_ROWS
+                {
+                    scoped::RecordIndex::build(
+                        state.network,
+                        state.genesis,
+                        self.metadata
+                            .iter()
+                            .map(|(key, bytes)| (key.as_str(), bytes.as_slice())),
+                    )
+                } else {
+                    None
+                },
+            );
         }
         // Retaining the borrowed slice makes pointer identity safe: its contents
         // cannot change or its allocation be reused while this cut holds it.
-        if self.eligible.as_ref().is_none_or(|(prior, _)| !std::ptr::eq(*prior, verified)) {
+        if self
+            .eligible
+            .as_ref()
+            .is_none_or(|(prior, _)| !std::ptr::eq(*prior, verified))
+        {
             #[cfg(test)]
             let _span = tests::projection_span(7);
             self.eligible = Some((verified, std::sync::Arc::new(verified.iter().collect())));
@@ -317,7 +381,9 @@ impl<'a> ProjectionCut<'a> {
                 if !eligible.contains(current) {
                     return Ok::<_, String>(walk::Step::Stop(None));
                 }
-                let Some((recipient, grant_id)) = grants.hop(current, |person| eligible.contains(person))? else {
+                let Some((recipient, grant_id)) =
+                    grants.hop(current, |person| eligible.contains(person))?
+                else {
                     return Ok(walk::Step::Stop(None));
                 };
                 if let Some(choice) = state.governance.key_ballot(proposal, current, grant_id) {

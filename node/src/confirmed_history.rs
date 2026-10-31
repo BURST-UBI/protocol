@@ -43,7 +43,12 @@ fn invalid(message: &str) -> StoreError {
     StoreError::Corruption(message.into())
 }
 
-fn history_digest(network: NetworkId, genesis: BlockHash, cutoff: u64, heads: usize) -> Blake2b<U32> {
+fn history_digest(
+    network: NetworkId,
+    genesis: BlockHash,
+    cutoff: u64,
+    heads: usize,
+) -> Blake2b<U32> {
     let mut digest = Blake2b::<U32>::new();
     digest.update(b"BURST/confirmed-history/v1\0");
     digest.update([match network {
@@ -684,9 +689,15 @@ pub(crate) fn causal_fallible_hash_order_after(
     mut dependencies: impl FnMut(&BlockHash) -> Result<Vec<BlockHash>, StoreError>,
 ) -> Result<Vec<BlockHash>, StoreError> {
     #[derive(Clone, Copy)]
-    enum Visit { New, Active, Complete }
+    enum Visit {
+        New,
+        Active,
+        Complete,
+    }
     let mut states = HashMap::new();
-    for hash in hashes { states.insert(*hash?.as_bytes(), Visit::New); }
+    for hash in hashes {
+        states.insert(*hash?.as_bytes(), Visit::New);
+    }
     // Deduplicate before allocating root order, including repeated untrusted input.
     // Root order is consensus-visible; membership and traversal colors are not.
     let mut hashes: Vec<_> = states.keys().copied().collect();
@@ -701,9 +712,12 @@ pub(crate) fn causal_fallible_hash_order_after(
                 }
                 continue;
             }
-            let state = states.get_mut(&hash)
+            let state = states
+                .get_mut(&hash)
                 .ok_or_else(|| invalid("history omits a replay prerequisite"))?;
-            if matches!(state, Visit::Complete) { continue; }
+            if matches!(state, Visit::Complete) {
+                continue;
+            }
             if complete {
                 *state = Visit::Complete;
                 replay.push(BlockHash::new(hash));
@@ -733,18 +747,24 @@ mod tests {
     #[test]
     fn streamed_head_commitment_matches_legacy_bytes_through_the_head_limit() {
         let genesis = BlockHash::new([91; 32]);
-        let mut heads: Vec<_> = (0..MAX_BLOCKS).map(|n| {
-            let mut public = [0; 32];
-            public[..8].copy_from_slice(&n.to_be_bytes());
-            HistoryHead {
-                account: burst_crypto::derive_address(&burst_types::PublicKey(public)),
-                height: n + 1,
-                hash: BlockHash::new([17; 32]),
-            }
-        }).collect();
+        let mut heads: Vec<_> = (0..MAX_BLOCKS)
+            .map(|n| {
+                let mut public = [0; 32];
+                public[..8].copy_from_slice(&n.to_be_bytes());
+                HistoryHead {
+                    account: burst_crypto::derive_address(&burst_types::PublicKey(public)),
+                    height: n + 1,
+                    hash: BlockHash::new([17; 32]),
+                }
+            })
+            .collect();
         heads.sort_by(|a, b| a.account.as_str().cmp(b.account.as_str()));
         for size in [1, 17, MAX_BLOCKS as usize] {
-            for (network, tag) in [(NetworkId::Live, 0), (NetworkId::Test, 1), (NetworkId::Dev, 2)] {
+            for (network, tag) in [
+                (NetworkId::Live, 0),
+                (NetworkId::Test, 1),
+                (NetworkId::Dev, 2),
+            ] {
                 // Independent oracle preserves the previous concatenated encoding.
                 let mut bytes = b"BURST/confirmed-history/v1\0".to_vec();
                 bytes.push(tag);
@@ -752,12 +772,16 @@ mod tests {
                 bytes.extend_from_slice(&u64::MAX.to_be_bytes());
                 bytes.extend_from_slice(&(size as u64).to_be_bytes());
                 for head in &heads[..size] {
-                    bytes.extend_from_slice(&burst_crypto::decode_address(head.account.as_str()).unwrap());
+                    bytes.extend_from_slice(
+                        &burst_crypto::decode_address(head.account.as_str()).unwrap(),
+                    );
                     bytes.extend_from_slice(&head.height.to_be_bytes());
                     bytes.extend_from_slice(head.hash.as_bytes());
                 }
-                assert_eq!(head_commitment(network, genesis, u64::MAX, &heads[..size]).unwrap(),
-                    BlockHash::new(burst_crypto::blake2b_256(&bytes)));
+                assert_eq!(
+                    head_commitment(network, genesis, u64::MAX, &heads[..size]).unwrap(),
+                    BlockHash::new(burst_crypto::blake2b_256(&bytes))
+                );
             }
         }
         assert!(head_commitment(NetworkId::Dev, genesis, 0, &[]).is_err());
@@ -772,8 +796,17 @@ mod tests {
             (heads[0].account.clone(), 0, genesis),
             (heads[0].account.clone(), 1, BlockHash::ZERO),
         ] {
-            assert!(head_commitment(NetworkId::Dev, genesis, 0,
-                &[HistoryHead { account, height, hash }]).is_err());
+            assert!(head_commitment(
+                NetworkId::Dev,
+                genesis,
+                0,
+                &[HistoryHead {
+                    account,
+                    height,
+                    hash
+                }]
+            )
+            .is_err());
         }
         heads.push(heads[0].clone());
         assert!(head_commitment(NetworkId::Dev, genesis, 0, &heads).is_err());
@@ -847,18 +880,26 @@ mod tests {
             let positions: HashMap<_, _> = roots.iter().enumerate().map(|(n, h)| (*h, n)).collect();
             for reverse in [false, true] {
                 let mut input = roots.clone();
-                if reverse { input.reverse(); }
+                if reverse {
+                    input.reverse();
+                }
                 input.extend_from_slice(&roots[..3]);
                 let mut reads = vec![0; count];
                 let order = causal_hash_order_after(input, &HashSet::new(), |h| {
                     let n = positions[h];
                     reads[n] += 1;
-                    let mut edges = if dense { roots[n + 1..].to_vec() }
-                        else { roots.get(n + 1).copied().into_iter().collect() };
+                    let mut edges = if dense {
+                        roots[n + 1..].to_vec()
+                    } else {
+                        roots.get(n + 1).copied().into_iter().collect()
+                    };
                     // Repeated edges must not repeat resolution or invent a cycle.
-                    if let Some(first) = edges.first().copied() { edges.push(first); }
+                    if let Some(first) = edges.first().copied() {
+                        edges.push(first);
+                    }
                     Ok(edges)
-                }).unwrap();
+                })
+                .unwrap();
                 assert_eq!(order, roots.iter().copied().rev().collect::<Vec<_>>());
                 assert!(reads.into_iter().all(|n| n == 1));
             }
@@ -868,9 +909,16 @@ mod tests {
     #[test]
     fn fallible_hash_inventory_fails_before_loading_dependencies() {
         let hash = BlockHash::new([7; 32]);
-        let error = causal_fallible_hash_order_after([
-            Ok(hash), Err(StoreError::Backend("inventory read failed".into())), Ok(hash),
-        ], &HashSet::new(), |_| panic!("partial inventory must never resolve dependencies")).unwrap_err();
+        let error = causal_fallible_hash_order_after(
+            [
+                Ok(hash),
+                Err(StoreError::Backend("inventory read failed".into())),
+                Ok(hash),
+            ],
+            &HashSet::new(),
+            |_| panic!("partial inventory must never resolve dependencies"),
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("inventory read failed"));
     }
 
@@ -1125,7 +1173,10 @@ mod tests {
                 .commitment();
         let mut canonical = heads.to_vec();
         canonical.sort_by(|a, b| a.account.as_str().cmp(b.account.as_str()));
-        assert_eq!(original, head_commitment(NetworkId::Dev, genesis.hash, 20, &canonical).unwrap());
+        assert_eq!(
+            original,
+            head_commitment(NetworkId::Dev, genesis.hash, 20, &canonical).unwrap()
+        );
         assert_ne!(
             original,
             ConfirmedHistory::read(&store, NetworkId::Dev, genesis.hash, 21, &heads, &[])

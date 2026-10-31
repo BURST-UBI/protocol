@@ -96,14 +96,37 @@ fn protoc_schema_and_rust_codec_agree_for_every_message() {
         );
         use burst_types::TrafficClass::{Bulk, Control};
         let expected = if body.starts_with("checkpoint_sync {") {
-            if body.contains("witness_chunk {") || body.contains("snapshot_chunk {")
-                || body.starts_with("checkpoint_sync { chunk {") { Bulk } else { Control }
-        } else if ["vote", "confirm_req", "confirm_ack", "keepalive", "handshake",
-            "verification_vote", "governance_vote", "telemetry_req", "telemetry_ack",
-            "checkpoint_agreement"].contains(&body.split_whitespace().next().unwrap()) {
+            if body.contains("witness_chunk {")
+                || body.contains("snapshot_chunk {")
+                || body.starts_with("checkpoint_sync { chunk {")
+            {
+                Bulk
+            } else {
+                Control
+            }
+        } else if [
+            "vote",
+            "confirm_req",
+            "confirm_ack",
+            "keepalive",
+            "handshake",
+            "verification_vote",
+            "governance_vote",
+            "telemetry_req",
+            "telemetry_ack",
+            "checkpoint_agreement",
+        ]
+        .contains(&body.split_whitespace().next().unwrap())
+        {
             Control
-        } else { Bulk };
-        assert_eq!(WireMessage::outbound_class(&output.stdout), expected, "{body}");
+        } else {
+            Bulk
+        };
+        assert_eq!(
+            WireMessage::outbound_class(&output.stdout),
+            expected,
+            "{body}"
+        );
         let decoded = WireMessage::decode(&output.stdout).unwrap();
         assert_eq!(
             decoded.encode().unwrap(),
@@ -134,5 +157,8 @@ fn previous_governance_protocol_is_not_silently_accepted() {
     assert_eq!(previous[1], burst_types::PROTOCOL_VERSION as u8);
     previous[1] = 36;
     assert!(WireMessage::decode(&previous).is_err());
-    assert_eq!(WireMessage::outbound_class(&previous), burst_types::TrafficClass::Bulk);
+    assert_eq!(
+        WireMessage::outbound_class(&previous),
+        burst_types::TrafficClass::Bulk
+    );
 }

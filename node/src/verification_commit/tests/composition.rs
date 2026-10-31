@@ -40,7 +40,8 @@ fn receive(f: &mut Fixture, receiver: u8, hash: TxHash) {
     let mut template =
         crate::block_economics::create_returned_token(&address(receiver), &hash, &pending);
     template.holder = address(receiver);
-    crate::block_economics::deliver_pending(&mut f.trst, &pending, template, test_time(300)).unwrap();
+    crate::block_economics::deliver_pending(&mut f.trst, &pending, template, test_time(300))
+        .unwrap();
     f.store
         .pending_store()
         .delete_pending(&address(receiver), &hash)
@@ -96,10 +97,12 @@ fn merged_fixture() -> (Fixture, TxHash) {
         .unwrap();
     f.trst.track_token(merged);
     let mut batch = f.store.tx_begin_write().unwrap();
-    batch.put_meta(
+    batch
+        .put_meta(
             crate::endorsement_commit::SNAPSHOT_KEY,
             &f.orchestrator.snapshot().encode().unwrap(),
-        ).unwrap();
+        )
+        .unwrap();
     batch.commit().unwrap();
     (f, origin)
 }
@@ -140,10 +143,12 @@ fn old_pending_has_no_receive_timeout_and_remains_claimable_after_restart() {
         f.params.trst_expiry_secs = expiry;
         f.trst.set_expiry_period(expiry, test_time(0)).unwrap();
         let mut batch = f.store.tx_begin_write().unwrap();
-        batch.put_meta(
-            crate::endorsement_commit::SNAPSHOT_KEY,
-            &f.orchestrator.snapshot().encode().unwrap(),
-        ).unwrap();
+        batch
+            .put_meta(
+                crate::endorsement_commit::SNAPSHOT_KEY,
+                &f.orchestrator.snapshot().encode().unwrap(),
+            )
+            .unwrap();
         batch.commit().unwrap();
         let destination =
             BlockHash::new(burst_crypto::decode_address(address(5).as_str()).unwrap());
@@ -216,10 +221,12 @@ fn old_pending_has_no_receive_timeout_and_remains_claimable_after_restart() {
 fn revoked_holder_keeps_clean_trst_and_spends_it_after_reverification_and_restart() {
     let mut f = Fixture::new();
     let mut batch = f.store.tx_begin_write().unwrap();
-    batch.put_meta(
+    batch
+        .put_meta(
             crate::endorsement_commit::SNAPSHOT_KEY,
             &f.orchestrator.snapshot().encode().unwrap(),
-        ).unwrap();
+        )
+        .unwrap();
     batch.commit().unwrap();
     let destination =
         |seed| BlockHash::new(burst_crypto::decode_address(address(seed).as_str()).unwrap());
@@ -323,7 +330,9 @@ fn expiry_return_receipt_does_not_double_count_revocation_or_restore_tainted_val
     assert_eq!(receipt.amount, 100);
     let extended_expiry = test_time(400).as_secs() - test_time(100).as_secs();
     f.params.trst_expiry_secs = extended_expiry;
-    f.trst.set_expiry_period(extended_expiry, test_time(320)).unwrap();
+    f.trst
+        .set_expiry_period(extended_expiry, test_time(320))
+        .unwrap();
     let mut batch = f.store.tx_begin_write().unwrap();
     crate::ledger_updater::persist_economics(&mut batch, &f.brn, &f.trst).unwrap();
     batch.commit().unwrap();
@@ -428,10 +437,12 @@ fn restored_pending_splits_survive_expiry_return_without_becoming_blended() {
 fn signed_payments_preserve_multiple_compositions_and_can_merge_the_received_remainder() {
     let mut f = Fixture::new();
     let mut batch = f.store.tx_begin_write().unwrap();
-    batch.put_meta(
+    batch
+        .put_meta(
             crate::endorsement_commit::SNAPSHOT_KEY,
             &f.orchestrator.snapshot().encode().unwrap(),
-        ).unwrap();
+        )
+        .unwrap();
     batch.commit().unwrap();
     let destination =
         |seed| BlockHash::new(burst_crypto::decode_address(address(seed).as_str()).unwrap());

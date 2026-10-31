@@ -775,7 +775,7 @@ mod tests {
         let mut e = Election::new(make_hash(1), 1000, ts(100));
         e.vote(&make_voter("alice"), make_hash(2), 700, false, ts(101));
         assert!(e.try_confirm(ts(102)).is_none()); // soft only
-        // Upgrade to final
+                                                   // Upgrade to final
         e.vote(&make_voter("alice"), make_hash(2), 700, true, ts(103));
         assert_eq!(e.final_tally.get(&make_hash(2)), Some(&700));
         assert!(e.try_confirm(ts(104)).is_some());

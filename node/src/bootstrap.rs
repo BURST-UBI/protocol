@@ -46,7 +46,6 @@ pub(crate) fn stored_blocks_after(
 }
 
 /// Bootstrap protocol messages — the ascending-bootstrap request/response pair.
-
 pub use burst_messages::bootstrap::{AscPullAckPayload, AscPullReqPayload, BootstrapMessage};
 
 /// Bootstrap server — responds to bootstrap requests from peers.
@@ -416,7 +415,6 @@ mod tests {
         )
     }
 
-
     fn encoded_block(
         account: WalletAddress,
         previous: BlockHash,
@@ -615,15 +613,22 @@ mod tests {
             .receive_blocks(id, "peer-b", std::slice::from_ref(&valid))
             .is_err());
         let (_, wrong_account) = encoded_block(test_account_2(), BlockHash::ZERO);
-        assert!(bootstrapper.receive_blocks(id, "peer-a", &[wrong_account]).is_err());
+        assert!(bootstrapper
+            .receive_blocks(id, "peer-a", &[wrong_account])
+            .is_err());
         let (_, wrong_start) = encoded_block(account, BlockHash::new([9; 32]));
-        assert!(bootstrapper.receive_blocks(id, "peer-a", &[wrong_start]).is_err());
+        assert!(bootstrapper
+            .receive_blocks(id, "peer-a", &[wrong_start])
+            .is_err());
         assert!(bootstrapper
             .receive_blocks(id, "peer-a", &[valid.clone(), valid.clone()])
             .is_err());
-        assert!(bootstrapper.receive_blocks(id, "peer-a", &[vec![0]]).is_err());
+        assert!(bootstrapper
+            .receive_blocks(id, "peer-a", &[vec![0]])
+            .is_err());
         assert_eq!(
-            bootstrapper.receive_blocks(id, "peer-a", std::slice::from_ref(&valid))
+            bootstrapper
+                .receive_blocks(id, "peer-a", std::slice::from_ref(&valid))
                 .unwrap()
                 .len(),
             1
@@ -658,7 +663,8 @@ mod tests {
         bootstrapper.enqueue(account, BlockHash::ZERO);
         let id = bootstrapper.next_requests(1)[0].0;
         bootstrapper.bind_peer(id, "peer");
-        bootstrapper.receive_blocks(id, "peer", &[first_bytes, second_bytes.clone()])
+        bootstrapper
+            .receive_blocks(id, "peer", &[first_bytes, second_bytes.clone()])
             .unwrap();
         bootstrapper.observe_persisted(|_| first.hash, |hash| *hash == first.hash);
         let next = bootstrapper.next_requests(2);
@@ -668,7 +674,9 @@ mod tests {
         );
         let id = next[0].0;
         bootstrapper.bind_peer(id, "peer");
-        bootstrapper.receive_blocks(id, "peer", &[second_bytes]).unwrap();
+        bootstrapper
+            .receive_blocks(id, "peer", &[second_bytes])
+            .unwrap();
         // No further persisted progress: retain the bounded timeout, not a spin.
         bootstrapper.observe_persisted(|_| first.hash, |hash| *hash == first.hash);
         assert!(bootstrapper.next_requests(3).is_empty());
@@ -806,7 +814,6 @@ mod tests {
             other => panic!("expected Frontiers ack, got {:?}", other),
         }
     }
-
 
     #[test]
     fn bootstrapper_respects_in_flight_budget_and_correlates() {

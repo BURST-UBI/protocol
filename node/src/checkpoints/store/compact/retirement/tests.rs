@@ -35,8 +35,7 @@ fn seed(directory: &std::path::Path) {
 
 fn stage_successor(batch: &mut LmdbWriteTransaction<'_>) {
     let prefix = prefix(&anchor());
-    record_storage::put(batch, &format!("{prefix}/14"), &vec![14; 16 * MIB])
-        .unwrap();
+    record_storage::put(batch, &format!("{prefix}/14"), &vec![14; 16 * MIB]).unwrap();
     batch
         .put_meta(&format!("{prefix}/head"), &14u64.to_be_bytes())
         .unwrap();
@@ -57,8 +56,8 @@ fn verify(store: &LmdbStore, committed: bool) {
     );
     for (height, size) in ROWS {
         let active = record_storage::get_batch(&batch, &format!("{prefix}/{height}")).unwrap();
-        let archived = record_storage::get_batch(&batch, &archived_record_key(&anchor, height))
-            .unwrap();
+        let archived =
+            record_storage::get_batch(&batch, &archived_record_key(&anchor, height)).unwrap();
         let bytes = if committed && height <= 10 {
             assert!(active.is_none());
             archived.unwrap()
@@ -78,12 +77,17 @@ fn verify(store: &LmdbStore, committed: bool) {
         assert!(next.is_none());
     }
     assert_eq!(
-        record_storage::get_batch(&batch, "unrelated-preference").unwrap().as_deref(),
+        record_storage::get_batch(&batch, "unrelated-preference")
+            .unwrap()
+            .as_deref(),
         Some(b"keep".as_slice())
     );
-    assert!(record_storage::get_batch(&batch, crate::confirmed_replay::snapshot::installed::BASE_KEY)
-        .unwrap()
-        .is_none());
+    assert!(record_storage::get_batch(
+        &batch,
+        crate::confirmed_replay::snapshot::installed::BASE_KEY
+    )
+    .unwrap()
+    .is_none());
 }
 
 #[test]
@@ -109,12 +113,16 @@ fn byte_pressure_retires_numeric_oldest_records_atomically_and_preserves_bytes()
             conflict
         );
         // Both earlier moves happened before the conflict at height 10.
-        assert!(record_storage::get_batch(&batch, &archived_record_key(&anchor, 1))
-            .unwrap()
-            .is_some());
-        assert!(record_storage::get_batch(&batch, &archived_record_key(&anchor, 2))
-            .unwrap()
-            .is_some());
+        assert!(
+            record_storage::get_batch(&batch, &archived_record_key(&anchor, 1))
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            record_storage::get_batch(&batch, &archived_record_key(&anchor, 2))
+                .unwrap()
+                .is_some()
+        );
         drop(batch);
         verify(&store, false);
     }

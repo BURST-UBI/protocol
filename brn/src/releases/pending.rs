@@ -1,11 +1,7 @@
 use super::StakeRelease;
 use burst_types::BlockHash;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::{
-    collections::BTreeMap,
-    ops::Index,
-    sync::Arc,
-};
+use std::{collections::BTreeMap, ops::Index, sync::Arc};
 
 /// Outcome-keyed release rows with derived totals and proof indexes. Only rows
 /// are serialized; loading rebuilds the indexes without validating the proofs.
@@ -33,31 +29,55 @@ mod tests {
             bytes[..8].copy_from_slice(&id.to_be_bytes());
             BlockHash::new(bytes)
         };
-        let rows: BTreeMap<_, _> = (1..=1024).map(|id| (hash(id), StakeRelease {
-            amount: id as u128,
-            sources: vec![hash(id), hash(2000), hash(2001)],
-            completed_at: Timestamp::new(10),
-        })).collect();
+        let rows: BTreeMap<_, _> = (1..=1024)
+            .map(|id| {
+                (
+                    hash(id),
+                    StakeRelease {
+                        amount: id as u128,
+                        sources: vec![hash(id), hash(2000), hash(2001)],
+                        completed_at: Timestamp::new(10),
+                    },
+                )
+            })
+            .collect();
         let before = PendingReleases::from(rows.clone());
         let bytes = bincode::serialize(&before).unwrap();
         assert_eq!(bytes, bincode::serialize(&rows).unwrap());
         let mut after = before.clone();
         assert!(before.rows.ptr_eq(&after.rows));
-        after.insert(hash(1), StakeRelease {
-            amount: 7, sources: vec![hash(2000)], completed_at: Timestamp::new(11),
-        });
+        after.insert(
+            hash(1),
+            StakeRelease {
+                amount: 7,
+                sources: vec![hash(2000)],
+                completed_at: Timestamp::new(11),
+            },
+        );
         after.remove(&hash(2));
         for id in 3..=1024 {
-            assert!(Arc::ptr_eq(&before.rows[&hash(id)], &after.rows[&hash(id)]),
-                "unchanged release proof was copied");
+            assert!(
+                Arc::ptr_eq(&before.rows[&hash(id)], &after.rows[&hash(id)]),
+                "unchanged release proof was copied"
+            );
         }
         assert_eq!(bincode::serialize(&before).unwrap(), bytes);
-        assert_eq!(after.total_checked(), Some(before.total_checked().unwrap() - 3 + 7));
-        assert_eq!(after.unindexed_outcomes().collect::<Vec<_>>(), vec![hash(1)]);
-        let restored: PendingReleases = bincode::deserialize(&bincode::serialize(&after).unwrap()).unwrap();
+        assert_eq!(
+            after.total_checked(),
+            Some(before.total_checked().unwrap() - 3 + 7)
+        );
+        assert_eq!(
+            after.unindexed_outcomes().collect::<Vec<_>>(),
+            vec![hash(1)]
+        );
+        let restored: PendingReleases =
+            bincode::deserialize(&bincode::serialize(&after).unwrap()).unwrap();
         assert_eq!(restored, after);
         assert_eq!(restored.total_checked(), after.total_checked());
-        assert_eq!(restored.has_more_sources(&[hash(2000)]), after.has_more_sources(&[hash(2000)]));
+        assert_eq!(
+            restored.has_more_sources(&[hash(2000)]),
+            after.has_more_sources(&[hash(2000)])
+        );
         let mut sibling = after.clone();
         assert!(sibling.unindexed.ptr_eq(&after.unindexed));
         sibling.remove(&hash(1));
@@ -75,13 +95,18 @@ impl Eq for PendingReleases {}
 
 impl Index<&BlockHash> for PendingReleases {
     type Output = StakeRelease;
-    fn index(&self, key: &BlockHash) -> &Self::Output { &self.rows[key] }
+    fn index(&self, key: &BlockHash) -> &Self::Output {
+        &self.rows[key]
+    }
 }
 
 impl From<BTreeMap<BlockHash, StakeRelease>> for PendingReleases {
     fn from(rows: BTreeMap<BlockHash, StakeRelease>) -> Self {
         let mut result = Self {
-            rows: rows.into_iter().map(|(key, value)| (key, Arc::new(value))).collect(),
+            rows: rows
+                .into_iter()
+                .map(|(key, value)| (key, Arc::new(value)))
+                .collect(),
             ..Self::default()
         };
         for (outcome, release) in &result.rows {
@@ -123,20 +148,33 @@ impl PendingReleases {
             match change {
                 DiffItem::Add(key, value) => emit(key, None, Some(value))?,
                 DiffItem::Remove(key, value) => emit(key, Some(value), None)?,
-                DiffItem::Update { old: (_, old), new: (key, new) } => emit(key, Some(old), Some(new))?,
+                DiffItem::Update {
+                    old: (_, old),
+                    new: (key, new),
+                } => emit(key, Some(old), Some(new))?,
             }
         }
         Ok(())
     }
 
-    pub fn len(&self) -> usize { self.rows.len() }
-    pub fn is_empty(&self) -> bool { self.rows.is_empty() }
-    pub fn contains_key(&self, key: &BlockHash) -> bool { self.rows.contains_key(key) }
-    pub fn get(&self, key: &BlockHash) -> Option<&StakeRelease> { self.rows.get(key).map(Arc::as_ref) }
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+    pub fn contains_key(&self, key: &BlockHash) -> bool {
+        self.rows.contains_key(key)
+    }
+    pub fn get(&self, key: &BlockHash) -> Option<&StakeRelease> {
+        self.rows.get(key).map(Arc::as_ref)
+    }
     pub fn iter(&self) -> impl ExactSizeIterator<Item = (&BlockHash, &StakeRelease)> {
         self.rows.iter().map(|(key, value)| (key, value.as_ref()))
     }
-    pub fn keys(&self) -> impl ExactSizeIterator<Item = &BlockHash> { self.rows.keys() }
+    pub fn keys(&self) -> impl ExactSizeIterator<Item = &BlockHash> {
+        self.rows.keys()
+    }
     pub fn values(&self) -> impl ExactSizeIterator<Item = &StakeRelease> {
         self.rows.values().map(Arc::as_ref)
     }
@@ -173,16 +211,24 @@ impl PendingReleases {
     }
 
     pub(super) fn has_more_sources(&self, selected: &[BlockHash]) -> bool {
-        if self.with_sources.is_empty() { return false }
+        if self.with_sources.is_empty() {
+            return false;
+        }
         let indexed = self.with_sources.len() - self.unindexed.len();
         // Each ordinary proof includes its unique map key. More such proofs
         // than selected hashes cannot all be covered.
-        if indexed > selected.len() { return true }
+        if indexed > selected.len() {
+            return true;
+        }
         if self.rows.len() <= selected.len() {
             // A scan is bounded by the caller's selected length here and avoids
             // extra tree lookups for small or fully covered backlogs.
-            return self.rows.values().any(|release| release.sources.iter()
-                .any(|source| selected.binary_search(source).is_err()));
+            return self.rows.values().any(|release| {
+                release
+                    .sources
+                    .iter()
+                    .any(|source| selected.binary_search(source).is_err())
+            });
         }
         if indexed != 0 {
             let candidates = if selected.windows(2).all(|pair| pair[0] <= pair[1]) {
@@ -195,28 +241,48 @@ impl PendingReleases {
             let mut covered = 0;
             let mut previous = None;
             for outcome in candidates.iter() {
-                if previous == Some(outcome) { continue }
+                if previous == Some(outcome) {
+                    continue;
+                }
                 previous = Some(outcome);
-                if self.unindexed.contains(outcome) { continue }
-                let Some(release) = self.rows.get(outcome) else { continue };
-                if release.sources.is_empty() { continue }
+                if self.unindexed.contains(outcome) {
+                    continue;
+                }
+                let Some(release) = self.rows.get(outcome) else {
+                    continue;
+                };
+                if release.sources.is_empty() {
+                    continue;
+                }
                 // Membership uses binary search on the original slice; callers
                 // must supply sorted hashes for a meaningful coverage result.
-                if release.sources.iter().any(|source| selected.binary_search(source).is_err()) {
+                if release
+                    .sources
+                    .iter()
+                    .any(|source| selected.binary_search(source).is_err())
+                {
                     return true;
                 }
                 covered += 1;
             }
-            if covered != indexed { return true }
+            if covered != indexed {
+                return true;
+            }
         }
         // Raw loaded proofs may omit their outcome key, so inspect those rows
         // separately. Normal indexed proofs need no unrelated-row scan.
-        self.unindexed.iter().any(|outcome| self.rows[outcome].sources.iter()
-            .any(|source| selected.binary_search(source).is_err()))
+        self.unindexed.iter().any(|outcome| {
+            self.rows[outcome]
+                .sources
+                .iter()
+                .any(|source| selected.binary_search(source).is_err())
+        })
     }
 
     #[cfg(test)]
-    pub(super) fn nonempty_count(&self) -> usize { self.with_sources.len() }
+    pub(super) fn nonempty_count(&self) -> usize {
+        self.with_sources.len()
+    }
 
     /// Return the cached sum if it fits u128. Carries are retained so removal
     /// can bring an overflowing total back into range without rescanning rows.

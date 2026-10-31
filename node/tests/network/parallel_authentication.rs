@@ -8,8 +8,6 @@ use burst_wallet_core::NodeClient;
 use serde_json::json;
 use std::time::Duration;
 
-
-
 async fn submit(
     client: &NodeClient,
     block: &StateBlock,
@@ -79,7 +77,9 @@ async fn concurrent_accounts_recover_gaps_reject_invalid_blocks_and_persist() {
     let epoch = store.meta_store().payment_epoch().unwrap();
     let shutdown = node.shutdown.clone();
     let task = tokio::spawn(async move {
-        node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+        node.start_with_services(burst_daemon::start_public_services)
+            .await
+            .unwrap();
         node.stop().await.unwrap();
     });
     let url = format!("http://127.0.0.1:{}", config.rpc_port);

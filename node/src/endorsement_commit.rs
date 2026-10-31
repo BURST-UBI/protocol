@@ -227,7 +227,11 @@ mod tests {
         };
         let mut batch = store.tx_begin_write().unwrap();
         crate::bootstrap_phase::initialize(&mut batch, &params).unwrap();
-        batch.put_meta(SNAPSHOT_KEY, &VerificationOrchestrator::new().snapshot().encode().unwrap())
+        batch
+            .put_meta(
+                SNAPSHOT_KEY,
+                &VerificationOrchestrator::new().snapshot().encode().unwrap(),
+            )
             .unwrap();
         batch.migrate_verification_records().unwrap();
         batch.commit().unwrap();
@@ -238,9 +242,15 @@ mod tests {
             let mut candidate = restore(&batch).unwrap();
             assert!(candidate.shares_record_storage_with(&before));
             apply(
-                &mut batch, &block, 10, NetworkId::Dev, &params, &mut candidate,
+                &mut batch,
+                &block,
+                10,
+                NetworkId::Dev,
+                &params,
+                &mut candidate,
                 (&mut BrnEngine::new(), &mut TrstEngine::new()),
-            ).unwrap();
+            )
+            .unwrap();
             let staged = restore(&batch).unwrap();
             assert!(staged.get_state(&target).is_some());
             assert!(staged.shares_record_storage_with(&candidate));
@@ -252,7 +262,10 @@ mod tests {
                 drop(batch);
             }
             let batch = store.tx_begin_write().unwrap();
-            assert_eq!(restore(&batch).unwrap().get_state(&target).is_some(), commit);
+            assert_eq!(
+                restore(&batch).unwrap().get_state(&target).is_some(),
+                commit
+            );
         }
         drop(store);
         let store = LmdbStore::open(dir.path(), 32, 16 * 1024 * 1024).unwrap();

@@ -1,10 +1,12 @@
-use super::{account_not_found, governance_projection, deserialize_proposal, require_faucet, parse_private_key,
-    signing_predecessor, build_and_sign_block, submit_and_confirm};
-use super::helpers::{validate_hash, parse_tx_hash, to_value};
+use super::helpers::{parse_tx_hash, to_value, validate_hash};
+use super::{
+    account_not_found, build_and_sign_block, deserialize_proposal, governance_projection,
+    parse_private_key, require_faucet, signing_predecessor, submit_and_confirm,
+};
 use crate::{error::RpcError, pagination, state::RpcState};
 use burst_governance::Proposal;
-use burst_types::{BlockHash, Timestamp, TxHash};
 use burst_store::StoreError;
+use burst_types::{BlockHash, Timestamp, TxHash};
 
 /// Return hash-ordered proposals, projecting scheduled phases when a reader or
 /// engine is available. The store-only fallback skips unreadable proposal rows;

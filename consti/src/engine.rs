@@ -10,8 +10,8 @@ use burst_governance::proposal::GovernancePhase;
 use burst_types::{TxHash, WalletAddress};
 use std::collections::HashMap;
 
-mod snapshot_undo;
 mod retention;
+mod snapshot_undo;
 mod snapshot_view;
 pub use snapshot_view::SnapshotView;
 
@@ -147,10 +147,7 @@ impl ConstiEngine {
     /// Apply the patch and mark it activated. Reject an already activated or
     /// conflicted stored amendment. The caller must establish approval and
     /// activation timing; this method does not check a quorum certificate.
-    pub fn activate_amendment(
-        &mut self,
-        amendment: &Amendment,
-    ) -> Result<(), ConstiError> {
+    pub fn activate_amendment(&mut self, amendment: &Amendment) -> Result<(), ConstiError> {
         if self.amendments.get(&amendment.hash).is_some_and(|saved| {
             matches!(
                 saved.phase,
@@ -720,7 +717,9 @@ mod tests {
                 text: "Original text.".to_string(),
             }],
         );
-        engine.apply_amendment_to_document(&add, &mut document).unwrap();
+        engine
+            .apply_amendment_to_document(&add, &mut document)
+            .unwrap();
         assert_eq!(document.get_article(1).unwrap().text, "Original text.");
 
         let modify = create_diff_amendment(
@@ -730,7 +729,9 @@ mod tests {
                 new_text: "Updated and improved text.".to_string(),
             }],
         );
-        engine.apply_amendment_to_document(&modify, &mut document).unwrap();
+        engine
+            .apply_amendment_to_document(&modify, &mut document)
+            .unwrap();
 
         assert_eq!(document.version, 2);
         let article = document.get_article(1).unwrap();
@@ -768,14 +769,18 @@ mod tests {
                 text: "This rule is temporary.".to_string(),
             }],
         );
-        engine.apply_amendment_to_document(&add, &mut document).unwrap();
+        engine
+            .apply_amendment_to_document(&add, &mut document)
+            .unwrap();
         assert_eq!(document.article_count(), 1);
 
         let repeal = create_diff_amendment(
             "Repeal Obsolete".to_string(),
             vec![AmendmentOp::RepealArticle { article_number: 1 }],
         );
-        engine.apply_amendment_to_document(&repeal, &mut document).unwrap();
+        engine
+            .apply_amendment_to_document(&repeal, &mut document)
+            .unwrap();
 
         assert_eq!(document.version, 2);
         assert_eq!(document.article_count(), 0);
@@ -798,13 +803,17 @@ mod tests {
                 text: "Temp text.".to_string(),
             }],
         );
-        engine.apply_amendment_to_document(&add, &mut document).unwrap();
+        engine
+            .apply_amendment_to_document(&add, &mut document)
+            .unwrap();
 
         let repeal = create_diff_amendment(
             "First Repeal".to_string(),
             vec![AmendmentOp::RepealArticle { article_number: 1 }],
         );
-        engine.apply_amendment_to_document(&repeal, &mut document).unwrap();
+        engine
+            .apply_amendment_to_document(&repeal, &mut document)
+            .unwrap();
 
         let repeal2 = create_diff_amendment(
             "Double Repeal".to_string(),
@@ -845,7 +854,9 @@ mod tests {
                 },
             ],
         );
-        engine.apply_amendment_to_document(&setup, &mut document).unwrap();
+        engine
+            .apply_amendment_to_document(&setup, &mut document)
+            .unwrap();
         assert_eq!(document.article_count(), 2);
 
         // Complex amendment: modify one, repeal another, add a new one
@@ -864,7 +875,9 @@ mod tests {
                 },
             ],
         );
-        engine.apply_amendment_to_document(&complex, &mut document).unwrap();
+        engine
+            .apply_amendment_to_document(&complex, &mut document)
+            .unwrap();
 
         assert_eq!(document.version, 2);
         // 2 active articles (article 1 modified, article 2 repealed, article 3 added)

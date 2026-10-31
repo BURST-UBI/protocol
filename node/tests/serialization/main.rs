@@ -383,7 +383,12 @@ proptest! {
 fn stress_lmdb_1000_accounts() {
     use burst_store::account::AccountStore;
     let dir = tempfile::tempdir().unwrap();
-    let env = burst_store_lmdb::LmdbEnvironment::open(dir.path(), burst_store_lmdb::REQUIRED_DATABASES, 256 * 1024 * 1024).unwrap();
+    let env = burst_store_lmdb::LmdbEnvironment::open(
+        dir.path(),
+        burst_store_lmdb::REQUIRED_DATABASES,
+        256 * 1024 * 1024,
+    )
+    .unwrap();
     let store = env.account_store();
 
     let accounts: Vec<AccountInfo> = (0u16..1000)
@@ -438,7 +443,12 @@ fn stress_lmdb_1000_accounts() {
 fn stress_lmdb_1000_pending_entries() {
     use burst_store::pending::PendingStore;
     let dir = tempfile::tempdir().unwrap();
-    let env = burst_store_lmdb::LmdbEnvironment::open(dir.path(), burst_store_lmdb::REQUIRED_DATABASES, 256 * 1024 * 1024).unwrap();
+    let env = burst_store_lmdb::LmdbEnvironment::open(
+        dir.path(),
+        burst_store_lmdb::REQUIRED_DATABASES,
+        256 * 1024 * 1024,
+    )
+    .unwrap();
     let store = env.pending_store();
 
     let dest = WalletAddress::new("brst_destination0000000000000000");
@@ -467,7 +477,12 @@ fn stress_lmdb_1000_pending_entries() {
 fn stress_lmdb_account_pagination() {
     use burst_store::account::AccountStore;
     let dir = tempfile::tempdir().unwrap();
-    let env = burst_store_lmdb::LmdbEnvironment::open(dir.path(), burst_store_lmdb::REQUIRED_DATABASES, 256 * 1024 * 1024).unwrap();
+    let env = burst_store_lmdb::LmdbEnvironment::open(
+        dir.path(),
+        burst_store_lmdb::REQUIRED_DATABASES,
+        256 * 1024 * 1024,
+    )
+    .unwrap();
     let store = env.account_store();
 
     for i in 0u16..100 {
@@ -519,7 +534,12 @@ fn stress_lmdb_account_pagination() {
 fn dropped_write_batch_preserves_committed_blocks() {
     use burst_store::block::BlockStore;
     let dir = tempfile::tempdir().unwrap();
-    let env = burst_store_lmdb::LmdbEnvironment::open(dir.path(), burst_store_lmdb::REQUIRED_DATABASES, 64 * 1024 * 1024).unwrap();
+    let env = burst_store_lmdb::LmdbEnvironment::open(
+        dir.path(),
+        burst_store_lmdb::REQUIRED_DATABASES,
+        64 * 1024 * 1024,
+    )
+    .unwrap();
 
     let hash1 = BlockHash::new([1u8; 32]);
     let hash2 = BlockHash::new([2u8; 32]);

@@ -1,6 +1,6 @@
 //! Borrowed reads from one LMDB transaction, including a writer's pending changes.
-use crate::{LmdbEnvironment, LmdbError, write_batch::CleanStorageCut};
-use burst_store::{StoreError, account::AccountInfo};
+use crate::{write_batch::CleanStorageCut, LmdbEnvironment, LmdbError};
+use burst_store::{account::AccountInfo, StoreError};
 use heed::RoTxn;
 
 /// Borrows its transaction and environment; exposes no mutation or commit API.
@@ -13,52 +13,91 @@ pub struct LedgerReadView<'a> {
 }
 
 impl<'a> LedgerReadView<'a> {
-    pub(crate) fn new(env: &'a LmdbEnvironment, txn: &'a RoTxn<'a>, cut: Option<CleanStorageCut>) -> Self {
+    pub(crate) fn new(
+        env: &'a LmdbEnvironment,
+        txn: &'a RoTxn<'a>,
+        cut: Option<CleanStorageCut>,
+    ) -> Self {
         Self { env, txn, cut }
     }
 
     /// Read up to 257 retained roots of an unfinished historical-head migration.
-    pub fn checkpoint_head_staging(&self, id: &crate::checkpoint_heads::NodeHash)
-        -> Result<Vec<crate::checkpoint_heads::NodeHash>, StoreError> {
-        crate::checkpoint_heads::read_staging(self.env.meta_db, self.env.checkpoint_heads_db, self.txn, id)
+    pub fn checkpoint_head_staging(
+        &self,
+        id: &crate::checkpoint_heads::NodeHash,
+    ) -> Result<Vec<crate::checkpoint_heads::NodeHash>, StoreError> {
+        crate::checkpoint_heads::read_staging(
+            self.env.meta_db,
+            self.env.checkpoint_heads_db,
+            self.txn,
+            id,
+        )
     }
 
     /// Checks only the first durable cleanup entry; does not scan historical nodes.
     pub fn checkpoint_heads_need_cleanup(&self) -> Result<bool, StoreError> {
-        Ok(crate::checkpoint_heads::next_unowned(self.env.checkpoint_heads_db, self.txn)?.is_some())
+        Ok(
+            crate::checkpoint_heads::next_unowned(self.env.checkpoint_heads_db, self.txn)?
+                .is_some(),
+        )
     }
 
-    pub fn clean_storage_cut(&self) -> Option<CleanStorageCut> { self.cut.clone() }
+    pub fn clean_storage_cut(&self) -> Option<CleanStorageCut> {
+        self.cut.clone()
+    }
 
-    pub fn storage_directory(&self) -> &'a std::path::Path { self.env.env().path() }
+    pub fn storage_directory(&self) -> &'a std::path::Path {
+        self.env.env().path()
+    }
 
     pub fn visit_indexed_block_window(
-        &self, after: Option<burst_types::BlockHash>, max_rows: usize, max_bytes: usize,
+        &self,
+        after: Option<burst_types::BlockHash>,
+        max_rows: usize,
+        max_bytes: usize,
         visit: impl FnMut(crate::block::IndexedBlock<'a>) -> Result<(), StoreError>,
     ) -> Result<crate::block::IndexedBlockWindow, StoreError> {
-        crate::block::inventory::visit_window(self.txn, self.env.blocks_db,
-            self.env.height_db, self.env.block_height_db, after, max_rows, max_bytes, visit)
+        crate::block::inventory::visit_window(
+            self.txn,
+            self.env.blocks_db,
+            self.env.height_db,
+            self.env.block_height_db,
+            after,
+            max_rows,
+            max_bytes,
+            visit,
+        )
     }
 
     /// Visit at most 131,072 metadata rows and 64 MiB of keys plus values.
     /// Errors can follow earlier callbacks; stage callback side effects until success.
-    pub fn visit_checkpoint_metadata(&self, prefix: &[u8],
-        mut visit: impl FnMut(&[u8], &[u8]) -> Result<(), StoreError>) -> Result<(), StoreError> {
+    pub fn visit_checkpoint_metadata(
+        &self,
+        prefix: &[u8],
+        mut visit: impl FnMut(&[u8], &[u8]) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
         let db = self.env.meta_db;
         let mut total = 0usize;
-        let iter: Box<dyn Iterator<Item = Result<(&[u8], &[u8]), heed::Error>> + '_> = match (!prefix.is_empty()).then_some(prefix) {
-            Some(prefix) => Box::new(db.prefix_iter(&self.txn, prefix).map_err(LmdbError::from)?),
-            None => Box::new(db.iter(&self.txn).map_err(LmdbError::from)?),
-        };
+        let iter: Box<dyn Iterator<Item = Result<(&[u8], &[u8]), heed::Error>> + '_> =
+            match (!prefix.is_empty()).then_some(prefix) {
+                Some(prefix) => {
+                    Box::new(db.prefix_iter(&self.txn, prefix).map_err(LmdbError::from)?)
+                }
+                None => Box::new(db.iter(&self.txn).map_err(LmdbError::from)?),
+            };
         for (count, row) in iter.enumerate() {
             let (key, value) = row.map_err(LmdbError::from)?;
             total = total
                 .checked_add(key.len())
                 .and_then(|n| n.checked_add(value.len()))
                 .filter(|n| *n <= (64 << 20))
-                .ok_or_else(|| StoreError::Corruption("checkpoint scan exceeds byte limit".into()))?;
+                .ok_or_else(|| {
+                    StoreError::Corruption("checkpoint scan exceeds byte limit".into())
+                })?;
             if count == 131_072 {
-                return Err(StoreError::Corruption("checkpoint scan exceeds row limit".into()));
+                return Err(StoreError::Corruption(
+                    "checkpoint scan exceeds row limit".into(),
+                ));
             }
             visit(key, value)?;
         }
@@ -72,7 +111,8 @@ impl<'a> LedgerReadView<'a> {
 
     /// Visit the same bounded encoding scan with caller-owned interruption checks.
     pub fn verify_checkpoint_undo_encoding_with_poll(
-        &self, mut checkpoint: impl FnMut(&'static str) -> Result<(), StoreError>,
+        &self,
+        mut checkpoint: impl FnMut(&'static str) -> Result<(), StoreError>,
     ) -> Result<(), StoreError> {
         self.visit_checkpoint_metadata(b"block_undo/", |key, bytes| {
             checkpoint("storage:undo-row")?;
@@ -80,23 +120,38 @@ impl<'a> LedgerReadView<'a> {
                 .strip_prefix(crate::block_undo::PREFIX)
                 .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
                 .map(burst_types::BlockHash::new)
-                .ok_or_else(|| StoreError::Corruption("invalid block undo key or version".into()))?;
+                .ok_or_else(|| {
+                    StoreError::Corruption("invalid block undo key or version".into())
+                })?;
             crate::block_undo::BlockUndo::decode(&hash, bytes)?;
             Ok(())
         })
     }
 
     /// Borrow physical rows only. This does not reconstruct virtual undo images.
-    pub fn undo_value_ref(&self, table: crate::block_undo::UndoTable, key: &[u8])
-        -> Result<Option<&'a [u8]>, StoreError> {
-        table.database(self.env).get(self.txn, key).map_err(LmdbError::from).map_err(Into::into)
+    pub fn undo_value_ref(
+        &self,
+        table: crate::block_undo::UndoTable,
+        key: &[u8],
+    ) -> Result<Option<&'a [u8]>, StoreError> {
+        table
+            .database(self.env)
+            .get(self.txn, key)
+            .map_err(LmdbError::from)
+            .map_err(Into::into)
     }
 
     /// Borrow BRN wallet rows within cumulative row and key/value byte limits.
     /// Keys are checked for UTF-8 and prefix; values remain undecoded. Stop
     /// consuming on error. These limits do not bound LMDB pages retained by the view.
-    pub fn bounded_brn_entries(&self, limit: usize, byte_limit: usize)
-        -> Result<impl Iterator<Item = Result<(burst_types::WalletAddress, &'a [u8]), StoreError>> + 'a, StoreError> {
+    pub fn bounded_brn_entries(
+        &self,
+        limit: usize,
+        byte_limit: usize,
+    ) -> Result<
+        impl Iterator<Item = Result<(burst_types::WalletAddress, &'a [u8]), StoreError>> + 'a,
+        StoreError,
+    > {
         let mut count = 0usize;
         let mut total = 0usize;
         let rows = self
@@ -119,28 +174,41 @@ impl<'a> LedgerReadView<'a> {
             count += 1;
             Ok((address, bytes))
         }))
-        }
+    }
 
     /// Raw node integrity only; historical certificates still require authentication.
-    pub fn checkpoint_head_node(&self, hash: &[u8; 32])
-        -> Result<Option<crate::checkpoint_heads::HeadNode>, StoreError> {
+    pub fn checkpoint_head_node(
+        &self,
+        hash: &[u8; 32],
+    ) -> Result<Option<crate::checkpoint_heads::HeadNode>, StoreError> {
         crate::checkpoint_heads::read(self.env.checkpoint_heads_db, self.txn, hash)
             .map(|row| row.map(|(_, node)| node))
     }
 
     pub fn get_meta(&self, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
-        self.env.meta_db.get(self.txn, key.as_bytes())
+        self.env
+            .meta_db
+            .get(self.txn, key.as_bytes())
             .map(|value| value.map(<[u8]>::to_vec))
             .map_err(|error| StoreError::Backend(error.to_string()))
     }
 
     pub fn contains_meta(&self, key: &str) -> Result<bool, StoreError> {
-        self.env.meta_db.get(self.txn, key.as_bytes()).map(|value| value.is_some())
+        self.env
+            .meta_db
+            .get(self.txn, key.as_bytes())
+            .map(|value| value.is_some())
             .map_err(|error| StoreError::Backend(error.to_string()))
     }
 
-    pub fn account_entries(&self) -> Result<impl Iterator<Item = Result<AccountInfo, StoreError>> + 'a, StoreError> {
-        let entries = self.env.accounts_db.iter(self.txn).map_err(LmdbError::from)?;
+    pub fn account_entries(
+        &self,
+    ) -> Result<impl Iterator<Item = Result<AccountInfo, StoreError>> + 'a, StoreError> {
+        let entries = self
+            .env
+            .accounts_db
+            .iter(self.txn)
+            .map_err(LmdbError::from)?;
         Ok(entries.map(|entry| {
             let (key, bytes) = entry.map_err(LmdbError::from)?;
             crate::account::decode_account_entry(key, bytes)
@@ -148,13 +216,26 @@ impl<'a> LedgerReadView<'a> {
     }
 
     /// Keep the existing per-record bound; callers own aggregate work budgets.
-    pub fn checkpoint_metadata_entries(&self, prefix: &'a [u8])
-        -> Result<impl Iterator<Item = Result<(&'a [u8], &'a [u8]), StoreError>> + 'a, StoreError> {
-        let rows = self.env.meta_db.prefix_iter(self.txn, prefix).map_err(LmdbError::from)?;
+    pub fn checkpoint_metadata_entries(
+        &self,
+        prefix: &'a [u8],
+    ) -> Result<impl Iterator<Item = Result<(&'a [u8], &'a [u8]), StoreError>> + 'a, StoreError>
+    {
+        let rows = self
+            .env
+            .meta_db
+            .prefix_iter(self.txn, prefix)
+            .map_err(LmdbError::from)?;
         Ok(rows.map(|row| {
             let (key, value) = row.map_err(LmdbError::from)?;
-            if key.len().checked_add(value.len()).is_none_or(|bytes| bytes > 64 << 20) {
-                return Err(StoreError::Corruption("checkpoint metadata row exceeds byte limit".into()));
+            if key
+                .len()
+                .checked_add(value.len())
+                .is_none_or(|bytes| bytes > 64 << 20)
+            {
+                return Err(StoreError::Corruption(
+                    "checkpoint metadata row exceeds byte limit".into(),
+                ));
             }
             Ok((key, value))
         }))
@@ -162,13 +243,25 @@ impl<'a> LedgerReadView<'a> {
 
     /// Borrow pending rows with a 64 MiB bound per key/value pair. The caller
     /// decodes each receipt and bounds the total scan.
-    pub fn pending_entries(&self)
-        -> Result<impl Iterator<Item = Result<(&'a [u8], &'a [u8]), StoreError>> + 'a, StoreError> {
-        let rows = self.env.pending_db.iter(self.txn).map_err(LmdbError::from)?;
+    pub fn pending_entries(
+        &self,
+    ) -> Result<impl Iterator<Item = Result<(&'a [u8], &'a [u8]), StoreError>> + 'a, StoreError>
+    {
+        let rows = self
+            .env
+            .pending_db
+            .iter(self.txn)
+            .map_err(LmdbError::from)?;
         Ok(rows.map(|row| {
             let (key, bytes) = row.map_err(LmdbError::from)?;
-            if key.len().checked_add(bytes.len()).is_none_or(|size| size > 64 << 20) {
-                return Err(StoreError::Corruption("pending row exceeds byte limit".into()));
+            if key
+                .len()
+                .checked_add(bytes.len())
+                .is_none_or(|size| size > 64 << 20)
+            {
+                return Err(StoreError::Corruption(
+                    "pending row exceeds byte limit".into(),
+                ));
             }
             Ok((key, bytes))
         }))
@@ -178,22 +271,28 @@ impl<'a> LedgerReadView<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burst_types::{WalletAddress, BlockHash};
+    use burst_types::{BlockHash, WalletAddress};
 
     #[test]
     fn pinned_view_keeps_rows_and_identity_while_writer_commits() {
         let directory = tempfile::tempdir().unwrap();
-        let env = std::sync::Arc::new(LmdbEnvironment::open(directory.path(), 32, 32 << 20).unwrap());
+        let env =
+            std::sync::Arc::new(LmdbEnvironment::open(directory.path(), 32, 32 << 20).unwrap());
         let address = WalletAddress::new("brst_read_view_account");
         let mut account = AccountInfo::unopened(address.clone());
         let mut writer = env.tx_begin_write().unwrap();
         writer.put_meta("read_view/a", b"before").unwrap();
         writer.put_account_info(&account, false).unwrap();
         let pending = burst_store::pending::PendingInfo {
-            source: address.clone(), amount: 5, timestamp: burst_types::Timestamp::new(1),
-            provenance: Vec::new(), return_credit: false,
+            source: address.clone(),
+            amount: 5,
+            timestamp: burst_types::Timestamp::new(1),
+            provenance: Vec::new(),
+            return_credit: false,
         };
-        writer.put_pending(&address, &[9; 32], &bincode::serialize(&pending).unwrap()).unwrap();
+        writer
+            .put_pending(&address, &[9; 32], &bincode::serialize(&pending).unwrap())
+            .unwrap();
         writer.commit().unwrap();
         let reader = env.tx_begin_read().unwrap();
         let view = env.read_view(&reader).unwrap();
@@ -212,25 +311,66 @@ mod tests {
             writer.commit().unwrap();
             sent.send(()).unwrap();
         });
-        received.recv_timeout(std::time::Duration::from_secs(5)).expect("pinned read blocked the writer");
+        received
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("pinned read blocked the writer");
         thread.join().unwrap();
-        assert_eq!(view.get_meta("read_view/a").unwrap(), Some(b"before".to_vec()));
+        assert_eq!(
+            view.get_meta("read_view/a").unwrap(),
+            Some(b"before".to_vec())
+        );
         assert!(!view.contains_meta("read_view/b").unwrap());
-        assert_eq!(view.checkpoint_metadata_entries(b"read_view/").unwrap().count(), 1);
-        let pending_rows = view.pending_entries().unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(
+            view.checkpoint_metadata_entries(b"read_view/")
+                .unwrap()
+                .count(),
+            1
+        );
+        let pending_rows = view
+            .pending_entries()
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
         assert_eq!(pending_rows.len(), 1);
-        assert_eq!(bincode::deserialize::<burst_store::pending::PendingInfo>(pending_rows[0].1).unwrap(), pending);
-        assert_eq!(view.account_entries().unwrap().next().unwrap().unwrap().block_count, 0);
+        assert_eq!(
+            bincode::deserialize::<burst_store::pending::PendingInfo>(pending_rows[0].1).unwrap(),
+            pending
+        );
+        assert_eq!(
+            view.account_entries()
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .block_count,
+            0
+        );
         assert!(before.same_committed_view(&view.clean_storage_cut().unwrap()));
-        assert!(before.body_dependencies_unchanged(&view.clean_storage_cut().unwrap(), &env).unwrap());
-        drop(view); drop(reader);
+        assert!(before
+            .body_dependencies_unchanged(&view.clean_storage_cut().unwrap(), &env)
+            .unwrap());
+        drop(view);
+        drop(reader);
         let current = env.tx_begin_read().unwrap();
         let view = env.read_view(&current).unwrap();
-        assert_eq!(view.get_meta("read_view/a").unwrap(), Some(b"after".to_vec()));
-        assert_eq!(view.account_entries().unwrap().next().unwrap().unwrap().block_count, 1);
+        assert_eq!(
+            view.get_meta("read_view/a").unwrap(),
+            Some(b"after".to_vec())
+        );
+        assert_eq!(
+            view.account_entries()
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .block_count,
+            1
+        );
         assert!(view.pending_entries().unwrap().next().is_none());
         assert!(!before.same_committed_view(&view.clean_storage_cut().unwrap()));
-        assert!(!before.body_dependencies_unchanged(&view.clean_storage_cut().unwrap(), &env).unwrap());
+        assert!(!before
+            .body_dependencies_unchanged(&view.clean_storage_cut().unwrap(), &env)
+            .unwrap());
     }
 
     #[test]
@@ -249,7 +389,11 @@ mod tests {
                 writer.commit()
             };
             write(0).unwrap();
-            let watch = env.tx_begin_write().unwrap().watch_body_changes(65_536, 64 << 20).unwrap();
+            let watch = env
+                .tx_begin_write()
+                .unwrap()
+                .watch_body_changes(65_536, 64 << 20)
+                .unwrap();
             let reader = pinned.then(|| env.tx_begin_read().unwrap());
             let measure = |stage: &str| {
                 let info = env.env().info();
@@ -267,7 +411,8 @@ mod tests {
                 match write(n as u8) {
                     Ok(()) => completed += 1,
                     Err(StoreError::MapFull(message))
-                        if message == heed::Error::Mdb(heed::MdbError::MapFull).to_string() => {
+                        if message == heed::Error::Mdb(heed::MdbError::MapFull).to_string() =>
+                    {
                         capacity = true;
                         break;
                     }
@@ -275,12 +420,23 @@ mod tests {
                 }
             }
             eprintln!("MVCC_PROBE pinned={pinned} completed={completed} map_full={capacity} elapsed_us={}", started.elapsed().as_micros());
-            assert_eq!(capacity, pinned, "same fixed overwrite workload differs only by reader retention");
+            assert_eq!(
+                capacity, pinned,
+                "same fixed overwrite workload differs only by reader retention"
+            );
             assert!(completed > 0);
-            if !pinned { assert_eq!(completed, WRITES); }
+            if !pinned {
+                assert_eq!(completed, WRITES);
+            }
             measure("overwritten");
             if let Some(reader) = &reader {
-                assert_eq!(env.read_view(reader).unwrap().get_meta("read_view/mvcc").unwrap(), Some(vec![0; VALUE]));
+                assert_eq!(
+                    env.read_view(reader)
+                        .unwrap()
+                        .get_meta("read_view/mvcc")
+                        .unwrap(),
+                    Some(vec![0; VALUE])
+                );
             }
             // The failed transaction rolls back, and observer capacity still
             // covers the current cut: its byte limit did not bound native pages.
@@ -289,11 +445,18 @@ mod tests {
             drop(reader);
             {
                 let reader = env.tx_begin_read().unwrap();
-                assert_eq!(env.read_view(&reader).unwrap().get_meta("read_view/mvcc").unwrap(),
-                    Some(vec![completed as u8; VALUE]));
+                assert_eq!(
+                    env.read_view(&reader)
+                        .unwrap()
+                        .get_meta("read_view/mvcc")
+                        .unwrap(),
+                    Some(vec![completed as u8; VALUE])
+                );
             }
             drop(watch);
-            for n in 0..WRITES { write(255 - n as u8).unwrap(); }
+            for n in 0..WRITES {
+                write(255 - n as u8).unwrap();
+            }
             measure("released-and-reused");
         }
 
@@ -301,31 +464,61 @@ mod tests {
         // The undo record adds another value-sized write during commit itself.
         let directory = tempfile::tempdir().unwrap();
         let env = LmdbEnvironment::open(directory.path(), 32, MAP).unwrap();
-        let watch = env.tx_begin_write().unwrap().watch_body_changes(65_536, 64 << 20).unwrap();
+        let watch = env
+            .tx_begin_write()
+            .unwrap()
+            .watch_body_changes(65_536, 64 << 20)
+            .unwrap();
         let reader = env.tx_begin_read().unwrap();
         let extent = || env.env().real_disk_size().unwrap();
         let before = extent();
         let hash = burst_types::BlockHash::new([73; 32]);
         let value = vec![73; 3 << 20];
         let mut writer = env.tx_begin_write().unwrap();
-        writer.begin_block_undo(hash, burst_types::WalletAddress::new("brst_capacity"), 1).unwrap();
+        writer
+            .begin_block_undo(hash, burst_types::WalletAddress::new("brst_capacity"), 1)
+            .unwrap();
         writer.put_meta("read_view/private_pages", &value).unwrap();
         let private = extent();
-        assert_eq!(private, before, "default LMDB keeps this transaction's pages private before commit");
-        assert!(env.read_view(&reader).unwrap().get_meta("read_view/private_pages").unwrap().is_none());
+        assert_eq!(
+            private, before,
+            "default LMDB keeps this transaction's pages private before commit"
+        );
+        assert!(env
+            .read_view(&reader)
+            .unwrap()
+            .get_meta("read_view/private_pages")
+            .unwrap()
+            .is_none());
         writer.commit().unwrap();
         let committed = extent();
         eprintln!("MVCC_PRIVATE_PROBE before_bytes={before} private_bytes={private} committed_bytes={committed} value_bytes={} map={MAP}", value.len());
-        assert!(committed - before > (4 << 20), "one commit exceeds conservative capture headroom despite no precommit extent growth");
+        assert!(
+            committed - before > (4 << 20),
+            "one commit exceeds conservative capture headroom despite no precommit extent growth"
+        );
         assert_eq!(env.env().info().map_size, MAP);
         assert!(committed <= MAP as u64);
-        assert!(env.read_view(&reader).unwrap().get_meta("read_view/private_pages").unwrap().is_none());
+        assert!(env
+            .read_view(&reader)
+            .unwrap()
+            .get_meta("read_view/private_pages")
+            .unwrap()
+            .is_none());
         let current = env.tx_begin_write().unwrap();
-        assert_eq!(current.get_meta("read_view/private_pages").unwrap().as_deref(), Some(value.as_slice()));
+        assert_eq!(
+            current
+                .get_meta("read_view/private_pages")
+                .unwrap()
+                .as_deref(),
+            Some(value.as_slice())
+        );
         let journal = current.block_undo(&hash).unwrap().unwrap();
         assert_eq!(journal.changes.len(), 1);
         assert_eq!(journal.changes[0].after.as_deref(), Some(value.as_slice()));
-        watch.check_covered_cut(&env, &current.clean_storage_cut().unwrap()).unwrap();
+        watch
+            .check_covered_cut(&env, &current.clean_storage_cut().unwrap())
+            .unwrap();
     }
 
     #[test]
@@ -344,9 +537,14 @@ mod tests {
         let value = vec![74; 3 << 20];
         let mut writer = env.tx_begin_write().unwrap();
         let outcome = writer.growth_outcome().unwrap();
-        writer.begin_block_undo(hash, burst_types::WalletAddress::new("brst_capacity"), 1).unwrap();
+        writer
+            .begin_block_undo(hash, burst_types::WalletAddress::new("brst_capacity"), 1)
+            .unwrap();
         writer.put_meta("limited", &value).unwrap();
-        assert!(matches!(writer.commit(), Err(StoreError::GrowthLimit(_))), "journal sealing must respect the native ceiling");
+        assert!(
+            matches!(writer.commit(), Err(StoreError::GrowthLimit(_))),
+            "journal sealing must respect the native ceiling"
+        );
         assert!(outcome.was_rejected());
         assert!(watch.was_exceeded());
         assert!(!outcome.watch().wait_released(std::time::Duration::ZERO));
@@ -358,31 +556,47 @@ mod tests {
         assert!(env.env().real_disk_size().unwrap() <= 4 << 20);
 
         let mut raw = env.env().write_txn().unwrap();
-        assert!(matches!(env.meta_db.put(&mut raw, b"raw", &vec![1; 5 << 20]),
-            Err(heed::Error::Mdb(heed::MdbError::GrowthLimit))));
+        assert!(matches!(
+            env.meta_db.put(&mut raw, b"raw", &vec![1; 5 << 20]),
+            Err(heed::Error::Mdb(heed::MdbError::GrowthLimit))
+        ));
         drop(raw);
         let mut raw = env.env().write_txn().unwrap();
         let parent_outcome = raw.growth_outcome().unwrap();
         let mut nested = env.env().nested_write_txn(&mut raw).unwrap();
         let child_outcome = nested.growth_outcome().unwrap();
         assert!(nested.limit_file_extent(8 << 20).is_err());
-        assert!(matches!(env.meta_db.put(&mut nested, b"nested", &vec![2; 5 << 20]),
-            Err(heed::Error::Mdb(heed::MdbError::GrowthLimit))));
+        assert!(matches!(
+            env.meta_db.put(&mut nested, b"nested", &vec![2; 5 << 20]),
+            Err(heed::Error::Mdb(heed::MdbError::GrowthLimit))
+        ));
         drop(nested);
         drop(raw);
         assert!(child_outcome.was_rejected());
-        assert!(!parent_outcome.was_rejected(), "nested failure must not identify an unrelated root failure");
-        assert!(env.read_view(&reader).unwrap().get_meta("limited").unwrap().is_none());
+        assert!(
+            !parent_outcome.was_rejected(),
+            "nested failure must not identify an unrelated root failure"
+        );
+        assert!(env
+            .read_view(&reader)
+            .unwrap()
+            .get_meta("limited")
+            .unwrap()
+            .is_none());
         drop(reader);
         // Releasing a lease does not retroactively relax an active writer.
         let mut raw = env.env().write_txn().unwrap();
         drop(limit);
         assert!(outcome.watch().wait_released(std::time::Duration::ZERO));
-        assert!(matches!(env.meta_db.put(&mut raw, b"active", &vec![3; 5 << 20]),
-            Err(heed::Error::Mdb(heed::MdbError::GrowthLimit))));
+        assert!(matches!(
+            env.meta_db.put(&mut raw, b"active", &vec![3; 5 << 20]),
+            Err(heed::Error::Mdb(heed::MdbError::GrowthLimit))
+        ));
         drop(raw);
         let mut writer = env.tx_begin_write().unwrap();
-        writer.begin_block_undo(hash, burst_types::WalletAddress::new("brst_capacity"), 1).unwrap();
+        writer
+            .begin_block_undo(hash, burst_types::WalletAddress::new("brst_capacity"), 1)
+            .unwrap();
         writer.put_meta("limited", &value).unwrap();
         writer.commit().unwrap();
         assert_eq!(env.env().info().last_txn_id, before + 1);
@@ -404,7 +618,9 @@ mod tests {
             let directory = tempfile::tempdir().unwrap();
             let env = LmdbEnvironment::open(directory.path(), 32, 8 << 20).unwrap();
             let mut seed = env.env().write_txn().unwrap();
-            env.meta_db.put(&mut seed, b"native", &[0; 64 << 10]).unwrap();
+            env.meta_db
+                .put(&mut seed, b"native", &[0; 64 << 10])
+                .unwrap();
             let page_size = env.meta_db.stat(&seed).unwrap().page_size as usize;
             seed.commit().unwrap();
             let reader = env.tx_begin_read().unwrap();
@@ -419,12 +635,20 @@ mod tests {
                 Ok(()) => match writer.commit() {
                     Err(heed::Error::Mdb(heed::MdbError::GrowthLimit)) => {
                         commit_limited = true;
-                        assert!(outcome.was_rejected(), "commit-time rejection must survive native transaction destruction");
+                        assert!(
+                            outcome.was_rejected(),
+                            "commit-time rejection must survive native transaction destruction"
+                        );
                         assert!(limit.watch().was_exceeded());
                         assert_eq!(env.env().info().last_txn_id, generation);
                         let current = env.env().write_txn().unwrap();
-                        assert_eq!(env.meta_db.get(&current, b"native").unwrap(), Some([0; 64 << 10].as_slice()));
-                        eprintln!("NATIVE_COMMIT_LIMIT extra_pages={extra_pages} ceiling={ceiling}");
+                        assert_eq!(
+                            env.meta_db.get(&current, b"native").unwrap(),
+                            Some([0; 64 << 10].as_slice())
+                        );
+                        eprintln!(
+                            "NATIVE_COMMIT_LIMIT extra_pages={extra_pages} ceiling={ceiling}"
+                        );
                     }
                     Ok(()) => (),
                     Err(error) => panic!("unexpected commit error: {error}"),
@@ -433,9 +657,14 @@ mod tests {
             assert!(env.env().real_disk_size().unwrap() <= ceiling as u64);
             drop(reader);
             drop(limit);
-            if commit_limited { break; }
+            if commit_limited {
+                break;
+            }
         }
-        assert!(commit_limited, "exercise native commit allocation after a successful put");
+        assert!(
+            commit_limited,
+            "exercise native commit allocation after a successful put"
+        );
     }
 
     #[test]
@@ -450,8 +679,10 @@ mod tests {
         let first = writer.growth_outcome().unwrap();
         let retry = writer.reserve_growth_retry().unwrap().unwrap();
         let retry_clone = retry.clone();
-        assert!(matches!(env.meta_db.put(&mut writer, b"first", &vec![1; 5 << 20]),
-            Err(heed::Error::Mdb(heed::MdbError::GrowthLimit))));
+        assert!(matches!(
+            env.meta_db.put(&mut writer, b"first", &vec![1; 5 << 20]),
+            Err(heed::Error::Mdb(heed::MdbError::GrowthLimit))
+        ));
         writer.abort();
         assert!(first.was_rejected());
         assert!(first.watch().was_exceeded());
@@ -490,14 +721,19 @@ mod tests {
         assert!(!second.was_rejected());
         assert!(!second.watch().wait_released(Duration::ZERO));
         assert!(first.watch().wait_released(Duration::ZERO));
-        env.meta_db.put(&mut writer, b"small", b"committed").unwrap();
+        env.meta_db
+            .put(&mut writer, b"small", b"committed")
+            .unwrap();
         writer.commit().unwrap();
         assert!(!second.was_rejected());
         assert!(!next.watch().was_exceeded());
         drop(next);
         assert!(env.env().may_limit_file_extent());
         assert!(second.watch().wait_released(Duration::ZERO));
-        assert!(first.was_rejected(), "later leases cannot reset an old outcome");
+        assert!(
+            first.was_rejected(),
+            "later leases cannot reset an old outcome"
+        );
     }
 
     #[test]
@@ -510,7 +746,13 @@ mod tests {
         assert!(other.read_view(&reader).is_err());
         let before = env.read_view(&reader).unwrap().clean_storage_cut().unwrap();
         let foreign = other.tx_begin_read().unwrap();
-        assert!(!before.same_committed_view(&other.read_view(&foreign).unwrap().clean_storage_cut().unwrap()));
+        assert!(!before.same_committed_view(
+            &other
+                .read_view(&foreign)
+                .unwrap()
+                .clean_storage_cut()
+                .unwrap()
+        ));
         drop(foreign);
         drop(reader);
         let mut writer = env.tx_begin_write().unwrap();
@@ -518,10 +760,18 @@ mod tests {
         writer.put_meta("read_view/aborted", b"private").unwrap();
         let view = writer.read_view();
         assert!(view.clean_storage_cut().is_none());
-        assert_eq!(view.get_meta("read_view/aborted").unwrap(), Some(b"private".to_vec()));
-        drop(view); drop(writer);
+        assert_eq!(
+            view.get_meta("read_view/aborted").unwrap(),
+            Some(b"private".to_vec())
+        );
+        drop(view);
+        drop(writer);
         let reader = env.tx_begin_read().unwrap();
-        assert!(!env.read_view(&reader).unwrap().contains_meta("read_view/aborted").unwrap());
+        assert!(!env
+            .read_view(&reader)
+            .unwrap()
+            .contains_meta("read_view/aborted")
+            .unwrap());
     }
 
     #[test]
@@ -531,10 +781,19 @@ mod tests {
         let mut account = AccountInfo::unopened(WalletAddress::new("brst_expected"));
         account.confirmation_height = 1;
         let mut writer = env.tx_begin_write().unwrap();
-        writer.put_account(&account.address, &bincode::serialize(&account).unwrap()).unwrap();
+        writer
+            .put_account(&account.address, &bincode::serialize(&account).unwrap())
+            .unwrap();
         assert!(writer.account_entries().unwrap().next().unwrap().is_err());
         writer.commit().unwrap();
         let reader = env.tx_begin_read().unwrap();
-        assert!(env.read_view(&reader).unwrap().account_entries().unwrap().next().unwrap().is_err());
+        assert!(env
+            .read_view(&reader)
+            .unwrap()
+            .account_entries()
+            .unwrap()
+            .next()
+            .unwrap()
+            .is_err());
     }
 }

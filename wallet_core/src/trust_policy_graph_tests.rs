@@ -86,7 +86,9 @@ async fn transitive_payment_checks_every_creator_and_never_falls_back_on_unknown
         }
         let requests = observed.lock().unwrap();
         for creator in creators {
-            if scenario == "nonmember" && creator != denied_for_assert { continue; }
+            if scenario == "nonmember" && creator != denied_for_assert {
+                continue;
+            }
             assert!(requests.contains(&format!("/root/verify/{creator}")));
             assert_eq!(
                 requests.contains(&format!("/leaf/verify/{creator}")),
@@ -162,30 +164,67 @@ async fn payment_requests_share_one_limit_across_creators_and_groups() {
     });
     let mut report = tests::payment();
     let template = report.provenance.origins[0].clone();
-    report.provenance.origins = (1..=12).map(|id| {
-        let mut origin = template.clone();
-        origin.hash = format!("{id:02x}").repeat(32);
-        origin.originator = burst_crypto::derive_address(&burst_crypto::keypair_from_seed(&[id;32]).public).to_string();
-        origin
-    }).collect();
+    report.provenance.origins = (1..=12)
+        .map(|id| {
+            let mut origin = template.clone();
+            origin.hash = format!("{id:02x}").repeat(32);
+            origin.originator =
+                burst_crypto::derive_address(&burst_crypto::keypair_from_seed(&[id; 32]).public)
+                    .to_string();
+            origin
+        })
+        .collect();
     let mut registry = GroupRegistry::new();
     for id in ["first", "second"] {
-        registry.register(GroupInfo { id: id.into(), name: id.into(), description: String::new(),
-            endpoint_url: format!("{base}/{id}"), member_count: 0 }).unwrap();
+        registry
+            .register(GroupInfo {
+                id: id.into(),
+                name: id.into(),
+                description: String::new(),
+                endpoint_url: format!("{base}/{id}"),
+                member_count: 0,
+            })
+            .unwrap();
     }
-    let query = tokio::spawn(async move {
-        evaluate_payment_groups(&report, &["first".into(), "second".into()], true,
-            OfflineFallback::Review, &GroupClient::new().unwrap(), &registry).await
-    });
-    for _ in 0..8 {
-        tokio::time::timeout(Duration::from_secs(2), requests.recv()).await.unwrap().unwrap();
+    let query = async {
+        evaluate_payment_groups(
+            &report,
+            &["first".into(), "second".into()],
+            true,
+            OfflineFallback::Review,
+            &GroupClient::new().unwrap(),
+            &registry,
+        )
+        .await
+    };
+    tokio::pin!(query);
+    let admission = async {
+        for _ in 0..8 {
+            tokio::time::timeout(Duration::from_secs(2), requests.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), requests.recv())
+                .await
+                .is_err(),
+            "more than eight requests in flight"
+        );
+        release.add_permits(24);
+    };
+    tokio::select! {
+        _ = &mut query => panic!("payment evaluation completed before the group responses were released"),
+        () = admission => {},
     }
-    assert!(tokio::time::timeout(Duration::from_millis(50), requests.recv()).await.is_err(), "more than eight requests in flight");
-    release.add_permits(24);
-    let result = tokio::time::timeout(Duration::from_secs(2), query).await.unwrap().unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(2), query)
+        .await
+        .unwrap();
     assert_eq!(result.decision, TrustDecision::Accept);
     assert_eq!(result.checked_originators, 12);
-    for _ in 8..24 { requests.try_recv().unwrap(); }
+    for _ in 8..24 {
+        requests.try_recv().unwrap();
+    }
     assert!(requests.try_recv().is_err());
     server.abort();
 }
@@ -221,19 +260,43 @@ async fn decisive_group_response_does_not_wait_for_a_stalled_group() {
         });
         let mut registry = GroupRegistry::new();
         for id in ["slow", "fast"] {
-            registry.register(GroupInfo { id: id.into(), name: id.into(), description: String::new(),
-                endpoint_url: format!("{base}/{id}"), member_count: 0 }).unwrap();
+            registry
+                .register(GroupInfo {
+                    id: id.into(),
+                    name: id.into(),
+                    description: String::new(),
+                    endpoint_url: format!("{base}/{id}"),
+                    member_count: 0,
+                })
+                .unwrap();
         }
-        let result = tokio::time::timeout(Duration::from_secs(2), check_group_membership_with_depth(
-            &["slow".into(), "fast".into()], require_all,
-            &WalletAddress::new(tests::payment().provenance.origins[0].originator.clone()),
-            &GroupClient::new().unwrap(), &registry, 0,
-        )).await.unwrap();
-        if require_all { assert!(matches!(result.decision, TrustDecision::Reject { .. })); }
-        else { assert_eq!(result.decision, TrustDecision::Accept); }
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            check_group_membership_with_depth(
+                &["slow".into(), "fast".into()],
+                require_all,
+                &WalletAddress::new(tests::payment().provenance.origins[0].originator.clone()),
+                &GroupClient::new().unwrap(),
+                &registry,
+                0,
+            ),
+        )
+        .await
+        .unwrap();
+        if require_all {
+            assert!(matches!(result.decision, TrustDecision::Reject { .. }));
+        } else {
+            assert_eq!(result.decision, TrustDecision::Accept);
+        }
         assert!(!result.offline_only);
-        let closed = tokio::time::timeout(Duration::from_secs(2), disconnected.recv()).await.unwrap().unwrap();
-        assert!(matches!(closed, Ok(0)) || closed.is_err(), "losing request was not cancelled");
+        let closed = tokio::time::timeout(Duration::from_secs(2), disconnected.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(closed, Ok(0)) || closed.is_err(),
+            "losing request was not cancelled"
+        );
         server.abort();
     }
 }

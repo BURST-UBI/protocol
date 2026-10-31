@@ -29,15 +29,31 @@ pub struct VoteCache {
 
 impl VoteCache {
     pub fn new() -> Self {
-        Self { entries: HashMap::new(), time_index: BTreeSet::new(), vote_count: 0 }
+        Self {
+            entries: HashMap::new(),
+            time_index: BTreeSet::new(),
+            vote_count: 0,
+        }
     }
 
     /// Legacy component interface. Wire callers must use insert_signed so the
     /// signed sequence is retained independently of the timestamp.
-    pub fn insert(&mut self, hash: BlockHash, voter: WalletAddress, weight: u128,
-        timestamp: u64, is_final: bool) {
-        self.insert_signed(VoteInfo::new(voter, hash, weight, is_final,
-            Timestamp::new(timestamp), timestamp.max(1)));
+    pub fn insert(
+        &mut self,
+        hash: BlockHash,
+        voter: WalletAddress,
+        weight: u128,
+        timestamp: u64,
+        is_final: bool,
+    ) {
+        self.insert_signed(VoteInfo::new(
+            voter,
+            hash,
+            weight,
+            is_final,
+            Timestamp::new(timestamp),
+            timestamp.max(1),
+        ));
     }
 
     /// Signature verification is the caller's responsibility. This cache never
@@ -47,30 +63,50 @@ impl VoteCache {
     }
 
     fn insert_at(&mut self, vote: VoteInfo, now: Instant) {
-        if vote.sequence == 0 || vote.weight == 0 { return; }
+        if vote.sequence == 0 || vote.weight == 0 {
+            return;
+        }
         let hash = vote.block_hash;
-        if self.entries.get(&hash).is_some_and(|e| now.duration_since(e.arrived) >= VOTE_CACHE_TTL) {
+        if self
+            .entries
+            .get(&hash)
+            .is_some_and(|e| now.duration_since(e.arrived) >= VOTE_CACHE_TTL)
+        {
             self.remove(&hash);
         }
         if let Some(entry) = self.entries.get_mut(&hash) {
             if let Some(old) = entry.votes.iter_mut().find(|v| v.voter == vote.voter) {
-                if !old.is_final && (vote.is_final || vote.sequence > old.sequence) { *old = vote; }
+                if !old.is_final && (vote.is_final || vote.sequence > old.sequence) {
+                    *old = vote;
+                }
                 return;
             }
             if entry.votes.len() == MAX_VOTERS_PER_HASH {
-                let (index, smallest) = entry.votes.iter().enumerate().min_by_key(|(_, v)| v.weight).unwrap();
-                if vote.weight > smallest.weight { entry.votes[index] = vote; }
+                let (index, smallest) = entry
+                    .votes
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, v)| v.weight)
+                    .unwrap();
+                if vote.weight > smallest.weight {
+                    entry.votes[index] = vote;
+                }
                 return;
             }
         }
         // Evict one whole oldest bucket, without scanning the cache or running
         // an unbounded expiry sweep on the ingress path.
         if self.vote_count == MAX_VOTES {
-            if let Some((_, oldest)) = self.time_index.first().copied() { self.remove(&oldest); }
+            if let Some((_, oldest)) = self.time_index.first().copied() {
+                self.remove(&oldest);
+            }
         }
         let entry = self.entries.entry(hash).or_insert_with(|| {
             self.time_index.insert((now, hash));
-            CacheEntry { votes: Vec::new(), arrived: now }
+            CacheEntry {
+                votes: Vec::new(),
+                arrived: now,
+            }
         });
         entry.votes.push(vote);
         self.vote_count += 1;
@@ -88,26 +124,39 @@ impl VoteCache {
     }
 
     fn drain_at(&mut self, hash: &BlockHash, now: Instant) -> Vec<VoteInfo> {
-        self.remove(hash).filter(|e| now.duration_since(e.arrived) < VOTE_CACHE_TTL)
+        self.remove(hash)
+            .filter(|e| now.duration_since(e.arrived) < VOTE_CACHE_TTL)
             .map_or_else(Vec::new, |e| e.votes)
     }
 
     pub fn drain(&mut self, hash: &BlockHash) -> Vec<(WalletAddress, u128, u64, bool)> {
-        self.drain_signed(hash).into_iter()
-            .map(|v| (v.voter, v.weight, v.timestamp.as_secs(), v.is_final)).collect()
+        self.drain_signed(hash)
+            .into_iter()
+            .map(|v| (v.voter, v.weight, v.timestamp.as_secs(), v.is_final))
+            .collect()
     }
 
     /// Cached combined and final weights. Does not filter expired buckets or
     /// refresh weights from authority; callers use these values only as hints.
     pub fn tally(&self, hash: &BlockHash) -> (u128, u128) {
-        self.entries.get(hash).map_or((0, 0), |e| e.votes.iter().fold((0u128, 0u128), |(all, final_), v|
-            (all.saturating_add(v.weight), final_.saturating_add(if v.is_final { v.weight } else { 0 }))))
+        self.entries.get(hash).map_or((0, 0), |e| {
+            e.votes.iter().fold((0u128, 0u128), |(all, final_), v| {
+                (
+                    all.saturating_add(v.weight),
+                    final_.saturating_add(if v.is_final { v.weight } else { 0 }),
+                )
+            })
+        })
     }
 
     /// Sort all cached hashes by combined weight, then retain at most `n`.
     /// Expired buckets remain visible until maintenance; ties are unspecified.
     pub fn top(&self, n: usize) -> Vec<(BlockHash, u128)> {
-        let mut entries: Vec<_> = self.entries.keys().map(|hash| (*hash, self.tally(hash).0)).collect();
+        let mut entries: Vec<_> = self
+            .entries
+            .keys()
+            .map(|hash| (*hash, self.tally(hash).0))
+            .collect();
         entries.sort_by_key(|b| std::cmp::Reverse(b.1));
         entries.truncate(n);
         entries
@@ -117,18 +166,28 @@ impl VoteCache {
     pub fn cleanup(&mut self) {
         let now = Instant::now();
         while let Some(&(arrived, hash)) = self.time_index.first() {
-            if now.duration_since(arrived) < VOTE_CACHE_TTL { break; }
+            if now.duration_since(arrived) < VOTE_CACHE_TTL {
+                break;
+            }
             self.remove(&hash);
         }
     }
 
-    pub fn len(&self) -> usize { self.entries.len() }
-    pub fn is_empty(&self) -> bool { self.entries.is_empty() }
-    pub fn total_votes(&self) -> usize { self.vote_count }
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+    pub fn total_votes(&self) -> usize {
+        self.vote_count
+    }
 }
 
 impl Default for VoteCache {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -147,8 +206,16 @@ mod tests {
     fn signed_ordering_and_finality_survive_cache_replay() {
         let mut cache = VoteCache::new();
         let hash = make_hash(1);
-        let vote = |sequence, timestamp, final_| VoteInfo::new(make_voter("alice"), hash,
-            100, final_, Timestamp::new(timestamp), sequence);
+        let vote = |sequence, timestamp, final_| {
+            VoteInfo::new(
+                make_voter("alice"),
+                hash,
+                100,
+                final_,
+                Timestamp::new(timestamp),
+                sequence,
+            )
+        };
         cache.insert_signed(vote(0, 100, true));
         assert!(cache.is_empty());
         cache.insert_signed(vote(10, 100, false));
@@ -170,8 +237,16 @@ mod tests {
         let mut cache = VoteCache::new();
         let now = Instant::now();
         let hash = make_hash(1);
-        let vote = |sequence| VoteInfo::new(make_voter("alice"), hash, 100,
-            false, Timestamp::new(100), sequence);
+        let vote = |sequence| {
+            VoteInfo::new(
+                make_voter("alice"),
+                hash,
+                100,
+                false,
+                Timestamp::new(100),
+                sequence,
+            )
+        };
         cache.insert_at(vote(1), now);
         cache.insert_at(vote(2), now + VOTE_CACHE_TTL / 2);
         assert_eq!(cache.time_index.len(), 1);
@@ -192,16 +267,34 @@ mod tests {
         for n in 0..=MAX_VOTES {
             let mut bytes = [0; 32];
             bytes[..8].copy_from_slice(&(n as u64).to_be_bytes());
-            cache.insert_at(VoteInfo::new(make_voter("alice"), BlockHash::new(bytes),
-                1, false, Timestamp::new(1), 1), now);
+            cache.insert_at(
+                VoteInfo::new(
+                    make_voter("alice"),
+                    BlockHash::new(bytes),
+                    1,
+                    false,
+                    Timestamp::new(1),
+                    1,
+                ),
+                now,
+            );
         }
         assert_eq!(cache.total_votes(), MAX_VOTES);
         assert_eq!(cache.time_index.len(), cache.len());
         assert!(!cache.entries.contains_key(&BlockHash::ZERO));
         let hash = make_hash(255);
         for n in 0..100 {
-            cache.insert_at(VoteInfo::new(make_voter(&n.to_string()), hash,
-                2, true, Timestamp::new(1), 1), now);
+            cache.insert_at(
+                VoteInfo::new(
+                    make_voter(&n.to_string()),
+                    hash,
+                    2,
+                    true,
+                    Timestamp::new(1),
+                    1,
+                ),
+                now,
+            );
             assert!(cache.total_votes() <= MAX_VOTES);
         }
         assert_eq!(cache.drain_at(&hash, now).len(), MAX_VOTERS_PER_HASH);

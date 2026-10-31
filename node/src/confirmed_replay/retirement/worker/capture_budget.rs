@@ -19,11 +19,18 @@ pub(crate) struct CaptureBudget {
 
 impl CaptureBudget {
     pub fn start(store: &LmdbStore, limits: CaptureLimits) -> Result<Self, StoreError> {
-        Ok(Self { started: Instant::now(), initial_bytes: Self::extent(store)?, limits })
+        Ok(Self {
+            started: Instant::now(),
+            initial_bytes: Self::extent(store)?,
+            limits,
+        })
     }
 
     fn extent(store: &LmdbStore) -> Result<u64, StoreError> {
-        store.env().real_disk_size().map_err(|error| StoreError::Backend(error.to_string()))
+        store
+            .env()
+            .real_disk_size()
+            .map_err(|error| StoreError::Backend(error.to_string()))
     }
 
     /// Compute the file-extent ceiling to install under the capture writer before
@@ -31,7 +38,8 @@ impl CaptureBudget {
     /// filesystem allocation.
     pub fn file_ceiling(&self, store: &LmdbStore) -> usize {
         let map = store.env().info().map_size;
-        self.initial_bytes.saturating_add(self.limits.growth_bytes)
+        self.initial_bytes
+            .saturating_add(self.limits.growth_bytes)
             .min((map as u64).saturating_sub(self.limits.headroom_bytes)) as usize
     }
 
@@ -39,7 +47,11 @@ impl CaptureBudget {
         self.exceeded_at(store, Instant::now())
     }
 
-    fn exceeded_at(&self, store: &LmdbStore, now: Instant) -> Result<Option<&'static str>, StoreError> {
+    fn exceeded_at(
+        &self,
+        store: &LmdbStore,
+        now: Instant,
+    ) -> Result<Option<&'static str>, StoreError> {
         if now.saturating_duration_since(self.started) >= self.limits.duration {
             return Ok(Some("capture lifetime"));
         }
@@ -62,7 +74,10 @@ impl CaptureBudget {
 pub(crate) struct CapturePoll<'a> {
     store: &'a LmdbStore,
     budget: CaptureBudget,
-    growth: Option<(burst_store_lmdb::FileGrowthLimit, burst_store_lmdb::GrowthWatch)>,
+    growth: Option<(
+        burst_store_lmdb::FileGrowthLimit,
+        burst_store_lmdb::GrowthWatch,
+    )>,
     next: std::cell::Cell<Instant>,
     stopped: std::cell::Cell<bool>,
     error: std::cell::RefCell<Option<StoreError>>,
@@ -75,24 +90,41 @@ impl<'a> CapturePoll<'a> {
         let growth = if budget.exceeded(store)?.is_some() {
             None
         } else {
-            writer.try_limit_file_extent(budget.file_ceiling(store))?
-                .map(|lease| { let watch = lease.watch(); (lease, watch) })
+            writer
+                .try_limit_file_extent(budget.file_ceiling(store))?
+                .map(|lease| {
+                    let watch = lease.watch();
+                    (lease, watch)
+                })
         };
         let stopped = growth.is_none();
         drop(writer);
-        Ok(Self { store, budget, growth,
-            next: std::cell::Cell::new(Instant::now()), stopped: std::cell::Cell::new(stopped),
-            error: std::cell::RefCell::new(None) })
+        Ok(Self {
+            store,
+            budget,
+            growth,
+            next: std::cell::Cell::new(Instant::now()),
+            stopped: std::cell::Cell::new(stopped),
+            error: std::cell::RefCell::new(None),
+        })
     }
 
     pub fn cancelled(&self) -> bool {
-        if self.stopped.get() { return true; }
-        if self.growth.as_ref().is_some_and(|(_, watch)| watch.was_exceeded()) {
+        if self.stopped.get() {
+            return true;
+        }
+        if self
+            .growth
+            .as_ref()
+            .is_some_and(|(_, watch)| watch.was_exceeded())
+        {
             self.stopped.set(true);
             return true;
         }
         let now = Instant::now();
-        if now < self.next.get() { return false; }
+        if now < self.next.get() {
+            return false;
+        }
         self.next.set(now + Duration::from_millis(10));
         match self.budget.exceeded_at(self.store, now) {
             Ok(None) => false,
@@ -111,7 +143,10 @@ impl<'a> CapturePoll<'a> {
 
     pub fn finish(self) -> Result<bool, StoreError> {
         let stopped = self.stopped.get()
-            || self.growth.as_ref().is_some_and(|(_, watch)| watch.was_exceeded());
+            || self
+                .growth
+                .as_ref()
+                .is_some_and(|(_, watch)| watch.was_exceeded());
         match self.error.into_inner() {
             Some(error) => Err(error),
             None => Ok(stopped || self.budget.exceeded(self.store)?.is_some()),
@@ -127,16 +162,26 @@ mod tests {
     fn reconciliation_lease_latches_native_pressure_and_defers_to_retry() {
         let directory = tempfile::tempdir().unwrap();
         let store = LmdbStore::open(directory.path(), 32, 8 << 20).unwrap();
-        let limits = CaptureLimits { duration: Duration::from_secs(1), growth_bytes: 1 << 20, headroom_bytes: 1 << 20 };
+        let limits = CaptureLimits {
+            duration: Duration::from_secs(1),
+            growth_bytes: 1 << 20,
+            headroom_bytes: 1 << 20,
+        };
         let poll = CapturePoll::start(&store, limits).unwrap();
         assert!(!poll.cancelled());
         let reader = store.tx_begin_read().unwrap();
         let mut writer = store.tx_begin_write().unwrap();
         let outcome = writer.growth_outcome().unwrap();
         let retry = writer.reserve_growth_retry().unwrap().unwrap();
-        assert!(matches!(writer.put_meta("pressure", &vec![0; 2 << 20]), Err(StoreError::GrowthLimit(_))));
+        assert!(matches!(
+            writer.put_meta("pressure", &vec![0; 2 << 20]),
+            Err(StoreError::GrowthLimit(_))
+        ));
         drop(writer);
-        assert!(poll.cancelled(), "native pressure must bypass the filesystem poll throttle");
+        assert!(
+            poll.cancelled(),
+            "native pressure must bypass the filesystem poll throttle"
+        );
         assert!(!outcome.watch().wait_released(Duration::ZERO));
         drop(reader);
         assert!(poll.finish().unwrap());
@@ -150,25 +195,49 @@ mod tests {
         assert!(!resumed.finish().unwrap());
         let mut expired = CapturePoll::start(&store, limits).unwrap();
         expired.budget.started -= Duration::from_secs(2);
-        assert!(expired.finish().unwrap(), "finish must check time after the final read callback");
+        assert!(
+            expired.finish().unwrap(),
+            "finish must check time after the final read callback"
+        );
     }
 
     #[test]
     fn capture_limits_stop_growth_and_deadline_without_changing_the_map() {
         let directory = tempfile::tempdir().unwrap();
         let store = LmdbStore::open(directory.path(), 32, 8 << 20).unwrap();
-        let limits = CaptureLimits { duration: Duration::from_secs(1), growth_bytes: 1 << 20, headroom_bytes: 1 << 20 };
+        let limits = CaptureLimits {
+            duration: Duration::from_secs(1),
+            growth_bytes: 1 << 20,
+            headroom_bytes: 1 << 20,
+        };
         let budget = CaptureBudget::start(&store, limits).unwrap();
         assert_eq!(budget.exceeded_at(&store, budget.started).unwrap(), None);
-        assert_eq!(budget.file_ceiling(&store) as u64, budget.initial_bytes + limits.growth_bytes);
-        let capped = CaptureBudget::start(&store, CaptureLimits { growth_bytes: u64::MAX, ..limits }).unwrap();
+        assert_eq!(
+            budget.file_ceiling(&store) as u64,
+            budget.initial_bytes + limits.growth_bytes
+        );
+        let capped = CaptureBudget::start(
+            &store,
+            CaptureLimits {
+                growth_bytes: u64::MAX,
+                ..limits
+            },
+        )
+        .unwrap();
         assert_eq!(capped.file_ceiling(&store), (8 << 20) - (1 << 20));
-        assert_eq!(budget.exceeded_at(&store, budget.started + limits.duration).unwrap(), Some("capture lifetime"));
+        assert_eq!(
+            budget
+                .exceeded_at(&store, budget.started + limits.duration)
+                .unwrap(),
+            Some("capture lifetime")
+        );
         let reader = store.tx_begin_read().unwrap();
         let mut stopped = false;
         for n in 0..32 {
             let mut writer = store.tx_begin_write().unwrap();
-            writer.put_meta("capture-growth", &vec![n; 128 << 10]).unwrap();
+            writer
+                .put_meta("capture-growth", &vec![n; 128 << 10])
+                .unwrap();
             writer.commit().unwrap();
             if budget.exceeded_at(&store, budget.started).unwrap() == Some("capture file growth") {
                 stopped = true;
@@ -179,10 +248,28 @@ mod tests {
         assert_eq!(store.env().info().map_size, 8 << 20);
         drop(reader);
         let mut writer = store.tx_begin_write().unwrap();
-        writer.put_meta("capture-growth", &[99]).unwrap(); writer.commit().unwrap();
-        let budget = CaptureBudget::start(&store, CaptureLimits { headroom_bytes: 8 << 20, ..limits }).unwrap();
-        assert_eq!(budget.exceeded_at(&store, budget.started).unwrap(), Some("capture map headroom"));
-        let poll = CapturePoll::start(&store, CaptureLimits { headroom_bytes: 8 << 20, ..limits }).unwrap();
+        writer.put_meta("capture-growth", &[99]).unwrap();
+        writer.commit().unwrap();
+        let budget = CaptureBudget::start(
+            &store,
+            CaptureLimits {
+                headroom_bytes: 8 << 20,
+                ..limits
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            budget.exceeded_at(&store, budget.started).unwrap(),
+            Some("capture map headroom")
+        );
+        let poll = CapturePoll::start(
+            &store,
+            CaptureLimits {
+                headroom_bytes: 8 << 20,
+                ..limits
+            },
+        )
+        .unwrap();
         assert!(poll.cancelled());
         assert!(poll.cancelled(), "budget cancellation must remain latched");
         assert!(poll.finish().unwrap());

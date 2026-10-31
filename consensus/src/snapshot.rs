@@ -98,8 +98,10 @@ impl SnapshotManifest {
         {
             return Err(CheckpointError::WrongParent);
         }
-        if !matches!(self.state_format, LEGACY_STATE_FORMAT | PREVIOUS_STATE_FORMAT | STATE_FORMAT)
-            || self.state_bytes == 0
+        if !matches!(
+            self.state_format,
+            LEGACY_STATE_FORMAT | PREVIOUS_STATE_FORMAT | STATE_FORMAT
+        ) || self.state_bytes == 0
             || self.state_bytes > MAX_SNAPSHOT_BYTES
             || self.state_hash.is_zero()
         {
@@ -130,8 +132,10 @@ impl SnapshotManifest {
     /// Check format, byte length and hash. Does not decode economic state or
     /// establish that the manifest was certified.
     pub fn verify_state(&self, state: &[u8]) -> Result<(), CheckpointError> {
-        if !matches!(self.state_format, LEGACY_STATE_FORMAT | PREVIOUS_STATE_FORMAT | STATE_FORMAT)
-            || self.state_bytes == 0
+        if !matches!(
+            self.state_format,
+            LEGACY_STATE_FORMAT | PREVIOUS_STATE_FORMAT | STATE_FORMAT
+        ) || self.state_bytes == 0
             || self.state_bytes > MAX_SNAPSHOT_BYTES
             || self.state_bytes != state.len() as u64
             || self.state_hash != BlockHash::new(blake2b_256(state))

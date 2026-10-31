@@ -13,16 +13,18 @@ pub(crate) fn key(hash: &BlockHash) -> Vec<u8> {
 }
 
 pub(crate) fn decode(key: &[u8], value: &[u8]) -> Result<BlockHash, StoreError> {
-    let bytes: [u8; 32] = key.strip_prefix(crate::confirmation_queue::PREFIX)
+    let bytes: [u8; 32] = key
+        .strip_prefix(crate::confirmation_queue::PREFIX)
         .and_then(|bytes| bytes.try_into().ok())
         .ok_or_else(|| StoreError::Corruption("invalid confirmation queue key".into()))?;
     let hash = BlockHash::new(bytes);
     if hash.is_zero() || value != [1] {
-        return Err(StoreError::Corruption("invalid confirmation queue record".into()));
+        return Err(StoreError::Corruption(
+            "invalid confirmation queue record".into(),
+        ));
     }
     Ok(hash)
 }
-
 
 impl LmdbMetaStore {
     pub fn confirmation_pending_txn(

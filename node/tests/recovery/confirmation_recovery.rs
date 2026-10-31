@@ -31,7 +31,9 @@ async fn pooled_rpc_client_cannot_submit_to_a_stopped_node_after_restart() {
         let mut node = BurstNode::new(config.clone()).await.unwrap();
         let shutdown = node.shutdown.clone();
         let worker = tokio::spawn(async move {
-            node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+            node.start_with_services(burst_daemon::start_public_services)
+                .await
+                .unwrap();
             node.stop().await.unwrap();
         });
         let session = tokio::time::timeout(Duration::from_secs(30), async {
@@ -102,7 +104,10 @@ async fn startup_never_reopens_or_repairs_unproven_bootstrap_authority() {
         .brn_store()
         .put_meta(BootstrapPhase::KEY, &[])
         .unwrap();
-    let error = node.start_with_services(burst_daemon::start_public_services).await.unwrap_err();
+    let error = node
+        .start_with_services(burst_daemon::start_public_services)
+        .await
+        .unwrap_err();
     assert!(
         error.to_string().contains("invalid bootstrap phase"),
         "{error}"
@@ -151,7 +156,9 @@ async fn startup_restores_origin_ownership_even_without_a_portfolio() {
     let engine = node.trst_engine.clone();
     let shutdown = node.shutdown.clone();
     let task = tokio::spawn(async move {
-        node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+        node.start_with_services(burst_daemon::start_public_services)
+            .await
+            .unwrap();
         node.stop().await.unwrap();
     });
     let recovered = tokio::time::timeout(Duration::from_secs(20), async {
@@ -200,7 +207,10 @@ async fn legacy_trst_snapshot_requires_replay_without_overwriting_its_data() {
         .meta_store()
         .put_meta(burst_trst::TrstEngine::meta_key(), &legacy)
         .unwrap();
-    let error = node.start_with_services(burst_daemon::start_public_services).await.unwrap_err();
+    let error = node
+        .start_with_services(burst_daemon::start_public_services)
+        .await
+        .unwrap_err();
     assert!(error
         .to_string()
         .contains("explicit ledger replay required"));
@@ -249,7 +259,9 @@ async fn shutdown_preserves_committed_payments_when_engine_caches_are_stale() {
     let brn = node.brn_engine.clone();
     let shutdown = node.shutdown.clone();
     let task = tokio::spawn(async move {
-        node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+        node.start_with_services(burst_daemon::start_public_services)
+            .await
+            .unwrap();
         node
     });
     let client = NodeClient::new(format!("http://127.0.0.1:{port}")).unwrap();
@@ -306,7 +318,9 @@ async fn shutdown_preserves_committed_payments_when_engine_caches_are_stale() {
     let brn = node.brn_engine.clone();
     let shutdown = node.shutdown.clone();
     let task = tokio::spawn(async move {
-        node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+        node.start_with_services(burst_daemon::start_public_services)
+            .await
+            .unwrap();
         node.stop().await.unwrap();
     });
     let result = tokio::time::timeout(Duration::from_secs(30), async {
@@ -533,7 +547,9 @@ async fn recover_cementation(existing_election: bool) {
         vec![next.hash]
     );
     let task = tokio::spawn(async move {
-        node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+        node.start_with_services(burst_daemon::start_public_services)
+            .await
+            .unwrap();
         node.stop().await.unwrap();
     });
     let recovered = tokio::time::timeout(Duration::from_secs(30), async {

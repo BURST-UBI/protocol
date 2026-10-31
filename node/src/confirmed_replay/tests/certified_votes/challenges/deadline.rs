@@ -27,7 +27,8 @@ async fn assert_live_deadline(expiry: u64, retire: bool) {
         .await
         .unwrap();
     for reason in [ChallengeReason::Fraud, ChallengeReason::Inactivity] {
-        let (mut fixture, directory, store, selection, _) = setup_with_expiry(reason, 0, 9000, expiry);
+        let (mut fixture, directory, store, selection, _) =
+            setup_with_expiry(reason, 0, 9000, expiry);
         let epoch = store.meta_store().payment_epoch().unwrap();
         vote_choice_in_epoch(
             &mut fixture,
@@ -44,7 +45,11 @@ async fn assert_live_deadline(expiry: u64, retire: bool) {
             assert_eq!(state.pending.len(), 2);
             assert!(state.pending.values().all(|pending| pending.return_credit));
             let target = state.account(&address(20)).unwrap();
-            let expected = if reason == ChallengeReason::Fraud { (1, 1) } else { (2, 0) };
+            let expected = if reason == ChallengeReason::Fraud {
+                (1, 1)
+            } else {
+                (2, 0)
+            };
             assert_eq!((target.expired_trst, target.revoked_trst), expected);
             assert_eq!(target.trst_balance, 0);
             crate::confirmed_replay::tests::snapshot_history::installed_recovery::installation::live::bootstrap::progression::assert_successor_after_retirement(fixture, directory, store, 3).await;

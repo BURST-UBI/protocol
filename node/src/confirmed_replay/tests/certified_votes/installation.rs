@@ -128,9 +128,17 @@ fn checkpoint_installation_replaces_poisoned_projections_and_retains_minority_ev
             .len(),
         1
     );
-    assert!(!store.tx_begin_write().unwrap().uses_stable_trst_records().unwrap());
+    assert!(!store
+        .tx_begin_write()
+        .unwrap()
+        .uses_stable_trst_records()
+        .unwrap());
     let installed = installation.commit(&store).unwrap();
-    assert!(store.tx_begin_write().unwrap().uses_stable_trst_records().unwrap());
+    assert!(store
+        .tx_begin_write()
+        .unwrap()
+        .uses_stable_trst_records()
+        .unwrap());
     assert_eq!(installed.retired_blocks, vec![excluded]);
     assert_eq!(installed.minority_promises, vec![excluded]);
     assert_eq!(installed.anchor.hash(), epoch);
@@ -200,11 +208,19 @@ fn checkpoint_installation_replaces_poisoned_projections_and_retains_minority_ev
     drop(store);
     let store = LmdbStore::open(dir.path(), 32, 32 << 20).unwrap();
     assert_eq!(store.meta_store().payment_epoch().unwrap(), epoch);
-    assert!(store.tx_begin_write().unwrap().uses_stable_trst_records().unwrap());
+    assert!(store
+        .tx_begin_write()
+        .unwrap()
+        .uses_stable_trst_records()
+        .unwrap());
     assert!(store.meta_store().get_meta(TrstEngine::meta_key()).is_err());
     assert_eq!(
-        crate::trst_storage::load(&store.tx_begin_write().unwrap(), fixture.params.trst_expiry_secs)
-            .unwrap().save_wallets(),
+        crate::trst_storage::load(
+            &store.tx_begin_write().unwrap(),
+            fixture.params.trst_expiry_secs
+        )
+        .unwrap()
+        .save_wallets(),
         installed.trst.save_wallets()
     );
     assert!(

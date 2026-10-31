@@ -18,26 +18,42 @@ pub struct BallotElectorate<'a> {
 
 impl<'a> BallotElectorate<'a> {
     pub fn new(verified: impl Into<std::borrow::Cow<'a, [WalletAddress]>>) -> Self {
-        Self { verified: verified.into(), commitment: std::cell::OnceCell::new() }
+        Self {
+            verified: verified.into(),
+            commitment: std::cell::OnceCell::new(),
+        }
     }
 
-    pub fn verified(&self) -> &[WalletAddress] { &self.verified }
+    pub fn verified(&self) -> &[WalletAddress] {
+        &self.verified
+    }
 
     fn commitment(&self) -> Result<(u32, BlockHash), GovernanceError> {
-        self.commitment.get_or_init(|| {
-            let eligible = u32::try_from(self.verified.len())
-                .map_err(|_| "electorate exceeds supported size")?;
-            let mut keys = BTreeSet::new();
-            for address in self.verified.iter() {
-                let key = burst_crypto::decode_address(address.as_str())
-                    .ok_or("invalid electorate address")?;
-                if !keys.insert(key) { return Err("duplicate electorate member") }
-            }
-            let count = eligible.to_be_bytes();
-            let prefix: [&[u8]; 2] = [b"BURST/governance-electorate/v1\0", &count];
-            let parts = prefix.into_iter().chain(keys.iter().map(|key| key.as_slice()));
-            Ok((eligible, BlockHash::new(burst_crypto::blake2b_256_iter(parts))))
-        }).as_ref().copied().map_err(|error| GovernanceError::Other((*error).into()))
+        self.commitment
+            .get_or_init(|| {
+                let eligible = u32::try_from(self.verified.len())
+                    .map_err(|_| "electorate exceeds supported size")?;
+                let mut keys = BTreeSet::new();
+                for address in self.verified.iter() {
+                    let key = burst_crypto::decode_address(address.as_str())
+                        .ok_or("invalid electorate address")?;
+                    if !keys.insert(key) {
+                        return Err("duplicate electorate member");
+                    }
+                }
+                let count = eligible.to_be_bytes();
+                let prefix: [&[u8]; 2] = [b"BURST/governance-electorate/v1\0", &count];
+                let parts = prefix
+                    .into_iter()
+                    .chain(keys.iter().map(|key| key.as_slice()));
+                Ok((
+                    eligible,
+                    BlockHash::new(burst_crypto::blake2b_256_iter(parts)),
+                ))
+            })
+            .as_ref()
+            .copied()
+            .map_err(|error| GovernanceError::Other((*error).into()))
     }
 }
 
@@ -171,8 +187,14 @@ impl GovernanceEngine {
         delegation: &DelegationEngine,
         verified: &[WalletAddress],
     ) -> Result<PreparedBallot, GovernanceError> {
-        self.prepare_ballot_with_electorate(proposal, history, cutoff, params,
-            delegation, &BallotElectorate::new(verified))
+        self.prepare_ballot_with_electorate(
+            proposal,
+            history,
+            cutoff,
+            params,
+            delegation,
+            &BallotElectorate::new(verified),
+        )
     }
 
     /// Reuse only the electorate from this exact immutable replay cut.

@@ -101,7 +101,7 @@ pub(super) fn validate_view_with_poll(
                 let prefix = format!("{namespace}/v1/{}/", anchor.hash());
                 for row in batch.checkpoint_metadata_entries(prefix.as_bytes())? {
                     row?;
-        poll("journal:record-row")?;
+                    poll("journal:record-row")?;
                     counters = counters
                         .checked_sub(1)
                         .ok_or_else(|| invalid("duplicate journal authority"))?;
@@ -224,13 +224,23 @@ mod tests {
                 .is_err()
         );
         let polls = std::cell::Cell::new(0);
-        assert!(validate_view_with_poll(&batch.read_view(), [Ok(anchor.clone())], &anchor, &|stage| {
-            if stage == "journal:record-row" {
-                polls.set(polls.get() + 1);
-                if polls.get() == 3 { return Err(StoreError::Backend("journal record sentinel".into())); }
+        assert!(validate_view_with_poll(
+            &batch.read_view(),
+            [Ok(anchor.clone())],
+            &anchor,
+            &|stage| {
+                if stage == "journal:record-row" {
+                    polls.set(polls.get() + 1);
+                    if polls.get() == 3 {
+                        return Err(StoreError::Backend("journal record sentinel".into()));
+                    }
+                }
+                Ok(())
             }
-            Ok(())
-        }).unwrap_err().to_string().contains("journal record sentinel"));
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("journal record sentinel"));
         assert_eq!(polls.get(), 3);
         let fingerprint = super::super::observe(&batch).unwrap();
         let sequences = super::super::sequences::SequenceGuard::capture(&batch).unwrap();

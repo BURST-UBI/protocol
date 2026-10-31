@@ -92,7 +92,9 @@ pub(super) async fn fetch(
                 .checked_add(manifest.length as usize)
                 .filter(|used| *used <= MAX_TAIL_BYTES)
                 .ok_or_else(|| invalid("certified suffix content exceeds byte budget"))?;
-            let bytes = match store.meta_store().get_meta_txn(&read, &crate::governance_content::key(block.hash))?
+            let bytes = match store
+                .meta_store()
+                .get_meta_txn(&read, &crate::governance_content::key(block.hash))?
             {
                 Some(bytes) => Some(bytes),
                 None => store.meta_store().get_meta_txn(

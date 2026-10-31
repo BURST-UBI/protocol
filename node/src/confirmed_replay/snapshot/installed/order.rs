@@ -10,10 +10,10 @@ pub(super) fn read(
     applied: &super::super::tail::cemented::AppliedTail,
     base: &super::super::SnapshotContinuation,
 ) -> Result<Vec<(BlockHash, BlockHash)>, StoreError> {
-        read_view(&batch.read_view(), applied, base)
-    }
+    read_view(&batch.read_view(), applied, base)
+}
 
-    pub(super) fn read_view(
+pub(super) fn read_view(
     batch: &burst_store_lmdb::read_view::LedgerReadView<'_>,
     applied: &super::super::tail::cemented::AppliedTail,
     base: &super::super::SnapshotContinuation,

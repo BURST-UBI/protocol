@@ -18,7 +18,7 @@ fn encoded<K: serde::Serialize, V: serde::Serialize>(
 
 #[test]
 fn authenticated_economic_snapshot_matches_independent_replays_and_restores_all_state() {
-    let mut fixture = Fixture::selection();
+    let mut fixture = Fixture::selection_with(|params| params.bootstrap_exit_threshold = 10);
     let grant = fixture.push(0, BlockType::ChangeSigner, 1_595_434_049, |block| {
         block.link = BlockHash::new([77; 32]);
     });
@@ -26,6 +26,12 @@ fn authenticated_economic_snapshot_matches_independent_replays_and_restores_all_
     fixture.push(1, BlockType::Epoch, 1_595_434_049, |_| {});
     sign(0, fixture.blocks.last_mut().unwrap());
     let foreign_marker = fixture.blocks.last().unwrap().clone();
+    // Epoch markers precede bootstrap exit; selection follows it.
+    fixture.push(0, BlockType::Endorse, 1_595_434_049, |block| {
+        block.brn_spent += 1;
+        block.link = destination(9);
+    });
+    fixture.push(9, BlockType::Open, 1_595_434_049, |_| {});
     let (_dir, store, heads) = fixture.store();
     let cutoff = 1_595_434_050;
     let candidate = CertifiedCheckpoint::prepare(
@@ -209,10 +215,13 @@ fn authenticated_economic_snapshot_matches_independent_replays_and_restores_all_
         restored.account(&address(0)).unwrap().epoch,
         burst_ledger::CURRENT_BLOCK_VERSION
     );
-    for format in [burst_consensus::snapshot::LEGACY_STATE_FORMAT,
-        burst_consensus::snapshot::PREVIOUS_STATE_FORMAT] {
+    for format in [
+        burst_consensus::snapshot::LEGACY_STATE_FORMAT,
+        burst_consensus::snapshot::PREVIOUS_STATE_FORMAT,
+    ] {
         let legacy = restored.legacy_snapshot_bytes(format).unwrap();
-        let mut manifest = burst_consensus::snapshot::SnapshotManifest::new(&anchor, &legacy).unwrap();
+        let mut manifest =
+            burst_consensus::snapshot::SnapshotManifest::new(&anchor, &legacy).unwrap();
         manifest.state_format = format;
         let signatures = (0..7)
             .map(|seed| burst_consensus::checkpoint::CheckpointSignature {
@@ -234,20 +243,34 @@ fn authenticated_economic_snapshot_matches_independent_replays_and_restores_all_
             legacy_restored.snapshot_bytes().unwrap(),
             restored.snapshot_bytes().unwrap()
         );
-        let preserved = legacy_restored.prepare_snapshot_format_in(&anchor, staging.path(), format).unwrap();
+        let preserved = legacy_restored
+            .prepare_snapshot_format_in(&anchor, staging.path(), format)
+            .unwrap();
         assert_eq!(preserved.manifest(), &legacy_certificate.manifest);
         // A valid signature on the wrong body-version/format pair is still invalid.
         let mut wrong_format = legacy_certificate.manifest.clone();
         wrong_format.state_format = burst_consensus::snapshot::STATE_FORMAT;
-        let signatures = (0..7).map(|seed| burst_consensus::checkpoint::CheckpointSignature {
-            representative: address(seed),
-            signature: burst_crypto::sign_message(&wrong_format.signing_payload(),
-                &burst_crypto::keypair_from_seed(&[seed; 32]).private),
-        }).collect();
-        assert!(ConfirmedReplay::from_authenticated_snapshot(&anchor,
-            &SnapshotCertificate { manifest: wrong_format, signatures }, &legacy).is_err());
+        let signatures = (0..7)
+            .map(|seed| burst_consensus::checkpoint::CheckpointSignature {
+                representative: address(seed),
+                signature: burst_crypto::sign_message(
+                    &wrong_format.signing_payload(),
+                    &burst_crypto::keypair_from_seed(&[seed; 32]).private,
+                ),
+            })
+            .collect();
+        assert!(ConfirmedReplay::from_authenticated_snapshot(
+            &anchor,
+            &SnapshotCertificate {
+                manifest: wrong_format,
+                signatures
+            },
+            &legacy
+        )
+        .is_err());
     }
-    let legacy_verification = ciborium::value::Value::serialized(&restored.verification.snapshot()).unwrap();
+    let legacy_verification =
+        ciborium::value::Value::serialized(&restored.verification.snapshot()).unwrap();
     restored.assert_snapshot_encoding_compatibility();
     let disk = restored
         .prepare_snapshot_in(&anchor, staging.path())
@@ -431,21 +454,37 @@ fn authenticated_economic_snapshot_matches_independent_replays_and_restores_all_
                 dependencies.extend([hash.clone(), hash]);
             }
             5 => {
-                fields.iter_mut().find(|(key, _)| key.as_text() == Some("verification"))
-                    .unwrap().1 = legacy_verification.clone();
+                fields
+                    .iter_mut()
+                    .find(|(key, _)| key.as_text() == Some("verification"))
+                    .unwrap()
+                    .1 = legacy_verification.clone();
             }
             6 | 7 => {
-                let Value::Map(accounts) = &mut fields.iter_mut()
-                    .find(|(key, _)| key.as_text() == Some("accounts")).unwrap().1
-                else { panic!("account map"); };
+                let Value::Map(accounts) = &mut fields
+                    .iter_mut()
+                    .find(|(key, _)| key.as_text() == Some("accounts"))
+                    .unwrap()
+                    .1
+                else {
+                    panic!("account map");
+                };
                 let (key, value) = accounts.first_mut().unwrap();
                 if case == 6 {
-                    let Value::Bytes(bytes) = value else { panic!("compact account record"); };
+                    let Value::Bytes(bytes) = value else {
+                        panic!("compact account record");
+                    };
                     bytes.push(0);
                 } else {
-                    let Value::Bytes(bytes) = key else { panic!("compact account key"); };
-                    *key = Value::Text(burst_crypto::derive_address(
-                        &burst_types::PublicKey(bytes.as_slice().try_into().unwrap())).to_string());
+                    let Value::Bytes(bytes) = key else {
+                        panic!("compact account key");
+                    };
+                    *key = Value::Text(
+                        burst_crypto::derive_address(&burst_types::PublicKey(
+                            bytes.as_slice().try_into().unwrap(),
+                        ))
+                        .to_string(),
+                    );
                 }
             }
             _ => (),

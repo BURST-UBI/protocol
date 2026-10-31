@@ -58,17 +58,24 @@ impl SelectionRefresh {
 
     /// Advance one row, returning its height only if its beacon is missing.
     /// `None` can also mean a skipped row; use `at_cycle_start` to detect wraparound.
-    pub(crate) fn next(&mut self, store: &burst_store_lmdb::LmdbStore) -> Result<Option<u64>, StoreError> {
+    pub(crate) fn next(
+        &mut self,
+        store: &burst_store_lmdb::LmdbStore,
+    ) -> Result<Option<u64>, StoreError> {
         if self.position == self.count {
             self.position = 0;
             return Ok(None);
         }
-        let row = self.rows.get(&key(self.position))?
+        let row = self
+            .rows
+            .get(&key(self.position))?
             .ok_or_else(|| invalid("missing selection refresh row"))?;
         self.position += 1;
         let txn = store.tx_begin_read()?;
-        let stored = store.meta_store().get_meta_txn(&txn,
-            &crate::checkpoint_store::archive_selection::beacon_key(row.hash))?;
+        let stored = store.meta_store().get_meta_txn(
+            &txn,
+            &crate::checkpoint_store::archive_selection::beacon_key(row.hash),
+        )?;
         Ok((!row.has_beacon && stored.is_none()).then_some(row.height))
     }
 }
@@ -81,7 +88,11 @@ fn key(position: usize) -> [u8; 32] {
 
 impl SelectionHistory {
     pub(crate) fn refresh_cursor(&self) -> Result<SelectionRefresh, StoreError> {
-        Ok(SelectionRefresh { rows: self.hints.fork()?, count: self.count, position: 0 })
+        Ok(SelectionRefresh {
+            rows: self.hints.fork()?,
+            count: self.count,
+            position: 0,
+        })
     }
 
     #[cfg(test)]
@@ -220,7 +231,8 @@ impl SelectionHistory {
                 if row.beacon.is_none() {
                     row.beacon = selection.beacon().cloned();
                     if !updated.put(key(position), &row)?
-                        || !hints.put(key(position), &row.refresh_hint())? {
+                        || !hints.put(key(position), &row.refresh_hint())?
+                    {
                         return Err(invalid("updated selection history row was absent"));
                     }
                 }
@@ -252,7 +264,9 @@ impl SelectionSource for SelectionHistory {
         found.ok_or_else(|| super::super::super::invalid("missing authenticated selection"))
     }
 
-    fn iter_selections(&self) -> impl Iterator<Item = Result<Cow<'_, CertifiedCheckpoint>, ReplayError>> {
+    fn iter_selections(
+        &self,
+    ) -> impl Iterator<Item = Result<Cow<'_, CertifiedCheckpoint>, ReplayError>> {
         let mut anchors = self.authority.iter();
         let mut current: Option<CheckpointAnchor> = None;
         let mut position = 0;

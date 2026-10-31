@@ -5,7 +5,11 @@ use burst_types::{ProtocolParams, Timestamp, TxHash, WalletAddress};
 
 #[derive(Clone, Copy)]
 pub enum Selection {
-    Page { after: Option<TxHash>, offset: u64, count: u32 },
+    Page {
+        after: Option<TxHash>,
+        offset: u64,
+        count: u32,
+    },
     Info(TxHash),
     All,
 }

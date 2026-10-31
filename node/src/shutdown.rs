@@ -165,9 +165,12 @@ mod tests {
                 ..crate::NodeConfig::default()
             };
             let mut node = crate::BurstNode::new(config).await.unwrap();
-            let started = tokio::time::timeout(std::time::Duration::from_secs(10), node.start_with_services(burst_daemon::start_public_services))
-                .await
-                .unwrap();
+            let started = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                node.start_with_services(burst_daemon::start_public_services),
+            )
+            .await
+            .unwrap();
             if server == "P2P listener" {
                 assert!(started
                     .unwrap_err()

@@ -36,13 +36,13 @@ fn read_query_inputs(source: &std::path::Path) -> Result<SnapshotInputs, String>
     let population = value["human_count"]
         .as_u64()
         .ok_or("missing saved population")?;
-    if !(3..=100_000).contains(&population)
-        || population > u64::from(params.bootstrap_exit_threshold)
-        || params
-            != crate::verification_test_support::governance_fixture_params(
-                params.bootstrap_exit_threshold,
-            )
-    {
+    let direct = crate::verification_test_support::governance_fixture_params(
+        params.bootstrap_exit_threshold,
+    );
+    let electorate = crate::verification_test_support::electorate_params(direct.clone());
+    let supported = (params == direct && population <= u64::from(params.bootstrap_exit_threshold))
+        || params == electorate;
+    if !(3..=100_000).contains(&population) || !supported {
         return Err("saved governance population or parameters are incompatible".into());
     }
     let base = value["base"].as_u64().ok_or("missing saved base clock")?;
@@ -97,13 +97,25 @@ fn confirmation_wait_heads(
 }
 
 pub(super) async fn reconcile(
-    clients: &[NodeClient], stores: &[Arc<burst_store_lmdb::LmdbStore>],
-    keys: &[KeyPair], params: &ProtocolParams, base: u64,
+    clients: &[NodeClient],
+    stores: &[Arc<burst_store_lmdb::LmdbStore>],
+    keys: &[KeyPair],
+    params: &ProtocolParams,
+    base: u64,
 ) -> Vec<StateBlock> {
-    if std::env::var_os("BURST_GOVERNANCE_QUERY_RETAINED").is_none() { return Vec::new(); }
-    let addresses: Vec<_> = keys.iter().map(|key| burst_crypto::derive_address(&key.public)).collect();
+    if std::env::var_os("BURST_GOVERNANCE_QUERY_RETAINED").is_none() {
+        return Vec::new();
+    }
+    let addresses: Vec<_> = keys
+        .iter()
+        .map(|key| burst_crypto::derive_address(&key.public))
+        .collect();
     let heads = confirmation_wait_heads(stores, &addresses);
-    eprintln!("signed_governance_retained_wait_heads count={} peers={}", heads.len(), clients.len());
+    eprintln!(
+        "signed_governance_retained_wait_heads count={} peers={}",
+        heads.len(),
+        clients.len()
+    );
     if let Ok(expected) = std::env::var("BURST_GOVERNANCE_EXPECT_UNSETTLED_HEADS") {
         assert_eq!(heads.len(), expected.parse::<usize>().unwrap());
     }
@@ -111,7 +123,10 @@ pub(super) async fn reconcile(
     // ordinary catch-up for unsettled or divergent heads and the pinned checks below.
     for head in heads {
         for client in clients {
-            client.wait_confirmed(&head.to_string(), Duration::from_secs(25)).await.unwrap();
+            client
+                .wait_confirmed(&head.to_string(), Duration::from_secs(25))
+                .await
+                .unwrap();
         }
     }
     let stores = stores.to_vec();
@@ -130,16 +145,33 @@ pub(super) async fn reconcile(
             let mut observed = Vec::new();
             for (index, address) in addresses.iter().enumerate() {
                 let account = accounts.get_account_txn(&snapshot, address).unwrap();
-                assert_eq!(account.confirmation_height, account.block_count, "retained tail not settled");
+                assert_eq!(
+                    account.confirmation_height, account.block_count,
+                    "retained tail not settled"
+                );
                 observed.push(account.head);
                 for height in 1..=account.block_count {
-                    let hash = blocks.block_at_height_txn(&snapshot, address, height).unwrap().unwrap();
-                    let block: StateBlock = bincode::deserialize(&blocks.get_block_txn(&snapshot, &hash).unwrap()).unwrap();
-                    if !matches!(block.block_type, BlockType::GovernanceProposal | BlockType::GovernanceEndorse) { continue; }
+                    let hash = blocks
+                        .block_at_height_txn(&snapshot, address, height)
+                        .unwrap()
+                        .unwrap();
+                    let block: StateBlock =
+                        bincode::deserialize(&blocks.get_block_txn(&snapshot, &hash).unwrap())
+                            .unwrap();
+                    if !matches!(
+                        block.block_type,
+                        BlockType::GovernanceProposal | BlockType::GovernanceEndorse
+                    ) {
+                        continue;
+                    }
                     assert_eq!(block.hash, hash);
                     assert_eq!(block.compute_hash(), hash);
                     assert_eq!(&block.account, address);
-                    assert!(burst_crypto::verify_signature(hash.as_bytes(), &block.signature, &public_keys[index]));
+                    assert!(burst_crypto::verify_signature(
+                        hash.as_bytes(),
+                        &block.signature,
+                        &public_keys[index]
+                    ));
                     assert_eq!(block.timestamp, Timestamp::new(base + 20));
                     assert_eq!(block.params_hash, params_hash);
                     observed.push(hash);
@@ -154,20 +186,31 @@ pub(super) async fn reconcile(
                     }
                 }
             }
-            if let Some(expected) = &canonical { assert_eq!(&observed, expected, "retained peers disagree"); }
-            else { canonical = Some(observed); }
+            if let Some(expected) = &canonical {
+                assert_eq!(&observed, expected, "retained peers disagree");
+            } else {
+                canonical = Some(observed);
+            }
         }
         (proposals, supported)
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     let hashes: BTreeSet<_> = proposals.iter().map(|p| p.hash).collect();
-    assert!(supported.is_subset(&hashes), "retained support lacks proposal");
+    assert!(
+        supported.is_subset(&hashes),
+        "retained support lacks proposal"
+    );
     for proposal in &proposals {
         if !supported.contains(&proposal.hash) {
             support_rate_proposal(clients, &keys[1], params, base + 20, proposal).await;
         }
     }
-    eprintln!("signed_governance_retained_reconciled proposals={} supports={} scope=retained_setup",
-        proposals.len(), supported.len());
+    eprintln!(
+        "signed_governance_retained_reconciled proposals={} supports={} scope=retained_setup",
+        proposals.len(),
+        supported.len()
+    );
     proposals
 }
 
@@ -187,14 +230,20 @@ pub(in super::super) fn copy_snapshot(
         std::env::var_os("BURST_GOVERNANCE_QUERY_RETAINED").is_none(),
         "choose one retained source"
     );
-    let (version, params, epoch, population, now): (u8, ProtocolParams, BlockHash, u32, u64) =
-        bincode::deserialize(&std::fs::read(source.join("resource-probe.bin")).unwrap()).unwrap();
-    assert_eq!(version, 1);
+    let (version, params, epoch, population, now, target): (
+        u8,
+        ProtocolParams,
+        BlockHash,
+        u32,
+        u64,
+        u32,
+    ) = bincode::deserialize(&std::fs::read(source.join("resource-probe.bin")).unwrap()).unwrap();
+    assert_eq!(version, 2);
     assert!((3..=100_000).contains(&population));
     assert_eq!(
         params,
-        crate::verification_test_support::governance_fixture_params(
-            params.bootstrap_exit_threshold
+        crate::verification_test_support::electorate_params(
+            crate::verification_test_support::governance_fixture_params(target)
         ),
         "snapshot must use the signed governance fixture's economic/timing parameters from genesis"
     );
@@ -277,22 +326,51 @@ fn retained_query_metadata_preserves_parameters_and_rejects_clock_rollback() {
 #[test]
 fn retained_waits_preserve_unsettled_and_divergent_peer_heads() {
     let directories: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
-    let stores: Vec<_> = directories.iter().map(|dir|
-        Arc::new(burst_store_lmdb::LmdbStore::open(dir.path(), 32, 8 << 20).unwrap())).collect();
-    let address = burst_crypto::derive_address(&burst_crypto::keypair_from_seed(&[1;32]).public);
+    let stores: Vec<_> = directories
+        .iter()
+        .map(|dir| Arc::new(burst_store_lmdb::LmdbStore::open(dir.path(), 32, 8 << 20).unwrap()))
+        .collect();
+    let address = burst_crypto::derive_address(&burst_crypto::keypair_from_seed(&[1; 32]).public);
     let mut account = burst_store::account::AccountInfo::unopened(address.clone());
-    let first = BlockHash::new([2;32]); let later = BlockHash::new([3;32]);
-    account.head = first; account.block_count = 1;
-    for store in &stores { store.account_store().put_account(&account).unwrap(); }
-    assert_eq!(confirmation_wait_heads(&stores, &[address.clone()]), BTreeSet::from([first]));
-    for store in &stores { store.account_store().advance_confirmation_height(&address, 1).unwrap(); }
+    let first = BlockHash::new([2; 32]);
+    let later = BlockHash::new([3; 32]);
+    account.head = first;
+    account.block_count = 1;
+    for store in &stores {
+        store.account_store().put_account(&account).unwrap();
+    }
+    assert_eq!(
+        confirmation_wait_heads(&stores, &[address.clone()]),
+        BTreeSet::from([first])
+    );
+    for store in &stores {
+        store
+            .account_store()
+            .advance_confirmation_height(&address, 1)
+            .unwrap();
+    }
     assert!(confirmation_wait_heads(&stores, &[address.clone()]).is_empty());
-    account.head = later; account.block_count = 2; account.confirmation_height = 2;
+    account.head = later;
+    account.block_count = 2;
+    account.confirmation_height = 2;
     stores[2].account_store().put_account(&account).unwrap();
-    assert_eq!(confirmation_wait_heads(&stores, &[address.clone()]), BTreeSet::from([first, later]));
+    assert_eq!(
+        confirmation_wait_heads(&stores, &[address.clone()]),
+        BTreeSet::from([first, later])
+    );
     account.confirmation_height = 1;
-    for store in &stores[..2] { store.account_store().put_account(&account).unwrap(); }
-    assert_eq!(confirmation_wait_heads(&stores, &[address.clone()]), BTreeSet::from([later]));
-    for store in &stores { store.account_store().advance_confirmation_height(&address, 2).unwrap(); }
+    for store in &stores[..2] {
+        store.account_store().put_account(&account).unwrap();
+    }
+    assert_eq!(
+        confirmation_wait_heads(&stores, &[address.clone()]),
+        BTreeSet::from([later])
+    );
+    for store in &stores {
+        store
+            .account_store()
+            .advance_confirmation_height(&address, 2)
+            .unwrap();
+    }
     assert!(confirmation_wait_heads(&stores, &[address]).is_empty());
 }

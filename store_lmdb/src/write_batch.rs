@@ -25,12 +25,12 @@ use crate::environment::LmdbEnvironment;
 use crate::LmdbError;
 
 pub(crate) mod auxiliary_cache;
-pub mod checkpoint_projection;
 mod checkpoint_heads;
+pub mod checkpoint_projection;
 mod governance_records;
 pub use governance_records::{prepare_governance_undo, GovernanceUndoProjection};
-mod verification_records;
 pub(crate) mod payment_epoch;
+mod verification_records;
 pub(crate) mod vote_fence;
 
 pub type BrnWalletEntry<'a> = (WalletAddress, &'a [u8]);
@@ -42,7 +42,8 @@ pub type BrnWalletEntry<'a> = (WalletAddress, &'a [u8]);
 pub struct LmdbReadTransaction<'a> {
     pub(crate) txn: RoTxn<'a>,
     pub(crate) generation: Option<usize>,
-    environment: std::sync::Weak<std::sync::Mutex<Option<(usize, auxiliary_cache::AuxiliaryCache)>>>,
+    environment:
+        std::sync::Weak<std::sync::Mutex<Option<(usize, auxiliary_cache::AuxiliaryCache)>>>,
 }
 
 impl<'a> LmdbReadTransaction<'a> {
@@ -53,7 +54,8 @@ impl<'a> LmdbReadTransaction<'a> {
     }
 
     pub(crate) fn belongs_to(&self, env: &LmdbEnvironment) -> bool {
-        self.environment.ptr_eq(&std::sync::Arc::downgrade(&env.auxiliary_cache))
+        self.environment
+            .ptr_eq(&std::sync::Arc::downgrade(&env.auxiliary_cache))
     }
 
     /// Detach only this view's identity. The token retains neither the reader
@@ -75,13 +77,21 @@ impl<'a> LmdbReadTransaction<'a> {
         // Metadata can become visible before LMDB publishes it to new readers.
         // Only the transaction itself identifies the snapshot it actually pins.
         let generation = Some(txn.id());
-        Self { txn, generation, environment: std::sync::Arc::downgrade(&env.auxiliary_cache) }
+        Self {
+            txn,
+            generation,
+            environment: std::sync::Arc::downgrade(&env.auxiliary_cache),
+        }
     }
 
     /// Wrap an already-opened heed read transaction. Used by self-committing
     /// store methods to delegate to their `*_txn` counterparts.
     pub(crate) fn from_ro(txn: RoTxn<'a>) -> Self {
-        Self { txn, generation: None, environment: std::sync::Weak::new() }
+        Self {
+            txn,
+            generation: None,
+            environment: std::sync::Weak::new(),
+        }
     }
 }
 
@@ -89,7 +99,8 @@ impl<'a> LmdbReadTransaction<'a> {
 /// publication authority and retains no database transaction or environment.
 #[derive(Clone)]
 pub struct CleanStorageCut {
-    environment: std::sync::Weak<std::sync::Mutex<Option<(usize, auxiliary_cache::AuxiliaryCache)>>>,
+    environment:
+        std::sync::Weak<std::sync::Mutex<Option<(usize, auxiliary_cache::AuxiliaryCache)>>>,
     generation: usize,
 }
 
@@ -102,7 +113,9 @@ impl CleanStorageCut {
 
     pub(crate) fn matches_generation(&self, env: &LmdbEnvironment, generation: usize) -> bool {
         self.generation == generation
-            && self.environment.ptr_eq(&std::sync::Arc::downgrade(&env.auxiliary_cache))
+            && self
+                .environment
+                .ptr_eq(&std::sync::Arc::downgrade(&env.auxiliary_cache))
     }
 
     /// Compare detached views for body-dependency reuse only. Soft sequence
@@ -118,8 +131,12 @@ impl CleanStorageCut {
         if !self.environment.ptr_eq(&identity) || !later.environment.ptr_eq(&identity) {
             return Ok(false);
         }
-        if self.generation == later.generation { return Ok(true); }
-        let commits = env.sequence_commits.lock()
+        if self.generation == later.generation {
+            return Ok(true);
+        }
+        let commits = env
+            .sequence_commits
+            .lock()
             .map_err(|error| StoreError::Backend(error.to_string()))?;
         Ok(commits.covers(self.generation, later.generation))
     }
@@ -155,23 +172,36 @@ impl<'a> LmdbWriteTransaction<'a> {
 
     /// Start optional mutation coverage under an untouched exclusive writer.
     /// This observes local bytes only; it is not a replay or retirement proof.
-    pub fn watch_body_changes(&self, max_rows: usize, max_bytes: usize)
-        -> Result<crate::retention::BodyChangeWatch, StoreError> {
+    pub fn watch_body_changes(
+        &self,
+        max_rows: usize,
+        max_bytes: usize,
+    ) -> Result<crate::retention::BodyChangeWatch, StoreError> {
         if self.clean_storage_cut().is_none() {
-            return Err(StoreError::Corruption("body change watch requires a clean writer".into()));
+            return Err(StoreError::Corruption(
+                "body change watch requires a clean writer".into(),
+            ));
         }
-        self.env.body_changes.watch(self.base_txn_id, max_rows, max_bytes)
+        self.env
+            .body_changes
+            .watch(self.base_txn_id, max_rows, max_bytes)
     }
 
     fn invalidate_body_changes(&mut self) {
-        if let Some(changes) = self.body_changes.as_mut() { changes.invalidate(); }
+        if let Some(changes) = self.body_changes.as_mut() {
+            changes.invalidate();
+        }
     }
 
     /// A sealed journal is outside reversible recording, but still contributes
     /// a carrier and local images to optional dependency-change observation.
     fn observe_sealed_journal(&mut self, key: &[u8], bytes: &[u8]) -> Result<(), StoreError> {
         if let Some(changes) = self.body_changes.as_mut() {
-            let before = self.env.meta_db.get(&self.txn, key).map_err(LmdbError::from)?;
+            let before = self
+                .env
+                .meta_db
+                .get(&self.txn, key)
+                .map_err(LmdbError::from)?;
             if before != Some(bytes) {
                 changes.record(UndoTable::Meta, key, before, Some(bytes));
                 // The observed journal change advances the native writer.
@@ -194,16 +224,21 @@ impl<'a> LmdbWriteTransaction<'a> {
     }
 
     pub fn matches_clean_storage_cut(&self, cut: &CleanStorageCut) -> bool {
-        !self.changed_value && self.require_clean_checkpoint_boundary().is_ok()
+        !self.changed_value
+            && self.require_clean_checkpoint_boundary().is_ok()
             && cut.generation == self.base_txn_id
-            && cut.environment.ptr_eq(&std::sync::Arc::downgrade(&self.env.auxiliary_cache))
+            && cut
+                .environment
+                .ptr_eq(&std::sync::Arc::downgrade(&self.env.auxiliary_cache))
     }
 
     /// Pin committed TRST rows while this writer excludes intervening commits.
     /// Callers may check their authenticated recovery proof first, then release
     /// the writer before scanning. This method does not authenticate that proof.
     /// Uncommitted edits cannot be represented by the returned read transaction.
-    pub fn trst_reference_reader(&self) -> Result<crate::retention::TrstReferenceReader<'a>, StoreError> {
+    pub fn trst_reference_reader(
+        &self,
+    ) -> Result<crate::retention::TrstReferenceReader<'a>, StoreError> {
         self.require_clean_checkpoint_boundary()?;
         if self.changed_value {
             return Err(StoreError::Corruption(
@@ -218,10 +253,15 @@ impl<'a> LmdbWriteTransaction<'a> {
     /// intervening commit rejects the old view, including new queue entries or
     /// higher signing sequences. This does not prove dependency closure or grant
     /// deletion authority; it only prevents publishing from a stale storage cut.
-    pub fn check_retention_cut(&self, reader: &crate::retention::TrstReferenceReader<'_>) -> Result<(), StoreError> {
+    pub fn check_retention_cut(
+        &self,
+        reader: &crate::retention::TrstReferenceReader<'_>,
+    ) -> Result<(), StoreError> {
         self.require_clean_checkpoint_boundary()?;
         if self.changed_value {
-            return Err(StoreError::Corruption("retention cut requires an unchanged writer".into()));
+            return Err(StoreError::Corruption(
+                "retention cut requires an unchanged writer".into(),
+            ));
         }
         reader.check_cut(self.env, self.base_txn_id)
     }
@@ -230,10 +270,15 @@ impl<'a> LmdbWriteTransaction<'a> {
     /// reservation interval. This never restores signer records; callers retain
     /// newer counters. Final votes, ledger/queue edits and unknown commits reject.
     /// Complete authenticated closure remains the caller's separate obligation.
-    pub fn check_body_retention_cut(&self, reader: &crate::retention::TrstReferenceReader<'_>) -> Result<(), StoreError> {
+    pub fn check_body_retention_cut(
+        &self,
+        reader: &crate::retention::TrstReferenceReader<'_>,
+    ) -> Result<(), StoreError> {
         self.require_clean_checkpoint_boundary()?;
         if self.changed_value {
-            return Err(StoreError::Corruption("body retention cut requires an unchanged writer".into()));
+            return Err(StoreError::Corruption(
+                "body retention cut requires an unchanged writer".into(),
+            ));
         }
         reader.check_body_cut(self.env, self.base_txn_id)
     }
@@ -242,10 +287,13 @@ impl<'a> LmdbWriteTransaction<'a> {
     /// publication edits. The cut itself proves neither closure nor authority.
     /// Only fully covered soft sequence commits may intervene; newer counters
     /// stay in this writer and must never be restored from the old proof.
-    pub fn check_detached_body_retention_cut(&self, cut: &CleanStorageCut) -> Result<(), StoreError> {
-        let current = self.clean_storage_cut().ok_or_else(|| StoreError::Corruption(
-            "body retention cut requires an unchanged clean writer".into(),
-        ))?;
+    pub fn check_detached_body_retention_cut(
+        &self,
+        cut: &CleanStorageCut,
+    ) -> Result<(), StoreError> {
+        let current = self.clean_storage_cut().ok_or_else(|| {
+            StoreError::Corruption("body retention cut requires an unchanged clean writer".into())
+        })?;
         if !cut.body_dependencies_unchanged(&current, self.env)? {
             return Err(StoreError::Corruption(
                 "body retention dependencies changed or commit coverage is missing".into(),
@@ -285,10 +333,14 @@ impl<'a> LmdbWriteTransaction<'a> {
     /// Uncommitted writes are visible. The caller must preserve total coverage
     /// and budgets; reaching a suffix end alone proves neither completeness nor finality.
     pub fn visit_indexed_block_window<'view>(
-        &'view self, after: Option<BlockHash>, max_rows: usize, max_bytes: usize,
+        &'view self,
+        after: Option<BlockHash>,
+        max_rows: usize,
+        max_bytes: usize,
         visit: impl FnMut(crate::block::IndexedBlock<'view>) -> Result<(), StoreError>,
     ) -> Result<crate::block::IndexedBlockWindow, StoreError> {
-        self.read_view().visit_indexed_block_window(after, max_rows, max_bytes, visit)
+        self.read_view()
+            .visit_indexed_block_window(after, max_rows, max_bytes, visit)
     }
 
     /// Collect the bounded physical inventory when the caller needs owned bodies.
@@ -311,25 +363,42 @@ impl<'a> LmdbWriteTransaction<'a> {
     /// Protected readers must drop before the guard. This bounds new file pages,
     /// not RAM or other processes; callers must handle GrowthLimit by aborting.
     pub fn limit_file_extent(&mut self, bytes: usize) -> Result<heed::FileGrowthLimit, StoreError> {
-        self.txn.limit_file_extent(bytes).map_err(LmdbError::from).map_err(StoreError::from)
+        self.txn
+            .limit_file_extent(bytes)
+            .map_err(LmdbError::from)
+            .map_err(StoreError::from)
     }
 
     /// Live metadata-tree pages in this writer's view, without scanning records.
     /// Excludes retired/COW pages, allocator free lists and other databases;
     /// these counts do not measure remaining transaction allocation capacity.
     pub fn metadata_page_stats(&self) -> Result<heed::DatabaseStat, StoreError> {
-        self.env.meta_db.stat(&self.txn)
-            .map_err(LmdbError::from).map_err(StoreError::from)
+        self.env
+            .meta_db
+            .stat(&self.txn)
+            .map_err(LmdbError::from)
+            .map_err(StoreError::from)
     }
 
-    pub fn growth_outcome(&self) -> Option<heed::GrowthOutcome> { self.txn.growth_outcome() }
+    pub fn growth_outcome(&self) -> Option<heed::GrowthOutcome> {
+        self.txn.growth_outcome()
+    }
 
     pub fn reserve_growth_retry(&self) -> Result<Option<heed::GrowthRetry>, StoreError> {
-        self.txn.reserve_growth_retry().map_err(LmdbError::from).map_err(StoreError::from)
+        self.txn
+            .reserve_growth_retry()
+            .map_err(LmdbError::from)
+            .map_err(StoreError::from)
     }
 
-    pub fn try_limit_file_extent(&mut self, bytes: usize) -> Result<Option<heed::FileGrowthLimit>, StoreError> {
-        self.txn.try_limit_file_extent(bytes).map_err(LmdbError::from).map_err(StoreError::from)
+    pub fn try_limit_file_extent(
+        &mut self,
+        bytes: usize,
+    ) -> Result<Option<heed::FileGrowthLimit>, StoreError> {
+        self.txn
+            .try_limit_file_extent(bytes)
+            .map_err(LmdbError::from)
+            .map_err(StoreError::from)
     }
 
     /// Begin a new write transaction.
@@ -406,10 +475,17 @@ impl<'a> LmdbWriteTransaction<'a> {
             }
             // The previous active journal was not in meta_db during the first
             // duplicate check. Sealing it must not permit reuse of its identity.
-            if self.env.meta_db.get(&self.txn, &crate::block_undo::key(&block))
-                .map_err(LmdbError::from)?.is_some() {
+            if self
+                .env
+                .meta_db
+                .get(&self.txn, &crate::block_undo::key(&block))
+                .map_err(LmdbError::from)?
+                .is_some()
+            {
                 self.failed = true;
-                return Err(StoreError::Corruption("duplicate grouped block undo boundary".into()));
+                return Err(StoreError::Corruption(
+                    "duplicate grouped block undo boundary".into(),
+                ));
             }
         }
         self.undo = Some(UndoRecorder::new(block, account, height));
@@ -553,13 +629,18 @@ impl<'a> LmdbWriteTransaction<'a> {
     /// snapshots may be reconstructed from normalized rows rather than copied
     /// from one physical key.
     pub fn undo_value(&self, table: UndoTable, key: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
-        if table == UndoTable::Meta && key == b"verification_orchestrator" && self.uses_verification_records()? {
+        if table == UndoTable::Meta
+            && key == b"verification_orchestrator"
+            && self.uses_verification_records()?
+        {
             return self.verification_undo_snapshot_with_overlay(&Default::default(), 64 << 20);
         }
         if table == UndoTable::Meta && self.uses_virtual_verification_target(key)? {
             return self.verification_target_undo_with_overlay(
                 std::str::from_utf8(key).map_err(|e| StoreError::Corruption(e.to_string()))?,
-                &Default::default(), 64 << 20);
+                &Default::default(),
+                64 << 20,
+            );
         }
         if table == UndoTable::BrnMeta
             && key == b"governance_engine"
@@ -716,10 +797,18 @@ impl<'a> LmdbWriteTransaction<'a> {
         value: Option<&[u8]>,
     ) -> Result<(), StoreError> {
         let result = (|| {
-            if self.undo.is_some() && table == UndoTable::BrnMeta && key == burst_brn::wallet_storage::FORMAT_KEY {
-                return Err(StoreError::Corruption("wallet format cannot change inside block undo".into()));
+            if self.undo.is_some()
+                && table == UndoTable::BrnMeta
+                && key == burst_brn::wallet_storage::FORMAT_KEY
+            {
+                return Err(StoreError::Corruption(
+                    "wallet format cannot change inside block undo".into(),
+                ));
             }
-            if table == UndoTable::Meta && key == b"verification_orchestrator" && self.uses_verification_records()? {
+            if table == UndoTable::Meta
+                && key == b"verification_orchestrator"
+                && self.uses_verification_records()?
+            {
                 return self.replace_verification_undo_snapshot(value);
             }
             if table == UndoTable::Meta && self.uses_virtual_verification_target(key)? {
@@ -735,14 +824,26 @@ impl<'a> LmdbWriteTransaction<'a> {
             let before = db.get(&self.txn, key).map_err(LmdbError::from)?;
             let changed = before != value;
             if changed {
-                if let Some(changes) = self.body_changes.as_mut() { changes.record(table, key, before, value); }
-                self.auxiliary_cache.get_mut().mark_counter_account(table, key);
-                self.auxiliary_cache.get_mut().mark_pending_expiry(table, key);
+                if let Some(changes) = self.body_changes.as_mut() {
+                    changes.record(table, key, before, value);
+                }
+                self.auxiliary_cache
+                    .get_mut()
+                    .mark_counter_account(table, key);
+                self.auxiliary_cache
+                    .get_mut()
+                    .mark_pending_expiry(table, key);
                 self.changed_value = true;
-                self.auxiliary_cache.get_mut().update_brn(table, key, before, value);
+                self.auxiliary_cache
+                    .get_mut()
+                    .update_brn(table, key, before, value);
                 if table == UndoTable::Meta {
-                    self.auxiliary_cache.get_mut().update_confirmations(key, value);
-                    self.auxiliary_cache.get_mut().update_trst(key, before, value);
+                    self.auxiliary_cache
+                        .get_mut()
+                        .update_confirmations(key, value);
+                    self.auxiliary_cache
+                        .get_mut()
+                        .update_trst(key, before, value);
                     self.auxiliary_cache.get_mut().invalidate(key);
                 }
                 if (table == UndoTable::Meta
@@ -762,7 +863,13 @@ impl<'a> LmdbWriteTransaction<'a> {
             }
             self.dirty = true;
             if table == UndoTable::Accounts {
-                if crate::verified_index::update(&mut self.txn, self.env.accounts_db, self.env.verified_accounts_db, key, value)? {
+                if crate::verified_index::update(
+                    &mut self.txn,
+                    self.env.accounts_db,
+                    self.env.verified_accounts_db,
+                    key,
+                    value,
+                )? {
                     self.auxiliary_cache.get_mut().clear_electorate(table);
                 }
             }
@@ -1257,10 +1364,11 @@ impl<'a> LmdbWriteTransaction<'a> {
         account: &WalletAddress,
         height: u64,
     ) -> Result<(), StoreError> {
-        if self.block_group.is_some() || !self
-            .undo
-            .as_ref()
-            .is_some_and(|undo| undo.matches(expected, account, height))
+        if self.block_group.is_some()
+            || !self
+                .undo
+                .as_ref()
+                .is_some_and(|undo| undo.matches(expected, account, height))
         {
             return Err(StoreError::Corruption(
                 "candidate undo boundary missing or mismatched".into(),
@@ -1347,7 +1455,8 @@ impl<'a> LmdbWriteTransaction<'a> {
     /// a separate sync barrier.
     pub fn commit(mut self) -> Result<(), StoreError> {
         #[cfg(test)]
-        let probe = COMMIT_PROBE.with(|slot| slot.borrow().is_some())
+        let probe = COMMIT_PROBE
+            .with(|slot| slot.borrow().is_some())
             .then(std::time::Instant::now);
         if self.failed {
             return Err(StoreError::Corruption(
@@ -1355,7 +1464,9 @@ impl<'a> LmdbWriteTransaction<'a> {
             ));
         }
         if self.block_group.is_some() && self.undo.is_none() {
-            return Err(StoreError::Corruption("block group has no active journal".into()));
+            return Err(StoreError::Corruption(
+                "block group has no active journal".into(),
+            ));
         }
         self.seal_block_undo()?;
         let cached = self.governance_cache.into_inner();
@@ -1364,11 +1475,22 @@ impl<'a> LmdbWriteTransaction<'a> {
         // Untracked direct writes can cause a conservative miss, never a hit
         // tagged with an unobserved later writer's generation.
         let cache_id = self.base_txn_id + usize::from(self.changed_value);
-        let next_id = if self.changed_value { self.txn.id() } else { self.base_txn_id };
-        let commit = || self.txn.commit().map_err(LmdbError::from).map_err(StoreError::from);
+        let next_id = if self.changed_value {
+            self.txn.id()
+        } else {
+            self.base_txn_id
+        };
+        let commit = || {
+            self.txn
+                .commit()
+                .map_err(LmdbError::from)
+                .map_err(StoreError::from)
+        };
         if let Some(changes) = self.body_changes {
             changes.commit(self.base_txn_id, next_id, commit)?;
-        } else { commit()?; }
+        } else {
+            commit()?;
+        }
         #[cfg(test)]
         let database_ns = probe.map(|start| start.elapsed().as_nanos());
         if !auxiliary.is_empty() {
@@ -1389,11 +1511,13 @@ impl<'a> LmdbWriteTransaction<'a> {
         if let Some(start) = probe {
             let database_ns = database_ns.unwrap();
             let auxiliary_ns = auxiliary_ns.unwrap();
-            COMMIT_PROBE.with(|slot| slot.borrow_mut().as_mut().unwrap().push([
-                database_ns,
-                auxiliary_ns - database_ns,
-                start.elapsed().as_nanos() - auxiliary_ns,
-            ]));
+            COMMIT_PROBE.with(|slot| {
+                slot.borrow_mut().as_mut().unwrap().push([
+                    database_ns,
+                    auxiliary_ns - database_ns,
+                    start.elapsed().as_nanos() - auxiliary_ns,
+                ])
+            });
         }
         Ok(())
     }
@@ -1428,8 +1552,8 @@ mod tests {
 
     fn temp_env() -> (tempfile::TempDir, LmdbEnvironment) {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
-        let env =
-            LmdbEnvironment::open(dir.path(), crate::REQUIRED_DATABASES, 10 * 1024 * 1024).expect("failed to open env");
+        let env = LmdbEnvironment::open(dir.path(), crate::REQUIRED_DATABASES, 10 * 1024 * 1024)
+            .expect("failed to open env");
         (dir, env)
     }
 
@@ -1441,7 +1565,10 @@ mod tests {
         let native_id = writer.txn.id();
         let cut = writer.commit_with_storage_cut().unwrap();
         assert_eq!(cut.generation, native_id);
-        env.tx_begin_write().unwrap().check_detached_body_retention_cut(&cut).unwrap();
+        env.tx_begin_write()
+            .unwrap()
+            .check_detached_body_retention_cut(&cut)
+            .unwrap();
 
         // A later writer must not become part of the returned proof, even if it
         // restores the same bytes. Each cut retains its own native generation.
@@ -1454,21 +1581,34 @@ mod tests {
         assert!(current.check_detached_body_retention_cut(&cut).is_err());
         drop(current);
         let (_other_directory, other) = temp_env();
-        assert!(other.tx_begin_write().unwrap().check_detached_body_retention_cut(&later).is_err());
+        assert!(other
+            .tx_begin_write()
+            .unwrap()
+            .check_detached_body_retention_cut(&later)
+            .is_err());
     }
 
     #[test]
     fn committed_storage_cut_rejects_empty_untracked_and_failed_transactions() {
         let (_directory, env) = temp_env();
         let before = env.tx_begin_read().unwrap().clean_storage_cut().unwrap();
-        assert!(env.tx_begin_write().unwrap().commit_with_storage_cut().is_err());
+        assert!(env
+            .tx_begin_write()
+            .unwrap()
+            .commit_with_storage_cut()
+            .is_err());
         let mut writer = env.tx_begin_write().unwrap();
         writer.delete_meta("absent_cut_key").unwrap();
         assert!(writer.commit_with_storage_cut().is_err());
-        assert!(env.tx_begin_write().unwrap().matches_clean_storage_cut(&before));
+        assert!(env
+            .tx_begin_write()
+            .unwrap()
+            .matches_clean_storage_cut(&before));
 
         let mut writer = env.tx_begin_write().unwrap();
-        env.meta_db.put(&mut writer.txn, b"untracked_cut", b"raw").unwrap();
+        env.meta_db
+            .put(&mut writer.txn, b"untracked_cut", b"raw")
+            .unwrap();
         assert!(writer.commit_with_storage_cut().is_err());
         let current = env.tx_begin_write().unwrap();
         assert!(!current.contains_meta("untracked_cut").unwrap());
@@ -1723,7 +1863,8 @@ mod tests {
         assert_eq!(outgoing[0].1, tx);
         assert_eq!(outgoing[0].2.amount, 20);
         drop(env);
-        let env = LmdbEnvironment::open(dir.path(), crate::REQUIRED_DATABASES, 10 * 1024 * 1024).unwrap();
+        let env =
+            LmdbEnvironment::open(dir.path(), crate::REQUIRED_DATABASES, 10 * 1024 * 1024).unwrap();
         let txn = env.tx_begin_write().unwrap();
         assert_eq!(txn.verified_accounts().unwrap(), vec![account.clone()]);
         let record = txn.block_undo(&hash).unwrap().unwrap();
@@ -1765,7 +1906,12 @@ mod tests {
         assert!(batch.verified_accounts().unwrap().is_empty());
         batch.commit().unwrap();
         assert_eq!(snapshot(&env), before);
-        assert!(env.tx_begin_write().unwrap().verified_accounts().unwrap().is_empty());
+        assert!(env
+            .tx_begin_write()
+            .unwrap()
+            .verified_accounts()
+            .unwrap()
+            .is_empty());
         let outgoing = env
             .pending_store()
             .get_pending_from_account(&account)
@@ -1774,9 +1920,15 @@ mod tests {
         assert_eq!(outgoing[0].1.as_bytes(), hash.as_bytes());
         assert_eq!(outgoing[0].2.amount, 10);
         drop(env);
-        let env = LmdbEnvironment::open(dir.path(), crate::REQUIRED_DATABASES, 10 * 1024 * 1024).unwrap();
+        let env =
+            LmdbEnvironment::open(dir.path(), crate::REQUIRED_DATABASES, 10 * 1024 * 1024).unwrap();
         assert_eq!(snapshot(&env), before);
-        assert!(env.tx_begin_write().unwrap().verified_accounts().unwrap().is_empty());
+        assert!(env
+            .tx_begin_write()
+            .unwrap()
+            .verified_accounts()
+            .unwrap()
+            .is_empty());
         assert!(env
             .tx_begin_write()
             .unwrap()
@@ -1810,36 +1962,65 @@ mod tests {
         let account = AccountInfo::unopened(WalletAddress::new("brst_identical_publication"));
         let mut writer = env.tx_begin_write().unwrap();
         writer.put_account_info(&account, false).unwrap();
-        writer.put_meta("verification_identity_source/v1/test", &[7; 32]).unwrap();
+        writer
+            .put_meta("verification_identity_source/v1/test", &[7; 32])
+            .unwrap();
         writer.put_brn_meta(b"publication-test", b"same").unwrap();
         writer.commit().unwrap();
         let generation = env.env().info().last_txn_id;
         let mut writer = env.tx_begin_write().unwrap();
         writer.put_account_info(&account, false).unwrap();
-        writer.put_meta("verification_identity_source/v1/test", &[7; 32]).unwrap();
+        writer
+            .put_meta("verification_identity_source/v1/test", &[7; 32])
+            .unwrap();
         writer.put_brn_meta(b"publication-test", b"same").unwrap();
         writer.delete_meta("absent-publication-test").unwrap();
-        assert!(writer.dirty, "attempted writes still invalidate clean-writer guards");
+        assert!(
+            writer.dirty,
+            "attempted writes still invalidate clean-writer guards"
+        );
         assert!(!writer.changed_value);
         writer.commit().unwrap();
-        assert_eq!(env.env().info().last_txn_id, generation,
-            "identical primary values must not create a durable writer generation");
+        assert_eq!(
+            env.env().info().last_txn_id,
+            generation,
+            "identical primary values must not create a durable writer generation"
+        );
 
         let mut writer = env.tx_begin_write().unwrap();
-        writer.put_meta("verification_identity_source/v1/test", &[8; 32]).unwrap();
+        writer
+            .put_meta("verification_identity_source/v1/test", &[8; 32])
+            .unwrap();
         writer.commit().unwrap();
         assert!(env.env().info().last_txn_id > generation);
         let mut writer = env.tx_begin_write().unwrap();
-        writer.put_meta("verification_identity_source/v1/test", &[9; 32]).unwrap();
+        writer
+            .put_meta("verification_identity_source/v1/test", &[9; 32])
+            .unwrap();
         drop(writer);
         let mut writer = env.tx_begin_write().unwrap();
-        assert_eq!(writer.get_meta("verification_identity_source/v1/test").unwrap(), Some(vec![8; 32]));
+        assert_eq!(
+            writer
+                .get_meta("verification_identity_source/v1/test")
+                .unwrap(),
+            Some(vec![8; 32])
+        );
         // Equality of the primary row must not hide a corrupt membership index.
-        env.verified_accounts_db.put(&mut writer.txn, account.address.as_str().as_bytes(), &[1]).unwrap();
-        assert!(writer.put_account_info(&account, false).unwrap_err().to_string().contains("verified index disagrees"));
+        env.verified_accounts_db
+            .put(&mut writer.txn, account.address.as_str().as_bytes(), &[1])
+            .unwrap();
+        assert!(writer
+            .put_account_info(&account, false)
+            .unwrap_err()
+            .to_string()
+            .contains("verified index disagrees"));
         assert!(writer.commit().is_err());
         let writer = env.tx_begin_write().unwrap();
-        assert!(env.verified_accounts_db.get(&writer.txn, account.address.as_str().as_bytes()).unwrap().is_none());
+        assert!(env
+            .verified_accounts_db
+            .get(&writer.txn, account.address.as_str().as_bytes())
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -1971,10 +2152,20 @@ mod tests {
         replacement.state = burst_types::WalletState::Challenged;
         for commit in [false, true] {
             let mut batch = env.tx_begin_write().unwrap();
-            batch.clear_checkpoint_rows(UndoTable::Accounts, None).unwrap();
+            batch
+                .clear_checkpoint_rows(UndoTable::Accounts, None)
+                .unwrap();
             assert!(batch.verified_accounts().unwrap().is_empty());
-            batch.put_account(&replacement.address, &bincode::serialize(&replacement).unwrap()).unwrap();
-            assert_eq!(batch.verified_accounts().unwrap(), vec![replacement.address.clone()]);
+            batch
+                .put_account(
+                    &replacement.address,
+                    &bincode::serialize(&replacement).unwrap(),
+                )
+                .unwrap();
+            assert_eq!(
+                batch.verified_accounts().unwrap(),
+                vec![replacement.address.clone()]
+            );
             if commit {
                 batch.commit().unwrap();
             } else {
@@ -1982,7 +2173,11 @@ mod tests {
             }
             assert_eq!(
                 env.tx_begin_write().unwrap().verified_accounts().unwrap(),
-                vec![if commit { replacement.address.clone() } else { original.address.clone() }]
+                vec![if commit {
+                    replacement.address.clone()
+                } else {
+                    original.address.clone()
+                }]
             );
         }
     }

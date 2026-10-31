@@ -72,7 +72,9 @@ mod tests {
     fn post_commit_barrier_preserves_default_and_relaxed_durability() {
         fn marker(name: &str, phase: &str) {
             use std::io::Write;
-            std::io::stderr().write_all(format!("BURST_DURABILITY {name} {phase}\n").as_bytes()).unwrap();
+            std::io::stderr()
+                .write_all(format!("BURST_DURABILITY {name} {phase}\n").as_bytes())
+                .unwrap();
         }
         for (name, flags) in [
             ("default", EnvFlags::empty()),
@@ -84,10 +86,16 @@ mod tests {
             options.max_dbs(1).map_size(1 << 20);
             let env = SharedEnv::open(dir.path(), options.clone()).unwrap();
             let mut txn = env.write_txn().unwrap();
-            let db = env.create_database::<Bytes, Bytes>(&mut txn, Some("intent")).unwrap();
+            let db = env
+                .create_database::<Bytes, Bytes>(&mut txn, Some("intent"))
+                .unwrap();
             txn.commit().unwrap();
             // Isolated environment, no concurrent flag changes or transactions.
-            if !flags.is_empty() { unsafe { env.set_flags(flags, FlagSetMode::Enable).unwrap(); } }
+            if !flags.is_empty() {
+                unsafe {
+                    env.set_flags(flags, FlagSetMode::Enable).unwrap();
+                }
+            }
             assert_eq!(env.get_flags().unwrap(), flags.bits());
             let mut txn = env.write_txn().unwrap();
             db.put(&mut txn, b"final", b"choice").unwrap();
@@ -99,7 +107,10 @@ mod tests {
             drop(env);
             let reopened = SharedEnv::open(dir.path(), options).unwrap();
             let txn = reopened.read_txn().unwrap();
-            let db = reopened.open_database::<Bytes, Bytes>(&txn, Some("intent")).unwrap().unwrap();
+            let db = reopened
+                .open_database::<Bytes, Bytes>(&txn, Some("intent"))
+                .unwrap()
+                .unwrap();
             assert_eq!(db.get(&txn, b"final").unwrap(), Some(b"choice".as_slice()));
         }
     }

@@ -238,7 +238,9 @@ async fn restart_and_admit(directory: &Path, fixture: &Fixture, epoch: BlockHash
     }));
     let shutdown = node.shutdown.clone();
     let mut task = tokio::spawn(async move {
-        node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+        node.start_with_services(burst_daemon::start_public_services)
+            .await
+            .unwrap();
         node
     });
     let result = tokio::time::timeout(Duration::from_secs(30), async {

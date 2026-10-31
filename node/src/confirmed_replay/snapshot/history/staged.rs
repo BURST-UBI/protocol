@@ -21,18 +21,25 @@ impl HistoricalBlocks {
         proofs: impl IntoIterator<Item = HistoricalBlock>,
     ) -> Result<Self, StoreError> {
         let mut positions = Vec::new();
-        let mut builder = ScratchRecordsBuilder::new(directory,
+        let mut builder = ScratchRecordsBuilder::new(
+            directory,
             super::super::tail::MAX_TAIL_BLOCKS,
-            super::super::tail::MAX_TAIL_BYTES as u64)?;
+            super::super::tail::MAX_TAIL_BYTES as u64,
+        )?;
         for proof in proofs {
             let block = proof.block;
             if block.hash != block.compute_hash()
-                || bincode::serialized_size(&block).map_err(corrupt)? > burst_types::MAX_P2P_MESSAGE_BYTES as u64
+                || bincode::serialized_size(&block).map_err(corrupt)?
+                    > burst_types::MAX_P2P_MESSAGE_BYTES as u64
             {
                 return Err(corrupt("invalid staged historical block"));
             }
             builder.push(*block.hash.as_bytes(), &block)?;
-            positions.push(Position { hash: block.hash, context: proof.context, height: proof.height });
+            positions.push(Position {
+                hash: block.hash,
+                context: proof.context,
+                height: proof.height,
+            });
         }
         let bodies = builder.finish()?;
         let result = Self { bodies, positions };
@@ -51,11 +58,9 @@ impl HistoricalBlocks {
         &self,
     ) -> impl ExactSizeIterator<Item = Result<HistoricalBlock, StoreError>> + '_ {
         self.positions.iter().map(|position| {
-            let block = self
-                .block(&position.hash)?
-                .ok_or_else(|| {
-                    StoreError::NotFound(format!("staged historical block {}", position.hash))
-                })?;
+            let block = self.block(&position.hash)?.ok_or_else(|| {
+                StoreError::NotFound(format!("staged historical block {}", position.hash))
+            })?;
             Ok(HistoricalBlock {
                 context: position.context,
                 height: position.height,
@@ -106,10 +111,14 @@ impl HistoricalBlocks {
         &self,
         hash: &BlockHash,
     ) -> Result<Option<std::borrow::Cow<'_, burst_ledger::StateBlock>>, StoreError> {
-        self.block(hash).map(|block| block.map(std::borrow::Cow::Owned))
+        self.block(hash)
+            .map(|block| block.map(std::borrow::Cow::Owned))
     }
 
-    fn check_identity(hash: &BlockHash, block: &burst_ledger::StateBlock) -> Result<(), StoreError> {
+    fn check_identity(
+        hash: &BlockHash,
+        block: &burst_ledger::StateBlock,
+    ) -> Result<(), StoreError> {
         if block.hash != *hash || block.compute_hash() != *hash {
             return Err(corrupt("staged historical block identity changed"));
         }
@@ -118,24 +127,32 @@ impl HistoricalBlocks {
 
     fn block(&self, hash: &BlockHash) -> Result<Option<burst_ledger::StateBlock>, StoreError> {
         let block = self.bodies.get(hash.as_bytes())?;
-        if let Some(block) = &block { Self::check_identity(hash, block)?; }
+        if let Some(block) = &block {
+            Self::check_identity(hash, block)?;
+        }
         Ok(block)
     }
 
     pub(crate) fn encoded(&self, hash: &BlockHash) -> Result<Option<Vec<u8>>, StoreError> {
-        self.block(hash)?.map(|block| bincode::serialize(&block).map_err(corrupt)).transpose()
+        self.block(hash)?
+            .map(|block| bincode::serialize(&block).map_err(corrupt))
+            .transpose()
     }
 
     pub(crate) fn row(&self, index: usize) -> Option<Result<(BlockHash, Vec<u8>), StoreError>> {
         self.positions.get(index).map(|position| {
-            self.encoded(&position.hash)?.map(|bytes| (position.hash, bytes))
-                .ok_or_else(|| StoreError::NotFound(format!("staged historical block {}", position.hash)))
+            self.encoded(&position.hash)?
+                .map(|bytes| (position.hash, bytes))
+                .ok_or_else(|| {
+                    StoreError::NotFound(format!("staged historical block {}", position.hash))
+                })
         })
     }
-
 }
 
-fn corrupt(error: impl ToString) -> StoreError { StoreError::Corruption(error.to_string()) }
+fn corrupt(error: impl ToString) -> StoreError {
+    StoreError::Corruption(error.to_string())
+}
 
 #[cfg(test)]
 mod tests {
@@ -171,7 +188,10 @@ mod tests {
         assert!(HistoricalBlocks::stage(directory.path(), [proof.clone(), proof.clone()]).is_err());
         // Payload and index files must fit the shared scratch limit.
         let _limit = crate::confirmed_replay::scratch_file::ScratchLimit::acquire(
-            directory.path(), bytes.len() as u64 + 256).unwrap();
+            directory.path(),
+            bytes.len() as u64 + 256,
+        )
+        .unwrap();
         let stored = HistoricalBlocks::stage(directory.path(), [proof]).unwrap();
         assert_eq!(stored.hashes().collect::<Vec<_>>(), vec![block.hash]);
         let restored = stored.iter().next().unwrap().unwrap();

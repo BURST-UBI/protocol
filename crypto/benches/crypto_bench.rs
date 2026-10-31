@@ -58,7 +58,7 @@ fn keypair_generation_bench(c: &mut Criterion) {
 }
 
 fn reference_blake2b_256(data: &[u8]) -> [u8; 32] {
-    use blake2::{Blake2b, Digest, digest::consts::U32};
+    use blake2::{digest::consts::U32, Blake2b, Digest};
     Blake2b::<U32>::digest(data).into()
 }
 
@@ -74,17 +74,29 @@ fn blake2b_backend_comparison(c: &mut Criterion) {
         for chunk in [1, 31, 128, 129, 512] {
             let mut streamed = params.to_state();
             streamed.update(&[]);
-            for part in data.chunks(chunk) { streamed.update(part); }
+            for part in data.chunks(chunk) {
+                streamed.update(part);
+            }
             streamed.update(&[]);
             assert_eq!(streamed.finalize().as_bytes(), reference_blake2b_256(&data));
         }
         group.throughput(Throughput::Bytes(length as u64));
-        group.bench_with_input(BenchmarkId::new("rustcrypto_reference", length), &data, |b, data| {
-            b.iter(|| reference_blake2b_256(black_box(data)))
-        });
-        group.bench_with_input(BenchmarkId::new("simd_candidate", length), &data, |b, data| {
-            b.iter(|| blake2b_simd::Params::new().hash_length(32).hash(black_box(data)))
-        });
+        group.bench_with_input(
+            BenchmarkId::new("rustcrypto_reference", length),
+            &data,
+            |b, data| b.iter(|| reference_blake2b_256(black_box(data))),
+        );
+        group.bench_with_input(
+            BenchmarkId::new("simd_candidate", length),
+            &data,
+            |b, data| {
+                b.iter(|| {
+                    blake2b_simd::Params::new()
+                        .hash_length(32)
+                        .hash(black_box(data))
+                })
+            },
+        );
     }
     group.finish();
 }

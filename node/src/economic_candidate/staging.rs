@@ -1,5 +1,5 @@
 #[cfg(test)]
-use super::{StagedBlockEffects, EconomicContext};
+use super::{EconomicContext, StagedBlockEffects};
 use burst_brn::BrnEngine;
 #[cfg(test)]
 use burst_ledger::StateBlock;
@@ -105,16 +105,22 @@ impl<'a> StagedEngines<'a> {
     /// Write deltas without committing or advancing the comparison baseline.
     /// Abort the transaction on error.
     pub(crate) fn persist(&self, batch: &mut LmdbWriteTransaction<'_>) -> Result<(), String> {
-        let (before_brn, before_trst) = self.persisted.as_ref()
+        let (before_brn, before_trst) = self
+            .persisted
+            .as_ref()
             .map_or((self.brn, self.trst), |(brn, trst)| (brn, trst));
         if let Some(brn) = &self.staged_brn {
             crate::ledger_updater::persist_brn_delta(batch, before_brn, brn)?;
         }
         if let Some(trst) = &self.staged_trst {
-            if batch.uses_stable_trst_records().map_err(|e| e.to_string())?
+            if batch
+                .uses_stable_trst_records()
+                .map_err(|e| e.to_string())?
                 && batch.uses_graph_records().map_err(|e| e.to_string())?
             {
-                batch.persist_stable_trst_transition(before_trst, trst).map_err(|e| e.to_string())?;
+                batch
+                    .persist_stable_trst_transition(before_trst, trst)
+                    .map_err(|e| e.to_string())?;
                 return Ok(());
             }
             if !trst

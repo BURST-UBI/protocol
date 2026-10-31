@@ -15,8 +15,8 @@ use burst_governance::GovernanceEngine;
 use burst_ledger::{BlockType, DagFrontier, StateBlock, CURRENT_BLOCK_VERSION};
 use burst_messages::PeerAddress;
 use burst_network::{Broadcaster, ClockSync, PeerManager, PortMapper, UpnpState};
-use burst_store::block::BlockStore;
 use burst_rpc::ProcessResult as RpcProcessResult;
+use burst_store::block::BlockStore;
 use burst_store::brn::BrnStore;
 use burst_store::frontier::FrontierStore;
 use burst_store_lmdb::LmdbStore;
@@ -58,8 +58,8 @@ const MERGER_GRAPH_META_KEY: &str = "merger_graph";
 
 use crate::genesis_key;
 
-mod rpc_adapter;
 mod online_weight_worker;
+mod rpc_adapter;
 /// Maximum number of recently confirmed hashes to remember.
 const RECENTLY_CONFIRMED_CAPACITY: usize = 65_536;
 /// Default maximum concurrent elections.
@@ -163,11 +163,11 @@ mod admission_group;
 mod admission_worker;
 mod confirmation_handoff;
 mod confirmation_requests;
+mod dependency_waits;
 mod local_votes;
 mod recovery_peers;
 mod recovery_publication;
 mod repair_timer;
-mod dependency_waits;
 mod snapshot_bootstrap;
 #[cfg(test)]
 mod startup_tests;
@@ -198,7 +198,9 @@ impl BurstNode {
         config.validate_drand_relays()?;
         let database_map_size = config.database_map_size().map_err(NodeError::Config)?;
         let peer_limits = config.effective_peer_limits()?;
-        let recovery_budget = config.recovery_scratch_budget().map_err(NodeError::Config)?;
+        let recovery_budget = config
+            .recovery_scratch_budget()
+            .map_err(NodeError::Config)?;
         if config.body_retirement.enabled && !cfg!(test) {
             return Err(NodeError::Config(
                 "physical body retirement remains behind the qualification gate".into(),
@@ -222,14 +224,23 @@ impl BurstNode {
         let store = LmdbStore::open(&config.data_dir, MAX_DBS, database_map_size)
             .map_err(|e| NodeError::Other(format!("failed to open LMDB: {e}")))?;
         let store = Arc::new(store);
-        let recovery_scratch = recovery_budget.map(|bytes| {
-            let map_bytes = ((bytes / 4).min(16 << 20) & !4095) as usize;
-            let reserved = crate::confirmed_replay::snapshot::history::DurableHistoryInputs::reservation(map_bytes)?;
-            let limit = crate::confirmed_replay::scratch_file::ScratchLimit::acquire_shared_reserved(
-                store.env().path(), bytes, reserved,
-            ).map_err(|error| burst_store::StoreError::Corruption(error.to_string()))?;
-            Ok::<_, burst_store::StoreError>((limit, map_bytes))
-        }).transpose()?;
+        let recovery_scratch = recovery_budget
+            .map(|bytes| {
+                let map_bytes = ((bytes / 4).min(16 << 20) & !4095) as usize;
+                let reserved =
+                    crate::confirmed_replay::snapshot::history::DurableHistoryInputs::reservation(
+                        map_bytes,
+                    )?;
+                let limit =
+                    crate::confirmed_replay::scratch_file::ScratchLimit::acquire_shared_reserved(
+                        store.env().path(),
+                        bytes,
+                        reserved,
+                    )
+                    .map_err(|error| burst_store::StoreError::Corruption(error.to_string()))?;
+                Ok::<_, burst_store::StoreError>((limit, map_bytes))
+            })
+            .transpose()?;
         crate::network_identity::verify_network(&store, config.network)?;
         let initial_params =
             crate::network_identity::genesis_params(&store, config.network, &config.params)?;
@@ -305,7 +316,8 @@ impl BurstNode {
                 }
             };
             let representative_key = Arc::new(representative_key);
-            let mut generator = VoteGenerator::with_shared_key(representative.clone(), representative_key.clone());
+            let mut generator =
+                VoteGenerator::with_shared_key(representative.clone(), representative_key.clone());
             if config.enable_representative {
                 generator.set_representative(true);
                 tracing::info!(representative = %representative, "node voting as representative (enabled)");
@@ -698,9 +710,10 @@ impl BurstNode {
         outbound_rx: mpsc::Receiver<(String, Vec<u8>)>,
     ) -> Result<(), NodeError> {
         let diagnostic_port = self.config.port;
-        self.connection_registry.write().await.start_vote_dispatch(
-            self.active_elections.clone(), self.rep_weights.clone(),
-        );
+        self.connection_registry
+            .write()
+            .await
+            .start_vote_dispatch(self.active_elections.clone(), self.rep_weights.clone());
         let fork_install_tx = {
             self.block_processor.lock().await.historical_finality = self
                 .connection_registry
@@ -809,7 +822,8 @@ impl BurstNode {
             self.track_task("historical admissions", history_task);
             if self.certified_selection_enabled() {
                 let cleanup = crate::checkpoint_store::record_storage::maintenance::start(
-                    self.store.clone(), self.shutdown.clone(),
+                    self.store.clone(),
+                    self.shutdown.clone(),
                 );
                 self.track_task("shared checkpoint cleanup", cleanup);
             }
@@ -943,7 +957,8 @@ impl BurstNode {
                             tracing::debug!(hash = %block.hash, account = %block.account, %reason,
                                 "block admission rejected");
                             if certified_selection && reason.contains("backdating rejected") {
-                                if let Err(error) = crate::checkpoint_recovery::request(&store, &block)
+                                if let Err(error) =
+                                    crate::checkpoint_recovery::request(&store, &block)
                                 {
                                     tracing::error!(%error, "cannot retain checkpoint recovery demand");
                                 }
@@ -992,18 +1007,23 @@ impl BurstNode {
                             }
                             continue;
                         }
-                        let ready = authentication.growth_fork_content.clone().map_or_else(
-                            || governance_transfers.ready(block.hash), |content| Ok(Some(content)),
-                        ).and_then(|ready| {
-                            if ready.is_some() {
-                                return Ok(ready);
-                            }
-                            store
-                                .meta_store()
-                                .fork_content(&block.hash)
-                                .map(|bytes| bytes.map(Arc::new))
-                                .map_err(|e| e.to_string())
-                        });
+                        let ready = authentication
+                            .growth_fork_content
+                            .clone()
+                            .map_or_else(
+                                || governance_transfers.ready(block.hash),
+                                |content| Ok(Some(content)),
+                            )
+                            .and_then(|ready| {
+                                if ready.is_some() {
+                                    return Ok(ready);
+                                }
+                                store
+                                    .meta_store()
+                                    .fork_content(&block.hash)
+                                    .map(|bytes| bytes.map(Arc::new))
+                                    .map_err(|e| e.to_string())
+                            });
                         match ready {
                             Ok(Some(bytes)) => Some(bytes),
                             _ => {
@@ -1077,10 +1097,14 @@ impl BurstNode {
                             admission_time,
                             network,
                             certified_selection,
-                            certified_selection.then_some(crate::fork_resolution::GovernanceInput {
-                                genesis: chain_identity.1,
-                                content: proposal_content.as_ref().map(|bytes| bytes.as_slice()),
-                            }),
+                            certified_selection.then_some(
+                                crate::fork_resolution::GovernanceInput {
+                                    genesis: chain_identity.1,
+                                    content: proposal_content
+                                        .as_ref()
+                                        .map(|bytes| bytes.as_slice()),
+                                },
+                            ),
                         )
                         .map_err(|failure| {
                             fork_pressure = failure.pressure;
@@ -1093,14 +1117,17 @@ impl BurstNode {
                                 })?;
                                 new_fork_payload =
                                     store.meta_store().fork_candidate(&block.hash)?.is_none();
-                                store.meta_store().put_fork_candidate_with_content_retry(
-                                    &block.hash,
-                                    &bytes,
-                                    proposal_content.as_ref().map(|bytes| bytes.as_slice()),
-                                ).map_err(|failure| {
-                                    fork_pressure = failure.pressure;
-                                    failure.error
-                                })?;
+                                store
+                                    .meta_store()
+                                    .put_fork_candidate_with_content_retry(
+                                        &block.hash,
+                                        &bytes,
+                                        proposal_content.as_ref().map(|bytes| bytes.as_slice()),
+                                    )
+                                    .map_err(|failure| {
+                                        fork_pressure = failure.pressure;
+                                        failure.error
+                                    })?;
                             }
                             Ok(target.is_some())
                         });
@@ -1112,7 +1139,8 @@ impl BurstNode {
                                     drop(_trst);
                                     drop(_brn);
                                     drop(_governance);
-                                    if !admission_group::wait_growth_release(watch, &shutdown).await {
+                                    if !admission_group::wait_growth_release(watch, &shutdown).await
+                                    {
                                         break;
                                     }
                                     authentication._growth_retry = Some(permit);
@@ -1174,7 +1202,8 @@ impl BurstNode {
                             .get_pending(&block.account, &send_hash)
                         {
                             Ok(pending) => {
-                                let prev_trst = previous_block.as_ref().map_or(0, |b| b.trst_balance);
+                                let prev_trst =
+                                    previous_block.as_ref().map_or(0, |b| b.trst_balance);
                                 let claimed = block.trst_balance.saturating_sub(prev_trst);
                                 if claimed != pending.amount {
                                     Some(format!(
@@ -1207,20 +1236,23 @@ impl BurstNode {
                         } else if block.block_type == BlockType::Challenge && certified_selection {
                             None
                         } else {
-                            crate::verification_vote::availability_error(
-                                &block.block_type,
-                                network,
-                            )
+                            crate::verification_vote::availability_error(&block.block_type, network)
                         };
 
-                    let result = if block.block_type == BlockType::GovernanceActivation
-                    {
+                    let result = if block.block_type == BlockType::GovernanceActivation {
                         ProcessResult::Rejected(
                             "governance activation requires its certified boundary".into(),
                         )
-                    } else if !certified_selection && matches!(block.block_type,
-                        BlockType::GovernanceProposal | BlockType::GovernanceVote |
-                        BlockType::GovernanceEndorse | BlockType::GovernanceWithdraw | BlockType::GovernanceVeto) {
+                    } else if !certified_selection
+                        && matches!(
+                            block.block_type,
+                            BlockType::GovernanceProposal
+                                | BlockType::GovernanceVote
+                                | BlockType::GovernanceEndorse
+                                | BlockType::GovernanceWithdraw
+                                | BlockType::GovernanceVeto
+                        )
+                    {
                         ProcessResult::Rejected("governance requires certified activation; unavailable behind the release gate".into())
                     } else if admitted_fork {
                         ProcessResult::Fork
@@ -1253,7 +1285,9 @@ impl BurstNode {
                             }
                             let mut grouped = Vec::new();
                             let mut group_gap_positions = Vec::new();
-                            if serial_pending.is_empty() && admission_group::eligible(&authentication) {
+                            if serial_pending.is_empty()
+                                && admission_group::eligible(&authentication)
+                            {
                                 let mut budget = admission_group::Budget::new(&block);
                                 while budget.has_capacity() {
                                     let Some(next) = validation_queue.try_next_ready() else {
@@ -1273,10 +1307,9 @@ impl BurstNode {
                                     {
                                         let mut processor = block_processor.lock().await;
                                         let current = frontier.read().await;
-                                        Some(
-                                            processor
-                                                .validate_candidate_with_authentication(&candidate, &current),
-                                        )
+                                        Some(processor.validate_candidate_with_authentication(
+                                            &candidate, &current,
+                                        ))
                                     } else {
                                         None
                                     };
@@ -1319,8 +1352,9 @@ impl BurstNode {
                             let mut live_trst = trst_engine.lock().await;
                             // Compute on isolated state. Failed economic validation
                             // or persistence must not consume BRN/TRST in memory.
-                            let mut engines =
-                                crate::economic_candidate::StagedEngines::new(&live_brn, &live_trst);
+                            let mut engines = crate::economic_candidate::StagedEngines::new(
+                                &live_brn, &live_trst,
+                            );
 
                             // Abort the entire primary-state transaction on any
                             // failed write; publish isolated engines only on success.
@@ -1436,8 +1470,12 @@ impl BurstNode {
                             let economics = match commit {
                                 Ok(economics) => economics,
                                 Err(error) => {
-                                    if let Some(outcome) = growth_outcome.filter(|outcome| outcome.was_rejected()) {
-                                        let permit = growth_retry.take().expect("guarded writer reserved retry before staging");
+                                    if let Some(outcome) =
+                                        growth_outcome.filter(|outcome| outcome.was_rejected())
+                                    {
+                                        let permit = growth_retry
+                                            .take()
+                                            .expect("guarded writer reserved retry before staging");
                                         drop(engines);
                                         drop(staged_governance);
                                         drop(staged_orchestrator);
@@ -1447,14 +1485,28 @@ impl BurstNode {
                                         drop(live_brn);
                                         drop(live_governance);
                                         #[cfg(test)]
-                                        if let Some(probe) = &admission_group_probe { probe.aborted(block.hash, commit_attempted); }
-                                        if !admission_group::wait_growth_release(outcome.watch(), &shutdown).await {
+                                        if let Some(probe) = &admission_group_probe {
+                                            probe.aborted(block.hash, commit_attempted);
+                                        }
+                                        if !admission_group::wait_growth_release(
+                                            outcome.watch(),
+                                            &shutdown,
+                                        )
+                                        .await
+                                        {
                                             break;
                                         }
                                         authentication._growth_retry = Some(permit.clone());
-                                        for candidate in &mut grouped { candidate._growth_retry = Some(permit.clone()); }
+                                        for candidate in &mut grouped {
+                                            candidate._growth_retry = Some(permit.clone());
+                                        }
                                         tracing::debug!(hash = %block.hash, "capture pressure aborted admission; retrying after owned reader release");
-                                        admission_group::retry_in_order(authentication, grouped, group_gap_positions, &mut serial_pending);
+                                        admission_group::retry_in_order(
+                                            authentication,
+                                            grouped,
+                                            group_gap_positions,
+                                            &mut serial_pending,
+                                        );
                                         continue;
                                     }
                                     if group_attempt && !commit_attempted {
@@ -1475,8 +1527,10 @@ impl BurstNode {
                                     tracing::error!(hash = %block.hash, %error, "block persistence failed; candidate not published");
                                     if !commit_attempted {
                                         if let Ok(payload) = bincode::serialize(&block) {
-                                            submission_results
-                                                .complete(&payload, RpcProcessResult::Rejected(error));
+                                            submission_results.complete(
+                                                &payload,
+                                                RpcProcessResult::Rejected(error),
+                                            );
                                         }
                                     }
                                     continue;
@@ -1536,7 +1590,8 @@ impl BurstNode {
                                     ledger_cache.inc_pending_count();
                                 }
                                 if block.block_type == BlockType::Receive
-                                    || (block.block_type == BlockType::Open && block.trst_balance > 0)
+                                    || (block.block_type == BlockType::Open
+                                        && block.trst_balance > 0)
                                 {
                                     ledger_cache.dec_pending_count();
                                 }
@@ -1603,7 +1658,8 @@ impl BurstNode {
 
                                 // Every node publishes accepted blocks, including nodes
                                 // that do not vote or whose vote is currently spaced.
-                                if let Ok(bytes) = WireMessage::Block(Box::new(block.clone())).encode()
+                                if let Ok(bytes) =
+                                    WireMessage::Block(Box::new(block.clone())).encode()
                                 {
                                     let peers: Vec<_> = peer_manager
                                         .read()
@@ -1611,9 +1667,8 @@ impl BurstNode {
                                         .iter_connected()
                                         .map(|(_, peer)| peer.clone())
                                         .collect();
-                                    let _ = broadcaster
-                                        .broadcast_with_fanout(&bytes, &peers, 4)
-                                        .await;
+                                    let _ =
+                                        broadcaster.broadcast_with_fanout(&bytes, &peers, 4).await;
                                 }
 
                                 local_votes::enqueue(&local_votes, block.hash);
@@ -1631,11 +1686,11 @@ impl BurstNode {
                                     .iter_connected()
                                     .map(|(_, peer)| peer.clone())
                                     .collect();
-                                if let Ok(bytes) = WireMessage::Block(Box::new(block.clone())).encode()
+                                if let Ok(bytes) =
+                                    WireMessage::Block(Box::new(block.clone())).encode()
                                 {
-                                    let _ = broadcaster
-                                        .broadcast_with_fanout(&bytes, &peers, 4)
-                                        .await;
+                                    let _ =
+                                        broadcaster.broadcast_with_fanout(&bytes, &peers, 4).await;
                                 }
                             }
                             // Cache the fork block for election consideration
@@ -1647,7 +1702,8 @@ impl BurstNode {
                             let now = Timestamp::new(unix_now_secs());
                             {
                                 let mut elections = active_elections.write().await;
-                                if let Err(e) = elections.register_candidate(root, block.hash, now) {
+                                if let Err(e) = elections.register_candidate(root, block.hash, now)
+                                {
                                     tracing::debug!(root = %root, error = %e, "could not start election for fork");
                                 } else {
                                     tracing::info!(root = %root, fork_hash = %block.hash, "election started for fork");
@@ -2487,7 +2543,8 @@ impl BurstNode {
     pub async fn start(&mut self) -> Result<(), NodeError> {
         if self.config.enable_rpc || self.config.enable_websocket {
             return Err(NodeError::Config(
-                "public listeners require start_with_services and an application service factory".into(),
+                "public listeners require start_with_services and an application service factory"
+                    .into(),
             ));
         }
         self.start_with_services(|_, _, _| Vec::new()).await
@@ -2497,8 +2554,12 @@ impl BurstNode {
     /// Returned tasks join the existing node shutdown/failure supervision.
     pub async fn start_with_services<F>(&mut self, start_services: F) -> Result<(), NodeError>
     where
-        F: FnOnce(crate::services::RpcEndpoint, crate::services::WebSocketEndpoint,
-            Arc<ShutdownController>) -> crate::services::ServiceTasks + Send,
+        F: FnOnce(
+                crate::services::RpcEndpoint,
+                crate::services::WebSocketEndpoint,
+                Arc<ShutdownController>,
+            ) -> crate::services::ServiceTasks
+            + Send,
     {
         if self.outbound_rx.is_none() {
             return Err(NodeError::Other("node has already been started".into()));
@@ -2515,8 +2576,12 @@ impl BurstNode {
 
     async fn start_inner<F>(&mut self, start_services: F) -> Result<(), NodeError>
     where
-        F: FnOnce(crate::services::RpcEndpoint, crate::services::WebSocketEndpoint,
-            Arc<ShutdownController>) -> crate::services::ServiceTasks + Send,
+        F: FnOnce(
+                crate::services::RpcEndpoint,
+                crate::services::WebSocketEndpoint,
+                Arc<ShutdownController>,
+            ) -> crate::services::ServiceTasks
+            + Send,
     {
         if self.config.snapshot_bootstrap.is_some() && !self.certified_selection_enabled() {
             return Err(NodeError::Config(
@@ -2553,7 +2618,9 @@ impl BurstNode {
                 registry.set_governance_inbox(content_tx);
                 registry.set_recovery_content(recovery.clone());
             }
-            self.track_task("governance content", tokio::spawn(crate::governance_content::transfer::run(
+            self.track_task(
+                "governance content",
+                tokio::spawn(crate::governance_content::transfer::run(
                     self.governance_transfers.clone(),
                     recovery,
                     self.store.clone(),
@@ -2561,7 +2628,8 @@ impl BurstNode {
                     self.connection_registry.clone(),
                     content_rx,
                     self.shutdown.clone(),
-                )));
+                )),
+            );
         }
         crate::checkpoint_sync::witness::start(
             self.store.clone(),
@@ -2662,9 +2730,14 @@ impl BurstNode {
                 {
                     let mut brn = self.brn_engine.lock().await;
                     if brn.get_wallet(&genesis_account).is_none() {
-                        let account = account_store.get_account(&genesis_account).map_err(|error| {
-                            NodeError::Other(format!("cannot read genesis account: {error}"))
-                        })?;
+                        let account =
+                            account_store
+                                .get_account(&genesis_account)
+                                .map_err(|error| {
+                                    NodeError::Other(format!(
+                                        "cannot read genesis account: {error}"
+                                    ))
+                                })?;
                         if account.state.accrues_brn() {
                             if account.block_count != 1
                                 || account.total_brn_burned != 0
@@ -2916,23 +2989,29 @@ impl BurstNode {
                 #[cfg(test)]
                 prepared_probe: None,
             });
-            self.track_task("body retirement", retirement.start(self.config.body_retirement.clone()));
+            self.track_task(
+                "body retirement",
+                retirement.start(self.config.body_retirement.clone()),
+            );
         }
 
         if let Some(service) = self.nts_service.take() {
             let mut stop = self.shutdown.subscribe();
-            self.track_task("NTS service", tokio::spawn(async move {
-                let (cancel, receiver) = tokio::sync::watch::channel(false);
-                let worker = service.run(receiver);
-                tokio::pin!(worker);
-                tokio::select! {
-                    _ = &mut worker => {}
-                    _ = stop.recv() => {
-                        let _ = cancel.send(true);
-                        worker.await;
+            self.track_task(
+                "NTS service",
+                tokio::spawn(async move {
+                    let (cancel, receiver) = tokio::sync::watch::channel(false);
+                    let worker = service.run(receiver);
+                    tokio::pin!(worker);
+                    tokio::select! {
+                        _ = &mut worker => {}
+                        _ = stop.recv() => {
+                            let _ = cancel.send(true);
+                            worker.await;
+                        }
                     }
-                }
-            }));
+                }),
+            );
         }
 
         // Periodic NTP re-sync (every 5 minutes)
@@ -3612,21 +3691,24 @@ impl BurstNode {
         };
         let agreement_registry = self.connection_registry.clone();
         let agreement_shutdown = self.shutdown.clone();
-        self.track_task("checkpoint agreement", tokio::spawn(async move {
-            if let Err(error) = crate::checkpoint_service::run_node_with_recovery(
-                agreement_settings,
-                agreement_registry,
-                agreement_rx,
-                agreement_clock,
-                agreement_shutdown.clone(),
-                agreement_recovery,
-            )
-            .await
-            {
-                tracing::error!(%error, "checkpoint agreement worker stopped");
-                agreement_shutdown.fail("checkpoint agreement worker", &error);
-            }
-        }));
+        self.track_task(
+            "checkpoint agreement",
+            tokio::spawn(async move {
+                if let Err(error) = crate::checkpoint_service::run_node_with_recovery(
+                    agreement_settings,
+                    agreement_registry,
+                    agreement_rx,
+                    agreement_clock,
+                    agreement_shutdown.clone(),
+                    agreement_recovery,
+                )
+                .await
+                {
+                    tracing::error!(%error, "checkpoint agreement worker stopped");
+                    agreement_shutdown.fail("checkpoint agreement worker", &error);
+                }
+            }),
+        );
         self.connection_registry
             .write()
             .await
@@ -3637,7 +3719,9 @@ impl BurstNode {
             .await
             .historical_admissions
             .clone();
-        self.track_task("checkpoint sync", tokio::spawn(crate::checkpoint_sync::run(
+        self.track_task(
+            "checkpoint sync",
+            tokio::spawn(crate::checkpoint_sync::run(
                 Arc::clone(&self.store),
                 crate::checkpoint_sync::Settings {
                     network: self.config.network,
@@ -3649,7 +3733,8 @@ impl BurstNode {
                 checkpoint_rx,
                 Arc::clone(&self.shutdown),
                 historical_admissions,
-            )));
+            )),
+        );
         let beacon_interval = Duration::from_secs(30);
         #[cfg(test)]
         let beacon_interval = if self.verification_fixture_clock.is_some() {
@@ -3657,7 +3742,9 @@ impl BurstNode {
         } else {
             beacon_interval
         };
-        self.track_task("checkpoint beacon", tokio::spawn(crate::checkpoint_beacon::run(
+        self.track_task(
+            "checkpoint beacon",
+            tokio::spawn(crate::checkpoint_beacon::run(
                 Arc::clone(&self.store),
                 self.config.network,
                 self.initial_params.clone(),
@@ -3670,7 +3757,8 @@ impl BurstNode {
                         registry: Arc::clone(&self.connection_registry),
                         orchestrator: Arc::clone(&self.verification_orchestrator),
                     }),
-            )));
+            )),
+        );
 
         let conn_registry_telemetry = Arc::clone(&self.connection_registry);
         let peer_manager_telemetry = Arc::clone(&self.peer_manager);
@@ -3774,12 +3862,15 @@ impl BurstNode {
         }
 
         let rpc_endpoint = self.rpc_endpoint(display_clock).await;
-        let websocket_endpoint = self.config.enable_websocket.then(|| (
-            self.config.websocket_port,
-            self.config.websocket_bind.clone(),
-            self.ws_state.clone(),
-        ));
-        for (name, task) in start_services(rpc_endpoint, websocket_endpoint, self.shutdown.clone()) {
+        let websocket_endpoint = self.config.enable_websocket.then(|| {
+            (
+                self.config.websocket_port,
+                self.config.websocket_bind.clone(),
+                self.ws_state.clone(),
+            )
+        });
+        for (name, task) in start_services(rpc_endpoint, websocket_endpoint, self.shutdown.clone())
+        {
             self.track_task(name, task);
         }
 
@@ -4239,7 +4330,8 @@ async fn rebuild_rep_weights(
         ));
     }
     // Legacy authority can change with cementation and is not cached here.
-    crate::confirmed_authority::ConfirmedAuthority::read(store)?.rebuild_weights(&mut weights_cache);
+    crate::confirmed_authority::ConfirmedAuthority::read(store)?
+        .rebuild_weights(&mut weights_cache);
     active
         .set_authority(weights_cache.all_weights())
         .map_err(|e| burst_store::StoreError::Corruption(e.to_string()))?;

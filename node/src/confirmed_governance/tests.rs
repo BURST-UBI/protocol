@@ -108,7 +108,11 @@ fn emergency_submission_immediately_fences_its_counting_cut_without_endorsements
 #[test]
 fn invalid_deadline_cannot_partially_write_a_schedule() {
     let (_dir, store, params, epoch) = setup();
-    let before = store.tx_begin_write().unwrap().checkpoint_metadata(b"confirmed_governance/").unwrap();
+    let before = store
+        .tx_begin_write()
+        .unwrap()
+        .checkpoint_metadata(b"confirmed_governance/")
+        .unwrap();
     let mut batch = store.tx_begin_write().unwrap();
     let mut schedule = ConfirmedGovernance::load(&batch).unwrap().unwrap();
     let proposal = proposal(&params, epoch, 100);
@@ -133,7 +137,14 @@ fn invalid_deadline_cannot_partially_write_a_schedule() {
         .voting_secs = u64::MAX;
     assert!(schedule.persist(&mut batch).is_err());
     batch.commit().unwrap();
-    assert_eq!(store.tx_begin_write().unwrap().checkpoint_metadata(b"confirmed_governance/").unwrap(), before);
+    assert_eq!(
+        store
+            .tx_begin_write()
+            .unwrap()
+            .checkpoint_metadata(b"confirmed_governance/")
+            .unwrap(),
+        before
+    );
     assert_eq!(limit(&store, epoch), None);
 }
 
@@ -307,7 +318,11 @@ fn earliest_active_proposal_wins_and_voting_survives_threshold_increase() {
         Some(expected)
     );
     for hash in schedule.proposals.keys().copied().collect::<Vec<_>>() {
-        schedule.proposals.get_mut(&hash).unwrap().exploration_started_at = Some(u64::MAX);
+        schedule
+            .proposals
+            .get_mut(&hash)
+            .unwrap()
+            .exploration_started_at = Some(u64::MAX);
     }
     assert!(schedule.limit_bytes().is_err());
 }
@@ -333,9 +348,20 @@ fn startup_rejects_consistent_but_fabricated_schedule_without_repair() {
         .unwrap();
     schedule.persist(&mut batch).unwrap();
     batch.commit().unwrap();
-    let before = store.tx_begin_write().unwrap().checkpoint_metadata(b"confirmed_governance/").unwrap();
+    let before = store
+        .tx_begin_write()
+        .unwrap()
+        .checkpoint_metadata(b"confirmed_governance/")
+        .unwrap();
     assert!(crate::payment_authority::initialize(&store, NetworkId::Dev, &params).is_err());
-    assert_eq!(store.tx_begin_write().unwrap().checkpoint_metadata(b"confirmed_governance/").unwrap(), before);
+    assert_eq!(
+        store
+            .tx_begin_write()
+            .unwrap()
+            .checkpoint_metadata(b"confirmed_governance/")
+            .unwrap(),
+        before
+    );
     assert_eq!(limit(&store, epoch), Some(131));
 }
 
@@ -345,12 +371,16 @@ fn legacy_schedule_reauthenticates_and_converts_on_next_confirmation() {
     let mut batch = store.tx_begin_write().unwrap();
     let schedule = ConfirmedGovernance::load(&batch).unwrap().unwrap();
     batch.delete_meta(HEADER).unwrap();
-    batch.put_meta(KEY, &bincode::serialize(&schedule).unwrap()).unwrap();
+    batch
+        .put_meta(KEY, &bincode::serialize(&schedule).unwrap())
+        .unwrap();
     batch.commit().unwrap();
     crate::payment_authority::initialize(&store, NetworkId::Dev, &params).unwrap();
     let mut batch = store.tx_begin_write().unwrap();
     let mut schedule = ConfirmedGovernance::load(&batch).unwrap().unwrap();
-    schedule.promote(&batch, &proposal(&params, epoch, 100)).unwrap();
+    schedule
+        .promote(&batch, &proposal(&params, epoch, 100))
+        .unwrap();
     schedule.persist(&mut batch).unwrap();
     assert!(batch.get_meta(KEY).unwrap().is_none());
     assert!(batch.get_meta(HEADER).unwrap().is_some());

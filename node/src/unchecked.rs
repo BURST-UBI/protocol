@@ -433,7 +433,6 @@ mod tests {
         }
     }
 
-
     fn make_receive_block(previous: BlockHash, source: BlockHash) -> StateBlock {
         let mut block = StateBlock {
             signing_grant: burst_types::BlockHash::ZERO,

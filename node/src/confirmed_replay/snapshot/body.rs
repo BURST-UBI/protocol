@@ -21,9 +21,12 @@ impl StagedBody {
     pub(super) fn prepare(
         anchor: &CheckpointAnchor,
         directory: &std::path::Path,
-        encode: impl FnOnce(&mut BufWriter<crate::confirmed_replay::scratch_file::ScratchFile>) -> Result<(), ReplayError>,
+        encode: impl FnOnce(
+            &mut BufWriter<crate::confirmed_replay::scratch_file::ScratchFile>,
+        ) -> Result<(), ReplayError>,
     ) -> Result<(Self, super::SnapshotManifest), ReplayError> {
-        let file = crate::confirmed_replay::scratch_file::ScratchFile::new_in(directory).map_err(invalid)?;
+        let file = crate::confirmed_replay::scratch_file::ScratchFile::new_in(directory)
+            .map_err(invalid)?;
         let mut writer = BufWriter::with_capacity(BUFFER_BYTES, file);
         encode(&mut writer)?;
         let mut file = writer.into_inner().map_err(invalid)?;
@@ -32,7 +35,10 @@ impl StagedBody {
         let manifest =
             super::SnapshotManifest::from_commitment(anchor, length, hash).map_err(invalid)?;
         Ok((
-            Self { file: std::sync::Mutex::new(file), directory: directory.to_path_buf() },
+            Self {
+                file: std::sync::Mutex::new(file),
+                directory: directory.to_path_buf(),
+            },
             manifest,
         ))
     }
@@ -142,7 +148,9 @@ impl<'a> VerifiedBody<'a> {
         Ok(())
     }
 
-    pub(super) fn matches_state_with_poll(&mut self, state: &super::State<'_>,
+    pub(super) fn matches_state_with_poll(
+        &mut self,
+        state: &super::State<'_>,
         poll: &dyn Fn(&'static str) -> Result<(), ReplayError>,
     ) -> Result<bool, ReplayError> {
         self.rewind()?;
@@ -259,7 +267,9 @@ impl VerifiedBody<'static> {
         let mut file = if length > MEMORY_BYTES {
             Some(
                 match directory {
-                    Some(directory) => crate::confirmed_replay::scratch_file::ScratchFile::new_in(directory),
+                    Some(directory) => {
+                        crate::confirmed_replay::scratch_file::ScratchFile::new_in(directory)
+                    }
                     None => crate::confirmed_replay::scratch_file::ScratchFile::new(),
                 }
                 .map_err(invalid)?,
@@ -350,17 +360,31 @@ mod tests {
                     let calls = std::cell::Cell::new(0);
                     let poll = |_: &'static str| {
                         calls.set(calls.get() + 1);
-                        if calls.get() == 2 { Err(invalid("body cancellation")) } else { Ok(()) }
+                        if calls.get() == 2 {
+                            Err(invalid("body cancellation"))
+                        } else {
+                            Ok(())
+                        }
                     };
                     let error = if comparing {
                         let mut comparator = Comparator {
-                            body: &mut body, buffer: [0; BUFFER_BYTES], poll: &poll, bytes_until_poll: 0,
+                            body: &mut body,
+                            buffer: [0; BUFFER_BYTES],
+                            poll: &poll,
+                            bytes_until_poll: 0,
                         };
-                        super::super::canonical::encode_into(&value, &mut comparator).unwrap_err().to_string()
+                        super::super::canonical::encode_into(&value, &mut comparator)
+                            .unwrap_err()
+                            .to_string()
                     } else {
                         ciborium::from_reader::<super::super::Blob<'_>, _>(PollingReader {
-                            inner: &mut body, poll: &poll, bytes_until_poll: 0,
-                        }).err().unwrap().to_string()
+                            inner: &mut body,
+                            poll: &poll,
+                            bytes_until_poll: 0,
+                        })
+                        .err()
+                        .unwrap()
+                        .to_string()
                     };
                     assert!(error.contains("body cancellation"));
                     assert_eq!(calls.get(), 2);

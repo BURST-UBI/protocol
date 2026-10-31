@@ -368,12 +368,11 @@ async fn certified_revote_worker_preserves_prior_votes_and_resumes_the_next_pane
     batch
         .put_brn_meta(BootstrapPhase::KEY, &BootstrapPhase::Complete.encoding())
         .unwrap();
-    batch
-        .put_meta(
-            crate::endorsement_commit::SNAPSHOT_KEY,
-            &waiting.snapshot().encode().unwrap(),
-        )
-        .unwrap();
+    let persisted = crate::verification_storage::load(&batch).unwrap();
+    assert_eq!(
+        persisted.snapshot().encode().unwrap(),
+        waiting.snapshot().encode().unwrap()
+    );
     batch.commit().unwrap();
 
     let mut batch = store.tx_begin_write().unwrap();
@@ -388,9 +387,10 @@ async fn certified_revote_worker_preserves_prior_votes_and_resumes_the_next_pane
         .unwrap();
     assert_eq!(candidate.selection_context(&address(20)), Some(expected));
     drop(batch);
-    let before = store
-        .meta_store()
-        .get_meta(crate::endorsement_commit::SNAPSHOT_KEY)
+    let before = crate::verification_storage::load(&store.tx_begin_write().unwrap())
+        .unwrap()
+        .snapshot()
+        .encode()
         .unwrap();
     let restored =
         VerificationOrchestrator::restore(OrchestratorSnapshot::decode(&before).unwrap());
@@ -426,9 +426,10 @@ async fn certified_revote_worker_preserves_prior_votes_and_resumes_the_next_pane
         );
     }
     assert_eq!(
-        store
-            .meta_store()
-            .get_meta(crate::endorsement_commit::SNAPSHOT_KEY)
+        crate::verification_storage::load(&store.tx_begin_write().unwrap())
+            .unwrap()
+            .snapshot()
+            .encode()
             .unwrap(),
         before
     );
@@ -480,9 +481,10 @@ async fn certified_revote_worker_preserves_prior_votes_and_resumes_the_next_pane
     service.stop().await;
     assert!(shutdown.failure().is_none(), "{:?}", shutdown.failure());
     installed.unwrap();
-    let bytes = store
-        .meta_store()
-        .get_meta(crate::endorsement_commit::SNAPSHOT_KEY)
+    let bytes = crate::verification_storage::load(&store.tx_begin_write().unwrap())
+        .unwrap()
+        .snapshot()
+        .encode()
         .unwrap();
     let snapshot = OrchestratorSnapshot::decode(&bytes).unwrap();
     let votes = &snapshot.prior_votes[&address(20)];

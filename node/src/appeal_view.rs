@@ -31,7 +31,8 @@ impl Reader {
             Some(bytes) => bincode::deserialize(&bytes).map_err(|e| e.to_string())?,
             None => self.initial_params.clone(),
         };
-        let (state_present, challenge_active) = match get("verification_records_format")?.as_deref() {
+        let (state_present, challenge_active) = match get("verification_records_format")?.as_deref()
+        {
             Some([format @ (1 | 2)]) => {
                 use burst_verification::orchestrator::records::VerificationRecord;
                 if get(crate::endorsement_commit::SNAPSHOT_KEY)?.is_some() {
@@ -43,14 +44,22 @@ impl Reader {
                 let legacy_key = VerificationRecord::target_storage_key(account)?;
                 let active = if *format == 2 {
                     use burst_verification::orchestrator::records::normalized;
-                    if get(&legacy_key)?.is_some() { return Err("aggregate target in normalized state".into()); }
+                    if get(&legacy_key)?.is_some() {
+                        return Err("aggregate target in normalized state".into());
+                    }
                     let key = normalized::target_header_key(account)?;
-                    get(&key)?.map(|bytes| normalized::header_has_active_challenge(account, &bytes))
-                        .transpose()?.unwrap_or(false)
+                    get(&key)?
+                        .map(|bytes| normalized::header_has_active_challenge(account, &bytes))
+                        .transpose()?
+                        .unwrap_or(false)
                 } else {
-                    get(&legacy_key)?.map(|bytes| {
-                        VerificationRecord::from_storage_entry(&legacy_key, &bytes)?.has_active_challenge()
-                    }).transpose()?.unwrap_or(false)
+                    get(&legacy_key)?
+                        .map(|bytes| {
+                            VerificationRecord::from_storage_entry(&legacy_key, &bytes)?
+                                .has_active_challenge()
+                        })
+                        .transpose()?
+                        .unwrap_or(false)
                 };
                 (true, active)
             }
@@ -60,8 +69,12 @@ impl Reader {
                     .map(|bytes| burst_verification::OrchestratorSnapshot::decode(&bytes))
                     .transpose()
                     .map_err(|e| e.to_string())?;
-                (snapshot.is_some(), snapshot.as_ref()
-                    .is_some_and(|state| state.active_challenges.contains_key(account)))
+                (
+                    snapshot.is_some(),
+                    snapshot
+                        .as_ref()
+                        .is_some_and(|state| state.active_challenges.contains_key(account)),
+                )
             }
         };
         let mut review = AppealReview {

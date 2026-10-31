@@ -2,7 +2,11 @@
 use crate::shared::Shared;
 use burst_types::WalletAddress;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::{collections::HashSet, ops::{Deref, DerefMut}, sync::{Arc, OnceLock}};
+use std::{
+    collections::HashSet,
+    ops::{Deref, DerefMut},
+    sync::{Arc, OnceLock},
+};
 
 /// Ordered members with a lazily built membership set. Construction and
 /// deserialization preserve duplicates; callers enforce committee uniqueness.
@@ -14,7 +18,9 @@ pub struct Committee {
 }
 impl Committee {
     pub fn contains(&self, wallet: &WalletAddress) -> bool {
-        self.lookup.get_or_init(|| self.members.iter().cloned().collect()).contains(wallet)
+        self.lookup
+            .get_or_init(|| self.members.iter().cloned().collect())
+            .contains(wallet)
     }
     pub(crate) fn shares_storage_with(&self, other: &Self) -> bool {
         self.members.shares_storage_with(&other.members)
@@ -22,7 +28,10 @@ impl Committee {
 }
 impl From<Vec<WalletAddress>> for Committee {
     fn from(members: Vec<WalletAddress>) -> Self {
-        Self { members: members.into(), lookup: Arc::default() }
+        Self {
+            members: members.into(),
+            lookup: Arc::default(),
+        }
     }
 }
 impl FromIterator<WalletAddress> for Committee {
@@ -32,7 +41,9 @@ impl FromIterator<WalletAddress> for Committee {
 }
 impl Deref for Committee {
     type Target = Vec<WalletAddress>;
-    fn deref(&self) -> &Self::Target { &self.members }
+    fn deref(&self) -> &Self::Target {
+        &self.members
+    }
 }
 impl DerefMut for Committee {
     fn deref_mut(&mut self) -> &mut Self::Target {
@@ -41,7 +52,9 @@ impl DerefMut for Committee {
     }
 }
 impl PartialEq for Committee {
-    fn eq(&self, other: &Self) -> bool { self.members == other.members }
+    fn eq(&self, other: &Self) -> bool {
+        self.members == other.members
+    }
 }
 impl Eq for Committee {}
 impl Serialize for Committee {
@@ -57,18 +70,24 @@ impl<'de> Deserialize<'de> for Committee {
 impl<'a> IntoIterator for &'a Committee {
     type Item = &'a WalletAddress;
     type IntoIter = std::slice::Iter<'a, WalletAddress>;
-    fn into_iter(self) -> Self::IntoIter { self.members.iter() }
+    fn into_iter(self) -> Self::IntoIter {
+        self.members.iter()
+    }
 }
 impl IntoIterator for Committee {
     type Item = WalletAddress;
     type IntoIter = std::vec::IntoIter<WalletAddress>;
-    fn into_iter(self) -> Self::IntoIter { self.members.into_iter() }
+    fn into_iter(self) -> Self::IntoIter {
+        self.members.into_iter()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn wallet(n: usize) -> WalletAddress { WalletAddress::new(format!("brst_committee_{n:06}")) }
+    fn wallet(n: usize) -> WalletAddress {
+        WalletAddress::new(format!("brst_committee_{n:06}"))
+    }
     #[test]
     fn shared_lookup_preserves_order_bytes_duplicates_and_mutation_isolation() {
         for count in [128, 1024, 10_000] {
@@ -81,8 +100,12 @@ mod tests {
             assert!(after.contains(&wallet(0)));
             assert!(before.lookup.get().is_some());
             assert!(!after.contains(&wallet(count)));
-            assert_eq!(bincode::serialize(&before).unwrap(), bincode::serialize(&ordered).unwrap());
-            let restored: Committee = bincode::deserialize(&bincode::serialize(&ordered).unwrap()).unwrap();
+            assert_eq!(
+                bincode::serialize(&before).unwrap(),
+                bincode::serialize(&ordered).unwrap()
+            );
+            let restored: Committee =
+                bincode::deserialize(&bincode::serialize(&ordered).unwrap()).unwrap();
             assert_eq!(*restored, ordered);
             assert!(restored.lookup.get().is_none());
             assert!(restored.contains(&wallet(0)));

@@ -5,7 +5,7 @@ use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-const CHILD: &str = "checkpoint_agreement::tests::process_crash::crash_child";
+const CHILD: &str = "checkpoints::agreement::tests::process_crash::crash_child";
 const MARKER: &str = "checkpoint-crash-test/atomic-marker";
 
 fn ready() -> ! {

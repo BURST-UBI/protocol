@@ -1,24 +1,30 @@
 //! Snapshot-specific keys for the shared atomic metadata pager.
-use super::BASE_KEY;
 #[cfg(test)]
 use super::invalid;
+use super::BASE_KEY;
 use crate::paged_metadata;
-pub(crate) use paged_metadata::Commitment;
 use burst_store::StoreError;
 use burst_store_lmdb::LmdbWriteTransaction;
+pub(crate) use paged_metadata::Commitment;
+#[cfg(test)]
+use paged_metadata::{LEGACY_MAGIC, LEGACY_PAGE_BYTES, MAGIC, PAGE_BYTES};
 #[cfg(test)]
 use std::io::{self, Read, Seek, SeekFrom, Write};
-#[cfg(test)]
-use paged_metadata::{LEGACY_MAGIC, MAGIC, LEGACY_PAGE_BYTES, PAGE_BYTES};
 
 const PREFIX: &str = "checkpoint_snapshot/pages/v1/";
 
 pub(crate) struct SnapshotLocation;
 impl paged_metadata::Location for SnapshotLocation {
-    fn descriptor_key(&self) -> &str { BASE_KEY }
-    fn page_key(&self, index: usize) -> String { key(index) }
+    fn descriptor_key(&self) -> &str {
+        BASE_KEY
+    }
+    fn page_key(&self, index: usize) -> String {
+        key(index)
+    }
 }
-fn key(index: usize) -> String { format!("{PREFIX}{index:08x}") }
+fn key(index: usize) -> String {
+    format!("{PREFIX}{index:08x}")
+}
 
 pub(super) type Reader<F> = paged_metadata::Reader<F, SnapshotLocation>;
 pub(super) type Writer<'a, 'db> = paged_metadata::Writer<'a, 'db, SnapshotLocation>;
@@ -34,7 +40,10 @@ impl<'a, 'db> Writer<'a, 'db> {
     }
 }
 impl Commitment {
-    pub(crate) fn verify(&self, get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StoreError>) -> Result<(), StoreError> {
+    pub(crate) fn verify(
+        &self,
+        get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StoreError>,
+    ) -> Result<(), StoreError> {
         self.verify_at(SnapshotLocation, get)
     }
 }
@@ -171,7 +180,9 @@ mod tests {
         let mut reader = Reader::open(|name| {
             assert_eq!(name, BASE_KEY);
             Ok(Some(original.to_vec()))
-        }).unwrap().unwrap();
+        })
+        .unwrap()
+        .unwrap();
         assert!(reader.seek(SeekFrom::End(0)).is_err());
         io::copy(&mut reader, &mut io::sink()).unwrap();
         reader.rewind().unwrap();
@@ -187,7 +198,9 @@ mod tests {
     fn legacy_pages_migrate_atomically_preserving_commitment_and_pinned_reads() {
         let dir = tempfile::tempdir().unwrap();
         let store = LmdbStore::open(dir.path(), 32, 32 << 20).unwrap();
-        let original: Vec<_> = (0..LEGACY_PAGE_BYTES * 2 + 17).map(|i| (i % 251) as u8).collect();
+        let original: Vec<_> = (0..LEGACY_PAGE_BYTES * 2 + 17)
+            .map(|i| (i % 251) as u8)
+            .collect();
         let mut descriptor = LEGACY_MAGIC.to_vec();
         descriptor.extend_from_slice(&(original.len() as u64).to_be_bytes());
         descriptor.extend_from_slice(&burst_crypto::blake2b_256(&original));
@@ -198,18 +211,29 @@ mod tests {
         batch.put_meta(BASE_KEY, &descriptor).unwrap();
         batch.commit().unwrap();
         let pinned = store.tx_begin_read().unwrap();
-        let mut reader = Reader::open(|name| store.meta_store().get_meta_txn(&pinned, name)).unwrap().unwrap();
+        let mut reader = Reader::open(|name| store.meta_store().get_meta_txn(&pinned, name))
+            .unwrap()
+            .unwrap();
         io::copy(&mut reader, &mut io::sink()).unwrap();
         let commitment = reader.commitment().unwrap();
-        reader.seek(SeekFrom::Start((LEGACY_PAGE_BYTES - 7) as u64)).unwrap();
+        reader
+            .seek(SeekFrom::Start((LEGACY_PAGE_BYTES - 7) as u64))
+            .unwrap();
         let mut boundary = [0; 19];
         reader.read_exact(&mut boundary).unwrap();
-        assert_eq!(&boundary, &original[LEGACY_PAGE_BYTES - 7..LEGACY_PAGE_BYTES + 12]);
+        assert_eq!(
+            &boundary,
+            &original[LEGACY_PAGE_BYTES - 7..LEGACY_PAGE_BYTES + 12]
+        );
         {
             let mut batch = store.tx_begin_write().unwrap();
             write(&mut batch, &original).unwrap();
             commitment.verify(|name| batch.get_meta(name)).unwrap();
-            assert!(batch.get_meta(BASE_KEY).unwrap().unwrap().starts_with(MAGIC));
+            assert!(batch
+                .get_meta(BASE_KEY)
+                .unwrap()
+                .unwrap()
+                .starts_with(MAGIC));
         }
         let mut batch = store.tx_begin_write().unwrap();
         assert_eq!(batch.get_meta(BASE_KEY).unwrap(), Some(descriptor));
@@ -226,12 +250,18 @@ mod tests {
         let replacement = vec![9; PAGE_BYTES + 3];
         write(&mut batch, &replacement).unwrap();
         assert!(batch.get_meta(&key(2)).unwrap().is_none());
-        assert!(batch.get_meta(&key(original.len().div_ceil(PAGE_BYTES) - 1)).unwrap().is_none());
+        assert!(batch
+            .get_meta(&key(original.len().div_ceil(PAGE_BYTES) - 1))
+            .unwrap()
+            .is_none());
         batch.commit().unwrap();
         store.env().force_sync().unwrap();
         drop(store);
         let reopened = LmdbStore::open(dir.path(), 32, 32 << 20).unwrap();
-        assert_eq!(super::super::read_stored_base_bytes(&reopened).unwrap(), Some(replacement));
+        assert_eq!(
+            super::super::read_stored_base_bytes(&reopened).unwrap(),
+            Some(replacement)
+        );
     }
 
     #[test]
@@ -282,9 +312,12 @@ mod tests {
         write(&mut batch, &replacement).unwrap();
         batch.commit().unwrap();
         let mut pinned_reader = Reader::open(|name| store.meta_store().get_meta_txn(&pinned, name))
-            .unwrap().unwrap();
+            .unwrap()
+            .unwrap();
         io::copy(&mut pinned_reader, &mut io::sink()).unwrap();
-        pinned_reader.seek(SeekFrom::Start(PAGE_BYTES as u64)).unwrap();
+        pinned_reader
+            .seek(SeekFrom::Start(PAGE_BYTES as u64))
+            .unwrap();
         let mut old_tail = Vec::new();
         pinned_reader.read_to_end(&mut old_tail).unwrap();
         assert_eq!(old_tail, original[PAGE_BYTES..]);

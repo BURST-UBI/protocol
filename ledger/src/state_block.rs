@@ -183,8 +183,10 @@ impl StateBlock {
             return Err("epoch marker cannot contain an account action");
         }
         if self.block_type == BlockType::GovernanceVeto
-            && (self.previous.is_zero() || self.link.is_zero()
-                || !self.origin.is_zero() || !self.delegation_payload.is_empty())
+            && (self.previous.is_zero()
+                || self.link.is_zero()
+                || !self.origin.is_zero()
+                || !self.delegation_payload.is_empty())
         {
             return Err("invalid bootstrap governance veto");
         }
@@ -378,14 +380,19 @@ impl StateBlock {
     /// Ledger references followed by returned-stake sources. May contain repeated
     /// hashes across fields; this is not a deduplicated or validated dependency set.
     pub fn dependencies(&self) -> impl Iterator<Item = BlockHash> + '_ {
-        self.dependency_heads().into_iter().flatten()
+        self.dependency_heads()
+            .into_iter()
+            .flatten()
             .chain(self.release_sources.iter().copied())
     }
 
     /// Retain traversal progress without copying the source list or repeatedly
     /// decoding delegation metadata when a graph walk yields between edges.
     pub fn into_dependencies(self) -> impl Iterator<Item = BlockHash> + Send {
-        self.dependency_heads().into_iter().flatten().chain(self.release_sources)
+        self.dependency_heads()
+            .into_iter()
+            .flatten()
+            .chain(self.release_sources)
     }
 
     /// Compute the hash of this block from its contents.
@@ -802,7 +809,9 @@ mod tests {
 
     #[test]
     fn scoped_key_payload_is_signed_bounded_and_never_authorizes_spending() {
-        use burst_governance::signing_delegation::{operation::DelegationOperation, Grant, KeyScope};
+        use burst_governance::signing_delegation::{
+            operation::DelegationOperation, Grant, KeyScope,
+        };
         let owner = burst_crypto::keypair_from_seed(&[1; 32]);
         let recipient = burst_crypto::keypair_from_seed(&[2; 32]);
         let proposal = TxHash::new([3; 32]);

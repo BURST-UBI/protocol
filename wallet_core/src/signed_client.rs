@@ -31,7 +31,9 @@ impl PreparedWork {
     }
 }
 
-fn proposal_review(info: &Value) -> Result<burst_governance::proposal::ProposalReview, WalletError> {
+fn proposal_review(
+    info: &Value,
+) -> Result<burst_governance::proposal::ProposalReview, WalletError> {
     serde_json::from_value(info.clone())
         .map_err(|error| WalletError::Node(format!("invalid proposal review: {error}")))
 }
@@ -82,7 +84,11 @@ fn require_payment_epoch(params: &Value, expected: BlockHash) -> Result<(), Wall
 }
 
 pub fn parse_hash(value: &str) -> Result<BlockHash, WalletError> {
-    value.parse().map_err(|error: burst_types::transaction_hash::ParseHashError| WalletError::Node(error.to_string()))
+    value
+        .parse()
+        .map_err(|error: burst_types::transaction_hash::ParseHashError| {
+            WalletError::Node(error.to_string())
+        })
 }
 
 pub fn parse_address(value: &str) -> Result<WalletAddress, WalletError> {
@@ -357,7 +363,9 @@ impl NodeClient {
         let mut resumed = self.clone();
         resumed.payment_journal = None;
         resumed
-            .submit_offline_payment_before(block, || crate::offline::record_submission_attempt(path, &hash))
+            .submit_offline_payment_before(block, || {
+                crate::offline::record_submission_attempt(path, &hash)
+            })
             .await
     }
 
@@ -1071,30 +1079,51 @@ impl NodeClient {
         self.submit_ready_block(block).await
     }
 
-    pub async fn review_governance_veto(&self, account: &WalletAddress, proposal: TxHash)
-        -> Result<serde_json::Value, WalletError>
-    {
-        let info = self.rpc_call("governance_proposal_info", json!({"hash": proposal.to_string()})).await?;
+    pub async fn review_governance_veto(
+        &self,
+        account: &WalletAddress,
+        proposal: TxHash,
+    ) -> Result<serde_json::Value, WalletError> {
+        let info = self
+            .rpc_call(
+                "governance_proposal_info",
+                json!({"hash": proposal.to_string()}),
+            )
+            .await?;
         let bootstrap = self.rpc_call("bootstrap_status", json!({})).await?;
         let review = proposal_review(&info)?;
-        if proposal.is_zero() || review.hash != proposal.to_string()
+        if proposal.is_zero()
+            || review.hash != proposal.to_string()
             || !matches!(review.phase.as_str(), "Cooldown" | "Activation")
             || review.phase_projected
             || Timestamp::now().as_secs() >= review.phase_deadline
             || bootstrap["creator"].as_str() != Some(account.as_str())
             || bootstrap["veto_available"] != true
         {
-            return Err(WalletError::TransactionBuild("creator veto is unavailable; review the proposal and bootstrap status again".into()));
+            return Err(WalletError::TransactionBuild(
+                "creator veto is unavailable; review the proposal and bootstrap status again"
+                    .into(),
+            ));
         }
-        Ok(json!({"phase_deadline": info["phase_deadline"], "proposal": info, "bootstrap": bootstrap}))
+        Ok(
+            json!({"phase_deadline": info["phase_deadline"], "proposal": info, "bootstrap": bootstrap}),
+        )
     }
 
-    pub async fn veto_proposal_signed(&self, keys: &KeyPair, proposal: TxHash)
-        -> Result<ProcessResponse, WalletError>
-    {
-        self.review_governance_veto(&burst_crypto::derive_address(&keys.public), proposal).await?;
-        self.account_operation_signed(keys, BlockType::GovernanceVeto,
-            BlockHash::new(*proposal.as_bytes()), 0).await
+    pub async fn veto_proposal_signed(
+        &self,
+        keys: &KeyPair,
+        proposal: TxHash,
+    ) -> Result<ProcessResponse, WalletError> {
+        self.review_governance_veto(&burst_crypto::derive_address(&keys.public), proposal)
+            .await?;
+        self.account_operation_signed(
+            keys,
+            BlockType::GovernanceVeto,
+            BlockHash::new(*proposal.as_bytes()),
+            0,
+        )
+        .await
     }
 
     pub async fn withdraw_proposal_signed(
@@ -1431,7 +1460,10 @@ impl NodeClient {
         self.submit_with_work(block).await
     }
 
-    async fn submit_with_work(&self, mut block: StateBlock) -> Result<ProcessResponse, WalletError> {
+    async fn submit_with_work(
+        &self,
+        mut block: StateBlock,
+    ) -> Result<ProcessResponse, WalletError> {
         let work = self
             .rpc_call(
                 "work_generate",
@@ -1818,10 +1850,11 @@ mod submission_tests {
                             serde_json::to_string(&saved).unwrap(),
                             serde_json::to_string(&expected).unwrap()
                         );
-                        assert!(
-                            crate::offline::payment_may_have_been_submitted(&inspect_path, &saved.hash)
-                                .unwrap()
-                        );
+                        assert!(crate::offline::payment_may_have_been_submitted(
+                            &inspect_path,
+                            &saved.hash
+                        )
+                        .unwrap());
                     }
                 });
                 let result = client
@@ -1868,7 +1901,10 @@ mod submission_tests {
                         crate::offline::load_payment(&path).unwrap().hash,
                         block.hash
                     );
-                    assert!(crate::offline::payment_may_have_been_submitted(&path, &block.hash).unwrap());
+                    assert!(
+                        crate::offline::payment_may_have_been_submitted(&path, &block.hash)
+                            .unwrap()
+                    );
                 }
             }
         }
@@ -2119,10 +2155,11 @@ mod submission_tests {
                             request["proposal_content"].as_str(),
                             expected_content.as_deref()
                         );
-                        assert!(
-                            crate::offline::payment_may_have_been_submitted(&inspect_path, &saved_hash)
-                                .unwrap()
-                        );
+                        assert!(crate::offline::payment_may_have_been_submitted(
+                            &inspect_path,
+                            &saved_hash
+                        )
+                        .unwrap());
                     }
                 });
                 let result = client.submit_saved_offline_action(&path, &account).await;
@@ -2176,7 +2213,9 @@ mod submission_tests {
                     .await
                     .is_err());
                 assert_eq!(server.join().unwrap().len(), 4);
-                assert!(!crate::offline::payment_may_have_been_submitted(&path, &block.hash).unwrap());
+                assert!(
+                    !crate::offline::payment_may_have_been_submitted(&path, &block.hash).unwrap()
+                );
             }
         }
     }
@@ -2786,7 +2825,9 @@ mod submission_tests {
         let drafts = tempfile::tempdir().unwrap();
         let draft_path = drafts.path().join("payment.json");
         context.save_payment(&draft_path, &block).unwrap();
-        assert!(!crate::offline::payment_may_have_been_submitted(&draft_path, &block.hash).unwrap());
+        assert!(
+            !crate::offline::payment_may_have_been_submitted(&draft_path, &block.hash).unwrap()
+        );
         drop(context);
         drop(keys);
         let expected = serde_json::to_string(&block).unwrap();
@@ -2868,7 +2909,9 @@ mod submission_tests {
             .unwrap_err()
             .to_string()
             .contains("stale"));
-        assert!(!crate::offline::payment_may_have_been_submitted(&stale_path, &block.hash).unwrap());
+        assert!(
+            !crate::offline::payment_may_have_been_submitted(&stale_path, &block.hash).unwrap()
+        );
         assert!(stale_server
             .join()
             .unwrap()
@@ -3375,7 +3418,11 @@ mod submission_tests {
                 json!("peer_matches"),
                 "payment epoch",
             ),
-            (json!("malformed"), json!("peer_matches"), "expected exactly 64 hexadecimal characters"),
+            (
+                json!("malformed"),
+                json!("peer_matches"),
+                "expected exactly 64 hexadecimal characters",
+            ),
             (
                 json!(BlockHash::new([1; 32]).to_string()),
                 json!("catching_up"),

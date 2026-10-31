@@ -11,20 +11,20 @@
 //! These accounting helpers do not verify signatures, authorize burns, or commit
 //! account-chain blocks. The node validates and settles those operations.
 
+mod comparison;
+mod dependency_counts;
 pub mod engine;
 pub mod error;
 pub mod merger_graph;
-mod comparison;
-mod dependency_counts;
 mod snapshot_encoding;
 mod snapshot_undo;
 pub mod token;
 
+pub use burst_utils::{Shared, SharedMap, SharedSet};
 pub use engine::{
-    ConsumedProvenance, RevocationEvent, TrstEngine, RestorationEvent, WalletPortfolio,
+    ConsumedProvenance, RestorationEvent, RevocationEvent, TrstEngine, WalletPortfolio,
     MAX_MERGE_SOURCES,
 };
 pub use error::TrstError;
-pub use merger_graph::{MergeNode, MergeSource, MergerGraph, MergeRevocation, MergeRestoration};
-pub use burst_utils::{Shared, SharedMap, SharedSet};
+pub use merger_graph::{MergeNode, MergeRestoration, MergeRevocation, MergeSource, MergerGraph};
 pub use token::TrstToken;

@@ -144,7 +144,8 @@ fn ledger_updater_burn_tracks_brn_correctly() {
     let previous_brn_spent: u128 = 500;
     let mut batch = env.tx_begin_write().unwrap();
     let info2 =
-        burst_node::update_account_on_block(&mut batch, &burn, Some(&info), previous_brn_spent).unwrap();
+        burst_node::update_account_on_block(&mut batch, &burn, Some(&info), previous_brn_spent)
+            .unwrap();
     batch.commit().unwrap();
 
     assert_eq!(info2.total_brn_burned, 200);

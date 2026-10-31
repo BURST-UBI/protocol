@@ -169,13 +169,20 @@ mod tests {
         drop(sender);
         let mut bytes = [0; 24];
         tokio::time::timeout(Duration::from_secs(3), client.read_exact(&mut bytes))
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(&bytes[..4], &8u32.to_be_bytes());
         assert_eq!(&bytes[4..12], &[7; 8]);
         assert_eq!(&bytes[12..16], &8u32.to_be_bytes());
         assert_eq!(&bytes[16..], &[9; 8]);
-        tokio::time::timeout(Duration::from_secs(3), task).await.unwrap().unwrap();
-        assert!(limits.acquire("127.0.0.1".parse().unwrap(), false).is_some());
+        tokio::time::timeout(Duration::from_secs(3), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(limits
+            .acquire("127.0.0.1".parse().unwrap(), false)
+            .is_some());
     }
 
     #[tokio::test]

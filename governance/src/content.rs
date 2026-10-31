@@ -32,10 +32,12 @@ impl ProposalContent {
     pub fn validate_content(&self) -> Result<(), ContentError> {
         match self {
             Self::ParameterChange { param, new_value }
-            | Self::Emergency { param, new_value, .. }
-                if *new_value > param.maximum_value() =>
-            {
-                return Err(ContentError::Invalid("parameter value exceeds storage width"));
+            | Self::Emergency {
+                param, new_value, ..
+            } if *new_value > param.maximum_value() => {
+                return Err(ContentError::Invalid(
+                    "parameter value exceeds storage width",
+                ));
             }
             _ => {}
         }

@@ -91,14 +91,12 @@ mod tests {
             .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(2)))
             .clone();
         let held = slots.clone().acquire_many_owned(2).await.unwrap();
-        assert!(generate_blocking(
-            &burst_work::WorkGenerator,
-            &burst_types::BlockHash::ZERO,
-            0,
-        )
-        .unwrap_err()
-        .to_string()
-        .contains("busy"));
+        assert!(
+            generate_blocking(&burst_work::WorkGenerator, &burst_types::BlockHash::ZERO, 0,)
+                .unwrap_err()
+                .to_string()
+                .contains("busy")
+        );
         assert!(generate(
             Arc::new(burst_work::WorkGenerator),
             burst_types::BlockHash::ZERO,

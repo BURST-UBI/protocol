@@ -413,7 +413,9 @@ mod tests {
         assert_eq!(result.save_wallets(), expected.save_wallets());
         assert_eq!(
             result.wallet_origins[&wallet(1)],
-            [hash(10), hash(12)].into_iter().collect::<crate::SharedSet<_>>()
+            [hash(10), hash(12)]
+                .into_iter()
+                .collect::<crate::SharedSet<_>>()
         );
         assert!(result.get_portfolio(&wallet(11)).is_none());
     }
@@ -471,7 +473,9 @@ mod tests {
         let restored = TrstEngine::load_wallets(&bytes, 100).unwrap();
         let mut expected = before.clone();
         expected.debit_wallet_with_provenance(&wallet(2), &hash(2), 30);
-        expected.set_expiry_period(100, Timestamp::new(250)).unwrap();
+        expected
+            .set_expiry_period(100, Timestamp::new(250))
+            .unwrap();
         assert_eq!(bytes, expected.save_wallets());
         assert_eq!(
             restored
@@ -511,7 +515,9 @@ mod tests {
             .unwrap();
             let result = TrstEngine::load_wallets(&bytes, period).unwrap();
             let mut expected = before.clone();
-            expected.set_expiry_period(period, Timestamp::new(250)).unwrap();
+            expected
+                .set_expiry_period(period, Timestamp::new(250))
+                .unwrap();
             assert_eq!(bytes, expected.save_wallets());
             assert_eq!(
                 result

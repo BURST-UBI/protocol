@@ -13,7 +13,11 @@ fn invalid(reason: impl ToString) -> StoreError {
 }
 
 pub(crate) fn uses_row_storage(batch: &LmdbWriteTransaction<'_>) -> Result<bool, StoreError> {
-    if batch.uses_stable_trst_records()? { Ok(true) } else { batch.uses_trst_records() }
+    if batch.uses_stable_trst_records()? {
+        Ok(true)
+    } else {
+        batch.uses_trst_records()
+    }
 }
 
 pub(crate) fn present(batch: &LmdbWriteTransaction<'_>) -> Result<bool, StoreError> {
@@ -233,7 +237,10 @@ fn convert_undo_format(
 ) -> Result<burst_store_lmdb::block_undo::BlockUndo, StoreError> {
     use burst_store_lmdb::block_undo::UndoChange;
     use std::collections::BTreeMap;
-    fn entries(bytes: Option<&[u8]>, stable: bool) -> Result<BTreeMap<String, Vec<u8>>, StoreError> {
+    fn entries(
+        bytes: Option<&[u8]>,
+        stable: bool,
+    ) -> Result<BTreeMap<String, Vec<u8>>, StoreError> {
         let mut entries = BTreeMap::new();
         if let Some(bytes) = bytes {
             let mut insert = |key, value| {
@@ -243,23 +250,32 @@ fn convert_undo_format(
                 Ok(())
             };
             if stable {
-                TrstEngine::visit_wallet_snapshot_stable_entries(bytes, &mut insert).map_err(invalid)?;
+                TrstEngine::visit_wallet_snapshot_stable_entries(bytes, &mut insert)
+                    .map_err(invalid)?;
             } else {
                 TrstEngine::visit_wallet_snapshot_records(bytes, |record| {
                     let (key, value) = record.storage_entry()?;
                     insert(key, value)
-                }).map_err(invalid)?;
+                })
+                .map_err(invalid)?;
             }
         }
         Ok(entries)
     }
     let mut changes = BTreeMap::new();
     for change in record.changes {
-        if stable && change.table == UndoTable::Meta
-            && (change.key.starts_with(WalletRecord::STORAGE_PREFIX.as_bytes())
-                || change.key.starts_with(burst_trst::engine::holding_rows::PREFIX.as_bytes()))
+        if stable
+            && change.table == UndoTable::Meta
+            && (change
+                .key
+                .starts_with(WalletRecord::STORAGE_PREFIX.as_bytes())
+                || change
+                    .key
+                    .starts_with(burst_trst::engine::holding_rows::PREFIX.as_bytes()))
         {
-            return Err(invalid("aggregate migration contains mixed holding row images"));
+            return Err(invalid(
+                "aggregate migration contains mixed holding row images",
+            ));
         }
         let expanded =
             if change.table == UndoTable::Meta && change.key == TrstEngine::meta_key().as_bytes() {
@@ -511,13 +527,18 @@ mod tests {
 
     #[test]
     fn confirmed_legacy_histories_activate_stable_rows_without_rewriting_finalized_journals() {
-        for (positional, starts_provisional) in [(false, false), (true, false), (false, true), (true, true)] {
+        for (positional, starts_provisional) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
             let directory = tempfile::tempdir().unwrap();
             let store = LmdbStore::open(directory.path(), 32, 16 << 20).unwrap();
             let before = fixture();
             let mut batch = store.tx_begin_write().unwrap();
-            if positional { stage_fixture_conversion(&mut batch, &before).unwrap(); }
-            else { persist(&mut batch, &before).unwrap(); }
+            if positional {
+                stage_fixture_conversion(&mut batch, &before).unwrap();
+            } else {
+                persist(&mut batch, &before).unwrap();
+            }
             batch.commit().unwrap();
             let owner = WalletAddress::new("brst_owner");
             let hash = BlockHash::new([21; 32]);
@@ -528,32 +549,51 @@ mod tests {
             after.set_expiry_period(200, Timestamp::new(150)).unwrap();
             let mut batch = store.tx_begin_write().unwrap();
             batch.begin_block_undo(hash, owner.clone(), 1).unwrap();
-            batch.put_block_with_account(&hash, b"first fixture block", &owner, 1).unwrap();
+            batch
+                .put_block_with_account(&hash, b"first fixture block", &owner, 1)
+                .unwrap();
             batch.put_frontier(&owner, &hash).unwrap();
             batch.put_account_info(&account, false).unwrap();
             persist(&mut batch, &after).unwrap();
             batch.commit().unwrap();
             if starts_provisional {
                 assert_eq!(migrate(&store, 200).unwrap(), !positional);
-                assert_eq!(store.tx_begin_write().unwrap().uses_stable_trst_records().unwrap(),
-                    !positional, "only complete aggregate cuts can convert provisional history");
+                assert_eq!(
+                    store
+                        .tx_begin_write()
+                        .unwrap()
+                        .uses_stable_trst_records()
+                        .unwrap(),
+                    !positional,
+                    "only complete aggregate cuts can convert provisional history"
+                );
             }
             let mut batch = store.tx_begin_write().unwrap();
             account.confirmation_height = 1;
             batch.put_account_info(&account, false).unwrap();
             let journal = batch.block_undo(&hash).unwrap().unwrap();
             batch.commit().unwrap();
-            assert_eq!(migrate(&store, 200).unwrap(), positional || !starts_provisional);
+            assert_eq!(
+                migrate(&store, 200).unwrap(),
+                positional || !starts_provisional
+            );
             assert!(!migrate(&store, 200).unwrap());
             drop(store);
             let store = LmdbStore::open(directory.path(), 32, 16 << 20).unwrap();
             let batch = store.tx_begin_write().unwrap();
             assert!(batch.uses_stable_trst_records().unwrap());
             assert_eq!(batch.block_undo(&hash).unwrap().unwrap(), journal);
-            assert_eq!(load(&batch, 200).unwrap().save_wallets(), after.save_wallets());
+            assert_eq!(
+                load(&batch, 200).unwrap().save_wallets(),
+                after.save_wallets()
+            );
             drop(batch);
             let mut batch = store.tx_begin_write().unwrap();
-            assert!(batch.rewind_block(&hash).unwrap_err().to_string().contains("unconfirmed"));
+            assert!(batch
+                .rewind_block(&hash)
+                .unwrap_err()
+                .to_string()
+                .contains("unconfirmed"));
             drop(batch);
             // New stable journals remain reversible while old finalized evidence survives.
             let next = BlockHash::new([22; 32]);
@@ -563,14 +603,19 @@ mod tests {
             batch.begin_block_undo(next, owner.clone(), 2).unwrap();
             account.head = next;
             account.block_count = 2;
-            batch.put_block_with_account(&next, b"second fixture block", &owner, 2).unwrap();
+            batch
+                .put_block_with_account(&next, b"second fixture block", &owner, 2)
+                .unwrap();
             batch.put_frontier(&owner, &next).unwrap();
             batch.put_account_info(&account, false).unwrap();
             persist(&mut batch, &later).unwrap();
             batch.commit().unwrap();
             let mut batch = store.tx_begin_write().unwrap();
             batch.rewind_block(&next).unwrap();
-            assert_eq!(load(&batch, 200).unwrap().save_wallets(), after.save_wallets());
+            assert_eq!(
+                load(&batch, 200).unwrap().save_wallets(),
+                after.save_wallets()
+            );
             assert_eq!(batch.block_undo(&hash).unwrap().unwrap(), journal);
             batch.commit().unwrap();
         }
@@ -593,13 +638,17 @@ mod tests {
             let actor = WalletAddress::new(name);
             let hash = BlockHash::new([byte; 32]);
             let before = engine.save_wallets();
-            engine.set_expiry_period(period, Timestamp::new(150)).unwrap();
+            engine
+                .set_expiry_period(period, Timestamp::new(150))
+                .unwrap();
             let mut batch = store.tx_begin_write().unwrap();
             batch.begin_block_undo(hash, actor.clone(), 1).unwrap();
             let mut account = burst_store::account::AccountInfo::unopened(actor.clone());
             account.head = hash;
             account.block_count = 1;
-            batch.put_block_with_account(&hash, b"fixture action", &actor, 1).unwrap();
+            batch
+                .put_block_with_account(&hash, b"fixture action", &actor, 1)
+                .unwrap();
             batch.put_frontier(&actor, &hash).unwrap();
             batch.put_account_info(&account, false).unwrap();
             persist(&mut batch, &engine).unwrap();
@@ -616,7 +665,12 @@ mod tests {
             assert_eq!(load(&batch, period).unwrap().save_wallets(), expected);
             batch.commit().unwrap();
         }
-        assert_eq!(load(&store.tx_begin_write().unwrap(), 100).unwrap().save_wallets(), baseline.save_wallets());
+        assert_eq!(
+            load(&store.tx_begin_write().unwrap(), 100)
+                .unwrap()
+                .save_wallets(),
+            baseline.save_wallets()
+        );
     }
 
     #[test]
@@ -647,11 +701,22 @@ mod tests {
         let original = batch.block_undo(&hash).unwrap().unwrap();
         let converted = convert_undo(original.clone()).unwrap();
         let stable = convert_undo_format(original.clone(), true).unwrap();
-        assert!(stable.changes.iter().any(|change|
-            change.key.starts_with(burst_trst::engine::holding_rows::PREFIX.as_bytes())));
+        assert!(stable.changes.iter().any(|change| change
+            .key
+            .starts_with(burst_trst::engine::holding_rows::PREFIX.as_bytes())));
         let mut mixed = original.clone();
-        mixed.changes.push(converted.changes.iter().find(|change|
-            change.key.starts_with(WalletRecord::STORAGE_PREFIX.as_bytes())).unwrap().clone());
+        mixed.changes.push(
+            converted
+                .changes
+                .iter()
+                .find(|change| {
+                    change
+                        .key
+                        .starts_with(WalletRecord::STORAGE_PREFIX.as_bytes())
+                })
+                .unwrap()
+                .clone(),
+        );
         assert!(convert_undo_format(mixed, true).is_err());
         let unchanged = |record: &burst_store_lmdb::block_undo::BlockUndo| {
             record

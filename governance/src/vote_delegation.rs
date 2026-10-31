@@ -6,12 +6,12 @@
 
 use crate::error::GovernanceError;
 use burst_types::{TxHash, WalletAddress};
+use imbl::{HashMap as PersistentMap, HashSet as PersistentSet};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use imbl::{HashMap as PersistentMap, HashSet as PersistentSet};
 
-mod snapshot_undo;
 mod retention;
+mod snapshot_undo;
 mod snapshot_view;
 pub use snapshot_view::{DelegationView, WalletSet};
 mod ballot_resolver;
@@ -58,7 +58,8 @@ pub struct DelegationState {
     max_depth: usize,
     /// Cut-local key-ballot projection. None blocks legacy fallback for an
     /// explicit scoped revocation or a grant with no currently effective vote.
-    key_ballots: PersistentMap<WalletAddress, Option<burst_transactions::governance::GovernanceVote>>,
+    key_ballots:
+        PersistentMap<WalletAddress, Option<burst_transactions::governance::GovernanceVote>>,
 }
 
 impl std::ops::Deref for DelegationEngine {
@@ -84,7 +85,11 @@ fn ordered_reverse<S: serde::Serializer>(
             self.0.ordered_sources().serialize(serializer)
         }
     }
-    serializer.collect_map(reverse.iter().map(|(wallet, sources)| (wallet, Sources(sources))))
+    serializer.collect_map(
+        reverse
+            .iter()
+            .map(|(wallet, sources)| (wallet, Sources(sources))),
+    )
 }
 
 impl DelegationEngine {
@@ -156,7 +161,9 @@ impl DelegationEngine {
 
     /// Remove a global delegation.
     pub fn undelegate(&mut self, from: &WalletAddress) {
-        if !self.delegations.contains_key(from) { return; }
+        if !self.delegations.contains_key(from) {
+            return;
+        }
         if let Some(old_to) = self.delegations.remove(from) {
             if let Some(set) = self.reverse_delegations.get_mut(&old_to) {
                 set.remove(from);
@@ -181,7 +188,8 @@ impl DelegationEngine {
             return Err(GovernanceError::SelfDelegation);
         }
         if self.scoped_delegations.get(&(from.clone(), scope.clone())) != Some(to) {
-            self.scoped_delegations.insert((from.clone(), scope), to.clone());
+            self.scoped_delegations
+                .insert((from.clone(), scope), to.clone());
         }
         Ok(())
     }
@@ -365,8 +373,14 @@ impl DelegationEngine {
         self.max_depth == snapshot.max_depth
             && self.delegations.len() == snapshot.delegations.len()
             && self.scoped_delegations.len() == snapshot.scoped_delegations.len()
-            && snapshot.delegations.iter().all(|(from, to)| self.delegations.get(from) == Some(to))
-            && snapshot.scoped_delegations.iter().all(|(key, to)| self.scoped_delegations.get(key) == Some(to))
+            && snapshot
+                .delegations
+                .iter()
+                .all(|(from, to)| self.delegations.get(from) == Some(to))
+            && snapshot
+                .scoped_delegations
+                .iter()
+                .all(|(key, to)| self.scoped_delegations.get(key) == Some(to))
     }
 
     /// Serialize the delegation graph to bytes for LMDB persistence.
@@ -432,30 +446,56 @@ mod tests {
             reverse_delegations: HashMap<WalletAddress, HashSet<WalletAddress>>,
             scoped_delegations: HashMap<(WalletAddress, DelegationScope), WalletAddress>,
             max_depth: usize,
-            key_ballots: HashMap<WalletAddress, Option<burst_transactions::governance::GovernanceVote>>,
+            key_ballots:
+                HashMap<WalletAddress, Option<burst_transactions::governance::GovernanceVote>>,
         }
         let mut original = DelegationEngine::default();
         original.delegate(&wallet("a"), &wallet("b")).unwrap();
-        original.delegate_scoped(&wallet("c"), &wallet("d"), DelegationScope::Category("economic".into())).unwrap();
+        original
+            .delegate_scoped(
+                &wallet("c"),
+                &wallet("d"),
+                DelegationScope::Category("economic".into()),
+            )
+            .unwrap();
         original.project_key_ballot(wallet("a"), None);
         for index in (0..129).rev() {
-            original.delegate(&wallet(&format!("source_{index}")), &wallet(&format!("target_{}", index % 4))).unwrap();
+            original
+                .delegate(
+                    &wallet(&format!("source_{index}")),
+                    &wallet(&format!("target_{}", index % 4)),
+                )
+                .unwrap();
         }
         #[derive(Serialize)]
-        struct Reverse<'a>(#[serde(serialize_with = "ordered_reverse")] &'a PersistentMap<WalletAddress, PersistentSet<WalletAddress>>);
-        let legacy_reverse: HashMap<_, _> = original.reverse_delegations.iter().map(|(target, sources)| {
-            let mut sources: Vec<_> = sources.iter().collect();
-            sources.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-            (target, sources)
-        }).collect();
-        assert_eq!(serde_json::to_value(Reverse(&original.reverse_delegations)).unwrap(),
-            serde_json::to_value(&legacy_reverse).unwrap());
-        assert_eq!(bincode::serialized_size(&Reverse(&original.reverse_delegations)).unwrap(),
-            bincode::serialized_size(&legacy_reverse).unwrap());
+        struct Reverse<'a>(
+            #[serde(serialize_with = "ordered_reverse")]
+            &'a PersistentMap<WalletAddress, PersistentSet<WalletAddress>>,
+        );
+        let legacy_reverse: HashMap<_, _> = original
+            .reverse_delegations
+            .iter()
+            .map(|(target, sources)| {
+                let mut sources: Vec<_> = sources.iter().collect();
+                sources.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+                (target, sources)
+            })
+            .collect();
+        assert_eq!(
+            serde_json::to_value(Reverse(&original.reverse_delegations)).unwrap(),
+            serde_json::to_value(&legacy_reverse).unwrap()
+        );
+        assert_eq!(
+            bincode::serialized_size(&Reverse(&original.reverse_delegations)).unwrap(),
+            bincode::serialized_size(&legacy_reverse).unwrap()
+        );
         let mut candidate = original.clone();
         assert!(std::sync::Arc::ptr_eq(&original.0, &candidate.0));
         let encoded = bincode::serialize(&original).unwrap();
-        assert_eq!(encoded, bincode::serialize(&original.snapshot_view()).unwrap());
+        assert_eq!(
+            encoded,
+            bincode::serialize(&original.snapshot_view()).unwrap()
+        );
         let legacy: LegacyState = bincode::deserialize(&encoded).unwrap();
         assert_eq!(legacy.delegations.get(&wallet("a")), Some(&wallet("b")));
         assert!(legacy.reverse_delegations[&wallet("b")].contains(&wallet("a")));
@@ -466,7 +506,10 @@ mod tests {
             bincode::deserialize(&bincode::serialize(&legacy).unwrap()).unwrap();
         assert_eq!(restored.get_delegate(&wallet("a")), Some(&wallet("b")));
         assert_eq!(restored.key_ballot(&wallet("a")), Some(None));
-        assert_eq!(restored.resolve_for_context(&wallet("c"), None, Some("economic")), Some(wallet("d")));
+        assert_eq!(
+            restored.resolve_for_context(&wallet("c"), None, Some("economic")),
+            Some(wallet("d"))
+        );
         candidate.delegate(&wallet("c"), &wallet("d")).unwrap();
         assert!(!std::sync::Arc::ptr_eq(&original.0, &candidate.0));
         assert_eq!(original.get_delegate(&wallet("c")), None);
@@ -481,20 +524,35 @@ mod tests {
         for n in 0..4096 {
             let owner = wallet(&format!("owner_{n}"));
             original.delegate(&owner, &hub).unwrap();
-            original.delegate_scoped(&owner, &other_hub, DelegationScope::Category("economic".into())).unwrap();
+            original
+                .delegate_scoped(
+                    &owner,
+                    &other_hub,
+                    DelegationScope::Category("economic".into()),
+                )
+                .unwrap();
         }
         original.delegate(&wallet("unrelated"), &other_hub).unwrap();
         let mut projected = original.clone();
         projected.project_key_ballot(wallet("owner_0"), None);
         assert!(projected.delegations.ptr_eq(&original.delegations));
-        assert!(projected.scoped_delegations.ptr_eq(&original.scoped_delegations));
-        assert!(projected.reverse_delegations.ptr_eq(&original.reverse_delegations));
+        assert!(projected
+            .scoped_delegations
+            .ptr_eq(&original.scoped_delegations));
+        assert!(projected
+            .reverse_delegations
+            .ptr_eq(&original.reverse_delegations));
         assert_eq!(original.key_ballot(&wallet("owner_0")), None);
         assert_eq!(projected.key_ballot(&wallet("owner_0")), Some(None));
         let mut candidate = original.clone();
-        candidate.delegate(&wallet("owner_0"), &wallet("new_hub")).unwrap();
-        assert!(candidate.scoped_delegations.ptr_eq(&original.scoped_delegations));
-        assert!(candidate.reverse_delegations[&other_hub].ptr_eq(&original.reverse_delegations[&other_hub]));
+        candidate
+            .delegate(&wallet("owner_0"), &wallet("new_hub"))
+            .unwrap();
+        assert!(candidate
+            .scoped_delegations
+            .ptr_eq(&original.scoped_delegations));
+        assert!(candidate.reverse_delegations[&other_hub]
+            .ptr_eq(&original.reverse_delegations[&other_hub]));
         assert_eq!(candidate.get_delegators(&hub).len(), 4095);
         assert_eq!(original.get_delegators(&hub).len(), 4096);
         candidate.undelegate(&wallet("owner_0"));
@@ -503,14 +561,27 @@ mod tests {
         let snapshot: DelegationSnapshot = bincode::deserialize(&candidate.save_state()).unwrap();
         assert_eq!(snapshot.delegations.len(), 4096);
         assert_eq!(snapshot.scoped_delegations.len(), 4096);
-        let restored = DelegationEngine::load_state(&bincode::serialize(&snapshot).unwrap()).unwrap();
+        let restored =
+            DelegationEngine::load_state(&bincode::serialize(&snapshot).unwrap()).unwrap();
         assert_eq!(restored.get_delegators(&hub).len(), 4095);
-        assert_eq!(restored.resolve_for_context(&wallet("owner_0"), None, Some("economic")), Some(other_hub));
+        assert_eq!(
+            restored.resolve_for_context(&wallet("owner_0"), None, Some("economic")),
+            Some(other_hub)
+        );
         let mut unchanged = original.clone();
         unchanged.delegate(&wallet("owner_0"), &hub).unwrap();
         unchanged.undelegate(&wallet("absent"));
-        unchanged.delegate_scoped(&wallet("owner_0"), &wallet("other_hub"), DelegationScope::Category("economic".into())).unwrap();
-        unchanged.undelegate_scoped(&wallet("absent"), DelegationScope::Category("economic".into()));
+        unchanged
+            .delegate_scoped(
+                &wallet("owner_0"),
+                &wallet("other_hub"),
+                DelegationScope::Category("economic".into()),
+            )
+            .unwrap();
+        unchanged.undelegate_scoped(
+            &wallet("absent"),
+            DelegationScope::Category("economic".into()),
+        );
         assert!(unchanged.shares_storage_with(&original));
         let mut same_projection = projected.clone();
         same_projection.project_key_ballot(wallet("owner_0"), None);
@@ -537,7 +608,6 @@ mod tests {
     fn tx_hash(seed: u8) -> TxHash {
         TxHash::new([seed; 32])
     }
-
 
     #[test]
     fn test_simple_delegation() {
@@ -652,7 +722,6 @@ mod tests {
         }
         assert_eq!(engine.voting_power(&delegate), 6); // own + 5 delegators
     }
-
 
     #[test]
     fn scoped_only_transitive_ancestors_are_counted_once() {

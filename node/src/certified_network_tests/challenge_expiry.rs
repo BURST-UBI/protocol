@@ -103,10 +103,19 @@ async fn partitioned_appeal_keeps_identity_stakes_and_epoch_until_quorum_recover
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "explicit capped signed lifecycle fanout qualification"]
 async fn many_origin_holders_settle_and_recover_for_fraud_and_inactivity() {
-    let _permit = crate::verification_test_support::NETWORK_FIXTURE.acquire().await.unwrap();
+    let _permit = crate::verification_test_support::NETWORK_FIXTURE
+        .acquire()
+        .await
+        .unwrap();
     let selected = std::env::var("BURST_LIFECYCLE_FANOUT_CASE").ok();
-    assert!(matches!(selected.as_deref(), None | Some("fraud") | Some("inactivity")));
-    for (name, reason) in [("fraud", ChallengeReason::Fraud), ("inactivity", ChallengeReason::Inactivity)] {
+    assert!(matches!(
+        selected.as_deref(),
+        None | Some("fraud") | Some("inactivity")
+    ));
+    for (name, reason) in [
+        ("fraud", ChallengeReason::Fraud),
+        ("inactivity", ChallengeReason::Inactivity),
+    ] {
         if selected.as_deref().is_none_or(|selected| selected == name) {
             journey_with_origins(reason, false, &[], false, 64).await;
         }
@@ -116,10 +125,19 @@ async fn many_origin_holders_settle_and_recover_for_fraud_and_inactivity() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "explicit capped sustained mixed lifecycle qualification"]
 async fn sustained_payments_and_queries_cross_challenge_settlement_and_recover() {
-    let _permit = crate::verification_test_support::NETWORK_FIXTURE.acquire().await.unwrap();
+    let _permit = crate::verification_test_support::NETWORK_FIXTURE
+        .acquire()
+        .await
+        .unwrap();
     let selected = std::env::var("BURST_LIFECYCLE_FANOUT_CASE").ok();
-    assert!(matches!(selected.as_deref(), None | Some("fraud") | Some("inactivity")));
-    for (name, reason) in [("fraud", ChallengeReason::Fraud), ("inactivity", ChallengeReason::Inactivity)] {
+    assert!(matches!(
+        selected.as_deref(),
+        None | Some("fraud") | Some("inactivity")
+    ));
+    for (name, reason) in [
+        ("fraud", ChallengeReason::Fraud),
+        ("inactivity", ChallengeReason::Inactivity),
+    ] {
         if selected.as_deref().is_none_or(|selected| selected == name) {
             journey_with_traffic(reason, false, &[], false, 64, true).await;
         }
@@ -256,7 +274,9 @@ async fn journey_with_traffic(
         workers.push((
             node.shutdown.clone(),
             tokio::spawn(async move {
-                node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+                node.start_with_services(burst_daemon::start_public_services)
+                    .await
+                    .unwrap();
                 node.stop().await.unwrap();
             }),
         ));
@@ -306,7 +326,10 @@ async fn journey_with_traffic(
     }
     governance_certified::stop(&mut workers).await;
     if extra_origins != 0 && !matches!(&result, Ok(Ok(_))) {
-        eprintln!("retained failed lifecycle fanout fixture: {}", directory.keep().display());
+        eprintln!(
+            "retained failed lifecycle fanout fixture: {}",
+            directory.keep().display()
+        );
     }
     let (addresses, expected, receipt) =
         result.expect("challenge/expiry journey timed out").unwrap();
@@ -407,9 +430,15 @@ async fn run(
         .await;
         submit(clients, &opening).await;
         if mixed && index >= 5 {
-            let delegation = signed_block(&clients[0], &keys[index],
-                Transaction::ChangeRepresentative(build_change_rep_tx(
-                    &addresses[index], &addresses[0], time(10)).unwrap()), params).await;
+            let delegation = signed_block(
+                &clients[0],
+                &keys[index],
+                Transaction::ChangeRepresentative(
+                    build_change_rep_tx(&addresses[index], &addresses[0], time(10)).unwrap(),
+                ),
+                params,
+            )
+            .await;
             submit(clients, &delegation).await;
         }
         if index < 4 {
@@ -431,19 +460,40 @@ async fn run(
     let amount = BRN_UNIT / 1000;
     for n in 0..extra_origins {
         let holder = 1 + n % holder_amounts.len();
-        let burn = signed_block(&clients[0], &keys[4], Transaction::Burn(
-            build_burn_tx(&addresses[4], &addresses[holder], amount, time(20)).unwrap(),
-        ), params).await;
+        let burn = signed_block(
+            &clients[0],
+            &keys[4],
+            Transaction::Burn(
+                build_burn_tx(&addresses[4], &addresses[holder], amount, time(20)).unwrap(),
+            ),
+            params,
+        )
+        .await;
         submit(clients, &burn).await;
-        let receive = signed_block(&clients[0], &keys[holder], Transaction::Receive(
-            build_receive_tx(&addresses[holder], burn.hash.into_tx_hash(), amount, time(20)).unwrap(),
-        ), params).await;
+        let receive = signed_block(
+            &clients[0],
+            &keys[holder],
+            Transaction::Receive(
+                build_receive_tx(
+                    &addresses[holder],
+                    burn.hash.into_tx_hash(),
+                    amount,
+                    time(20),
+                )
+                .unwrap(),
+            ),
+            params,
+        )
+        .await;
         submit(clients, &receive).await;
         holder_amounts[holder - 1] += amount;
     }
     if extra_origins != 0 {
-        eprintln!("lifecycle fanout: origins={extra_origins} holders=3 signed_blocks={} setup_ms={}",
-            extra_origins * 2, fanout_started.elapsed().as_millis());
+        eprintln!(
+            "lifecycle fanout: origins={extra_origins} holders=3 signed_blocks={} setup_ms={}",
+            extra_origins * 2,
+            fanout_started.elapsed().as_millis()
+        );
     }
     let mut inputs = Vec::new();
     for originator in [0, 4] {
@@ -514,8 +564,13 @@ async fn run(
     clock.store(time(100).as_secs(), Ordering::SeqCst);
     let mut traffic = if mixed {
         Some(mixed::Traffic::start(clients, stores, params, clock, &addresses[4]).await)
-    } else { None };
-    if let Some(traffic) = &traffic { traffic.wait_for_progress(0).await; traffic.set_phase(1); }
+    } else {
+        None
+    };
+    if let Some(traffic) = &traffic {
+        traffic.wait_for_progress(0).await;
+        traffic.set_phase(1);
+    }
     let challenge = signed_block(
         &clients[0],
         &keys[0],
@@ -643,7 +698,10 @@ async fn run(
         .iter()
         .map(|store| store.meta_store().payment_epoch().unwrap())
         .collect();
-    if let Some(traffic) = &traffic { traffic.wait_for_progress(1).await; traffic.set_phase(2); }
+    if let Some(traffic) = &traffic {
+        traffic.wait_for_progress(1).await;
+        traffic.set_phase(2);
+    }
     let settlement_started = std::time::Instant::now();
     clock.store(deadline + 2, Ordering::SeqCst);
     if let Some(partition) = partition {
@@ -713,7 +771,10 @@ async fn run(
     .await
     .expect("challenge deadline and expiry did not install");
     if extra_origins != 0 {
-        eprintln!("lifecycle fanout: {reason:?} settlement_ms={}", settlement_started.elapsed().as_millis());
+        eprintln!(
+            "lifecycle fanout: {reason:?} settlement_ms={}",
+            settlement_started.elapsed().as_millis()
+        );
     }
     let mut completion = None;
     for store in stores {
@@ -862,8 +923,10 @@ async fn run(
         if reason == ChallengeReason::Fraud {
             assert_eq!(receipt.rewards.len(), 1);
             assert_eq!(receipt.rewards[0].recipient, addresses[0]);
-            assert_eq!(receipt.rewards[0].amount,
-                (BRN_UNIT + holder_amounts.iter().sum::<u128>()) / 100);
+            assert_eq!(
+                receipt.rewards[0].amount,
+                (BRN_UNIT + holder_amounts.iter().sum::<u128>()) / 100
+            );
         } else {
             assert!(receipt.rewards.is_empty());
         }
@@ -901,36 +964,52 @@ fn lifecycle_params(mixed: bool) -> ProtocolParams {
 async fn retained_mixed_metadata_recovery_diagnostic() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_test_writer().try_init();
-    let directory = std::path::PathBuf::from(std::env::var_os("BURST_RETAINED_MIXED_FIXTURE")
-        .expect("set BURST_RETAINED_MIXED_FIXTURE to a disposable fixture copy"));
+        .with_test_writer()
+        .try_init();
+    let directory = std::path::PathBuf::from(
+        std::env::var_os("BURST_RETAINED_MIXED_FIXTURE")
+            .expect("set BURST_RETAINED_MIXED_FIXTURE to a disposable fixture copy"),
+    );
     let params = lifecycle_params(true);
     let mut manifests = Vec::new();
     if std::env::var_os("BURST_RETAINED_MIXED_VOTES").is_some() {
         for index in 0..4 {
             let store = burst_store_lmdb::LmdbStore::open(
-                &directory.join(format!("node-{index}")), crate::node::MAX_DBS, 1 << 30,
-            ).unwrap();
+                &directory.join(format!("node-{index}")),
+                crate::node::MAX_DBS,
+                1 << 30,
+            )
+            .unwrap();
             let batch = store.tx_begin_write().unwrap();
             for (key, bytes) in batch.checkpoint_metadata(b"checkpoint_round/v1/").unwrap() {
                 crate::checkpoint_agreement::retention::visit_round(
-                    std::str::from_utf8(&key).unwrap(), &bytes, NetworkId::Dev,
+                    std::str::from_utf8(&key).unwrap(),
+                    &bytes,
+                    NetworkId::Dev,
                     crate::genesis_state::block(NetworkId::Dev, &params).hash,
                     |journal| {
                         for manifest in journal.manifests.unwrap_or(&[]) {
-                            if !manifests.contains(manifest) { manifests.push(manifest.clone()); }
+                            if !manifests.contains(manifest) {
+                                manifests.push(manifest.clone());
+                            }
                         }
                         Ok(())
                     },
-                ).unwrap();
+                )
+                .unwrap();
             }
         }
     }
     let mut failures = Vec::new();
     for index in 0..4 {
-        let store = Arc::new(burst_store_lmdb::LmdbStore::open(
-            &directory.join(format!("node-{index}")), crate::node::MAX_DBS, 1 << 30,
-        ).unwrap());
+        let store = Arc::new(
+            burst_store_lmdb::LmdbStore::open(
+                &directory.join(format!("node-{index}")),
+                crate::node::MAX_DBS,
+                1 << 30,
+            )
+            .unwrap(),
+        );
         let epoch = store.meta_store().payment_epoch().unwrap();
         let registry = Arc::new(tokio::sync::RwLock::new(
             crate::connection_registry::ConnectionRegistry::new(),
@@ -939,11 +1018,17 @@ async fn retained_mixed_metadata_recovery_diagnostic() {
         crate::checkpoint_sync::witness::start(store.clone(), registry.clone(), stop.clone()).await;
         let started = std::time::Instant::now();
         let result = crate::confirmed_replay::snapshot::installed::recover_metadata_from_peers(
-            store.clone(), NetworkId::Dev, params.clone(), registry.clone(),
-        ).await;
+            store.clone(),
+            NetworkId::Dev,
+            params.clone(),
+            registry.clone(),
+        )
+        .await;
         stop.shutdown();
         let tasks = registry.write().await.take_tasks();
-        for task in tasks { task.await.unwrap(); }
+        for task in tasks {
+            task.await.unwrap();
+        }
         registry.write().await.close();
         match result {
             Ok(Some(metadata)) => {
@@ -952,31 +1037,50 @@ async fn retained_mixed_metadata_recovery_diagnostic() {
                     Ok(cache) => {
                         assert_eq!(cache.recovered.continuation.anchor().hash(), epoch);
                         if std::env::var_os("BURST_RETAINED_MIXED_VOTES").is_some() {
-                            retained_vote_coverage(index, &store, &cache.recovered.continuation, &manifests);
+                            retained_vote_coverage(
+                                index,
+                                &store,
+                                &cache.recovered.continuation,
+                                &manifests,
+                            );
                         }
                         if let Ok(now) = std::env::var("BURST_RETAINED_MIXED_CLOCK") {
                             let now: u64 = now.parse().unwrap();
-                            let activation = crate::checkpoint_activation::PreparedActivation::prepare_next(
-                                &store, NetworkId::Dev, &params, now - 1,
-                            ).unwrap().expect("retained activation candidate");
+                            let activation =
+                                crate::checkpoint_activation::PreparedActivation::prepare_next(
+                                    &store,
+                                    NetworkId::Dev,
+                                    &params,
+                                    now - 1,
+                                )
+                                .unwrap()
+                                .expect("retained activation candidate");
                             let manifest = activation.manifest();
                             let batch = store.tx_begin_write().unwrap();
                             let mut outside = Vec::new();
                             for account in batch.account_entries().unwrap() {
                                 let account = account.unwrap();
-                                if account.confirmation_height == 0 { continue; }
-                                let hash = batch.block_at_height(&account.address, account.confirmation_height)
-                                    .unwrap().unwrap();
-                                let block: StateBlock = bincode::deserialize(&batch.get_block(&hash).unwrap()).unwrap();
+                                if account.confirmation_height == 0 {
+                                    continue;
+                                }
+                                let hash = batch
+                                    .block_at_height(&account.address, account.confirmation_height)
+                                    .unwrap()
+                                    .unwrap();
+                                let block: StateBlock =
+                                    bincode::deserialize(&batch.get_block(&hash).unwrap()).unwrap();
                                 if block.timestamp.as_secs() > manifest.checkpoint.cutoff {
                                     outside.push(serde_json::json!({"account":account.address.to_string(),
                                         "hash":hash.to_string(),"confirmation_height":account.confirmation_height,
                                         "timestamp":block.timestamp.as_secs()}));
                                 }
                             }
-                            eprintln!("retained_clock_cut {}", serde_json::json!({"node":index,
+                            eprintln!(
+                                "retained_clock_cut {}",
+                                serde_json::json!({"node":index,
                                 "clock":now,"candidate_cutoff":manifest.checkpoint.cutoff,
-                                "confirmed_outside_cut":outside}));
+                                "confirmed_outside_cut":outside})
+                            );
                         }
                         eprintln!("retained_recovery node={index} stage=handoff result=pass elapsed_ms={}", started.elapsed().as_millis());
                     }
@@ -988,25 +1092,34 @@ async fn retained_mixed_metadata_recovery_diagnostic() {
             }
             Ok(None) => failures.push((index, "installed metadata absent".into())),
             Err(error) => {
-                eprintln!("retained_recovery node={index} stage=metadata error={error} elapsed_ms={}", started.elapsed().as_millis());
+                eprintln!(
+                    "retained_recovery node={index} stage=metadata error={error} elapsed_ms={}",
+                    started.elapsed().as_millis()
+                );
                 failures.push((index, error.to_string()));
             }
         }
     }
-    assert!(failures.is_empty(), "retained recovery failures: {failures:?}");
+    assert!(
+        failures.is_empty(),
+        "retained recovery failures: {failures:?}"
+    );
 }
 
 // Inspect preserved failed fixtures through the normal journal codec and native
 // block indexes. This is diagnosis, never authority to sign or a workload pass.
 fn retained_vote_coverage(
-    index: usize, store: &burst_store_lmdb::LmdbStore,
+    index: usize,
+    store: &burst_store_lmdb::LmdbStore,
     base: &crate::confirmed_replay::snapshot::SnapshotContinuation,
     manifests: &[crate::checkpoint_agreement::ReplayManifest],
 ) {
     let batch = store.tx_begin_write().unwrap();
     let epoch = batch.payment_epoch().unwrap();
     let rounds = batch.checkpoint_metadata(b"checkpoint_round/v1/").unwrap();
-    let pending = batch.checkpoint_metadata(b"pending_confirmation/v1/").unwrap();
+    let pending = batch
+        .checkpoint_metadata(b"pending_confirmation/v1/")
+        .unwrap();
     for (key, bytes) in rounds {
         let key = String::from_utf8(key).unwrap();
         crate::checkpoint_agreement::retention::visit_round(

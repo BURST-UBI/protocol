@@ -11,7 +11,8 @@ pub struct AccountWorkPool {
     account_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     /// Process semaphore capacity and speculative account limit
     max_concurrent: usize,
-    speculative: std::sync::Mutex<HashMap<String, std::sync::Weak<tokio::sync::OwnedMutexGuard<()>>>>,
+    speculative:
+        std::sync::Mutex<HashMap<String, std::sync::Weak<tokio::sync::OwnedMutexGuard<()>>>>,
     /// Semaphore for limiting total concurrency
     semaphore: Arc<tokio::sync::Semaphore>,
 }
@@ -44,7 +45,8 @@ impl AccountWorkPool {
     /// sibling's serial fallback after the original candidate has committed.
     /// Never wait after removing a block from a cancellation-safe queue.
     pub(crate) fn try_reserve(
-        &self, account: &str,
+        &self,
+        account: &str,
     ) -> Option<(Arc<tokio::sync::OwnedMutexGuard<()>>, bool)> {
         let mut speculative = self.speculative.try_lock().ok()?;
         speculative.retain(|_, guard| guard.strong_count() > 0);
@@ -56,8 +58,12 @@ impl AccountWorkPool {
         if !locks.contains_key(account) && locks.len() >= self.max_concurrent {
             return None;
         }
-        let guard = locks.entry(account.to_owned()).or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone().try_lock_owned().ok()?;
+        let guard = locks
+            .entry(account.to_owned())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+            .try_lock_owned()
+            .ok()?;
         let guard = Arc::new(guard);
         speculative.insert(account.to_owned(), Arc::downgrade(&guard));
         Some((guard, true))
@@ -153,11 +159,7 @@ mod tests {
     #[tokio::test]
     async fn cancellation_retains_account_and_capacity_guards_until_blocking_work_finishes() {
         for same_account in [true, false] {
-            let pool = Arc::new(AccountWorkPool::new(if same_account {
-                2
-            } else {
-                1
-            }));
+            let pool = Arc::new(AccountWorkPool::new(if same_account { 2 } else { 1 }));
             let (entered, started) = tokio::sync::oneshot::channel();
             let (release, released) = std::sync::mpsc::channel();
             let first_processor = pool.clone();
@@ -180,12 +182,11 @@ mod tests {
             );
             let (entered, mut started) = tokio::sync::oneshot::channel();
             let second = tokio::spawn(async move {
-                pool
-                    .process(if same_account { "a" } else { "b" }, move || {
-                        entered.send(()).unwrap();
-                        42
-                    })
-                    .await
+                pool.process(if same_account { "a" } else { "b" }, move || {
+                    entered.send(()).unwrap();
+                    42
+                })
+                .await
             });
             assert!(
                 tokio::time::timeout(Duration::from_millis(25), &mut started)

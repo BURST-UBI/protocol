@@ -65,7 +65,9 @@ async fn full_proposal_fork_survives_pre_election_restart_and_replacement() {
         let queue = node.block_queue();
         let shutdown = node.shutdown.clone();
         let task = tokio::spawn(async move {
-            node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+            node.start_with_services(burst_daemon::start_public_services)
+                .await
+                .unwrap();
             node.stop().await.unwrap();
         });
         let result = tokio::time::timeout(Duration::from_secs(45), async {
@@ -104,7 +106,9 @@ async fn full_proposal_fork_survives_pre_election_restart_and_replacement() {
         let governance = node.governance.clone();
         let shutdown = node.shutdown.clone();
         let task = tokio::spawn(async move {
-            node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+            node.start_with_services(burst_daemon::start_public_services)
+                .await
+                .unwrap();
             node.stop().await.unwrap();
         });
         let result = tokio::time::timeout(Duration::from_secs(45), async {

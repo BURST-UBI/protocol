@@ -39,8 +39,13 @@ mod tests {
         let challenger = WalletAddress::new("brst_activity_challenger");
         let mut engine = VerificationOrchestrator::new();
         engine.initialize_genesis(&target);
-        let challenge = engine.challenges.initiate(challenger, target.clone(), 7,
-            burst_types::ChallengeReason::Fraud, Timestamp::new(100));
+        let challenge = engine.challenges.initiate(
+            challenger,
+            target.clone(),
+            7,
+            burst_types::ChallengeReason::Fraud,
+            Timestamp::new(100),
+        );
         engine.active_challenges.insert(target.clone(), challenge);
         engine.states.begin_changes();
         let before = engine.activity_snapshot();
@@ -49,13 +54,23 @@ mod tests {
         let encoded = bincode::serialize(before.get_state(&target).unwrap()).unwrap();
         engine.states.get_mut(&target).unwrap().phase = VerificationPhase::Challenged;
         engine.active_challenges.remove(&target);
-        engine.pending_events.push(VerificationEvent::WalletUnverified { wallet: target.clone() });
+        engine
+            .pending_events
+            .push(VerificationEvent::WalletUnverified {
+                wallet: target.clone(),
+            });
         let after = engine.activity_snapshot();
         assert_eq!(before.states().count(), 1);
         assert_eq!(before.active_challenges().len(), 1);
         assert_eq!(before.active_challenges().next().unwrap().stake_amount, 7);
-        assert_eq!(bincode::serialize(before.get_state(&target).unwrap()).unwrap(), encoded);
-        assert_eq!(after.get_state(&target).unwrap().phase, VerificationPhase::Challenged);
+        assert_eq!(
+            bincode::serialize(before.get_state(&target).unwrap()).unwrap(),
+            encoded
+        );
+        assert_eq!(
+            after.get_state(&target).unwrap().phase,
+            VerificationPhase::Challenged
+        );
         assert_eq!(after.active_challenges().len(), 0);
         assert_eq!(engine.pending_events.len(), 1);
     }

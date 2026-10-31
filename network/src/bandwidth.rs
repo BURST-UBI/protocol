@@ -5,7 +5,10 @@
 pub const DEFAULT_MAX_BYTES_PER_SEC: u64 = 5 * 1024 * 1024;
 
 use serde::{Deserialize, Serialize};
-use std::{sync::Mutex, time::{Duration, Instant}};
+use std::{
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -97,7 +100,8 @@ impl SharedBandwidth {
         bulk.refill(now);
         let cost = bytes as u128 * 1_000_000_000;
         let wait = |bucket: &Bucket| {
-            cost.saturating_sub(bucket.credit).div_ceil(u128::from(bucket.rate.max(1)))
+            cost.saturating_sub(bucket.credit)
+                .div_ceil(u128::from(bucket.rate.max(1)))
         };
         let delay = if class == TrafficClass::Bulk {
             wait(total).max(wait(bulk))
@@ -113,7 +117,6 @@ impl SharedBandwidth {
         }
         Ok(())
     }
-
 }
 
 #[cfg(test)]
@@ -123,13 +126,22 @@ mod tests {
     #[test]
     fn pacing_waits_for_deficit_without_debiting_rejected_reservations() {
         let now = Instant::now();
-        let b = SharedBandwidth::at(&BandwidthLimits {
-            total_bytes_per_second: 100, bulk_bytes_per_second: 80,
-        }, now);
+        let b = SharedBandwidth::at(
+            &BandwidthLimits {
+                total_bytes_per_second: 100,
+                bulk_bytes_per_second: 80,
+            },
+            now,
+        );
         assert!(b.consume_at(100, TrafficClass::Control, now));
-        assert_eq!(b.reserve_at(20, TrafficClass::Control, now), Err(Duration::from_millis(200)));
-        assert_eq!(b.reserve_at(20, TrafficClass::Control, now + Duration::from_millis(100)),
-            Err(Duration::from_millis(100)));
+        assert_eq!(
+            b.reserve_at(20, TrafficClass::Control, now),
+            Err(Duration::from_millis(200))
+        );
+        assert_eq!(
+            b.reserve_at(20, TrafficClass::Control, now + Duration::from_millis(100)),
+            Err(Duration::from_millis(100))
+        );
         assert!(b.consume_at(20, TrafficClass::Control, now + Duration::from_millis(200)));
         assert!(!b.consume_at(1, TrafficClass::Control, now + Duration::from_millis(200)));
     }

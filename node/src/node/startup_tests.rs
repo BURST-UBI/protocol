@@ -131,16 +131,20 @@ async fn snapshot_bootstrap_rejects_closed_gate_and_damaged_archive_before_admis
         if enabled {
             node.verification_fixture_clock = Some(Arc::new(|| None));
         }
-        let result = tokio::time::timeout(Duration::from_secs(10), node.start_with_services(burst_daemon::start_public_services))
-            .await
-            .unwrap();
+        let gate_open = node.certified_selection_enabled();
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            node.start_with_services(burst_daemon::start_public_services),
+        )
+        .await
+        .unwrap();
         assert!(result.is_err());
-        if !enabled {
+        if !gate_open {
             assert!(result.unwrap_err().to_string().contains("release gate"));
         }
         assert_eq!(
             node.store.block_store().block_count().unwrap(),
-            u64::from(enabled)
+            u64::from(gate_open)
         );
         assert!(node
             .store
@@ -183,7 +187,8 @@ async fn final_quorum_handoff_progresses_while_local_signer_is_held() {
     let creator = genesis_key::genesis_address(node.config.network);
     let store = node.store.clone();
     let genesis = store.account_store().get_account(&creator).unwrap().head;
-    let mut block: StateBlock = bincode::deserialize(&store.block_store().get_block(&genesis).unwrap()).unwrap();
+    let mut block: StateBlock =
+        bincode::deserialize(&store.block_store().get_block(&genesis).unwrap()).unwrap();
     let key = burst_crypto::keypair_from_seed(&[17; 32]);
     block.account = burst_crypto::derive_address(&key.public);
     block.representative = block.account.clone();
@@ -199,7 +204,9 @@ async fn final_quorum_handoff_progresses_while_local_signer_is_held() {
     let registry = node.connection_registry.clone();
     let shutdown = node.shutdown.clone();
     let task = tokio::spawn(async move {
-        let result = node.start_with_services(burst_daemon::start_public_services).await;
+        let result = node
+            .start_with_services(burst_daemon::start_public_services)
+            .await;
         (node, result)
     });
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -207,42 +214,78 @@ async fn final_quorum_handoff_progresses_while_local_signer_is_held() {
             assert!(!task.is_finished());
             tokio::task::yield_now().await;
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     let held = generator.lock_owned().await;
     let sequence = held.sequence();
     let outcome = tokio::time::timeout(Duration::from_secs(5), async {
         let payload = bincode::serialize(&block).unwrap();
         results.track(&payload);
         assert!(queue.push(block.clone()).await);
-        assert_eq!(results.wait(&payload).await, Some(burst_rpc::ProcessResult::Accepted));
+        assert_eq!(
+            results.wait(&payload).await,
+            Some(burst_rpc::ProcessResult::Accepted)
+        );
         let root = crate::ledger_updater::election_root(&block);
         let key = genesis_key::genesis_signing_key(burst_types::NetworkId::Dev).unwrap();
         let mut external = burst_consensus::VoteGenerator::new(creator.clone(), key.private.0);
         let vote = external.generate_final_vote(block.hash);
-        assert!(burst_crypto::verify_signature(&burst_consensus::vote_signing_payload(
-            &vote.voter, vote.is_final, vote.timestamp, vote.sequence, &[vote.block_hash]),
-            &vote.signature, &key.public));
+        assert!(burst_crypto::verify_signature(
+            &burst_consensus::vote_signing_payload(
+                &vote.voter,
+                vote.is_final,
+                vote.timestamp,
+                vote.sequence,
+                &[vote.block_hash]
+            ),
+            &vote.signature,
+            &key.public
+        ));
         let weight = weights.read().await.weight(&creator);
         assert!(weight > 0);
         let now = Timestamp::now();
-        assert!(elections.write().await.process_signed_vote(&root,
-            burst_consensus::VoteInfo::new(vote.voter, block.hash, weight, true,
-                Timestamp::new(vote.timestamp / 1000), vote.sequence), now).unwrap().is_some());
+        assert!(elections
+            .write()
+            .await
+            .process_signed_vote(
+                &root,
+                burst_consensus::VoteInfo::new(
+                    vote.voter,
+                    block.hash,
+                    weight,
+                    true,
+                    Timestamp::new(vote.timestamp / 1000),
+                    vote.sequence
+                ),
+                now
+            )
+            .unwrap()
+            .is_some());
         loop {
             let account = store.account_store().get_account(&block.account).unwrap();
-            if account.confirmation_height == 1 && elections.read().await.get_election(&root).is_none() {
+            if account.confirmation_height == 1
+                && elections.read().await.get_election(&root).is_none()
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert_eq!(held.sequence(), sequence, "local signer must remain unused");
-    }).await;
+    })
+    .await;
     drop(held);
     shutdown.shutdown();
-    let (mut node, result) = tokio::time::timeout(Duration::from_secs(10), task).await.unwrap().unwrap();
+    let (mut node, result) = tokio::time::timeout(Duration::from_secs(10), task)
+        .await
+        .unwrap()
+        .unwrap();
     result.unwrap();
     node.stop().await.unwrap();
-    assert!(outcome.is_ok(), "final quorum could not cement while local signer was held");
+    assert!(
+        outcome.is_ok(),
+        "final quorum could not cement while local signer was held"
+    );
 }
 
 #[tokio::test]
@@ -272,7 +315,10 @@ async fn synchronous_submission_uses_bounded_queue_without_publishing_acceptance
         node.process_block(&candidate).unwrap(),
         ProcessResult::Queued
     );
-    assert_eq!(node.process_block(&candidate).unwrap(), ProcessResult::Queued);
+    assert_eq!(
+        node.process_block(&candidate).unwrap(),
+        ProcessResult::Queued
+    );
     assert_eq!(node.block_queue.len().await, 1);
     let mut distinct_payload = candidate.clone();
     distinct_payload.work ^= 1;
@@ -358,44 +404,86 @@ enum GroupCase {
 
 #[tokio::test]
 async fn ready_gap_does_not_prevent_independent_group_commit_or_abort() {
-    for case in [GroupCase::GapAbort, GroupCase::GapCommit, GroupCase::SourceGapAbort, GroupCase::SourceGapCommit] {
+    for case in [
+        GroupCase::GapAbort,
+        GroupCase::GapCommit,
+        GroupCase::SourceGapAbort,
+        GroupCase::SourceGapCommit,
+    ] {
         prepared_admission_workload(1, 1, false, false, Some(case)).await;
     }
 }
 
 async fn prepared_admission_workload(
-    account_rounds: usize, payment_rounds: usize, report: bool, concurrent_queries: bool,
+    account_rounds: usize,
+    payment_rounds: usize,
+    report: bool,
+    concurrent_queries: bool,
     group_case: Option<GroupCase>,
 ) {
-    let pressure = matches!(group_case, Some(GroupCase::PressureAbort | GroupCase::PressureCommit));
+    let pressure = matches!(
+        group_case,
+        Some(GroupCase::PressureAbort | GroupCase::PressureCommit)
+    );
     let commit_pressure = matches!(group_case, Some(GroupCase::PressureCommit));
     let prepare_follower = matches!(group_case, Some(GroupCase::PreparedAbort));
-    let abort_group = matches!(group_case, Some(GroupCase::PreparedAbort | GroupCase::PressureAbort | GroupCase::PressureCommit | GroupCase::UnpreparedAbort | GroupCase::GapAbort | GroupCase::SourceGapAbort));
-    let source_gap = matches!(group_case, Some(GroupCase::SourceGapAbort | GroupCase::SourceGapCommit));
-    let inject_gap = source_gap || matches!(group_case, Some(GroupCase::GapAbort | GroupCase::GapCommit));
+    let abort_group = matches!(
+        group_case,
+        Some(
+            GroupCase::PreparedAbort
+                | GroupCase::PressureAbort
+                | GroupCase::PressureCommit
+                | GroupCase::UnpreparedAbort
+                | GroupCase::GapAbort
+                | GroupCase::SourceGapAbort
+        )
+    );
+    let source_gap = matches!(
+        group_case,
+        Some(GroupCase::SourceGapAbort | GroupCase::SourceGapCommit)
+    );
+    let inject_gap =
+        source_gap || matches!(group_case, Some(GroupCase::GapAbort | GroupCase::GapCommit));
     let directory = tempfile::tempdir().unwrap();
     let mut settings = config(directory.path(), 0);
     settings.params.min_work_difficulty = 0;
     let query_url = if concurrent_queries {
         settings.enable_rpc = true;
         settings.rpc_bind = "127.0.0.1".into();
-        settings.rpc_port = std::net::TcpListener::bind("127.0.0.1:0").unwrap()
-            .local_addr().unwrap().port();
+        settings.rpc_port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
         Some(format!("http://127.0.0.1:{}", settings.rpc_port))
-    } else { None };
+    } else {
+        None
+    };
 
     let mut node = BurstNode::new(settings).await.unwrap();
     let (probe, mut probe_controller) = if group_case.is_some() {
         let (probe, controller) = admission_group::AbortProbe::new();
         node.admission_group_probe = Some(probe.clone());
         (Some(probe), Some(controller))
-    } else { (None, None) };
+    } else {
+        (None, None)
+    };
     let admission_processor = node.block_processor.clone();
     let admission_frontier = node.frontier.clone();
     node.initialize_genesis().unwrap();
-    assert!(node.store.tx_begin_write().unwrap().uses_stable_trst_records().unwrap());
+    assert!(node
+        .store
+        .tx_begin_write()
+        .unwrap()
+        .uses_stable_trst_records()
+        .unwrap());
     node.initialize_genesis().unwrap();
-    assert!(node.store.tx_begin_write().unwrap().uses_stable_trst_records().unwrap());
+    assert!(node
+        .store
+        .tx_begin_write()
+        .unwrap()
+        .uses_stable_trst_records()
+        .unwrap());
     let store = node.store.clone();
     let queue = node.block_queue();
     let results = node.submission_results.clone();
@@ -404,15 +492,20 @@ async fn prepared_admission_workload(
     let params = node.config.params.clone();
     let creator = genesis_key::genesis_address(node.config.network);
     let genesis = store.account_store().get_account(&creator).unwrap().head;
-    let base: StateBlock = bincode::deserialize(&store.block_store().get_block(&genesis).unwrap()).unwrap();
+    let base: StateBlock =
+        bincode::deserialize(&store.block_store().get_block(&genesis).unwrap()).unwrap();
     let epoch = store.meta_store().payment_epoch().unwrap();
     let sign = |block: &mut StateBlock, seed: u8| {
         block.hash = block.compute_hash();
-        block.signature = burst_crypto::sign_message(block.hash.as_bytes(),
-            &burst_crypto::keypair_from_seed(&[seed; 32]).private);
+        block.signature = burst_crypto::sign_message(
+            block.hash.as_bytes(),
+            &burst_crypto::keypair_from_seed(&[seed; 32]).private,
+        );
     };
     let task = tokio::spawn(async move {
-        let started = node.start_with_services(burst_daemon::start_public_services).await;
+        let started = node
+            .start_with_services(burst_daemon::start_public_services)
+            .await;
         (node, started)
     });
     let outcome = tokio::time::timeout(Duration::from_secs(60), async {
@@ -766,10 +859,21 @@ async fn prepared_admission_workload(
         assert_eq!(store.account_store().get_account(&creator).unwrap().head, block.hash);
     }).await;
     shutdown.shutdown();
-    let (mut node, started) = tokio::time::timeout(Duration::from_secs(20), task).await.unwrap().unwrap();
+    let (mut node, started) = tokio::time::timeout(Duration::from_secs(20), task)
+        .await
+        .unwrap()
+        .unwrap();
     started.unwrap();
-    assert!(store.tx_begin_write().unwrap().uses_normalized_verification_records().unwrap());
-    assert!(store.tx_begin_write().unwrap().uses_brn_wallet_records().unwrap());
+    assert!(store
+        .tx_begin_write()
+        .unwrap()
+        .uses_normalized_verification_records()
+        .unwrap());
+    assert!(store
+        .tx_begin_write()
+        .unwrap()
+        .uses_brn_wallet_records()
+        .unwrap());
     node.stop().await.unwrap();
     outcome.expect("prepared admission did not complete");
 }
@@ -783,12 +887,21 @@ async fn configured_recovery_budget_is_active_before_start_and_survives_in_retai
     let node = BurstNode::new(settings.clone()).await.unwrap();
     assert!(node.recovery_scratch.is_some());
     let mut file = ScratchFile::new_in(directory.path()).unwrap();
-    assert!(file.set_len(64 << 20).is_err(), "durable reservation must reduce scratch capacity");
+    assert!(
+        file.set_len(64 << 20).is_err(),
+        "durable reservation must reduce scratch capacity"
+    );
     drop(node);
-    assert!(file.set_len(64 << 20).is_err(), "retained file lost the node's policy");
+    assert!(
+        file.set_len(64 << 20).is_err(),
+        "retained file lost the node's policy"
+    );
     assert!(ScratchLimit::acquire(directory.path(), 64 << 20).is_err());
     let restarted = BurstNode::new(settings).await.unwrap();
-    assert!(restarted.recovery_scratch.is_some(), "same budget must remain usable");
+    assert!(
+        restarted.recovery_scratch.is_some(),
+        "same budget must remain usable"
+    );
     drop(restarted);
     drop(file);
     drop(ScratchLimit::acquire(directory.path(), 1).unwrap());
@@ -820,7 +933,9 @@ async fn genesis_only_brn_recovery_is_durable_before_shutdown() {
     let store = node.store.clone();
     let shutdown = node.shutdown.clone();
     let task = tokio::spawn(async move {
-        let result = node.start_with_services(burst_daemon::start_public_services).await;
+        let result = node
+            .start_with_services(burst_daemon::start_public_services)
+            .await;
         (node, result)
     });
     let recovered = tokio::time::timeout(Duration::from_secs(10), async {
@@ -844,7 +959,11 @@ async fn genesis_only_brn_recovery_is_durable_before_shutdown() {
         .unwrap()
         .unwrap();
     started.unwrap();
-    assert!(store.tx_begin_write().unwrap().uses_normalized_verification_records().unwrap());
+    assert!(store
+        .tx_begin_write()
+        .unwrap()
+        .uses_normalized_verification_records()
+        .unwrap());
     {
         let live = node.brn_engine.lock().await;
         for _ in 0..2 {
@@ -864,9 +983,13 @@ async fn genesis_only_brn_recovery_is_durable_before_shutdown() {
         let live = node.trst_engine.lock().await;
         for _ in 0..2 {
             let batch = node.store.tx_begin_write().unwrap();
-            let restored = batch.read_trst_engine(node.config.params.trst_expiry_secs).unwrap();
+            let restored = batch
+                .read_trst_engine(node.config.params.trst_expiry_secs)
+                .unwrap();
             assert!(live.shares_wallet_snapshot_with(&restored));
-            assert!(live.merger_graph.shares_storage_with(&restored.merger_graph));
+            assert!(live
+                .merger_graph
+                .shares_storage_with(&restored.merger_graph));
         }
     }
     node.stop().await.unwrap();
@@ -890,10 +1013,13 @@ async fn missing_genesis_brn_after_spending_is_not_reconstructed() {
             .unwrap();
     }
     let mut node = BurstNode::new(settings).await.unwrap();
-    let error = tokio::time::timeout(Duration::from_secs(10), node.start_with_services(burst_daemon::start_public_services))
-        .await
-        .unwrap()
-        .unwrap_err();
+    let error = tokio::time::timeout(
+        Duration::from_secs(10),
+        node.start_with_services(burst_daemon::start_public_services),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
     assert!(error.to_string().contains("missing BRN history"), "{error}");
     assert!(node
         .store
@@ -946,7 +1072,9 @@ async fn recovery_listener_serves_proofs_before_restoration_and_cleans_up_on_fai
         let genesis = crate::genesis_state::block(node.config.network, &node.initial_params);
         drop(reservation);
         let startup = tokio::spawn(async move {
-            let result = node.start_with_services(burst_daemon::start_public_services).await;
+            let result = node
+                .start_with_services(burst_daemon::start_public_services)
+                .await;
             (node, result)
         });
         let mut stream = loop {
@@ -1107,9 +1235,12 @@ async fn occupied_listener_fails_startup_without_leaving_workers() {
     ))
     .await
     .unwrap();
-    let result = tokio::time::timeout(Duration::from_secs(5), node.start_with_services(burst_daemon::start_public_services))
-        .await
-        .unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        node.start_with_services(burst_daemon::start_public_services),
+    )
+    .await
+    .unwrap();
     assert!(result
         .unwrap_err()
         .to_string()
@@ -1198,58 +1329,87 @@ async fn certified_authority_refresh_reuses_only_unchanged_published_inputs() {
     crate::payment_authority::initialize(&store, burst_types::NetworkId::Dev, &params).unwrap();
     let weights = RwLock::new(RepWeightCache::new());
     let elections = RwLock::new(ActiveElections::new(16, 0));
-    rebuild_rep_weights(&store, &weights, &elections).await.unwrap();
+    rebuild_rep_weights(&store, &weights, &elections)
+        .await
+        .unwrap();
     let identity = weights.read().await.publication_identity();
     assert!(identity.is_some());
     let mut batch = store.tx_begin_write().unwrap();
     batch.put_meta("unrelated_payment", b"one").unwrap();
     batch.commit().unwrap();
-    rebuild_rep_weights(&store, &weights, &elections).await.unwrap();
+    rebuild_rep_weights(&store, &weights, &elections)
+        .await
+        .unwrap();
     assert_eq!(weights.read().await.publication_identity(), identity);
-    weights.write().await.rebuild_from_accounts(std::iter::empty());
+    weights
+        .write()
+        .await
+        .rebuild_from_accounts(std::iter::empty());
     assert_eq!(weights.read().await.publication_identity(), None);
-    rebuild_rep_weights(&store, &weights, &elections).await.unwrap();
+    rebuild_rep_weights(&store, &weights, &elections)
+        .await
+        .unwrap();
     assert_eq!(weights.read().await.weight(&genesis.account), 10_000);
     elections.write().await.set_online_weight(0);
     assert_eq!(elections.read().await.publication_identity(), None);
-    rebuild_rep_weights(&store, &weights, &elections).await.unwrap();
+    rebuild_rep_weights(&store, &weights, &elections)
+        .await
+        .unwrap();
     assert_eq!(elections.read().await.publication_identity(), identity);
     let key = burst_store::meta::CERTIFIED_PAYMENT_AUTHORITY_KEY;
     let original = store.meta_store().get_meta(key).unwrap();
-    let alternate = burst_crypto::derive_address(&burst_crypto::keypair_from_seed(&[73; 32]).public);
+    let alternate =
+        burst_crypto::derive_address(&burst_crypto::keypair_from_seed(&[73; 32]).public);
     let changed = bincode::serialize(&(
         genesis.hash,
         vec![burst_consensus::checkpoint::HumanDelegation {
-            human: genesis.account.clone(), representative: alternate,
+            human: genesis.account.clone(),
+            representative: alternate,
         }],
         6700u16,
         genesis.timestamp.as_secs(),
-    )).unwrap();
+    ))
+    .unwrap();
     let mut batch = store.tx_begin_write().unwrap();
     batch.put_meta(key, &changed).unwrap();
     batch.commit().unwrap();
     // Decodable descriptor with the same epoch must reach the existing
     // authority comparison, never reuse old published weights silently.
     assert!(crate::payment_authority::PaymentAuthority::read(&store).is_ok());
-    assert!(rebuild_rep_weights(&store, &weights, &elections).await.is_err());
+    assert!(rebuild_rep_weights(&store, &weights, &elections)
+        .await
+        .is_err());
     assert_eq!(weights.read().await.weight(&genesis.account), 10_000);
     let mut batch = store.tx_begin_write().unwrap();
     batch.put_meta(key, &original).unwrap();
     batch.commit().unwrap();
-    rebuild_rep_weights(&store, &weights, &elections).await.unwrap();
+    rebuild_rep_weights(&store, &weights, &elections)
+        .await
+        .unwrap();
     // Force the same canonical genesis bytes through the paged representation.
     struct PagedAuthority;
     impl crate::paged_metadata::Location for PagedAuthority {
-        fn descriptor_key(&self) -> &str { burst_store::meta::CERTIFIED_PAYMENT_AUTHORITY_KEY }
+        fn descriptor_key(&self) -> &str {
+            burst_store::meta::CERTIFIED_PAYMENT_AUTHORITY_KEY
+        }
         fn page_key(&self, index: usize) -> String {
-            format!("{}{:08x}", burst_store::meta::CERTIFIED_PAYMENT_AUTHORITY_PAGE_PREFIX, index)
+            format!(
+                "{}{:08x}",
+                burst_store::meta::CERTIFIED_PAYMENT_AUTHORITY_PAGE_PREFIX,
+                index
+            )
         }
     }
     let mut batch = store.tx_begin_write().unwrap();
     crate::paged_metadata::write_bytes_at(PagedAuthority, &mut batch, &original).unwrap();
     batch.commit().unwrap();
-    rebuild_rep_weights(&store, &weights, &elections).await.unwrap();
-    let page = format!("{}00000000", burst_store::meta::CERTIFIED_PAYMENT_AUTHORITY_PAGE_PREFIX);
+    rebuild_rep_weights(&store, &weights, &elections)
+        .await
+        .unwrap();
+    let page = format!(
+        "{}00000000",
+        burst_store::meta::CERTIFIED_PAYMENT_AUTHORITY_PAGE_PREFIX
+    );
     let descriptor = store.meta_store().get_meta(key).unwrap();
     let identity = weights.read().await.publication_identity();
     let mut damaged = original.clone();
@@ -1258,32 +1418,47 @@ async fn certified_authority_refresh_reuses_only_unchanged_published_inputs() {
         let mut batch = store.tx_begin_write().unwrap();
         batch.put_meta(&page, &damaged).unwrap();
     }
-    rebuild_rep_weights(&store, &weights, &elections).await.unwrap();
+    rebuild_rep_weights(&store, &weights, &elections)
+        .await
+        .unwrap();
     assert_eq!(weights.read().await.publication_identity(), identity);
     let pinned = store.tx_begin_read().unwrap();
     let mut batch = store.tx_begin_write().unwrap();
     batch.put_meta(&page, &damaged).unwrap();
     batch.commit().unwrap();
-    assert!(crate::payment_authority::PaymentAuthority::read_at(
-        |key| store.meta_store().get_meta_txn(&pinned, key)).unwrap().is_some());
+    assert!(
+        crate::payment_authority::PaymentAuthority::read_at(|key| store
+            .meta_store()
+            .get_meta_txn(&pinned, key))
+        .unwrap()
+        .is_some()
+    );
     drop(pinned);
     assert_eq!(store.meta_store().get_meta(key).unwrap(), descriptor);
-    assert!(rebuild_rep_weights(&store, &weights, &elections).await.is_err());
+    assert!(rebuild_rep_weights(&store, &weights, &elections)
+        .await
+        .is_err());
     assert_eq!(weights.read().await.weight(&genesis.account), 10_000);
     let mut batch = store.tx_begin_write().unwrap();
     batch.put_meta(&page, &original).unwrap();
     batch.commit().unwrap();
-    rebuild_rep_weights(&store, &weights, &elections).await.unwrap();
+    rebuild_rep_weights(&store, &weights, &elections)
+        .await
+        .unwrap();
     let identity = weights.read().await.publication_identity();
     let mut batch = store.tx_begin_write().unwrap();
     batch.put_meta(key, b"malformed").unwrap();
     drop(batch);
-    rebuild_rep_weights(&store, &weights, &elections).await.unwrap();
+    rebuild_rep_weights(&store, &weights, &elections)
+        .await
+        .unwrap();
     assert_eq!(weights.read().await.publication_identity(), identity);
     let mut batch = store.tx_begin_write().unwrap();
     batch.put_meta(key, b"malformed").unwrap();
     batch.commit().unwrap();
-    assert!(rebuild_rep_weights(&store, &weights, &elections).await.is_err());
+    assert!(rebuild_rep_weights(&store, &weights, &elections)
+        .await
+        .is_err());
     assert_eq!(weights.read().await.weight(&genesis.account), 10_000);
 }
 
@@ -1298,5 +1473,8 @@ async fn configured_database_map_is_used_on_open_and_reopen() {
         drop(node);
     }
     configuration.database_map_size_bytes = 0;
-    assert!(matches!(BurstNode::new(configuration).await, Err(NodeError::Config(_))));
+    assert!(matches!(
+        BurstNode::new(configuration).await,
+        Err(NodeError::Config(_))
+    ));
 }

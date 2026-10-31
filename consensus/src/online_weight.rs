@@ -210,7 +210,6 @@ mod tests {
         assert_eq!(sampler.online_weight(1000, &HashMap::new()), 0);
     }
 
-
     #[test]
     fn test_trend_initializes_from_first_sample() {
         let mut sampler = OnlineWeightSampler::new(300);

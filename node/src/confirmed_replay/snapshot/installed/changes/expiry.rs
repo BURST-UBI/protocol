@@ -13,7 +13,8 @@ pub(super) struct ExpiryView {
 impl ExpiryView {
     pub(super) fn new(trst: &TrstEngine, period: u64, at: Timestamp) -> Result<Self, ReplayError> {
         let mut trst = trst.clone();
-        trst.set_expiry_period(period, at).map_err(crate::confirmed_replay::invalid)?;
+        trst.set_expiry_period(period, at)
+            .map_err(crate::confirmed_replay::invalid)?;
         Ok(Self { trst, at })
     }
 
@@ -45,7 +46,9 @@ mod tests {
 
     #[test]
     fn normalized_expiry_preserves_signed_balances_revocation_and_original_state() {
-        for retained in [false, true] { normalized_expiry_case(retained); }
+        for retained in [false, true] {
+            normalized_expiry_case(retained);
+        }
     }
 
     fn normalized_expiry_case(retained: bool) {
@@ -102,15 +105,24 @@ mod tests {
     }
     #[test]
     fn expiry_view_rejects_resurrection_overflow_without_changing_source() {
-        for retained in [false, true] { overflow_view_case(retained); }
+        for retained in [false, true] {
+            overflow_view_case(retained);
+        }
     }
 
     fn overflow_view_case(retained: bool) {
         let holder = WalletAddress::new("brst_overflow");
         let mut trst = TrstEngine::with_expiry(10);
         for (n, amount) in [(1, u128::MAX), (2, 1)] {
-            let mut token = trst.mint(TxHash::new([n; 32]), holder.clone(), amount,
-                holder.clone(), Timestamp::new(100)).unwrap();
+            let mut token = trst
+                .mint(
+                    TxHash::new([n; 32]),
+                    holder.clone(),
+                    amount,
+                    holder.clone(),
+                    Timestamp::new(100),
+                )
+                .unwrap();
             token.state = TrstState::Expired;
             trst.track_token(token);
         }
@@ -128,5 +140,4 @@ mod tests {
         assert_eq!(trst.expiry_secs, 10);
         assert_eq!(trst.save_wallets(), before);
     }
-
 }

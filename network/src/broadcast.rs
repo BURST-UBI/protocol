@@ -93,7 +93,6 @@ impl Broadcaster {
         let count = ((eligible as f64).sqrt().ceil() as usize).max(min_fanout);
         self.broadcast_to_subset(message, peers, count).await
     }
-
 }
 
 #[cfg(test)]
@@ -225,7 +224,9 @@ mod tests {
         assert_eq!(received.len(), 4);
         let unique: std::collections::HashSet<_> = received.iter().collect();
         assert_eq!(unique.len(), 4);
-        assert!(received.iter().all(|id| peers.iter().any(|peer| &peer.peer_id == id)));
+        assert!(received
+            .iter()
+            .all(|id| peers.iter().any(|peer| &peer.peer_id == id)));
     }
 
     #[tokio::test]

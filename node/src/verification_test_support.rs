@@ -190,3 +190,14 @@ pub fn select_activation(
         deadline: started_at.checked_add(duration).unwrap(),
     }
 }
+
+pub(crate) fn electorate_params(mut params: ProtocolParams) -> ProtocolParams {
+    params.bootstrap_exit_threshold = 3;
+    params.brn_rate = burst_types::BRN_UNIT;
+    params.min_work_difficulty = 0;
+    params.endorsement_burn_amount = 1;
+    params.endorsement_threshold = 1;
+    params.num_verifiers = 1;
+    params.trst_expiry_secs = u64::MAX;
+    params
+}

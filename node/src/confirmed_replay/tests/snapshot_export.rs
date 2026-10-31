@@ -183,7 +183,9 @@ async fn snapshot_peer_transfer_stages_authenticated_archive_over_tcp_and_restar
         stores.push(node.store.clone());
         registries.push(node.connection_registry.clone());
         tasks.push(tokio::spawn(async move {
-            let result = node.start_with_services(burst_daemon::start_public_services).await;
+            let result = node
+                .start_with_services(burst_daemon::start_public_services)
+                .await;
             (node, result)
         }));
     }
@@ -398,7 +400,9 @@ async fn snapshot_peer_transfer_stages_authenticated_archive_over_tcp_and_restar
     node.verification_fixture_clock = Some(Arc::new(|| None));
     let stop = node.shutdown.clone();
     let task = tokio::spawn(async move {
-        let result = node.start_with_services(burst_daemon::start_public_services).await;
+        let result = node
+            .start_with_services(burst_daemon::start_public_services)
+            .await;
         (node, result)
     });
     let ready = tokio::time::timeout(Duration::from_secs(15), async {

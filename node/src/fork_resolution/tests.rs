@@ -87,7 +87,9 @@ async fn verification_fork_workload(pressure: bool) {
             (endorse, preference)
         };
         let task = tokio::spawn(async move {
-            node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+            node.start_with_services(burst_daemon::start_public_services)
+                .await
+                .unwrap();
             node.stop().await.unwrap();
         });
         let result = tokio::time::timeout(Duration::from_secs(60), async {
@@ -116,30 +118,53 @@ async fn verification_fork_workload(pressure: bool) {
                     // Consume pre-existing reusable pages while this reader pins
                     // subsequent frees, so the fork needs new file pages.
                     for n in 0..8 {
-                        capture_store.meta_store().put_meta("test/fork-pressure", &vec![n; 128 << 10]).unwrap();
+                        capture_store
+                            .meta_store()
+                            .put_meta("test/fork-pressure", &vec![n; 128 << 10])
+                            .unwrap();
                     }
                     let mut writer = capture_store.tx_begin_write().unwrap();
-                    let limit = writer.limit_file_extent(capture_store.env().real_disk_size().unwrap() as usize).unwrap();
+                    let limit = writer
+                        .limit_file_extent(capture_store.env().real_disk_size().unwrap() as usize)
+                        .unwrap();
                     drop(writer);
                     ready.send(limit.watch()).unwrap();
                     released.recv_timeout(Duration::from_secs(5)).unwrap();
                     drop(reader);
                     drop(limit);
                 });
-                Some((release, owner, received.recv_timeout(Duration::from_secs(2)).unwrap()))
-            } else { None };
+                Some((
+                    release,
+                    owner,
+                    received.recv_timeout(Duration::from_secs(2)).unwrap(),
+                ))
+            } else {
+                None
+            };
             assert!(queue.push(winner.clone()).await);
             if let Some((release, owner, watch)) = capture {
                 tokio::time::timeout(Duration::from_secs(2), async {
-                    while !watch.was_exceeded() { tokio::task::yield_now().await; }
-                }).await.unwrap();
-                tokio::time::timeout(Duration::from_secs(2), async {
-                    loop {
-                        if verification.try_lock().is_ok() { break; }
+                    while !watch.was_exceeded() {
                         tokio::task::yield_now().await;
                     }
-                }).await.unwrap();
-                assert!(store.meta_store().fork_candidate(&winner.hash).unwrap().is_none());
+                })
+                .await
+                .unwrap();
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    loop {
+                        if verification.try_lock().is_ok() {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                assert!(store
+                    .meta_store()
+                    .fork_candidate(&winner.hash)
+                    .unwrap()
+                    .is_none());
                 assert!(store.block_store().exists(&losing.hash).unwrap());
                 assert!(!watch.wait_released(Duration::ZERO));
                 release.send(()).unwrap();
@@ -195,7 +220,10 @@ async fn verification_fork_workload(pressure: bool) {
             assert_eq!(
                 live.snapshot().encode().unwrap(),
                 crate::verification_storage::load(&store.tx_begin_write().unwrap())
-                        .unwrap().snapshot().encode().unwrap()
+                    .unwrap()
+                    .snapshot()
+                    .encode()
+                    .unwrap()
             );
             assert_eq!(
                 store.account_store().get_account(&target).is_ok(),
@@ -216,7 +244,10 @@ async fn verification_fork_workload(pressure: bool) {
         let verification = restarted.verification_orchestrator.clone();
         let shutdown = restarted.shutdown.clone();
         let task = tokio::spawn(async move {
-            restarted.start_with_services(burst_daemon::start_public_services).await.unwrap();
+            restarted
+                .start_with_services(burst_daemon::start_public_services)
+                .await
+                .unwrap();
             restarted.stop().await.unwrap();
         });
         let result = tokio::time::timeout(Duration::from_secs(30), async {

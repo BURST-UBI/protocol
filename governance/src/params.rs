@@ -117,8 +117,7 @@ impl GovernableParam {
             | Self::EmergencyQuorumBps
             | Self::EmergencySupermajorityBps => "governance",
             Self::ConstiSupermajorityBps | Self::ConstiQuorumBps => "constitution",
-            Self::MinWorkDifficulty
-            | Self::NewWalletRateLimitDurationSecs => "network",
+            Self::MinWorkDifficulty | Self::NewWalletRateLimitDurationSecs => "network",
         }
     }
 }

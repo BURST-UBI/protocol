@@ -1,10 +1,10 @@
 //! Optional wallet acceptance rules over originator facts and group responses.
 //! These decisions do not validate protocol state or sign receive blocks.
 
-use burst_groups::{GroupClient, GroupEvaluation, GroupRegistry};
-use futures_util::{stream, StreamExt};
 use burst_groups::evaluation::MAX_CONCURRENT_REQUESTS;
+use burst_groups::{GroupClient, GroupEvaluation, GroupRegistry};
 use burst_types::WalletAddress;
+use futures_util::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
 
 /// A wallet's trust policy for accepting TRST.
@@ -115,7 +115,9 @@ pub async fn evaluate_payment_groups(
     .await
 }
 
-fn payment_creators(payment: &crate::provenance::PaymentOrigins) -> Result<std::collections::BTreeSet<&str>, &'static str> {
+fn payment_creators(
+    payment: &crate::provenance::PaymentOrigins,
+) -> Result<std::collections::BTreeSet<&str>, &'static str> {
     if !payment.confirmed
         || !payment.provenance.complete
         || !payment.provenance.confirmed
@@ -158,8 +160,11 @@ pub fn evaluate_payment_creators(
     trusted: &[String],
 ) -> PaymentTrustResult {
     let decision = (|| {
-        if trusted.is_empty() || trusted.len() > 256
-            || trusted.iter().any(|address| crate::signed_client::parse_address(address).is_err())
+        if trusted.is_empty()
+            || trusted.len() > 256
+            || trusted
+                .iter()
+                .any(|address| crate::signed_client::parse_address(address).is_err())
         {
             return Err("choose between 1 and 256 valid creator addresses".into());
         }
@@ -167,16 +172,22 @@ pub fn evaluate_payment_creators(
         let allowed: std::collections::BTreeSet<_> = trusted.iter().map(String::as_str).collect();
         let count = creators.len();
         if let Some(creator) = creators.iter().find(|creator| !allowed.contains(**creator)) {
-            return Ok((TrustDecision::Reject {
-                reason: format!("Original creator {creator} is not on your trusted list"),
-            }, count));
+            return Ok((
+                TrustDecision::Reject {
+                    reason: format!("Original creator {creator} is not on your trusted list"),
+                },
+                count,
+            ));
         }
         Ok((TrustDecision::Accept, count))
     })();
-    let (decision, checked_originators) = decision.unwrap_or_else(|reason: String| {
-        (TrustDecision::Warn { reason }, 0)
-    });
-    PaymentTrustResult { decision, checked_originators, used_protocol_fallback: false }
+    let (decision, checked_originators) =
+        decision.unwrap_or_else(|reason: String| (TrustDecision::Warn { reason }, 0));
+    PaymentTrustResult {
+        decision,
+        checked_originators,
+        used_protocol_fallback: false,
+    }
 }
 
 /// Check every distinct surviving originator in the supplied payment report.
@@ -216,11 +227,17 @@ pub async fn evaluate_payment_group_graph(
                 let rules = &rules;
                 async move {
                     check_membership(
-                        rules.group_ids, rules.require_all, &WalletAddress::new(creator),
-                        queries, registry, rules.max_hops,
-                    ).await
+                        rules.group_ids,
+                        rules.require_all,
+                        &WalletAddress::new(creator),
+                        queries,
+                        registry,
+                        rules.max_hops,
+                    )
+                    .await
                 }
-            })).buffer_unordered(MAX_CONCURRENT_REQUESTS);
+            }))
+            .buffer_unordered(MAX_CONCURRENT_REQUESTS);
             while let Some(result) = results.next().await {
                 checked_originators += 1;
                 match result.decision {
@@ -367,7 +384,15 @@ pub async fn check_group_membership_with_depth(
     registry: &GroupRegistry,
     max_hops: u8,
 ) -> GroupCheck {
-    check_membership(group_ids, require_all, originator, &client.evaluation(), registry, max_hops).await
+    check_membership(
+        group_ids,
+        require_all,
+        originator,
+        &client.evaluation(),
+        registry,
+        max_hops,
+    )
+    .await
 }
 
 async fn check_membership(
@@ -403,13 +428,19 @@ async fn check_membership(
         }
         let mut responses = stream::iter(endpoints.into_iter().map(|(id, endpoint)| async move {
             let response = if max_hops == 0 {
-                queries.verify_member(endpoint, originator.as_str()).await.map(|member| member.valid)
+                queries
+                    .verify_member(endpoint, originator.as_str())
+                    .await
+                    .map(|member| member.valid)
             } else {
-                queries.verify_member_through_groups(registry, id, originator.as_str(), max_hops)
-                    .await.map(|path| path.is_some())
+                queries
+                    .verify_member_through_groups(registry, id, originator.as_str(), max_hops)
+                    .await
+                    .map(|path| path.is_some())
             };
             (id.to_owned(), response)
-        })).buffer_unordered(MAX_CONCURRENT_REQUESTS);
+        }))
+        .buffer_unordered(MAX_CONCURRENT_REQUESTS);
         let mut has_member = false;
         let mut has_nonmember = false;
         while let Some((id, response)) = responses.next().await {
@@ -524,23 +555,45 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     fn personal_trust_checks_every_surviving_creator() {
         let mut report = payment();
-        let trusted: Vec<_> = report.provenance.origins.iter().map(|o| o.originator.clone()).collect();
-        assert_eq!(evaluate_payment_creators(&report, &trusted).decision, TrustDecision::Accept);
-        assert!(matches!(evaluate_payment_creators(&report, &trusted[..1]).decision, TrustDecision::Reject { .. }));
+        let trusted: Vec<_> = report
+            .provenance
+            .origins
+            .iter()
+            .map(|o| o.originator.clone())
+            .collect();
+        assert_eq!(
+            evaluate_payment_creators(&report, &trusted).decision,
+            TrustDecision::Accept
+        );
+        assert!(matches!(
+            evaluate_payment_creators(&report, &trusted[..1]).decision,
+            TrustDecision::Reject { .. }
+        ));
         report.provenance.origins[1].revoked = true;
         let result = evaluate_payment_creators(&report, &trusted[..1]);
         assert_eq!(result.decision, TrustDecision::Accept);
         assert_eq!(result.checked_originators, 1);
         assert!(!result.used_protocol_fallback);
-        report.provenance.origins.push(report.provenance.origins[0].clone());
-        assert_eq!(evaluate_payment_creators(&report, &trusted).checked_originators, 1);
+        report
+            .provenance
+            .origins
+            .push(report.provenance.origins[0].clone());
+        assert_eq!(
+            evaluate_payment_creators(&report, &trusted).checked_originators,
+            1
+        );
     }
 
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn personal_trust_holds_incomplete_reports_and_invalid_lists() {
         let baseline = payment();
-        let trusted: Vec<_> = baseline.provenance.origins.iter().map(|o| o.originator.clone()).collect();
+        let trusted: Vec<_> = baseline
+            .provenance
+            .origins
+            .iter()
+            .map(|o| o.originator.clone())
+            .collect();
         for case in 0..6 {
             let mut report = baseline.clone();
             match case {
@@ -549,12 +602,26 @@ mod tests {
                 2 => report.provenance.confirmed = false,
                 3 => report.provenance.origins[0].confirmed = false,
                 4 => report.provenance.origins.clear(),
-                _ => report.provenance.origins.iter_mut().for_each(|o| o.revoked = true),
+                _ => report
+                    .provenance
+                    .origins
+                    .iter_mut()
+                    .for_each(|o| o.revoked = true),
             }
-            assert!(matches!(evaluate_payment_creators(&report, &trusted).decision, TrustDecision::Warn { .. }));
+            assert!(matches!(
+                evaluate_payment_creators(&report, &trusted).decision,
+                TrustDecision::Warn { .. }
+            ));
         }
-        for list in [vec![], vec!["invalid".into()], vec![trusted[0].clone(); 257]] {
-            assert!(matches!(evaluate_payment_creators(&baseline, &list).decision, TrustDecision::Warn { .. }));
+        for list in [
+            vec![],
+            vec!["invalid".into()],
+            vec![trusted[0].clone(); 257],
+        ] {
+            assert!(matches!(
+                evaluate_payment_creators(&baseline, &list).decision,
+                TrustDecision::Warn { .. }
+            ));
         }
     }
 

@@ -49,7 +49,9 @@ pub enum Action {
 }
 
 fn parse_epoch(value: &str) -> Result<burst_types::BlockHash, String> {
-    value.parse().map_err(|error: burst_types::transaction_hash::ParseHashError| error.to_string())
+    value
+        .parse()
+        .map_err(|error: burst_types::transaction_hash::ParseHashError| error.to_string())
 }
 
 pub fn run(config: &NodeConfig, action: Action) -> anyhow::Result<()> {

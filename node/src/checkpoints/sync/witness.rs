@@ -342,9 +342,13 @@ fn validate_request(roots: &Roots, wanted: &[BlockHash]) -> Result<(), StoreErro
         return exact::validate(cursors, wanted);
     }
     if let Roots::Stored(roots) = roots {
-        if roots.len() == 0 || roots.len() > MAX_WALK_BLOCKS || wanted.is_empty()
-            || wanted.len() > MAX_TAIL_BLOCKS || wanted.iter().any(BlockHash::is_zero)
-            || wanted.iter().collect::<HashSet<_>>().len() != wanted.len() {
+        if roots.len() == 0
+            || roots.len() > MAX_WALK_BLOCKS
+            || wanted.is_empty()
+            || wanted.len() > MAX_TAIL_BLOCKS
+            || wanted.iter().any(BlockHash::is_zero)
+            || wanted.iter().collect::<HashSet<_>>().len() != wanted.len()
+        {
             return Err(invalid("invalid stored historical witness request"));
         }
         return Ok(());
@@ -583,7 +587,10 @@ impl Transfer {
         }
         let proofs = match self.cache.available(&command.roots, &command.wanted) {
             Ok(proofs) => proofs,
-            Err(error) => { let _ = command.result.send(Err(error)); return; }
+            Err(error) => {
+                let _ = command.result.send(Err(error));
+                return;
+            }
         };
         let retained_bytes = match proofs.iter().try_fold(0usize, |bytes, proof| {
             bytes
@@ -653,7 +660,8 @@ impl Transfer {
     }
     fn expire(&mut self, now: Instant) {
         if self.job.as_ref().is_some_and(|job| {
-            job.result.is_closed() || now.saturating_duration_since(job.started_at) >= TRANSFER_TIMEOUT
+            job.result.is_closed()
+                || now.saturating_duration_since(job.started_at) >= TRANSFER_TIMEOUT
         }) {
             self.download = None;
             if let Some(job) = self.job.take() {
@@ -992,10 +1000,15 @@ impl Transfer {
                 let remaining_heads = if job.discover {
                     let mut all = true;
                     for hash in &job.wanted {
-                        if !job.roots.contains_head(*hash)? { all = false; break; }
+                        if !job.roots.contains_head(*hash)? {
+                            all = false;
+                            break;
+                        }
                     }
                     all
-                } else { false };
+                } else {
+                    false
+                };
                 if remaining_heads || job.cursor.as_ref().expect("active cursor").next().is_none() {
                     if !job.discover {
                         let job = self.job.take().expect("active job");

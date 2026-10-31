@@ -231,9 +231,12 @@ impl SnapshotContinuation {
         batch: &burst_store_lmdb::LmdbWriteTransaction<'_>,
         cemented: &super::tail::cemented::CementedTail,
     ) -> Result<(), burst_store::StoreError> {
-        self.verify_installed_metadata_read(&batch.read_view(), cemented,
+        self.verify_installed_metadata_read(
+            &batch.read_view(),
+            cemented,
             |schedule| schedule.verify_compact_tail(batch, cemented.tail()),
-            || cemented.verify_view(&batch.read_view()))
+            || cemented.verify_view(&batch.read_view()),
+        )
     }
 
     pub(crate) fn verify_installed_metadata_view_with_poll(
@@ -242,9 +245,12 @@ impl SnapshotContinuation {
         cemented: &super::tail::cemented::CementedTail,
         poll: &dyn Fn(&'static str) -> Result<(), burst_store::StoreError>,
     ) -> Result<(), burst_store::StoreError> {
-        self.verify_installed_metadata_read(batch, cemented,
+        self.verify_installed_metadata_read(
+            batch,
+            cemented,
             |schedule| schedule.verify_compact_tail_view_with_poll(batch, cemented.tail(), poll),
-            || cemented.verify_view_with_poll(batch, poll))
+            || cemented.verify_view_with_poll(batch, poll),
+        )
     }
 
     /// Candidate discovery tolerates provisional extensions only. Confirmed
@@ -254,15 +260,21 @@ impl SnapshotContinuation {
         batch: &burst_store_lmdb::LmdbWriteTransaction<'_>,
         cemented: &super::tail::cemented::CementedTail,
     ) -> Result<(), burst_store::StoreError> {
-        self.verify_installed_metadata_read(&batch.read_view(), cemented,
+        self.verify_installed_metadata_read(
+            &batch.read_view(),
+            cemented,
             |schedule| schedule.verify_compact_tail(batch, cemented.tail()),
-            || cemented.verify_confirmed_view(&batch.read_view()))
+            || cemented.verify_confirmed_view(&batch.read_view()),
+        )
     }
 
     fn verify_installed_metadata_read(
-        &self, batch: &burst_store_lmdb::read_view::LedgerReadView<'_>,
+        &self,
+        batch: &burst_store_lmdb::read_view::LedgerReadView<'_>,
         cemented: &super::tail::cemented::CementedTail,
-        verify_schedule: impl FnOnce(crate::confirmed_governance::ConfirmedGovernance) -> Result<(), burst_store::StoreError>,
+        verify_schedule: impl FnOnce(
+            crate::confirmed_governance::ConfirmedGovernance,
+        ) -> Result<(), burst_store::StoreError>,
         verify_cut: impl FnOnce() -> Result<(), burst_store::StoreError>,
     ) -> Result<(), burst_store::StoreError> {
         let invalid = |message: &str| burst_store::StoreError::Corruption(message.into());
@@ -277,12 +289,15 @@ impl SnapshotContinuation {
     }
 
     pub(crate) fn verify_installed_authority_view(
-        &self, batch: &burst_store_lmdb::read_view::LedgerReadView<'_>,
+        &self,
+        batch: &burst_store_lmdb::read_view::LedgerReadView<'_>,
     ) -> Result<(), burst_store::StoreError> {
         use crate::confirmed_replay::installation::{authority_bytes, CUTOFF_KEY};
         let invalid = |message: &str| burst_store::StoreError::Corruption(message.into());
         if batch.payment_epoch()? != self.anchor.hash() {
-            return Err(burst_store::StoreError::StaleRead("installed authority epoch changed".into()));
+            return Err(burst_store::StoreError::StaleRead(
+                "installed authority epoch changed".into(),
+            ));
         }
         if crate::payment_authority::storage::read_at(|key| batch.get_meta(key))?
             != Some(authority_bytes(&self.anchor, self.anchor.cutoff())?)
@@ -321,11 +336,15 @@ impl SnapshotContinuation {
     /// Materialize account roots in authenticated private scratch without a
     /// second in-memory copy of every account cursor.
     pub(crate) fn stored_history_roots(
-        &self, directory: &std::path::Path,
+        &self,
+        directory: &std::path::Path,
     ) -> Result<super::history::StoredHistoryRoots, ReplayError> {
-        let mut roots = super::history::StoredHistoryRoots::new(directory, self.context, self.anchor.cutoff())?;
+        let mut roots =
+            super::history::StoredHistoryRoots::new(directory, self.context, self.anchor.cutoff())?;
         for account in self.state.accounts.keys() {
-            if let Some(cursor) = self.history_cursor(account)? { roots.insert(cursor)?; }
+            if let Some(cursor) = self.history_cursor(account)? {
+                roots.insert(cursor)?;
+            }
         }
         Ok(roots)
     }
@@ -396,13 +415,18 @@ impl SnapshotContinuation {
             let Some(head) = committed.remove(hash) else {
                 continue;
             };
-            cursors.push(Self::cursor_for_committed_head(anchor, context, state, &head)?);
+            cursors.push(Self::cursor_for_committed_head(
+                anchor, context, state, &head,
+            )?);
         }
         Ok(cursors)
     }
 
     fn cursor_for_committed_head(
-        anchor: &CheckpointAnchor, context: HistoryContext, state: &ConfirmedReplay, head: &HistoryHead,
+        anchor: &CheckpointAnchor,
+        context: HistoryContext,
+        state: &ConfirmedReplay,
+        head: &HistoryHead,
     ) -> Result<HistoryCursor, ReplayError> {
         let mut account = state
             .account(&head.account)
@@ -419,9 +443,8 @@ impl SnapshotContinuation {
         account.head = head.hash;
         account.block_count = head.height;
         account.confirmation_height = head.height;
-        let cursor =
-            HistoryCursor::new(anchor, context.state_hash, &head.account, Some(&account))?
-                .ok_or_else(|| super::invalid("committed history has no account cursor"))?;
+        let cursor = HistoryCursor::new(anchor, context.state_hash, &head.account, Some(&account))?
+            .ok_or_else(|| super::invalid("committed history has no account cursor"))?;
         Ok(cursor)
     }
 
@@ -440,7 +463,9 @@ impl SnapshotContinuation {
         Ok(())
     }
 
-    pub(in crate::confirmed_replay) fn committed_history_walk(&self) -> committed::CommittedHistoryWalk<'_> {
+    pub(in crate::confirmed_replay) fn committed_history_walk(
+        &self,
+    ) -> committed::CommittedHistoryWalk<'_> {
         committed::CommittedHistoryWalk::new(self)
     }
 
@@ -1106,7 +1131,6 @@ impl AppliedBlocks for CompletedInput<'_> {
     }
 }
 
-
 #[cfg(test)]
 mod sharing_tests {
     use super::*;
@@ -1114,22 +1138,35 @@ mod sharing_tests {
     #[test]
     fn continuation_forks_share_state_until_mutation_and_preserve_parent() {
         let original = SnapshotContinuation::from_genesis(
-            burst_types::NetworkId::Dev, &burst_types::ProtocolParams::default(),
-        ).unwrap();
+            burst_types::NetworkId::Dev,
+            &burst_types::ProtocolParams::default(),
+        )
+        .unwrap();
         let mut changed = original.clone();
         let untouched = original.clone();
         assert!(std::ptr::eq(original.state(), changed.state()));
         assert!(std::ptr::eq(original.state(), untouched.state()));
         let address = original.state.accounts.keys().next().unwrap().clone();
         let account = original.state.accounts[&address].clone();
-        changed.state.accounts.get_mut(&address).unwrap().block_count += 1;
+        changed
+            .state
+            .accounts
+            .get_mut(&address)
+            .unwrap()
+            .block_count += 1;
         assert!(!std::ptr::eq(original.state(), changed.state()));
         assert!(std::ptr::eq(original.state(), untouched.state()));
         assert_eq!(original.state.accounts[&address], account);
         assert_eq!(untouched.state.accounts[&address], account);
-        assert_eq!(changed.state.accounts[&address].block_count, account.block_count + 1);
+        assert_eq!(
+            changed.state.accounts[&address].block_count,
+            account.block_count + 1
+        );
         assert_eq!(changed.anchor.hash(), original.anchor.hash());
         let unique = changed.state.into_inner();
-        assert_eq!(unique.accounts[&address].block_count, account.block_count + 1);
+        assert_eq!(
+            unique.accounts[&address].block_count,
+            account.block_count + 1
+        );
     }
 }

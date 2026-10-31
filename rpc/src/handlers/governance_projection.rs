@@ -24,14 +24,23 @@ pub(super) async fn page(
         let reader = reader.clone();
         let now = (state.display_now)();
         let cache = state.governance_projection_cache.clone();
-        return state.read_executor.run(move || {
-            let snapshot = reader.capture(crate::governance_snapshot::Selection::Page {
-                after, offset, count,
-            }, now)?;
-            Ok(Some(Page {
-                proposals: project_snapshot(&cache, &snapshot), next_hash: snapshot.next_hash,
-            }))
-        }).await;
+        return state
+            .read_executor
+            .run(move || {
+                let snapshot = reader.capture(
+                    crate::governance_snapshot::Selection::Page {
+                        after,
+                        offset,
+                        count,
+                    },
+                    now,
+                )?;
+                Ok(Some(Page {
+                    proposals: project_snapshot(&cache, &snapshot),
+                    next_hash: snapshot.next_hash,
+                }))
+            })
+            .await;
     }
     let Some(engine) = &state.governance_engine else {
         return Ok(None);
@@ -46,7 +55,11 @@ pub(super) async fn page(
     if has_more {
         selected.pop();
     }
-    let next_hash = if has_more { selected.last().map(|proposal| proposal.hash) } else { None };
+    let next_hash = if has_more {
+        selected.last().map(|proposal| proposal.hash)
+    } else {
+        None
+    };
     let params = state.current_params()?;
     let proposals = project(state, &governance, &selected, &params).await?;
     Ok(Some(Page {
@@ -58,20 +71,41 @@ pub(super) async fn page(
 pub(super) async fn info(
     state: &RpcState,
     hash: TxHash,
-) -> Result<Option<(Proposal, bool, GovernanceTiming, burst_types::ProtocolParams, Option<burst_consti::AmendmentConflict>)>, RpcError> {
+) -> Result<
+    Option<(
+        Proposal,
+        bool,
+        GovernanceTiming,
+        burst_types::ProtocolParams,
+        Option<burst_consti::AmendmentConflict>,
+    )>,
+    RpcError,
+> {
     if let Some(reader) = &state.governance_reader {
         let reader = reader.clone();
         let now = (state.display_now)();
         let cache = state.governance_projection_cache.clone();
-        return state.read_executor.run(move || {
-            let snapshot = reader.capture(crate::governance_snapshot::Selection::Info(hash), now)?;
-            let projected = project_snapshot(&cache, &snapshot).pop()
-                .ok_or_else(|| RpcError::ProposalNotFound(hash.to_string()))?;
-            let timing = snapshot.governance.timing(&projected.proposal, &snapshot.params)
-                .map_err(|error| RpcError::Store(error.to_string()))?;
-            Ok(Some((projected.proposal, projected.phase_projected, timing,
-                snapshot.params, snapshot.activation_conflict)))
-        }).await;
+        return state
+            .read_executor
+            .run(move || {
+                let snapshot =
+                    reader.capture(crate::governance_snapshot::Selection::Info(hash), now)?;
+                let projected = project_snapshot(&cache, &snapshot)
+                    .pop()
+                    .ok_or_else(|| RpcError::ProposalNotFound(hash.to_string()))?;
+                let timing = snapshot
+                    .governance
+                    .timing(&projected.proposal, &snapshot.params)
+                    .map_err(|error| RpcError::Store(error.to_string()))?;
+                Ok(Some((
+                    projected.proposal,
+                    projected.phase_projected,
+                    timing,
+                    snapshot.params,
+                    snapshot.activation_conflict,
+                )))
+            })
+            .await;
     }
     let Some(engine) = &state.governance_engine else {
         return Ok(None);
@@ -114,9 +148,7 @@ async fn project(
         None
     };
     let verified = if needs_electorate {
-        state
-            .account_store
-            .all_verified_addresses()?
+        state.account_store.all_verified_addresses()?
     } else {
         Vec::new()
     };
@@ -136,16 +168,38 @@ async fn project(
         .collect())
 }
 
-fn project_snapshot(cache: &crate::GovernanceProjectionCache, snapshot: &crate::governance_snapshot::Snapshot) -> Vec<ProjectedProposal> {
+fn project_snapshot(
+    cache: &crate::GovernanceProjectionCache,
+    snapshot: &crate::governance_snapshot::Snapshot,
+) -> Vec<ProjectedProposal> {
     let context = crate::governance_projection_cache::Context::from_snapshot(snapshot);
-    snapshot.selected.iter().map(|hash| {
-        let original = snapshot.governance.get_proposal(hash).expect("selected snapshot proposal");
-        let proposal = cache.project_until(context, *hash, || {
-            let proposal = snapshot.governance.project_proposal_at(original, snapshot.now,
-                &snapshot.params, &snapshot.delegation, &snapshot.verified);
-            let until = snapshot.governance.projection_valid_until(&proposal, snapshot.now, &snapshot.params);
-            (proposal, until)
-        });
-        ProjectedProposal { phase_projected: original.phase != proposal.phase, proposal }
-    }).collect()
+    snapshot
+        .selected
+        .iter()
+        .map(|hash| {
+            let original = snapshot
+                .governance
+                .get_proposal(hash)
+                .expect("selected snapshot proposal");
+            let proposal = cache.project_until(context, *hash, || {
+                let proposal = snapshot.governance.project_proposal_at(
+                    original,
+                    snapshot.now,
+                    &snapshot.params,
+                    &snapshot.delegation,
+                    &snapshot.verified,
+                );
+                let until = snapshot.governance.projection_valid_until(
+                    &proposal,
+                    snapshot.now,
+                    &snapshot.params,
+                );
+                (proposal, until)
+            });
+            ProjectedProposal {
+                phase_projected: original.phase != proposal.phase,
+                proposal,
+            }
+        })
+        .collect()
 }

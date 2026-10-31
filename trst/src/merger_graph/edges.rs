@@ -25,14 +25,23 @@ struct TreeEdges {
 
 impl TreeEdges {
     fn next_position(&self) -> usize {
-        self.entries.get_max().map_or(0, |(position, _)| position.checked_add(1)
-            .expect("graph edge position space exhausted"))
+        self.entries.get_max().map_or(0, |(position, _)| {
+            position
+                .checked_add(1)
+                .expect("graph edge position space exhausted")
+        })
     }
 
     fn push(&mut self, child: TxHash) {
-        let occurrence = self.positions.range((child, 0)..=(child, u64::MAX))
-            .next_back().map_or(0, |((_, occurrence), _)| occurrence.checked_add(1)
-                .expect("edge count fits sequence length"));
+        let occurrence = self
+            .positions
+            .range((child, 0)..=(child, u64::MAX))
+            .next_back()
+            .map_or(0, |((_, occurrence), _)| {
+                occurrence
+                    .checked_add(1)
+                    .expect("edge count fits sequence length")
+            });
         let position = self.next_position();
         self.entries.insert(position, (child, occurrence));
         self.positions.insert((child, occurrence), position);
@@ -70,9 +79,16 @@ impl EdgeList {
     /// Sparse durable positions do not imply sparse occurrence counts.
     pub(super) fn has_multiplicity(&self, child: &TxHash, expected: usize) -> bool {
         match &self.0 {
-            Repr::Small(children) => children.iter().filter(|value| *value == child).count() == expected,
-            Repr::Large(tree) => tree.positions.range((*child, 0)..=(*child, u64::MAX))
-                .take(expected.saturating_add(1)).count() == expected,
+            Repr::Small(children) => {
+                children.iter().filter(|value| *value == child).count() == expected
+            }
+            Repr::Large(tree) => {
+                tree.positions
+                    .range((*child, 0)..=(*child, u64::MAX))
+                    .take(expected.saturating_add(1))
+                    .count()
+                    == expected
+            }
         }
     }
 
@@ -108,14 +124,20 @@ impl EdgeList {
 
     /// Remove every occurrence of selected children. Large parents touch only
     /// indexed occurrences and tree paths; retained slots need not be renumbered.
-    pub(super) fn remove_children(&mut self, children: &std::collections::HashSet<TxHash>) -> usize {
+    pub(super) fn remove_children(
+        &mut self,
+        children: &std::collections::HashSet<TxHash>,
+    ) -> usize {
         let before = self.len();
         match &mut self.0 {
             Repr::Small(edges) => edges.retain(|child| !children.contains(child)),
             Repr::Large(tree) => {
                 for child in children {
-                    let positions: Vec<_> = tree.positions.range((*child, 0)..=(*child, u64::MAX))
-                        .map(|(key, position)| (*key, *position)).collect();
+                    let positions: Vec<_> = tree
+                        .positions
+                        .range((*child, 0)..=(*child, u64::MAX))
+                        .map(|(key, position)| (*key, *position))
+                        .collect();
                     for (key, position) in positions {
                         tree.entries.remove(&position);
                         tree.positions.remove(&key);
@@ -151,9 +173,14 @@ impl EdgeList {
                     match change {
                         DiffItem::Add(position, (child, occurrence)) if *position == expected => {
                             appended.push((*child, *occurrence));
-                            expected = expected.checked_add(1).ok_or("graph edge position space exhausted")?;
+                            expected = expected
+                                .checked_add(1)
+                                .ok_or("graph edge position space exhausted")?;
                         }
-                        _ => { suffix = false; break; }
+                        _ => {
+                            suffix = false;
+                            break;
+                        }
                     }
                 }
                 if suffix && appended.len() == self.len() - before.len() {
@@ -166,7 +193,9 @@ impl EdgeList {
                     if !self.iter().take(before.len()).eq(before.iter()) {
                         return Err(INVALID_APPEND.into());
                     }
-                    for (position, (child, occurrence)) in new.entries.values().enumerate().skip(before.len()) {
+                    for (position, (child, occurrence)) in
+                        new.entries.values().enumerate().skip(before.len())
+                    {
                         visit(position, *child, *occurrence)?;
                     }
                 }
@@ -188,7 +217,9 @@ impl EdgeList {
                 if !self.iter().take(old.len()).eq(old.iter()) {
                     return Err(INVALID_APPEND.into());
                 }
-                for (position, (child, occurrence)) in new.entries.values().enumerate().skip(old.len()) {
+                for (position, (child, occurrence)) in
+                    new.entries.values().enumerate().skip(old.len())
+                {
                     visit(position, *child, *occurrence)?;
                 }
             }
@@ -275,7 +306,9 @@ mod tests {
         let original = EdgeList::from((0..4096).map(tx).collect::<Vec<_>>());
         let mut candidate = original.clone();
         assert!(large(&candidate).entries.ptr_eq(&large(&original).entries));
-        assert!(large(&candidate).positions.ptr_eq(&large(&original).positions));
+        assert!(large(&candidate)
+            .positions
+            .ptr_eq(&large(&original).positions));
         candidate.push(tx(7));
         candidate.push(tx(7));
         candidate.push(tx(5000));
@@ -407,26 +440,55 @@ mod tests {
         let mut removed = original.clone();
         let children = [tx(7), tx(100), tx(3000)].into_iter().collect();
         assert_eq!(removed.remove_children(&children), 5);
-        let reference: Vec<_> = values.iter().filter(|child| !children.contains(child)).copied().collect();
+        let reference: Vec<_> = values
+            .iter()
+            .filter(|child| !children.contains(child))
+            .copied()
+            .collect();
         assert_eq!(removed, reference);
         assert_eq!(original, values);
         // Exactly the selected occurrences changed. Remaining entries retain
         // their original slots and persistent subtrees rather than renumbering.
-        assert_eq!(large(&original).entries.diff(&large(&removed).entries).count(), 5);
-        assert_eq!(large(&original).positions.diff(&large(&removed).positions).count(), 5);
+        assert_eq!(
+            large(&original)
+                .entries
+                .diff(&large(&removed).entries)
+                .count(),
+            5
+        );
+        assert_eq!(
+            large(&original)
+                .positions
+                .diff(&large(&removed).positions)
+                .count(),
+            5
+        );
         assert_eq!(large(&removed).positions.get(&(tx(8), 1)), Some(&4097));
         let mut appended = removed.clone();
         appended.push(tx(8));
         appended.push(tx(7));
         let mut suffix = Vec::new();
-        appended.visit_appended(&removed, |p, c, o| { suffix.push((p, c, o)); Ok(()) }).unwrap();
-        assert_eq!(suffix, vec![(reference.len(), tx(8), 2), (reference.len() + 1, tx(7), 0)]);
+        appended
+            .visit_appended(&removed, |p, c, o| {
+                suffix.push((p, c, o));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            suffix,
+            vec![(reference.len(), tx(8), 2), (reference.len() + 1, tx(7), 0)]
+        );
         let bytes = bincode::serialize(&appended).unwrap();
         let restored: EdgeList = bincode::deserialize(&bytes).unwrap();
         assert_eq!(restored, appended);
         assert_eq!(bincode::serialize(&restored).unwrap(), bytes);
         let mut cold_suffix = Vec::new();
-        restored.visit_appended(&removed, |p, c, o| { cold_suffix.push((p, c, o)); Ok(()) }).unwrap();
+        restored
+            .visit_appended(&removed, |p, c, o| {
+                cold_suffix.push((p, c, o));
+                Ok(())
+            })
+            .unwrap();
         assert_eq!(cold_suffix, suffix);
         assert!(removed.visit_appended(&original, |_, _, _| Ok(())).is_err());
     }
@@ -436,7 +498,8 @@ mod tests {
         let mut reference: Vec<_> = (0..40).map(|n| tx(n % 9)).collect();
         let mut actual = EdgeList::from(reference.clone());
         for round in 0..30 {
-            let children: std::collections::HashSet<_> = [tx(round % 9), tx((round + 3) % 9)].into_iter().collect();
+            let children: std::collections::HashSet<_> =
+                [tx(round % 9), tx((round + 3) % 9)].into_iter().collect();
             let old = reference.len();
             reference.retain(|child| !children.contains(child));
             assert_eq!(actual.remove_children(&children), old - reference.len());
@@ -444,19 +507,33 @@ mod tests {
             let before = actual.clone();
             let mut expected = Vec::new();
             for child in [tx(round % 9), tx(99), tx(round % 9)] {
-                expected.push((reference.len(), child, reference.iter().filter(|x| **x == child).count() as u64));
-                actual.push(child); reference.push(child);
+                expected.push((
+                    reference.len(),
+                    child,
+                    reference.iter().filter(|x| **x == child).count() as u64,
+                ));
+                actual.push(child);
+                reference.push(child);
             }
             let mut suffix = Vec::new();
-            actual.visit_appended(&before, |p, c, o| { suffix.push((p, c, o)); Ok(()) }).unwrap();
+            actual
+                .visit_appended(&before, |p, c, o| {
+                    suffix.push((p, c, o));
+                    Ok(())
+                })
+                .unwrap();
             assert_eq!(suffix, expected);
             assert_eq!(actual, reference);
-            assert_eq!(bincode::serialize(&actual).unwrap(), bincode::serialize(&reference).unwrap());
+            assert_eq!(
+                bincode::serialize(&actual).unwrap(),
+                bincode::serialize(&reference).unwrap()
+            );
         }
         let all = reference.iter().copied().collect();
         assert_eq!(actual.remove_children(&all), reference.len());
         assert!(matches!(actual.0, Repr::Small(_)));
-        actual.push(tx(1)); actual.push(tx(1));
+        actual.push(tx(1));
+        actual.push(tx(1));
         assert_eq!(actual, vec![tx(1), tx(1)]);
     }
 

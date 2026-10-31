@@ -13,21 +13,30 @@ pub struct UnindexedWallets {
 impl UnindexedWallets {
     /// Build holder indexes without attaching or validating the separately stored
     /// merger graph. This alone does not make the state ready for ledger use.
-    pub fn into_engine_with_poll(mut self, poll: &dyn Fn(&'static str) -> Result<(), String>) -> Result<TrstEngine, String> {
+    pub fn into_engine_with_poll(
+        mut self,
+        poll: &dyn Fn(&'static str) -> Result<(), String>,
+    ) -> Result<TrstEngine, String> {
         self.engine.rebuild_indexes_with_poll(poll)?;
         Ok(self.engine)
     }
 
     /// Validate the same state and counts without retaining mutation-only indexes.
-    pub fn restore_for_comparison_with_poll(mut self, graph: MergerGraph,
-        poll: &dyn Fn(&'static str) -> Result<(), String>) -> Result<TrstEngine, String> {
+    pub fn restore_for_comparison_with_poll(
+        mut self,
+        graph: MergerGraph,
+        poll: &dyn Fn(&'static str) -> Result<(), String>,
+    ) -> Result<TrstEngine, String> {
         self.engine.merger_graph = graph;
         RestoredTrstState::validate_for_comparison_with_poll(self.engine, poll)
     }
 
     /// Attach the separately decoded graph and run complete restoration checks.
-    pub fn restore_with_poll(mut self, graph: MergerGraph,
-        poll: &dyn Fn(&'static str) -> Result<(), String>) -> Result<RestoredTrstState, String> {
+    pub fn restore_with_poll(
+        mut self,
+        graph: MergerGraph,
+        poll: &dyn Fn(&'static str) -> Result<(), String>,
+    ) -> Result<RestoredTrstState, String> {
         self.engine.merger_graph = graph;
         RestoredTrstState::from_engine_with_poll(self.engine, poll)
     }
@@ -85,9 +94,15 @@ impl WalletRecord {
                 visit(Account(holder))?;
                 token.visit_retention_references(&mut visit)?;
             }
-            Self::Origin { owner, origin } => { visit(Account(owner))?; visit(Graph(*origin))?; }
+            Self::Origin { owner, origin } => {
+                visit(Account(owner))?;
+                visit(Graph(*origin))?;
+            }
             Self::Invalidation { origin, .. } => visit(Graph(*origin))?,
-            Self::Cause { origin, cause } => { visit(Graph(*origin))?; visit(Block(*cause))?; }
+            Self::Cause { origin, cause } => {
+                visit(Graph(*origin))?;
+                visit(Block(*cause))?;
+            }
         }
         std::ops::ControlFlow::Continue(())
     }
@@ -97,12 +112,18 @@ impl WalletRecord {
     /// Exact portfolio key and holding namespace for a scoped durable read.
     pub fn portfolio_storage_keys(holder: &WalletAddress) -> (String, String) {
         let holder = hex(holder.as_str().as_bytes());
-        (format!("{}0/{holder}", Self::STORAGE_PREFIX),
-         format!("{}1/{holder}/", Self::STORAGE_PREFIX))
+        (
+            format!("{}0/{holder}", Self::STORAGE_PREFIX),
+            format!("{}1/{holder}/", Self::STORAGE_PREFIX),
+        )
     }
 
     pub fn origin_owner_storage_key(owner: &WalletAddress) -> String {
-        format!("{}2/{}", Self::STORAGE_PREFIX, hex(owner.as_str().as_bytes()))
+        format!(
+            "{}2/{}",
+            Self::STORAGE_PREFIX,
+            hex(owner.as_str().as_bytes())
+        )
     }
 
     pub fn origin_storage_key(origin: &TxHash) -> String {
@@ -111,7 +132,10 @@ impl WalletRecord {
 
     pub fn invalidation_storage_keys(origin: &TxHash) -> (String, String) {
         let origin = hex(origin.as_bytes());
-        (format!("{}4/{origin}", Self::STORAGE_PREFIX), format!("{}5/{origin}/", Self::STORAGE_PREFIX))
+        (
+            format!("{}4/{origin}", Self::STORAGE_PREFIX),
+            format!("{}5/{origin}/", Self::STORAGE_PREFIX),
+        )
     }
 
     fn storage_key(&self) -> Result<String, String> {
@@ -212,7 +236,11 @@ impl WalletRecordReader {
                     .wallets
                     .insert(
                         holder,
-                        Shared::from(WalletPortfolio::from_parts(Vec::new(), cached_transferable, earliest_expiry)),
+                        Shared::from(WalletPortfolio::from_parts(
+                            Vec::new(),
+                            cached_transferable,
+                            earliest_expiry,
+                        )),
                     )
                     .is_some()
                 {
@@ -298,21 +326,36 @@ impl WalletRecordReader {
         self.finish_with_checks(check_expiry, &|_| Ok(()))
     }
 
-    pub fn finish_with_poll(self, poll: &dyn Fn(&'static str) -> Result<(), String>) -> Result<TrstEngine, String> {
+    pub fn finish_with_poll(
+        self,
+        poll: &dyn Fn(&'static str) -> Result<(), String>,
+    ) -> Result<TrstEngine, String> {
         self.finish_with_checks(true, poll)
     }
 
-    fn finish_with_checks(self, check_expiry: bool, poll: &dyn Fn(&'static str) -> Result<(), String>) -> Result<TrstEngine, String> {
-        self.finish_unindexed(check_expiry, poll)?.into_engine_with_poll(poll)
+    fn finish_with_checks(
+        self,
+        check_expiry: bool,
+        poll: &dyn Fn(&'static str) -> Result<(), String>,
+    ) -> Result<TrstEngine, String> {
+        self.finish_unindexed(check_expiry, poll)?
+            .into_engine_with_poll(poll)
     }
 
     /// Keep incomplete holdings private until either ordinary index construction
     /// or complete graph restoration finishes. All record checks still run here.
-    pub fn finish_for_restoration_with_poll(self, poll: &dyn Fn(&'static str) -> Result<(), String>) -> Result<UnindexedWallets, String> {
+    pub fn finish_for_restoration_with_poll(
+        self,
+        poll: &dyn Fn(&'static str) -> Result<(), String>,
+    ) -> Result<UnindexedWallets, String> {
         self.finish_unindexed(true, poll)
     }
 
-    pub(super) fn finish_unindexed(self, check_expiry: bool, poll: &dyn Fn(&'static str) -> Result<(), String>) -> Result<UnindexedWallets, String> {
+    pub(super) fn finish_unindexed(
+        self,
+        check_expiry: bool,
+        poll: &dyn Fn(&'static str) -> Result<(), String>,
+    ) -> Result<UnindexedWallets, String> {
         if self.failed {
             return Err("cannot publish failed TRST record reconstruction".into());
         }
@@ -339,7 +382,9 @@ impl WalletRecordReader {
                 return Err("invalid outcome revocation causes".into());
             }
         }
-        Ok(UnindexedWallets { engine: self.engine })
+        Ok(UnindexedWallets {
+            engine: self.engine,
+        })
     }
 }
 
@@ -484,44 +529,79 @@ mod tests {
         let expected = fixture();
         let read = || {
             let mut reader = WalletRecordReader::new(expected.expiry_secs);
-            for row in rows(&expected) { reader.push(row).unwrap(); }
+            for row in rows(&expected) {
+                reader.push(row).unwrap();
+            }
             reader
         };
         for aggregate in [false, true] {
             let pending = if aggregate {
-                TrstEngine::load_wallets_for_restoration(&expected.save_wallets(), expected.expiry_secs).unwrap()
+                TrstEngine::load_wallets_for_restoration(
+                    &expected.save_wallets(),
+                    expected.expiry_secs,
+                )
+                .unwrap()
             } else {
-                read().finish_for_restoration_with_poll(&|stage| {
-                    assert_ne!(stage, "trst:index-token"); Ok(())
-                }).unwrap()
+                read()
+                    .finish_for_restoration_with_poll(&|stage| {
+                        assert_ne!(stage, "trst:index-token");
+                        Ok(())
+                    })
+                    .unwrap()
             };
             assert!(pending.engine.origin_holders.is_empty());
             assert!(pending.engine.revoked_holders.is_empty());
             let visits = std::cell::Cell::new(0);
-            let restored = pending.restore_with_poll(expected.merger_graph.clone(), &|stage| {
-                if stage == "trst:index-token" { visits.set(visits.get() + 1); }
-                Ok(())
-            }).unwrap().into_engine();
+            let restored = pending
+                .restore_with_poll(expected.merger_graph.clone(), &|stage| {
+                    if stage == "trst:index-token" {
+                        visits.set(visits.get() + 1);
+                    }
+                    Ok(())
+                })
+                .unwrap()
+                .into_engine();
             assert_eq!(visits.get(), 2);
             assert_eq!(restored.save_wallets(), expected.save_wallets());
             assert!(restored.origin_holders == expected.origin_holders);
             assert!(restored.revoked_holders == expected.revoked_holders);
         }
-        let pending = read().finish_for_restoration_with_poll(&|_| Ok(())).unwrap();
-        assert!(pending.restore_with_poll(expected.merger_graph.clone(), &|stage| {
-            if stage == "trst:index-token" { Err("index stop".into()) } else { Ok(()) }
-        }).err().unwrap().contains("index stop"));
+        let pending = read()
+            .finish_for_restoration_with_poll(&|_| Ok(()))
+            .unwrap();
+        assert!(pending
+            .restore_with_poll(expected.merger_graph.clone(), &|stage| {
+                if stage == "trst:index-token" {
+                    Err("index stop".into())
+                } else {
+                    Ok(())
+                }
+            })
+            .err()
+            .unwrap()
+            .contains("index stop"));
         let mut bad = read();
         bad.engine.wallet_origins.clear();
         let pending = bad.finish_for_restoration_with_poll(&|_| Ok(())).unwrap();
-        assert!(pending.restore_with_poll(expected.merger_graph.clone(), &|_| Ok(())).is_err());
+        assert!(pending
+            .restore_with_poll(expected.merger_graph.clone(), &|_| Ok(()))
+            .is_err());
         let mut bad = read();
-        bad.engine.wallets.get_mut(&WalletAddress::new("brst_owner")).unwrap().cached_transferable += 1;
+        bad.engine
+            .wallets
+            .get_mut(&WalletAddress::new("brst_owner"))
+            .unwrap()
+            .cached_transferable += 1;
         assert!(bad.finish_for_restoration_with_poll(&|_| Ok(())).is_err());
         // Ordinary public readers still return immediately usable holder indexes.
         let ordinary = read().finish().unwrap();
         assert!(ordinary.origin_holders == expected.origin_holders);
-        assert!(TrstEngine::load_wallets(&expected.save_wallets(), expected.expiry_secs).unwrap().origin_holders == expected.origin_holders);
+        assert!(
+            TrstEngine::load_wallets(&expected.save_wallets(), expected.expiry_secs)
+                .unwrap()
+                .origin_holders
+                == expected.origin_holders
+        );
     }
 
     fn roundtrip(engine: &TrstEngine) -> TrstEngine {

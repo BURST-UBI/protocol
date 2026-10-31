@@ -1,5 +1,5 @@
 use super::*;
-use crate::confirmed_replay::scratch_index::{FixedScratchCompaction};
+use crate::confirmed_replay::scratch_index::FixedScratchCompaction;
 
 /// In-process progress over one pinned cut. This is neither a restart token nor
 /// evidence of closure until finish succeeds. Any error poisons the traversal.
@@ -22,53 +22,102 @@ pub(super) struct ClosureWalk {
 }
 
 impl ClosureWalk {
-    pub(super) fn new(roots: &Roots, directory: &std::path::Path, limits: BodyClosureLimits)
-        -> Result<Self, BodyClosureError> {
+    pub(super) fn new(
+        roots: &Roots,
+        directory: &std::path::Path,
+        limits: BodyClosureLimits,
+    ) -> Result<Self, BodyClosureError> {
         Self::with_budget(roots, directory, ClosureBudget::new(limits, None)?)
     }
 
-    pub(super) fn with_budget(roots: &Roots, directory: &std::path::Path, budget: ClosureBudget)
-        -> Result<Self, BodyClosureError> {
+    pub(super) fn with_budget(
+        roots: &Roots,
+        directory: &std::path::Path,
+        budget: ClosureBudget,
+    ) -> Result<Self, BodyClosureError> {
         let limits = budget.total;
-        if roots.count > limits.bodies { return Err(BodyClosureError::Budget("body count")); }
-        Ok(Self { #[cfg(test)] compaction_nodes: 0, compaction: None, seed: Some(roots.rows.cursor()?), seed_count: roots.count, seed_seen: 0, pending_body: None, queue_next: 0,
-            queue: ScratchSequence::new(directory)?, pending_edges: Box::new(std::iter::empty()),
-            limits, expansion_bodies: budget.expansion.bodies, work: ClosureWork { bodies: 0, bytes: 0, edges: 0 },
-            complete: false, failed: false })
+        if roots.count > limits.bodies {
+            return Err(BodyClosureError::Budget("body count"));
+        }
+        Ok(Self {
+            #[cfg(test)]
+            compaction_nodes: 0,
+            compaction: None,
+            seed: Some(roots.rows.cursor()?),
+            seed_count: roots.count,
+            seed_seen: 0,
+            pending_body: None,
+            queue_next: 0,
+            queue: ScratchSequence::new(directory)?,
+            pending_edges: Box::new(std::iter::empty()),
+            limits,
+            expansion_bodies: budget.expansion.bodies,
+            work: ClosureWork {
+                bodies: 0,
+                bytes: 0,
+                edges: 0,
+            },
+            complete: false,
+            failed: false,
+        })
     }
 
     /// A seed step charges authenticated scratch nodes; body resolution and
     /// each dependency edge consume separate steps. Whole-attempt body, byte and
     /// edge limits remain cumulative. No previous body is resolved again.
     pub(super) fn advance(
-        &mut self, roots: &mut Roots, budget: usize,
+        &mut self,
+        roots: &mut Roots,
+        budget: usize,
         mut resolve: impl FnMut(BlockHash) -> Result<Option<(StateBlock, BodyOrigin)>, StoreError>,
         mut missing: impl FnMut(BlockHash) -> Result<(), BodyClosureError>,
     ) -> Result<bool, BodyClosureError> {
-        if self.failed { return Err(invalid("closure traversal already failed").into()); }
+        if self.failed {
+            return Err(invalid("closure traversal already failed").into());
+        }
         self.failed = true;
         #[cfg(test)]
-        { self.compaction_nodes = 0; }
-        if budget < 2 { return Err(BodyClosureError::Budget("invalid closure page budget")); }
-        if self.complete { self.failed = false; return Ok(true); }
+        {
+            self.compaction_nodes = 0;
+        }
+        if budget < 2 {
+            return Err(BodyClosureError::Budget("invalid closure page budget"));
+        }
+        if self.complete {
+            self.failed = false;
+            return Ok(true);
+        }
         let mut remaining = budget;
         while remaining > 0 {
             if let Some(compaction) = &mut self.compaction {
                 let page = compaction.advance(remaining)?;
                 remaining -= page.nodes;
                 #[cfg(test)]
-                { self.compaction_nodes += page.nodes; }
+                {
+                    self.compaction_nodes += page.nodes;
+                }
                 if page.done {
-                    self.compaction.take().expect("active compaction").finish(&mut roots.rows.index)?;
+                    self.compaction
+                        .take()
+                        .expect("active compaction")
+                        .finish(&mut roots.rows.index)?;
                 }
                 continue;
             }
             if let Some(dependency) = self.pending_edges.next() {
                 remaining -= 1;
-                self.work.edges = self.work.edges.checked_add(1).filter(|n| *n <= self.limits.edges)
+                self.work.edges = self
+                    .work
+                    .edges
+                    .checked_add(1)
+                    .filter(|n| *n <= self.limits.edges)
                     .ok_or(BodyClosureError::Budget("dependency edges"))?;
-                if roots.rows.get(dependency.as_bytes())?.is_some() { continue; }
-                if roots.count >= self.limits.bodies { return Err(BodyClosureError::Budget("body count")); }
+                if roots.rows.get(dependency.as_bytes())?.is_some() {
+                    continue;
+                }
+                if roots.count >= self.limits.bodies {
+                    return Err(BodyClosureError::Budget("body count"));
+                }
                 if self.queue.len() >= self.expansion_bodies {
                     return Err(BodyClosureError::Budget("discovered body count"));
                 }
@@ -111,7 +160,8 @@ impl ClosureWalk {
                 hash
             } else {
                 if self.work.bodies != roots.count
-                    || self.seed_count.checked_add(self.queue.len()) != Some(roots.count) {
+                    || self.seed_count.checked_add(self.queue.len()) != Some(roots.count)
+                {
                     return Err(invalid("closure queue differs from root inventory").into());
                 }
                 self.complete = true;
@@ -128,7 +178,11 @@ impl ClosureWalk {
                 return Err(invalid("resolved closure body differs from requested hash").into());
             }
             let length = bincode::serialized_size(&block).map_err(invalid)?;
-            self.work.bytes = self.work.bytes.checked_add(length).filter(|n| *n <= self.limits.bytes)
+            self.work.bytes = self
+                .work
+                .bytes
+                .checked_add(length)
+                .filter(|n| *n <= self.limits.bytes)
                 .ok_or(BodyClosureError::Budget("body bytes"))?;
             self.work.bodies += 1;
             if origin != BodyOrigin::SnapshotPrefix {
@@ -140,13 +194,19 @@ impl ClosureWalk {
     }
 
     #[cfg(test)]
-    pub(super) fn compaction_nodes(&self) -> usize { self.compaction_nodes }
+    pub(super) fn compaction_nodes(&self) -> usize {
+        self.compaction_nodes
+    }
 
     #[cfg(test)]
-    pub(super) fn queued_dependencies(&self) -> u64 { self.queue.len() }
+    pub(super) fn queued_dependencies(&self) -> u64 {
+        self.queue.len()
+    }
 
     #[cfg(test)]
-    pub(super) fn work(&self) -> &ClosureWork { &self.work }
+    pub(super) fn work(&self) -> &ClosureWork {
+        &self.work
+    }
 
     pub(super) fn finish(self) -> Result<ClosureWork, BodyClosureError> {
         if self.failed || !self.complete {

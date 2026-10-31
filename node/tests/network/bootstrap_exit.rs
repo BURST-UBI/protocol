@@ -22,7 +22,6 @@ impl RunningNode {
         )
         .unwrap()
     }
-
 }
 
 async fn ready(nodes: &[RunningNode]) {
@@ -30,10 +29,7 @@ async fn ready(nodes: &[RunningNode]) {
         loop {
             let mut all_ready = true;
             for node in nodes {
-                assert!(
-                    !node.is_finished(),
-                    "node exited before readiness"
-                );
+                assert!(!node.is_finished(), "node exited before readiness");
                 all_ready &= node
                     .client
                     .rpc_call("peers", json!({}))
@@ -113,15 +109,13 @@ async fn bootstrap_exit_survives_signed_endorsement_restart_and_fresh_sync() {
     }
     let mut nodes = Vec::new();
     for config in &configs[..2] {
-        nodes.push(RunningNode::launch(config.clone()).await);
+        nodes.push(RunningNode::launch_with_admin(config.clone()).await);
     }
     ready(&nodes).await;
     for node in &nodes {
         assert_eq!(node.phase(), BootstrapPhase::Active);
     }
-    let admission = nodes[0]
-        .client
-        .rpc_call("genesis_endorse", json!({"account":first_human.as_str()}))
+    let admission = running_node::admin_rpc::endorse(&nodes[0].client, first_human.as_str())
         .await
         .unwrap();
     assert_eq!(admission["verified"], true);
@@ -142,9 +136,7 @@ async fn bootstrap_exit_survives_signed_endorsement_restart_and_fresh_sync() {
             .state
             .is_verified());
     }
-    let denied = nodes[0]
-        .client
-        .rpc_call("genesis_endorse", json!({"account":next_human.as_str()}))
+    let denied = running_node::admin_rpc::endorse(&nodes[0].client, next_human.as_str())
         .await
         .unwrap_err();
     assert!(
@@ -177,15 +169,13 @@ async fn bootstrap_exit_survives_signed_endorsement_restart_and_fresh_sync() {
     }
 
     for config in &configs {
-        nodes.push(RunningNode::launch(config.clone()).await);
+        nodes.push(RunningNode::launch_with_admin(config.clone()).await);
     }
     ready(&nodes).await;
     for node in &nodes {
         assert_closed(node, &next_human, &submitted.hash).await;
     }
-    let denied = nodes[0]
-        .client
-        .rpc_call("genesis_endorse", json!({"account":next_human.as_str()}))
+    let denied = running_node::admin_rpc::endorse(&nodes[0].client, next_human.as_str())
         .await
         .unwrap_err();
     assert!(

@@ -22,7 +22,9 @@ pub(crate) enum CompactPreparation {
 
 impl PreparedCompactInstallation {
     #[cfg(test)]
-    pub(crate) fn reused_accepted_successor(&self) -> bool { self.reused_accepted }
+    pub(crate) fn reused_accepted_successor(&self) -> bool {
+        self.reused_accepted
+    }
 
     pub fn anchor(&self) -> &burst_consensus::checkpoint::CheckpointAnchor {
         self.next.continuation.anchor()
@@ -264,8 +266,11 @@ impl RecoveredInstalledMetadata {
         })
         .await
         .map_err(invalid)??;
-        tracing::debug!(elapsed_ms = started.elapsed().as_millis(), stage = "plan",
-            "checkpoint successor preparation timing");
+        tracing::debug!(
+            elapsed_ms = started.elapsed().as_millis(),
+            stage = "plan",
+            "checkpoint successor preparation timing"
+        );
         let (installed, next) = planned;
         let Some((record, observations, plan, available)) = next else {
             return Ok(CompactPreparation::CaughtUp(Box::new(ReplayCache {
@@ -281,8 +286,11 @@ impl RecoveredInstalledMetadata {
             available,
         )
         .await?;
-        tracing::debug!(elapsed_ms = started.elapsed().as_millis(), stage = "witness",
-            "checkpoint successor preparation timing");
+        tracing::debug!(
+            elapsed_ms = started.elapsed().as_millis(),
+            stage = "witness",
+            "checkpoint successor preparation timing"
+        );
         let started = std::time::Instant::now();
         let source = store.clone();
         let (installed, next, cut, observations, witness_plan, reused_accepted) =
@@ -300,16 +308,30 @@ impl RecoveredInstalledMetadata {
                     source.env().path(),
                 )
                 .map_err(invalid)?;
-                Ok::<_, StoreError>((installed, next, cut, observations, witness_plan, reused_accepted))
+                Ok::<_, StoreError>((
+                    installed,
+                    next,
+                    cut,
+                    observations,
+                    witness_plan,
+                    reused_accepted,
+                ))
             })
             .await
             .map_err(invalid)??;
-        tracing::debug!(elapsed_ms = started.elapsed().as_millis(), stage = "replay", reused_accepted,
-            "checkpoint successor preparation timing");
+        tracing::debug!(
+            elapsed_ms = started.elapsed().as_millis(),
+            stage = "replay",
+            reused_accepted,
+            "checkpoint successor preparation timing"
+        );
         let started = std::time::Instant::now();
         let witnesses = witness::fetch_plan(&registry, &next.continuation, &witness_plan).await?;
-        tracing::debug!(elapsed_ms = started.elapsed().as_millis(), stage = "installed-witness",
-            "checkpoint successor preparation timing");
+        tracing::debug!(
+            elapsed_ms = started.elapsed().as_millis(),
+            stage = "installed-witness",
+            "checkpoint successor preparation timing"
+        );
         let started = std::time::Instant::now();
         let result = tokio::task::spawn_blocking(move || {
             let witnesses = Arc::new(super::super::super::history::HistoricalBlocks::stage(
@@ -331,8 +353,11 @@ impl RecoveredInstalledMetadata {
         })
         .await
         .map_err(invalid)?;
-        tracing::debug!(elapsed_ms = started.elapsed().as_millis(), stage = "verify",
-            "checkpoint successor preparation timing");
+        tracing::debug!(
+            elapsed_ms = started.elapsed().as_millis(),
+            stage = "verify",
+            "checkpoint successor preparation timing"
+        );
         result
     }
 }

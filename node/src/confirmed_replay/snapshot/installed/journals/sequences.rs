@@ -39,11 +39,16 @@ impl SequenceGuard {
     }
 
     #[cfg(test)]
-    pub(super) fn capture_view(batch: &burst_store_lmdb::read_view::LedgerReadView<'_>) -> Result<Self, StoreError> {
+    pub(super) fn capture_view(
+        batch: &burst_store_lmdb::read_view::LedgerReadView<'_>,
+    ) -> Result<Self, StoreError> {
         Self::capture_view_with_poll(batch, &|_| Ok(()))
     }
 
-    pub(super) fn capture_view_with_poll(batch: &burst_store_lmdb::read_view::LedgerReadView<'_>, poll: &dyn Fn(&'static str) -> Result<(), StoreError>) -> Result<Self, StoreError> {
+    pub(super) fn capture_view_with_poll(
+        batch: &burst_store_lmdb::read_view::LedgerReadView<'_>,
+        poll: &dyn Fn(&'static str) -> Result<(), StoreError>,
+    ) -> Result<Self, StoreError> {
         let mut guard = Self {
             rows: ScratchRecords::new(batch.storage_directory())?,
             count: 0,
@@ -68,11 +73,18 @@ impl SequenceGuard {
     }
 
     #[cfg(test)]
-    pub(super) fn verify_view(&self, batch: &burst_store_lmdb::read_view::LedgerReadView<'_>) -> Result<(), StoreError> {
+    pub(super) fn verify_view(
+        &self,
+        batch: &burst_store_lmdb::read_view::LedgerReadView<'_>,
+    ) -> Result<(), StoreError> {
         self.verify_view_with_poll(batch, &|_| Ok(()))
     }
 
-    pub(super) fn verify_view_with_poll(&self, batch: &burst_store_lmdb::read_view::LedgerReadView<'_>, poll: &dyn Fn(&'static str) -> Result<(), StoreError>) -> Result<(), StoreError> {
+    pub(super) fn verify_view_with_poll(
+        &self,
+        batch: &burst_store_lmdb::read_view::LedgerReadView<'_>,
+        poll: &dyn Fn(&'static str) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
         let mut retained = 0u64;
         visit_view(batch, |key, current| {
             poll("metadata:signing-sequence")?;
@@ -114,15 +126,21 @@ mod tests {
             capture_reached.set(true);
             Err(StoreError::Backend("sequence capture sentinel".into()))
         });
-        assert!(matches!(interrupted, Err(ref error) if error.to_string().contains("sequence capture sentinel")));
+        assert!(
+            matches!(interrupted, Err(ref error) if error.to_string().contains("sequence capture sentinel"))
+        );
         assert!(capture_reached.get());
         let guard = SequenceGuard::capture(&batch).unwrap();
         let reached = std::cell::Cell::new(false);
-        assert!(guard.verify_view_with_poll(&batch.read_view(), &|stage| {
-            assert_eq!(stage, "metadata:signing-sequence");
-            reached.set(true);
-            Err(StoreError::Backend("sequence checkpoint sentinel".into()))
-        }).unwrap_err().to_string().contains("sequence checkpoint sentinel"));
+        assert!(guard
+            .verify_view_with_poll(&batch.read_view(), &|stage| {
+                assert_eq!(stage, "metadata:signing-sequence");
+                reached.set(true);
+                Err(StoreError::Backend("sequence checkpoint sentinel".into()))
+            })
+            .unwrap_err()
+            .to_string()
+            .contains("sequence checkpoint sentinel"));
         assert!(reached.get());
         for sequence in [12u64, 13, u64::MAX] {
             batch.put_meta(&key, &sequence.to_be_bytes()).unwrap();

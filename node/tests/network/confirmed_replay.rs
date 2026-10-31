@@ -20,7 +20,9 @@ use std::time::Duration;
 mod running_node;
 use running_node::RunningNode;
 
-async fn launch(config: NodeConfig) -> RunningNode { RunningNode::launch(config).await }
+async fn launch(config: NodeConfig) -> RunningNode {
+    RunningNode::launch_with_admin(config).await
+}
 
 async fn wait_for_confirmation(nodes: &[RunningNode], hash: &str) {
     wait_for_confirmation_with_timeout(nodes, hash, Duration::from_secs(20)).await;
@@ -28,7 +30,10 @@ async fn wait_for_confirmation(nodes: &[RunningNode], hash: &str) {
 
 async fn wait_for_confirmation_with_timeout(nodes: &[RunningNode], hash: &str, timeout: Duration) {
     for (index, node) in nodes.iter().enumerate() {
-        assert!(!node.is_finished(), "node {index} exited before confirmation");
+        assert!(
+            !node.is_finished(),
+            "node {index} exited before confirmation"
+        );
         node.client
             .wait_confirmed(hash, timeout)
             .await
@@ -255,9 +260,7 @@ async fn payment_replay_journey(certified_catchup: bool) {
             .await
             .unwrap();
         wait_for_confirmation(&nodes, &delegate.hash).await;
-        let endorse = nodes[0]
-            .client
-            .rpc_call("genesis_endorse", json!({"account":recipient.as_str()}))
+        let endorse = running_node::admin_rpc::endorse(&nodes[0].client, recipient.as_str())
             .await
             .unwrap();
         let endorsement_hash = endorse["block_hash"].as_str().unwrap();
@@ -362,7 +365,12 @@ async fn payment_replay_journey(certified_catchup: bool) {
         // Loopback peers share the five-handshakes-per-minute IP limit. Fresh
         // catch-up must allow that window plus frontier discovery and block
         // pulls; already connected payment confirmations keep their 20s bound.
-        wait_for_confirmation_with_timeout(&nodes, &normal_endorsement.hash, Duration::from_secs(120)).await;
+        wait_for_confirmation_with_timeout(
+            &nodes,
+            &normal_endorsement.hash,
+            Duration::from_secs(120),
+        )
+        .await;
         wait_for_confirmation(&nodes, &receipt.hash).await;
         for mut replay in replay_cut(&nodes, &creator, &params) {
             assert_eq!(replay.account(&creator).unwrap().trst_balance, 33);

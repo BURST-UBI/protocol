@@ -13,12 +13,12 @@ use burst_types::{BlockHash, NetworkId, ProtocolParams};
 use tokio::sync::{mpsc, RwLock};
 
 use crate::checkpoint_store::historical::HistoricalAdmissions;
-#[cfg(test)]
-use burst_messages::checkpoint_sync::MAX_TRANSFER_BYTES;
 use crate::checkpoint_store::CertifiedCheckpoint;
 use crate::connection_registry::ConnectionRegistry;
 use crate::shutdown::ShutdownController;
 use crate::wire_message::WireMessage;
+#[cfg(test)]
+use burst_messages::checkpoint_sync::MAX_TRANSFER_BYTES;
 
 pub(crate) mod authority;
 mod input;
@@ -142,7 +142,10 @@ struct Driver {
     #[cfg(test)]
     refresh_scans: usize,
     archived_refresh: crate::checkpoint_store::ArchivedRefresh,
-    selection_refresh: Option<(BlockHash, crate::confirmed_replay::snapshot::installed::SelectionRefresh)>,
+    selection_refresh: Option<(
+        BlockHash,
+        crate::confirmed_replay::snapshot::installed::SelectionRefresh,
+    )>,
     projection: Option<Arc<crate::confirmed_replay::snapshot::installed::ProjectionCache>>,
     refresh: bool,
     serve_window_start: Instant,
@@ -204,15 +207,22 @@ impl Driver {
     fn refresh_candidates(&mut self) -> Result<Vec<u64>, StoreError> {
         let before = self.store.tx_begin_read()?.clean_storage_cut();
         if let Some((cut, heights)) = &self.refresh_cache {
-            if before.as_ref().is_some_and(|current| cut.same_committed_view(current)) {
+            if before
+                .as_ref()
+                .is_some_and(|current| cut.same_committed_view(current))
+            {
                 return Ok(heights.clone());
             }
         }
         self.refresh_cache = None;
         #[cfg(test)]
-        { self.refresh_scans += 1; }
+        {
+            self.refresh_scans += 1;
+        }
         let heights = crate::checkpoint_store::selection_refresh_heights(
-            &self.store, self.network, &self.params,
+            &self.store,
+            self.network,
+            &self.params,
         )?;
         let after = self.store.tx_begin_read()?.clean_storage_cut();
         // These are scheduling hints, not import authority. Retain neither an
@@ -290,10 +300,14 @@ impl Driver {
                 // Finish the current selection cycle before adopting a newer
                 // epoch, so frequent installations cannot starve later rows.
                 if let Some(projection) = self.projection.as_ref().filter(|_| {
-                    self.selection_refresh.as_ref().is_none_or(|(_, cursor)| cursor.at_cycle_start())
+                    self.selection_refresh
+                        .as_ref()
+                        .is_none_or(|(_, cursor)| cursor.at_cycle_start())
                 }) {
                     if let Some(cursor) = projection.selection_refresh(
-                        &self.store, self.network, self.params.params_hash(),
+                        &self.store,
+                        self.network,
+                        self.params.params_hash(),
                         self.selection_refresh.as_ref().map(|(epoch, _)| *epoch),
                     )? {
                         self.selection_refresh = Some(cursor);
@@ -559,9 +573,15 @@ pub(crate) async fn run(
     let mut stop = shutdown.subscribe();
     let snapshot_staging = store.env().path().to_path_buf();
     let mut authority = match authority::authenticate_until_shutdown(
-        store, settings.network, settings.params.clone(), registry.clone(),
-        settings.recovery.take(), shutdown.clone(),
-    ).await {
+        store,
+        settings.network,
+        settings.params.clone(),
+        registry.clone(),
+        settings.recovery.take(),
+        shutdown.clone(),
+    )
+    .await
+    {
         Ok(Some(authority)) => authority,
         Ok(None) => return,
         Err(error) => {
@@ -592,10 +612,15 @@ pub(crate) async fn run(
             driver.network,
             &driver.params,
         )?;
-        driver.selection_refresh = recovery.as_ref().map(|cache| {
-            Ok::<_, StoreError>((cache.recovered.continuation.anchor().hash(),
-                cache.recovered.selections.refresh_cursor()?))
-        }).transpose()?;
+        driver.selection_refresh = recovery
+            .as_ref()
+            .map(|cache| {
+                Ok::<_, StoreError>((
+                    cache.recovered.continuation.anchor().hash(),
+                    cache.recovered.selections.refresh_cursor()?,
+                ))
+            })
+            .transpose()?;
         driver.projection = Some(projection);
         driver.snapshots = Some(snapshots);
         let imports =
@@ -745,35 +770,59 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(LmdbStore::open(dir.path(), 32, 32 << 20).unwrap());
         let mut driver = Driver::new(
-            store.clone(), NetworkId::Dev, ProtocolParams::default(), Arc::default(),
-        ).unwrap();
-        for _ in 0..10 { assert!(driver.refresh_candidates().unwrap().is_empty()); }
+            store.clone(),
+            NetworkId::Dev,
+            ProtocolParams::default(),
+            Arc::default(),
+        )
+        .unwrap();
+        for _ in 0..10 {
+            assert!(driver.refresh_candidates().unwrap().is_empty());
+        }
         assert_eq!(driver.refresh_scans, 1);
 
         // Scheduling never reauthenticates economic snapshot pages. Imports still do.
-        store.meta_store().put_meta("checkpoint_snapshot/pages/v1/00000000", b"changed").unwrap();
+        store
+            .meta_store()
+            .put_meta("checkpoint_snapshot/pages/v1/00000000", b"changed")
+            .unwrap();
         assert!(driver.refresh_candidates().unwrap().is_empty());
         assert_eq!(driver.refresh_scans, 2);
-        store.meta_store().put_meta(
-            crate::confirmed_replay::snapshot::installed::BASE_KEY, b"invalid archive",
-        ).unwrap();
+        store
+            .meta_store()
+            .put_meta(
+                crate::confirmed_replay::snapshot::installed::BASE_KEY,
+                b"invalid archive",
+            )
+            .unwrap();
         assert!(driver.refresh_candidates().unwrap().is_empty());
         assert!(crate::confirmed_replay::snapshot::installed::load_base(
-            &store, NetworkId::Dev, &driver.params,
-        ).is_err());
+            &store,
+            NetworkId::Dev,
+            &driver.params,
+        )
+        .is_err());
         let genesis = crate::checkpoint_replay::ReplayedCheckpoint::genesis_anchor(
-            NetworkId::Dev, &driver.params,
-        ).unwrap();
-        store.meta_store().put_meta(
-            &format!("checkpoint_chain/v1/dev/{}/head", genesis.genesis_hash()),
-            &8u64.to_be_bytes(),
-        ).unwrap();
+            NetworkId::Dev,
+            &driver.params,
+        )
+        .unwrap();
+        store
+            .meta_store()
+            .put_meta(
+                &format!("checkpoint_chain/v1/dev/{}/head", genesis.genesis_hash()),
+                &8u64.to_be_bytes(),
+            )
+            .unwrap();
         for turn in 0..6 {
             driver.download = None;
             let now = Instant::now();
             driver.next_poll = now;
             let request = driver.poll(vec!["peer".into()], now).unwrap().unwrap();
-            assert!(matches!(request.message, CheckpointSyncMessage::Request { height: 9, .. }));
+            assert!(matches!(
+                request.message,
+                CheckpointSyncMessage::Request { height: 9, .. }
+            ));
             assert_eq!(driver.refresh, turn % 2 == 0);
         }
         assert_eq!(driver.refresh_scans, 4);
@@ -1002,7 +1051,10 @@ mod tests {
             assert!(matches!(response.message, CheckpointSyncMessage::Chunk {
                 data, digest: actual, ..
             } if data == bytes && actual == digest));
-            assert_eq!(driver.load_attempts, 0, "queued retry must not repeat export work");
+            assert_eq!(
+                driver.load_attempts, 0,
+                "queued retry must not repeat export work"
+            );
         }
         // An expired first-chunk request still reloads. The empty fixture has
         // no durable record, so it must not serve the old bytes indefinitely.
@@ -1313,7 +1365,10 @@ mod tests {
             .is_err()
         );
         assert!(driver.download.is_none());
-        assert!(driver.poll(peers.clone(), now + RETRY_INTERVAL).unwrap().is_none());
+        assert!(driver
+            .poll(peers.clone(), now + RETRY_INTERVAL)
+            .unwrap()
+            .is_none());
         assert_eq!(
             driver
                 .poll(peers, now + PEER_TIMEOUT)
@@ -1357,7 +1412,10 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(driver.download.as_ref().unwrap().bytes.is_empty());
-        let retry = driver.poll(peers.clone(), now + RETRY_INTERVAL).unwrap().unwrap();
+        let retry = driver
+            .poll(peers.clone(), now + RETRY_INTERVAL)
+            .unwrap()
+            .unwrap();
         assert_eq!(retry.peer, "a");
         let next = driver.poll(peers, now + PEER_TIMEOUT).unwrap().unwrap();
         assert_eq!(next.peer, "b");

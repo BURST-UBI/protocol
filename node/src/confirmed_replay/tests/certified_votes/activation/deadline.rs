@@ -100,7 +100,8 @@ async fn compact_deadline_journal_recovers_active_and_terminal_rounds_from_peers
             .checkpoint_metadata(b"")
             .unwrap();
         let service =
-            WitnessService::start(source.clone(), local.clone(), if case == 3 { 5 } else { 0 }).await;
+            WitnessService::start(source.clone(), local.clone(), if case == 3 { 5 } else { 0 })
+                .await;
         let recovered = if case == 1 {
             let recovered = Arc::new(recovered);
             let unavailable = Arc::new(tokio::sync::RwLock::new(

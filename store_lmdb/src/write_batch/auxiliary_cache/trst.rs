@@ -1,6 +1,9 @@
 use super::*;
 use burst_trst::{
-    engine::{holding_rows, RestoredTrstChanges, RestoredTrstState, RestoredTrstInvalidation, UnindexedWallets, WalletRecord, WalletRecordReader},
+    engine::{
+        holding_rows, RestoredTrstChanges, RestoredTrstInvalidation, RestoredTrstState,
+        UnindexedWallets, WalletRecord, WalletRecordReader,
+    },
     merger_graph::GraphRecord,
     MergerGraph, SharedSet, TrstEngine, WalletPortfolio,
 };
@@ -17,15 +20,18 @@ fn invalid(reason: impl ToString) -> StoreError {
 
 // Engine validators use String errors; keep storage and cancellation variants
 // intact when polling crosses that API boundary.
-fn with_engine_poll<T>(poll: &dyn Fn(&'static str) -> Result<(), StoreError>,
+fn with_engine_poll<T>(
+    poll: &dyn Fn(&'static str) -> Result<(), StoreError>,
     read: impl FnOnce(&dyn Fn(&'static str) -> Result<(), String>) -> Result<T, String>,
 ) -> Result<T, StoreError> {
     let failure = std::cell::RefCell::new(None);
-    let result = read(&|stage| poll(stage).map_err(|error| {
-        let message = error.to_string();
-        *failure.borrow_mut() = Some(error);
-        message
-    }));
+    let result = read(&|stage| {
+        poll(stage).map_err(|error| {
+            let message = error.to_string();
+            *failure.borrow_mut() = Some(error);
+            message
+        })
+    });
     match failure.into_inner() {
         Some(error) => Err(error),
         None => result.map_err(invalid),
@@ -33,7 +39,11 @@ fn with_engine_poll<T>(poll: &dyn Fn(&'static str) -> Result<(), StoreError>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum HoldingsFormat { Aggregate, Positional, Stable }
+enum HoldingsFormat {
+    Aggregate,
+    Positional,
+    Stable,
+}
 
 #[derive(Clone)]
 pub(super) struct TrstCache {
@@ -47,10 +57,13 @@ pub(super) struct TrstCache {
 
 impl TrstCache {
     pub(super) fn clean_snapshot(&self, expiry_secs: u64) -> Option<TrstEngine> {
-        (self.format == HoldingsFormat::Stable && self.state.engine().expiry_secs == expiry_secs
-            && self.dirty.is_empty() && self.dirty_owners.is_empty()
-            && self.dirty_origins.is_empty() && self.dirty_invalidations.is_empty())
-            .then(|| self.state.engine().clone())
+        (self.format == HoldingsFormat::Stable
+            && self.state.engine().expiry_secs == expiry_secs
+            && self.dirty.is_empty()
+            && self.dirty_owners.is_empty()
+            && self.dirty_origins.is_empty()
+            && self.dirty_invalidations.is_empty())
+        .then(|| self.state.engine().clone())
     }
 }
 
@@ -79,13 +92,20 @@ impl AuxiliaryCache {
             self.trst = None;
         } else if key.starts_with(holding_rows::PREFIX.as_bytes()) {
             let records = (|| {
-                if cache.format != HoldingsFormat::Stable { return None; }
+                if cache.format != HoldingsFormat::Stable {
+                    return None;
+                }
                 let key = std::str::from_utf8(key).ok()?;
-                before.into_iter().chain(after)
+                before
+                    .into_iter()
+                    .chain(after)
                     .map(|bytes| holding_rows::Row::from_storage_entry(key, bytes).ok())
                     .collect::<Option<Vec<_>>>()
             })();
-            let Some(records) = records else { self.trst = None; return; };
+            let Some(records) = records else {
+                self.trst = None;
+                return;
+            };
             for record in records {
                 let holder = match record {
                     holding_rows::Row::Header { holder, .. }
@@ -125,7 +145,8 @@ impl AuxiliaryCache {
                     WalletRecord::Origin { origin, .. } => {
                         cache.dirty_origins.insert(origin);
                     }
-                    WalletRecord::Invalidation { origin, .. } | WalletRecord::Cause { origin, .. } => {
+                    WalletRecord::Invalidation { origin, .. }
+                    | WalletRecord::Cause { origin, .. } => {
                         cache.dirty_invalidations.insert(origin);
                     }
                 }
@@ -137,39 +158,83 @@ impl AuxiliaryCache {
 impl LmdbWriteTransaction<'_> {
     /// Called only after every journal image matched this writer. Simulate cache
     /// invalidations separately; raw mutations keep their normal invalidation.
-    pub(crate) fn prepare_trst_rewind(&self, changes: &[crate::block_undo::UndoChange]) -> Result<Option<TrstRewind>, StoreError> {
+    pub(crate) fn prepare_trst_rewind(
+        &self,
+        changes: &[crate::block_undo::UndoChange],
+    ) -> Result<Option<TrstRewind>, StoreError> {
         let auxiliary = self.auxiliary_cache.borrow();
-        let Some(cache) = auxiliary.trst.as_ref() else { return Ok(None) };
-        if cache.format != HoldingsFormat::Stable || !cache.dirty.is_empty()
-            || !cache.dirty_owners.is_empty() || !cache.dirty_origins.is_empty() || !cache.dirty_invalidations.is_empty() {
+        let Some(cache) = auxiliary.trst.as_ref() else {
+            return Ok(None);
+        };
+        if cache.format != HoldingsFormat::Stable
+            || !cache.dirty.is_empty()
+            || !cache.dirty_owners.is_empty()
+            || !cache.dirty_origins.is_empty()
+            || !cache.dirty_invalidations.is_empty()
+        {
             return Ok(None);
         }
-        let mut pending = AuxiliaryCache { trst: Some(cache.clone()), ..Default::default() };
+        let mut pending = AuxiliaryCache {
+            trst: Some(cache.clone()),
+            ..Default::default()
+        };
         let mut graph = Vec::new();
-        for change in changes.iter().filter(|change| change.table == UndoTable::Meta) {
-            if change.key.starts_with(GraphRecord::STORAGE_PREFIX.as_bytes()) {
-                if change.before == change.after { continue; }
+        for change in changes
+            .iter()
+            .filter(|change| change.table == UndoTable::Meta)
+        {
+            if change
+                .key
+                .starts_with(GraphRecord::STORAGE_PREFIX.as_bytes())
+            {
+                if change.before == change.after {
+                    continue;
+                }
                 let key = std::str::from_utf8(&change.key).map_err(invalid)?;
-                let decode = |bytes: &[u8]| GraphRecord::from_storage_entry(key, bytes).map_err(invalid);
-                graph.push((change.after.as_deref().map(decode).transpose()?,
-                    change.before.as_deref().map(decode).transpose()?));
+                let decode =
+                    |bytes: &[u8]| GraphRecord::from_storage_entry(key, bytes).map_err(invalid);
+                graph.push((
+                    change.after.as_deref().map(decode).transpose()?,
+                    change.before.as_deref().map(decode).transpose()?,
+                ));
             } else {
-                pending.update_trst(&change.key, change.after.as_deref(), change.before.as_deref());
+                pending.update_trst(
+                    &change.key,
+                    change.after.as_deref(),
+                    change.before.as_deref(),
+                );
             }
         }
-        Ok(pending.trst.filter(|_| !graph.is_empty()).map(|cache| TrstRewind { cache, graph }))
+        Ok(pending
+            .trst
+            .filter(|_| !graph.is_empty())
+            .map(|cache| TrstRewind { cache, graph }))
     }
 
     /// Publish only after the entire raw rewind succeeds. Unsupported graph edits
     /// leave the invalidated cache absent and use ordinary full restoration.
-    pub(crate) fn finish_trst_rewind(&mut self, pending: Option<TrstRewind>) -> Result<(), StoreError> {
-        let Some(pending) = pending else { return Ok(()) };
+    pub(crate) fn finish_trst_rewind(
+        &mut self,
+        pending: Option<TrstRewind>,
+    ) -> Result<(), StoreError> {
+        let Some(pending) = pending else {
+            return Ok(());
+        };
         let changes = self.trst_cache_changes(&pending.cache)?;
-        if let Some(state) = pending.cache.state.retained_graph_rewind(&pending.graph, changes).map_err(invalid)? {
+        if let Some(state) = pending
+            .cache
+            .state
+            .retained_graph_rewind(&pending.graph, changes)
+            .map_err(invalid)?
+        {
             self.validate_pending_bases(&state.engine().merger_graph)?;
             self.auxiliary_cache.get_mut().trst = Some(TrstCache {
-                state, format: HoldingsFormat::Stable, dirty: SharedSet::default(),
-                dirty_owners: SharedSet::default(), dirty_origins: SharedSet::default(), dirty_invalidations: SharedSet::default(),
+                state,
+                format: HoldingsFormat::Stable,
+                dirty: SharedSet::default(),
+                dirty_owners: SharedSet::default(),
+                dirty_origins: SharedSet::default(),
+                dirty_invalidations: SharedSet::default(),
             });
         }
         Ok(())
@@ -217,16 +282,24 @@ impl LmdbWriteTransaction<'_> {
         let successor = {
             let auxiliary = self.auxiliary_cache.borrow();
             match auxiliary.trst.as_ref().filter(|cache| {
-                cache.format == HoldingsFormat::Stable && cache.dirty.is_empty()
-                    && cache.dirty_owners.is_empty() && cache.dirty_origins.is_empty() && cache.dirty_invalidations.is_empty()
+                cache.format == HoldingsFormat::Stable
+                    && cache.dirty.is_empty()
+                    && cache.dirty_owners.is_empty()
+                    && cache.dirty_origins.is_empty()
+                    && cache.dirty_invalidations.is_empty()
             }) {
-                Some(cache) => cache.state.retained_holdings_successor(before, after).map_err(invalid)?,
+                Some(cache) => cache
+                    .state
+                    .retained_holdings_successor(before, after)
+                    .map_err(invalid)?,
                 None => None,
             }
         };
         #[cfg(test)]
         HOLDING_PROBE.with(|slot| {
-            if let Some(parts) = slot.borrow_mut().as_mut() { parts[0] += proof_start.elapsed().as_nanos(); }
+            if let Some(parts) = slot.borrow_mut().as_mut() {
+                parts[0] += proof_start.elapsed().as_nanos();
+            }
         });
         if successor.is_some() {
             // This synchronous CAS sequence already has a validated successor.
@@ -238,8 +311,14 @@ impl LmdbWriteTransaction<'_> {
             holding_rows::visit_delta(owner, old, new, invalid, |old, new| {
                 #[cfg(test)]
                 let encode_start = std::time::Instant::now();
-                let old = old.map(|row| row.storage_entry()).transpose().map_err(invalid)?;
-                let new = new.map(|row| row.storage_entry()).transpose().map_err(invalid)?;
+                let old = old
+                    .map(|row| row.storage_entry())
+                    .transpose()
+                    .map_err(invalid)?;
+                let new = new
+                    .map(|row| row.storage_entry())
+                    .transpose()
+                    .map_err(invalid)?;
                 #[cfg(test)]
                 HOLDING_PROBE.with(|slot| {
                     if let Some(parts) = slot.borrow_mut().as_mut() {
@@ -252,16 +331,24 @@ impl LmdbWriteTransaction<'_> {
         })?;
         after.visit_wallet_metadata_delta(before, |old, new| {
             self.apply_stable_trst_change(
-                old.map(|row| row.storage_entry()).transpose().map_err(invalid)?,
-                new.map(|row| row.storage_entry()).transpose().map_err(invalid)?,
+                old.map(|row| row.storage_entry())
+                    .transpose()
+                    .map_err(invalid)?,
+                new.map(|row| row.storage_entry())
+                    .transpose()
+                    .map_err(invalid)?,
             )
         })?;
         if let Some(state) = successor {
             // The candidate was tied to the clean pre-write cut. Only this
             // synchronous delta's checked writes ran before publication.
             self.auxiliary_cache.get_mut().trst = Some(TrstCache {
-                state, format: HoldingsFormat::Stable, dirty: SharedSet::default(),
-                dirty_owners: SharedSet::default(), dirty_origins: SharedSet::default(), dirty_invalidations: SharedSet::default(),
+                state,
+                format: HoldingsFormat::Stable,
+                dirty: SharedSet::default(),
+                dirty_owners: SharedSet::default(),
+                dirty_origins: SharedSet::default(),
+                dirty_invalidations: SharedSet::default(),
             });
         }
         Ok(())
@@ -271,10 +358,14 @@ impl LmdbWriteTransaction<'_> {
     /// Cache reuse requires a validated successor; otherwise a later read restores
     /// the full state. Abort the transaction on error: earlier rows may be staged.
     pub fn persist_stable_trst_transition(
-        &mut self, before: &TrstEngine, after: &TrstEngine,
+        &mut self,
+        before: &TrstEngine,
+        after: &TrstEngine,
     ) -> Result<(), StoreError> {
         if self.trst_format()? != HoldingsFormat::Stable || !self.uses_graph_records()? {
-            return Err(invalid("combined TRST transition requires stable holdings and graph rows"));
+            return Err(invalid(
+                "combined TRST transition requires stable holdings and graph rows",
+            ));
         }
         if before.merger_graph.shares_storage_with(&after.merger_graph) {
             return self.persist_stable_trst_delta(before, after);
@@ -284,12 +375,22 @@ impl LmdbWriteTransaction<'_> {
         let successor = {
             let auxiliary = self.auxiliary_cache.borrow();
             match auxiliary.trst.as_ref().filter(|cache| {
-                cache.format == HoldingsFormat::Stable && cache.dirty.is_empty()
-                    && cache.dirty_owners.is_empty() && cache.dirty_origins.is_empty() && cache.dirty_invalidations.is_empty()
+                cache.format == HoldingsFormat::Stable
+                    && cache.dirty.is_empty()
+                    && cache.dirty_owners.is_empty()
+                    && cache.dirty_origins.is_empty()
+                    && cache.dirty_invalidations.is_empty()
             }) {
-                Some(cache) => match cache.state.retained_append_successor(before, after).map_err(invalid)? {
+                Some(cache) => match cache
+                    .state
+                    .retained_append_successor(before, after)
+                    .map_err(invalid)?
+                {
                     Some(next) => Some(next),
-                    None => cache.state.retained_revocation_successor(before, after).map_err(invalid)?,
+                    None => cache
+                        .state
+                        .retained_revocation_successor(before, after)
+                        .map_err(invalid)?,
                 },
                 None => None,
             }
@@ -312,8 +413,12 @@ impl LmdbWriteTransaction<'_> {
         });
         if let Some(state) = successor {
             self.auxiliary_cache.get_mut().trst = Some(TrstCache {
-                state, format: HoldingsFormat::Stable, dirty: SharedSet::default(),
-                dirty_owners: SharedSet::default(), dirty_origins: SharedSet::default(), dirty_invalidations: SharedSet::default(),
+                state,
+                format: HoldingsFormat::Stable,
+                dirty: SharedSet::default(),
+                dirty_owners: SharedSet::default(),
+                dirty_origins: SharedSet::default(),
+                dirty_invalidations: SharedSet::default(),
             });
         }
         Ok(())
@@ -324,9 +429,17 @@ impl LmdbWriteTransaction<'_> {
         old: Option<(String, Vec<u8>)>,
         new: Option<(String, Vec<u8>)>,
     ) -> Result<(), StoreError> {
-        let key = new.as_ref().or(old.as_ref())
-            .ok_or_else(|| invalid("empty stable TRST delta"))?.0.as_str();
-        if old.as_ref().zip(new.as_ref()).is_some_and(|(a, b)| a.0 != b.0) {
+        let key = new
+            .as_ref()
+            .or(old.as_ref())
+            .ok_or_else(|| invalid("empty stable TRST delta"))?
+            .0
+            .as_str();
+        if old
+            .as_ref()
+            .zip(new.as_ref())
+            .is_some_and(|(a, b)| a.0 != b.0)
+        {
             return Err(invalid("stable TRST delta changes its primary key"));
         }
         #[cfg(test)]
@@ -336,15 +449,22 @@ impl LmdbWriteTransaction<'_> {
         }
         #[cfg(test)]
         HOLDING_PROBE.with(|slot| {
-            if let Some(parts) = slot.borrow_mut().as_mut() { parts[2] += cas_start.elapsed().as_nanos(); }
+            if let Some(parts) = slot.borrow_mut().as_mut() {
+                parts[2] += cas_start.elapsed().as_nanos();
+            }
         });
         #[cfg(test)]
         let write_start = std::time::Instant::now();
-        let result = if let Some((_, bytes)) = &new { self.put_meta(key, bytes) }
-            else { self.delete_meta(key) };
+        let result = if let Some((_, bytes)) = &new {
+            self.put_meta(key, bytes)
+        } else {
+            self.delete_meta(key)
+        };
         #[cfg(test)]
         HOLDING_PROBE.with(|slot| {
-            if let Some(parts) = slot.borrow_mut().as_mut() { parts[3] += write_start.elapsed().as_nanos(); }
+            if let Some(parts) = slot.borrow_mut().as_mut() {
+                parts[3] += write_start.elapsed().as_nanos();
+            }
         });
         result
     }
@@ -366,23 +486,36 @@ impl LmdbWriteTransaction<'_> {
         }
         let mut write = |key: String, bytes: Vec<u8>| {
             old_keys.remove(&key);
-            if self.get_meta(&key)?.as_deref() != Some(bytes.as_slice()) { self.put_meta(&key, &bytes)?; }
+            if self.get_meta(&key)?.as_deref() != Some(bytes.as_slice()) {
+                self.put_meta(&key, &bytes)?;
+            }
             Ok::<_, StoreError>(())
         };
         for (owner, portfolio) in &engine.wallets {
             holding_rows::visit_delta(owner, None, Some(portfolio), invalid, |_, row| {
-                let (key, bytes) = row.ok_or_else(|| invalid("missing stable replacement row"))?
-                    .storage_entry().map_err(invalid)?;
+                let (key, bytes) = row
+                    .ok_or_else(|| invalid("missing stable replacement row"))?
+                    .storage_entry()
+                    .map_err(invalid)?;
                 write(key, bytes)
             })?;
         }
-        engine.visit_wallet_metadata_delta(&TrstEngine::with_expiry(engine.expiry_secs), |old, new| {
-            if old.is_some() { return Err(invalid("replacement emitted an old metadata row")); }
-            let (key, bytes) = new.ok_or_else(|| invalid("missing replacement metadata row"))?
-                .storage_entry().map_err(invalid)?;
-            write(key, bytes)
-        })?;
-        for key in old_keys { self.delete_meta(&key)?; }
+        engine.visit_wallet_metadata_delta(
+            &TrstEngine::with_expiry(engine.expiry_secs),
+            |old, new| {
+                if old.is_some() {
+                    return Err(invalid("replacement emitted an old metadata row"));
+                }
+                let (key, bytes) = new
+                    .ok_or_else(|| invalid("missing replacement metadata row"))?
+                    .storage_entry()
+                    .map_err(invalid)?;
+                write(key, bytes)
+            },
+        )?;
+        for key in old_keys {
+            self.delete_meta(&key)?;
+        }
         Ok(())
     }
 
@@ -391,7 +524,8 @@ impl LmdbWriteTransaction<'_> {
         owner: &WalletAddress,
         expiry_secs: u64,
     ) -> Result<Option<WalletPortfolio>, StoreError> {
-        self.read_view().read_stable_trst_portfolio(owner, expiry_secs)
+        self.read_view()
+            .read_stable_trst_portfolio(owner, expiry_secs)
     }
 
     pub fn read_merger_graph(&self) -> Result<MergerGraph, StoreError> {
@@ -437,23 +571,20 @@ impl LmdbWriteTransaction<'_> {
         let mut changes = RestoredTrstChanges::default();
         for owner in cache.dirty_owners.iter() {
             let key = WalletRecord::origin_owner_storage_key(owner);
-            let present = if let Some(bytes) =
-                self.undo_value_ref(UndoTable::Meta, key.as_bytes())?
-            {
-                match WalletRecord::from_storage_entry(&key, bytes).map_err(invalid)? {
-                    WalletRecord::OriginOwner(found) if &found == owner => true,
-                    _ => return Err(invalid("TRST owner header key mismatch")),
-                }
-            } else {
-                false
-            };
+            let present =
+                if let Some(bytes) = self.undo_value_ref(UndoTable::Meta, key.as_bytes())? {
+                    match WalletRecord::from_storage_entry(&key, bytes).map_err(invalid)? {
+                        WalletRecord::OriginOwner(found) if &found == owner => true,
+                        _ => return Err(invalid("TRST owner header key mismatch")),
+                    }
+                } else {
+                    false
+                };
             changes.owner_headers.insert(owner.clone(), present);
         }
         for origin in cache.dirty_origins.iter() {
             let key = WalletRecord::origin_storage_key(origin);
-            let owner = if let Some(bytes) =
-                self.undo_value_ref(UndoTable::Meta, key.as_bytes())?
-            {
+            let owner = if let Some(bytes) = self.undo_value_ref(UndoTable::Meta, key.as_bytes())? {
                 match WalletRecord::from_storage_entry(&key, bytes).map_err(invalid)? {
                     WalletRecord::Origin {
                         owner,
@@ -468,19 +599,34 @@ impl LmdbWriteTransaction<'_> {
         }
         for origin in cache.dirty_invalidations.iter() {
             let (key, prefix) = WalletRecord::invalidation_storage_keys(origin);
-            let header = self.undo_value_ref(UndoTable::Meta, key.as_bytes())?
-                .map(|bytes| WalletRecord::from_storage_entry(&key, bytes).map_err(invalid)).transpose()?;
+            let header = self
+                .undo_value_ref(UndoTable::Meta, key.as_bytes())?
+                .map(|bytes| WalletRecord::from_storage_entry(&key, bytes).map_err(invalid))
+                .transpose()?;
             let mut causes = std::collections::HashSet::new();
             for row in self.checkpoint_metadata_entries(prefix.as_bytes())? {
                 let (key, bytes) = row?;
-                match WalletRecord::from_storage_entry(std::str::from_utf8(key).map_err(invalid)?, bytes).map_err(invalid)? {
-                    WalletRecord::Cause { origin: found, cause } if found == *origin && causes.insert(cause) => {},
+                match WalletRecord::from_storage_entry(
+                    std::str::from_utf8(key).map_err(invalid)?,
+                    bytes,
+                )
+                .map_err(invalid)?
+                {
+                    WalletRecord::Cause {
+                        origin: found,
+                        cause,
+                    } if found == *origin && causes.insert(cause) => {}
                     _ => return Err(invalid("invalid scoped outcome cause")),
                 }
             }
             let value = match header {
-                Some(WalletRecord::Invalidation { origin: found, wallet_revoked }) if found == *origin =>
-                    Some(RestoredTrstInvalidation { wallet_revoked, causes }),
+                Some(WalletRecord::Invalidation {
+                    origin: found,
+                    wallet_revoked,
+                }) if found == *origin => Some(RestoredTrstInvalidation {
+                    wallet_revoked,
+                    causes,
+                }),
                 None if causes.is_empty() => None,
                 _ => return Err(invalid("outcome causes lack their matching header")),
             };
@@ -500,14 +646,23 @@ impl LmdbWriteTransaction<'_> {
     /// This refreshes the current-state cache but writes no records and does not
     /// install the candidate in that cache.
     pub fn rebase_trst_payment(
-        &self, before: &TrstEngine, after: &TrstEngine,
-        read_wallets: &[WalletAddress], expiry_secs: u64,
+        &self,
+        before: &TrstEngine,
+        after: &TrstEngine,
+        read_wallets: &[WalletAddress],
+        expiry_secs: u64,
     ) -> Result<Option<TrstEngine>, StoreError> {
         self.read_trst_engine(expiry_secs)?;
         let auxiliary = self.auxiliary_cache.borrow();
-        let cache = auxiliary.trst.as_ref().ok_or_else(|| invalid("TRST rebase cache missing"))?;
-        cache.state.rebase_payment(before, after, read_wallets)
-            .map(|state| state.map(RestoredTrstState::into_engine)).map_err(invalid)
+        let cache = auxiliary
+            .trst
+            .as_ref()
+            .ok_or_else(|| invalid("TRST rebase cache missing"))?;
+        cache
+            .state
+            .rebase_payment(before, after, read_wallets)
+            .map(|state| state.map(RestoredTrstState::into_engine))
+            .map_err(invalid)
     }
 
     /// Read combined holdings and graph state, including this writer's changes.
@@ -526,7 +681,8 @@ impl LmdbWriteTransaction<'_> {
         if let Some(cache) = auxiliary.trst.as_mut() {
             if !cache.dirty.is_empty()
                 || !cache.dirty_owners.is_empty()
-                || !cache.dirty_origins.is_empty() || !cache.dirty_invalidations.is_empty()
+                || !cache.dirty_origins.is_empty()
+                || !cache.dirty_invalidations.is_empty()
             {
                 let changes = self.trst_cache_changes(cache)?;
                 cache.state.replace_records(changes).map_err(invalid)?;
@@ -538,9 +694,13 @@ impl LmdbWriteTransaction<'_> {
             return Ok(cache.state.engine().clone());
         }
         let format = self.trst_format()?;
-        let wallets = self.read_view().read_trst_wallets_for_restoration(expiry_secs, &|_| Ok(()))?;
+        let wallets = self
+            .read_view()
+            .read_trst_wallets_for_restoration(expiry_secs, &|_| Ok(()))?;
         let graph = self.read_merger_graph()?;
-        let mut state = wallets.restore_with_poll(graph, &|_| Ok(())).map_err(invalid)?;
+        let mut state = wallets
+            .restore_with_poll(graph, &|_| Ok(()))
+            .map_err(invalid)?;
         if format == HoldingsFormat::Stable {
             state.retain_portfolio_indexes().map_err(invalid)?;
         }
@@ -550,7 +710,8 @@ impl LmdbWriteTransaction<'_> {
             format,
             dirty: SharedSet::default(),
             dirty_owners: SharedSet::default(),
-            dirty_origins: SharedSet::default(), dirty_invalidations: SharedSet::default(),
+            dirty_origins: SharedSet::default(),
+            dirty_invalidations: SharedSet::default(),
         });
         Ok(engine)
     }
@@ -602,7 +763,10 @@ impl crate::read_view::LedgerReadView<'_> {
     fn trst_format(&self) -> Result<HoldingsFormat, StoreError> {
         let marker = self.get_meta(HOLDINGS_FORMAT)?;
         if marker.as_deref() == Some(&[2]) {
-            if self.undo_value_ref(UndoTable::Meta, TrstEngine::meta_key().as_bytes())?.is_some() {
+            if self
+                .undo_value_ref(UndoTable::Meta, TrstEngine::meta_key().as_bytes())?
+                .is_some()
+            {
                 return Err(invalid("mixed aggregate and stable TRST state"));
             }
             for kind in ["0/", "1/"] {
@@ -614,12 +778,25 @@ impl crate::read_view::LedgerReadView<'_> {
             }
             return Ok(HoldingsFormat::Stable);
         }
-        if let Some(row) = self.checkpoint_metadata_entries(holding_rows::PREFIX.as_bytes())?.next() {
+        if let Some(row) = self
+            .checkpoint_metadata_entries(holding_rows::PREFIX.as_bytes())?
+            .next()
+        {
             row?;
             return Err(invalid("stable TRST holdings require their format marker"));
         }
-        self.economic_row_format(HOLDINGS_FORMAT, TrstEngine::meta_key(), WalletRecord::STORAGE_PREFIX)
-            .map(|rows| if rows { HoldingsFormat::Positional } else { HoldingsFormat::Aggregate })
+        self.economic_row_format(
+            HOLDINGS_FORMAT,
+            TrstEngine::meta_key(),
+            WalletRecord::STORAGE_PREFIX,
+        )
+        .map(|rows| {
+            if rows {
+                HoldingsFormat::Positional
+            } else {
+                HoldingsFormat::Aggregate
+            }
+        })
     }
 
     pub fn uses_graph_records(&self) -> Result<bool, StoreError> {
@@ -630,17 +807,25 @@ impl crate::read_view::LedgerReadView<'_> {
         self.read_trst_holdings_with_poll(expiry_secs, &|_| Ok(()))
     }
 
-    fn read_trst_holdings_with_poll(&self, expiry_secs: u64,
-        poll: &dyn Fn(&'static str) -> Result<(), StoreError>) -> Result<TrstEngine, StoreError> {
+    fn read_trst_holdings_with_poll(
+        &self,
+        expiry_secs: u64,
+        poll: &dyn Fn(&'static str) -> Result<(), StoreError>,
+    ) -> Result<TrstEngine, StoreError> {
         let wallets = self.read_trst_wallets_for_restoration(expiry_secs, poll)?;
         with_engine_poll(poll, |poll| wallets.into_engine_with_poll(poll))
     }
 
-    fn read_trst_wallets_for_restoration(&self, expiry_secs: u64,
-        poll: &dyn Fn(&'static str) -> Result<(), StoreError>) -> Result<UnindexedWallets, StoreError> {
+    fn read_trst_wallets_for_restoration(
+        &self,
+        expiry_secs: u64,
+        poll: &dyn Fn(&'static str) -> Result<(), StoreError>,
+    ) -> Result<UnindexedWallets, StoreError> {
         poll("storage:trst-holdings")?;
         let format = self.trst_format()?;
-        if format == HoldingsFormat::Stable { return self.read_stable_trst_holdings(expiry_secs, poll); }
+        if format == HoldingsFormat::Stable {
+            return self.read_stable_trst_holdings(expiry_secs, poll);
+        }
         if format == HoldingsFormat::Aggregate {
             let bytes = self
                 .undo_value_ref(UndoTable::Meta, TrstEngine::meta_key().as_bytes())?
@@ -651,8 +836,15 @@ impl crate::read_view::LedgerReadView<'_> {
         for row in self.checkpoint_metadata_entries(WalletRecord::STORAGE_PREFIX.as_bytes())? {
             poll("storage:trst-record")?;
             let (key, bytes) = row?;
-            reader.push(WalletRecord::from_storage_entry(
-                std::str::from_utf8(key).map_err(invalid)?, bytes).map_err(invalid)?).map_err(invalid)?;
+            reader
+                .push(
+                    WalletRecord::from_storage_entry(
+                        std::str::from_utf8(key).map_err(invalid)?,
+                        bytes,
+                    )
+                    .map_err(invalid)?,
+                )
+                .map_err(invalid)?;
         }
         poll("storage:trst-holdings-finish")?;
         with_engine_poll(poll, |poll| reader.finish_for_restoration_with_poll(poll))
@@ -666,8 +858,12 @@ impl crate::read_view::LedgerReadView<'_> {
         self.read_stable_trst_portfolio_with_poll(owner, expiry_secs, &|_| Ok(()))
     }
 
-    fn read_stable_trst_portfolio_with_poll(&self, owner: &WalletAddress, expiry_secs: u64,
-        poll: &dyn Fn(&'static str) -> Result<(), StoreError>) -> Result<Option<WalletPortfolio>, StoreError> {
+    fn read_stable_trst_portfolio_with_poll(
+        &self,
+        owner: &WalletAddress,
+        expiry_secs: u64,
+        poll: &dyn Fn(&'static str) -> Result<(), StoreError>,
+    ) -> Result<Option<WalletPortfolio>, StoreError> {
         poll("storage:trst-portfolio")?;
         let (key, prefix) = holding_rows::portfolio_keys(owner);
         let rows = self.checkpoint_metadata_entries(prefix.as_bytes())?;
@@ -682,45 +878,82 @@ impl crate::read_view::LedgerReadView<'_> {
         // The holding decoder uses String errors. Preserve the original storage
         // or cancellation error when crossing that iterator boundary.
         let mut failure = None;
-        let restored = with_engine_poll(poll, |engine_poll| holding_rows::restore_with_poll(owner, header, rows.map(|row| {
-            let result = (|| {
-                poll("storage:trst-holding")?;
-                let (key, bytes) = row?;
-                holding_rows::Row::from_storage_entry(std::str::from_utf8(key).map_err(invalid)?, bytes)
-                    .map_err(invalid)
-            })();
-            result.map_err(|error| { let message = error.to_string(); failure = Some(error); message })
-        }), expiry_secs, engine_poll));
-        if let Some(error) = failure { return Err(error); }
+        let restored = with_engine_poll(poll, |engine_poll| {
+            holding_rows::restore_with_poll(
+                owner,
+                header,
+                rows.map(|row| {
+                    let result = (|| {
+                        poll("storage:trst-holding")?;
+                        let (key, bytes) = row?;
+                        holding_rows::Row::from_storage_entry(
+                            std::str::from_utf8(key).map_err(invalid)?,
+                            bytes,
+                        )
+                        .map_err(invalid)
+                    })();
+                    result.map_err(|error| {
+                        let message = error.to_string();
+                        failure = Some(error);
+                        message
+                    })
+                }),
+                expiry_secs,
+                engine_poll,
+            )
+        });
+        if let Some(error) = failure {
+            return Err(error);
+        }
         let portfolio = restored?;
         poll("storage:trst-portfolio-finished")?;
         Ok(Some(portfolio))
     }
 
-    fn read_stable_trst_holdings(&self, expiry_secs: u64,
-        poll: &dyn Fn(&'static str) -> Result<(), StoreError>) -> Result<UnindexedWallets, StoreError> {
+    fn read_stable_trst_holdings(
+        &self,
+        expiry_secs: u64,
+        poll: &dyn Fn(&'static str) -> Result<(), StoreError>,
+    ) -> Result<UnindexedWallets, StoreError> {
         let mut reader = WalletRecordReader::new(expiry_secs);
         let mut restored_rows = 0usize;
         let header_prefix = format!("{}0/", holding_rows::PREFIX);
         for row in self.checkpoint_metadata_entries(header_prefix.as_bytes())? {
             poll("storage:trst-header")?;
             let (key, bytes) = row?;
-            let header = holding_rows::Row::from_storage_entry(std::str::from_utf8(key).map_err(invalid)?, bytes)
-                .map_err(invalid)?;
+            let header = holding_rows::Row::from_storage_entry(
+                std::str::from_utf8(key).map_err(invalid)?,
+                bytes,
+            )
+            .map_err(invalid)?;
             let holding_rows::Row::Header { holder, .. } = header else {
                 return Err(invalid("stable TRST header namespace contains a holding"));
             };
-            let portfolio = self.read_stable_trst_portfolio_with_poll(&holder, expiry_secs, poll)?
-                .ok_or_else(|| invalid("stable TRST portfolio disappeared from pinned transaction"))?;
-            restored_rows = restored_rows.checked_add(1).and_then(|n| n.checked_add(portfolio.tokens.len()))
+            let portfolio = self
+                .read_stable_trst_portfolio_with_poll(&holder, expiry_secs, poll)?
+                .ok_or_else(|| {
+                    invalid("stable TRST portfolio disappeared from pinned transaction")
+                })?;
+            restored_rows = restored_rows
+                .checked_add(1)
+                .and_then(|n| n.checked_add(portfolio.tokens.len()))
                 .ok_or_else(|| invalid("stable TRST row count overflow"))?;
-            reader.push(WalletRecord::Portfolio { holder: holder.clone(),
-                cached_transferable: portfolio.cached_transferable,
-                earliest_expiry: portfolio.earliest_expiry }).map_err(invalid)?;
+            reader
+                .push(WalletRecord::Portfolio {
+                    holder: holder.clone(),
+                    cached_transferable: portfolio.cached_transferable,
+                    earliest_expiry: portfolio.earliest_expiry,
+                })
+                .map_err(invalid)?;
             for (position, token) in portfolio.into_canonical().tokens.into_iter().enumerate() {
                 poll("storage:trst-restored-holding")?;
-                reader.push(WalletRecord::Holding { holder: holder.clone(), position: position as u64,
-                    token: Box::new(token) }).map_err(invalid)?;
+                reader
+                    .push(WalletRecord::Holding {
+                        holder: holder.clone(),
+                        position: position as u64,
+                        token: Box::new(token),
+                    })
+                    .map_err(invalid)?;
             }
         }
         // Compare the stored row count with the rows reconstructed above to catch
@@ -729,15 +962,23 @@ impl crate::read_view::LedgerReadView<'_> {
         for row in self.checkpoint_metadata_entries(holding_rows::PREFIX.as_bytes())? {
             poll("storage:trst-inventory")?;
             row?;
-            stored_rows = stored_rows.checked_add(1).ok_or_else(|| invalid("stable TRST row count overflow"))?;
+            stored_rows = stored_rows
+                .checked_add(1)
+                .ok_or_else(|| invalid("stable TRST row count overflow"))?;
         }
-        if restored_rows != stored_rows { return Err(invalid("unclaimed stable TRST rows")); }
+        if restored_rows != stored_rows {
+            return Err(invalid("unclaimed stable TRST rows"));
+        }
         for row in self.checkpoint_metadata_entries(WalletRecord::STORAGE_PREFIX.as_bytes())? {
             poll("storage:trst-record")?;
             let (key, bytes) = row?;
-            let record = WalletRecord::from_storage_entry(std::str::from_utf8(key).map_err(invalid)?, bytes)
-                .map_err(invalid)?;
-            if matches!(record, WalletRecord::Portfolio { .. } | WalletRecord::Holding { .. }) {
+            let record =
+                WalletRecord::from_storage_entry(std::str::from_utf8(key).map_err(invalid)?, bytes)
+                    .map_err(invalid)?;
+            if matches!(
+                record,
+                WalletRecord::Portfolio { .. } | WalletRecord::Holding { .. }
+            ) {
                 return Err(invalid("mixed positional and stable TRST holdings"));
             }
             reader.push(record).map_err(invalid)?;
@@ -750,8 +991,10 @@ impl crate::read_view::LedgerReadView<'_> {
         self.read_merger_graph_with_poll(&|_| Ok(()))
     }
 
-    fn read_merger_graph_with_poll(&self, poll: &dyn Fn(&'static str) -> Result<(), StoreError>)
-        -> Result<MergerGraph, StoreError> {
+    fn read_merger_graph_with_poll(
+        &self,
+        poll: &dyn Fn(&'static str) -> Result<(), StoreError>,
+    ) -> Result<MergerGraph, StoreError> {
         poll("storage:trst-graph")?;
         if !self.uses_graph_records()? {
             let bytes = self
@@ -763,8 +1006,15 @@ impl crate::read_view::LedgerReadView<'_> {
         for row in self.checkpoint_metadata_entries(GraphRecord::STORAGE_PREFIX.as_bytes())? {
             poll("storage:trst-graph-record")?;
             let (key, bytes) = row?;
-            reader.push(GraphRecord::from_storage_entry(
-                std::str::from_utf8(key).map_err(invalid)?, bytes).map_err(invalid)?).map_err(invalid)?;
+            reader
+                .push(
+                    GraphRecord::from_storage_entry(
+                        std::str::from_utf8(key).map_err(invalid)?,
+                        bytes,
+                    )
+                    .map_err(invalid)?,
+                )
+                .map_err(invalid)?;
         }
         poll("storage:trst-graph-finish")?;
         with_engine_poll(poll, |poll| reader.finish_with_poll(poll))
@@ -780,29 +1030,43 @@ impl crate::read_view::LedgerReadView<'_> {
     /// Fully validate the captured state without preparing portfolio indexes for
     /// future writes. Comparison and clock normalization can use the raw holdings,
     /// avoiding the stable format's additional O(t log t) cold index construction.
-    pub fn read_trst_engine_for_comparison(&self, expiry_secs: u64) -> Result<TrstEngine, StoreError> {
+    pub fn read_trst_engine_for_comparison(
+        &self,
+        expiry_secs: u64,
+    ) -> Result<TrstEngine, StoreError> {
         self.read_trst_engine_for_comparison_with_poll(expiry_secs, &|_| Ok(()))
     }
 
     /// Poll storage traversal and private validation/index construction. Legacy
     /// aggregate decoding and destruction remain synchronous; no hard time bound.
-    pub fn read_trst_engine_for_comparison_with_poll(&self, expiry_secs: u64,
-        poll: &dyn Fn(&'static str) -> Result<(), StoreError>) -> Result<TrstEngine, StoreError> {
+    pub fn read_trst_engine_for_comparison_with_poll(
+        &self,
+        expiry_secs: u64,
+        poll: &dyn Fn(&'static str) -> Result<(), StoreError>,
+    ) -> Result<TrstEngine, StoreError> {
         self.restore_trst_engine(expiry_secs, false, poll)
     }
 
-    fn restore_trst_engine(&self, expiry_secs: u64, retain_indexes: bool,
-        poll: &dyn Fn(&'static str) -> Result<(), StoreError>) -> Result<TrstEngine, StoreError> {
+    fn restore_trst_engine(
+        &self,
+        expiry_secs: u64,
+        retain_indexes: bool,
+        poll: &dyn Fn(&'static str) -> Result<(), StoreError>,
+    ) -> Result<TrstEngine, StoreError> {
         let format = self.trst_format()?;
         let wallets = self.read_trst_wallets_for_restoration(expiry_secs, poll)?;
         let graph = self.read_merger_graph_with_poll(poll)?;
         poll("storage:trst-validation")?;
         let engine = if retain_indexes {
             let mut state = with_engine_poll(poll, |poll| wallets.restore_with_poll(graph, poll))?;
-            if format == HoldingsFormat::Stable { state.retain_portfolio_indexes().map_err(invalid)?; }
+            if format == HoldingsFormat::Stable {
+                state.retain_portfolio_indexes().map_err(invalid)?;
+            }
             state.into_engine()
         } else {
-            with_engine_poll(poll, |poll| wallets.restore_for_comparison_with_poll(graph, poll))?
+            with_engine_poll(poll, |poll| {
+                wallets.restore_for_comparison_with_poll(graph, poll)
+            })?
         };
         poll("storage:trst-restored")?;
         Ok(engine)

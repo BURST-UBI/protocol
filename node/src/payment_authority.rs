@@ -205,7 +205,10 @@ pub(crate) fn initialize(
             .advance(event.certificate(), event.next_roster().clone())
             .map_err(invalid)?;
         if storage::read(store)?
-            != Some(authority_bytes(&anchor, event.certificate().checkpoint.cutoff)?)
+            != Some(authority_bytes(
+                &anchor,
+                event.certificate().checkpoint.cutoff,
+            )?)
         {
             return Err(invalid(
                 "installed payment authority differs from certified history",

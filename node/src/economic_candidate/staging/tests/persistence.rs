@@ -14,8 +14,15 @@ fn stable_merge_candidate_retains_validated_graph_and_holdings() {
     let holder = initial.wallets.keys().next().unwrap().clone();
     let first = initial.wallets[&holder].tokens[0].id;
     let second = TxHash::new([77; 32]);
-    let extra = initial.mint(second, holder.clone(), 20, holder.clone(),
-        Timestamp::new(100)).unwrap();
+    let extra = initial
+        .mint(
+            second,
+            holder.clone(),
+            20,
+            holder.clone(),
+            Timestamp::new(100),
+        )
+        .unwrap();
     initial.track_token(extra);
     let period = initial.expiry_secs;
     let mut batch = store.tx_begin_write().unwrap();
@@ -27,23 +34,37 @@ fn stable_merge_candidate_retains_validated_graph_and_holdings() {
     let after = staged.trst_mut();
     let ids = [first, second];
     let inputs = after.wallets[&holder].select_merge_inputs(&ids).unwrap();
-    let merged = after.merge(&inputs, holder.clone(), TxHash::new([78; 32]),
-        Timestamp::new(101)).unwrap();
+    let merged = after
+        .merge(
+            &inputs,
+            holder.clone(),
+            TxHash::new([78; 32]),
+            Timestamp::new(101),
+        )
+        .unwrap();
     after.bulk_untrack(&holder, &ids.into_iter().collect());
     after.track_token(merged);
     let expected = after.clone();
     let mut batch = store.tx_begin_write().unwrap();
     staged.persist(&mut batch).unwrap();
     let cached = batch.read_trst_engine(period).unwrap();
-    assert!(std::ptr::eq(&*cached.wallets[&holder], &*expected.wallets[&holder]));
-    assert!(cached.merger_graph.shares_storage_with(&expected.merger_graph));
+    assert!(std::ptr::eq(
+        &*cached.wallets[&holder],
+        &*expected.wallets[&holder]
+    ));
+    assert!(cached
+        .merger_graph
+        .shares_storage_with(&expected.merger_graph));
     batch.commit().unwrap();
     drop(store);
     let store = LmdbStore::open(directory.path(), 32, 4 * 1024 * 1024).unwrap();
     let batch = store.tx_begin_write().unwrap();
     let restored = batch.read_trst_engine(period).unwrap();
     assert_eq!(restored.save_wallets(), expected.save_wallets());
-    assert_eq!(restored.merger_graph.to_bytes(), expected.merger_graph.to_bytes());
+    assert_eq!(
+        restored.merger_graph.to_bytes(),
+        expected.merger_graph.to_bytes()
+    );
 }
 
 fn stored_brn(store: &LmdbStore) -> StoredBrn {
@@ -54,7 +75,12 @@ fn stored_brn(store: &LmdbStore) -> StoredBrn {
         wallets,
         brn.get_meta(b"rate_history").unwrap().unwrap_or_else(|| {
             let snapshot = brn.read_snapshot().unwrap();
-            bincode::serialize(&burst_brn::rate_storage::read_snapshot(snapshot.as_ref()).unwrap().unwrap()).unwrap()
+            bincode::serialize(
+                &burst_brn::rate_storage::read_snapshot(snapshot.as_ref())
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap()
         }),
         brn.get_meta(b"next_stake_id").unwrap().unwrap(),
     )
@@ -142,7 +168,8 @@ fn brn_delta_matches_full_persistence_and_journals_insert_update_delete() {
     candidate
         .apply_rate_change(2_000_000, Timestamp::new(200))
         .unwrap();
-    let expected_rate_row = burst_brn::rate_storage::row_value(candidate.rate_history.segments().last().unwrap());
+    let expected_rate_row =
+        burst_brn::rate_storage::row_value(candidate.rate_history.segments().last().unwrap());
     let expected_directory = tempfile::tempdir().unwrap();
     let expected = LmdbStore::open(expected_directory.path(), 32, 4 * 1024 * 1024).unwrap();
     let mut batch = expected.tx_begin_write().unwrap();
@@ -163,14 +190,32 @@ fn brn_delta_matches_full_persistence_and_journals_insert_update_delete() {
         "only three wallets, allocator, rate count and appended rate row changed"
     );
     let rate_key = burst_brn::rate_storage::row_key(brn.rate_history.segments().len() as u64);
-    let metadata: std::collections::BTreeSet<_> = undo.changes.iter()
+    let metadata: std::collections::BTreeSet<_> = undo
+        .changes
+        .iter()
         .filter(|change| change.table == UndoTable::BrnMeta)
-        .map(|change| change.key.clone()).collect();
-    assert_eq!(metadata, [b"next_stake_id".to_vec(), burst_brn::rate_storage::HEADER.to_vec(), rate_key.clone()]
-        .into_iter().collect());
-    let appended = undo.changes.iter().find(|change| change.table == UndoTable::BrnMeta && change.key == rate_key).unwrap();
+        .map(|change| change.key.clone())
+        .collect();
+    assert_eq!(
+        metadata,
+        [
+            b"next_stake_id".to_vec(),
+            burst_brn::rate_storage::HEADER.to_vec(),
+            rate_key.clone()
+        ]
+        .into_iter()
+        .collect()
+    );
+    let appended = undo
+        .changes
+        .iter()
+        .find(|change| change.table == UndoTable::BrnMeta && change.key == rate_key)
+        .unwrap();
     assert!(appended.before.is_none());
-    assert_eq!(appended.after.as_deref(), Some(expected_rate_row.as_slice()));
+    assert_eq!(
+        appended.after.as_deref(),
+        Some(expected_rate_row.as_slice())
+    );
     let deletion = undo
         .changes
         .iter()
@@ -215,8 +260,11 @@ fn brn_delta_detects_release_contents_and_aborts_all_writes_on_failure() {
         let mut staged = StagedEngines::new(&brn, &trst);
         let candidate = staged.brn_mut();
         let wallet = candidate.get_wallet_mut(&block.account).unwrap();
-        let mut releases: std::collections::BTreeMap<_, _> = wallet.pending_releases.iter()
-            .map(|(key, value)| (*key, value.clone())).collect();
+        let mut releases: std::collections::BTreeMap<_, _> = wallet
+            .pending_releases
+            .iter()
+            .map(|(key, value)| (*key, value.clone()))
+            .collect();
         let release = releases.get_mut(&outcome).unwrap();
         match field {
             0 => release.amount += 1,

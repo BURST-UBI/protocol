@@ -1,4 +1,4 @@
-use super::governance_certified::{wait_for_installation, stop};
+use super::governance_certified::{stop, wait_for_installation};
 use super::*;
 use burst_governance::{
     signing_delegation::view::{Direction, Query},
@@ -107,7 +107,9 @@ async fn desktop_journey(constitution: bool, parameter_authoring: bool) {
         workers.push((
             node.shutdown.clone(),
             tokio::spawn(async move {
-                node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+                node.start_with_services(burst_daemon::start_public_services)
+                    .await
+                    .unwrap();
                 node.stop().await.unwrap();
             }),
         ));
@@ -303,7 +305,9 @@ async fn desktop_journey(constitution: bool, parameter_authoring: bool) {
         workers.push((
             node.shutdown.clone(),
             tokio::spawn(async move {
-                node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+                node.start_with_services(burst_daemon::start_public_services)
+                    .await
+                    .unwrap();
                 node.stop().await.unwrap();
             }),
         ));

@@ -132,10 +132,12 @@ pub(crate) fn settle_panel_deadline_candidate(
     Ok(absent)
 }
 
-
 #[cfg(test)]
 fn stage_time(stage: &str, started: std::time::Instant) {
     if std::env::var_os("BURST_DEADLINE_STAGE_DIAGNOSTIC").is_some() {
-        println!("signed_deadline_stage stage={stage} elapsed_ns={}", started.elapsed().as_nanos());
+        println!(
+            "signed_deadline_stage stage={stage} elapsed_ns={}",
+            started.elapsed().as_nanos()
+        );
     }
 }

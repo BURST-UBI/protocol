@@ -118,8 +118,17 @@ mod tests {
         use std::time::{Duration, Instant};
         let hash = BlockHash::new([19; 32]);
         let generator = WorkGenerator;
-        assert!(generator.generate_until(&hash, u64::MAX, &AtomicBool::new(true), Instant::now() + Duration::from_secs(1)).is_err());
-        assert!(generator.generate_until(&hash, u64::MAX, &AtomicBool::new(false), Instant::now()).is_err());
+        assert!(generator
+            .generate_until(
+                &hash,
+                u64::MAX,
+                &AtomicBool::new(true),
+                Instant::now() + Duration::from_secs(1)
+            )
+            .is_err());
+        assert!(generator
+            .generate_until(&hash, u64::MAX, &AtomicBool::new(false), Instant::now())
+            .is_err());
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -128,8 +137,12 @@ mod tests {
         use std::sync::atomic::AtomicBool;
         use std::time::{Duration, Instant};
         let start = Instant::now();
-        let result = WorkGenerator.generate_until(&BlockHash::new([19; 32]), u64::MAX,
-            &AtomicBool::new(false), start + Duration::from_millis(10));
+        let result = WorkGenerator.generate_until(
+            &BlockHash::new([19; 32]),
+            u64::MAX,
+            &AtomicBool::new(false),
+            start + Duration::from_millis(10),
+        );
         assert!(result.is_err());
         assert!(start.elapsed() < Duration::from_secs(2));
     }
@@ -142,11 +155,7 @@ mod tests {
 
         let nonce = generator.generate(&block_hash, min_difficulty).unwrap();
 
-        assert!(crate::validate_work(
-            &block_hash,
-            nonce.0,
-            min_difficulty
-        ));
+        assert!(crate::validate_work(&block_hash, nonce.0, min_difficulty));
     }
 
     #[test]
@@ -155,11 +164,7 @@ mod tests {
         let block_hash = BlockHash::new([0u8; 32]);
         let min_difficulty = 0;
 
-        assert!(crate::validate_work(
-            &block_hash,
-            0,
-            min_difficulty
-        ));
+        assert!(crate::validate_work(&block_hash, 0, min_difficulty));
 
         let nonce = generator.generate(&block_hash, min_difficulty).unwrap();
         assert_eq!(nonce.0, 0);
@@ -172,25 +177,12 @@ mod tests {
         let nonce = 12345;
         let work_value = crate::work_value(&block_hash, nonce);
 
-        assert!(crate::validate_work(
-            &block_hash,
-            nonce,
-            work_value
-        ));
+        assert!(crate::validate_work(&block_hash, nonce, work_value));
 
         if work_value > 0 {
-            assert!(crate::validate_work(
-                &block_hash,
-                nonce,
-                work_value - 1
-            ));
+            assert!(crate::validate_work(&block_hash, nonce, work_value - 1));
         }
 
-        assert!(!crate::validate_work(
-            &block_hash,
-            nonce,
-            work_value + 1
-        ));
+        assert!(!crate::validate_work(&block_hash, nonce, work_value + 1));
     }
-
 }

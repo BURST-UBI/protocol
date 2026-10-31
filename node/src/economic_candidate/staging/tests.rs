@@ -1,5 +1,5 @@
 use super::*;
-use crate::{economic_candidate, genesis_state, block_economics::EconomicResult, ledger_updater};
+use crate::{block_economics::EconomicResult, economic_candidate, genesis_state, ledger_updater};
 use burst_brn::BrnWalletState;
 use burst_ledger::BlockType;
 use burst_store::{account::AccountInfo, meta::MetaStore, pending::PendingInfo};
@@ -270,8 +270,7 @@ fn account_only_preparation_cost() {
             ledger_updater::persist_economics(&mut batch, &brn, &trst).unwrap();
             if rows {
                 crate::trst_storage::stage_rows_for_test(&mut batch, &trst).unwrap();
-                crate::graph_storage::stage_rows_for_test(&mut batch, &trst.merger_graph)
-                    .unwrap();
+                crate::graph_storage::stage_rows_for_test(&mut batch, &trst.merger_graph).unwrap();
             }
             batch.commit().unwrap();
             for (mode, label) in ["full publication", "borrowed", "restored + borrowed"]
@@ -294,7 +293,9 @@ fn account_only_preparation_cost() {
                         let state = crate::payment_transition::restore(&batch, &params).unwrap();
                         let elapsed = start.elapsed();
                         restore_time += elapsed;
-                        if iteration == 1 { first_restore = elapsed; }
+                        if iteration == 1 {
+                            first_restore = elapsed;
+                        }
                         assert_eq!(state.brn.wallets.len(), brn.wallets.len());
                         assert!(state.trst.wallet_snapshot_eq(&trst));
                         Some(state)
@@ -363,7 +364,9 @@ fn account_only_preparation_cost() {
                 portfolio.cached_transferable += 1;
                 let mut batch = store.tx_begin_write().unwrap();
                 let hash = BlockHash::new([100 + iteration; 32]);
-                batch.begin_block_undo(hash, block.account.clone(), 1).unwrap();
+                batch
+                    .begin_block_undo(hash, block.account.clone(), 1)
+                    .unwrap();
                 let start = Instant::now();
                 crate::trst_storage::persist_delta(&mut batch, &previous, &next).unwrap();
                 writes += start.elapsed();
@@ -373,7 +376,17 @@ fn account_only_preparation_cost() {
                 assert!(restored.trst.wallet_snapshot_eq(&next));
                 batch.put_meta("cost-probe", &[iteration]).unwrap();
                 batch.commit().unwrap();
-                assert_eq!(store.tx_begin_write().unwrap().block_undo(&hash).unwrap().unwrap().changes.len(), if rows { 3 } else { 2 });
+                assert_eq!(
+                    store
+                        .tx_begin_write()
+                        .unwrap()
+                        .block_undo(&hash)
+                        .unwrap()
+                        .unwrap()
+                        .changes
+                        .len(),
+                    if rows { 3 } else { 2 }
+                );
                 previous = next;
             }
             eprintln!("{count} portfolios, rows={rows}, one portfolio refresh: writes={:?}, restore={:?} (mean of 5; storage diagnostic only)", writes / 5, reads / 5);
@@ -382,12 +395,23 @@ fn account_only_preparation_cost() {
                 let mut reads = std::time::Duration::ZERO;
                 for iteration in 1..=5u8 {
                     let mut next = previous.clone();
-                    let owner = burst_types::WalletAddress::new(format!("brst_registry_probe_{iteration}"));
-                    let token = next.mint(TxHash::new([200 + iteration; 32]), owner.clone(), 1, owner, Timestamp::new(100)).unwrap();
+                    let owner =
+                        burst_types::WalletAddress::new(format!("brst_registry_probe_{iteration}"));
+                    let token = next
+                        .mint(
+                            TxHash::new([200 + iteration; 32]),
+                            owner.clone(),
+                            1,
+                            owner,
+                            Timestamp::new(100),
+                        )
+                        .unwrap();
                     next.track_token(token);
                     let mut batch = store.tx_begin_write().unwrap();
                     let hash = BlockHash::new([150 + iteration; 32]);
-                    batch.begin_block_undo(hash, block.account.clone(), 1).unwrap();
+                    batch
+                        .begin_block_undo(hash, block.account.clone(), 1)
+                        .unwrap();
                     let start = Instant::now();
                     crate::trst_storage::persist_delta(&mut batch, &previous, &next).unwrap();
                     writes += start.elapsed();
@@ -397,7 +421,17 @@ fn account_only_preparation_cost() {
                     assert!(restored.trst.wallet_snapshot_eq(&next));
                     batch.put_meta("cost-probe", &[iteration]).unwrap();
                     batch.commit().unwrap();
-                    assert_eq!(store.tx_begin_write().unwrap().block_undo(&hash).unwrap().unwrap().changes.len(), 5);
+                    assert_eq!(
+                        store
+                            .tx_begin_write()
+                            .unwrap()
+                            .block_undo(&hash)
+                            .unwrap()
+                            .unwrap()
+                            .changes
+                            .len(),
+                        5
+                    );
                     previous = next;
                 }
                 eprintln!("{count} portfolios, rows=true, origin registration refresh: writes={:?}, restore={:?} (mean of 5; storage diagnostic only)", writes / 5, reads / 5);

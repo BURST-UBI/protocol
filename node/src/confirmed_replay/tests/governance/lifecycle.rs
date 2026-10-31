@@ -428,8 +428,8 @@ async fn governance_expiry_boundaries_preserve_pending_ownership_and_retroactive
                 .unwrap();
         }
         let sender = fresh.account_store().get_account(&address(0)).unwrap();
-        let restored = crate::trst_storage::load(
-            &fresh.tx_begin_write().unwrap(), new_period as u64).unwrap();
+        let restored =
+            crate::trst_storage::load(&fresh.tx_begin_write().unwrap(), new_period as u64).unwrap();
         assert_eq!(
             (
                 restored
@@ -589,25 +589,49 @@ fn certified_bootstrap_veto_survives_replay_while_other_approval_activates() {
     let (mut fixture, proposals) = fixture_with_cooldown(10);
     let (_dir, store, _) = fixture.store();
     let ballot = PreparedGovernance::prepare_next(&store, NetworkId::Dev, &fixture.params, CUT)
-        .unwrap().unwrap();
+        .unwrap()
+        .unwrap();
     let epoch = ballot.manifest().checkpoint.hash();
-    install(&store, &fixture.params, ReplayManifest::Governance(ballot.manifest().clone()), &[0]);
+    install(
+        &store,
+        &fixture.params,
+        ReplayManifest::Governance(ballot.manifest().clone()),
+        &[0],
+    );
     fixture.push(0, BlockType::GovernanceVeto, CUT + 1, |block| {
         block.payment_epoch = epoch;
         block.link = BlockHash::new(*proposals[0].as_bytes());
         block.transaction = TxHash::ZERO;
     });
     fixture.append_confirmed_prefix(&store, CUT + 2);
-    let activation = PreparedGovernance::prepare_next(&store, NetworkId::Dev, &fixture.params, CUT + 11)
-        .unwrap().unwrap();
+    let activation =
+        PreparedGovernance::prepare_next(&store, NetworkId::Dev, &fixture.params, CUT + 11)
+            .unwrap()
+            .unwrap();
     assert_eq!(activation.manifest().proposals, vec![proposals[1]]);
-    install(&store, &fixture.params, ReplayManifest::Governance(activation.manifest().clone()), &[0, 1, 2]);
+    install(
+        &store,
+        &fixture.params,
+        ReplayManifest::Governance(activation.manifest().clone()),
+        &[0, 1, 2],
+    );
     let events = chain::load(&store, NetworkId::Dev, &fixture.params).unwrap();
-    let restored = ConfirmedReplay::replay_with_events(&fixture.history(CUT + 11),
-        NetworkId::Dev, &fixture.params, &events).unwrap();
+    let restored = ConfirmedReplay::replay_with_events(
+        &fixture.history(CUT + 11),
+        NetworkId::Dev,
+        &fixture.params,
+        &events,
+    )
+    .unwrap();
     let governance = &restored.governance.as_ref().unwrap().governance;
-    assert_eq!(governance.get_proposal(&proposals[0]).unwrap().phase, GovernancePhase::Vetoed);
-    assert_eq!(governance.get_proposal(&proposals[1]).unwrap().phase, GovernancePhase::Activated);
+    assert_eq!(
+        governance.get_proposal(&proposals[0]).unwrap().phase,
+        GovernancePhase::Vetoed
+    );
+    assert_eq!(
+        governance.get_proposal(&proposals[1]).unwrap().phase,
+        GovernancePhase::Activated
+    );
     assert_eq!(restored.params().brn_rate, 3);
     crate::confirmed_replay::tests::snapshot_history::boundaries::assert_chain(&fixture, &store);
 }

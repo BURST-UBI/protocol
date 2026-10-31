@@ -1,5 +1,5 @@
-use crate::checkpoint_store::record_storage;
 use super::*;
+use crate::checkpoint_store::record_storage;
 use burst_store_lmdb::LmdbWriteTransaction;
 
 /// Move the oldest active records into the archive to make room for a successor.
@@ -35,8 +35,13 @@ pub(super) fn make_room(
         if retained.len() as u64 >= MAX_CHECKPOINTS {
             return Err(invalid("checkpoint inventory exceeds active record limit"));
         }
-        let size = record_storage::validated_size(key, record, |name| batch.get_meta(name),
-            |hash| batch.read_view().checkpoint_head_node(hash), MAX_CHAIN_BYTES - retained_bytes)?;
+        let size = record_storage::validated_size(
+            key,
+            record,
+            |name| batch.get_meta(name),
+            |hash| batch.read_view().checkpoint_head_node(hash),
+            MAX_CHAIN_BYTES - retained_bytes,
+        )?;
         if size as u64 > MAX_RECORD_BYTES {
             return Err(invalid("retained checkpoint exceeds record byte limit"));
         }

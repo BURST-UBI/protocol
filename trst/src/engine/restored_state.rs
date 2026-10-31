@@ -44,7 +44,10 @@ impl RestoredTrstState {
 
     /// Validate and construct private indexes, returning no state if polling fails.
     /// This does not bound allocation, individual map operations or destruction.
-    pub fn from_engine_with_poll(mut engine: TrstEngine, poll: &dyn Fn(&'static str) -> Result<(), String>) -> Result<Self, String> {
+    pub fn from_engine_with_poll(
+        mut engine: TrstEngine,
+        poll: &dyn Fn(&'static str) -> Result<(), String>,
+    ) -> Result<Self, String> {
         Self::validate_engine_with_poll(&mut engine, poll)?;
         let mut owners = SharedMap::default();
         for (owner, origins) in &engine.wallet_origins {
@@ -56,13 +59,25 @@ impl RestoredTrstState {
             }
         }
         let revocation_counts = engine.merger_graph.revocation_counts_with_poll(poll)?;
-        let revision_index = crate::merger_graph::RevisionIndex::new_with_poll(&engine.merger_graph, poll)?;
-        let (revoked_token_origins, token_revisions) = Self::build_token_counts_with_poll(&engine, poll)?;
-        Ok(Self { engine, owners, revocation_counts, revision_index, revoked_token_origins, token_revisions, retain_indexes: false })
+        let revision_index =
+            crate::merger_graph::RevisionIndex::new_with_poll(&engine.merger_graph, poll)?;
+        let (revoked_token_origins, token_revisions) =
+            Self::build_token_counts_with_poll(&engine, poll)?;
+        Ok(Self {
+            engine,
+            owners,
+            revocation_counts,
+            revision_index,
+            revoked_token_origins,
+            token_revisions,
+            retain_indexes: false,
+        })
     }
 
-    fn validate_engine_with_poll(engine: &mut TrstEngine,
-        poll: &dyn Fn(&'static str) -> Result<(), String>) -> Result<(), String> {
+    fn validate_engine_with_poll(
+        engine: &mut TrstEngine,
+        poll: &dyn Fn(&'static str) -> Result<(), String>,
+    ) -> Result<(), String> {
         engine.merger_graph.validate_persisted_with_poll(poll)?;
         engine.validate_bases_with_poll(poll)?;
         for (owner, portfolio) in &engine.wallets {
@@ -71,10 +86,14 @@ impl RestoredTrstState {
         }
         for invalidation in engine.outcome_invalidations.values() {
             poll("trst:restored-outcome")?;
-            if invalidation.causes.is_empty() { return Err("invalid outcome revocation causes".into()); }
+            if invalidation.causes.is_empty() {
+                return Err("invalid outcome revocation causes".into());
+            }
             for cause in &invalidation.causes {
                 poll("trst:restored-cause")?;
-                if cause.is_zero() { return Err("invalid outcome revocation causes".into()); }
+                if cause.is_zero() {
+                    return Err("invalid outcome revocation causes".into());
+                }
             }
         }
         engine.rebuild_indexes_with_poll(poll)?;
@@ -83,28 +102,48 @@ impl RestoredTrstState {
 
     /// Full validation for a read-only consumer. Keep all checked counts, using
     /// temporary hash maps instead of retaining mutation indexes that it discards.
-    pub(super) fn validate_for_comparison_with_poll(mut engine: TrstEngine,
-        poll: &dyn Fn(&'static str) -> Result<(), String>) -> Result<TrstEngine, String> {
+    pub(super) fn validate_for_comparison_with_poll(
+        mut engine: TrstEngine,
+        poll: &dyn Fn(&'static str) -> Result<(), String>,
+    ) -> Result<TrstEngine, String> {
         Self::validate_engine_with_poll(&mut engine, poll)?;
         for origins in engine.wallet_origins.values() {
             poll("trst:restored-owner")?;
-            for _ in origins { poll("trst:restored-origin")?; }
+            for _ in origins {
+                poll("trst:restored-origin")?;
+            }
         }
-        drop(engine.merger_graph.build_revocation_counts_with_poll::<HashMap<TxHash, usize>>(poll)?);
-        drop(crate::merger_graph::RevisionIndex::build_counts_with_poll::<HashMap<TxHash, usize>>(&engine.merger_graph, poll)?);
+        drop(
+            engine
+                .merger_graph
+                .build_revocation_counts_with_poll::<HashMap<TxHash, usize>>(poll)?,
+        );
+        drop(
+            crate::merger_graph::RevisionIndex::build_counts_with_poll::<HashMap<TxHash, usize>>(
+                &engine.merger_graph,
+                poll,
+            )?,
+        );
         drop(Self::build_token_counts_with_poll::<HashMap<TxHash, usize>>(&engine, poll)?);
         Ok(engine)
     }
 
-    fn build_token_counts_with_poll<C: crate::dependency_counts::Counts>(engine: &TrstEngine,
-        poll: &dyn Fn(&'static str) -> Result<(), String>) -> Result<(C, C), String> {
+    fn build_token_counts_with_poll<C: crate::dependency_counts::Counts>(
+        engine: &TrstEngine,
+        poll: &dyn Fn(&'static str) -> Result<(), String>,
+    ) -> Result<(C, C), String> {
         let mut revoked_token_origins = C::default();
         let mut token_revisions = C::default();
         for portfolio in engine.wallets.values() {
             poll("trst:dependency-wallet")?;
             for token in &portfolio.tokens {
                 poll("trst:dependency-token")?;
-                Self::count_token_dependencies(&mut revoked_token_origins, &mut token_revisions, token, true)?;
+                Self::count_token_dependencies(
+                    &mut revoked_token_origins,
+                    &mut token_revisions,
+                    token,
+                    true,
+                )?;
             }
         }
         Ok((revoked_token_origins, token_revisions))
@@ -124,7 +163,10 @@ impl RestoredTrstState {
         let mut wallets = self.engine.wallets.clone();
         for (holder, portfolio) in &self.engine.wallets {
             let indexed = portfolio.validated_index(holder, self.engine.expiry_secs)?;
-            wallets.insert(holder.clone(), WalletPortfolio::from_indexed(indexed).into());
+            wallets.insert(
+                holder.clone(),
+                WalletPortfolio::from_indexed(indexed).into(),
+            );
         }
         self.engine.wallets = wallets;
         self.retain_indexes = true;
@@ -135,7 +177,9 @@ impl RestoredTrstState {
     /// the caller must use full restoration; Err means changed data is invalid.
     /// Public derived indexes in `after` are deliberately never adopted.
     pub fn retained_holdings_successor(
-        &self, before: &TrstEngine, after: &TrstEngine,
+        &self,
+        before: &TrstEngine,
+        after: &TrstEngine,
     ) -> Result<Option<Self>, String> {
         let base = &self.engine;
         if !base.shares_wallet_snapshot_with(before)
@@ -143,16 +187,25 @@ impl RestoredTrstState {
             || base.expiry_secs != after.expiry_secs
             || !base.merger_graph.shares_storage_with(&before.merger_graph)
             || !base.merger_graph.shares_storage_with(&after.merger_graph)
-            || !base.wallet_origins.shares_storage_with(&after.wallet_origins)
-            || !base.outcome_invalidations.shares_storage_with(&before.outcome_invalidations)
+            || !base
+                .wallet_origins
+                .shares_storage_with(&after.wallet_origins)
+            || !base
+                .outcome_invalidations
+                .shares_storage_with(&before.outcome_invalidations)
         {
             return Ok(None);
         }
         // Unchanged records inherit the validated cut. Changed causes remain
         // consistency data; outcome authorization belongs to the ledger caller.
-        for origin in after.outcome_invalidations.changed_keys(&base.outcome_invalidations) {
+        for origin in after
+            .outcome_invalidations
+            .changed_keys(&base.outcome_invalidations)
+        {
             if let Some(invalidation) = after.outcome_invalidations.get(origin) {
-                if invalidation.causes.is_empty() || invalidation.causes.iter().any(BlockHash::is_zero) {
+                if invalidation.causes.is_empty()
+                    || invalidation.causes.iter().any(BlockHash::is_zero)
+                {
                     return Err("invalid outcome revocation causes".into());
                 }
                 if !after.merger_graph.is_origin_revoked(origin) {
@@ -165,12 +218,20 @@ impl RestoredTrstState {
         let mut supported = true;
         after.visit_portfolio_changes(before, |holder, old, new| {
             let new_portfolio = new;
-            let empty = || holding_rows::indexed::IndexedPortfolio::from_portfolio(
-                holder.clone(), &WalletPortfolio::default(), base.expiry_secs);
+            let empty = || {
+                holding_rows::indexed::IndexedPortfolio::from_portfolio(
+                    holder.clone(),
+                    &WalletPortfolio::default(),
+                    base.expiry_secs,
+                )
+            };
             let old_root = match old {
                 Some(portfolio) => match portfolio.indexed() {
                     Some(root) => root.clone(),
-                    None => { supported = false; return Ok::<_, String>(()); }
+                    None => {
+                        supported = false;
+                        return Ok::<_, String>(());
+                    }
                 },
                 None => empty()?,
             };
@@ -180,7 +241,10 @@ impl RestoredTrstState {
                     // A newly created portfolio has no untouched holdings to
                     // scan: checking all its incoming data is required work.
                     None if old.is_none() => portfolio.validated_index(holder, base.expiry_secs)?,
-                    None => { supported = false; return Ok(()); }
+                    None => {
+                        supported = false;
+                        return Ok(());
+                    }
                 },
                 None => empty()?,
             };
@@ -190,47 +254,77 @@ impl RestoredTrstState {
             }
             let mut origins = HashSet::new();
             let mut tags = HashSet::new();
-            new.visit_delta(&old_root, |e| e, |old, new| {
-                if let Some(holding_rows::Row::Holding { token, .. }) = &new {
-                    Self::validate_token(base, holder, token)?;
-                }
-                if let Some(holding_rows::Row::Holding { token, .. }) = &old {
-                    Self::count_token_dependencies(&mut candidate.revoked_token_origins, &mut candidate.token_revisions, token, false)?;
-                }
-                if let Some(holding_rows::Row::Holding { token, .. }) = &new {
-                    Self::count_token_dependencies(&mut candidate.revoked_token_origins, &mut candidate.token_revisions, token, true)?;
-                }
-                for row in old.into_iter().chain(new) {
-                    if let holding_rows::Row::Holding { token, .. } = row {
-                        if let Some(tag) = token.revoked_origin { tags.insert(tag); }
-                        else { origins.insert(token.origin); }
+            new.visit_delta(
+                &old_root,
+                |e| e,
+                |old, new| {
+                    if let Some(holding_rows::Row::Holding { token, .. }) = &new {
+                        Self::validate_token(base, holder, token)?;
                     }
-                }
-                Ok(())
-            })?;
+                    if let Some(holding_rows::Row::Holding { token, .. }) = &old {
+                        Self::count_token_dependencies(
+                            &mut candidate.revoked_token_origins,
+                            &mut candidate.token_revisions,
+                            token,
+                            false,
+                        )?;
+                    }
+                    if let Some(holding_rows::Row::Holding { token, .. }) = &new {
+                        Self::count_token_dependencies(
+                            &mut candidate.revoked_token_origins,
+                            &mut candidate.token_revisions,
+                            token,
+                            true,
+                        )?;
+                    }
+                    for row in old.into_iter().chain(new) {
+                        if let holding_rows::Row::Holding { token, .. } = row {
+                            if let Some(tag) = token.revoked_origin {
+                                tags.insert(tag);
+                            } else {
+                                origins.insert(token.origin);
+                            }
+                        }
+                    }
+                    Ok(())
+                },
+            )?;
             for (keys, index, revoked) in [
                 (origins, &mut candidate.engine.origin_holders, false),
                 (tags, &mut candidate.engine.revoked_holders, true),
             ] {
                 for origin in keys {
-                    let present = if revoked { new.revoked_tokens(&origin).next().is_some() }
-                        else { new.origin_tokens(&origin).next().is_some() };
+                    let present = if revoked {
+                        new.revoked_tokens(&origin).next().is_some()
+                    } else {
+                        new.origin_tokens(&origin).next().is_some()
+                    };
                     if present {
                         index.entry(origin).or_default().insert(holder.clone());
                     } else if let Some(holders) = index.get_mut(&origin) {
                         holders.remove(holder);
-                        if holders.is_empty() { index.remove(&origin); }
+                        if holders.is_empty() {
+                            index.remove(&origin);
+                        }
                     }
                 }
             }
             match new_portfolio {
                 Some(portfolio) if portfolio.indexed().is_some() => {
-                    candidate.engine.wallets.insert(holder.clone(), after.wallets[holder].clone());
+                    candidate
+                        .engine
+                        .wallets
+                        .insert(holder.clone(), after.wallets[holder].clone());
                 }
                 Some(_) => {
-                    candidate.engine.wallets.insert(holder.clone(), WalletPortfolio::from_indexed(new).into());
+                    candidate
+                        .engine
+                        .wallets
+                        .insert(holder.clone(), WalletPortfolio::from_indexed(new).into());
                 }
-                None => { candidate.engine.wallets.remove(holder); }
+                None => {
+                    candidate.engine.wallets.remove(holder);
+                }
             }
             Ok(())
         })?;
@@ -240,19 +334,36 @@ impl RestoredTrstState {
     /// Validate appended merges and changed holdings against the current snapshot.
     /// Storage must persist both before publishing the returned state.
     pub fn retained_append_successor(
-        &self, before: &TrstEngine, after: &TrstEngine,
+        &self,
+        before: &TrstEngine,
+        after: &TrstEngine,
     ) -> Result<Option<Self>, String> {
-        if !self.engine.merger_graph.shares_storage_with(&before.merger_graph) {
+        if !self
+            .engine
+            .merger_graph
+            .shares_storage_with(&before.merger_graph)
+        {
             return Ok(None);
         }
-        let Some(added) = after.merger_graph.validated_append_ids(&self.engine.merger_graph)?
-            else { return Ok(None) };
+        let Some(added) = after
+            .merger_graph
+            .validated_append_ids(&self.engine.merger_graph)?
+        else {
+            return Ok(None);
+        };
         for id in &added {
             if self.owners.contains_key(id) {
                 return Err("TRST origin is registered as both burn and merge".into());
             }
-            for source in &after.merger_graph.get_merge(id).expect("validated added node").source_origins {
-                if !after.merger_graph.contains_merge(&source.origin) && !self.owners.contains_key(&source.origin) {
+            for source in &after
+                .merger_graph
+                .get_merge(id)
+                .expect("validated added node")
+                .source_origins
+            {
+                if !after.merger_graph.contains_merge(&source.origin)
+                    && !self.owners.contains_key(&source.origin)
+                {
                     return Err("merger graph source lacks burn ownership".into());
                 }
             }
@@ -260,8 +371,12 @@ impl RestoredTrstState {
         // Appends cannot alter an existing origin's ancestry or revocation state.
         // Reuse the holdings proof with the now-validated graph as its context.
         let mut context = self.clone();
-        context.revocation_counts = after.merger_graph.add_revocation_counts(&self.revocation_counts, added)?;
-        context.revision_index = self.revision_index.updated(&before.merger_graph, &after.merger_graph)?;
+        context.revocation_counts = after
+            .merger_graph
+            .add_revocation_counts(&self.revocation_counts, added)?;
+        context.revision_index = self
+            .revision_index
+            .updated(&before.merger_graph, &after.merger_graph)?;
         context.engine.merger_graph = after.merger_graph.clone();
         let mut scoped_before = before.clone();
         scoped_before.merger_graph = after.merger_graph.clone();
@@ -272,21 +387,40 @@ impl RestoredTrstState {
     /// Fixed topology, checked metadata deltas and private contribution counts
     /// preserve the validated graph without scanning untouched nodes.
     pub fn retained_revocation_successor(
-        &self, before: &TrstEngine, after: &TrstEngine,
+        &self,
+        before: &TrstEngine,
+        after: &TrstEngine,
     ) -> Result<Option<Self>, String> {
-        if !self.engine.merger_graph.shares_storage_with(&before.merger_graph)
+        if !self
+            .engine
+            .merger_graph
+            .shares_storage_with(&before.merger_graph)
             || !self.engine.shares_wallet_snapshot_with(before)
-            || !self.engine.wallet_origins.shares_storage_with(&after.wallet_origins)
-            || !self.engine.outcome_invalidations.shares_storage_with(&before.outcome_invalidations)
+            || !self
+                .engine
+                .wallet_origins
+                .shares_storage_with(&after.wallet_origins)
+            || !self
+                .engine
+                .outcome_invalidations
+                .shares_storage_with(&before.outcome_invalidations)
             || self.engine.expiry_secs != before.expiry_secs
-            || self.engine.expiry_secs != after.expiry_secs {
+            || self.engine.expiry_secs != after.expiry_secs
+        {
             return Ok(None);
         }
-        let Some(revocation_counts) = after.merger_graph.validated_revocation_transition(
-            &before.merger_graph, &self.revocation_counts,
-        )? else { return Ok(None) };
+        let Some(revocation_counts) = after
+            .merger_graph
+            .validated_revocation_transition(&before.merger_graph, &self.revocation_counts)?
+        else {
+            return Ok(None);
+        };
         let mut removed = Vec::new();
-        for origin in after.merger_graph.revoked_origins().changed_keys(before.merger_graph.revoked_origins()) {
+        for origin in after
+            .merger_graph
+            .revoked_origins()
+            .changed_keys(before.merger_graph.revoked_origins())
+        {
             if after.merger_graph.is_origin_revoked(origin) {
                 if !self.owners.contains_key(origin) {
                     return Err("revoked TRST origin lacks burn ownership".into());
@@ -300,14 +434,22 @@ impl RestoredTrstState {
         }
         let mut context = self.clone();
         context.revocation_counts = revocation_counts;
-        context.revision_index = self.revision_index.updated(&before.merger_graph, &after.merger_graph)?;
+        context.revision_index = self
+            .revision_index
+            .updated(&before.merger_graph, &after.merger_graph)?;
         context.engine.merger_graph = after.merger_graph.clone();
         let mut scoped_before = before.clone();
         scoped_before.merger_graph = after.merger_graph.clone();
-        let Some(candidate) = context.retained_holdings_successor(&scoped_before, after)?
-            else { return Ok(None) };
+        let Some(candidate) = context.retained_holdings_successor(&scoped_before, after)? else {
+            return Ok(None);
+        };
         for origin in removed {
-            if candidate.engine.revoked_holders.get(&origin).is_some_and(|holders| !holders.is_empty()) {
+            if candidate
+                .engine
+                .revoked_holders
+                .get(&origin)
+                .is_some_and(|holders| !holders.is_empty())
+            {
                 return Err("TRST revoked holding lacks its revoked burn origin".into());
             }
         }
@@ -323,23 +465,50 @@ impl RestoredTrstState {
         records: &[crate::merger_graph::GraphRecord],
         changes: RestoredTrstChanges,
     ) -> Result<Option<Self>, String> {
-        let Some((graph, removed)) = self.engine.merger_graph
-            .remove_appended_records(records, &self.revision_index)? else { return Ok(None) };
+        let Some((graph, removed)) = self
+            .engine
+            .merger_graph
+            .remove_appended_records(records, &self.revision_index)?
+        else {
+            return Ok(None);
+        };
         let mut candidate = self.clone();
         for id in &removed {
-            for origin in self.engine.merger_graph.get_merge(id).expect("checked removed node").revoked_contribs.keys() {
-                let count = candidate.revocation_counts.get(origin).copied().unwrap_or(0)
-                    .checked_sub(1).ok_or("revocation contribution count underflow")?;
-                if count == 0 { candidate.revocation_counts.remove(origin); }
-                else { candidate.revocation_counts.insert(*origin, count); }
+            for origin in self
+                .engine
+                .merger_graph
+                .get_merge(id)
+                .expect("checked removed node")
+                .revoked_contribs
+                .keys()
+            {
+                let count = candidate
+                    .revocation_counts
+                    .get(origin)
+                    .copied()
+                    .unwrap_or(0)
+                    .checked_sub(1)
+                    .ok_or("revocation contribution count underflow")?;
+                if count == 0 {
+                    candidate.revocation_counts.remove(origin);
+                } else {
+                    candidate.revocation_counts.insert(*origin, count);
+                }
             }
         }
-        candidate.revision_index = self.revision_index.updated(&self.engine.merger_graph, &graph)?;
+        candidate.revision_index = self
+            .revision_index
+            .updated(&self.engine.merger_graph, &graph)?;
         candidate.engine.merger_graph = graph;
         candidate.replace_records(changes)?;
         for id in removed {
-            if candidate.engine.origin_holders.get(&id).is_some_and(|holders| !holders.is_empty())
-                || candidate.revoked_token_origins.contains_key(&id) {
+            if candidate
+                .engine
+                .origin_holders
+                .get(&id)
+                .is_some_and(|holders| !holders.is_empty())
+                || candidate.revoked_token_origins.contains_key(&id)
+            {
                 return Err("graph row undo would orphan a TRST holding".into());
             }
         }
@@ -351,14 +520,22 @@ impl RestoredTrstState {
     /// remainder references are checked before returning a candidate.
     pub fn retained_graph_rewind(
         &self,
-        graph_changes: &[(Option<crate::merger_graph::GraphRecord>, Option<crate::merger_graph::GraphRecord>)],
+        graph_changes: &[(
+            Option<crate::merger_graph::GraphRecord>,
+            Option<crate::merger_graph::GraphRecord>,
+        )],
         changes: RestoredTrstChanges,
     ) -> Result<Option<Self>, String> {
         let Some(rewound) = self.engine.merger_graph.rewind_revocation_records(
-            graph_changes, &self.revocation_counts, &self.revision_index,
-        )? else {
-            let removed = graph_changes.iter().map(|(old, new)|
-                new.is_none().then(|| old.clone()).flatten()).collect::<Option<Vec<_>>>();
+            graph_changes,
+            &self.revocation_counts,
+            &self.revision_index,
+        )?
+        else {
+            let removed = graph_changes
+                .iter()
+                .map(|(old, new)| new.is_none().then(|| old.clone()).flatten())
+                .collect::<Option<Vec<_>>>();
             return match removed {
                 Some(rows) => self.retained_graph_removal(&rows, changes),
                 None => Ok(None),
@@ -374,12 +551,23 @@ impl RestoredTrstState {
                 return Err("graph undo would orphan a held composition revision".into());
             }
         }
-        for origin in candidate.engine.merger_graph.revoked_origins()
-            .changed_keys(self.engine.merger_graph.revoked_origins()) {
+        for origin in candidate
+            .engine
+            .merger_graph
+            .revoked_origins()
+            .changed_keys(self.engine.merger_graph.revoked_origins())
+        {
             if candidate.engine.merger_graph.is_origin_revoked(origin) {
-                if !candidate.owners.contains_key(origin) { return Err("revoked TRST origin lacks burn ownership".into()); }
+                if !candidate.owners.contains_key(origin) {
+                    return Err("revoked TRST origin lacks burn ownership".into());
+                }
             } else if candidate.engine.outcome_invalidations.contains_key(origin)
-                || candidate.engine.revoked_holders.get(origin).is_some_and(|holders| !holders.is_empty()) {
+                || candidate
+                    .engine
+                    .revoked_holders
+                    .get(origin)
+                    .is_some_and(|holders| !holders.is_empty())
+            {
                 return Err("graph undo leaves an active origin with revoked dependencies".into());
             }
         }
@@ -387,13 +575,25 @@ impl RestoredTrstState {
     }
 
     fn count_token_dependencies<C: crate::dependency_counts::Counts>(
-        revoked: &mut C, revisions: &mut C,
-        token: &TrstToken, add: bool,
+        revoked: &mut C,
+        revisions: &mut C,
+        token: &TrstToken,
+        add: bool,
     ) -> Result<(), String> {
-        let adjust = |counts: &mut C, key, add| crate::dependency_counts::adjust(
-            counts, key, add, "token dependency count overflow or underflow");
-        if token.revoked_origin.is_some() { adjust(revoked, token.origin, add)?; }
-        if let TrstBasis::Remainder(revision) = token.basis { adjust(revisions, revision, add)?; }
+        let adjust = |counts: &mut C, key, add| {
+            crate::dependency_counts::adjust(
+                counts,
+                key,
+                add,
+                "token dependency count overflow or underflow",
+            )
+        };
+        if token.revoked_origin.is_some() {
+            adjust(revoked, token.origin, add)?;
+        }
+        if let TrstBasis::Remainder(revision) = token.basis {
+            adjust(revisions, revision, add)?;
+        }
         Ok(())
     }
 
@@ -461,14 +661,23 @@ impl RestoredTrstState {
         }
         for (origin, invalidation) in changes.invalidations {
             if let Some(invalidation) = invalidation {
-                if invalidation.causes.is_empty() || invalidation.causes.iter().any(BlockHash::is_zero)
+                if invalidation.causes.is_empty()
+                    || invalidation.causes.iter().any(BlockHash::is_zero)
                     || !candidate.engine.merger_graph.is_origin_revoked(&origin)
-                    || !candidate.owners.contains_key(&origin) {
+                    || !candidate.owners.contains_key(&origin)
+                {
                     return Err("invalid outcome revocation record".into());
                 }
-                candidate.engine.outcome_invalidations.insert(origin, OutcomeInvalidation {
-                    wallet_revoked: invalidation.wallet_revoked, causes: invalidation.causes });
-            } else { candidate.engine.outcome_invalidations.remove(&origin); }
+                candidate.engine.outcome_invalidations.insert(
+                    origin,
+                    OutcomeInvalidation {
+                        wallet_revoked: invalidation.wallet_revoked,
+                        causes: invalidation.causes,
+                    },
+                );
+            } else {
+                candidate.engine.outcome_invalidations.remove(&origin);
+            }
         }
         for (owner, portfolio) in changes.portfolios {
             candidate.replace_portfolio(&owner, portfolio)?;
@@ -527,7 +736,11 @@ impl RestoredTrstState {
         Ok(())
     }
 
-    fn validate_token(engine: &TrstEngine, owner: &WalletAddress, token: &TrstToken) -> Result<(), String> {
+    fn validate_token(
+        engine: &TrstEngine,
+        owner: &WalletAddress,
+        token: &TrstToken,
+    ) -> Result<(), String> {
         if &token.holder != owner {
             return Err("TRST holding owner differs from its portfolio".into());
         }
@@ -563,9 +776,16 @@ impl RestoredTrstState {
         portfolio: Option<WalletPortfolio>,
     ) -> Result<(), String> {
         let portfolio = if self.retain_indexes {
-            portfolio.map(|portfolio| portfolio.validated_index(owner, self.engine.expiry_secs)
-                .map(WalletPortfolio::from_indexed)).transpose()?
-        } else { portfolio };
+            portfolio
+                .map(|portfolio| {
+                    portfolio
+                        .validated_index(owner, self.engine.expiry_secs)
+                        .map(WalletPortfolio::from_indexed)
+                })
+                .transpose()?
+        } else {
+            portfolio
+        };
         if let Some(portfolio) = &portfolio {
             Self::validate_portfolio(&self.engine, owner, portfolio)?;
         }
@@ -576,7 +796,12 @@ impl RestoredTrstState {
         let mut tags = HashSet::new();
         if let Some(old) = self.engine.wallets.get(owner) {
             for token in &old.tokens {
-                Self::count_token_dependencies(&mut self.revoked_token_origins, &mut self.token_revisions, token, false)?;
+                Self::count_token_dependencies(
+                    &mut self.revoked_token_origins,
+                    &mut self.token_revisions,
+                    token,
+                    false,
+                )?;
                 if let Some(tag) = token.revoked_origin {
                     tags.insert(tag);
                 } else {
@@ -588,7 +813,12 @@ impl RestoredTrstState {
         self.engine.deindex_wallet_origins(owner, &origins, &tags);
         if let Some(portfolio) = portfolio {
             for token in &portfolio.tokens {
-                Self::count_token_dependencies(&mut self.revoked_token_origins, &mut self.token_revisions, token, true)?;
+                Self::count_token_dependencies(
+                    &mut self.revoked_token_origins,
+                    &mut self.token_revisions,
+                    token,
+                    true,
+                )?;
                 match token.revoked_origin {
                     Some(tag) => {
                         self.engine

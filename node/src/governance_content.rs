@@ -83,10 +83,10 @@ pub(crate) fn load(
     batch: &LmdbWriteTransaction<'_>,
     block: &StateBlock,
 ) -> Result<ProposalContent, String> {
-        load_view(&batch.read_view(), block)
-    }
+    load_view(&batch.read_view(), block)
+}
 
-    pub(crate) fn load_view(
+pub(crate) fn load_view(
     batch: &burst_store_lmdb::read_view::LedgerReadView<'_>,
     block: &StateBlock,
 ) -> Result<ProposalContent, String> {

@@ -35,22 +35,37 @@ impl Cache {
         Ok((!blocks.is_empty()).then_some(blocks))
     }
 
-    pub(super) fn available(&self, roots: &Roots, wanted: &[BlockHash]) -> Result<Vec<HistoricalBlock>, StoreError> {
+    pub(super) fn available(
+        &self,
+        roots: &Roots,
+        wanted: &[BlockHash],
+    ) -> Result<Vec<HistoricalBlock>, StoreError> {
         if let Roots::Stored(roots) = roots {
             // Cache size is bounded independently of the account population.
             // Inspect only cached requested proofs, resolving their roots by key.
             let requested: std::collections::HashSet<_> = wanted.iter().copied().collect();
             let mut found = HashMap::new();
             for (proof, _, _) in &self.entries {
-                if !requested.contains(&proof.block().hash) || found.contains_key(&proof.block().hash) { continue; }
-                let Some(cursor) = roots.cursor(&proof.block().account)? else { continue; };
+                if !requested.contains(&proof.block().hash)
+                    || found.contains_key(&proof.block().hash)
+                {
+                    continue;
+                }
+                let Some(cursor) = roots.cursor(&proof.block().account)? else {
+                    continue;
+                };
                 let head = cursor.next().expect("stored nonempty root");
-                if proof.context() == cursor.context() && proof.height() <= head.height
-                    && (proof.height() != head.height || proof.block().hash == head.hash) {
+                if proof.context() == cursor.context()
+                    && proof.height() <= head.height
+                    && (proof.height() != head.height || proof.block().hash == head.hash)
+                {
                     found.insert(proof.block().hash, proof.clone());
                 }
             }
-            return Ok(wanted.iter().filter_map(|hash| found.remove(hash)).collect());
+            return Ok(wanted
+                .iter()
+                .filter_map(|hash| found.remove(hash))
+                .collect());
         }
         let cursors = match roots {
             Roots::Suffix { .. } => return Ok(Vec::new()),
@@ -63,18 +78,33 @@ impl Cache {
         // cached proofs. Expected work is linear in cursors, cache entries and
         // requested hashes; index space is linear in cache entries.
         #[derive(Hash, PartialEq, Eq)]
-        enum Key<'a> { Account(&'a WalletAddress), Hash(BlockHash) }
+        enum Key<'a> {
+            Account(&'a WalletAddress),
+            Hash(BlockHash),
+        }
         let exact = matches!(roots, Roots::Exact(_));
         let mut indexed: HashMap<_, Vec<_>> = HashMap::new();
         for (index, (proof, _, _)) in self.entries.iter().enumerate() {
-            let key = if exact { Key::Hash(proof.block().hash) } else { Key::Account(&proof.block().account) };
+            let key = if exact {
+                Key::Hash(proof.block().hash)
+            } else {
+                Key::Account(&proof.block().account)
+            };
             indexed.entry(key).or_default().push((index, proof));
         }
         let mut available: HashMap<BlockHash, (usize, &HistoricalBlock)> = HashMap::new();
         for cursor in cursors {
-            let Some(head) = cursor.next() else { continue; };
-            let key = if exact { Key::Hash(head.hash) } else { Key::Account(&head.account) };
-            let Some(proofs) = indexed.get(&key) else { continue; };
+            let Some(head) = cursor.next() else {
+                continue;
+            };
+            let key = if exact {
+                Key::Hash(head.hash)
+            } else {
+                Key::Account(&head.account)
+            };
+            let Some(proofs) = indexed.get(&key) else {
+                continue;
+            };
             for &(index, proof) in proofs {
                 if proof.context() == cursor.context()
                     && proof.block().account == head.account
@@ -82,12 +112,19 @@ impl Cache {
                     && (!exact || proof.height() == head.height)
                     && (proof.height() != head.height || proof.block().hash == head.hash)
                 {
-                    let entry = available.entry(proof.block().hash).or_insert((index, proof));
-                    if index < entry.0 { *entry = (index, proof); }
+                    let entry = available
+                        .entry(proof.block().hash)
+                        .or_insert((index, proof));
+                    if index < entry.0 {
+                        *entry = (index, proof);
+                    }
                 }
             }
         }
-        Ok(wanted.iter().filter_map(|hash| available.get(hash).map(|(_, proof)| (*proof).clone())).collect())
+        Ok(wanted
+            .iter()
+            .filter_map(|hash| available.get(hash).map(|(_, proof)| (*proof).clone()))
+            .collect())
     }
 
     pub(super) fn remember(&mut self, proofs: &[HistoricalBlock]) {

@@ -88,12 +88,22 @@ impl ProjectionCache {
                 Err(std::sync::TryLockError::WouldBlock) => return Ok(None),
                 Err(error) => return Err(invalid(error)),
             };
-            cached.as_ref()
-                .filter(|entry| entry.matches(store, network, initial, entry.epoch)
-                    && Some(entry.epoch) != previous)
-                .and_then(|entry| entry.replay.as_ref().map(|replay| (entry.epoch, replay.clone())))
+            cached
+                .as_ref()
+                .filter(|entry| {
+                    entry.matches(store, network, initial, entry.epoch)
+                        && Some(entry.epoch) != previous
+                })
+                .and_then(|entry| {
+                    entry
+                        .replay
+                        .as_ref()
+                        .map(|replay| (entry.epoch, replay.clone()))
+                })
         };
-        replay.map(|(epoch, replay)| Ok((epoch, replay.recovered.selections.refresh_cursor()?))).transpose()
+        replay
+            .map(|(epoch, replay)| Ok((epoch, replay.recovered.selections.refresh_cursor()?)))
+            .transpose()
     }
 
     #[cfg(test)]
@@ -129,7 +139,11 @@ impl ProjectionCache {
     }
 
     pub(super) fn get_view(
-        &self, store: &Arc<LmdbStore>, network: NetworkId, initial: BlockHash, epoch: BlockHash,
+        &self,
+        store: &Arc<LmdbStore>,
+        network: NetworkId,
+        initial: BlockHash,
+        epoch: BlockHash,
         continuation: &super::super::SnapshotContinuation,
         view: &burst_store_lmdb::read_view::LedgerReadView<'_>,
     ) -> Result<Option<Projection>, StoreError> {
@@ -138,13 +152,19 @@ impl ProjectionCache {
                 && projection.applied.verify_view(view).is_ok()
                 && projection.inventory.verify_view(view).is_ok()
                 && projection.economics.verify_view(view).is_ok()
-                && super::order::read_view(view, &projection.applied, continuation)? == projection.economics.ordering)
+                && super::order::read_view(view, &projection.applied, continuation)?
+                    == projection.economics.ordering)
         })
     }
 
     fn get_checked(
-        &self, store: &Arc<LmdbStore>, network: NetworkId, initial: BlockHash, epoch: BlockHash,
-        invalidate: bool, check: impl FnOnce(&Projection) -> Result<bool, StoreError>,
+        &self,
+        store: &Arc<LmdbStore>,
+        network: NetworkId,
+        initial: BlockHash,
+        epoch: BlockHash,
+        invalidate: bool,
+        check: impl FnOnce(&Projection) -> Result<bool, StoreError>,
     ) -> Result<Option<Projection>, StoreError> {
         let mut cached = self.0.lock().map_err(invalid)?;
         let Some(entry) = cached.as_ref() else {
@@ -156,7 +176,9 @@ impl ProjectionCache {
         let projection = &entry.projection;
         // A miss still requires full replay and never authorizes corrupt state.
         if !check(projection)? {
-            if invalidate { *cached = None; }
+            if invalidate {
+                *cached = None;
+            }
             return Ok(None);
         }
         Ok(Some(projection.clone()))
@@ -216,15 +238,25 @@ mod tests {
             let cache = &cache;
             let store = &store;
             let worker = scope.spawn(move || {
-                send.send(cache.selection_refresh(
-                    store, NetworkId::Dev, ProtocolParams::default().params_hash(), None,
-                ).map(|hint| hint.is_none())).unwrap();
+                send.send(
+                    cache
+                        .selection_refresh(
+                            store,
+                            NetworkId::Dev,
+                            ProtocolParams::default().params_hash(),
+                            None,
+                        )
+                        .map(|hint| hint.is_none()),
+                )
+                .unwrap();
             });
             let result = receive.recv_timeout(std::time::Duration::from_secs(1));
             // Release before asserting, so a regression cannot strand the worker.
             drop(guard);
             worker.join().unwrap();
-            assert!(result.expect("scheduling hint waited on projection validation").unwrap());
+            assert!(result
+                .expect("scheduling hint waited on projection validation")
+                .unwrap());
         });
     }
 }

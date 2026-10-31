@@ -602,23 +602,63 @@ fn compact_account_reconciliation_repairs_indexes_and_removes_stale_rows_atomica
     batch.put_account_info(&stale, false).unwrap();
     batch.commit().unwrap();
     let mut raw = store.env().write_txn().unwrap();
-    store.verified_accounts_db.put(&mut raw, accounts[0].address.as_str().as_bytes(), b"wrong").unwrap();
-    store.verified_accounts_db.delete(&mut raw, stale.address.as_str().as_bytes()).unwrap();
-    store.verified_accounts_db.put(&mut raw, b"orphan", &[1]).unwrap();
-    store.frontiers_db.put(&mut raw, accounts[0].address.as_str().as_bytes(), b"malformed").unwrap();
-    store.frontiers_db.put(&mut raw, b"orphan", b"malformed").unwrap();
+    store
+        .verified_accounts_db
+        .put(&mut raw, accounts[0].address.as_str().as_bytes(), b"wrong")
+        .unwrap();
+    store
+        .verified_accounts_db
+        .delete(&mut raw, stale.address.as_str().as_bytes())
+        .unwrap();
+    store
+        .verified_accounts_db
+        .put(&mut raw, b"orphan", &[1])
+        .unwrap();
+    store
+        .frontiers_db
+        .put(
+            &mut raw,
+            accounts[0].address.as_str().as_bytes(),
+            b"malformed",
+        )
+        .unwrap();
+    store
+        .frontiers_db
+        .put(&mut raw, b"orphan", b"malformed")
+        .unwrap();
     raw.commit().unwrap();
     let before = contents(&store);
     for commit in [false, true] {
         let mut batch = store.tx_begin_write().unwrap();
-        batch.replace_compact_checkpoint_ledger(hash(1), &blocks, &accounts).unwrap();
-        assert!(matches!(batch.get_account(&stale.address), Err(StoreError::NotFound(_))));
+        batch
+            .replace_compact_checkpoint_ledger(hash(1), &blocks, &accounts)
+            .unwrap();
+        assert!(matches!(
+            batch.get_account(&stale.address),
+            Err(StoreError::NotFound(_))
+        ));
         assert_eq!(batch.env.accounts_db.len(&batch.txn).unwrap(), 1);
         assert_eq!(batch.env.frontiers_db.len(&batch.txn).unwrap(), 1);
         assert_eq!(batch.env.verified_accounts_db.len(&batch.txn).unwrap(), 1);
-        assert_eq!(batch.env.verified_accounts_db.get(&batch.txn, accounts[0].address.as_str().as_bytes()).unwrap(), Some(&[1][..]));
-        assert_eq!(batch.env.frontiers_db.get(&batch.txn, accounts[0].address.as_str().as_bytes()).unwrap(), Some(accounts[0].head.as_bytes().as_slice()));
-        if commit { batch.commit().unwrap(); } else {
+        assert_eq!(
+            batch
+                .env
+                .verified_accounts_db
+                .get(&batch.txn, accounts[0].address.as_str().as_bytes())
+                .unwrap(),
+            Some(&[1][..])
+        );
+        assert_eq!(
+            batch
+                .env
+                .frontiers_db
+                .get(&batch.txn, accounts[0].address.as_str().as_bytes())
+                .unwrap(),
+            Some(accounts[0].head.as_bytes().as_slice())
+        );
+        if commit {
+            batch.commit().unwrap();
+        } else {
             drop(batch);
             assert_eq!(contents(&store), before);
         }
@@ -626,7 +666,13 @@ fn compact_account_reconciliation_repairs_indexes_and_removes_stale_rows_atomica
     store.force_sync().unwrap();
     drop(store);
     let store = LmdbStore::open(directory.path(), 32, 16 << 20).unwrap();
-    assert_eq!(store.account_store().get_account(&accounts[0].address).unwrap(), accounts[0]);
+    assert_eq!(
+        store
+            .account_store()
+            .get_account(&accounts[0].address)
+            .unwrap(),
+        accounts[0]
+    );
     assert!(store.account_store().get_account(&stale.address).is_err());
     let txn = store.env().read_txn().unwrap();
     assert_eq!(store.verified_accounts_db.len(&txn).unwrap(), 1);

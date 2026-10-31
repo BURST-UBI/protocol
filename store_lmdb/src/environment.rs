@@ -28,13 +28,15 @@ pub struct LmdbEnvironment {
     pub(crate) governance_cache:
         std::sync::Arc<std::sync::Mutex<Option<(usize, burst_governance::GovernanceEngine)>>>,
 
-    pub(crate) auxiliary_cache:
-        std::sync::Arc<std::sync::Mutex<Option<(usize, crate::write_batch::auxiliary_cache::AuxiliaryCache)>>>,
+    pub(crate) auxiliary_cache: std::sync::Arc<
+        std::sync::Mutex<Option<(usize, crate::write_batch::auxiliary_cache::AuxiliaryCache)>>,
+    >,
 
     pub(crate) body_changes: std::sync::Arc<crate::retention::changes::Observers>,
 
     pub(crate) deferred_votes: std::sync::Arc<crate::meta::vote_admission::DeferredVotes>,
-    pub(crate) sequence_commits: std::sync::Arc<std::sync::Mutex<crate::retention::SequenceCommits>>,
+    pub(crate) sequence_commits:
+        std::sync::Arc<std::sync::Mutex<crate::retention::SequenceCommits>>,
 
     // Account store
     pub(crate) accounts_db: Database<Bytes, Bytes>,
@@ -156,9 +158,11 @@ impl LmdbEnvironment {
         let existing_positions: Option<Database<Bytes, Bytes>> =
             env.open_database(&wtxn, Some("graph_positions"))?;
         if meta_db.get(&wtxn, b"schema_version")?.is_some_and(|bytes| {
-            bytes == 5u32.to_le_bytes() || bytes == 6u32.to_le_bytes() || bytes == 7u32.to_le_bytes() || bytes == crate::CURRENT_SCHEMA_VERSION.to_le_bytes()
-        })
-            && existing_positions.is_none()
+            bytes == 5u32.to_le_bytes()
+                || bytes == 6u32.to_le_bytes()
+                || bytes == 7u32.to_le_bytes()
+                || bytes == crate::CURRENT_SCHEMA_VERSION.to_le_bytes()
+        }) && existing_positions.is_none()
         {
             return Err(LmdbError::Heed(
                 "schema with graph positions is missing its graph position index".into(),
@@ -166,17 +170,28 @@ impl LmdbEnvironment {
         }
         let graph_position_db = env.create_database(&mut wtxn, Some("graph_positions"))?;
 
-        let existing_verified: Option<Database<Bytes, Bytes>> = env.open_database(&wtxn, Some("verified_accounts"))?;
-        if meta_db.get(&wtxn, b"schema_version")?.is_some_and(|bytes| bytes == 7u32.to_le_bytes() || bytes == crate::CURRENT_SCHEMA_VERSION.to_le_bytes()) && existing_verified.is_none() {
-            return Err(LmdbError::Heed("schema is missing its verified account index".into()));
+        let existing_verified: Option<Database<Bytes, Bytes>> =
+            env.open_database(&wtxn, Some("verified_accounts"))?;
+        if meta_db.get(&wtxn, b"schema_version")?.is_some_and(|bytes| {
+            bytes == 7u32.to_le_bytes() || bytes == crate::CURRENT_SCHEMA_VERSION.to_le_bytes()
+        }) && existing_verified.is_none()
+        {
+            return Err(LmdbError::Heed(
+                "schema is missing its verified account index".into(),
+            ));
         }
         let verified_accounts_db = env.create_database(&mut wtxn, Some("verified_accounts"))?;
-        let existing_heads: Option<Database<Bytes, Bytes>> = env.open_database(&wtxn, Some("checkpoint_heads"))?;
-        if meta_db.get(&wtxn, b"schema_version")? == Some(&crate::CURRENT_SCHEMA_VERSION.to_le_bytes()[..]) && existing_heads.is_none() {
-            return Err(LmdbError::Heed("schema is missing its checkpoint head store".into()));
+        let existing_heads: Option<Database<Bytes, Bytes>> =
+            env.open_database(&wtxn, Some("checkpoint_heads"))?;
+        if meta_db.get(&wtxn, b"schema_version")?
+            == Some(&crate::CURRENT_SCHEMA_VERSION.to_le_bytes()[..])
+            && existing_heads.is_none()
+        {
+            return Err(LmdbError::Heed(
+                "schema is missing its checkpoint head store".into(),
+            ));
         }
         let checkpoint_heads_db = env.create_database(&mut wtxn, Some("checkpoint_heads"))?;
-
 
         // Pending-layout markers do not establish the signed block encoding.
         // Never relabel an unversioned nonempty ledger as the signing-grant schema.
@@ -274,7 +289,10 @@ impl LmdbEnvironment {
         if meta_db.get(&wtxn, b"schema_version")?
             != Some(&crate::CURRENT_SCHEMA_VERSION.to_le_bytes()[..])
         {
-            if meta_db.get(&wtxn, b"schema_version")?.is_none_or(|bytes| bytes == 3u32.to_le_bytes() || bytes == 4u32.to_le_bytes()) {
+            if meta_db
+                .get(&wtxn, b"schema_version")?
+                .is_none_or(|bytes| bytes == 3u32.to_le_bytes() || bytes == 4u32.to_le_bytes())
+            {
                 crate::graph_position::rebuild(&mut wtxn, meta_db, graph_position_db)?;
             }
             if meta_db.get(&wtxn, b"schema_version")? != Some(&7u32.to_le_bytes()[..]) {
@@ -338,7 +356,9 @@ impl LmdbEnvironment {
     /// Begin a transaction for a bounded group with a separate journal per block.
     /// Publish effects only after commit. An error aborts the entire group;
     /// process blocks separately if failures need to be isolated.
-    pub fn tx_begin_block_group(&self) -> Result<LmdbWriteTransaction<'_>, burst_store::StoreError> {
+    pub fn tx_begin_block_group(
+        &self,
+    ) -> Result<LmdbWriteTransaction<'_>, burst_store::StoreError> {
         LmdbWriteTransaction::new_block_group(self)
     }
 
@@ -356,12 +376,20 @@ impl LmdbEnvironment {
     }
 
     /// Bind shared read operations to a pinned reader from this environment.
-    pub fn read_view<'a>(&'a self, reader: &'a LmdbReadTransaction<'_>)
-        -> Result<crate::read_view::LedgerReadView<'a>, burst_store::StoreError> {
+    pub fn read_view<'a>(
+        &'a self,
+        reader: &'a LmdbReadTransaction<'_>,
+    ) -> Result<crate::read_view::LedgerReadView<'a>, burst_store::StoreError> {
         if !reader.belongs_to(self) {
-            return Err(burst_store::StoreError::Corruption("read view belongs to another environment".into()));
+            return Err(burst_store::StoreError::Corruption(
+                "read view belongs to another environment".into(),
+            ));
         }
-        Ok(crate::read_view::LedgerReadView::new(self, &reader.txn, reader.clean_storage_cut()))
+        Ok(crate::read_view::LedgerReadView::new(
+            self,
+            &reader.txn,
+            reader.clean_storage_cut(),
+        ))
     }
 
     /// Create an account store backed by this environment.
@@ -513,21 +541,40 @@ mod lifecycle_tests {
             let raw = SharedEnv::open(dir.path(), options).unwrap();
             let mut txn = raw.write_txn().unwrap();
             let meta: Database<Bytes, Bytes> = raw.create_database(&mut txn, Some("meta")).unwrap();
-            let _: Database<Bytes, Bytes> = raw.create_database(&mut txn, Some("graph_positions")).unwrap();
-            let _: Database<Bytes, Bytes> = raw.create_database(&mut txn, Some("verified_accounts")).unwrap();
-            meta.put(&mut txn, b"schema_version", &version.to_le_bytes()).unwrap();
+            let _: Database<Bytes, Bytes> = raw
+                .create_database(&mut txn, Some("graph_positions"))
+                .unwrap();
+            let _: Database<Bytes, Bytes> = raw
+                .create_database(&mut txn, Some("verified_accounts"))
+                .unwrap();
+            meta.put(&mut txn, b"schema_version", &version.to_le_bytes())
+                .unwrap();
             txn.commit().unwrap();
             let opened = LmdbEnvironment::open(dir.path(), crate::REQUIRED_DATABASES, 2 << 20);
             if version == 7 {
                 let env = opened.unwrap();
-                assert_eq!(env.meta_store().get_schema_version().unwrap(), crate::CURRENT_SCHEMA_VERSION);
+                assert_eq!(
+                    env.meta_store().get_schema_version().unwrap(),
+                    crate::CURRENT_SCHEMA_VERSION
+                );
                 let reader = env.tx_begin_read().unwrap();
-                assert!(env.read_view(&reader).unwrap().checkpoint_head_node(&[1; 32]).unwrap().is_none());
+                assert!(env
+                    .read_view(&reader)
+                    .unwrap()
+                    .checkpoint_head_node(&[1; 32])
+                    .unwrap()
+                    .is_none());
             } else {
                 assert!(opened.is_err());
                 let reader = raw.read_txn().unwrap();
-                assert!(raw.open_database::<Bytes, Bytes>(&reader, Some("checkpoint_heads")).unwrap().is_none());
-                assert_eq!(meta.get(&reader, b"schema_version").unwrap(), Some(version.to_le_bytes().as_slice()));
+                assert!(raw
+                    .open_database::<Bytes, Bytes>(&reader, Some("checkpoint_heads"))
+                    .unwrap()
+                    .is_none());
+                assert_eq!(
+                    meta.get(&reader, b"schema_version").unwrap(),
+                    Some(version.to_le_bytes().as_slice())
+                );
             }
         }
     }
@@ -540,12 +587,22 @@ mod lifecycle_tests {
         let raw = SharedEnv::open(dir.path(), options).unwrap();
         let mut txn = raw.write_txn().unwrap();
         let meta: Database<Bytes, Bytes> = raw.create_database(&mut txn, Some("meta")).unwrap();
-        let _: Database<Bytes, Bytes> = raw.create_database(&mut txn, Some("graph_positions")).unwrap();
-        meta.put(&mut txn, b"schema_version", &crate::CURRENT_SCHEMA_VERSION.to_le_bytes()).unwrap();
+        let _: Database<Bytes, Bytes> = raw
+            .create_database(&mut txn, Some("graph_positions"))
+            .unwrap();
+        meta.put(
+            &mut txn,
+            b"schema_version",
+            &crate::CURRENT_SCHEMA_VERSION.to_le_bytes(),
+        )
+        .unwrap();
         txn.commit().unwrap();
         assert!(LmdbEnvironment::open(dir.path(), crate::REQUIRED_DATABASES, 1 << 20).is_err());
         let txn = raw.read_txn().unwrap();
-        assert!(raw.open_database::<Bytes, Bytes>(&txn, Some("verified_accounts")).unwrap().is_none());
+        assert!(raw
+            .open_database::<Bytes, Bytes>(&txn, Some("verified_accounts"))
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -704,7 +761,8 @@ mod lifecycle_tests {
     #[test]
     fn final_environment_owner_closes_the_database() {
         let dir = tempfile::tempdir().unwrap();
-        let environment = LmdbEnvironment::open(dir.path(), crate::REQUIRED_DATABASES, 1 << 20).unwrap();
+        let environment =
+            LmdbEnvironment::open(dir.path(), crate::REQUIRED_DATABASES, 1 << 20).unwrap();
         let closed = heed::env_closing_event(environment.env().path()).unwrap();
         drop(environment);
         assert!(

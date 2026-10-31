@@ -399,7 +399,9 @@ fn plan(batch: &LmdbWriteTransaction<'_>, target: BlockHash) -> Result<RollbackP
                 {
                     batch.verification_target_undo_with_overlay(
                         std::str::from_utf8(&change.key).map_err(|e| invalid(&e.to_string()))?,
-                        &values, MAX_BYTES)?
+                        &values,
+                        MAX_BYTES,
+                    )?
                 } else {
                     match values.get(&key) {
                         Some(value) => value.clone(),
@@ -430,7 +432,9 @@ fn plan(batch: &LmdbWriteTransaction<'_>, target: BlockHash) -> Result<RollbackP
                 break;
             }
         }
-        for hash in deferred { ready.remove(&hash); }
+        for hash in deferred {
+            ready.remove(&hash);
+        }
         let (hash, candidate) = selected.ok_or_else(|| {
             invalid("rollback conflicts with state outside the dependency closure")
         })?;
@@ -478,16 +482,22 @@ fn plan(batch: &LmdbWriteTransaction<'_>, target: BlockHash) -> Result<RollbackP
             {
                 crate::verification_storage::overlay_snapshot_delta(
                     batch.uses_normalized_verification_records()?,
-                    change.after.as_deref(), change.before.as_deref(), &mut values,
-                    &mut restored_bytes, MAX_BYTES,
+                    change.after.as_deref(),
+                    change.before.as_deref(),
+                    &mut values,
+                    &mut restored_bytes,
+                    MAX_BYTES,
                 )?;
             } else if change.table == UndoTable::Meta
                 && batch.uses_virtual_verification_target(&change.key)?
             {
                 crate::verification_storage::overlay_target_delta(
                     std::str::from_utf8(&change.key).map_err(|e| invalid(&e.to_string()))?,
-                    change.after.as_deref(), change.before.as_deref(), &mut values,
-                    &mut restored_bytes, MAX_BYTES,
+                    change.after.as_deref(),
+                    change.before.as_deref(),
+                    &mut values,
+                    &mut restored_bytes,
+                    MAX_BYTES,
                 )?;
             } else {
                 revision_waiters.wake(&change, &mut ready);
@@ -697,28 +707,49 @@ mod tests {
         save(&store, &target, 0, true);
         // Synthetic storage dependency fan-out exercises the planner, not payment
         // or ballot admission. Hash order opposes the local journal write order.
-        let mut children: Vec<_> = (2..=33).map(|person|
-            block(person, BlockType::Open, BlockHash::ZERO, target.hash)).collect();
+        let mut children: Vec<_> = (2..=33)
+            .map(|person| block(person, BlockType::Open, BlockHash::ZERO, target.hash))
+            .collect();
         children.sort_by_key(|block| block.hash);
         let key = format!("governance_revision/v1/{}", TxHash::new([7; 32]));
         for (index, child) in children.iter().enumerate() {
             save_with(&store, child, 0, true, |batch| {
-                batch.put_meta(&key, &(index as u128 + 1).to_be_bytes()).unwrap();
+                batch
+                    .put_meta(&key, &(index as u128 + 1).to_be_bytes())
+                    .unwrap();
             });
         }
         crate::causal_cementation::cement(&store, root.hash).unwrap();
-        let before = store.tx_begin_write().unwrap().checkpoint_metadata(b"block_undo/").unwrap();
+        let before = store
+            .tx_begin_write()
+            .unwrap()
+            .checkpoint_metadata(b"block_undo/")
+            .unwrap();
         let planned = preflight(&store, target.hash).unwrap();
-        let expected: Vec<_> = children.iter().rev().map(|b| b.hash).chain([target.hash]).collect();
+        let expected: Vec<_> = children
+            .iter()
+            .rev()
+            .map(|b| b.hash)
+            .chain([target.hash])
+            .collect();
         assert_eq!(planned.blocks(), expected);
-        assert_eq!(store.tx_begin_write().unwrap().checkpoint_metadata(b"block_undo/").unwrap(), before);
+        assert_eq!(
+            store
+                .tx_begin_write()
+                .unwrap()
+                .checkpoint_metadata(b"block_undo/")
+                .unwrap(),
+            before
+        );
         // A counter value outside the closure must still reject the whole plan.
         let mut batch = store.tx_begin_write().unwrap();
         batch.put_meta(&key, &999u128.to_be_bytes()).unwrap();
         assert!(plan(&batch, target.hash).is_err());
         drop(batch);
         let mut batch = store.tx_begin_write().unwrap();
-        for hash in planned.blocks() { batch.rewind_block(hash).unwrap(); }
+        for hash in planned.blocks() {
+            batch.rewind_block(hash).unwrap();
+        }
         assert_eq!(batch.get_meta(&key).unwrap(), None);
         assert_eq!(batch.get_account(&root.account).unwrap().head, root.hash);
         batch.commit().unwrap();
@@ -818,70 +849,125 @@ mod tests {
     #[test]
     fn historical_verification_aggregate_and_keyed_undo_share_one_plan() {
         for normalize_at in [0, 1, 2] {
-        use burst_verification::{OrchestratorSnapshot, VerificationOrchestrator};
-        let directory = tempfile::tempdir().unwrap();
-        let store = LmdbStore::open(directory.path(), 32, 16 << 20).unwrap();
-        let empty = VerificationOrchestrator::new();
-        let empty_bytes = empty.snapshot().encode().unwrap();
-        let mut batch = store.tx_begin_write().unwrap();
-        crate::payment_epoch::initialize(&mut batch, BlockHash::new([1; 32])).unwrap();
-        batch.put_meta(crate::endorsement_commit::SNAPSHOT_KEY, &empty_bytes).unwrap();
-        batch.commit().unwrap();
-        let root = block(1, BlockType::Open, BlockHash::ZERO, BlockHash::ZERO);
-        save(&store, &root, 0, true);
-        let first = block(1, BlockType::ChangeRepresentative, root.hash, BlockHash::ZERO);
-        let second = block(1, BlockType::ChangeRepresentative, first.hash, BlockHash::ZERO);
-        let third = block(1, BlockType::ChangeRepresentative, second.hash, BlockHash::ZERO);
-        let mut state = empty.storage_clone();
-        state.initialize_genesis(&root.account);
-        save_with(&store, &first, 1, true, |batch| {
-            batch.put_meta(crate::endorsement_commit::SNAPSHOT_KEY,
-                &state.snapshot().encode().unwrap()).unwrap();
-        });
-        let mut batch = store.tx_begin_write().unwrap();
-        batch.migrate_verification_records().unwrap();
-        if normalize_at == 1 { batch.normalize_verification_records().unwrap(); }
-        batch.commit().unwrap();
-        // A row journal between historical and virtual aggregate journals forces
-        // preflight to reconcile both representations against the same overlay.
-        save_with(&store, &second, 2, true, |batch| {
-            let before = batch.read_verification_records().unwrap();
-            let mut after = before.storage_clone();
-            after.begin_record_changes();
-            after.initialize_genesis(&block(2, BlockType::Open, BlockHash::ZERO, BlockHash::ZERO).account);
-            batch.apply_verification_record_delta(&before, &after).unwrap();
-            state = after;
-        });
-        if normalize_at == 2 {
+            use burst_verification::{OrchestratorSnapshot, VerificationOrchestrator};
+            let directory = tempfile::tempdir().unwrap();
+            let store = LmdbStore::open(directory.path(), 32, 16 << 20).unwrap();
+            let empty = VerificationOrchestrator::new();
+            let empty_bytes = empty.snapshot().encode().unwrap();
             let mut batch = store.tx_begin_write().unwrap();
-            let historical = batch.block_undo(&second.hash).unwrap().unwrap();
-            batch.normalize_verification_records().unwrap();
-            assert_eq!(batch.block_undo(&second.hash).unwrap().unwrap(), historical);
+            crate::payment_epoch::initialize(&mut batch, BlockHash::new([1; 32])).unwrap();
+            batch
+                .put_meta(crate::endorsement_commit::SNAPSHOT_KEY, &empty_bytes)
+                .unwrap();
             batch.commit().unwrap();
+            let root = block(1, BlockType::Open, BlockHash::ZERO, BlockHash::ZERO);
+            save(&store, &root, 0, true);
+            let first = block(
+                1,
+                BlockType::ChangeRepresentative,
+                root.hash,
+                BlockHash::ZERO,
+            );
+            let second = block(
+                1,
+                BlockType::ChangeRepresentative,
+                first.hash,
+                BlockHash::ZERO,
+            );
+            let third = block(
+                1,
+                BlockType::ChangeRepresentative,
+                second.hash,
+                BlockHash::ZERO,
+            );
+            let mut state = empty.storage_clone();
+            state.initialize_genesis(&root.account);
+            save_with(&store, &first, 1, true, |batch| {
+                batch
+                    .put_meta(
+                        crate::endorsement_commit::SNAPSHOT_KEY,
+                        &state.snapshot().encode().unwrap(),
+                    )
+                    .unwrap();
+            });
+            let mut batch = store.tx_begin_write().unwrap();
+            batch.migrate_verification_records().unwrap();
+            if normalize_at == 1 {
+                batch.normalize_verification_records().unwrap();
+            }
+            batch.commit().unwrap();
+            // A row journal between historical and virtual aggregate journals forces
+            // preflight to reconcile both representations against the same overlay.
+            save_with(&store, &second, 2, true, |batch| {
+                let before = batch.read_verification_records().unwrap();
+                let mut after = before.storage_clone();
+                after.begin_record_changes();
+                after.initialize_genesis(
+                    &block(2, BlockType::Open, BlockHash::ZERO, BlockHash::ZERO).account,
+                );
+                batch
+                    .apply_verification_record_delta(&before, &after)
+                    .unwrap();
+                state = after;
+            });
+            if normalize_at == 2 {
+                let mut batch = store.tx_begin_write().unwrap();
+                let historical = batch.block_undo(&second.hash).unwrap().unwrap();
+                batch.normalize_verification_records().unwrap();
+                assert_eq!(batch.block_undo(&second.hash).unwrap().unwrap(), historical);
+                batch.commit().unwrap();
+            }
+            state.initialize_genesis(
+                &block(3, BlockType::Open, BlockHash::ZERO, BlockHash::ZERO).account,
+            );
+            save_with(&store, &third, 3, true, |batch| {
+                batch
+                    .put_meta(
+                        crate::endorsement_commit::SNAPSHOT_KEY,
+                        &state.snapshot().encode().unwrap(),
+                    )
+                    .unwrap();
+            });
+            crate::causal_cementation::cement(&store, root.hash).unwrap();
+            let plan = preflight(&store, first.hash).unwrap();
+            assert_eq!(plan.blocks(), &[third.hash, second.hash, first.hash]);
+            let mut batch = store.tx_begin_write().unwrap();
+            for hash in plan.blocks() {
+                batch
+                    .rewind_block_with_snapshots(hash, |key, before, after, current| {
+                        assert_eq!(key, crate::endorsement_commit::SNAPSHOT_KEY.as_bytes());
+                        OrchestratorSnapshot::rewind(before, after, current)
+                            .map_err(|e| invalid(&e))
+                    })
+                    .unwrap();
+            }
+            assert_eq!(
+                batch
+                    .read_verification_records()
+                    .unwrap()
+                    .snapshot()
+                    .encode()
+                    .unwrap(),
+                empty_bytes
+            );
+            batch.commit().unwrap();
+            drop(store);
+            let store = LmdbStore::open(directory.path(), 32, 16 << 20).unwrap();
+            let batch = store.tx_begin_write().unwrap();
+            assert_eq!(
+                batch
+                    .read_verification_records()
+                    .unwrap()
+                    .snapshot()
+                    .encode()
+                    .unwrap(),
+                empty_bytes
+            );
+            assert!(batch
+                .get_meta(crate::endorsement_commit::SNAPSHOT_KEY)
+                .unwrap()
+                .is_none());
         }
-        state.initialize_genesis(&block(3, BlockType::Open, BlockHash::ZERO, BlockHash::ZERO).account);
-        save_with(&store, &third, 3, true, |batch| {
-            batch.put_meta(crate::endorsement_commit::SNAPSHOT_KEY,
-                &state.snapshot().encode().unwrap()).unwrap();
-        });
-        crate::causal_cementation::cement(&store, root.hash).unwrap();
-        let plan = preflight(&store, first.hash).unwrap();
-        assert_eq!(plan.blocks(), &[third.hash, second.hash, first.hash]);
-        let mut batch = store.tx_begin_write().unwrap();
-        for hash in plan.blocks() {
-            batch.rewind_block_with_snapshots(hash, |key, before, after, current| {
-                assert_eq!(key, crate::endorsement_commit::SNAPSHOT_KEY.as_bytes());
-                OrchestratorSnapshot::rewind(before, after, current).map_err(|e| invalid(&e))
-            }).unwrap();
-        }
-        assert_eq!(batch.read_verification_records().unwrap().snapshot().encode().unwrap(), empty_bytes);
-        batch.commit().unwrap();
-        drop(store);
-        let store = LmdbStore::open(directory.path(), 32, 16 << 20).unwrap();
-        let batch = store.tx_begin_write().unwrap();
-        assert_eq!(batch.read_verification_records().unwrap().snapshot().encode().unwrap(), empty_bytes);
-        assert!(batch.get_meta(crate::endorsement_commit::SNAPSHOT_KEY).unwrap().is_none());
-    }
     }
 
     #[test]

@@ -7,9 +7,9 @@ use std::sync::{
 use tokio::sync::{mpsc, RwLock};
 
 mod authority;
+pub(in crate::confirmed_replay::tests) mod body_retirement;
 mod compact_journal;
 mod graph;
-pub(in crate::confirmed_replay::tests) mod body_retirement;
 pub(in crate::confirmed_replay::tests) mod installation;
 #[cfg(unix)]
 mod publication_crash;
@@ -232,7 +232,9 @@ async fn compact_candidate_rejects_authority_changes_during_peer_retrieval() {
             .unwrap(),
             bincode::serialize(&expected_accounts).unwrap()
         );
-        if change == 0 {
+        // Discovery authenticates confirmed history, not provisional balances.
+        // Startup and publication check the full account inventory separately.
+        if matches!(change, 0 | 6) {
             assert_eq!(result.unwrap(), manifest);
             assert_eq!(
                 local
@@ -655,11 +657,22 @@ async fn identity_arrival_recovery(with_governance: bool) {
             .unwrap()
             .unwrap();
             service.stop().await;
-            let cache_at = burst_types::Timestamp::new(checked.recovered().continuation.anchor().cutoff());
+            let cache_at =
+                burst_types::Timestamp::new(checked.recovered().continuation.anchor().cutoff());
             let prepared = checked.prepare_token_indexes_at(&local, cache_at).unwrap();
             let mut roots = std::collections::HashSet::new();
-            prepared.visit_rollback_body_roots(local.env().path(), |hash| { roots.insert(hash); Ok(()) }).unwrap();
-            prepared.visit_replayed_changes(|record| { assert!(roots.contains(&record.block)); Ok(()) }).unwrap();
+            prepared
+                .visit_rollback_body_roots(local.env().path(), |hash| {
+                    roots.insert(hash);
+                    Ok(())
+                })
+                .unwrap();
+            prepared
+                .visit_replayed_changes(|record| {
+                    assert!(roots.contains(&record.block));
+                    Ok(())
+                })
+                .unwrap();
             let projected = prepared.stage(&local).unwrap();
             let hashes: Vec<_> = projected
                 .economic_changes()
@@ -760,28 +773,82 @@ async fn identity_arrival_recovery(with_governance: bool) {
             if with_governance && !normalized_verification && order == vec![0, 1, 2, 3] {
                 let (before_metadata, before_aggregate, before_journals) = {
                     let batch = local.tx_begin_write().unwrap();
-                    (batch.checkpoint_metadata(b"").unwrap(),
-                     batch.undo_value(burst_store_lmdb::block_undo::UndoTable::BrnMeta, b"governance_engine").unwrap(),
-                     blocks.iter().map(|block| bincode::serialize(&batch.block_undo(&block.hash).unwrap()).unwrap()).collect::<Vec<_>>())
+                    (
+                        batch.checkpoint_metadata(b"").unwrap(),
+                        batch
+                            .undo_value(
+                                burst_store_lmdb::block_undo::UndoTable::BrnMeta,
+                                b"governance_engine",
+                            )
+                            .unwrap(),
+                        blocks
+                            .iter()
+                            .map(|block| {
+                                bincode::serialize(&batch.block_undo(&block.hash).unwrap()).unwrap()
+                            })
+                            .collect::<Vec<_>>(),
+                    )
                 };
-                let projected = recovered.project_token_indexes_with_stable_holdings(&local, cache_at).unwrap();
-                let proposal = projected.economic_changes().into_iter().find(|row| row.block == blocks[3].hash).unwrap();
-                assert!(proposal.governance.is_some(), "migration must derive keyed undo directly");
-                assert!(proposal.changes.iter().all(|row| row.key != b"governance_engine"));
+                let projected = recovered
+                    .project_token_indexes_with_stable_holdings(&local, cache_at)
+                    .unwrap();
+                let proposal = projected
+                    .economic_changes()
+                    .into_iter()
+                    .find(|row| row.block == blocks[3].hash)
+                    .unwrap();
+                assert!(
+                    proposal.governance.is_some(),
+                    "migration must derive keyed undo directly"
+                );
+                assert!(proposal
+                    .changes
+                    .iter()
+                    .all(|row| row.key != b"governance_engine"));
                 let aborted = projected.stage_undo().unwrap();
                 let journal = aborted.journal(&blocks[3].hash).unwrap().unwrap();
-                assert!(journal.changes.iter().any(|row| row.key.starts_with(b"governance_revision/")));
-                assert!(journal.changes.iter().all(|row| row.key != b"governance_engine"));
+                assert!(journal
+                    .changes
+                    .iter()
+                    .any(|row| row.key.starts_with(b"governance_revision/")));
+                assert!(journal
+                    .changes
+                    .iter()
+                    .all(|row| row.key != b"governance_engine"));
                 drop(aborted);
                 {
                     let batch = local.tx_begin_write().unwrap();
                     assert!(!batch.uses_governance_records().unwrap());
                     assert_eq!(batch.checkpoint_metadata(b"").unwrap(), before_metadata);
-                    assert_eq!(batch.undo_value(burst_store_lmdb::block_undo::UndoTable::BrnMeta, b"governance_engine").unwrap(), before_aggregate);
-                    assert_eq!(blocks.iter().map(|block| bincode::serialize(&batch.block_undo(&block.hash).unwrap()).unwrap()).collect::<Vec<_>>(), before_journals);
+                    assert_eq!(
+                        batch
+                            .undo_value(
+                                burst_store_lmdb::block_undo::UndoTable::BrnMeta,
+                                b"governance_engine"
+                            )
+                            .unwrap(),
+                        before_aggregate
+                    );
+                    assert_eq!(
+                        blocks
+                            .iter()
+                            .map(|block| bincode::serialize(
+                                &batch.block_undo(&block.hash).unwrap()
+                            )
+                            .unwrap())
+                            .collect::<Vec<_>>(),
+                        before_journals
+                    );
                 }
-                recovered = installed::recover_metadata_from_peers(Arc::clone(&local), NetworkId::Dev,
-                    fixture.params.clone(), Arc::clone(&service.registry)).await.unwrap().unwrap();
+                recovered = installed::recover_metadata_from_peers(
+                    Arc::clone(&local),
+                    NetworkId::Dev,
+                    fixture.params.clone(),
+                    Arc::clone(&service.registry),
+                )
+                .await
+                .unwrap()
+                .unwrap();
             }
             service.stop().await;
             let runtime_dir = tempfile::tempdir().unwrap();
@@ -804,9 +871,7 @@ async fn identity_arrival_recovery(with_governance: bool) {
                 .unwrap());
             // Unauthenticated time must not influence recovered expiry caches.
             node.clock_sync.lock().await.offset_ms = i64::MAX;
-            node.publish_recovered(recovered)
-                .await
-                .unwrap();
+            node.publish_recovered(recovered).await.unwrap();
             assert!(local
                 .tx_begin_write()
                 .unwrap()
@@ -815,11 +880,23 @@ async fn identity_arrival_recovery(with_governance: bool) {
             {
                 let batch = local.tx_begin_write().unwrap();
                 assert!(batch.uses_governance_records().unwrap());
-                assert!(batch.undo_value_ref(burst_store_lmdb::block_undo::UndoTable::BrnMeta, b"governance_engine").unwrap().is_none());
+                assert!(batch
+                    .undo_value_ref(
+                        burst_store_lmdb::block_undo::UndoTable::BrnMeta,
+                        b"governance_engine"
+                    )
+                    .unwrap()
+                    .is_none());
                 if with_governance {
                     let journal = batch.block_undo(&blocks[3].hash).unwrap().unwrap();
-                    assert!(journal.changes.iter().any(|row| row.key.starts_with(b"governance_revision/")));
-                    assert!(journal.changes.iter().all(|row| row.key != b"governance_engine"));
+                    assert!(journal
+                        .changes
+                        .iter()
+                        .any(|row| row.key.starts_with(b"governance_revision/")));
+                    assert!(journal
+                        .changes
+                        .iter()
+                        .all(|row| row.key != b"governance_engine"));
                 }
             }
             assert!(node.connection_registry.read().await.is_recovering());
@@ -968,34 +1045,61 @@ async fn payment_delta_recovery(uses_row_storage: bool) {
     .unwrap()
     .unwrap();
     service.stop().await;
-    let before_preparation = local.tx_begin_write().unwrap().checkpoint_metadata(b"").unwrap();
-    let prepared = checked.prepare_token_indexes_at(
-        &local, burst_types::Timestamp::new(expected.anchor().cutoff()),
-    ).unwrap();
+    let before_preparation = local
+        .tx_begin_write()
+        .unwrap()
+        .checkpoint_metadata(b"")
+        .unwrap();
+    let prepared = checked
+        .prepare_token_indexes_at(
+            &local,
+            burst_types::Timestamp::new(expected.anchor().cutoff()),
+        )
+        .unwrap();
     let mut replayed_blocks = std::collections::HashSet::new();
-    prepared.visit_replayed_changes(|record| {
-        assert!(replayed_blocks.insert(record.block));
-        // This would deadlock if preparation retained the publication writer.
-        let batch = local.tx_begin_write()?;
-        assert!(batch.get_account(&record.account)?.block_count >= record.height);
-        Ok(())
-    }).unwrap();
+    prepared
+        .visit_replayed_changes(|record| {
+            assert!(replayed_blocks.insert(record.block));
+            // This would deadlock if preparation retained the publication writer.
+            let batch = local.tx_begin_write()?;
+            assert!(batch.get_account(&record.account)?.block_count >= record.height);
+            Ok(())
+        })
+        .unwrap();
     assert_eq!(replayed_blocks.len(), 5);
-    assert_eq!(replayed_blocks, recorded.iter().map(|record| record.block).collect());
+    assert_eq!(
+        replayed_blocks,
+        recorded.iter().map(|record| record.block).collect()
+    );
     let mut rollback_roots = std::collections::HashSet::new();
-    prepared.visit_rollback_body_roots(local.env().path(), |hash| {
-        assert!(rollback_roots.insert(hash));
-        Ok(())
-    }).unwrap();
-    assert!(replayed_blocks.iter().all(|hash| rollback_roots.contains(hash)));
+    prepared
+        .visit_rollback_body_roots(local.env().path(), |hash| {
+            assert!(rollback_roots.insert(hash));
+            Ok(())
+        })
+        .unwrap();
+    assert!(replayed_blocks
+        .iter()
+        .all(|hash| rollback_roots.contains(hash)));
     assert!(rollback_roots.contains(&blocks[0].previous));
     let mut callbacks = 0;
-    assert!(prepared.visit_replayed_changes(|_| {
-        callbacks += 1;
-        Err(burst_store::StoreError::Corruption("retention inspection stopped".into()))
-    }).is_err());
+    assert!(prepared
+        .visit_replayed_changes(|_| {
+            callbacks += 1;
+            Err(burst_store::StoreError::Corruption(
+                "retention inspection stopped".into(),
+            ))
+        })
+        .is_err());
     assert_eq!(callbacks, 1);
-    assert_eq!(local.tx_begin_write().unwrap().checkpoint_metadata(b"").unwrap(), before_preparation);
+    assert_eq!(
+        local
+            .tx_begin_write()
+            .unwrap()
+            .checkpoint_metadata(b"")
+            .unwrap(),
+        before_preparation
+    );
     let projected = prepared.stage(&local).unwrap();
     let derived = projected.economic_changes();
     assert_eq!(derived.len(), 5);
@@ -1236,10 +1340,16 @@ async fn payment_delta_recovery(uses_row_storage: bool) {
     service.stop().await;
     {
         let view = local.tx_begin_read().unwrap();
-        let resolved = checked.resolve_body(&local, &view, &burn).unwrap().expect("cemented burn");
+        let resolved = checked
+            .resolve_body(&local, &view, &burn)
+            .unwrap()
+            .expect("cemented burn");
         assert_eq!(resolved.origin(), installed::BodyOrigin::CementedSuffix);
         assert_eq!(resolved.block().hash, burn);
-        let resolved = checked.resolve_body(&local, &view, &successor).unwrap().expect("provisional successor");
+        let resolved = checked
+            .resolve_body(&local, &view, &successor)
+            .unwrap()
+            .expect("provisional successor");
         assert_eq!(resolved.origin(), installed::BodyOrigin::ProvisionalSuffix);
     }
     let projected = checked.project_token_indexes_at(&local, later).unwrap();
@@ -1390,20 +1500,37 @@ async fn recovered_trst_pages_bind_authority_and_reject_changed_economics() {
     let bytes = archive(&source, &fixture, epoch);
     let expected = snapshot.into_continuation();
     let (_local_dir, local) = cemented::sparse(&expected, &source);
-    local.meta_store().put_meta(installed::BASE_KEY, &bytes).unwrap();
-    for (key, value) in source.tx_begin_write().unwrap()
-        .checkpoint_metadata(b"checkpoint_chain/v1/").unwrap()
+    local
+        .meta_store()
+        .put_meta(installed::BASE_KEY, &bytes)
+        .unwrap();
+    for (key, value) in source
+        .tx_begin_write()
+        .unwrap()
+        .checkpoint_metadata(b"checkpoint_chain/v1/")
+        .unwrap()
     {
-        local.meta_store().put_meta(std::str::from_utf8(&key).unwrap(), &value).unwrap();
+        local
+            .meta_store()
+            .put_meta(std::str::from_utf8(&key).unwrap(), &value)
+            .unwrap();
     }
     let local = Arc::new(local);
     let service = WitnessService::start(Arc::new(source), Arc::clone(&local), 0).await;
     let checked = installed::recover_metadata_from_peers(
-        Arc::clone(&local), NetworkId::Dev, fixture.params.clone(),
+        Arc::clone(&local),
+        NetworkId::Dev,
+        fixture.params.clone(),
         Arc::clone(&service.registry),
-    ).await.unwrap().unwrap();
+    )
+    .await
+    .unwrap()
+    .unwrap();
     service.stop().await;
-    assert!(checked.trst_references(&local).is_err(), "aggregate layout unsupported");
+    assert!(
+        checked.trst_references(&local).is_err(),
+        "aggregate layout unsupported"
+    );
     // This fully certified fixture has no provisional journals to convert.
     let mut batch = local.tx_begin_write().unwrap();
     let payment = crate::payment_transition::restore(&batch, &fixture.params).unwrap();
@@ -1415,69 +1542,132 @@ async fn recovered_trst_pages_bind_authority_and_reject_changed_economics() {
     }
     batch.normalize_verification_records().unwrap();
     batch.migrate_governance_records().unwrap();
-    batch.put_brn_rate_history(&payment.brn.rate_history).unwrap();
+    batch
+        .put_brn_rate_history(&payment.brn.rate_history)
+        .unwrap();
     let original_constitution = batch.get_meta("consti_engine").unwrap().unwrap();
-    let decoded_constitution: burst_consti::ConstiEngine = bincode::deserialize(&original_constitution).unwrap();
+    let decoded_constitution: burst_consti::ConstiEngine =
+        bincode::deserialize(&original_constitution).unwrap();
     let original_schedule = batch.read_confirmed_governance().unwrap();
-    batch.write_confirmed_governance(original_schedule.clone()).unwrap();
+    batch
+        .write_confirmed_governance(original_schedule.clone())
+        .unwrap();
     let expected_delegation = batch.checkpoint_metadata(b"key_delegation/").unwrap().len();
-    let expected_governance = batch.checkpoint_metadata(b"governance_state/").unwrap().len()
-        + batch.checkpoint_metadata(b"governance_endorsement/").unwrap().len();
-    let expected_verification = batch.checkpoint_metadata(b"verification_state/").unwrap().len();
+    let expected_governance = batch
+        .checkpoint_metadata(b"governance_state/")
+        .unwrap()
+        .len()
+        + batch
+            .checkpoint_metadata(b"governance_endorsement/")
+            .unwrap()
+            .len();
+    let expected_verification = batch
+        .checkpoint_metadata(b"verification_state/")
+        .unwrap()
+        .len();
     assert!(expected_verification > 1);
-    let expected_receipts: usize = crate::verification_commit::retention::PREFIXES.iter()
-        .map(|prefix| batch.checkpoint_metadata(prefix.as_bytes()).unwrap().len()).sum();
+    let expected_receipts: usize = crate::verification_commit::retention::PREFIXES
+        .iter()
+        .map(|prefix| batch.checkpoint_metadata(prefix.as_bytes()).unwrap().len())
+        .sum();
     batch.commit().unwrap();
     {
         let bodies = checked.body_requirements(&local).unwrap();
         assert!(bodies.has_root(fixture.blocks[0].hash).unwrap());
         assert!(bodies.has_root(burn).unwrap());
         let mut found_burn = false;
-        bodies.visit_resolved_roots(|hash, resolved| {
-            if hash == burn {
-                let resolved = resolved.expect("checked burn witness");
-                assert_eq!(resolved.block().hash, hash);
-                assert_eq!(resolved.origin(), installed::BodyOrigin::SnapshotPrefix);
-                assert_eq!(resolved.context(), checked.recovered().continuation.history_context());
-                found_burn = true;
-            }
-            Ok(())
-        }).unwrap();
+        bodies
+            .visit_resolved_roots(|hash, resolved| {
+                if hash == burn {
+                    let resolved = resolved.expect("checked burn witness");
+                    assert_eq!(resolved.block().hash, hash);
+                    assert_eq!(resolved.origin(), installed::BodyOrigin::SnapshotPrefix);
+                    assert_eq!(
+                        resolved.context(),
+                        checked.recovered().continuation.history_context()
+                    );
+                    found_burn = true;
+                }
+                Ok(())
+            })
+            .unwrap();
         assert!(found_burn);
         let mut roots = std::collections::HashSet::new();
-        bodies.visit_roots(|hash| { assert!(roots.insert(hash)); Ok(()) }).unwrap();
+        bodies
+            .visit_roots(|hash| {
+                assert!(roots.insert(hash));
+                Ok(())
+            })
+            .unwrap();
         assert!(roots.len() >= 2);
-        bodies.check_unchanged_cut(&local.tx_begin_write().unwrap()).unwrap();
-        local.meta_store().put_meta("body_plan_stale_cut", &[1]).unwrap();
-        assert!(bodies.check_unchanged_cut(&local.tx_begin_write().unwrap()).is_err());
+        bodies
+            .check_unchanged_cut(&local.tx_begin_write().unwrap())
+            .unwrap();
+        local
+            .meta_store()
+            .put_meta("body_plan_stale_cut", &[1])
+            .unwrap();
+        assert!(bodies
+            .check_unchanged_cut(&local.tx_begin_write().unwrap())
+            .is_err());
         assert!(bodies.close(Default::default()).is_err());
     }
-    local.meta_store().delete_meta("body_plan_stale_cut").unwrap();
+    local
+        .meta_store()
+        .delete_meta("body_plan_stale_cut")
+        .unwrap();
     let mut reader = checked.trst_references(&local).unwrap();
     {
         use crate::confirmed_replay::snapshot::SelectionSource;
         let (base, steps) = reader.signer_authority();
         let mut authority = base.clone();
-        for step in steps { authority = step.unwrap().authenticate(&authority).unwrap(); }
+        for step in steps {
+            authority = step.unwrap().authenticate(&authority).unwrap();
+        }
         assert_eq!(authority.hash(), epoch);
-        assert_eq!(reader.signer_selections().len(), checked.recovered().selections.len());
-        for selection in reader.signer_selections().iter_selections() { selection.unwrap(); }
+        assert_eq!(
+            reader.signer_selections().len(),
+            checked.recovered().selections.len()
+        );
+        for selection in reader.signer_selections().iter_selections() {
+            selection.unwrap();
+        }
     }
 
     assert_eq!(reader.confirmed_governance_schedule(), &original_schedule);
     assert_eq!(reader.confirmed_governance_schedule().epoch, epoch);
-    assert!(std::ptr::eq(reader.confirmed_governance_schedule(), reader.confirmed_governance_schedule()));
-    let original_rates: Vec<_> = payment.brn.rate_history.segments().iter().cloned().collect();
+    assert!(std::ptr::eq(
+        reader.confirmed_governance_schedule(),
+        reader.confirmed_governance_schedule()
+    ));
+    let original_rates: Vec<_> = payment
+        .brn
+        .rate_history
+        .segments()
+        .iter()
+        .cloned()
+        .collect();
     assert!(!original_rates.is_empty());
     let mut rate_iter = reader.brn_rate_segments();
     let mut observed_rates: Vec<_> = rate_iter.by_ref().take(1).cloned().collect();
     observed_rates.extend(rate_iter.cloned());
     assert_eq!(observed_rates, original_rates);
     assert_eq!(reader.constitution().unwrap(), &decoded_constitution);
-    assert!(!reader.constitution().unwrap().get_constitution().articles.is_empty());
-    let legacy_roots: Vec<_> = reader.legacy_delegation_references().unwrap()
-        .map(|r| format!("{r:?}")).collect();
-    assert_eq!(reader.metadata().recovered().continuation.anchor().hash(), epoch);
+    assert!(!reader
+        .constitution()
+        .unwrap()
+        .get_constitution()
+        .articles
+        .is_empty());
+    let legacy_roots: Vec<_> = reader
+        .legacy_delegation_references()
+        .unwrap()
+        .map(|r| format!("{r:?}"))
+        .collect();
+    assert_eq!(
+        reader.metadata().recovered().continuation.anchor().hash(),
+        epoch
+    );
     let mut brn_reader = reader.brn_wallet_references().unwrap();
     let original_brn = payment.brn.get_wallet(&address(0)).unwrap();
     // A writer can proceed while pages remain pinned to authenticated old rows.
@@ -1487,13 +1677,27 @@ async fn recovered_trst_pages_bind_authority_and_reject_changed_economics() {
     crate::trst_storage::stage_replayed_stable(&mut batch, &altered).unwrap();
     let mut altered_brn = original_brn.clone();
     altered_brn.verified_at = burst_types::Timestamp::new(42);
-    batch.put_brn_wallet_state(&address(0), &altered_brn).unwrap();
-    batch.put_meta("verification_receipt/v1/forged", b"invalid").unwrap();
-    batch.put_meta("verification_state/v3/forged", b"invalid").unwrap();
-    batch.put_meta("governance_state/v2/forged", b"invalid").unwrap();
-    batch.put_meta("key_delegation/v3/forged", b"invalid").unwrap();
-    batch.put_meta("governance_endorsement/forged", b"invalid").unwrap();
-    batch.put_meta("confirmed_governance/v4/forged", b"invalid").unwrap();
+    batch
+        .put_brn_wallet_state(&address(0), &altered_brn)
+        .unwrap();
+    batch
+        .put_meta("verification_receipt/v1/forged", b"invalid")
+        .unwrap();
+    batch
+        .put_meta("verification_state/v3/forged", b"invalid")
+        .unwrap();
+    batch
+        .put_meta("governance_state/v2/forged", b"invalid")
+        .unwrap();
+    batch
+        .put_meta("key_delegation/v3/forged", b"invalid")
+        .unwrap();
+    batch
+        .put_meta("governance_endorsement/forged", b"invalid")
+        .unwrap();
+    batch
+        .put_meta("confirmed_governance/v4/forged", b"invalid")
+        .unwrap();
     let legacy_key = burst_governance::DelegationEngine::meta_key();
     let original_legacy = batch.get_meta(legacy_key).unwrap().unwrap();
     batch.put_meta(legacy_key, b"invalid").unwrap();
@@ -1505,33 +1709,55 @@ async fn recovered_trst_pages_bind_authority_and_reject_changed_economics() {
     let changed_rate = burst_brn::rate_storage::row_value(&changed_rate);
     batch.put_brn_meta(&rate_key, &changed_rate).unwrap();
     batch.commit().unwrap();
-    assert_eq!(reader.brn_rate_segments().cloned().collect::<Vec<_>>(), original_rates);
+    assert_eq!(
+        reader.brn_rate_segments().cloned().collect::<Vec<_>>(),
+        original_rates
+    );
     assert_eq!(reader.confirmed_governance_schedule(), &original_schedule);
     assert_eq!(reader.constitution().unwrap(), &decoded_constitution);
     let mut brn_found = false;
     let mut brn_done = false;
     for _ in 0..100 {
-        let page = brn_reader.visit_next_page(1, 1 << 20, |reference| {
-            use burst_brn::retention::Reference;
-            brn_found |= reference == Reference::Boundary(original_brn.verified_at);
-            assert_ne!(reference, Reference::Boundary(burst_types::Timestamp::new(42)));
-            Ok(())
-        }).unwrap();
+        let page = brn_reader
+            .visit_next_page(1, 1 << 20, |reference| {
+                use burst_brn::retention::Reference;
+                brn_found |= reference == Reference::Boundary(original_brn.verified_at);
+                assert_ne!(
+                    reference,
+                    Reference::Boundary(burst_types::Timestamp::new(42))
+                );
+                Ok(())
+            })
+            .unwrap();
         assert!(page.rows <= 1);
-        if page.done { brn_done = true; break; }
+        if page.done {
+            brn_done = true;
+            break;
+        }
     }
     assert!(brn_done && brn_found);
     drop(brn_reader);
-    assert_eq!(legacy_roots, reader.legacy_delegation_references().unwrap()
-        .map(|r| format!("{r:?}")).collect::<Vec<_>>());
+    assert_eq!(
+        legacy_roots,
+        reader
+            .legacy_delegation_references()
+            .unwrap()
+            .map(|r| format!("{r:?}"))
+            .collect::<Vec<_>>()
+    );
     let mut delegation_reader = reader.delegation_references().unwrap();
     let mut delegation_rows = 0;
     let mut delegation_done = false;
     for _ in 0..expected_delegation + 1 {
-        let page = delegation_reader.visit_next_page(1, 4096, |_| Ok(())).unwrap();
+        let page = delegation_reader
+            .visit_next_page(1, 4096, |_| Ok(()))
+            .unwrap();
         assert!(page.rows <= 1 && page.bytes <= 4096);
         delegation_rows += page.rows;
-        if page.done { delegation_done = true; break; }
+        if page.done {
+            delegation_done = true;
+            break;
+        }
     }
     assert!(delegation_done);
     assert_eq!(delegation_rows, expected_delegation);
@@ -1540,10 +1766,15 @@ async fn recovered_trst_pages_bind_authority_and_reject_changed_economics() {
     let mut governance_rows = 0;
     let mut governance_done = false;
     for _ in 0..expected_governance + 2 {
-        let page = governance_reader.visit_next_page(1, 1 << 20, |_| Ok(())).unwrap();
+        let page = governance_reader
+            .visit_next_page(1, 1 << 20, |_| Ok(()))
+            .unwrap();
         assert!(page.rows <= 1 && page.bytes <= 1 << 20);
         governance_rows += page.rows;
-        if page.done { governance_done = true; break; }
+        if page.done {
+            governance_done = true;
+            break;
+        }
     }
     assert!(governance_done);
     assert_eq!(governance_rows, expected_governance);
@@ -1553,13 +1784,21 @@ async fn recovered_trst_pages_bind_authority_and_reject_changed_economics() {
     let mut verification_done = false;
     let mut verification_target = false;
     for _ in 0..expected_verification + 1 {
-        let page = verification_reader.visit_next_page(1, 1 << 20, |reference| {
-            verification_target |= reference == burst_verification::orchestrator::records::retention::Reference::Account(&address(0));
-            Ok(())
-        }).unwrap();
+        let page = verification_reader
+            .visit_next_page(1, 1 << 20, |reference| {
+                verification_target |= reference
+                    == burst_verification::orchestrator::records::retention::Reference::Account(
+                        &address(0),
+                    );
+                Ok(())
+            })
+            .unwrap();
         assert!(page.rows <= 1 && page.bytes <= 1 << 20);
         verification_rows += page.rows;
-        if page.done { verification_done = true; break; }
+        if page.done {
+            verification_done = true;
+            break;
+        }
     }
     assert!(verification_done && verification_target);
     assert_eq!(verification_rows, expected_verification);
@@ -1568,9 +1807,14 @@ async fn recovered_trst_pages_bind_authority_and_reject_changed_economics() {
     let mut receipt_rows = 0;
     let mut receipts_done = false;
     for _ in 0..(expected_receipts + crate::verification_commit::retention::PREFIXES.len() + 1) {
-        let page = receipt_reader.visit_next_page(1, 1 << 20, |_| Ok(())).unwrap();
+        let page = receipt_reader
+            .visit_next_page(1, 1 << 20, |_| Ok(()))
+            .unwrap();
         receipt_rows += page.rows;
-        if page.done { receipts_done = true; break; }
+        if page.done {
+            receipts_done = true;
+            break;
+        }
     }
     assert!(receipts_done);
     assert_eq!(receipt_rows, expected_receipts);
@@ -1578,26 +1822,45 @@ async fn recovered_trst_pages_bind_authority_and_reject_changed_economics() {
     let mut found = false;
     let mut done = false;
     for _ in 0..100 {
-        let page = reader.visit_next_page(1, 1 << 20, |reference| {
-            found |= reference == burst_types::TrstReference::Token(burn.into_tx_hash());
-            Ok(())
-        }).unwrap();
+        let page = reader
+            .visit_next_page(1, 1 << 20, |reference| {
+                found |= reference == burst_types::TrstReference::Token(burn.into_tx_hash());
+                Ok(())
+            })
+            .unwrap();
         assert!(page.rows <= 1);
-        if page.done { done = true; break; }
+        if page.done {
+            done = true;
+            break;
+        }
     }
     assert!(done && found);
     drop(reader);
-    assert!(checked.trst_references(&local).is_err(), "combined changed rights reject acquisition");
-    let forged_keys = ["verification_receipt/v1/forged", "verification_state/v3/forged",
-        "governance_state/v2/forged", "key_delegation/v3/forged", "governance_endorsement/forged",
-        "confirmed_governance/v4/forged"];
+    assert!(
+        checked.trst_references(&local).is_err(),
+        "combined changed rights reject acquisition"
+    );
+    let forged_keys = [
+        "verification_receipt/v1/forged",
+        "verification_state/v3/forged",
+        "governance_state/v2/forged",
+        "key_delegation/v3/forged",
+        "governance_endorsement/forged",
+        "confirmed_governance/v4/forged",
+    ];
     let mut batch = local.tx_begin_write().unwrap();
     crate::trst_storage::stage_replayed_stable(&mut batch, &payment.trst).unwrap();
-    batch.put_brn_wallet_state(&address(0), original_brn).unwrap();
+    batch
+        .put_brn_wallet_state(&address(0), original_brn)
+        .unwrap();
     batch.put_brn_meta(&rate_key, &original_rate).unwrap();
     batch.put_meta(legacy_key, &original_legacy).unwrap();
-    batch.put_meta("consti_engine", &original_constitution).unwrap();
-    for key in forged_keys { batch.delete_meta(key).unwrap(); }
+    batch
+        .put_meta("consti_engine", &original_constitution)
+        .unwrap();
+    for key in forged_keys {
+        batch.delete_meta(key).unwrap();
+    }
     batch.commit().unwrap();
     drop(checked.trst_references(&local).unwrap());
 
@@ -1605,29 +1868,63 @@ async fn recovered_trst_pages_bind_authority_and_reject_changed_economics() {
     // corruptions cannot mask a missing check for another dependency family.
     for key in forged_keys {
         local.meta_store().put_meta(key, b"invalid").unwrap();
-        assert!(checked.trst_references(&local).is_err(), "independent rejection: {key}");
+        assert!(
+            checked.trst_references(&local).is_err(),
+            "independent rejection: {key}"
+        );
         local.meta_store().delete_meta(key).unwrap();
         drop(checked.trst_references(&local).unwrap());
     }
     // Structurally valid but inconsistent with authenticated constitutional history.
     let changed_constitution = burst_consti::ConstiEngine::new();
-    local.meta_store().put_meta("consti_engine", &bincode::serialize(&changed_constitution).unwrap()).unwrap();
-    assert!(checked.trst_references(&local).is_err(), "changed constitution alone");
-    local.meta_store().put_meta("consti_engine", &original_constitution).unwrap();
+    local
+        .meta_store()
+        .put_meta(
+            "consti_engine",
+            &bincode::serialize(&changed_constitution).unwrap(),
+        )
+        .unwrap();
+    assert!(
+        checked.trst_references(&local).is_err(),
+        "changed constitution alone"
+    );
+    local
+        .meta_store()
+        .put_meta("consti_engine", &original_constitution)
+        .unwrap();
     drop(checked.trst_references(&local).unwrap());
     local.meta_store().put_meta(legacy_key, b"invalid").unwrap();
-    assert!(checked.trst_references(&local).is_err(), "legacy delegation alone");
-    local.meta_store().put_meta(legacy_key, &original_legacy).unwrap();
+    assert!(
+        checked.trst_references(&local).is_err(),
+        "legacy delegation alone"
+    );
+    local
+        .meta_store()
+        .put_meta(legacy_key, &original_legacy)
+        .unwrap();
     drop(checked.trst_references(&local).unwrap());
     for trst in [true, false] {
         let mut batch = local.tx_begin_write().unwrap();
-        if trst { crate::trst_storage::stage_replayed_stable(&mut batch, &altered).unwrap(); }
-        else { batch.put_brn_wallet_state(&address(0), &altered_brn).unwrap(); }
+        if trst {
+            crate::trst_storage::stage_replayed_stable(&mut batch, &altered).unwrap();
+        } else {
+            batch
+                .put_brn_wallet_state(&address(0), &altered_brn)
+                .unwrap();
+        }
         batch.commit().unwrap();
-        assert!(checked.trst_references(&local).is_err(), "independent changed wallet, trst={trst}");
+        assert!(
+            checked.trst_references(&local).is_err(),
+            "independent changed wallet, trst={trst}"
+        );
         let mut batch = local.tx_begin_write().unwrap();
-        if trst { crate::trst_storage::stage_replayed_stable(&mut batch, &payment.trst).unwrap(); }
-        else { batch.put_brn_wallet_state(&address(0), original_brn).unwrap(); }
+        if trst {
+            crate::trst_storage::stage_replayed_stable(&mut batch, &payment.trst).unwrap();
+        } else {
+            batch
+                .put_brn_wallet_state(&address(0), original_brn)
+                .unwrap();
+        }
         batch.commit().unwrap();
         drop(checked.trst_references(&local).unwrap());
     }
@@ -1638,56 +1935,126 @@ async fn recovered_trst_pages_bind_authority_and_reject_changed_economics() {
         match corruption {
             0 => batch.put_brn_meta(&rate_key, &changed_rate).unwrap(),
             1 => batch.delete_brn_meta(&rate_key).unwrap(),
-            _ => batch.put_brn_meta(b"rate_history", &bincode::serialize(&payment.brn.rate_history).unwrap()).unwrap(),
+            _ => batch
+                .put_brn_meta(
+                    b"rate_history",
+                    &bincode::serialize(&payment.brn.rate_history).unwrap(),
+                )
+                .unwrap(),
         }
         batch.commit().unwrap();
-        assert!(checked.trst_references(&local).is_err(), "independent rate corruption {corruption}");
+        assert!(
+            checked.trst_references(&local).is_err(),
+            "independent rate corruption {corruption}"
+        );
         let mut batch = local.tx_begin_write().unwrap();
         batch.put_brn_meta(&rate_key, &original_rate).unwrap();
         batch.delete_brn_meta(b"rate_history").unwrap();
         batch.commit().unwrap();
         let valid = checked.trst_references(&local).unwrap();
-        assert_eq!(valid.brn_rate_segments().cloned().collect::<Vec<_>>(), original_rates);
+        assert_eq!(
+            valid.brn_rate_segments().cloned().collect::<Vec<_>>(),
+            original_rates
+        );
     }
     let mut fabricated = original_schedule.clone();
-    fabricated.proposals.insert([9;32], burst_store_lmdb::confirmed_governance::Schedule {
-        proposer: address(0), created_at: 1_595_434_042,
-        timing: burst_governance::GovernanceTiming { proposal_secs: 10, voting_secs: 20, buffer_secs: 1 },
-        endorsements: 1, last_endorsement: Some(1_595_434_043),
-        withdrawn_at: None, exploration_started_at: None,
-    });
+    fabricated.proposals.insert(
+        [9; 32],
+        burst_store_lmdb::confirmed_governance::Schedule {
+            proposer: address(0),
+            created_at: 1_595_434_042,
+            timing: burst_governance::GovernanceTiming {
+                proposal_secs: 10,
+                voting_secs: 20,
+                buffer_secs: 1,
+            },
+            endorsements: 1,
+            last_endorsement: Some(1_595_434_043),
+            withdrawn_at: None,
+            exploration_started_at: None,
+        },
+    );
     let mut batch = local.tx_begin_write().unwrap();
-    batch.write_confirmed_governance(fabricated.clone()).unwrap();
+    batch
+        .write_confirmed_governance(fabricated.clone())
+        .unwrap();
     batch.commit().unwrap();
     // The physical manifest and derived fence are consistent; history is not.
-    assert_eq!(local.tx_begin_write().unwrap().read_confirmed_governance().unwrap(), fabricated);
-    assert!(checked.trst_references(&local).is_err(), "fabricated schedule alone");
+    assert_eq!(
+        local
+            .tx_begin_write()
+            .unwrap()
+            .read_confirmed_governance()
+            .unwrap(),
+        fabricated
+    );
+    assert!(
+        checked.trst_references(&local).is_err(),
+        "fabricated schedule alone"
+    );
     let mut batch = local.tx_begin_write().unwrap();
-    batch.write_confirmed_governance(original_schedule.clone()).unwrap();
+    batch
+        .write_confirmed_governance(original_schedule.clone())
+        .unwrap();
     batch.commit().unwrap();
-    assert_eq!(checked.trst_references(&local).unwrap().confirmed_governance_schedule(), &original_schedule);
-    for key in ["payment_epoch/v2", "payment_epoch/v2/closed/test", "payment_epoch/v1/unknown"] {
-        local.meta_store().put_meta(key, b"unknown epoch record").unwrap();
-        assert!(checked.trst_references(&local).is_err(), "unknown payment namespace: {key}");
+    assert_eq!(
+        checked
+            .trst_references(&local)
+            .unwrap()
+            .confirmed_governance_schedule(),
+        &original_schedule
+    );
+    for key in [
+        "payment_epoch/v2",
+        "payment_epoch/v2/closed/test",
+        "payment_epoch/v1/unknown",
+    ] {
+        local
+            .meta_store()
+            .put_meta(key, b"unknown epoch record")
+            .unwrap();
+        assert!(
+            checked.trst_references(&local).is_err(),
+            "unknown payment namespace: {key}"
+        );
         local.meta_store().delete_meta(key).unwrap();
         drop(checked.trst_references(&local).unwrap());
     }
-    let revision_key = format!("governance_revision/v1/{}", burst_types::TxHash::new([66;32]));
+    let revision_key = format!(
+        "governance_revision/v1/{}",
+        burst_types::TxHash::new([66; 32])
+    );
     let pinned_rollback = checked.trst_references(&local).unwrap();
     let mut rollback = pinned_rollback.rollback_records().unwrap();
-    local.meta_store().put_meta(&revision_key, &1u128.to_be_bytes()).unwrap();
+    local
+        .meta_store()
+        .put_meta(&revision_key, &1u128.to_be_bytes())
+        .unwrap();
     // This certified fixture has no provisional journals or local counters.
     // Later writes cannot enter its checked old cut; nonempty local images are
     // covered separately by the physical reader and typed recovery fixtures.
-    let page = rollback.visit_next_page(1, 4096, |_| panic!("later local rollback row leaked into pinned cut")).unwrap();
+    let page = rollback
+        .visit_next_page(1, 4096, |_| {
+            panic!("later local rollback row leaked into pinned cut")
+        })
+        .unwrap();
     assert!(page.done && page.rows == 0);
     drop(rollback);
     drop(pinned_rollback);
-    assert!(checked.trst_references(&local).is_err(), "local rollback revision changed after capture");
+    assert!(
+        checked.trst_references(&local).is_err(),
+        "local rollback revision changed after capture"
+    );
     local.meta_store().delete_meta(&revision_key).unwrap();
     drop(checked.trst_references(&local).unwrap());
-    local.meta_store().put_meta(burst_store::meta::PAYMENT_EPOCH_KEY, &[99; 32]).unwrap();
-    assert!(checked.trst_references(&local).is_err(), "changed authority cannot acquire a checked reader");
+    local
+        .meta_store()
+        .put_meta(burst_store::meta::PAYMENT_EPOCH_KEY, &[99; 32])
+        .unwrap();
+    assert!(
+        checked.trst_references(&local).is_err(),
+        "changed authority cannot acquire a checked reader"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -1828,7 +2195,16 @@ async fn installed_recovery_allows_later_expiry_cache_but_rejects_changed_token_
         .is_none());
     let staged = projected.stage_undo().unwrap();
     assert_eq!(staged.runtime().anchor.hash(), epoch);
-    assert_eq!(staged.runtime().trst.get_portfolio(&address(30)).unwrap().tokens.len(), 1);
+    assert_eq!(
+        staged
+            .runtime()
+            .trst
+            .get_portfolio(&address(30))
+            .unwrap()
+            .tokens
+            .len(),
+        1
+    );
     drop(staged);
     assert!(index.get_by_origin(&token).unwrap().is_empty());
     assert_eq!(index.get_by_origin(&foreign).unwrap(), vec![foreign]);
@@ -1891,18 +2267,32 @@ async fn installed_recovery_rechecks_economic_caches_without_repairing_them() {
                 .unwrap(),
             6 => {
                 if batch.uses_verification_records().unwrap() {
-                    let (key, _) = batch.checkpoint_metadata(b"verification_state/").unwrap()
-                        .into_iter().next().expect("nonempty keyed verification state");
-                    batch.put_meta(std::str::from_utf8(&key).unwrap(), b"bad").unwrap();
+                    let (key, _) = batch
+                        .checkpoint_metadata(b"verification_state/")
+                        .unwrap()
+                        .into_iter()
+                        .next()
+                        .expect("nonempty keyed verification state");
+                    batch
+                        .put_meta(std::str::from_utf8(&key).unwrap(), b"bad")
+                        .unwrap();
                 } else {
-                    batch.put_meta(crate::endorsement_commit::SNAPSHOT_KEY, b"bad").unwrap();
+                    batch
+                        .put_meta(crate::endorsement_commit::SNAPSHOT_KEY, b"bad")
+                        .unwrap();
                 }
             }
             7 => {
                 if batch.uses_governance_records().unwrap() {
-                    let (key, _) = batch.checkpoint_metadata(b"governance_state/").unwrap()
-                        .into_iter().next().expect("nonempty keyed governance state");
-                    batch.put_meta(std::str::from_utf8(&key).unwrap(), b"bad").unwrap();
+                    let (key, _) = batch
+                        .checkpoint_metadata(b"governance_state/")
+                        .unwrap()
+                        .into_iter()
+                        .next()
+                        .expect("nonempty keyed governance state");
+                    batch
+                        .put_meta(std::str::from_utf8(&key).unwrap(), b"bad")
+                        .unwrap();
                 } else {
                     batch.put_brn_meta(b"governance_engine", b"bad").unwrap();
                 }
@@ -1933,39 +2323,73 @@ async fn installed_recovery_rechecks_economic_caches_without_repairing_them() {
             for damage in 0..3 {
                 let mut batch = local.tx_begin_write().unwrap();
                 batch.migrate_verification_records().unwrap();
-                if normalized { batch.normalize_verification_records().unwrap(); }
+                if normalized {
+                    batch.normalize_verification_records().unwrap();
+                }
                 batch.migrate_governance_records().unwrap();
                 checked.verify_unchanged(&batch).unwrap();
-                let (key, _) = batch.checkpoint_metadata(prefix.as_bytes()).unwrap()
-                    .into_iter().next().expect("nonempty keyed engine");
+                let (key, _) = batch
+                    .checkpoint_metadata(prefix.as_bytes())
+                    .unwrap()
+                    .into_iter()
+                    .next()
+                    .expect("nonempty keyed engine");
                 let key = String::from_utf8(key).unwrap();
                 match damage {
                     0 => batch.put_meta(&key, b"bad").unwrap(),
                     1 => batch.delete_meta(&key).unwrap(),
-                    2 => batch.put_meta(&format!("{prefix}unexpected"), b"bad").unwrap(),
+                    2 => batch
+                        .put_meta(&format!("{prefix}unexpected"), b"bad")
+                        .unwrap(),
                     _ => unreachable!(),
                 }
                 let before = batch.checkpoint_metadata(prefix.as_bytes()).unwrap();
-                assert!(checked.verify_unchanged(&batch).is_err(),
-                    "keyed cache normalized={normalized} prefix={prefix} damage={damage}");
-                assert_eq!(batch.checkpoint_metadata(prefix.as_bytes()).unwrap(), before);
+                assert!(
+                    checked.verify_unchanged(&batch).is_err(),
+                    "keyed cache normalized={normalized} prefix={prefix} damage={damage}"
+                );
+                assert_eq!(
+                    batch.checkpoint_metadata(prefix.as_bytes()).unwrap(),
+                    before
+                );
                 drop(batch);
-                checked.verify_unchanged(&local.tx_begin_write().unwrap()).unwrap();
+                checked
+                    .verify_unchanged(&local.tx_begin_write().unwrap())
+                    .unwrap();
             }
         }
     }
     // Preparation releases the writer; a later edit must still reject staging.
-    let prepared = checked.prepare_token_indexes_at(
-        &local, burst_types::Timestamp::new(expected.anchor().cutoff()),
-    ).unwrap();
-    local.meta_store().put_meta("consti_engine", b"changed after preparation").unwrap();
-    let before = local.tx_begin_write().unwrap().checkpoint_metadata(b"").unwrap();
+    let prepared = checked
+        .prepare_token_indexes_at(
+            &local,
+            burst_types::Timestamp::new(expected.anchor().cutoff()),
+        )
+        .unwrap();
+    local
+        .meta_store()
+        .put_meta("consti_engine", b"changed after preparation")
+        .unwrap();
+    let before = local
+        .tx_begin_write()
+        .unwrap()
+        .checkpoint_metadata(b"")
+        .unwrap();
     assert!(prepared.stage(&local).is_err());
-    assert_eq!(local.tx_begin_write().unwrap().checkpoint_metadata(b"").unwrap(), before);
-
+    assert_eq!(
+        local
+            .tx_begin_write()
+            .unwrap()
+            .checkpoint_metadata(b"")
+            .unwrap(),
+        before
+    );
 }
 
-pub(in crate::confirmed_replay::tests) fn normalize_retention_fixture(local: &LmdbStore, params: &ProtocolParams) {
+pub(in crate::confirmed_replay::tests) fn normalize_retention_fixture(
+    local: &LmdbStore,
+    params: &ProtocolParams,
+) {
     let mut batch = local.tx_begin_write().unwrap();
     let payment = crate::payment_transition::restore(&batch, params).unwrap();
     crate::trst_storage::stage_replayed_stable(&mut batch, &payment.trst).unwrap();
@@ -2000,9 +2424,19 @@ async fn installed_recovery_checks_provisional_chains_without_confirming_them() 
             // the other cases use sparse storage.
             let mut batch = local.tx_begin_write().unwrap();
             for body in fixture.blocks.iter().filter(|body| body.hash != good.hash) {
-                let height = source.block_store().height_of_block(&body.hash).unwrap().unwrap();
-                batch.put_block_with_account(&body.hash,
-                    &source.block_store().get_block(&body.hash).unwrap(), &body.account, height).unwrap();
+                let height = source
+                    .block_store()
+                    .height_of_block(&body.hash)
+                    .unwrap()
+                    .unwrap();
+                batch
+                    .put_block_with_account(
+                        &body.hash,
+                        &source.block_store().get_block(&body.hash).unwrap(),
+                        &body.account,
+                        height,
+                    )
+                    .unwrap();
             }
             batch.commit().unwrap();
         }
@@ -2073,8 +2507,18 @@ async fn installed_recovery_checks_provisional_chains_without_confirming_them() 
                 for dependency in block.dependencies() {
                     assert!(bodies.has_root(dependency).unwrap());
                 }
-                bodies.check_unchanged_cut(&local.tx_begin_write().unwrap()).unwrap();
-                assert_eq!(local.tx_begin_write().unwrap().get_account(&block.account).unwrap().confirmation_height, confirmation);
+                bodies
+                    .check_unchanged_cut(&local.tx_begin_write().unwrap())
+                    .unwrap();
+                assert_eq!(
+                    local
+                        .tx_begin_write()
+                        .unwrap()
+                        .get_account(&block.account)
+                        .unwrap()
+                        .confirmation_height,
+                    confirmation
+                );
             }
             assert_eq!(
                 checked
@@ -2189,48 +2633,74 @@ async fn installed_recovery_checks_provisional_chains_without_confirming_them() 
                     original.head
                 );
             }
-            let cache_at = burst_types::Timestamp::new(checked.recovered().continuation.anchor().cutoff());
+            let cache_at =
+                burst_types::Timestamp::new(checked.recovered().continuation.anchor().cutoff());
             let prepared = checked.prepare_token_indexes_at(&local, cache_at).unwrap();
             {
                 let roots = prepared.body_requirements(&local).unwrap();
                 assert!(roots.has_root(block.hash).unwrap());
                 assert!(roots.has_root(block.previous).unwrap());
                 let mut found = false;
-                roots.visit_resolved_roots(|hash, resolved| {
-                    if hash == block.hash {
-                        let resolved = resolved.expect("replayed provisional body");
-                        assert_eq!(resolved.origin(), installed::BodyOrigin::ProvisionalSuffix);
-                        assert_eq!(resolved.block().hash, block.hash);
-                        found = true;
-                    }
-                    Ok(())
-                }).unwrap();
+                roots
+                    .visit_resolved_roots(|hash, resolved| {
+                        if hash == block.hash {
+                            let resolved = resolved.expect("replayed provisional body");
+                            assert_eq!(resolved.origin(), installed::BodyOrigin::ProvisionalSuffix);
+                            assert_eq!(resolved.block().hash, block.hash);
+                            found = true;
+                        }
+                        Ok(())
+                    })
+                    .unwrap();
                 assert!(found);
-                roots.check_unchanged_cut(&local.tx_begin_write().unwrap()).unwrap();
+                roots
+                    .check_unchanged_cut(&local.tx_begin_write().unwrap())
+                    .unwrap();
                 let mut missing = Vec::new();
-                roots.visit_resolved_roots(|hash, body| {
-                    if body.is_none() { missing.push(hash); }
-                    Ok(())
-                }).unwrap();
+                roots
+                    .visit_resolved_roots(|hash, body| {
+                        if body.is_none() {
+                            missing.push(hash);
+                        }
+                        Ok(())
+                    })
+                    .unwrap();
                 if retain_prefix {
                     assert!(missing.is_empty());
                     let disconnected = Arc::new(RwLock::new(ConnectionRegistry::new()));
-                    let closed = roots.close_from_peers(Default::default(), &disconnected).await.unwrap();
+                    let closed = roots
+                        .close_from_peers(Default::default(), &disconnected)
+                        .await
+                        .unwrap();
                     assert!(closed.has_body(block.hash).unwrap());
                     assert!(closed.has_body(block.previous).unwrap());
                     let mut count = 0;
-                    closed.visit_bodies(|_| { count += 1; Ok(()) }).unwrap();
+                    closed
+                        .visit_bodies(|_| {
+                            count += 1;
+                            Ok(())
+                        })
+                        .unwrap();
                     assert_eq!(count, closed.work().bodies);
                     assert!(closed.work().bytes > 0);
-                    closed.check_unchanged_cut(&local.tx_begin_write().unwrap()).unwrap();
+                    closed
+                        .check_unchanged_cut(&local.tx_begin_write().unwrap())
+                        .unwrap();
                 } else {
                     assert!(!missing.is_empty());
-                    let error = roots.close(Default::default()).err().expect("sparse roots cannot close");
-                    assert_eq!(format!("{error:?}"), format!("Unresolved({:?})", missing[0]));
+                    let error = roots
+                        .close(Default::default())
+                        .err()
+                        .expect("sparse roots cannot close");
+                    assert_eq!(
+                        format!("{error:?}"),
+                        format!("Unresolved({:?})", missing[0])
+                    );
                     // A transport that returns no proofs must not manufacture
                     // a complete result or silently drop missing obligations.
                     let incomplete = Arc::new(RwLock::new(ConnectionRegistry::new()));
-                    let (sender, mut receiver) = mpsc::channel::<crate::checkpoint_sync::witness::Command>(1);
+                    let (sender, mut receiver) =
+                        mpsc::channel::<crate::checkpoint_sync::witness::Command>(1);
                     incomplete.write().await.set_witness_requests(sender);
                     let worker = tokio::spawn(async move {
                         let mut requests = 0;
@@ -2240,36 +2710,67 @@ async fn installed_recovery_checks_provisional_chains_without_confirming_them() 
                         }
                         requests
                     });
-                    assert!(prepared.body_requirements(&local).unwrap()
-                        .close_from_peers(Default::default(), &incomplete).await.is_err());
+                    assert!(prepared
+                        .body_requirements(&local)
+                        .unwrap()
+                        .close_from_peers(Default::default(), &incomplete)
+                        .await
+                        .is_err());
                     drop(incomplete);
                     assert!(worker.await.unwrap() > 0);
                     let count_before = local.block_store().block_count().unwrap();
-                    let service = WitnessService::start(Arc::clone(&source), Arc::clone(&local), 0).await;
-                    let closed = prepared.body_requirements(&local).unwrap()
-                        .close_from_peers(Default::default(), &service.registry).await.unwrap();
+                    let service =
+                        WitnessService::start(Arc::clone(&source), Arc::clone(&local), 0).await;
+                    let closed = prepared
+                        .body_requirements(&local)
+                        .unwrap()
+                        .close_from_peers(Default::default(), &service.registry)
+                        .await
+                        .unwrap();
                     assert!(service.stop().await > 0);
                     // Fetched bytes must remain accessible after transport stops.
                     for hash in missing {
-                        let body = closed.body(hash).unwrap().expect("retained checked witness");
-                        assert_eq!(bincode::serialize(&body).unwrap(), source.block_store().get_block(&hash).unwrap());
+                        let body = closed
+                            .body(hash)
+                            .unwrap()
+                            .expect("retained checked witness");
+                        assert_eq!(
+                            bincode::serialize(&body).unwrap(),
+                            source.block_store().get_block(&hash).unwrap()
+                        );
                     }
                     let mut closure_bytes = 0u64;
-                    closed.visit_bodies(|hash| {
-                        closure_bytes += bincode::serialized_size(&closed.body(hash)?.unwrap()).unwrap();
-                        Ok(())
-                    }).unwrap();
-                    assert_eq!(closed.work().bytes, closure_bytes,
-                        "local and recovered bodies share one closure byte budget");
+                    closed
+                        .visit_bodies(|hash| {
+                            closure_bytes +=
+                                bincode::serialized_size(&closed.body(hash)?.unwrap()).unwrap();
+                            Ok(())
+                        })
+                        .unwrap();
+                    assert_eq!(
+                        closed.work().bytes,
+                        closure_bytes,
+                        "local and recovered bodies share one closure byte budget"
+                    );
                     assert!(closed.body(BlockHash::new([99; 32])).unwrap().is_none());
-                    closed.check_unchanged_cut(&local.tx_begin_write().unwrap()).unwrap();
-                    local.meta_store().put_meta("closure_recovery_stale_cut", &[1]).unwrap();
-                    assert!(closed.check_unchanged_cut(&local.tx_begin_write().unwrap()).is_err());
+                    closed
+                        .check_unchanged_cut(&local.tx_begin_write().unwrap())
+                        .unwrap();
+                    local
+                        .meta_store()
+                        .put_meta("closure_recovery_stale_cut", &[1])
+                        .unwrap();
+                    assert!(closed
+                        .check_unchanged_cut(&local.tx_begin_write().unwrap())
+                        .is_err());
                     drop(closed);
                     // block_count opens a read transaction; release the plan's
                     // pinned reader first to respect LMDB's per-thread slot.
                     assert_eq!(local.block_store().block_count().unwrap(), count_before);
-                    local.meta_store().delete_meta("closure_recovery_stale_cut").unwrap();
+                    local
+                        .meta_store()
+                        .delete_meta("closure_recovery_stale_cut")
+                        .unwrap();
                 }
             }
             let projected = prepared.stage(&local).unwrap();
@@ -2406,14 +2907,21 @@ async fn installed_recovery_preserves_promises_and_authenticates_a_later_local_d
     // has no provisional undo to convert; use the existing replay projection.
     {
         let mut batch = local.tx_begin_write().unwrap();
-        assert!(batch.checkpoint_metadata_entries(b"block_undo/").unwrap().next().is_none());
+        assert!(batch
+            .checkpoint_metadata_entries(b"block_undo/")
+            .unwrap()
+            .next()
+            .is_none());
         let payment = crate::payment_transition::restore(&batch, &fixture.params).unwrap();
         crate::trst_storage::stage_replayed_stable(&mut batch, &payment.trst).unwrap();
         crate::graph_storage::stage_replayed(&mut batch, &payment.trst.merger_graph).unwrap();
         batch.commit().unwrap();
     }
     // Already-known historical work still needs its queue identity retained.
-    local.meta_store().enqueue_confirmation(&fixture.blocks[0].hash).unwrap();
+    local
+        .meta_store()
+        .enqueue_confirmation(&fixture.blocks[0].hash)
+        .unwrap();
     let before = local
         .tx_begin_write()
         .unwrap()
@@ -2448,7 +2956,9 @@ async fn installed_recovery_preserves_promises_and_authenticates_a_later_local_d
         let retained = checked.trst_references(&local).unwrap();
         let (base, steps) = retained.signer_authority();
         let mut authority = base.clone();
-        for step in steps { authority = step.unwrap().authenticate(&authority).unwrap(); }
+        for step in steps {
+            authority = step.unwrap().authenticate(&authority).unwrap();
+        }
         assert_eq!(authority.hash(), certificate.checkpoint.hash());
         assert!(authority.height() > checked.recovered().continuation.anchor().height());
         let mut selected = None;
@@ -2460,67 +2970,124 @@ async fn installed_recovery_preserves_promises_and_authenticates_a_later_local_d
         let mut accounts = 0;
         let mut pending = Vec::new();
         loop {
-            let page = account_work.visit_next_page(1,4096,|row| {
-                match row {
-                    burst_store_lmdb::retention::AccountWorkRecord::Account(account) => {
-                        assert_eq!(account, expected.state().account(&account.address).unwrap());
-                        accounts += 1;
-                    },
-                    burst_store_lmdb::retention::AccountWorkRecord::PendingConfirmation(hash) => pending.push(hash),
-                }
-                Ok(())
-            }).unwrap();
-            if page.done { break; }
+            let page = account_work
+                .visit_next_page(1, 4096, |row| {
+                    match row {
+                        burst_store_lmdb::retention::AccountWorkRecord::Account(account) => {
+                            assert_eq!(
+                                account,
+                                expected.state().account(&account.address).unwrap()
+                            );
+                            accounts += 1;
+                        }
+                        burst_store_lmdb::retention::AccountWorkRecord::PendingConfirmation(
+                            hash,
+                        ) => pending.push(hash),
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            if page.done {
+                break;
+            }
         }
         assert!(accounts > 0);
         assert_eq!(pending, vec![fixture.blocks[0].hash]);
         let mut signer_records = retained.signer_records();
         let mut observed = [false; 5];
         loop {
-            use installed::{SignerRecord, PaymentPromise};
-            let page = signer_records.visit_next_page(1, 4096, |_, record| {
-                match record {
-                    SignerRecord::Payment(PaymentPromise::Final { epoch: value, signer, account, root, block }) => {
-                        assert_eq!(value, epoch); assert_eq!(signer, address(0).as_str());
-                        assert_eq!(account, address(0).as_str()); assert_eq!(root, BlockHash::ZERO);
-                        assert_eq!(block, BlockHash::new([77;32])); observed[0] = true;
-                    },
-                    SignerRecord::Payment(PaymentPromise::Fence { epoch: value, .. }) => { assert_eq!(value,epoch); observed[1] = true; },
-                    SignerRecord::Time { value, .. } => { assert_eq!(value,expected.anchor().cutoff()); observed[2] = true; },
-                    SignerRecord::Governance { value, .. } => { assert_eq!(value,expected.anchor().cutoff()+10); observed[3] = true; },
-                    SignerRecord::Sequence { value, .. } => { assert_eq!(value,12); observed[4] = true; },
-                    _ => (),
-                }
-                Ok(())
-            }).unwrap();
-            if page.done { break; }
+            use installed::{PaymentPromise, SignerRecord};
+            let page = signer_records
+                .visit_next_page(1, 4096, |_, record| {
+                    match record {
+                        SignerRecord::Payment(PaymentPromise::Final {
+                            epoch: value,
+                            signer,
+                            account,
+                            root,
+                            block,
+                        }) => {
+                            assert_eq!(value, epoch);
+                            assert_eq!(signer, address(0).as_str());
+                            assert_eq!(account, address(0).as_str());
+                            assert_eq!(root, BlockHash::ZERO);
+                            assert_eq!(block, BlockHash::new([77; 32]));
+                            observed[0] = true;
+                        }
+                        SignerRecord::Payment(PaymentPromise::Fence { epoch: value, .. }) => {
+                            assert_eq!(value, epoch);
+                            observed[1] = true;
+                        }
+                        SignerRecord::Time { value, .. } => {
+                            assert_eq!(value, expected.anchor().cutoff());
+                            observed[2] = true;
+                        }
+                        SignerRecord::Governance { value, .. } => {
+                            assert_eq!(value, expected.anchor().cutoff() + 10);
+                            observed[3] = true;
+                        }
+                        SignerRecord::Sequence { value, .. } => {
+                            assert_eq!(value, 12);
+                            observed[4] = true;
+                        }
+                        _ => (),
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            if page.done {
+                break;
+            }
         }
         assert!(observed.into_iter().all(|found| found));
         let mut rounds = retained.checkpoint_rounds();
         let mut rows = 0;
         loop {
-            let page = rounds.visit_next_page(1, 64 << 20, |row| {
-                assert_eq!(row.height, certificate.checkpoint.height);
-                assert_eq!(row.state.decision().unwrap().checkpoint.hash(), certificate.checkpoint.hash());
-                assert!(row.manifests.unwrap().iter().any(|manifest| manifest.checkpoint().hash() == certificate.checkpoint.hash()));
-                rows += 1;
-                Ok(())
-            }).unwrap();
-            if page.done { break; }
+            let page = rounds
+                .visit_next_page(1, 64 << 20, |row| {
+                    assert_eq!(row.height, certificate.checkpoint.height);
+                    assert_eq!(
+                        row.state.decision().unwrap().checkpoint.hash(),
+                        certificate.checkpoint.hash()
+                    );
+                    assert!(row
+                        .manifests
+                        .unwrap()
+                        .iter()
+                        .any(|manifest| manifest.checkpoint().hash()
+                            == certificate.checkpoint.hash()));
+                    rows += 1;
+                    Ok(())
+                })
+                .unwrap();
+            if page.done {
+                break;
+            }
         }
         assert_eq!(rows, 1);
 
-        retained.check_unchanged_cut(&local.tx_begin_write().unwrap()).unwrap();
+        retained
+            .check_unchanged_cut(&local.tx_begin_write().unwrap())
+            .unwrap();
         let sequence_key = format!("consensus_sequence/v1/{}", address(0));
-        local.meta_store().put_meta(&sequence_key, &13u64.to_be_bytes()).unwrap();
+        local
+            .meta_store()
+            .put_meta(&sequence_key, &13u64.to_be_bytes())
+            .unwrap();
         let batch = local.tx_begin_write().unwrap();
         // Recovery explicitly permits a higher sequence; publication of this
         // older pinned cut must still reject it without restoring the previous sequence.
         checked.verify_unchanged(&batch).unwrap();
         assert!(retained.check_unchanged_cut(&batch).is_err());
-        assert_eq!(batch.get_meta(&sequence_key).unwrap(), Some(13u64.to_be_bytes().to_vec()));
+        assert_eq!(
+            batch.get_meta(&sequence_key).unwrap(),
+            Some(13u64.to_be_bytes().to_vec())
+        );
         drop(batch);
-        assert_eq!(retained.metadata().recovered().continuation.anchor().hash(), epoch);
+        assert_eq!(
+            retained.metadata().recovered().continuation.anchor().hash(),
+            epoch
+        );
     }
     local.meta_store().put_meta(&promise, &[78; 32]).unwrap();
     assert!(checked
@@ -2610,8 +3177,11 @@ async fn installed_recovery_rejects_damaged_or_foreign_signer_journals_without_r
             13 => ("block_undo/v1/short".into(), vec![77; 32]),
             15..=17 => {
                 let genesis = crate::checkpoint_replay::ReplayedCheckpoint::genesis_anchor(
-                    NetworkId::Dev, &fixture.params,
-                ).unwrap().hash();
+                    NetworkId::Dev,
+                    &fixture.params,
+                )
+                .unwrap()
+                .hash();
                 let (from, to) = match case {
                     15 => (genesis, genesis),
                     16 => (genesis, BlockHash::new([99; 32])),
@@ -2620,7 +3190,7 @@ async fn installed_recovery_rejects_damaged_or_foreign_signer_journals_without_r
                 let mut value = to.as_bytes().to_vec();
                 value.extend_from_slice(from.as_bytes());
                 (burst_store::meta::closed_payment_epoch_key(&from), value)
-            },
+            }
             _ => (
                 format!("block_undo/v1/{}", "x".repeat(32)),
                 b"damaged".to_vec(),
@@ -2656,8 +3226,12 @@ async fn installed_recovery_rejects_damaged_or_foreign_signer_journals_without_r
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn installed_recovery_authenticates_retained_old_rows_and_pins_the_inventory() {
-    static DURABLE_STOP: std::sync::Mutex<Option<(&'static str, Arc<crate::shutdown::ShutdownController>)>> = std::sync::Mutex::new(None);
-    static MUTATE: std::sync::Mutex<Option<(&'static str, Arc<LmdbStore>, BlockHash, Option<Vec<u8>>)>> = std::sync::Mutex::new(None);
+    static DURABLE_STOP: std::sync::Mutex<
+        Option<(&'static str, Arc<crate::shutdown::ShutdownController>)>,
+    > = std::sync::Mutex::new(None);
+    static MUTATE: std::sync::Mutex<
+        Option<(&'static str, Arc<LmdbStore>, BlockHash, Option<Vec<u8>>)>,
+    > = std::sync::Mutex::new(None);
     let (fixture, _dir, source, manifest, _) = selection::setup();
     let epoch = manifest.checkpoint.parent;
     let bytes = archive(&source, &fixture, epoch);
@@ -2704,8 +3278,11 @@ async fn installed_recovery_authenticates_retained_old_rows_and_pins_the_invento
                     &old.hash,
                     &body,
                     &old.account,
-                    if case == 4 { expected.state().account(&old.account).unwrap().block_count + 1 }
-                    else { old.height + u64::from(case == 2) },
+                    if case == 4 {
+                        expected.state().account(&old.account).unwrap().block_count + 1
+                    } else {
+                        old.height + u64::from(case == 2)
+                    },
                 )
                 .unwrap();
         }
@@ -2713,16 +3290,29 @@ async fn installed_recovery_authenticates_retained_old_rows_and_pins_the_invento
         let local = Arc::new(local);
         let service = WitnessService::start(Arc::clone(&source), Arc::clone(&local), 0).await;
         let map_bytes = 16 << 20;
-        let limit = crate::confirmed_replay::scratch_file::ScratchLimit::acquire_reserved(local.env().path(), 64 << 20,
-            crate::confirmed_replay::snapshot::history::DurableHistoryInputs::reservation(map_bytes).unwrap()).unwrap();
+        let limit = crate::confirmed_replay::scratch_file::ScratchLimit::acquire_reserved(
+            local.env().path(),
+            64 << 20,
+            crate::confirmed_replay::snapshot::history::DurableHistoryInputs::reservation(
+                map_bytes,
+            )
+            .unwrap(),
+        )
+        .unwrap();
         let shutdown = Arc::new(crate::shutdown::ShutdownController::new());
         if case <= 1 {
-            let stage = if case == 0 { "private-recovery:local-history-page" } else { "private-recovery:durable-history-page" };
+            let stage = if case == 0 {
+                "private-recovery:local-history-page"
+            } else {
+                "private-recovery:durable-history-page"
+            };
             *DURABLE_STOP.lock().unwrap() = Some((stage, shutdown.clone()));
             service.registry.write().await.recovery_probe = Some(|stage| {
                 let stop = DURABLE_STOP.lock().unwrap();
                 if let Some((expected, shutdown)) = stop.as_ref() {
-                    if stage == *expected { shutdown.shutdown(); }
+                    if stage == *expected {
+                        shutdown.shutdown();
+                    }
                 }
             });
         }
@@ -2731,32 +3321,63 @@ async fn installed_recovery_authenticates_retained_old_rows_and_pins_the_invento
             let changed = if case >= 10 {
                 let head = expected.state().account(&old.account).unwrap().head;
                 rows.iter().find(|row| row.hash == head).unwrap()
-            } else { old };
+            } else {
+                old
+            };
             let mut block: StateBlock = bincode::deserialize(&changed.bytes).unwrap();
-            if case == 11 { block.signature = burst_types::Signature([99; 64]); }
-            else { block.work = block.work.wrapping_add(1); }
-            assert_eq!(block.compute_hash(), changed.hash, "unsigned mutation keeps the signed hash");
+            if case == 11 {
+                block.signature = burst_types::Signature([99; 64]);
+            } else {
+                block.work = block.work.wrapping_add(1);
+            }
+            assert_eq!(
+                block.compute_hash(),
+                changed.hash,
+                "unsigned mutation keeps the signed hash"
+            );
             *MUTATE.lock().unwrap() = Some((
-                if case >= 10 { "private-recovery:confirmed-witnesses" }
-                else if case == 8 { "private-recovery:retained-inventory-page" } else { "private-recovery:retained-planned" },
-                local.clone(), changed.hash,
-                if case == 6 { None } else { Some(bincode::serialize(&block).unwrap()) }));
+                if case >= 10 {
+                    "private-recovery:confirmed-witnesses"
+                } else if case == 8 {
+                    "private-recovery:retained-inventory-page"
+                } else {
+                    "private-recovery:retained-planned"
+                },
+                local.clone(),
+                changed.hash,
+                if case == 6 {
+                    None
+                } else {
+                    Some(bincode::serialize(&block).unwrap())
+                },
+            ));
             service.registry.write().await.recovery_probe = Some(|stage| {
                 let mut mutation = MUTATE.lock().unwrap();
                 if mutation.as_ref().is_some_and(|(at, _, _, _)| stage == *at) {
                     let (_, store, hash, bytes) = mutation.take().unwrap();
-                    if let Some(bytes) = bytes { store.block_store().put_block(&hash, &bytes).unwrap(); }
-                    else { store.block_store().delete_block(&hash).unwrap(); }
+                    if let Some(bytes) = bytes {
+                        store.block_store().put_block(&hash, &bytes).unwrap();
+                    } else {
+                        store.block_store().delete_block(&hash).unwrap();
+                    }
                 }
             });
         }
 
         let result = installed::recover_metadata_with_durable_inputs(
-            Arc::clone(&local), NetworkId::Dev, fixture.params.clone(),
-            if case == 9 { Arc::new(RwLock::new(ConnectionRegistry::new())) }
-            else { Arc::clone(&service.registry) },
-            shutdown.clone(), Some((limit.clone(), map_bytes)),
-        ).await.map(|outcome| match outcome {
+            Arc::clone(&local),
+            NetworkId::Dev,
+            fixture.params.clone(),
+            if case == 9 {
+                Arc::new(RwLock::new(ConnectionRegistry::new()))
+            } else {
+                Arc::clone(&service.registry)
+            },
+            shutdown.clone(),
+            Some((limit.clone(), map_bytes)),
+        )
+        .await
+        .map(|outcome| match outcome {
             installed::StartupRecovery::Ready(result) => result,
             installed::StartupRecovery::Cancelled if case <= 1 => None,
             installed::StartupRecovery::Cancelled => panic!("unexpected recovery cancellation"),
@@ -2765,16 +3386,38 @@ async fn installed_recovery_authenticates_retained_old_rows_and_pins_the_invento
         if (2..9).contains(&case) || case >= 10 {
             assert!(result.is_err(), "corrupt retained case {case}");
             if case >= 10 {
-                assert!(MUTATE.lock().unwrap().is_none(), "mutation must follow tail authentication");
-                assert!(result.err().unwrap().to_string().contains("retained head differs from authenticated proof"));
+                assert!(
+                    MUTATE.lock().unwrap().is_none(),
+                    "mutation must follow tail authentication"
+                );
+                assert!(result
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("retained head differs from authenticated proof"));
             } else if case == 4 {
-                assert!(result.err().unwrap().to_string().contains("retained block exceeds local account height"));
+                assert!(result
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("retained block exceeds local account height"));
             } else if (5..9).contains(&case) {
-                assert!(MUTATE.lock().unwrap().is_none(), "mutation must follow inventory capture");
+                assert!(
+                    MUTATE.lock().unwrap().is_none(),
+                    "mutation must follow inventory capture"
+                );
                 if case == 8 {
-                    assert!(result.err().unwrap().to_string().contains("retained inventory changed"));
+                    assert!(result
+                        .err()
+                        .unwrap()
+                        .to_string()
+                        .contains("retained inventory changed"));
                 } else if case != 6 {
-                    assert!(result.err().unwrap().to_string().contains("retained payload differs from observation"));
+                    assert!(result
+                        .err()
+                        .unwrap()
+                        .to_string()
+                        .contains("retained payload differs from observation"));
                 }
             }
             continue;
@@ -2782,49 +3425,114 @@ async fn installed_recovery_authenticates_retained_old_rows_and_pins_the_invento
         assert_eq!(requests > 0, case == 1);
         let checked = if case <= 1 {
             assert!(shutdown.is_requested());
-            assert!(result.unwrap().is_none(), "cancelled preparation cannot be published");
+            assert!(
+                result.unwrap().is_none(),
+                "cancelled preparation cannot be published"
+            );
             *DURABLE_STOP.lock().unwrap() = None;
             if case == 1 {
-                assert!(local.env().path().join(crate::confirmed_replay::scratch_file::PERSISTENT_INPUTS_DIRECTORY).join("data.mdb").exists());
+                assert!(local
+                    .env()
+                    .path()
+                    .join(crate::confirmed_replay::scratch_file::PERSISTENT_INPUTS_DIRECTORY)
+                    .join("data.mdb")
+                    .exists());
             }
             let service = WitnessService::start(Arc::clone(&source), Arc::clone(&local), 0).await;
             let checked = match installed::recover_metadata_with_durable_inputs(
-                local.clone(), NetworkId::Dev, fixture.params.clone(), service.registry.clone(),
-                Arc::new(crate::shutdown::ShutdownController::new()), Some((limit.clone(), map_bytes)),
-            ).await.unwrap() {
+                local.clone(),
+                NetworkId::Dev,
+                fixture.params.clone(),
+                service.registry.clone(),
+                Arc::new(crate::shutdown::ShutdownController::new()),
+                Some((limit.clone(), map_bytes)),
+            )
+            .await
+            .unwrap()
+            {
                 installed::StartupRecovery::Ready(Some(checked)) => checked,
                 _ => panic!("durable retained recovery did not complete"),
             };
-            assert_eq!(service.stop().await, 0, "resumed local or cached ancestry must not request peers");
+            assert_eq!(
+                service.stop().await,
+                0,
+                "resumed local or cached ancestry must not request peers"
+            );
             checked
-        } else { result.unwrap().unwrap() };
+        } else {
+            result.unwrap().unwrap()
+        };
         checked
             .verify_unchanged(&local.tx_begin_write().unwrap())
             .unwrap();
-        let archived = checked.applied().tail().archive().input_block(&old.hash).unwrap().is_some()
-            || checked.cemented().tail().archive().input_block(&old.hash).unwrap().is_some();
+        let archived = checked
+            .applied()
+            .tail()
+            .archive()
+            .input_block(&old.hash)
+            .unwrap()
+            .is_some()
+            || checked
+                .cemented()
+                .tail()
+                .archive()
+                .input_block(&old.hash)
+                .unwrap()
+                .is_some();
         let view = local.tx_begin_read().unwrap();
-        let resolved = checked.resolve_body(&local, &view, &old.hash).unwrap().expect("authenticated old row");
+        let resolved = checked
+            .resolve_body(&local, &view, &old.hash)
+            .unwrap()
+            .expect("authenticated old row");
         assert_eq!(resolved.origin(), installed::BodyOrigin::SnapshotPrefix);
-        assert_eq!(resolved.context(), checked.recovered().continuation.history_context());
+        assert_eq!(
+            resolved.context(),
+            checked.recovered().continuation.history_context()
+        );
         assert_eq!(bincode::serialize(resolved.block()).unwrap(), old.bytes);
         local
             .block_store()
             .put_block(&old.hash, b"changed after verification")
             .unwrap();
-        assert_eq!(bincode::serialize(checked.resolve_body(&local, &view, &old.hash).unwrap().unwrap().block()).unwrap(), old.bytes);
+        assert_eq!(
+            bincode::serialize(
+                checked
+                    .resolve_body(&local, &view, &old.hash)
+                    .unwrap()
+                    .unwrap()
+                    .block()
+            )
+            .unwrap(),
+            old.bytes
+        );
         drop(view);
         let unknown = BlockHash::new([99; 32]);
-        local.block_store().put_block(&unknown, b"unverified raw body").unwrap();
+        local
+            .block_store()
+            .put_block(&unknown, b"unverified raw body")
+            .unwrap();
         let view = local.tx_begin_read().unwrap();
         if archived {
             // Immutable, independently checked archive bytes remain usable;
             // the live-cut guard below must still reject publication.
-            assert_eq!(bincode::serialize(checked.resolve_body(&local, &view, &old.hash).unwrap().unwrap().block()).unwrap(), old.bytes);
+            assert_eq!(
+                bincode::serialize(
+                    checked
+                        .resolve_body(&local, &view, &old.hash)
+                        .unwrap()
+                        .unwrap()
+                        .block()
+                )
+                .unwrap(),
+                old.bytes
+            );
         } else {
             assert!(checked.resolve_body(&local, &view, &old.hash).is_err());
         }
-        assert!(checked.resolve_body(&local, &view, &unknown).unwrap().is_none());
+        assert!(checked
+            .resolve_body(&local, &view, &unknown)
+            .unwrap()
+            .is_none());
         drop(view);
         assert!(checked
             .verify_unchanged(&local.tx_begin_write().unwrap())
@@ -2838,7 +3546,8 @@ async fn installed_recovery_targets_the_installed_epoch_not_the_accepted_tip() {
     let bytes = archive(&source, &fixture, manifest.checkpoint.parent);
     // The successor changes checkpoint/selection state, not account history.
     // Prove this prerequisite before asserting that recovery needs no peer I/O.
-    let base = authenticate(&source, &fixture.params, manifest.checkpoint.parent).into_continuation();
+    let base =
+        authenticate(&source, &fixture.params, manifest.checkpoint.parent).into_continuation();
     for head in &manifest.heads {
         let account = base.state().account(&head.account).unwrap();
         assert_eq!(account.head, head.hash);
@@ -2868,7 +3577,10 @@ async fn installed_recovery_targets_the_installed_epoch_not_the_accepted_tip() {
         )
         .await;
         let requests = service.stop().await;
-        assert_eq!(requests, 0, "unchanged account heads are covered by the snapshot");
+        assert_eq!(
+            requests, 0,
+            "unchanged account heads are covered by the snapshot"
+        );
         let checked = result.unwrap().unwrap();
         assert_eq!(checked.recovered().continuation.anchor().hash(), epoch);
         compact::assert_same(checked.recovered().continuation.state(), expected.state());
@@ -3091,7 +3803,7 @@ async fn accepted_tip_cache_reuses_history_but_rechecks_base_and_records() {
                 assert!(local.meta_store().get_meta(&key).is_ok());
                 local.meta_store().put_meta(&key, b"corrupt").unwrap();
             }
-            4 | 5 => {},
+            4 | 5 => {}
             _ => unreachable!(),
         }
         let before = local
@@ -3106,8 +3818,14 @@ async fn accepted_tip_cache_reuses_history_but_rechecks_base_and_records() {
             }
         });
         let mut initial = fixture.params.clone();
-        if change == 4 { initial.bootstrap_exit_threshold += 1; }
-        let network = if change == 5 { NetworkId::Test } else { NetworkId::Dev };
+        if change == 4 {
+            initial.bootstrap_exit_threshold += 1;
+        }
+        let network = if change == 5 {
+            NetworkId::Test
+        } else {
+            NetworkId::Dev
+        };
         let result = installed::recover_current_tip_until_shutdown(
             local.clone(),
             network,
@@ -3326,20 +4044,28 @@ async fn installed_recovery_rejects_epoch_base_or_record_changes_during_proof_de
     let expected =
         authenticate(&source, &fixture.params, certificate.checkpoint.hash()).into_continuation();
     let source = Arc::new(source);
-    let rows = source.block_store()
+    let rows = source
+        .block_store()
         .indexed_blocks_txn(&source.tx_begin_read().unwrap(), 131_072, 64 << 20)
         .unwrap();
-    let old = rows.iter().find(|row| {
-        expected.state().account(&row.account)
-            .is_some_and(|account| row.height + 1 < account.block_count)
-    }).expect("sparse old ancestor needs a membership proof");
+    let old = rows
+        .iter()
+        .find(|row| {
+            expected
+                .state()
+                .account(&row.account)
+                .is_some_and(|account| row.height + 1 < account.block_count)
+        })
+        .expect("sparse old ancestor needs a membership proof");
     for change in [0, 1, 2, 3, 4] {
         let (_dir, local) = cemented::sparse(&expected, &source);
         copy_installed_records(&local, &source, &fixture, &bytes);
         // Head-only inventory can be authenticated without requesting old history.
         // Retain an old non-head row so the mutation hook must deliver a proof.
         let mut batch = local.tx_begin_write().unwrap();
-        batch.put_block_with_account(&old.hash, &old.bytes, &old.account, old.height).unwrap();
+        batch
+            .put_block_with_account(&old.hash, &old.bytes, &old.account, old.height)
+            .unwrap();
         batch.commit().unwrap();
         let local = Arc::new(local);
         let before = local
@@ -3355,14 +4081,31 @@ async fn installed_recovery_rejects_epoch_base_or_record_changes_during_proof_de
             Arc::clone(&service.registry),
         )
         .await;
-        assert!(service.stop().await > 0, "change={change}, error={:?}", result.as_ref().err());
+        assert!(
+            service.stop().await > 0,
+            "change={change}, error={:?}",
+            result.as_ref().err()
+        );
         if change == 0 {
-            result.unwrap().unwrap()
-                .verify_unchanged(&local.tx_begin_write().unwrap()).unwrap();
-            assert_eq!(local.tx_begin_write().unwrap().checkpoint_metadata(b"").unwrap(), before);
+            result
+                .unwrap()
+                .unwrap()
+                .verify_unchanged(&local.tx_begin_write().unwrap())
+                .unwrap();
+            assert_eq!(
+                local
+                    .tx_begin_write()
+                    .unwrap()
+                    .checkpoint_metadata(b"")
+                    .unwrap(),
+                before
+            );
             continue;
         }
-        assert!(result.is_err(), "change={change} returned publishable recovery");
+        assert!(
+            result.is_err(),
+            "change={change} returned publishable recovery"
+        );
         let after = local
             .tx_begin_write()
             .unwrap()

@@ -63,18 +63,26 @@ mod tests {
     use super::*;
 
     fn reference_hash(bytes: &[u8]) -> [u8; 32] {
-        use blake2::{Blake2b, Digest, digest::consts::U32};
+        use blake2::{digest::consts::U32, Blake2b, Digest};
         Blake2b::<U32>::digest(bytes).into()
     }
 
     #[test]
     fn blake2b_256_known_answers() {
         for (input, expected) in [
-            (&b""[..], "0e5751c026e543b2e8ab2eb06099daa1d1e5df47778f7787faab45cdf12fe3a8"),
-            (&b"abc"[..], "bddd813c634239723171ef3fee98579b94964e3bb1cb3e427262c8c068d52319"),
+            (
+                &b""[..],
+                "0e5751c026e543b2e8ab2eb06099daa1d1e5df47778f7787faab45cdf12fe3a8",
+            ),
+            (
+                &b"abc"[..],
+                "bddd813c634239723171ef3fee98579b94964e3bb1cb3e427262c8c068d52319",
+            ),
         ] {
-            let expected: Vec<u8> = (0..64).step_by(2)
-                .map(|i| u8::from_str_radix(&expected[i..i + 2], 16).unwrap()).collect();
+            let expected: Vec<u8> = (0..64)
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&expected[i..i + 2], 16).unwrap())
+                .collect();
             assert_eq!(blake2b_256(input).as_slice(), expected);
             assert_eq!(blake2b_256_iter([input]).as_slice(), expected);
         }
@@ -82,14 +90,22 @@ mod tests {
 
     #[test]
     fn backend_matches_reference_across_lengths_and_stream_boundaries() {
-        let bytes: Vec<u8> = (0..16384).map(|i| ((i * 73 + i / 251) % 256) as u8).collect();
+        let bytes: Vec<u8> = (0..16384)
+            .map(|i| ((i * 73 + i / 251) % 256) as u8)
+            .collect();
         for length in (0..=1025).chain([4096, 16384]) {
             let input = &bytes[..length];
             let expected = reference_hash(input);
             assert_eq!(blake2b_256(input), expected, "length {length}");
             for chunk in [1, 31, 128, 129, 512] {
-                let parts = std::iter::once(&[][..]).chain(input.chunks(chunk)).chain([&[][..]]);
-                assert_eq!(blake2b_256_iter(parts), expected, "length {length}, chunk {chunk}");
+                let parts = std::iter::once(&[][..])
+                    .chain(input.chunks(chunk))
+                    .chain([&[][..]]);
+                assert_eq!(
+                    blake2b_256_iter(parts),
+                    expected,
+                    "length {length}, chunk {chunk}"
+                );
             }
         }
     }

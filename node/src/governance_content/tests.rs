@@ -1,5 +1,5 @@
 use super::*;
-use crate::{governance_commit::CandidateGovernance, block_economics::EconomicResult};
+use crate::{block_economics::EconomicResult, governance_commit::CandidateGovernance};
 use burst_governance::content::{EncodedContent, MAX_AMENDMENT_CHARS};
 use burst_store::{account::AccountStore, block::BlockStore, meta::MetaStore, BrnStore};
 use burst_store_lmdb::LmdbStore;

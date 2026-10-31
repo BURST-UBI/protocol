@@ -420,7 +420,9 @@ async fn deadline_journey(change_rules: bool) {
         workers.push((
             shutdown,
             tokio::spawn(async move {
-                node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+                node.start_with_services(burst_daemon::start_public_services)
+                    .await
+                    .unwrap();
                 node.stop().await.unwrap();
             }),
         ));
@@ -771,7 +773,9 @@ async fn deadline_journey(change_rules: bool) {
         workers.push((
             node.shutdown.clone(),
             tokio::spawn(async move {
-                node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+                node.start_with_services(burst_daemon::start_public_services)
+                    .await
+                    .unwrap();
                 node.stop().await.unwrap();
             }),
         ));

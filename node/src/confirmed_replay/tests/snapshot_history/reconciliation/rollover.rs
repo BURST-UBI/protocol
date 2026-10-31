@@ -5,9 +5,14 @@ use crate::{
     confirmed_replay::snapshot::installed,
 };
 
-mod electorate;
+pub(in crate::confirmed_replay::tests) mod electorate;
 
-fn install(fixture: &Fixture, store: &LmdbStore, epoch: BlockHash, signers: &[u8]) {
+pub(in crate::confirmed_replay::tests) fn install(
+    fixture: &Fixture,
+    store: &LmdbStore,
+    epoch: BlockHash,
+    signers: &[u8],
+) {
     let export = SnapshotExport::prepare(store, NetworkId::Dev, &fixture.params, epoch).unwrap();
     let signatures: Vec<_> = signers
         .iter()
@@ -24,7 +29,8 @@ fn install(fixture: &Fixture, store: &LmdbStore, epoch: BlockHash, signers: &[u8
     export.write(&signatures, &mut bytes).unwrap();
     let genesis = ReplayedCheckpoint::genesis_anchor(NetworkId::Dev, &fixture.params).unwrap();
     let snapshot =
-        AuthenticatedSnapshot::read_in(&genesis, &mut bytes.as_slice(), store.env().path()).unwrap();
+        AuthenticatedSnapshot::read_in(&genesis, &mut bytes.as_slice(), store.env().path())
+            .unwrap();
     let needs = snapshot.installation_needs(store).unwrap();
     let hashes: Vec<_> = needs
         .snapshot_heads
@@ -190,7 +196,8 @@ async fn repeated_snapshot_rollover_replays_real_roster_changes_beyond_height_12
     drop(store);
     let store = std::sync::Arc::new(LmdbStore::open(directory.path(), 32, 32 << 20).unwrap());
     let service =
-        super::super::installed_recovery::WitnessService::start(store.clone(), store.clone(), 0).await;
+        super::super::installed_recovery::WitnessService::start(store.clone(), store.clone(), 0)
+            .await;
     let recovered = installed::recover_metadata_from_peers(
         store.clone(),
         NetworkId::Dev,

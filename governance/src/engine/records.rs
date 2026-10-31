@@ -59,9 +59,9 @@ impl GovernanceRecord {
     fn validate_content(&self) -> Result<(), String> {
         match self {
             Self::Proposal(proposal) => proposal.content.validate_content(),
-            Self::PendingEffects { amendments, .. } => {
-                amendments.iter().try_for_each(ProposalContent::validate_content)
-            }
+            Self::PendingEffects { amendments, .. } => amendments
+                .iter()
+                .try_for_each(ProposalContent::validate_content),
             _ => Ok(()),
         }
         .map_err(|error| error.to_string())
@@ -140,10 +140,7 @@ impl GovernanceRecord {
 
     pub fn from_storage_entry(key: &str, bytes: &[u8]) -> Result<Self, String> {
         let limit = Self::byte_limit(key);
-        if !key.starts_with(Self::STORAGE_PREFIX)
-            || key.len() > 511
-            || bytes.len() > limit
-        {
+        if !key.starts_with(Self::STORAGE_PREFIX) || key.len() > 511 || bytes.len() > limit {
             return Err("invalid governance record bounds or namespace".into());
         }
         let (version, record): (u8, Self) = bincode::DefaultOptions::new()

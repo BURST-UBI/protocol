@@ -29,14 +29,32 @@ async fn node(
 
 fn legacy_verification_fixture(store: &LmdbStore) {
     let mut batch = store.tx_begin_write().unwrap();
-    let snapshot = crate::verification_storage::load(&batch).unwrap().snapshot().encode().unwrap();
-    let keys: Vec<_> = batch.checkpoint_metadata_entries(b"verification_state/").unwrap()
-        .map(|row| String::from_utf8(row.unwrap().0.to_vec()).unwrap()).collect();
-    for key in keys { batch.delete_meta(&key).unwrap(); }
+    let snapshot = crate::verification_storage::load(&batch)
+        .unwrap()
+        .snapshot()
+        .encode()
+        .unwrap();
+    let keys: Vec<_> = batch
+        .checkpoint_metadata_entries(b"verification_state/")
+        .unwrap()
+        .map(|row| String::from_utf8(row.unwrap().0.to_vec()).unwrap())
+        .collect();
+    for key in keys {
+        batch.delete_meta(&key).unwrap();
+    }
     batch.delete_meta("verification_records_format").unwrap();
-    batch.put_meta(crate::endorsement_commit::SNAPSHOT_KEY, &snapshot).unwrap();
+    batch
+        .put_meta(crate::endorsement_commit::SNAPSHOT_KEY, &snapshot)
+        .unwrap();
     assert!(!batch.uses_verification_records().unwrap());
-    assert_eq!(crate::verification_storage::load(&batch).unwrap().snapshot().encode().unwrap(), snapshot);
+    assert_eq!(
+        crate::verification_storage::load(&batch)
+            .unwrap()
+            .snapshot()
+            .encode()
+            .unwrap(),
+        snapshot
+    );
     batch.commit().unwrap();
 }
 
@@ -78,9 +96,12 @@ async fn compact_publication_child() {
             if stage == std::env::var("BURST_COMPACT_CRASH_STAGE").unwrap() {
                 println!("{READY}");
                 std::io::stdout().flush().unwrap();
-                loop { std::thread::park(); }
+                loop {
+                    std::thread::park();
+                }
             }
-        }).await;
+        })
+        .await;
         panic!("retirement crash boundary was not reached");
     }
     if std::env::var("BURST_COMPACT_CRASH_KIND").as_deref() == Ok("verification") {
@@ -97,7 +118,7 @@ async fn compact_publication_child() {
         }
     }
 
-    let (fixture, _dir, source, _, certificate) = selection::setup();
+    let (fixture, _dir, source, _, _) = selection::setup();
     let local = Arc::new(LmdbStore::open(Path::new(&directory), 32, 32 << 20).unwrap());
     let recovered = recover(Arc::new(source), Arc::clone(&local), fixture.params.clone()).await;
     let (_runtime_dir, mut node) = node(local, fixture.params).await;
@@ -110,14 +131,21 @@ async fn compact_publication_child() {
             }
         }
     });
-    node.publish_recovered(recovered)
-        .await
-        .unwrap();
+    node.publish_recovered(recovered).await.unwrap();
     panic!("compact publication crash boundary was not reached");
 }
 
 async fn kill_at_boundary(directory: &Path, stage: &str, verification: bool) {
-    kill_at_kind(directory, stage, if verification { "verification" } else { "publication" }).await;
+    kill_at_kind(
+        directory,
+        stage,
+        if verification {
+            "verification"
+        } else {
+            "publication"
+        },
+    )
+    .await;
 }
 
 pub(super) async fn kill_at_kind(directory: &Path, stage: &str, kind: &str) {
@@ -240,8 +268,17 @@ async fn compact_publication_recovers_after_abrupt_exit_at_each_boundary() {
     }) {
         let (directory, local) = cemented::sparse(&expected, &source);
         copy_installed_records(&local, &source, &fixture, &bytes);
-        if !normalized { legacy_verification_fixture(&local); }
-        assert_eq!(local.tx_begin_write().unwrap().uses_normalized_verification_records().unwrap(), normalized);
+        if !normalized {
+            legacy_verification_fixture(&local);
+        }
+        assert_eq!(
+            local
+                .tx_begin_write()
+                .unwrap()
+                .uses_normalized_verification_records()
+                .unwrap(),
+            normalized
+        );
         local
             .meta_store()
             .put_meta("application-preference", b"keep")
@@ -261,7 +298,11 @@ async fn compact_publication_recovers_after_abrupt_exit_at_each_boundary() {
             "format activation must share the commit boundary: {stage}"
         );
         assert_eq!(
-            local.tx_begin_write().unwrap().uses_normalized_verification_records().unwrap(),
+            local
+                .tx_begin_write()
+                .unwrap()
+                .uses_normalized_verification_records()
+                .unwrap(),
             normalized || stage != "prepared",
             "verification normalization must share the commit boundary: {stage}"
         );
@@ -293,10 +334,7 @@ async fn compact_publication_recovers_after_abrupt_exit_at_each_boundary() {
             .write()
             .await
             .update(address(99), BlockHash::new([99; 32]));
-        restarted
-            .publish_recovered(recovered)
-            .await
-            .unwrap();
+        restarted.publish_recovered(recovered).await.unwrap();
         for (key, bytes) in retained {
             assert_eq!(local.meta_store().get_meta(&key).unwrap(), bytes);
         }
@@ -324,7 +362,9 @@ async fn compact_publication_recovers_after_abrupt_exit_at_each_boundary() {
         let persisted = {
             let batch = local.tx_begin_write().unwrap();
             assert!(batch.uses_normalized_verification_records().unwrap());
-            crate::verification_storage::load(&batch).unwrap().snapshot()
+            crate::verification_storage::load(&batch)
+                .unwrap()
+                .snapshot()
         };
         assert_eq!(snapshot.encode().unwrap(), persisted.encode().unwrap());
         let counts = local.tx_begin_write().unwrap().ledger_counts().unwrap();
@@ -399,9 +439,7 @@ async fn compact_publication_worker_keeps_locks_when_caller_is_cancelled() {
         }
     });
     let publication = tokio::spawn(async move {
-        node.publish_recovered(recovered)
-            .await
-            .unwrap();
+        node.publish_recovered(recovered).await.unwrap();
     });
     tokio::time::timeout(Duration::from_secs(30), ready)
         .await
@@ -432,9 +470,15 @@ async fn compact_publication_worker_keeps_locks_when_caller_is_cancelled() {
         .unwrap()
         .uses_stable_trst_records()
         .unwrap());
-    assert!(local.tx_begin_write().unwrap().uses_normalized_verification_records().unwrap());
-    assert!(!crate::verification_storage::migrate(&local).unwrap(),
-        "startup must not repeat the committed verification conversion");
+    assert!(local
+        .tx_begin_write()
+        .unwrap()
+        .uses_normalized_verification_records()
+        .unwrap());
+    assert!(
+        !crate::verification_storage::migrate(&local).unwrap(),
+        "startup must not repeat the committed verification conversion"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -460,9 +504,7 @@ async fn shutdown_during_publication_commits_then_closes_startup() {
         "complete" => COMPLETED.store(true, Ordering::SeqCst),
         _ => (),
     });
-    node.publish_recovered(recovered)
-        .await
-        .unwrap();
+    node.publish_recovered(recovered).await.unwrap();
     assert!(COMPLETED.load(Ordering::SeqCst));
     assert_eq!(
         node.active_elections.read().await.authority_epoch(),
@@ -473,9 +515,15 @@ async fn shutdown_during_publication_commits_then_closes_startup() {
         .unwrap()
         .uses_stable_trst_records()
         .unwrap());
-    assert!(local.tx_begin_write().unwrap().uses_normalized_verification_records().unwrap());
-    assert!(!crate::verification_storage::migrate(&local).unwrap(),
-        "startup must not repeat the committed verification conversion");
+    assert!(local
+        .tx_begin_write()
+        .unwrap()
+        .uses_normalized_verification_records()
+        .unwrap());
+    assert!(
+        !crate::verification_storage::migrate(&local).unwrap(),
+        "startup must not repeat the committed verification conversion"
+    );
     assert!(node.connection_registry.read().await.is_recovering());
     assert!(node.stop_requested_startup().await.unwrap());
     assert!(!node.connection_registry.read().await.is_recovering());
@@ -543,9 +591,12 @@ async fn private_recovery_shutdown_drains_work_and_never_returns_publishable_sta
             }
         });
         let limit = crate::confirmed_replay::scratch_file::ScratchLimit::acquire_reserved(
-            local.env().path(), 64 << 20,
-            crate::confirmed_replay::snapshot::history::DurableHistoryInputs::reservation(16 << 20).unwrap(),
-        ).unwrap();
+            local.env().path(),
+            64 << 20,
+            crate::confirmed_replay::snapshot::history::DurableHistoryInputs::reservation(16 << 20)
+                .unwrap(),
+        )
+        .unwrap();
         let outcome = installed::recover_metadata_with_durable_inputs(
             local.clone(),
             NetworkId::Dev,
@@ -577,42 +628,95 @@ async fn private_recovery_shutdown_drains_work_and_never_returns_publishable_sta
         copy_installed_records(&captured_store, &source, &fixture, &bytes);
         normalize_retention_fixture(&captured_store, &fixture.params);
         let captured_store = Arc::new(captured_store);
-        let captured_before = captured_store.tx_begin_write().unwrap().checkpoint_metadata(b"").unwrap();
+        let captured_before = captured_store
+            .tx_begin_write()
+            .unwrap()
+            .checkpoint_metadata(b"")
+            .unwrap();
         let captured_blocks = captured_store.block_store().block_count().unwrap();
-        static CAPTURE_POLLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        static CAPTURE_POLLS: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(0);
         for stage in [
-            "private-recovery:source-reader", "private-recovery:source-page",
-            "snapshot:read", "snapshot:authority-step", "snapshot:certificate",
-            "snapshot:restore-state", "snapshot:state-restored", "snapshot:selection-step",
+            "private-recovery:source-reader",
+            "private-recovery:source-page",
+            "snapshot:read",
+            "snapshot:authority-step",
+            "snapshot:certificate",
+            "snapshot:restore-state",
+            "snapshot:state-restored",
+            "snapshot:selection-step",
             "snapshot:selections-finished",
-            "snapshot:decode-bytes", "snapshot:decoded-state", "snapshot:restore-brn",
-            "snapshot:restore-wallets", "snapshot:restore-graph", "snapshot:restore-continuation",
-            "snapshot:receipt-context", "snapshot:roster-context", "snapshot:governance-context",
-            "snapshot:canonical-state", "snapshot:canonical-bytes", "snapshot:canonical-finished",
-            "retirement-capture:before-reader", "retirement-capture:reader",
-            "private-recovery:retained-inventory-page", "private-recovery:retained-planned",
-            "private-recovery:tails-finished", "private-recovery:replayed-economics",
-            "private-recovery:publication-guards", "retirement-capture:before-roots",
-            "retirement-capture:before-transfer", "private-recovery:applied-transition",
-            "retirement-capture:root-page", "retirement-capture:projection-account",
-            "retirement-capture:rollback-transition", "root-builder:index",
-            "metadata:inventory-row", "metadata:economic-account", "metadata:journal-row",
-            "metadata:verification-complete", "metadata:record-observation",
-            "metadata:tail-account", "metadata:governance-tail-snapshot",
-            "journal:epoch-namespace", "journal:record-authority", "journal:round-authority",
-            "journal:promise-authority", "journal:capture-complete", "storage:lookup-account",
-            "metadata:governance-record", "metadata:governance-inventory", "metadata:governance-canonical",
-            "storage:verification-row", "storage:verification-finish",
-            "metadata:verification-expected", "metadata:verification-record", "metadata:verification-canonical",
-            "storage:brn-wallet", "storage:trst-header", "storage:trst-holding",
-            "storage:trst-restored-holding", "storage:trst-inventory", "storage:trst-record",
-            "storage:trst-validation", "storage:trst-restored",
-            "trst:holding-link", "trst:portfolio-token", "trst:wallet-expiry",
-            "trst:basis-token", "trst:restored-token", "trst:index-token",
-            "trst:restored-origin", "trst:dependency-token",
-            "trst:comparison-wallet-balance", "trst:comparison-balance", "trst:comparison-wallet",
-            "trst:comparison-token", "trst:comparison-owner", "trst:comparison-origin",
-            "trst:comparison-graph-parent", "trst:comparison-graph-revoked",
+            "snapshot:decode-bytes",
+            "snapshot:decoded-state",
+            "snapshot:restore-brn",
+            "snapshot:restore-wallets",
+            "snapshot:restore-graph",
+            "snapshot:restore-continuation",
+            "snapshot:receipt-context",
+            "snapshot:roster-context",
+            "snapshot:governance-context",
+            "snapshot:canonical-state",
+            "snapshot:canonical-bytes",
+            "snapshot:canonical-finished",
+            "retirement-capture:before-reader",
+            "retirement-capture:reader",
+            "private-recovery:retained-inventory-page",
+            "private-recovery:retained-planned",
+            "private-recovery:tails-finished",
+            "private-recovery:replayed-economics",
+            "private-recovery:publication-guards",
+            "retirement-capture:before-roots",
+            "retirement-capture:before-transfer",
+            "private-recovery:applied-transition",
+            "retirement-capture:root-page",
+            "retirement-capture:projection-account",
+            "retirement-capture:rollback-transition",
+            "root-builder:index",
+            "metadata:inventory-row",
+            "metadata:economic-account",
+            "metadata:journal-row",
+            "metadata:verification-complete",
+            "metadata:record-observation",
+            "metadata:tail-account",
+            "metadata:governance-tail-snapshot",
+            "journal:epoch-namespace",
+            "journal:record-authority",
+            "journal:round-authority",
+            "journal:promise-authority",
+            "journal:capture-complete",
+            "storage:lookup-account",
+            "metadata:governance-record",
+            "metadata:governance-inventory",
+            "metadata:governance-canonical",
+            "storage:verification-row",
+            "storage:verification-finish",
+            "metadata:verification-expected",
+            "metadata:verification-record",
+            "metadata:verification-canonical",
+            "storage:brn-wallet",
+            "storage:trst-header",
+            "storage:trst-holding",
+            "storage:trst-restored-holding",
+            "storage:trst-inventory",
+            "storage:trst-record",
+            "storage:trst-validation",
+            "storage:trst-restored",
+            "trst:holding-link",
+            "trst:portfolio-token",
+            "trst:wallet-expiry",
+            "trst:basis-token",
+            "trst:restored-token",
+            "trst:index-token",
+            "trst:restored-origin",
+            "trst:dependency-token",
+            "trst:comparison-wallet-balance",
+            "trst:comparison-balance",
+            "trst:comparison-wallet",
+            "trst:comparison-token",
+            "trst:comparison-owner",
+            "trst:comparison-origin",
+            "trst:comparison-graph-parent",
+            "trst:comparison-graph-revoked",
         ] {
             // The ordinary base predates the first selection. Receipt-row
             // cancellation needs a base that actually contains that receipt.
@@ -620,21 +724,36 @@ async fn private_recovery_shutdown_drains_work_and_never_returns_publishable_sta
                 let (directory, store) = cemented::sparse(&expected, &source);
                 let receipt_bytes = archive(&source, &fixture, certificate.checkpoint.hash());
                 let genesis = crate::checkpoint_replay::ReplayedCheckpoint::genesis_anchor(
-                    NetworkId::Dev, &fixture.params,
-                ).unwrap();
+                    NetworkId::Dev,
+                    &fixture.params,
+                )
+                .unwrap();
                 let snapshot = AuthenticatedSnapshot::read_in(
-                    &genesis, &mut receipt_bytes.as_slice(), directory.path(),
-                ).unwrap();
-                assert!(!snapshot.recover_selections().unwrap().is_empty(),
-                    "receipt cancellation requires a populated base");
+                    &genesis,
+                    &mut receipt_bytes.as_slice(),
+                    directory.path(),
+                )
+                .unwrap();
+                assert!(
+                    !snapshot.recover_selections().unwrap().is_empty(),
+                    "receipt cancellation requires a populated base"
+                );
                 drop(snapshot);
                 copy_installed_records(&store, &source, &fixture, &receipt_bytes);
                 normalize_retention_fixture(&store, &fixture.params);
                 Some((directory, Arc::new(store)))
-            } else { None };
-            let captured_store = receipt_fixture.as_ref()
-                .map(|(_, store)| store.clone()).unwrap_or_else(|| captured_store.clone());
-            let captured_before = captured_store.tx_begin_write().unwrap().checkpoint_metadata(b"").unwrap();
+            } else {
+                None
+            };
+            let captured_store = receipt_fixture
+                .as_ref()
+                .map(|(_, store)| store.clone())
+                .unwrap_or_else(|| captured_store.clone());
+            let captured_before = captured_store
+                .tx_begin_write()
+                .unwrap()
+                .checkpoint_metadata(b"")
+                .unwrap();
             let captured_blocks = captured_store.block_store().block_count().unwrap();
             CAPTURE_POLLS.store(0, std::sync::atomic::Ordering::SeqCst);
             let stop = Arc::new(ShutdownController::new());
@@ -645,69 +764,163 @@ async fn private_recovery_shutdown_drains_work_and_never_returns_publishable_sta
                     if *stage == at {
                         let required = match at {
                             "retirement-capture:root-page" => 4,
-                            "private-recovery:applied-transition" | "retirement-capture:rollback-transition" | "root-builder:index" | "metadata:inventory-row" => 2,
+                            "private-recovery:applied-transition"
+                            | "retirement-capture:rollback-transition"
+                            | "root-builder:index"
+                            | "metadata:inventory-row" => 2,
                             _ => 1,
                         };
-                        if CAPTURE_POLLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1 >= required {
+                        if CAPTURE_POLLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+                            >= required
+                        {
                             stop.shutdown();
                         }
                     }
                 }
             });
             let limit = crate::confirmed_replay::scratch_file::ScratchLimit::acquire_reserved(
-                captured_store.env().path(), 64 << 20,
-                crate::confirmed_replay::snapshot::history::DurableHistoryInputs::reservation(16 << 20).unwrap(),
-            ).unwrap();
+                captured_store.env().path(),
+                64 << 20,
+                crate::confirmed_replay::snapshot::history::DurableHistoryInputs::reservation(
+                    16 << 20,
+                )
+                .unwrap(),
+            )
+            .unwrap();
             let outcome = installed::recover_retirement_catalogue(
-                captured_store.clone(), NetworkId::Dev, fixture.params.clone(), service.registry.clone(),
-                stop.clone(), (limit.clone(), 16 << 20), 0, None, crate::config::BodyRetirementConfig::default().capture_limits(),
-            ).await.unwrap();
-            assert!(stop.is_requested(), "captured checkpoint not reached: {stage}");
-            assert!(outcome.is_none(), "cancelled capture returned a catalogue: {stage}");
-            assert_eq!(limit.used_temporary_bytes().unwrap(), 0, "captured scratch leaked: {stage}");
-            assert_eq!(captured_store.tx_begin_write().unwrap().checkpoint_metadata(b"").unwrap(), captured_before);
-            assert_eq!(captured_store.block_store().block_count().unwrap(), captured_blocks);
-            captured_store.tx_begin_write().unwrap().watch_body_changes(1, 4096).unwrap();
+                captured_store.clone(),
+                NetworkId::Dev,
+                fixture.params.clone(),
+                service.registry.clone(),
+                stop.clone(),
+                (limit.clone(), 16 << 20),
+                0,
+                None,
+                crate::config::BodyRetirementConfig::default().capture_limits(),
+            )
+            .await
+            .unwrap();
+            assert!(
+                stop.is_requested(),
+                "captured checkpoint not reached: {stage}"
+            );
+            assert!(
+                outcome.is_none(),
+                "cancelled capture returned a catalogue: {stage}"
+            );
+            assert_eq!(
+                limit.used_temporary_bytes().unwrap(),
+                0,
+                "captured scratch leaked: {stage}"
+            );
+            assert_eq!(
+                captured_store
+                    .tx_begin_write()
+                    .unwrap()
+                    .checkpoint_metadata(b"")
+                    .unwrap(),
+                captured_before
+            );
+            assert_eq!(
+                captured_store.block_store().block_count().unwrap(),
+                captured_blocks
+            );
+            captured_store
+                .tx_begin_write()
+                .unwrap()
+                .watch_body_changes(1, 4096)
+                .unwrap();
             service.stop().await;
             *STOP.lock().unwrap() = None;
         }
-        static BUDGET_READER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        static BUDGET_READER: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
         for headroom in [false, true] {
             BUDGET_READER.store(false, std::sync::atomic::Ordering::SeqCst);
             let stop = Arc::new(ShutdownController::new());
             let service = WitnessService::start(source.clone(), captured_store.clone(), 0).await;
             service.registry.write().await.recovery_probe = Some(|at| {
-                if matches!(at, "private-recovery:source-reader" | "retirement-capture:reader") {
+                if matches!(
+                    at,
+                    "private-recovery:source-reader" | "retirement-capture:reader"
+                ) {
                     BUDGET_READER.store(true, std::sync::atomic::Ordering::SeqCst);
                     std::thread::sleep(std::time::Duration::from_millis(30));
                 }
             });
             let limit = crate::confirmed_replay::scratch_file::ScratchLimit::acquire_reserved(
-                captured_store.env().path(), 64 << 20,
-                crate::confirmed_replay::snapshot::history::DurableHistoryInputs::reservation(16 << 20).unwrap(),
-            ).unwrap();
+                captured_store.env().path(),
+                64 << 20,
+                crate::confirmed_replay::snapshot::history::DurableHistoryInputs::reservation(
+                    16 << 20,
+                )
+                .unwrap(),
+            )
+            .unwrap();
             let mut budget = crate::config::BodyRetirementConfig::default().capture_limits();
-            if headroom { budget.headroom_bytes = u64::MAX; }
-            else { budget.duration = std::time::Duration::from_millis(1); }
+            if headroom {
+                budget.headroom_bytes = u64::MAX;
+            } else {
+                budget.duration = std::time::Duration::from_millis(1);
+            }
             let outcome = installed::recover_retirement_catalogue(
-                captured_store.clone(), NetworkId::Dev, fixture.params.clone(), service.registry.clone(),
-                stop.clone(), (limit.clone(), 16 << 20), 0, None, budget,
-            ).await.unwrap();
-            assert!(outcome.is_none(), "over-budget capture returned a catalogue");
+                captured_store.clone(),
+                NetworkId::Dev,
+                fixture.params.clone(),
+                service.registry.clone(),
+                stop.clone(),
+                (limit.clone(), 16 << 20),
+                0,
+                None,
+                budget,
+            )
+            .await
+            .unwrap();
+            assert!(
+                outcome.is_none(),
+                "over-budget capture returned a catalogue"
+            );
             assert!(!stop.is_requested(), "local budget stopped the node");
-            assert_eq!(BUDGET_READER.load(std::sync::atomic::Ordering::SeqCst), !headroom);
+            assert_eq!(
+                BUDGET_READER.load(std::sync::atomic::Ordering::SeqCst),
+                !headroom
+            );
             assert_eq!(limit.used_temporary_bytes().unwrap(), 0);
-            assert_eq!(captured_store.tx_begin_write().unwrap().checkpoint_metadata(b"").unwrap(), captured_before);
-            assert_eq!(captured_store.block_store().block_count().unwrap(), captured_blocks);
-            captured_store.tx_begin_write().unwrap().watch_body_changes(1, 4096).unwrap();
+            assert_eq!(
+                captured_store
+                    .tx_begin_write()
+                    .unwrap()
+                    .checkpoint_metadata(b"")
+                    .unwrap(),
+                captured_before
+            );
+            assert_eq!(
+                captured_store.block_store().block_count().unwrap(),
+                captured_blocks
+            );
+            captured_store
+                .tx_begin_write()
+                .unwrap()
+                .watch_body_changes(1, 4096)
+                .unwrap();
             service.stop().await;
         }
         // Exercise the actual capture lease, not a separately installed fixture
         // guard. Native rejection must cancel and drain this owned worker.
         static PRESSURE_STAGE: std::sync::Mutex<&'static str> = std::sync::Mutex::new("");
-        for (index, phase) in ["private-recovery:source-reader", "retirement-capture:reader"].into_iter().enumerate() {
+        for (index, phase) in [
+            "private-recovery:source-reader",
+            "retirement-capture:reader",
+        ]
+        .into_iter()
+        .enumerate()
+        {
             *PRESSURE_STAGE.lock().unwrap() = phase;
-            let pressure_before = captured_store.tx_begin_write().unwrap().checkpoint_metadata(b"").unwrap();
+            let pressure_before = captured_store
+                .tx_begin_write()
+                .unwrap()
+                .checkpoint_metadata(b"")
+                .unwrap();
             let stop = Arc::new(ShutdownController::new());
             let service = WitnessService::start(source.clone(), captured_store.clone(), 0).await;
             let (started, ready) = tokio::sync::oneshot::channel();
@@ -721,52 +934,113 @@ async fn private_recovery_shutdown_drains_work_and_never_returns_publishable_sta
                 }
             });
             let limit = crate::confirmed_replay::scratch_file::ScratchLimit::acquire_reserved(
-                captured_store.env().path(), 64 << 20,
-                crate::confirmed_replay::snapshot::history::DurableHistoryInputs::reservation(16 << 20).unwrap(),
-            ).unwrap();
+                captured_store.env().path(),
+                64 << 20,
+                crate::confirmed_replay::snapshot::history::DurableHistoryInputs::reservation(
+                    16 << 20,
+                )
+                .unwrap(),
+            )
+            .unwrap();
             let mut budget = crate::config::BodyRetirementConfig::default().capture_limits();
             budget.growth_bytes = 1 << 20;
             let capture = tokio::spawn(installed::recover_retirement_catalogue(
-                captured_store.clone(), NetworkId::Dev, fixture.params.clone(), service.registry.clone(),
-                stop.clone(), (limit.clone(), 16 << 20), 0, None, budget,
+                captured_store.clone(),
+                NetworkId::Dev,
+                fixture.params.clone(),
+                service.registry.clone(),
+                stop.clone(),
+                (limit.clone(), 16 << 20),
+                0,
+                None,
+                budget,
             ));
-            tokio::time::timeout(Duration::from_secs(5), ready).await.unwrap().unwrap();
+            tokio::time::timeout(Duration::from_secs(5), ready)
+                .await
+                .unwrap()
+                .unwrap();
             let generation = captured_store.env().info().last_txn_id;
             let extent = captured_store.env().real_disk_size().unwrap();
             let map = captured_store.env().info().map_size;
             let mut writer = captured_store.tx_begin_write().unwrap();
-            let outcome = writer.growth_outcome().expect("capture installed native limit");
-            let retry = writer.reserve_growth_retry().unwrap().expect("guarded retry priority");
-            assert!(matches!(writer.put_meta("test/captured-pressure", &vec![index as u8; 2 << 20]),
-                Err(burst_store::StoreError::GrowthLimit(_))));
+            let outcome = writer
+                .growth_outcome()
+                .expect("capture installed native limit");
+            let retry = writer
+                .reserve_growth_retry()
+                .unwrap()
+                .expect("guarded retry priority");
+            assert!(matches!(
+                writer.put_meta("test/captured-pressure", &vec![index as u8; 2 << 20]),
+                Err(burst_store::StoreError::GrowthLimit(_))
+            ));
             drop(writer);
             assert!(outcome.was_rejected());
             let watch = outcome.watch();
             assert!(!watch.wait_released(Duration::ZERO));
-            assert!(!capture.is_finished(), "capture detached its blocked worker");
+            assert!(
+                !capture.is_finished(),
+                "capture detached its blocked worker"
+            );
             assert_eq!(captured_store.env().info().last_txn_id, generation);
             assert!(captured_store.env().real_disk_size().unwrap() <= extent + budget.growth_bytes);
             release.send(()).unwrap();
-            assert!(tokio::time::timeout(Duration::from_secs(5), capture).await.unwrap().unwrap().unwrap().is_none());
+            assert!(tokio::time::timeout(Duration::from_secs(5), capture)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .is_none());
             assert!(watch.wait_released(Duration::ZERO));
             assert!(!stop.is_requested(), "capture pressure stopped the node");
             assert_eq!(limit.used_temporary_bytes().unwrap(), 0);
-            assert_eq!(captured_store.tx_begin_write().unwrap().checkpoint_metadata(b"").unwrap(), pressure_before);
-            assert_eq!(captured_store.block_store().block_count().unwrap(), captured_blocks);
+            assert_eq!(
+                captured_store
+                    .tx_begin_write()
+                    .unwrap()
+                    .checkpoint_metadata(b"")
+                    .unwrap(),
+                pressure_before
+            );
+            assert_eq!(
+                captured_store.block_store().block_count().unwrap(),
+                captured_blocks
+            );
             service.registry.write().await.recovery_probe = Some(|at| {
-                assert_ne!(at, "private-recovery:start", "capture replayed metadata despite admitted retry priority");
-                assert_ne!(at, "private-recovery:source-worker", "capture opened a source reader despite retry priority");
-                assert_ne!(at, "retirement-capture:reader", "capture ignored admitted retry priority");
+                assert_ne!(
+                    at, "private-recovery:start",
+                    "capture replayed metadata despite admitted retry priority"
+                );
+                assert_ne!(
+                    at, "private-recovery:source-worker",
+                    "capture opened a source reader despite retry priority"
+                );
+                assert_ne!(
+                    at, "retirement-capture:reader",
+                    "capture ignored admitted retry priority"
+                );
             });
             assert!(installed::recover_retirement_catalogue(
-                captured_store.clone(), NetworkId::Dev, fixture.params.clone(), service.registry.clone(),
-                stop, (limit.clone(), 16 << 20), 0, None, budget,
-            ).await.unwrap().is_none());
+                captured_store.clone(),
+                NetworkId::Dev,
+                fixture.params.clone(),
+                service.registry.clone(),
+                stop,
+                (limit.clone(), 16 << 20),
+                0,
+                None,
+                budget,
+            )
+            .await
+            .unwrap()
+            .is_none());
             // The fresh admitted writer is no longer limited while its reservation
             // prevents another capture from intervening.
             let mut writer = captured_store.tx_begin_write().unwrap();
             assert!(writer.growth_outcome().is_none());
-            writer.put_meta("test/captured-pressure", &vec![index as u8; 2 << 20]).unwrap();
+            writer
+                .put_meta("test/captured-pressure", &vec![index as u8; 2 << 20])
+                .unwrap();
             writer.commit().unwrap();
             drop(retry);
             assert_eq!(captured_store.env().info().map_size, map);
@@ -847,7 +1121,10 @@ async fn private_recovery_shutdown_drains_work_and_never_returns_publishable_sta
 
 #[tokio::test(flavor = "current_thread")]
 async fn applied_replay_releases_writer_and_rejects_concurrent_epoch_change() {
-    type Gate = (tokio::sync::oneshot::Sender<()>, std::sync::mpsc::Receiver<()>);
+    type Gate = (
+        tokio::sync::oneshot::Sender<()>,
+        std::sync::mpsc::Receiver<()>,
+    );
     static GATE: std::sync::Mutex<Option<Gate>> = std::sync::Mutex::new(None);
     for change_epoch in [false, true] {
         let (fixture, _dir, source, manifest, certificate) = selection::setup();
@@ -870,10 +1147,16 @@ async fn applied_replay_releases_writer_and_rejects_concurrent_epoch_change() {
             }
         });
         let recovery = tokio::spawn(installed::recover_metadata_until_shutdown(
-            local.clone(), NetworkId::Dev, fixture.params.clone(), service.registry.clone(),
+            local.clone(),
+            NetworkId::Dev,
+            fixture.params.clone(),
+            service.registry.clone(),
             Arc::new(crate::shutdown::ShutdownController::new()),
         ));
-        tokio::time::timeout(Duration::from_secs(5), entered_rx).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
         let writer_store = local.clone();
         let writer = tokio::task::spawn_blocking(move || {
             let mut batch = writer_store.tx_begin_write()?;
@@ -888,20 +1171,34 @@ async fn applied_replay_releases_writer_and_rejects_concurrent_epoch_change() {
         let writer_result = tokio::time::timeout(Duration::from_secs(2), writer).await;
         release.send(()).unwrap();
         let recovered = tokio::time::timeout(Duration::from_secs(5), recovery)
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         service.stop().await;
-        writer_result.expect("pure replay held the ledger writer").unwrap().unwrap();
+        writer_result
+            .expect("pure replay held the ledger writer")
+            .unwrap()
+            .unwrap();
         if change_epoch {
-            assert!(recovered.is_err(), "changed epoch produced publishable recovery state");
+            assert!(
+                recovered.is_err(),
+                "changed epoch produced publishable recovery state"
+            );
         } else {
-            assert!(matches!(recovered.unwrap(), installed::StartupRecovery::Ready(Some(_))));
+            assert!(matches!(
+                recovered.unwrap(),
+                installed::StartupRecovery::Ready(Some(_))
+            ));
         }
     }
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn metadata_recovery_diagnoses_valid_payment_between_reads() {
-    type Gate = (tokio::sync::oneshot::Sender<()>, std::sync::mpsc::Receiver<()>);
+    type Gate = (
+        tokio::sync::oneshot::Sender<()>,
+        std::sync::mpsc::Receiver<()>,
+    );
     static GATE: std::sync::Mutex<Option<Gate>> = std::sync::Mutex::new(None);
     for mode in 0..3 {
         let captured = mode > 0;
@@ -912,24 +1209,44 @@ async fn metadata_recovery_diagnoses_valid_payment_between_reads() {
         let (_directory, local) = cemented::sparse(&expected, &source);
         copy_installed_records(&local, &source, &fixture, &bytes);
         let epoch = expected.anchor().hash();
-        fixture.push(0, BlockType::ChangeRepresentative, expected.anchor().cutoff() + 1, |block| {
-            block.payment_epoch = epoch;
-            block.representative = address(1);
-        });
+        fixture.push(
+            0,
+            BlockType::ChangeRepresentative,
+            expected.anchor().cutoff() + 1,
+            |block| {
+                block.payment_epoch = epoch;
+                block.representative = address(1);
+            },
+        );
         let block = fixture.blocks.last().unwrap().clone();
         let local = Arc::new(local);
         let service = WitnessService::start(Arc::new(source), local.clone(), 0).await;
         if mode == 1 {
             let mut writer = local.tx_begin_write().unwrap();
-            let lease = writer.try_limit_file_extent(local.env().info().map_size).unwrap().unwrap();
+            let lease = writer
+                .try_limit_file_extent(local.env().info().map_size)
+                .unwrap()
+                .unwrap();
             drop(writer);
-            let denied = installed::recover_checkpoint_authority(local.clone(), NetworkId::Dev,
-                fixture.params.clone(), service.registry.clone(), None, &mut None).await;
-            assert!(matches!(denied, Err(burst_store::StoreError::Backend(_))),
-                "budget refusal must not look like an absent authority");
+            let denied = installed::recover_checkpoint_authority(
+                local.clone(),
+                NetworkId::Dev,
+                fixture.params.clone(),
+                service.registry.clone(),
+                None,
+                &mut None,
+            )
+            .await;
+            assert!(
+                matches!(denied, Err(burst_store::StoreError::Backend(_))),
+                "budget refusal must not look like an absent authority"
+            );
             drop(lease);
         }
-        let original_limit = local.meta_store().get_meta(burst_store::meta::PAYMENT_VOTE_LIMIT_KEY).unwrap();
+        let original_limit = local
+            .meta_store()
+            .get_meta(burst_store::meta::PAYMENT_VOTE_LIMIT_KEY)
+            .unwrap();
         let (entered, entered_rx) = tokio::sync::oneshot::channel();
         let (release, released) = std::sync::mpsc::channel();
         *GATE.lock().unwrap() = Some((entered, released));
@@ -946,18 +1263,32 @@ async fn metadata_recovery_diagnoses_valid_payment_between_reads() {
         let recovery = tokio::spawn(async move {
             if captured {
                 let cache = installed::recover_checkpoint_authority(
-                    recovery_store, NetworkId::Dev, recovery_params, registry, None, &mut None,
-                ).await?.expect("installed authority");
+                    recovery_store,
+                    NetworkId::Dev,
+                    recovery_params,
+                    registry,
+                    None,
+                    &mut None,
+                )
+                .await?
+                .expect("installed authority");
                 assert_eq!(cache.recovered.continuation.anchor().hash(), epoch);
             } else {
                 installed::recover_metadata_until_shutdown(
-                    recovery_store, NetworkId::Dev, recovery_params, registry,
+                    recovery_store,
+                    NetworkId::Dev,
+                    recovery_params,
+                    registry,
                     Arc::new(crate::shutdown::ShutdownController::new()),
-                ).await?;
+                )
+                .await?;
             }
             Ok::<_, burst_store::StoreError>(())
         });
-        tokio::time::timeout(Duration::from_secs(5), entered_rx).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
         let writer_store = local.clone();
         let params = fixture.params.clone();
         let writer = tokio::task::spawn_blocking(move || {
@@ -968,29 +1299,55 @@ async fn metadata_recovery_diagnoses_valid_payment_between_reads() {
             batch.commit().unwrap();
             if mode == 2 {
                 // Consensus metadata is deliberately outside payment undo.
-                writer_store.meta_store().put_meta(burst_store::meta::PAYMENT_VOTE_LIMIT_KEY, &[0x91; 32]).unwrap();
+                writer_store
+                    .meta_store()
+                    .put_meta(burst_store::meta::PAYMENT_VOTE_LIMIT_KEY, &[0x91; 32])
+                    .unwrap();
             }
         });
         let writer_result = tokio::time::timeout(Duration::from_secs(2), writer).await;
         release.send(()).unwrap();
-        let raced = tokio::time::timeout(Duration::from_secs(5), recovery).await.unwrap().unwrap();
+        let raced = tokio::time::timeout(Duration::from_secs(5), recovery)
+            .await
+            .unwrap()
+            .unwrap();
         service.registry.write().await.recovery_probe = None;
-        writer_result.expect("replay held the ledger writer").unwrap();
+        writer_result
+            .expect("replay held the ledger writer")
+            .unwrap();
         if mode == 1 {
             raced.expect("consistent authority recovery must tolerate a valid concurrent payment");
         } else if mode == 2 {
             let error = raced.expect_err("live authority tampering must fail handoff");
-            assert!(error.to_string().contains("installed metadata differs"), "{error}");
-            local.meta_store().put_meta(burst_store::meta::PAYMENT_VOTE_LIMIT_KEY, &original_limit).unwrap();
+            assert!(
+                error.to_string().contains("installed metadata differs"),
+                "{error}"
+            );
+            local
+                .meta_store()
+                .put_meta(burst_store::meta::PAYMENT_VOTE_LIMIT_KEY, &original_limit)
+                .unwrap();
         } else {
-            let error = raced.expect_err("strict startup recovery must reject the advanced applied tail");
-            assert!(error.to_string().contains("retained history changed during recovery"), "{error}");
+            let error =
+                raced.expect_err("strict startup recovery must reject the advanced applied tail");
+            assert!(
+                error
+                    .to_string()
+                    .contains("retained history changed during recovery"),
+                "{error}"
+            );
         }
         // A fresh full recovery must accept the exact same durable state. This
         // distinguishes a concurrent-read rejection from an invalid test update.
         let recovered = installed::recover_metadata_from_peers(
-            local.clone(), NetworkId::Dev, fixture.params.clone(), service.registry.clone(),
-        ).await.unwrap().unwrap();
+            local.clone(),
+            NetworkId::Dev,
+            fixture.params.clone(),
+            service.registry.clone(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         let authority = recovered.into_checkpoint_recovery(&local, None).unwrap();
         assert_eq!(authority.recovered.continuation.anchor().hash(), epoch);
         service.stop().await;
@@ -1005,20 +1362,47 @@ fn durable_inputs_child(directory: &Path) -> ! {
     let height = cursor.next().unwrap().height;
     assert!(height > 2);
     let context = DurableHistoryInputs::input_context(&cursor, height - 2).unwrap();
-    let mut inputs = DurableHistoryInputs::open(directory, cursor, height - 2, 4 << 20, 1 << 20).unwrap();
+    let mut inputs =
+        DurableHistoryInputs::open(directory, cursor, height - 2, 4 << 20, 1 << 20).unwrap();
     let stage = std::env::var("BURST_COMPACT_CRASH_STAGE").unwrap();
-    assert!(["opened", "appended", "sealed", "reset-start", "reset-page", "reset-done"].contains(&stage.as_str()));
+    assert!([
+        "opened",
+        "appended",
+        "sealed",
+        "reset-start",
+        "reset-page",
+        "reset-done"
+    ]
+    .contains(&stage.as_str()));
     if stage != "opened" {
-        inputs.append(&super::super::read_chunk(&source, inputs.cursor().next().unwrap().hash, 1).unwrap()).unwrap();
+        inputs
+            .append(
+                &super::super::read_chunk(&source, inputs.cursor().next().unwrap().hash, 1)
+                    .unwrap(),
+            )
+            .unwrap();
     }
     if stage != "opened" && stage != "appended" {
-        inputs.append(&super::super::read_chunk(&source, inputs.cursor().next().unwrap().hash, 1).unwrap()).unwrap();
+        inputs
+            .append(
+                &super::super::read_chunk(&source, inputs.cursor().next().unwrap().hash, 1)
+                    .unwrap(),
+            )
+            .unwrap();
         inputs.seal().unwrap();
     }
     if stage.starts_with("reset-") {
         use burst_store_lmdb::recovery_inputs::{Limits, RecoveryInputs};
-        let raw = RecoveryInputs::open(&directory.join(crate::confirmed_replay::scratch_file::PERSISTENT_INPUTS_DIRECTORY),
-            context, Limits { chunks: 131_072, bytes: 1 << 20, map_bytes: 1 << 20 }).unwrap();
+        let raw = RecoveryInputs::open(
+            &directory.join(crate::confirmed_replay::scratch_file::PERSISTENT_INPUTS_DIRECTORY),
+            context,
+            Limits {
+                chunks: 131_072,
+                bytes: 1 << 20,
+                map_bytes: 1 << 20,
+            },
+        )
+        .unwrap();
         raw.begin_reset(context).unwrap();
         if stage != "reset-start" {
             assert!(!raw.reset_page(1, (1 << 20) + 64).unwrap().complete);
@@ -1026,7 +1410,10 @@ fn durable_inputs_child(directory: &Path) -> ! {
         if stage == "reset-done" {
             let mut complete = false;
             for _ in 0..32 {
-                if raw.reset_page(1, (1 << 20) + 64).unwrap().complete { complete = true; break; }
+                if raw.reset_page(1, (1 << 20) + 64).unwrap().complete {
+                    complete = true;
+                    break;
+                }
             }
             assert!(complete);
         }
@@ -1034,35 +1421,57 @@ fn durable_inputs_child(directory: &Path) -> ! {
     println!("{READY}");
     std::io::stdout().flush().unwrap();
     // Keep every handle live: SIGKILL, not a destructor, closes the environment.
-    loop { std::thread::park(); }
+    loop {
+        std::thread::park();
+    }
 }
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn durable_history_inputs_reauthenticate_after_process_kill() {
-    use crate::confirmed_replay::snapshot::history::DurableHistoryInputs;
     use crate::confirmed_replay::scratch_file::{ScratchFile, ScratchLimit};
+    use crate::confirmed_replay::snapshot::history::DurableHistoryInputs;
     let fixture = Fixture::selection();
     let (_dir, source, snapshot) = super::super::snapshot(&fixture);
     let cursor = snapshot.history_cursor(&address(0)).unwrap().unwrap();
     let head = cursor.next().unwrap();
     let first = super::super::read_chunk(&source, head.hash, 2).unwrap();
     assert_eq!(first.len(), 2);
-    for (stage, committed) in [("opened", 0), ("appended", 1), ("sealed", 2), ("reset-start", 0), ("reset-page", 0), ("reset-done", 0)] {
+    for (stage, committed) in [
+        ("opened", 0),
+        ("appended", 1),
+        ("sealed", 2),
+        ("reset-start", 0),
+        ("reset-page", 0),
+        ("reset-done", 0),
+    ] {
         let directory = tempfile::tempdir().unwrap();
         kill_at_kind(directory.path(), stage, "recovery-inputs").await;
         if stage.starts_with("reset-") {
             use burst_store_lmdb::recovery_inputs::{Limits, RecoveryInputs};
             let context = DurableHistoryInputs::input_context(&cursor, head.height - 2).unwrap();
-            let raw = RecoveryInputs::open(&directory.path().join(crate::confirmed_replay::scratch_file::PERSISTENT_INPUTS_DIRECTORY),
-                context, Limits { chunks: 131_072, bytes: 1 << 20, map_bytes: 1 << 20 }).unwrap();
+            let raw = RecoveryInputs::open(
+                &directory
+                    .path()
+                    .join(crate::confirmed_replay::scratch_file::PERSISTENT_INPUTS_DIRECTORY),
+                context,
+                Limits {
+                    chunks: 131_072,
+                    bytes: 1 << 20,
+                    map_bytes: 1 << 20,
+                },
+            )
+            .unwrap();
             if stage == "reset-done" {
                 assert_eq!(raw.progress().unwrap().positions, 0);
             } else {
                 assert!(raw.progress().is_err());
                 let mut complete = false;
                 for _ in 0..32 {
-                    if raw.reset_page(1, (1 << 20) + 64).unwrap().complete { complete = true; break; }
+                    if raw.reset_page(1, (1 << 20) + 64).unwrap().complete {
+                        complete = true;
+                        break;
+                    }
                 }
                 assert!(complete);
             }
@@ -1070,9 +1479,19 @@ async fn durable_history_inputs_reauthenticate_after_process_kill() {
         // There is no surviving child registry or budget owner. Retained files
         // must still be charged by this new process's ordinary scratch policy.
         assert!(ScratchLimit::acquire(directory.path(), 1).is_err());
-        let mut inputs = DurableHistoryInputs::open(directory.path(), cursor.clone(), head.height - 2, 4 << 20, 1 << 20).unwrap();
+        let mut inputs = DurableHistoryInputs::open(
+            directory.path(),
+            cursor.clone(),
+            head.height - 2,
+            4 << 20,
+            1 << 20,
+        )
+        .unwrap();
         assert_eq!(inputs.cursor().next(), Some(head.clone()));
-        assert!(inputs.seal().is_err(), "saved completion is not proof authority");
+        assert!(
+            inputs.seal().is_err(),
+            "saved completion is not proof authority"
+        );
         let proofs = inputs.replay_page().unwrap();
         assert_eq!(proofs.len(), committed);
         for (proof, bytes) in proofs.iter().zip(&first) {
@@ -1081,14 +1500,25 @@ async fn durable_history_inputs_reauthenticate_after_process_kill() {
         }
         assert!(inputs.replay_page().unwrap().is_empty());
         let mut scratch = ScratchFile::new_in(directory.path()).unwrap();
-        scratch.write_all(&vec![0; (4 << 20) - (1 << 20) - (64 << 10)]).unwrap();
+        scratch
+            .write_all(&vec![0; (4 << 20) - (1 << 20) - (64 << 10)])
+            .unwrap();
         assert!(scratch.write_all(&[0]).is_err());
         drop(scratch);
-        if committed < 2 { inputs.append(&first[committed..]).unwrap(); }
+        if committed < 2 {
+            inputs.append(&first[committed..]).unwrap();
+        }
         inputs.seal().unwrap();
         assert_eq!(inputs.cursor().next().unwrap().height, head.height - 2);
         drop(inputs);
-        let mut inputs = DurableHistoryInputs::open(directory.path(), cursor.clone(), head.height - 2, 4 << 20, 1 << 20).unwrap();
+        let mut inputs = DurableHistoryInputs::open(
+            directory.path(),
+            cursor.clone(),
+            head.height - 2,
+            4 << 20,
+            1 << 20,
+        )
+        .unwrap();
         assert_eq!(inputs.replay_page().unwrap().len(), 2);
         inputs.seal().unwrap();
     }
@@ -1102,48 +1532,99 @@ async fn durable_inventory_child(directory: &Path) -> ! {
         if stage == std::env::var("BURST_COMPACT_CRASH_STAGE").unwrap() {
             println!("{READY}");
             std::io::stdout().flush().unwrap();
-            loop { std::thread::park(); }
+            loop {
+                std::thread::park();
+            }
         }
     });
     let limit = crate::confirmed_replay::scratch_file::ScratchLimit::acquire_reserved(
-        directory, 64 << 20,
-        crate::confirmed_replay::snapshot::history::DurableHistoryInputs::reservation(16 << 20).unwrap(),
-    ).unwrap();
-    installed::recover_metadata_with_durable_inputs(local, NetworkId::Dev, fixture.params,
-        service.registry.clone(), Arc::new(crate::shutdown::ShutdownController::new()),
-        Some((limit, 16 << 20))).await.unwrap();
+        directory,
+        64 << 20,
+        crate::confirmed_replay::snapshot::history::DurableHistoryInputs::reservation(16 << 20)
+            .unwrap(),
+    )
+    .unwrap();
+    installed::recover_metadata_with_durable_inputs(
+        local,
+        NetworkId::Dev,
+        fixture.params,
+        service.registry.clone(),
+        Arc::new(crate::shutdown::ShutdownController::new()),
+        Some((limit, 16 << 20)),
+    )
+    .await
+    .unwrap();
     panic!("inventory crash boundary was not reached");
 }
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn durable_inventory_reauthenticates_after_process_kill() {
-    use crate::confirmed_replay::{scratch_file::ScratchLimit, snapshot::history::DurableHistoryInputs};
+    use crate::confirmed_replay::{
+        scratch_file::ScratchLimit, snapshot::history::DurableHistoryInputs,
+    };
     let (fixture, _dir, source, manifest, certificate) = selection::setup();
     let bytes = archive(&source, &fixture, manifest.checkpoint.parent);
-    let expected = authenticate(&source, &fixture.params, certificate.checkpoint.hash()).into_continuation();
+    let expected =
+        authenticate(&source, &fixture.params, certificate.checkpoint.hash()).into_continuation();
     let source = Arc::new(source);
-    for stage in ["private-recovery:inventory-cache-page", "private-recovery:retained-inventory-page",
-        "private-recovery:retained-planned"] {
+    for stage in [
+        "private-recovery:inventory-cache-page",
+        "private-recovery:retained-inventory-page",
+        "private-recovery:retained-planned",
+    ] {
         let (directory, local) = cemented::sparse(&expected, &source);
         copy_installed_records(&local, &source, &fixture, &bytes);
-        let before = local.tx_begin_write().unwrap().checkpoint_metadata(b"").unwrap();
+        let before = local
+            .tx_begin_write()
+            .unwrap()
+            .checkpoint_metadata(b"")
+            .unwrap();
         let count = local.block_store().block_count().unwrap();
         drop(local);
         kill_at_kind(directory.path(), stage, "inventory-inputs").await;
         assert!(ScratchLimit::acquire(directory.path(), 1).is_err());
         let local = Arc::new(LmdbStore::open(directory.path(), 32, 32 << 20).unwrap());
-        assert_eq!(local.tx_begin_write().unwrap().checkpoint_metadata(b"").unwrap(), before);
+        assert_eq!(
+            local
+                .tx_begin_write()
+                .unwrap()
+                .checkpoint_metadata(b"")
+                .unwrap(),
+            before
+        );
         assert_eq!(local.block_store().block_count().unwrap(), count);
         let service = WitnessService::start(source.clone(), local.clone(), 0).await;
-        let limit = ScratchLimit::acquire_reserved(directory.path(), 64 << 20,
-            DurableHistoryInputs::reservation(16 << 20).unwrap()).unwrap();
-        let result = installed::recover_metadata_with_durable_inputs(local.clone(), NetworkId::Dev,
-            fixture.params.clone(), service.registry.clone(), Arc::new(crate::shutdown::ShutdownController::new()),
-            Some((limit, 16 << 20))).await.unwrap();
-        let installed::StartupRecovery::Ready(Some(recovered)) = result else { panic!("recovery did not finish at {stage}"); };
-        recovered.verify_unchanged(&local.tx_begin_write().unwrap()).unwrap();
-        assert_eq!(local.tx_begin_write().unwrap().checkpoint_metadata(b"").unwrap(), before);
+        let limit = ScratchLimit::acquire_reserved(
+            directory.path(),
+            64 << 20,
+            DurableHistoryInputs::reservation(16 << 20).unwrap(),
+        )
+        .unwrap();
+        let result = installed::recover_metadata_with_durable_inputs(
+            local.clone(),
+            NetworkId::Dev,
+            fixture.params.clone(),
+            service.registry.clone(),
+            Arc::new(crate::shutdown::ShutdownController::new()),
+            Some((limit, 16 << 20)),
+        )
+        .await
+        .unwrap();
+        let installed::StartupRecovery::Ready(Some(recovered)) = result else {
+            panic!("recovery did not finish at {stage}");
+        };
+        recovered
+            .verify_unchanged(&local.tx_begin_write().unwrap())
+            .unwrap();
+        assert_eq!(
+            local
+                .tx_begin_write()
+                .unwrap()
+                .checkpoint_metadata(b"")
+                .unwrap(),
+            before
+        );
         assert_eq!(local.block_store().block_count().unwrap(), count);
         service.stop().await;
     }

@@ -22,8 +22,8 @@ pub const INBOX_CAPACITY: usize = 32;
 pub type Clock = Arc<dyn Fn() -> Option<SigningClock> + std::marker::Send + Sync>;
 
 mod candidate;
-mod preparation;
 mod compact;
+mod preparation;
 pub(crate) use candidate::discover_candidate;
 pub(crate) mod compact_authority;
 pub use compact::CompactStart;
@@ -67,7 +67,10 @@ impl Session {
                 "invalid checkpoint step timeout".into(),
             ));
         }
-        let mut transport = Transport::new(crate::checkpoint_transport::context_from_anchor(driver.anchor())?, now);
+        let mut transport = Transport::new(
+            crate::checkpoint_transport::context_from_anchor(driver.anchor())?,
+            now,
+        );
         for message in driver.resume()? {
             transport.publish(&message)?;
         }

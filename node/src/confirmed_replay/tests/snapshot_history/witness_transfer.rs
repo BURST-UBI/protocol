@@ -57,22 +57,38 @@ async fn consumer_history_lookup_proves_membership_without_installing_blocks() {
         use crate::historical_lookup::preparation::{Cache, Request};
         let mut cache = Cache::default();
         let request = Request::Account(fixture.blocks[1].account.clone());
-        let first = cache.prepare(&local, NetworkId::Dev, &fixture.params, request.clone()).unwrap();
-        let warm = cache.prepare(&local, NetworkId::Dev, &fixture.params, request.clone()).unwrap();
+        let first = cache
+            .prepare(&local, NetworkId::Dev, &fixture.params, request.clone())
+            .unwrap();
+        let warm = cache
+            .prepare(&local, NetworkId::Dev, &fixture.params, request.clone())
+            .unwrap();
         assert!(Arc::ptr_eq(&first, &warm));
         let mut batch = local.tx_begin_write().unwrap();
-        batch.put_meta("history-cache-unrelated", b"tracked").unwrap();
+        batch
+            .put_meta("history-cache-unrelated", b"tracked")
+            .unwrap();
         batch.commit().unwrap();
-        assert!(Arc::ptr_eq(&first, &cache.prepare(&local, NetworkId::Dev,
-            &fixture.params, request.clone()).unwrap()));
+        assert!(Arc::ptr_eq(
+            &first,
+            &cache
+                .prepare(&local, NetworkId::Dev, &fixture.params, request.clone())
+                .unwrap()
+        ));
         let mut batch = local.tx_begin_write().unwrap();
         batch.delete_meta("history-cache-unrelated").unwrap();
         batch.commit().unwrap();
         let mut changed = fixture.params.clone();
         changed.brn_rate += 1;
-        assert!(cache.prepare(&local, NetworkId::Dev, &changed, request.clone()).is_err());
-        assert!(cache.prepare(&local, NetworkId::Test, &fixture.params, request.clone()).is_err());
-        let rebuilt = cache.prepare(&local, NetworkId::Dev, &fixture.params, request).unwrap();
+        assert!(cache
+            .prepare(&local, NetworkId::Dev, &changed, request.clone())
+            .is_err());
+        assert!(cache
+            .prepare(&local, NetworkId::Test, &fixture.params, request.clone())
+            .is_err());
+        let rebuilt = cache
+            .prepare(&local, NetworkId::Dev, &fixture.params, request)
+            .unwrap();
         assert!(!Arc::ptr_eq(&first, &rebuilt));
     }
     let before = local
@@ -366,9 +382,12 @@ async fn exact_witness_batch_splits_committed_inventory_into_bounded_requests() 
         .collect();
     let wanted: Vec<_> = heads.iter().map(|head| head.hash).collect();
     let local = std::sync::Arc::new(local);
-    let service =
-        super::installed_recovery::WitnessService::start(std::sync::Arc::new(source), local.clone(), 0)
-            .await;
+    let service = super::installed_recovery::WitnessService::start(
+        std::sync::Arc::new(source),
+        local.clone(),
+        0,
+    )
+    .await;
     let proofs = crate::checkpoint_sync::witness::request_with_committed(
         &service.registry,
         Roots::Plan(cursors.clone()),
@@ -628,9 +647,12 @@ async fn suffix_fetch_resumes_bounded_batches_without_installing_blocks() {
     .unwrap();
     let (_local_directory, local) = suffix_store(&[]);
     let local = std::sync::Arc::new(local);
-    let service =
-        super::installed_recovery::WitnessService::start(std::sync::Arc::new(source), local.clone(), 0)
-            .await;
+    let service = super::installed_recovery::WitnessService::start(
+        std::sync::Arc::new(source),
+        local.clone(),
+        0,
+    )
+    .await;
     let head_cursors = crate::confirmed_replay::snapshot::history::HistoryCursor::certified_cut(
         &parent,
         &certificate,
@@ -883,13 +905,27 @@ fn witness_plan_recovers_only_requested_heads_without_older_bodies() {
     let directory = tempfile::tempdir().unwrap();
     let stored = std::sync::Arc::new(snapshot.stored_history_roots(directory.path()).unwrap());
     for on_disk in [false, true] {
-        let roots = if on_disk { Roots::Stored(stored.clone()) } else {
-            Roots::Plan(heads.iter().map(|head| snapshot.history_cursor(&head.account).unwrap().unwrap()).collect())
+        let roots = if on_disk {
+            Roots::Stored(stored.clone())
+        } else {
+            Roots::Plan(
+                heads
+                    .iter()
+                    .map(|head| snapshot.history_cursor(&head.account).unwrap().unwrap())
+                    .collect(),
+            )
         };
         let now = Instant::now();
         let mut client = Transfer::new(now);
         let (result, mut received) = oneshot::channel();
-        client.start(Command { roots, wanted: wanted.clone(), result }, now);
+        client.start(
+            Command {
+                roots,
+                wanted: wanted.clone(),
+                result,
+            },
+            now,
+        );
         let mut complete = false;
         for _ in 0..100 {
             assert!(client.local_progress(&local, now));
@@ -898,14 +934,21 @@ fn witness_plan_recovers_only_requested_heads_without_older_bodies() {
                 assert_eq!(proofs.len(), wanted.len());
                 for proof in proofs {
                     assert!(wanted.contains(&proof.block().hash));
-                    snapshot.history_cursor(&proof.block().account).unwrap().unwrap()
-                        .accept(&[bincode::serialize(proof.block()).unwrap()]).unwrap();
+                    snapshot
+                        .history_cursor(&proof.block().account)
+                        .unwrap()
+                        .unwrap()
+                        .accept(&[bincode::serialize(proof.block()).unwrap()])
+                        .unwrap();
                 }
                 complete = true;
                 break;
             }
         }
-        assert!(complete, "head-only witness recovery did not finish; stored={on_disk}");
+        assert!(
+            complete,
+            "head-only witness recovery did not finish; stored={on_disk}"
+        );
     }
 }
 
@@ -1239,7 +1282,11 @@ fn witness_cache_reuses_only_matching_authenticated_prefixes_without_peers() {
     let (_dir, source, snapshot) = snapshot(&fixture);
     let snapshot = snapshot.into_continuation();
     let root_directory = tempfile::tempdir().unwrap();
-    let stored = std::sync::Arc::new(snapshot.stored_history_roots(root_directory.path()).unwrap());
+    let stored = std::sync::Arc::new(
+        snapshot
+            .stored_history_roots(root_directory.path())
+            .unwrap(),
+    );
     let (_dir, local) = suffix_store(&[]);
     let now = Instant::now();
     let mut client = Transfer::new(now);
@@ -1354,7 +1401,14 @@ fn witness_cache_reuses_only_matching_authenticated_prefixes_without_peers() {
     }
     stored.truncate_for_test();
     let (result, mut received) = oneshot::channel();
-    client.start(Command { roots: Roots::Stored(stored), wanted: vec![hash], result }, now);
+    client.start(
+        Command {
+            roots: Roots::Stored(stored),
+            wanted: vec![hash],
+            result,
+        },
+        now,
+    );
     assert!(received.try_recv().unwrap().is_err());
     assert!(client.poll(Vec::new(), now).is_none());
     assert_eq!(local.block_store().block_count().unwrap(), 0);
@@ -1668,9 +1722,12 @@ async fn witness_plan_discovers_accounts_and_authenticates_every_requested_body(
     .await
     .is_err());
     let local = std::sync::Arc::new(local);
-    let service =
-        super::installed_recovery::WitnessService::start(std::sync::Arc::new(source), local.clone(), 0)
-            .await;
+    let service = super::installed_recovery::WitnessService::start(
+        std::sync::Arc::new(source),
+        local.clone(),
+        0,
+    )
+    .await;
     let combined = crate::checkpoint_sync::witness::fetch_plan_reusing(
         &service.registry,
         &base,
@@ -2023,38 +2080,65 @@ async fn durable_suffix_pages_resume_download_and_replay_without_peers() {
     .unwrap();
     let (_local_directory, local) = suffix_store(&[]);
     let local = std::sync::Arc::new(local);
-    let service =
-        super::installed_recovery::WitnessService::start(std::sync::Arc::new(source), local.clone(), 0)
-            .await;
+    let service = super::installed_recovery::WitnessService::start(
+        std::sync::Arc::new(source),
+        local.clone(),
+        0,
+    )
+    .await;
     let cache = tempfile::tempdir().unwrap();
     let shutdown = crate::shutdown::ShutdownController::new();
     let initial = cursor.next().unwrap();
-    let inputs = DurableHistoryInputs::open(cache.path(), cursor.clone(), 1, 8 << 20, 4 << 20).unwrap();
-    let (inputs, page) = inputs.next_page(&service.registry, &shutdown).await.unwrap();
-    let first: Vec<_> = page.unwrap().iter().map(|proof| proof.block().hash).collect();
+    let inputs =
+        DurableHistoryInputs::open(cache.path(), cursor.clone(), 1, 8 << 20, 4 << 20).unwrap();
+    let (inputs, page) = inputs
+        .next_page(&service.registry, &shutdown)
+        .await
+        .unwrap();
+    let first: Vec<_> = page
+        .unwrap()
+        .iter()
+        .map(|proof| proof.block().hash)
+        .collect();
     assert_eq!(first.len(), MAX_WITNESS_BLOCKS);
-    assert_eq!(inputs.cursor().next().unwrap().height, initial.height - MAX_WITNESS_BLOCKS as u64);
+    assert_eq!(
+        inputs.cursor().next().unwrap().height,
+        initial.height - MAX_WITNESS_BLOCKS as u64
+    );
     drop(inputs);
-    let mut inputs = DurableHistoryInputs::open(cache.path(), cursor.clone(), 1, 8 << 20, 4 << 20).unwrap();
+    let mut inputs =
+        DurableHistoryInputs::open(cache.path(), cursor.clone(), 1, 8 << 20, 4 << 20).unwrap();
     let mut actual = Vec::new();
     loop {
-        let (next, page) = inputs.next_page(&service.registry, &shutdown).await.unwrap();
+        let (next, page) = inputs
+            .next_page(&service.registry, &shutdown)
+            .await
+            .unwrap();
         inputs = next;
         let page = page.unwrap();
-        if page.is_empty() { break; }
+        if page.is_empty() {
+            break;
+        }
         assert!(page.len() <= MAX_WITNESS_BLOCKS);
         actual.extend(page.iter().map(|proof| proof.block().hash));
     }
-    let expected: Vec<_> = fixture.blocks.iter().rev()
+    let expected: Vec<_> = fixture
+        .blocks
+        .iter()
+        .rev()
         .filter(|block| block.account == address(0) && block.hash != fixture.blocks[0].hash)
-        .map(|block| block.hash).collect();
+        .map(|block| block.hash)
+        .collect();
     assert_eq!(actual, expected);
     assert_eq!(&actual[..first.len()], first.as_slice());
     assert_eq!(local.block_store().block_count().unwrap(), 0);
     drop(inputs);
     assert!(service.stop().await > 0);
-    let registry = std::sync::Arc::new(tokio::sync::RwLock::new(crate::connection_registry::ConnectionRegistry::new()));
-    let mut inputs = DurableHistoryInputs::open(cache.path(), cursor.clone(), 1, 8 << 20, 4 << 20).unwrap();
+    let registry = std::sync::Arc::new(tokio::sync::RwLock::new(
+        crate::connection_registry::ConnectionRegistry::new(),
+    ));
+    let mut inputs =
+        DurableHistoryInputs::open(cache.path(), cursor.clone(), 1, 8 << 20, 4 << 20).unwrap();
     let cancelled = crate::shutdown::ShutdownController::new();
     cancelled.shutdown();
     let (next, page) = inputs.next_page(&registry, &cancelled).await.unwrap();
@@ -2066,7 +2150,9 @@ async fn durable_suffix_pages_resume_download_and_replay_without_peers() {
         let (next, page) = inputs.next_page(&registry, &shutdown).await.unwrap();
         inputs = next;
         let page = page.unwrap();
-        if page.is_empty() { break; }
+        if page.is_empty() {
+            break;
+        }
         replayed.extend(page.iter().map(|proof| proof.block().hash));
     }
     assert_eq!(replayed, expected);

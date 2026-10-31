@@ -14,10 +14,14 @@ use burst_store_lmdb::LmdbEnvironment;
 use burst_trst::TrstEngine;
 use burst_types::{BlockHash, Signature, Timestamp, TrstState, TxHash, WalletAddress};
 
-
 fn temp_env() -> (tempfile::TempDir, LmdbEnvironment) {
     let dir = tempfile::tempdir().expect("temp dir");
-    let env = LmdbEnvironment::open(dir.path(), burst_store_lmdb::REQUIRED_DATABASES, 64 * 1024 * 1024).expect("open env");
+    let env = LmdbEnvironment::open(
+        dir.path(),
+        burst_store_lmdb::REQUIRED_DATABASES,
+        64 * 1024 * 1024,
+    )
+    .expect("open env");
     (dir, env)
 }
 

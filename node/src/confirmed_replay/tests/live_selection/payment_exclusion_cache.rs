@@ -12,7 +12,8 @@ fn exclusion_cache_reuses_authority_but_rechecks_frontier_closure_and_reopen() {
     let info = store.account_store().get_account(&account).unwrap();
     let old_epoch = crate::genesis_state::block(NetworkId::Dev, &fixture.params).hash;
     let query = ExclusionQuery {
-        account: account.to_string(), previous: info.head.to_string(),
+        account: account.to_string(),
+        previous: info.head.to_string(),
         payment_epoch: old_epoch.to_string(),
     };
     let current = ExclusionQuery {
@@ -21,7 +22,9 @@ fn exclusion_cache_reuses_authority_but_rechecks_frontier_closure_and_reopen() {
     };
     assert!(!reader.read(current).unwrap().excluded);
     assert_eq!(reader.validation_count(), 0);
-    for _ in 0..3 { assert!(reader.read(query.clone()).unwrap().excluded); }
+    for _ in 0..3 {
+        assert!(reader.read(query.clone()).unwrap().excluded);
+    }
     assert_eq!(reader.validation_count(), 1);
 
     let mut changed = info.clone();
@@ -50,7 +53,10 @@ fn exclusion_cache_reuses_authority_but_rechecks_frontier_closure_and_reopen() {
     batch.commit().unwrap();
     assert!(reader.read(query.clone()).unwrap().excluded);
     assert_eq!(reader.validation_count(), 3);
-    store.meta_store().put_meta("exclusion-untracked", b"write").unwrap();
+    store
+        .meta_store()
+        .put_meta("exclusion-untracked", b"write")
+        .unwrap();
     assert!(reader.read(query.clone()).unwrap().excluded);
     assert_eq!(reader.validation_count(), 4);
     drop(reader);
@@ -63,18 +69,26 @@ fn exclusion_cache_reuses_authority_but_rechecks_frontier_closure_and_reopen() {
 
 #[test]
 fn exclusion_cache_rejects_page_only_damage_and_never_caches_errors() {
-    use std::io::Write;
     use crate::paged_metadata::Location;
+    use std::io::Write;
     struct AuthorityPages;
     impl Location for AuthorityPages {
-        fn descriptor_key(&self) -> &str { burst_store::meta::CERTIFIED_PAYMENT_AUTHORITY_KEY }
+        fn descriptor_key(&self) -> &str {
+            burst_store::meta::CERTIFIED_PAYMENT_AUTHORITY_KEY
+        }
         fn page_key(&self, index: usize) -> String {
-            format!("{}{:08x}", burst_store::meta::CERTIFIED_PAYMENT_AUTHORITY_PAGE_PREFIX, index)
+            format!(
+                "{}{:08x}",
+                burst_store::meta::CERTIFIED_PAYMENT_AUTHORITY_PAGE_PREFIX,
+                index
+            )
         }
     }
     let (_dir, store, fixture, _, _) = setup();
     let store = Arc::new(store);
-    let bytes = crate::payment_authority::storage::read(&store).unwrap().unwrap();
+    let bytes = crate::payment_authority::storage::read(&store)
+        .unwrap()
+        .unwrap();
     let mut batch = store.tx_begin_write().unwrap();
     let mut writer = crate::paged_metadata::Writer::new_at(AuthorityPages, &mut batch).unwrap();
     writer.write_all(&bytes).unwrap();
@@ -82,14 +96,21 @@ fn exclusion_cache_rejects_page_only_damage_and_never_caches_errors() {
     batch.commit().unwrap();
     let reader = crate::payment_exclusion::Reader::new(store.clone());
     let old_epoch = crate::genesis_state::block(NetworkId::Dev, &fixture.params).hash;
-    let query = ExclusionQuery { account: address(99).to_string(),
-        previous: BlockHash::ZERO.to_string(), payment_epoch: old_epoch.to_string() };
+    let query = ExclusionQuery {
+        account: address(99).to_string(),
+        previous: BlockHash::ZERO.to_string(),
+        payment_epoch: old_epoch.to_string(),
+    };
     assert!(reader.read(query.clone()).unwrap().excluded);
     assert_eq!(reader.validation_count(), 1);
     let key = AuthorityPages.page_key(0);
     let page = store.meta_store().get_meta(&key).unwrap();
-    let descriptor = store.meta_store().get_meta(AuthorityPages.descriptor_key()).unwrap();
-    let mut damaged = page.clone(); damaged[0] ^= 1;
+    let descriptor = store
+        .meta_store()
+        .get_meta(AuthorityPages.descriptor_key())
+        .unwrap();
+    let mut damaged = page.clone();
+    damaged[0] ^= 1;
     let mut batch = store.tx_begin_write().unwrap();
     batch.put_meta(&key, &damaged).unwrap();
     drop(batch);
@@ -100,20 +121,36 @@ fn exclusion_cache_rejects_page_only_damage_and_never_caches_errors() {
     let mut batch = store.tx_begin_write().unwrap();
     batch.put_meta(&key, &damaged).unwrap();
     batch.commit().unwrap();
-    std::thread::scope(|scope| scope.spawn(|| {
-        for expected in [2, 3] {
-            assert!(reader.read(query.clone()).is_err());
-            assert_eq!(reader.validation_count(), expected);
-        }
-    }).join().unwrap());
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                for expected in [2, 3] {
+                    assert!(reader.read(query.clone()).is_err());
+                    assert_eq!(reader.validation_count(), expected);
+                }
+            })
+            .join()
+            .unwrap()
+    });
     assert_eq!(store.read_payment_authority_identity(&pinned), None);
-    assert_eq!(reader.authority_epoch_for_test(&pinned).unwrap(), Some(installed));
+    assert_eq!(
+        reader.authority_epoch_for_test(&pinned).unwrap(),
+        Some(installed)
+    );
     assert_eq!(reader.validation_count(), 4);
     drop(pinned);
-    assert_eq!(store.meta_store().get_meta(AuthorityPages.descriptor_key()).unwrap(), descriptor);
+    assert_eq!(
+        store
+            .meta_store()
+            .get_meta(AuthorityPages.descriptor_key())
+            .unwrap(),
+        descriptor
+    );
     let mut batch = store.tx_begin_write().unwrap();
     batch.put_meta(&key, &page).unwrap();
     batch.commit().unwrap();
-    for _ in 0..2 { assert!(reader.read(query.clone()).unwrap().excluded); }
+    for _ in 0..2 {
+        assert!(reader.read(query.clone()).unwrap().excluded);
+    }
     assert_eq!(reader.validation_count(), 5);
 }

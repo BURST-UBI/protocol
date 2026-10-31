@@ -68,7 +68,9 @@ pub enum OfflineAction {
         proposal: TxHash,
         vote: GovernanceVote,
     },
-    GovernanceVeto { proposal: TxHash },
+    GovernanceVeto {
+        proposal: TxHash,
+    },
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -298,19 +300,22 @@ impl OfflineActionContext {
                         }
                         block.block_type = BlockType::GovernanceEndorse;
                         block.link = BlockHash::new(*proposal.as_bytes());
-                        block.brn_spent = signing
-                            .state
-                            .brn_spent
-                            .checked_add(*burn)
-                            .ok_or_else(|| {
+                        block.brn_spent =
+                            signing.state.brn_spent.checked_add(*burn).ok_or_else(|| {
                                 WalletError::TransactionBuild("BRN spend overflow".into())
                             })?;
                     }
-                    OfflineAction::GovernanceWithdraw { proposal } | OfflineAction::GovernanceVeto { proposal } => {
+                    OfflineAction::GovernanceWithdraw { proposal }
+                    | OfflineAction::GovernanceVeto { proposal } => {
                         if proposal.is_zero() {
                             return Err(WalletError::TransactionBuild("missing proposal".into()));
                         }
-                        block.block_type = if matches!(action, OfflineAction::GovernanceVeto { .. }) { BlockType::GovernanceVeto } else { BlockType::GovernanceWithdraw };
+                        block.block_type = if matches!(action, OfflineAction::GovernanceVeto { .. })
+                        {
+                            BlockType::GovernanceVeto
+                        } else {
+                            BlockType::GovernanceWithdraw
+                        };
                         block.link = BlockHash::new(*proposal.as_bytes());
                     }
                     OfflineAction::VerifierParticipation { enabled } => {
@@ -518,7 +523,9 @@ mod tests {
             panic!("expected revocation")
         };
         assert_eq!(revocation.generation, 2);
-        DelegationOperation::Revoke(revocation).validate_envelope().unwrap();
+        DelegationOperation::Revoke(revocation)
+            .validate_envelope()
+            .unwrap();
     }
 
     #[test]

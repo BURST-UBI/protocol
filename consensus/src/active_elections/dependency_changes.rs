@@ -15,10 +15,17 @@ const CAPACITY: usize = 4096;
 
 impl DependencyChanges {
     pub(super) fn new() -> Self {
-        Self { generation: 0, floor: 0, latest: HashMap::new(), order: VecDeque::new() }
+        Self {
+            generation: 0,
+            floor: 0,
+            latest: HashMap::new(),
+            order: VecDeque::new(),
+        }
     }
 
-    pub(super) fn generation(&self) -> u64 { self.generation }
+    pub(super) fn generation(&self) -> u64 {
+        self.generation
+    }
 
     pub(super) fn reset(&mut self) {
         self.generation = self.generation.saturating_add(1);
@@ -28,7 +35,9 @@ impl DependencyChanges {
     }
 
     pub(super) fn record(&mut self, hashes: &[BlockHash]) {
-        if hashes.is_empty() { return; }
+        if hashes.is_empty() {
+            return;
+        }
         self.generation = self.generation.saturating_add(1);
         for &hash in hashes {
             if self.order.len() == CAPACITY {
@@ -44,12 +53,18 @@ impl DependencyChanges {
     }
 
     pub(super) fn changed_since<'a>(
-        &self, generation: u64, dependencies: impl IntoIterator<Item = &'a BlockHash>,
+        &self,
+        generation: u64,
+        dependencies: impl IntoIterator<Item = &'a BlockHash>,
     ) -> bool {
         if self.generation == u64::MAX || generation > self.generation || generation < self.floor {
             return true;
         }
-        dependencies.into_iter().any(|hash| self.latest.get(hash).is_some_and(|&changed| changed > generation))
+        dependencies.into_iter().any(|hash| {
+            self.latest
+                .get(hash)
+                .is_some_and(|&changed| changed > generation)
+        })
     }
 }
 
@@ -70,7 +85,9 @@ mod tests {
         assert!(changes.changed_since(before, [&hash(1)]));
         assert!(!changes.changed_since(before, [&hash(2)]));
         let after = changes.generation();
-        for n in 2..=CAPACITY + 1 { changes.record(&[hash(n)]); }
+        for n in 2..=CAPACITY + 1 {
+            changes.record(&[hash(n)]);
+        }
         assert_eq!(changes.order.len(), CAPACITY);
         assert_eq!(changes.latest.len(), CAPACITY);
         assert!(changes.changed_since(before, [&hash(0)]));
@@ -85,7 +102,9 @@ mod tests {
         changes.record(&[hash(1)]);
         let before = changes.generation();
         changes.record(&[hash(1)]);
-        for n in 2..=CAPACITY { changes.record(&[hash(n)]); }
+        for n in 2..=CAPACITY {
+            changes.record(&[hash(n)]);
+        }
         assert!(changes.changed_since(before, [&hash(1)]));
         assert_eq!(changes.latest.len(), CAPACITY);
         let before = changes.generation();

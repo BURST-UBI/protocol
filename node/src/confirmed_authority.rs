@@ -2,13 +2,13 @@
 //! Promotion uses the block's committed journal, never its later live account state.
 
 use burst_store::{account::AccountInfo, StoreError};
+pub(crate) use burst_store_lmdb::confirmed_authority::Authority;
 use burst_store_lmdb::{block_undo::UndoTable, LmdbStore, LmdbWriteTransaction};
 use burst_types::BlockHash;
 #[cfg(test)]
 use burst_types::{WalletAddress, WalletState};
-use serde::{Deserialize, Serialize};
 use burst_utils::SharedMap;
-pub(crate) use burst_store_lmdb::confirmed_authority::Authority;
+use serde::{Deserialize, Serialize};
 #[cfg(test)]
 const KEY: &str = burst_store_lmdb::confirmed_authority::KEY;
 
@@ -54,24 +54,34 @@ impl ConfirmedAuthority {
         genesis: &AccountInfo,
     ) -> Result<(), StoreError> {
         if batch.has_confirmed_authority_storage()?
-            || genesis.block_count != 1 || genesis.head.is_zero() {
+            || genesis.block_count != 1
+            || genesis.head.is_zero()
+        {
             return Err(invalid("authority initialization requires a fresh genesis"));
         }
         Self {
             genesis: genesis.head,
-            accounts: [(genesis.address.to_string(), Authority::from(genesis))].into_iter().collect(),
+            accounts: [(genesis.address.to_string(), Authority::from(genesis))]
+                .into_iter()
+                .collect(),
         }
         .persist(batch)
     }
 
     pub fn read(store: &LmdbStore) -> Result<Self, StoreError> {
         let snapshot = store.read_confirmed_authority_snapshot()?;
-        Ok(Self { genesis: snapshot.genesis, accounts: snapshot.accounts })
+        Ok(Self {
+            genesis: snapshot.genesis,
+            accounts: snapshot.accounts,
+        })
     }
 
     pub fn load(batch: &LmdbWriteTransaction<'_>) -> Result<Self, StoreError> {
         let snapshot = batch.read_confirmed_authority()?;
-        Ok(Self { genesis: snapshot.genesis, accounts: snapshot.accounts })
+        Ok(Self {
+            genesis: snapshot.genesis,
+            accounts: snapshot.accounts,
+        })
     }
 
     /// Apply account authority changes from one committed journal in memory.
@@ -121,7 +131,9 @@ impl ConfirmedAuthority {
             return Err(invalid("authority journal omits the block account"));
         }
         for (key, authority) in staged {
-            if self.accounts.get(&key) != Some(&authority) { self.accounts.insert(key, authority); }
+            if self.accounts.get(&key) != Some(&authority) {
+                self.accounts.insert(key, authority);
+            }
         }
         Ok(())
     }
@@ -129,7 +141,8 @@ impl ConfirmedAuthority {
     /// Stage the projection in the supplied transaction; the caller commits it.
     pub fn persist(&self, batch: &mut LmdbWriteTransaction<'_>) -> Result<(), StoreError> {
         batch.write_confirmed_authority(burst_store_lmdb::confirmed_authority::Snapshot {
-            genesis: self.genesis, accounts: self.accounts.clone(),
+            genesis: self.genesis,
+            accounts: self.accounts.clone(),
         })
     }
 }
@@ -261,7 +274,9 @@ mod tests {
         confirmed.persist(&mut batch).unwrap();
         batch.commit().unwrap();
         let batch = store.tx_begin_write().unwrap();
-        assert!(ConfirmedAuthority::load(&batch).unwrap().accounts.shares_storage_with(&before));
+        assert!(ConfirmedAuthority::load(&batch)
+            .unwrap()
+            .accounts
+            .shares_storage_with(&before));
     }
-
 }

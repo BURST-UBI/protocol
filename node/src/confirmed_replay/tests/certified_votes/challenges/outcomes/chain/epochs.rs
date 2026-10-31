@@ -342,7 +342,11 @@ async fn outcome_rewards_and_stake_proofs_are_claimed_once_in_the_new_epoch() {
         .unwrap()
         .pending_releases
         .is_empty());
-    assert!(!state.brn.get_wallet(&address(8)).unwrap().has_more_releases(&[]));
+    assert!(!state
+        .brn
+        .get_wallet(&address(8))
+        .unwrap()
+        .has_more_releases(&[]));
     let accepted = fixture.blocks.last().unwrap().clone();
     let prefix_len = fixture.blocks.len();
     fixture.push(8, BlockType::ChangeRepresentative, CUTOFF + 73, |block| {
@@ -619,9 +623,13 @@ fn split_panel_resumes_across_epoch_then_requires_the_second_outcome_epoch() {
     }
 }
 
-
 fn retirement_history(fixture: &mut Fixture) {
     for offset in 0..4 {
-        fixture.push(0, BlockType::ChangeRepresentative, CUTOFF + 66 + offset, |_| {});
+        fixture.push(
+            0,
+            BlockType::ChangeRepresentative,
+            CUTOFF + 66 + offset,
+            |_| {},
+        );
     }
 }

@@ -1,8 +1,8 @@
 //! Derived dashboard data; persistent root identity is only a cache key.
 use crate::error::RpcError;
 use burst_trst::{MergerGraph, TrstEngine, WalletPortfolio};
-use burst_utils::{Shared, SharedMap, SharedSet};
 use burst_types::{Timestamp, TxHash, WalletAddress};
+use burst_utils::{Shared, SharedMap, SharedSet};
 
 pub(crate) struct Snapshot {
     merger_graph: MergerGraph,
@@ -130,9 +130,17 @@ fn compute(trst: &Snapshot, now: Timestamp) -> Result<(serde_json::Value, Option
     }
     let mut active = 0usize;
     let mut next_expiry = None;
-    for token in trst.wallets.values().flat_map(|portfolio| portfolio.iter_tokens()) {
-        if token.state == burst_types::TrstState::Revoked { continue; }
-        if !token.is_expired(now, trst.expiry_secs) { active += 1; }
+    for token in trst
+        .wallets
+        .values()
+        .flat_map(|portfolio| portfolio.iter_tokens())
+    {
+        if token.state == burst_types::TrstState::Revoked {
+            continue;
+        }
+        if !token.is_expired(now, trst.expiry_secs) {
+            active += 1;
+        }
         let deadline = token.earliest_expiry(trst.expiry_secs).as_secs();
         if deadline > now.as_secs() {
             next_expiry = Some(next_expiry.map_or(deadline, |old: u64| old.min(deadline)));
@@ -174,7 +182,9 @@ mod tests {
             .unwrap();
         assert_eq!(
             value,
-            compute(&Snapshot::new(engine), Timestamp::new(now)).unwrap().0
+            compute(&Snapshot::new(engine), Timestamp::new(now))
+                .unwrap()
+                .0
         );
         value
     }

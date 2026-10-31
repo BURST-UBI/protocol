@@ -189,7 +189,10 @@ pub(crate) fn accept_candidate_with_beacon_checked(
     #[cfg(test)]
     let report = |stage: &str| {
         if std::env::var_os("BURST_SNAPSHOT_INSTALL_STAGE_LOG").is_some() {
-            eprintln!("checkpoint-accept stage={stage} height={height} record_bytes={}", bytes.len());
+            eprintln!(
+                "checkpoint-accept stage={stage} height={height} record_bytes={}",
+                bytes.len()
+            );
         }
     };
     #[cfg(test)]
@@ -259,8 +262,8 @@ pub(crate) struct RecoveryRecordRef {
 impl RecoveryRecordRef {
     pub(crate) fn load(&self, store: &LmdbStore) -> Result<RecoveryRecord, StoreError> {
         let txn = store.tx_begin_read()?;
-        let bytes = record_storage::get_txn(&store.meta_store(), &txn, &self.key)?
-            .ok_or_else(|| {
+        let bytes =
+            record_storage::get_txn(&store.meta_store(), &txn, &self.key)?.ok_or_else(|| {
                 StoreError::StaleRead("checkpoint record disappeared during recovery".into())
             })?;
         if burst_crypto::blake2b_256(&bytes) != *self.digest.as_bytes() {
@@ -337,7 +340,9 @@ impl RecordObservation {
             {
                 if let Some(beacon) = selection.beacon() {
                     let expected = bincode::serialize(beacon).map_err(invalid)?;
-                    if record_storage::matches_batch(&batch, &self.key, expected.as_slice())? == Some(true) {
+                    if record_storage::matches_batch(&batch, &self.key, expected.as_slice())?
+                        == Some(true)
+                    {
                         self.value = ObservedValue::Record(Some(burst_types::BlockHash::new(
                             burst_crypto::blake2b_256(&expected),
                         )));
@@ -454,8 +459,11 @@ impl RecordObservation {
             }
             return Ok(());
         }
-        let current = record_storage::get(&self.key, |key| batch.get_meta(key),
-            |hash| batch.checkpoint_head_node(hash))?;
+        let current = record_storage::get(
+            &self.key,
+            |key| batch.get_meta(key),
+            |hash| batch.checkpoint_head_node(hash),
+        )?;
         let digest = current
             .as_deref()
             .map(|bytes| burst_types::BlockHash::new(burst_crypto::blake2b_256(bytes)));

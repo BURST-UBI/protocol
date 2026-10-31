@@ -272,7 +272,8 @@ async fn receive_over_tcp(
 ) {
     use crate::checkpoint_transport::{Body, Transport};
     use tokio::io::AsyncWriteExt;
-    let context = crate::checkpoint_transport::context_from_anchor(recovered.continuation.anchor()).unwrap();
+    let context =
+        crate::checkpoint_transport::context_from_anchor(recovered.continuation.anchor()).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let (client, server) = tokio::try_join!(
         TcpStream::connect(listener.local_addr().unwrap()),

@@ -67,7 +67,10 @@ fn sorted_votes<'a>(votes: impl IntoIterator<Item = &'a VerifierVote>) -> Vec<&'
     sorted
 }
 
-fn ordered_current_votes<S: serde::Serializer>(votes: &crate::votes::Votes, serializer: S) -> Result<S::Ok, S::Error> {
+fn ordered_current_votes<S: serde::Serializer>(
+    votes: &crate::votes::Votes,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
     sorted_votes(votes).serialize(serializer)
 }
 

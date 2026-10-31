@@ -18,7 +18,6 @@ pub mod archive;
 mod binary;
 mod body;
 mod brn_wallets;
-mod verification_state;
 mod canonical;
 mod compact;
 mod continuation;
@@ -27,6 +26,7 @@ pub mod history;
 pub mod installed;
 pub mod reconciliation;
 pub mod tail;
+mod verification_state;
 pub use crate::checkpoint_store::chain::CertifiedEvent;
 pub use continuation::{
     CompactActivationCoverage, CompactDeadlineCoverage, CompactGovernanceCoverage,
@@ -279,7 +279,8 @@ impl ConfirmedReplay {
     #[cfg(test)]
     pub(super) fn legacy_snapshot_bytes(&self, format: u16) -> Result<Vec<u8>, ReplayError> {
         let mut bytes = Vec::new();
-        self.snapshot_state_version(body_version(format)?).encode_into(&mut bytes)?;
+        self.snapshot_state_version(body_version(format)?)
+            .encode_into(&mut bytes)?;
         Ok(bytes)
     }
 
@@ -304,7 +305,9 @@ impl ConfirmedReplay {
                 .encode_into_in(writer, Some(directory))
         })?;
         manifest.state_format = format;
-        manifest.validate(anchor).map_err(|error| invalid(error.to_string()))?;
+        manifest
+            .validate(anchor)
+            .map_err(|error| invalid(error.to_string()))?;
         Ok(PreparedSnapshot { manifest, bytes })
     }
 
@@ -372,7 +375,8 @@ impl ConfirmedReplay {
             let borrowed_bytes = canonical::encode(&state).unwrap();
             let mut streamed = Vec::new();
             state.encode_into(&mut streamed).unwrap();
-            state.verification = verification_state::Verification::Owned(self.verification.snapshot());
+            state.verification =
+                verification_state::Verification::Owned(self.verification.snapshot());
             let legacy = canonical::encode(&state).unwrap();
             assert_eq!(borrowed_bytes, legacy);
             assert_eq!(streamed, legacy);
@@ -473,8 +477,11 @@ impl ConfirmedReplay {
         check: &dyn Fn(&'static str) -> Result<(), ReplayError>,
     ) -> Result<Self, ReplayError> {
         let state: State = ciborium::from_reader(body::PollingReader {
-            inner: &mut reader, poll: check, bytes_until_poll: 0,
-        }).map_err(|e| invalid(e.to_string()))?;
+            inner: &mut reader,
+            poll: check,
+            bytes_until_poll: 0,
+        })
+        .map_err(|e| invalid(e.to_string()))?;
         check("snapshot:decoded-state")?;
         let expected_version = body_version(reader.state_format())?;
         if !reader.consumed_all() || state.version != expected_version {
@@ -552,19 +559,25 @@ impl ConfirmedReplay {
         self.validate_snapshot_context_until(anchor, &|_| Ok(()))
     }
 
-    fn validate_snapshot_context_until(&self, anchor: &CheckpointAnchor,
+    fn validate_snapshot_context_until(
+        &self,
+        anchor: &CheckpointAnchor,
         check: &dyn Fn(&'static str) -> Result<(), ReplayError>,
     ) -> Result<(), ReplayError> {
         for (hash, at) in &self.minted_burns {
             check("snapshot:mint-context")?;
             if hash.is_zero() || *at > self.cutoff {
-                return Err(invalid("snapshot contains invalid mint records or non-lifecycle metadata"));
+                return Err(invalid(
+                    "snapshot contains invalid mint records or non-lifecycle metadata",
+                ));
             }
         }
         for key in self.lifecycle_metadata.keys() {
             check("snapshot:lifecycle-context")?;
             if !burst_store_lmdb::write_batch::checkpoint_projection::is_lifecycle_key(key) {
-                return Err(invalid("snapshot contains invalid mint records or non-lifecycle metadata"));
+                return Err(invalid(
+                    "snapshot contains invalid mint records or non-lifecycle metadata",
+                ));
             }
         }
         if self.selection_receipts.len() != self.selection_checkpoints.len() {

@@ -9,7 +9,9 @@ use burst_types::{
 };
 
 fn hash(value: &str) -> Result<BlockHash, String> {
-    value.parse().map_err(|error: burst_types::transaction_hash::ParseHashError| error.to_string())
+    value
+        .parse()
+        .map_err(|error: burst_types::transaction_hash::ParseHashError| error.to_string())
 }
 
 /// Canonical account position and finality are read from one database snapshot.
@@ -119,13 +121,16 @@ impl Reader {
         if let Some(identity) = identity {
             let cached = self.authority.lock().map_err(|error| error.to_string())?;
             if let Some((saved, epoch)) = *cached {
-                if saved == identity { return Ok(epoch); }
+                if saved == identity {
+                    return Ok(epoch);
+                }
             }
         }
         // Validate outside the cache lock. Cache only the epoch, never the roster
         // or the per-query closure, account position and canonical index.
         #[cfg(test)]
-        self.validations.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.validations
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let epoch = validated_epoch(&self.store, txn)?;
         if let Some(identity) = identity {
             *self.authority.lock().map_err(|error| error.to_string())? = Some((identity, epoch));
@@ -135,7 +140,8 @@ impl Reader {
 
     #[cfg(test)]
     pub(crate) fn authority_epoch_for_test(
-        &self, txn: &burst_store_lmdb::LmdbReadTransaction<'_>,
+        &self,
+        txn: &burst_store_lmdb::LmdbReadTransaction<'_>,
     ) -> Result<Option<BlockHash>, String> {
         self.authority_epoch(txn)
     }
@@ -164,7 +170,9 @@ pub(crate) fn read(store: &LmdbStore, query: ExclusionQuery) -> Result<Exclusion
 fn read_with_authority(
     store: &LmdbStore,
     query: ExclusionQuery,
-    authority: impl FnOnce(&burst_store_lmdb::LmdbReadTransaction<'_>) -> Result<Option<BlockHash>, String>,
+    authority: impl FnOnce(
+        &burst_store_lmdb::LmdbReadTransaction<'_>,
+    ) -> Result<Option<BlockHash>, String>,
 ) -> Result<ExclusionReview, String> {
     burst_crypto::decode_address(&query.account).ok_or("invalid recovery account")?;
     let account = WalletAddress::new(&query.account);
@@ -355,13 +363,21 @@ mod tests {
         let store = std::sync::Arc::new(LmdbStore::open(directory.path(), 32, 8 << 20).unwrap());
         let installed = BlockHash::new([31; 32]);
         let mut batch = store.tx_begin_write().unwrap();
-        batch.put_meta(meta::PAYMENT_EPOCH_KEY, installed.as_bytes()).unwrap();
+        batch
+            .put_meta(meta::PAYMENT_EPOCH_KEY, installed.as_bytes())
+            .unwrap();
         batch.commit().unwrap();
         let reader = Reader::new(store.clone());
-        let account = burst_crypto::derive_address(&burst_crypto::keypair_from_seed(&[92; 32]).public);
-        let query = ExclusionQuery { account: account.to_string(),
-            previous: BlockHash::ZERO.to_string(), payment_epoch: BlockHash::new([32;32]).to_string() };
-        for _ in 0..2 { assert!(!reader.read(query.clone()).unwrap().excluded); }
+        let account =
+            burst_crypto::derive_address(&burst_crypto::keypair_from_seed(&[92; 32]).public);
+        let query = ExclusionQuery {
+            account: account.to_string(),
+            previous: BlockHash::ZERO.to_string(),
+            payment_epoch: BlockHash::new([32; 32]).to_string(),
+        };
+        for _ in 0..2 {
+            assert!(!reader.read(query.clone()).unwrap().excluded);
+        }
         assert_eq!(reader.validation_count(), 1);
         let mut count = 1;
         for key in [

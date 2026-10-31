@@ -1,7 +1,7 @@
 //! Observed, one-record-at-a-time input for historical economic export.
 //! The caller must recheck all observations under the writer after replay.
-use crate::checkpoint_store::record_storage;
 use super::*;
+use crate::checkpoint_store::record_storage;
 
 pub(crate) struct ExportRecords<'a> {
     store: &'a LmdbStore,

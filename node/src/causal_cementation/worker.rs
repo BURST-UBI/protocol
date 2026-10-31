@@ -12,7 +12,10 @@ pub(crate) struct Worker {
 
 impl Worker {
     pub(crate) fn new(store: Arc<LmdbStore>) -> Self {
-        Self { store, gate: Arc::new(Mutex::new(())) }
+        Self {
+            store,
+            gate: Arc::new(Mutex::new(())),
+        }
     }
 
     async fn run<T: Send + 'static>(
@@ -24,22 +27,34 @@ impl Worker {
         tokio::task::spawn_blocking(move || {
             let _guard = guard;
             operation(&store)
-        }).await.map_err(|error| StoreError::Backend(format!("cementation worker failed: {error}")))?
+        })
+        .await
+        .map_err(|error| StoreError::Backend(format!("cementation worker failed: {error}")))?
     }
 
-    pub(crate) async fn pending(&self, cursor: Option<BlockHash>) -> Result<Vec<BlockHash>, StoreError> {
-        self.run(move |store| store.pending_confirmation_batch(cursor, super::MAX_HANDOFF_BATCH)).await
+    pub(crate) async fn pending(
+        &self,
+        cursor: Option<BlockHash>,
+    ) -> Result<Vec<BlockHash>, StoreError> {
+        self.run(move |store| store.pending_confirmation_batch(cursor, super::MAX_HANDOFF_BATCH))
+            .await
     }
 
-    pub(crate) async fn pending_group(&self, cursor: Option<BlockHash>)
-        -> Result<super::PendingCementation, StoreError> {
-        self.run(move |store| super::cement_pending_group(store, cursor)).await
+    pub(crate) async fn pending_group(
+        &self,
+        cursor: Option<BlockHash>,
+    ) -> Result<super::PendingCementation, StoreError> {
+        self.run(move |store| super::cement_pending_group(store, cursor))
+            .await
     }
 
     #[cfg(test)]
-    pub(crate) async fn group(&self, targets: Vec<BlockHash>)
-        -> Result<Option<Vec<(BlockHash, CementedBatch)>>, StoreError> {
-        self.run(move |store| super::cement_group(store, &targets)).await
+    pub(crate) async fn group(
+        &self,
+        targets: Vec<BlockHash>,
+    ) -> Result<Option<Vec<(BlockHash, CementedBatch)>>, StoreError> {
+        self.run(move |store| super::cement_group(store, &targets))
+            .await
     }
 
     pub(crate) async fn single(&self, target: BlockHash) -> Result<CementedBatch, StoreError> {
@@ -70,15 +85,23 @@ mod tests {
         });
         started.await.unwrap();
         let task_worker = worker.clone();
-        let mut task = tokio::spawn(async move { task_worker.single(BlockHash::new([1;32])).await });
-        assert!(tokio::time::timeout(Duration::from_millis(20), &mut task).await.is_err());
+        let mut task =
+            tokio::spawn(async move { task_worker.single(BlockHash::new([1; 32])).await });
+        assert!(tokio::time::timeout(Duration::from_millis(20), &mut task)
+            .await
+            .is_err());
         assert!(worker.gate.try_lock().is_err());
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
-        assert!(worker.gate.try_lock().is_err(), "blocking job retains serialization after caller cancellation");
+        assert!(
+            worker.gate.try_lock().is_err(),
+            "blocking job retains serialization after caller cancellation"
+        );
         release.send(()).unwrap();
         writer.join().unwrap();
-        let guard = tokio::time::timeout(Duration::from_secs(5), worker.gate.lock()).await.unwrap();
+        let guard = tokio::time::timeout(Duration::from_secs(5), worker.gate.lock())
+            .await
+            .unwrap();
         drop(guard);
         assert!(worker.pending(None).await.unwrap().is_empty());
         assert_eq!(worker.prune().await.unwrap(), 0);
@@ -87,11 +110,17 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn worker_preserves_errors_and_recovers_capacity_after_panic() {
         let directory = tempfile::tempdir().unwrap();
-        let worker = Worker::new(Arc::new(LmdbStore::open(directory.path(), 32, 16 << 20).unwrap()));
-        assert!(matches!(worker.run::<()>(|_| Err(StoreError::Corruption("fixture".into()))).await,
-            Err(StoreError::Corruption(message)) if message == "fixture"));
-        assert!(matches!(worker.run::<()>(|_| panic!("fixture worker panic")).await,
-            Err(StoreError::Backend(_))));
+        let worker = Worker::new(Arc::new(
+            LmdbStore::open(directory.path(), 32, 16 << 20).unwrap(),
+        ));
+        assert!(
+            matches!(worker.run::<()>(|_| Err(StoreError::Corruption("fixture".into()))).await,
+            Err(StoreError::Corruption(message)) if message == "fixture")
+        );
+        assert!(matches!(
+            worker.run::<()>(|_| panic!("fixture worker panic")).await,
+            Err(StoreError::Backend(_))
+        ));
         assert!(worker.group(Vec::new()).await.unwrap().unwrap().is_empty());
     }
 }

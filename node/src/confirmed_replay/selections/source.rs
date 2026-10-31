@@ -11,7 +11,9 @@ pub trait SelectionSource {
     }
     fn read_selection(&self, position: usize) -> Result<Cow<'_, CertifiedCheckpoint>, ReplayError>;
 
-    fn iter_selections(&self) -> impl Iterator<Item = Result<Cow<'_, CertifiedCheckpoint>, ReplayError>> {
+    fn iter_selections(
+        &self,
+    ) -> impl Iterator<Item = Result<Cow<'_, CertifiedCheckpoint>, ReplayError>> {
         (0..self.len()).map(|position| self.read_selection(position))
     }
 

@@ -43,14 +43,29 @@ impl Roots {
         Ok(())
     }
 
-    pub(super) fn image_references(&mut self, change: &UndoChange, bytes: &[u8],
-        network: NetworkId, genesis: BlockHash) -> Result<(), StoreError> {
+    pub(super) fn image_references(
+        &mut self,
+        change: &UndoChange,
+        bytes: &[u8],
+        network: NetworkId,
+        genesis: BlockHash,
+    ) -> Result<(), StoreError> {
         self.image_references_until(change, bytes, network, genesis, &|| false)
     }
 
-    pub(super) fn image_references_until(&mut self, change: &UndoChange, bytes: &[u8],
-        network: NetworkId, genesis: BlockHash, cancelled: &dyn Fn() -> bool) -> Result<(), StoreError> {
-        RootCollector { roots: self, cancelled }.image_references(change, bytes, network, genesis)
+    pub(super) fn image_references_until(
+        &mut self,
+        change: &UndoChange,
+        bytes: &[u8],
+        network: NetworkId,
+        genesis: BlockHash,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), StoreError> {
+        RootCollector {
+            roots: self,
+            cancelled,
+        }
+        .image_references(change, bytes, network, genesis)
     }
 }
 
@@ -68,15 +83,22 @@ impl RootCollector<'_> {
             other => self.roots.trst(other),
         }
     }
-    fn governance(&mut self, reference: burst_governance::record_references::Reference<'_>) -> Result<(), StoreError> {
+    fn governance(
+        &mut self,
+        reference: burst_governance::record_references::Reference<'_>,
+    ) -> Result<(), StoreError> {
         match reference {
-            burst_governance::record_references::Reference::Block(hash) => self.add(hash, Source::State),
+            burst_governance::record_references::Reference::Block(hash) => {
+                self.add(hash, Source::State)
+            }
             other => self.roots.governance(other),
         }
     }
     fn replay_block(&mut self, block: &burst_ledger::StateBlock) -> Result<(), StoreError> {
         self.add(block.hash, Source::Replay)?;
-        for dependency in block.dependencies() { self.add(dependency, Source::Replay)?; }
+        for dependency in block.dependencies() {
+            self.add(dependency, Source::Replay)?;
+        }
         Ok(())
     }
 

@@ -11,8 +11,6 @@ use burst_wallet_core::{
 use serde_json::json;
 use std::time::Duration;
 
-
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn signed_wire_vote_replaces_a_merge_without_losing_its_input_holdings() {
     let directory = tempfile::tempdir().unwrap();
@@ -49,7 +47,9 @@ async fn signed_wire_vote_replaces_a_merge_without_losing_its_input_holdings() {
         nodes.push((
             shutdown,
             tokio::spawn(async move {
-                node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+                node.start_with_services(burst_daemon::start_public_services)
+                    .await
+                    .unwrap();
                 node.stop().await.unwrap();
             }),
         ));

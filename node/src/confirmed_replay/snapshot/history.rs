@@ -300,13 +300,18 @@ pub fn read_chunk(
     let mut used = 0usize;
     let mut result = Vec::new();
     while !hash.is_zero() && result.len() < limit {
-        let bytes = match blocks.get_block_txn_bounded(&txn, &hash, burst_types::MAX_P2P_MESSAGE_BYTES) {
-            Ok(bytes) => Some(bytes),
-            Err(StoreError::NotFound(_)) => metadata
-                .get_meta_txn_bounded(&txn, &format!("checkpoint_history/v1/{hash}"), burst_types::MAX_P2P_MESSAGE_BYTES)
-                .map_err(invalid)?,
-            Err(error) => return Err(invalid(error)),
-        };
+        let bytes =
+            match blocks.get_block_txn_bounded(&txn, &hash, burst_types::MAX_P2P_MESSAGE_BYTES) {
+                Ok(bytes) => Some(bytes),
+                Err(StoreError::NotFound(_)) => metadata
+                    .get_meta_txn_bounded(
+                        &txn,
+                        &format!("checkpoint_history/v1/{hash}"),
+                        burst_types::MAX_P2P_MESSAGE_BYTES,
+                    )
+                    .map_err(invalid)?,
+                Err(error) => return Err(invalid(error)),
+            };
         let Some(bytes) = bytes else {
             if result.is_empty() {
                 return Err(invalid("historical witness is unavailable"));

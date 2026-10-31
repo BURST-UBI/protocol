@@ -128,7 +128,8 @@ impl CertifiedCheckpoint {
         let heads = archive.confirmed_heads();
         let state = archive.into_state();
         let installed = batch.payment_epoch()?;
-        let parameter_hash = if batch.get_meta(crate::confirmed_replay::installation::INSTALLED_KEY)?
+        let parameter_hash = if batch
+            .get_meta(crate::confirmed_replay::installation::INSTALLED_KEY)?
             .is_none()
         {
             None

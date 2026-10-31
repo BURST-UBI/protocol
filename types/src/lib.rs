@@ -8,19 +8,18 @@ pub mod amount;
 pub mod appeal;
 pub mod block_hash;
 pub mod error;
-pub mod transaction_hash;
 pub mod keys;
 pub mod network;
 pub mod params;
 pub mod payment_recovery;
 pub mod state;
 pub mod timestamp;
+pub mod transaction_hash;
 
 pub use address::WalletAddress;
 pub use amount::{BrnAmount, TrstAmount, BRN_UNIT, MBRN_UNIT, MTRST_UNIT, TRST_UNIT};
 pub use block_hash::BlockHash;
 pub use error::BurstError;
-pub use transaction_hash::TxHash;
 pub use keys::{KeyPair, PrivateKey, PublicKey, Signature};
 pub use network::NetworkId;
 pub use params::ProtocolParams;
@@ -29,6 +28,7 @@ pub use state::{
     INACTIVITY_CHALLENGE_MARKER,
 };
 pub use timestamp::Timestamp;
+pub use transaction_hash::TxHash;
 
 /// Maximum P2P message body, excluding the four-byte framing prefix.
 pub const MAX_P2P_MESSAGE_BYTES: usize = 64 * 1024;

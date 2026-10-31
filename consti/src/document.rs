@@ -65,9 +65,14 @@ pub struct Article {
 
 impl ConstiDocument {
     pub fn snapshot_view(&self) -> DocumentView<'_> {
-        DocumentView { articles: &self.articles, version: self.version,
-            version_history: &self.version_history, article_index: &self.article_index,
-            active_count: self.active_count, next_number: self.next_number }
+        DocumentView {
+            articles: &self.articles,
+            version: self.version,
+            version_history: &self.version_history,
+            article_index: &self.article_index,
+            active_count: self.active_count,
+            next_number: self.next_number,
+        }
     }
 
     /// Create the genesis constitution (empty, version 0).

@@ -43,7 +43,9 @@ impl LmdbWriteTransaction<'_> {
             return Ok(None);
         }
         let prefix = GovernanceRecord::STORAGE_NAMESPACE.as_bytes();
-        let mut rows = self.checkpoint_metadata_with_overlay(overlay, prefix)?.peekable();
+        let mut rows = self
+            .checkpoint_metadata_with_overlay(overlay, prefix)?
+            .peekable();
         if rows.peek().is_none() {
             return Ok(None);
         }
@@ -81,25 +83,37 @@ impl LmdbWriteTransaction<'_> {
     ) -> Result<(), StoreError> {
         let result = (|| {
             if self.failed || self.undo.is_some() {
-                return Err(invalid("recovered governance requires a healthy non-block writer"));
+                return Err(invalid(
+                    "recovered governance requires a healthy non-block writer",
+                ));
             }
             if bincode::serialized_size(after).map_err(|e| invalid(e.to_string()))? > 64 << 20 {
                 return Err(invalid("oversized governance recovery projection"));
             }
             if !self.uses_governance_records()? {
-                return self.put_brn_meta(b"governance_engine", &bincode::serialize(after).map_err(|e| invalid(e.to_string()))?);
+                return self.put_brn_meta(
+                    b"governance_engine",
+                    &bincode::serialize(after).map_err(|e| invalid(e.to_string()))?,
+                );
             }
             let before = self.governance_undo_engine_with_overlay(&Default::default(), 64 << 20)?;
-            if before.as_ref() == Some(after) { return Ok(()); }
+            if before.as_ref() == Some(after) {
+                return Ok(());
+            }
             self.governance_cache.get_mut().take();
             self.auxiliary_cache.get_mut().invalidate_projection();
             let mut scopes = std::collections::BTreeSet::new();
             let mut write = |old: Option<GovernanceRecord>, new: Option<GovernanceRecord>| {
-                if let Some(scope) = old.as_ref().or(new.as_ref()).and_then(GovernanceRecord::proposal_scope) {
+                if let Some(scope) = old
+                    .as_ref()
+                    .or(new.as_ref())
+                    .and_then(GovernanceRecord::proposal_scope)
+                {
                     scopes.insert(scope);
                 }
                 if let Some(old) = old {
-                    self.delete_meta(&old.storage_key()?).map_err(|e| e.to_string())?;
+                    self.delete_meta(&old.storage_key()?)
+                        .map_err(|e| e.to_string())?;
                 }
                 if let Some(new) = new {
                     let (key, bytes) = new.storage_entry()?;
@@ -110,11 +124,14 @@ impl LmdbWriteTransaction<'_> {
             match before.as_ref() {
                 Some(before) => after.visit_record_delta(before, &mut write),
                 None => after.visit_records(|row| write(None, Some(row))),
-            }.map_err(invalid)?;
+            }
+            .map_err(invalid)?;
             self.advance_governance_revisions(scopes)?;
             Ok(())
         })();
-        if result.is_err() { self.failed = true; }
+        if result.is_err() {
+            self.failed = true;
+        }
         result
     }
 
@@ -481,8 +498,11 @@ impl crate::read_view::LedgerReadView<'_> {
 
 impl crate::read_view::LedgerReadView<'_> {
     pub fn read_governance_records(&self) -> Result<GovernanceEngine, StoreError> {
-        if !self.uses_governance_records()? { return Err(invalid("governance record mode is not initialized")); }
-        let rows = self.checkpoint_metadata_entries(GovernanceRecord::STORAGE_NAMESPACE.as_bytes())?;
+        if !self.uses_governance_records()? {
+            return Err(invalid("governance record mode is not initialized"));
+        }
+        let rows =
+            self.checkpoint_metadata_entries(GovernanceRecord::STORAGE_NAMESPACE.as_bytes())?;
         let engine = GovernanceEngine::from_records(rows.map(|row| {
             let (key, bytes) = row.map_err(|e| e.to_string())?;
             let key = std::str::from_utf8(key).map_err(|e| e.to_string())?;

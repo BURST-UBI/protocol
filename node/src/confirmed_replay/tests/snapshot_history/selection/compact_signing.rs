@@ -489,15 +489,20 @@ fn assert_minority_decision_observation(accepted_ahead: bool) {
         )
         .unwrap();
         crate::checkpoint_store::compact::accept_selection(
-            &local, anchor, &candidate, &certificate,
+            &local,
+            anchor,
+            &candidate,
+            &certificate,
         )
         .unwrap();
         assert_eq!(local.meta_store().payment_epoch().unwrap(), anchor.hash());
-        assert!(checkpoint_agreement::read_state(&local, anchor, &address(0))
-            .unwrap()
-            .unwrap()
-            .decision()
-            .is_none());
+        assert!(
+            checkpoint_agreement::read_state(&local, anchor, &address(0))
+                .unwrap()
+                .unwrap()
+                .decision()
+                .is_none()
+        );
         let metadata = local
             .tx_begin_write()
             .unwrap()
@@ -512,9 +517,15 @@ fn assert_minority_decision_observation(accepted_ahead: bool) {
             None,
         )
         .unwrap_err();
-        assert!(error.to_string().contains("compact signing parent is not the accepted tip"));
+        assert!(error
+            .to_string()
+            .contains("compact signing parent is not the accepted tip"));
         assert_eq!(
-            local.tx_begin_write().unwrap().checkpoint_metadata(b"").unwrap(),
+            local
+                .tx_begin_write()
+                .unwrap()
+                .checkpoint_metadata(b"")
+                .unwrap(),
             metadata,
         );
     }
@@ -583,19 +594,26 @@ fn compact_split_final_promises_recover_with_replayed_extension_in_later_round()
     use crate::checkpoint_agreement::CompactReplayCandidate;
     use crate::checkpoint_driver::{CheckpointDriver, Message};
     use burst_consensus::checkpoint_round::Step;
-    use std::{collections::{HashSet, VecDeque}, sync::Arc};
+    use std::{
+        collections::{HashSet, VecDeque},
+        sync::Arc,
+    };
 
     let (mut fixture, _source_dir, source, original, _) = setup();
-    let base = authenticate(&source, &fixture.params, original.checkpoint.parent)
-        .into_continuation();
+    let base =
+        authenticate(&source, &fixture.params, original.checkpoint.parent).into_continuation();
     let initial_blocks = fixture.blocks.clone();
     fixture.push(1, BlockType::ChangeRepresentative, CUTOFF + 1, |block| {
         block.payment_epoch = base.anchor().hash();
     });
     let promised = fixture.blocks.last().unwrap().clone();
-    let initial_proposer = (0..9).find(|seed| address(*seed) == *base.anchor().proposer(0)).unwrap();
+    let initial_proposer = (0..9)
+        .find(|seed| address(*seed) == *base.anchor().proposer(0))
+        .unwrap();
     let fenced_signers: HashSet<_> = std::iter::once(initial_proposer)
-        .chain((0..9).filter(|seed| *seed != initial_proposer)).take(4).collect();
+        .chain((0..9).filter(|seed| *seed != initial_proposer))
+        .take(4)
+        .collect();
     let mut directories = Vec::new();
     let mut stores = Vec::new();
     let mut drivers = Vec::new();
@@ -604,12 +622,17 @@ fn compact_split_final_promises_recover_with_replayed_extension_in_later_round()
         let proofs = compact::retained(&snapshot, &fixture, &source, &[]);
         let mut heads = original.heads.clone();
         if extended {
-            let head = heads.iter_mut().find(|head| head.account == promised.account).unwrap();
+            let head = heads
+                .iter_mut()
+                .find(|head| head.account == promised.account)
+                .unwrap();
             assert_eq!(head.hash, promised.previous);
             head.height += 1;
             head.hash = promised.hash;
         }
-        let tail = base.read_tail(store, CUTOFF + u64::from(extended), &heads, proofs).unwrap();
+        let tail = base
+            .read_tail(store, CUTOFF + u64::from(extended), &heads, proofs)
+            .unwrap();
         base.prepare_next_selection(tail, &[]).unwrap().unwrap()
     };
     for seed in 0..9 {
@@ -618,82 +641,163 @@ fn compact_split_final_promises_recover_with_replayed_extension_in_later_round()
         for block in &initial_blocks {
             let height = heights.entry(block.account.clone()).or_insert(0u64);
             *height += 1;
-            if *height > base.state().account(&block.account).map_or(0, |account| account.block_count) {
+            if *height
+                > base
+                    .state()
+                    .account(&block.account)
+                    .map_or(0, |account| account.block_count)
+            {
                 cemented::append(&store, block, true);
             }
         }
-        store.meta_store().put_meta(
-            &format!("checkpoint_chain/v1/dev/{}/head", base.anchor().genesis_hash()),
-            &base.anchor().height().to_be_bytes(),
-        ).unwrap();
+        store
+            .meta_store()
+            .put_meta(
+                &format!(
+                    "checkpoint_chain/v1/dev/{}/head",
+                    base.anchor().genesis_hash()
+                ),
+                &base.anchor().height().to_be_bytes(),
+            )
+            .unwrap();
         cemented::append(&store, &promised, false);
         if !fenced_signers.contains(&seed) {
-            store.meta_store().reserve_consensus_vote_at(
-                &base.anchor().hash(), &address(seed), &promised.account, &promised.previous,
-                &promised.hash, true, 0, Some(promised.timestamp.as_secs()),
-            ).unwrap();
+            store
+                .meta_store()
+                .reserve_consensus_vote_at(
+                    &base.anchor().hash(),
+                    &address(seed),
+                    &promised.account,
+                    &promised.previous,
+                    &promised.hash,
+                    true,
+                    0,
+                    Some(promised.timestamp.as_secs()),
+                )
+                .unwrap();
         }
         let candidate = coverage(&store, false);
         let store = Arc::new(store);
         let mut driver = CheckpointDriver::new_compact_selection(
-            store.clone(), fixture.params.clone(),
+            store.clone(),
+            fixture.params.clone(),
             Arc::new(burst_crypto::keypair_from_seed(&[seed; 32]).private),
-            base.anchor().clone(), candidate, Vec::new(),
-        ).unwrap();
+            base.anchor().clone(),
+            candidate,
+            Vec::new(),
+        )
+        .unwrap();
         driver.resume().unwrap();
         directories.push(dir);
         stores.push(store);
         drivers.push(driver);
     }
-    let clock = Some(SigningClock { now: CUTOFF + 2, error_bound: 0 });
-    let proposal = drivers[initial_proposer as usize].propose(clock).unwrap()
-        .into_iter().find(|message| matches!(message, Message::Proposal { .. })).unwrap();
+    let clock = Some(SigningClock {
+        now: CUTOFF + 2,
+        error_bound: 0,
+    });
+    let proposal = drivers[initial_proposer as usize]
+        .propose(clock)
+        .unwrap()
+        .into_iter()
+        .find(|message| matches!(message, Message::Proposal { .. }))
+        .unwrap();
     for (seed, driver) in drivers.iter_mut().enumerate() {
         let result = driver.receive(proposal.clone(), clock);
         if fenced_signers.contains(&(seed as u8)) {
             result.unwrap();
         } else {
-            assert!(result.unwrap_err().to_string().contains("omits a durable final vote"));
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("omits a durable final vote"));
         }
         assert!(driver.state().unwrap().unwrap().decision().is_none());
     }
-    let promises_before: Vec<_> = stores.iter().map(|store|
-        store.tx_begin_write().unwrap().checkpoint_metadata(b"consensus_final/").unwrap()).collect();
+    let promises_before: Vec<_> = stores
+        .iter()
+        .map(|store| {
+            store
+                .tx_begin_write()
+                .unwrap()
+                .checkpoint_metadata(b"consensus_final/")
+                .unwrap()
+        })
+        .collect();
     // Finish the failed round through actual signed timeout participation.
     // Inventing future nil catch-up votes would equivocate when those same
     // signers later vote for the extended cut in that round.
     let mut votes = Vec::new();
     for driver in &mut drivers {
-        votes.extend(driver.resume().unwrap().into_iter().filter(|message| matches!(message, Message::Vote(_))));
+        votes.extend(
+            driver
+                .resume()
+                .unwrap()
+                .into_iter()
+                .filter(|message| matches!(message, Message::Vote(_))),
+        );
         votes.extend(driver.timeout(Step::Propose).unwrap());
     }
-    for vote in votes { for driver in &mut drivers { driver.receive(vote.clone(), None).unwrap(); } }
+    for vote in votes {
+        for driver in &mut drivers {
+            driver.receive(vote.clone(), None).unwrap();
+        }
+    }
     let mut votes = Vec::new();
-    for driver in &mut drivers { votes.extend(driver.timeout(Step::Prevote).unwrap()); }
-    for vote in votes { for driver in &mut drivers { driver.receive(vote.clone(), None).unwrap(); } }
+    for driver in &mut drivers {
+        votes.extend(driver.timeout(Step::Prevote).unwrap());
+    }
+    for vote in votes {
+        for driver in &mut drivers {
+            driver.receive(vote.clone(), None).unwrap();
+        }
+    }
     for (index, driver) in drivers.iter_mut().enumerate() {
         driver.timeout(Step::Precommit).unwrap();
         assert_eq!(driver.round(), 1);
-        assert!(driver.replace_unsigned_compact_candidate(
-            CompactReplayCandidate::Selection(Box::new(coverage(&stores[index], true))),
-        ).unwrap());
+        assert!(driver
+            .replace_unsigned_compact_candidate(CompactReplayCandidate::Selection(Box::new(
+                coverage(&stores[index], true)
+            )),)
+            .unwrap());
     }
-    let proposer = (0..9).find(|seed| address(*seed) == *base.anchor().proposer(1)).unwrap();
+    let proposer = (0..9)
+        .find(|seed| address(*seed) == *base.anchor().proposer(1))
+        .unwrap();
     let mut queue: VecDeque<_> = drivers[proposer as usize].propose(clock).unwrap().into();
     let mut seen = HashSet::new();
     while let Some(message) = queue.pop_front() {
-        if !seen.insert(bincode::serialize(&message).unwrap()) { continue; }
+        if !seen.insert(bincode::serialize(&message).unwrap()) {
+            continue;
+        }
         assert!(seen.len() < 200, "extended cut did not converge");
-        for driver in &mut drivers { queue.extend(driver.receive(message.clone(), clock).unwrap()); }
+        for driver in &mut drivers {
+            queue.extend(driver.receive(message.clone(), clock).unwrap());
+        }
     }
     for (index, driver) in drivers.iter().enumerate() {
         let state = driver.state().unwrap().unwrap();
-        let decision = state.decision().expect("replayed promised extension must decide");
+        let decision = state
+            .decision()
+            .expect("replayed promised extension must decide");
         base.anchor().verify_certificate(decision).unwrap();
         assert_eq!(decision.checkpoint.cutoff, CUTOFF + 1);
-        assert_eq!(stores[index].tx_begin_write().unwrap().checkpoint_metadata(b"consensus_final/").unwrap(), promises_before[index]);
-        let account = stores[index].account_store().get_account(&promised.account).unwrap();
-        assert_eq!(account.confirmation_height + 1, account.block_count,
-            "a checkpoint decision alone must not publish payment confirmation");
+        assert_eq!(
+            stores[index]
+                .tx_begin_write()
+                .unwrap()
+                .checkpoint_metadata(b"consensus_final/")
+                .unwrap(),
+            promises_before[index]
+        );
+        let account = stores[index]
+            .account_store()
+            .get_account(&promised.account)
+            .unwrap();
+        assert_eq!(
+            account.confirmation_height + 1,
+            account.block_count,
+            "a checkpoint decision alone must not publish payment confirmation"
+        );
     }
 }

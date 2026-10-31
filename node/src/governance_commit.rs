@@ -190,15 +190,24 @@ impl CandidateGovernance {
             BlockType::GovernanceVeto => {
                 let bootstrap = batch.bootstrap_phase()?;
                 if block.account != crate::genesis_key::genesis_address(self.network)
-                    || !batch.get_account(&block.account).map_err(|e| e.to_string())?.state.is_verified()
+                    || !batch
+                        .get_account(&block.account)
+                        .map_err(|e| e.to_string())?
+                        .state
+                        .is_verified()
                     || bootstrap == burst_verification::bootstrap::BootstrapPhase::Complete
                     || !bootstrap.permits_creator(
                         batch.verified_account_count().map_err(|e| e.to_string())?,
-                        self.params.bootstrap_exit_threshold)
+                        self.params.bootstrap_exit_threshold,
+                    )
                 {
-                    return Err("creator veto authority has ended or signer is not the verified creator".into());
+                    return Err(
+                        "creator veto authority has ended or signer is not the verified creator"
+                            .into(),
+                    );
                 }
-                self.governance.veto_approved(&block.link.into_tx_hash(), block.timestamp)
+                self.governance
+                    .veto_approved(&block.link.into_tx_hash(), block.timestamp)
                     .map_err(|e| e.to_string())?;
             }
 
@@ -402,8 +411,8 @@ mod tests {
 
     mod bootstrap_exit;
     mod key_fork_dependencies;
-    mod scoped_undo;
     mod pagination;
+    mod scoped_undo;
 
     fn candidate() -> CandidateGovernance {
         CandidateGovernance {
@@ -783,8 +792,16 @@ mod tests {
         );
         assert!(state.governance.drain_pending_changes().is_empty());
         assert_eq!(state.params.params_hash(), prior_params.params_hash());
-        state.activate_approved(&mut batch, id, &new_params_hash, block.timestamp,
-            &mut brn, &mut trst).unwrap();
+        state
+            .activate_approved(
+                &mut batch,
+                id,
+                &new_params_hash,
+                block.timestamp,
+                &mut brn,
+                &mut trst,
+            )
+            .unwrap();
         state.persist_checkpoint(&mut batch).unwrap();
         assert_eq!(state.params.params_hash(), new_params_hash);
         if !constitutional {
@@ -867,15 +884,22 @@ mod tests {
         let mut batch = store.tx_begin_write().unwrap();
         crate::payment_epoch::initialize(&mut batch, opening.payment_epoch).unwrap();
         batch.put_account_info(&account, false).unwrap();
-        batch.put_block_with_account(&opening.hash, &bincode::serialize(&opening).unwrap(),
-            &opening.account, 1).unwrap();
+        batch
+            .put_block_with_account(
+                &opening.hash,
+                &bincode::serialize(&opening).unwrap(),
+                &opening.account,
+                1,
+            )
+            .unwrap();
         batch.put_frontier(&opening.account, &opening.hash).unwrap();
         crate::ledger_updater::persist_economics(&mut batch, &brn, &trst).unwrap();
         crate::graph_storage::stage_replayed(&mut batch, &trst.merger_graph).unwrap();
         crate::trst_storage::stage_replayed_stable(&mut batch, &trst).unwrap();
         state.persist(&mut batch).unwrap();
         assert!(batch.migrate_governance_records().unwrap());
-        CandidateGovernance::restore(&batch, state.params.clone(), state.network, state.genesis).unwrap();
+        CandidateGovernance::restore(&batch, state.params.clone(), state.network, state.genesis)
+            .unwrap();
         batch.commit().unwrap();
         let mut batch = store.tx_begin_write().unwrap();
         crate::ledger_updater::stage_block(&mut batch, &proposal, Some(&account), 0, None, None)
@@ -916,36 +940,63 @@ mod tests {
         use crate::economic_candidate::{prepared::CapturedPayment, Engines, StagedEngines};
         let observe = |batch: &LmdbWriteTransaction<'_>| {
             let economics = crate::payment_transition::restore(batch, &state.params).unwrap();
-            (bincode::serialize(economics.brn.get_wallet(&support.account).unwrap()).unwrap(),
+            (
+                bincode::serialize(economics.brn.get_wallet(&support.account).unwrap()).unwrap(),
                 bincode::serialize(&batch.get_account(&support.account).unwrap()).unwrap(),
                 bincode::serialize(&batch.read_governance_records().unwrap()).unwrap(),
-                batch.get_meta(&marker).unwrap())
+                batch.get_meta(&marker).unwrap(),
+            )
         };
         let baseline = observe(&store.tx_begin_write().unwrap());
         // The proposal can close while actor-local work is being prepared.
         let batch = store.tx_begin_write().unwrap();
-        let captured = CapturedPayment::capture(&batch, &support, &state.params).unwrap().unwrap();
+        let captured = CapturedPayment::capture(&batch, &support, &state.params)
+            .unwrap()
+            .unwrap();
         let before = crate::payment_transition::restore(&batch, &state.params).unwrap();
         batch.commit().unwrap();
         let prepared = captured.prepare().unwrap();
         let mut withdrawn = state.clone();
-        withdrawn.governance.withdraw(&proposal.hash.into_tx_hash(), &proposal.account).unwrap();
+        withdrawn
+            .governance
+            .withdraw(&proposal.hash.into_tx_hash(), &proposal.account)
+            .unwrap();
         let mut batch = store.tx_begin_write().unwrap();
-        batch.apply_governance_record_delta(&state.governance, &withdrawn.governance).unwrap();
+        batch
+            .apply_governance_record_delta(&state.governance, &withdrawn.governance)
+            .unwrap();
         let closed = observe(&batch);
         batch.commit().unwrap();
         let mut batch = store.tx_begin_write().unwrap();
-        let prepared = prepared.stage_with_economics(&mut batch, &state.params).unwrap().unwrap();
+        let prepared = prepared
+            .stage_with_economics(&mut batch, &state.params)
+            .unwrap()
+            .unwrap();
         let mut engines = StagedEngines::new(&before.brn, &before.trst);
         engines.adopt_persisted(prepared.state.brn, prepared.state.trst);
-        let mut current = CandidateGovernance::restore(&batch, state.params.clone(), state.network, state.genesis).unwrap();
-        assert!(current.apply_staged(&mut batch, &support, &prepared.economics.effect,
-            &mut engines).unwrap_err().contains("support window is closed"));
+        let mut current = CandidateGovernance::restore(
+            &batch,
+            state.params.clone(),
+            state.network,
+            state.genesis,
+        )
+        .unwrap();
+        assert!(current
+            .apply_staged(
+                &mut batch,
+                &support,
+                &prepared.economics.effect,
+                &mut engines
+            )
+            .unwrap_err()
+            .contains("support window is closed"));
         drop(batch);
         assert_eq!(observe(&store.tx_begin_write().unwrap()), closed);
         assert!(store.block_store().get_block(&support.hash).is_err());
         let mut batch = store.tx_begin_write().unwrap();
-        batch.apply_governance_record_delta(&withdrawn.governance, &state.governance).unwrap();
+        batch
+            .apply_governance_record_delta(&withdrawn.governance, &state.governance)
+            .unwrap();
         batch.commit().unwrap();
         assert_eq!(observe(&store.tx_begin_write().unwrap()), baseline);
         let mut expected = None;
@@ -953,39 +1004,68 @@ mod tests {
             let mut staged = state.clone();
             let batch = store.tx_begin_write().unwrap();
             let before = crate::payment_transition::restore(&batch, &state.params).unwrap();
-            let captured = prepared.then(|| CapturedPayment::capture(&batch, &support,
-                &state.params).unwrap().unwrap());
+            let captured = prepared.then(|| {
+                CapturedPayment::capture(&batch, &support, &state.params)
+                    .unwrap()
+                    .unwrap()
+            });
             batch.commit().unwrap();
             let candidate = captured.map(|capture| capture.prepare().unwrap());
             let mut batch = store.tx_begin_write().unwrap();
             let mut engines = StagedEngines::new(&before.brn, &before.trst);
             let economic = if let Some(candidate) = candidate {
-                let prepared = candidate.stage_with_economics(&mut batch, &state.params).unwrap().unwrap();
+                let prepared = candidate
+                    .stage_with_economics(&mut batch, &state.params)
+                    .unwrap()
+                    .unwrap();
                 engines.adopt_persisted(prepared.state.brn, prepared.state.trst);
                 prepared.economics
             } else {
-                crate::economic_candidate::stage(&mut batch, &support, &state.params,
-                    &mut engines).unwrap()
+                crate::economic_candidate::stage(&mut batch, &support, &state.params, &mut engines)
+                    .unwrap()
             };
-            for invalid in [EconomicResult::NoEconomicEffect,
-                EconomicResult::GovernanceEndorse { burn_amount: 9 }] {
-                assert!(staged.clone().apply_staged(&mut batch, &support, &invalid,
-                    &mut engines).unwrap_err().contains("economic burn mismatch"));
+            for invalid in [
+                EconomicResult::NoEconomicEffect,
+                EconomicResult::GovernanceEndorse { burn_amount: 9 },
+            ] {
+                assert!(staged
+                    .clone()
+                    .apply_staged(&mut batch, &support, &invalid, &mut engines)
+                    .unwrap_err()
+                    .contains("economic burn mismatch"));
                 assert!(batch.get_meta(&marker).unwrap().is_none());
             }
-            staged.apply_staged(&mut batch, &support, &economic.effect, &mut engines).unwrap();
+            staged
+                .apply_staged(&mut batch, &support, &economic.effect, &mut engines)
+                .unwrap();
             engines.persist(&mut batch).unwrap();
-            assert_eq!(engines.brn().get_wallet(&support.account).unwrap().total_burned, 10);
+            assert_eq!(
+                engines
+                    .brn()
+                    .get_wallet(&support.account)
+                    .unwrap()
+                    .total_burned,
+                10
+            );
             let observed = observe(&batch);
-            if let Some(expected) = &expected { assert_eq!(&observed, expected); }
-            else { expected = Some(observed); }
+            if let Some(expected) = &expected {
+                assert_eq!(&observed, expected);
+            } else {
+                expected = Some(observed);
+            }
             if commit {
                 batch.commit().unwrap();
             } else {
                 drop(batch);
             }
-            assert_eq!(observe(&store.tx_begin_write().unwrap()),
-                if commit { expected.clone().unwrap() } else { baseline.clone() });
+            assert_eq!(
+                observe(&store.tx_begin_write().unwrap()),
+                if commit {
+                    expected.clone().unwrap()
+                } else {
+                    baseline.clone()
+                }
+            );
             assert_eq!(store.block_store().get_block(&support.hash).is_ok(), commit);
             assert_eq!(store.meta_store().get_meta(&marker).is_ok(), commit);
             assert_eq!(
@@ -1002,11 +1082,23 @@ mod tests {
                 if commit { 10 } else { 0 }
             );
         }
-        assert_eq!(observe(&store.tx_begin_write().unwrap()), expected.clone().unwrap());
+        assert_eq!(
+            observe(&store.tx_begin_write().unwrap()),
+            expected.clone().unwrap()
+        );
         drop(store);
         let store = LmdbStore::open(dir.path(), 32, 16 * 1024 * 1024).unwrap();
-        state.governance = store.tx_begin_write().unwrap().read_governance_records().unwrap();
-        assert_eq!(state.governance.get_endorsements(&proposal.hash.into_tx_hash()), Some((1, 10)));
+        state.governance = store
+            .tx_begin_write()
+            .unwrap()
+            .read_governance_records()
+            .unwrap();
+        assert_eq!(
+            state
+                .governance
+                .get_endorsements(&proposal.hash.into_tx_hash()),
+            Some((1, 10))
+        );
         let mut repeated = support.clone();
         repeated.previous = support.hash;
         repeated.brn_spent = 20;
@@ -1027,9 +1119,18 @@ mod tests {
         let mut batch = store.tx_begin_write().unwrap();
         batch.rewind_block(&support.hash).unwrap();
         let restored = crate::payment_transition::restore(&batch, &state.params).unwrap();
-        assert_eq!(bincode::serialize(restored.brn.get_wallet(&support.account).unwrap()).unwrap(), baseline.0);
-        assert_eq!(bincode::serialize(&batch.get_account(&support.account).unwrap()).unwrap(), baseline.1);
-        assert_eq!(bincode::serialize(&batch.read_governance_records().unwrap()).unwrap(), baseline.2);
+        assert_eq!(
+            bincode::serialize(restored.brn.get_wallet(&support.account).unwrap()).unwrap(),
+            baseline.0
+        );
+        assert_eq!(
+            bincode::serialize(&batch.get_account(&support.account).unwrap()).unwrap(),
+            baseline.1
+        );
+        assert_eq!(
+            bincode::serialize(&batch.read_governance_records().unwrap()).unwrap(),
+            baseline.2
+        );
         assert_eq!(batch.get_meta(&marker).unwrap(), baseline.3);
         batch.commit().unwrap();
     }

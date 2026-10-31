@@ -43,8 +43,13 @@ impl ConfirmedReplay {
             ]));
             let returned =
                 crate::block_economics::create_returned_token(&destination, &hash, &pending);
-            crate::block_economics::deliver_pending(&mut self.trst, &pending, returned, self.cutoff)
-                .map_err(invalid)?;
+            crate::block_economics::deliver_pending(
+                &mut self.trst,
+                &pending,
+                returned,
+                self.cutoff,
+            )
+            .map_err(invalid)?;
             self.pending.remove(&(destination, hash));
             pending.return_credit = true;
             if self

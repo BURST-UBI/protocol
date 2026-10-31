@@ -25,8 +25,14 @@ pub struct OwnerKeys {
 }
 
 impl OwnerKeys {
-    pub fn new(network: NetworkId, genesis: BlockHash, owner: &WalletAddress) -> Result<Self, String> {
-        Ok(Self { identity: owner_identity(network, genesis, owner)? })
+    pub fn new(
+        network: NetworkId,
+        genesis: BlockHash,
+        owner: &WalletAddress,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            identity: owner_identity(network, genesis, owner)?,
+        })
     }
 
     /// Validate the remaining key input when a complete record index supplies
@@ -40,9 +46,7 @@ impl OwnerKeys {
         identity.extend_from_slice(&self.identity);
         scope.encode(&mut identity)?;
         identity.extend_from_slice(&1u64.to_be_bytes());
-        let digest = burst_crypto::blake2b_256_multi(&[
-            b"BURST/delegation-scope/v1\0", &identity,
-        ]);
+        let digest = burst_crypto::blake2b_256_multi(&[b"BURST/delegation-scope/v1\0", &identity]);
         Ok(format!("{PREFIX}{}", BlockHash::new(digest)))
     }
 }
@@ -73,8 +77,12 @@ pub struct AuthenticatedGrant {
 }
 
 impl AuthenticatedGrant {
-    pub fn grant(&self) -> &Grant { &self.grant }
-    pub fn id(&self) -> BlockHash { self.id }
+    pub fn grant(&self) -> &Grant {
+        &self.grant
+    }
+    pub fn id(&self) -> BlockHash {
+        self.id
+    }
 }
 
 pub fn restore_authenticated_grant(
@@ -120,36 +128,63 @@ mod tests {
 
     #[test]
     fn owner_keys_match_legacy_bytes_and_identity_error_precedence() {
-        fn legacy(network: NetworkId, genesis: BlockHash, owner: &WalletAddress,
-            scope: &KeyScope) -> Result<String, String> {
-            if genesis.is_zero() { return Err("invalid delegation identity".into()); }
-            let decoded = burst_crypto::decode_address(owner.as_str()).ok_or("invalid delegation owner")?;
-            let mut bytes = vec![match network { NetworkId::Live => 0, NetworkId::Test => 1, NetworkId::Dev => 2 }];
+        fn legacy(
+            network: NetworkId,
+            genesis: BlockHash,
+            owner: &WalletAddress,
+            scope: &KeyScope,
+        ) -> Result<String, String> {
+            if genesis.is_zero() {
+                return Err("invalid delegation identity".into());
+            }
+            let decoded =
+                burst_crypto::decode_address(owner.as_str()).ok_or("invalid delegation owner")?;
+            let mut bytes = vec![match network {
+                NetworkId::Live => 0,
+                NetworkId::Test => 1,
+                NetworkId::Dev => 2,
+            }];
             bytes.extend_from_slice(genesis.as_bytes());
             bytes.extend_from_slice(&decoded);
             scope.encode(&mut bytes)?;
             bytes.extend_from_slice(&1u64.to_be_bytes());
-            Ok(format!("{PREFIX}{}", BlockHash::new(burst_crypto::blake2b_256_multi(
-                &[b"BURST/delegation-scope/v1\0", &bytes]))))
+            Ok(format!(
+                "{PREFIX}{}",
+                BlockHash::new(burst_crypto::blake2b_256_multi(&[
+                    b"BURST/delegation-scope/v1\0",
+                    &bytes
+                ]))
+            ))
         }
-        let owner = burst_crypto::derive_address(&burst_crypto::keypair_from_seed(&[19;32]).public);
-        let scopes = [KeyScope::Proposal(TxHash::new([21;32])),
-            KeyScope::Parameter(GovernableParam::BrnRate), KeyScope::Proposal(TxHash::ZERO)];
+        let owner =
+            burst_crypto::derive_address(&burst_crypto::keypair_from_seed(&[19; 32]).public);
+        let scopes = [
+            KeyScope::Proposal(TxHash::new([21; 32])),
+            KeyScope::Parameter(GovernableParam::BrnRate),
+            KeyScope::Proposal(TxHash::ZERO),
+        ];
         for network in [NetworkId::Live, NetworkId::Test, NetworkId::Dev] {
-            for genesis in [BlockHash::ZERO, BlockHash::new([23;32])] {
+            for genesis in [BlockHash::ZERO, BlockHash::new([23; 32])] {
                 for person in [&owner, &WalletAddress::new("brst_invalid")] {
                     for scope in &scopes {
                         let expected = legacy(network, genesis, person, scope);
                         assert_eq!(key(network, genesis, person, scope), expected);
-                        assert_eq!(OwnerKeys::new(network, genesis, person).and_then(|keys| keys.key(scope)), expected);
+                        assert_eq!(
+                            OwnerKeys::new(network, genesis, person)
+                                .and_then(|keys| keys.key(scope)),
+                            expected
+                        );
                     }
                 }
             }
         }
-        let keys = OwnerKeys::new(NetworkId::Dev, BlockHash::new([23;32]), &owner).unwrap();
+        let keys = OwnerKeys::new(NetworkId::Dev, BlockHash::new([23; 32]), &owner).unwrap();
         for _ in 0..3 {
             for scope in &scopes {
-                assert_eq!(keys.key(scope), legacy(NetworkId::Dev, BlockHash::new([23;32]), &owner, scope));
+                assert_eq!(
+                    keys.key(scope),
+                    legacy(NetworkId::Dev, BlockHash::new([23; 32]), &owner, scope)
+                );
             }
         }
     }
@@ -160,28 +195,51 @@ mod tests {
         let delegate = burst_crypto::keypair_from_seed(&[12; 32]);
         let owner = burst_crypto::derive_address(&owner_key.public);
         let genesis = BlockHash::new([13; 32]);
-        for scope in [KeyScope::Parameter(GovernableParam::BrnRate),
-            KeyScope::Proposal(TxHash::new([14; 32]))] {
+        for scope in [
+            KeyScope::Parameter(GovernableParam::BrnRate),
+            KeyScope::Proposal(TxHash::new([14; 32])),
+        ] {
             let mut authority = DelegationAuthority::new(NetworkId::Dev, genesis).unwrap();
-            let original = Grant::create(&owner_key, delegate.public.clone(), scope.clone(),
-                1, NetworkId::Dev, genesis).unwrap();
+            let original = Grant::create(
+                &owner_key,
+                delegate.public.clone(),
+                scope.clone(),
+                1,
+                NetworkId::Dev,
+                genesis,
+            )
+            .unwrap();
             authority.apply_grant(original.clone()).unwrap();
             let bytes = authority.save().unwrap();
-            let authenticated = restore_authenticated_grant(NetworkId::Dev, genesis,
-                &owner, &scope, &bytes).unwrap().unwrap();
+            let authenticated =
+                restore_authenticated_grant(NetworkId::Dev, genesis, &owner, &scope, &bytes)
+                    .unwrap()
+                    .unwrap();
             assert_eq!(authenticated.id(), original.id().unwrap());
-            assert_eq!(bincode::serialize(authenticated.grant()).unwrap(),
-                bincode::serialize(&original).unwrap());
-            assert_eq!(restore(NetworkId::Dev, genesis, &owner, &scope, &bytes)
-                .unwrap().save().unwrap(), bytes);
+            assert_eq!(
+                bincode::serialize(authenticated.grant()).unwrap(),
+                bincode::serialize(&original).unwrap()
+            );
+            assert_eq!(
+                restore(NetworkId::Dev, genesis, &owner, &scope, &bytes)
+                    .unwrap()
+                    .save()
+                    .unwrap(),
+                bytes
+            );
             let mut detached = authenticated.grant().clone();
             detached.generation += 1;
             assert_ne!(detached.id().unwrap(), authenticated.id());
             assert_eq!(authenticated.id(), original.id().unwrap());
             for fault in 0..8 {
                 let mut corrupted = authority.clone();
-                let grant = corrupted.entries.get_mut(&(owner.clone(), scope.clone()))
-                    .unwrap().grant.as_mut().unwrap();
+                let grant = corrupted
+                    .entries
+                    .get_mut(&(owner.clone(), scope.clone()))
+                    .unwrap()
+                    .grant
+                    .as_mut()
+                    .unwrap();
                 match fault {
                     0 => grant.signature.0[0] ^= 1,
                     1 => grant.genesis = BlockHash::ZERO,
@@ -195,28 +253,69 @@ mod tests {
                 let bytes = corrupted.save().unwrap();
                 let legacy = restore(NetworkId::Dev, genesis, &owner, &scope, &bytes).err();
                 assert!(legacy.is_some());
-                assert_eq!(restore_authenticated_grant(NetworkId::Dev, genesis,
-                    &owner, &scope, &bytes).err(), legacy);
+                assert_eq!(
+                    restore_authenticated_grant(NetworkId::Dev, genesis, &owner, &scope, &bytes)
+                        .err(),
+                    legacy
+                );
             }
             for (network, chain, person, selected_scope) in [
                 (NetworkId::Live, genesis, owner.clone(), scope.clone()),
-                (NetworkId::Dev, BlockHash::new([99;32]), owner.clone(), scope.clone()),
-                (NetworkId::Dev, genesis, burst_crypto::derive_address(&delegate.public), scope.clone()),
-                (NetworkId::Dev, genesis, owner.clone(), KeyScope::Proposal(TxHash::new([99;32]))),
+                (
+                    NetworkId::Dev,
+                    BlockHash::new([99; 32]),
+                    owner.clone(),
+                    scope.clone(),
+                ),
+                (
+                    NetworkId::Dev,
+                    genesis,
+                    burst_crypto::derive_address(&delegate.public),
+                    scope.clone(),
+                ),
+                (
+                    NetworkId::Dev,
+                    genesis,
+                    owner.clone(),
+                    KeyScope::Proposal(TxHash::new([99; 32])),
+                ),
             ] {
                 let legacy = restore(network, chain, &person, &selected_scope, &bytes).err();
                 assert!(legacy.is_some());
-                assert_eq!(restore_authenticated_grant(network, chain, &person, &selected_scope, &bytes).err(), legacy);
+                assert_eq!(
+                    restore_authenticated_grant(network, chain, &person, &selected_scope, &bytes)
+                        .err(),
+                    legacy
+                );
             }
-            let mut trailing = bytes.clone(); trailing.push(0);
-            for invalid in [&trailing[..], &[0xff][..], &vec![0;MAX_SCOPE_BYTES + 1][..]] {
-                assert_eq!(restore_authenticated_grant(NetworkId::Dev, genesis, &owner,
-                    &scope, invalid).err(), restore(NetworkId::Dev, genesis, &owner, &scope, invalid).err());
+            let mut trailing = bytes.clone();
+            trailing.push(0);
+            for invalid in [
+                &trailing[..],
+                &[0xff][..],
+                &vec![0; MAX_SCOPE_BYTES + 1][..],
+            ] {
+                assert_eq!(
+                    restore_authenticated_grant(NetworkId::Dev, genesis, &owner, &scope, invalid)
+                        .err(),
+                    restore(NetworkId::Dev, genesis, &owner, &scope, invalid).err()
+                );
             }
-            authority.apply_revocation(&Revocation::create(&owner_key, scope.clone(),
-                2, NetworkId::Dev, genesis).unwrap()).unwrap();
-            assert!(restore_authenticated_grant(NetworkId::Dev, genesis, &owner,
-                &scope, &authority.save().unwrap()).unwrap().is_none());
+            authority
+                .apply_revocation(
+                    &Revocation::create(&owner_key, scope.clone(), 2, NetworkId::Dev, genesis)
+                        .unwrap(),
+                )
+                .unwrap();
+            assert!(restore_authenticated_grant(
+                NetworkId::Dev,
+                genesis,
+                &owner,
+                &scope,
+                &authority.save().unwrap()
+            )
+            .unwrap()
+            .is_none());
         }
     }
 

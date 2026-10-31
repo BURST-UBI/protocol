@@ -13,10 +13,14 @@ mod load;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut urls: Vec<_> = std::env::args().skip(1).collect();
     if urls.first().map(String::as_str) == Some("--load-preflight") {
-        return load::preflight(&urls[1..]).await.map_err(|error| error as Box<dyn std::error::Error>);
+        return load::preflight(&urls[1..])
+            .await
+            .map_err(|error| error as Box<dyn std::error::Error>);
     }
     if urls.first().map(String::as_str) == Some("--load") {
-        return load::execute(&urls[1..]).await.map_err(|error| error as Box<dyn std::error::Error>);
+        return load::execute(&urls[1..])
+            .await
+            .map_err(|error| error as Box<dyn std::error::Error>);
     }
     let experimental = urls.first().map(String::as_str) == Some("--experimental-testnet");
     if experimental {
@@ -81,18 +85,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
             let governance = &expected["governance"];
-            let actual = node
-                .rpc_call(
-                    "governance_proposal_info",
-                    json!({"hash":governance["hash"]}),
-                )
-                .await?;
-            assert_eq!(
-                actual, *governance,
-                "governance state did not survive recovery"
-            );
+            if governance.get("release_gated") == Some(&json!(true)) {
+                assert!(
+                    !experimental,
+                    "release-gated report requires the default artifact"
+                );
+            } else {
+                let actual = node
+                    .rpc_call(
+                        "governance_proposal_info",
+                        json!({"hash":governance["hash"]}),
+                    )
+                    .await?;
+                assert_eq!(
+                    actual, *governance,
+                    "governance state did not survive recovery"
+                );
+            }
         }
-        println!("PASS durable balances, portfolios, confirmations and governance record after restart on all nodes");
+        println!("PASS saved balances, portfolios, confirmations and governance expectations after restart on all nodes");
         return Ok(());
     }
     let primary_node = &nodes[0];
@@ -136,9 +147,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Public disposable test accounts: Alice={}, Bob={}",
         alice.address, bob.address
     );
-    let endorsement = primary_node
-        .rpc_call("genesis_endorse", json!({"account":alice.address.as_str()}))
-        .await?;
+    let endorsement = endorse(primary_node, alice.address.as_str()).await?;
     let hash = endorsement["block_hash"]
         .as_str()
         .ok_or("no endorsement hash")?;
@@ -159,7 +168,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         node.wait_confirmed(&fund.hash, Duration::from_secs(40))
             .await?;
     }
-    let open = primary_node.receive_signed(&alice.primary_keys, &fund.hash).await?;
+    let open = primary_node
+        .receive_signed(&alice.primary_keys, &fund.hash)
+        .await?;
     for node in &nodes {
         node.wait_confirmed(&open.hash, Duration::from_secs(40))
             .await?;
@@ -251,14 +262,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("PASS unverified recipient explicitly accepts TRST");
     let before = primary_node.account_info(bob.address.as_str()).await?;
     assert!(
-        primary_node.transfer_signed(
-            &bob.primary_keys,
-            &alice.address,
-            1,
-            parse_hash(&pay.hash)?.into_tx_hash()
-        )
-        .await
-        .is_err(),
+        primary_node
+            .transfer_signed(
+                &bob.primary_keys,
+                &alice.address,
+                1,
+                parse_hash(&pay.hash)?.into_tx_hash()
+            )
+            .await
+            .is_err(),
         "unverified TRST spending must fail"
     );
     assert_eq!(
@@ -267,7 +279,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("PASS unverified TRST holder cannot spend");
     assert!(
-        primary_node.set_verifier_opt_in_signed(&bob.primary_keys, true)
+        primary_node
+            .set_verifier_opt_in_signed(&bob.primary_keys, true)
             .await
             .is_err(),
         "unverified wallet must not opt in to verification"
@@ -291,9 +304,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("PASS client-signed verifier opt-in/out and rejection for an unverified wallet");
     // Bob may receive before verification but may not spend until verified.
-    let endorsement = primary_node
-        .rpc_call("genesis_endorse", json!({"account":bob.address.as_str()}))
-        .await?;
+    let endorsement = endorse(primary_node, bob.address.as_str()).await?;
     let hash = endorsement["block_hash"]
         .as_str()
         .ok_or("no endorsement hash")?;
@@ -314,7 +325,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         node.wait_confirmed(&send.hash, Duration::from_secs(40))
             .await?;
     }
-    let receive = primary_node.receive_signed(&alice.primary_keys, &send.hash).await?;
+    let receive = primary_node
+        .receive_signed(&alice.primary_keys, &send.hash)
+        .await?;
     for node in &nodes {
         node.wait_confirmed(&receive.hash, Duration::from_secs(40))
             .await?;
@@ -517,65 +530,102 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("PASS signed delegation and revocation on all nodes");
 
-    let proposal_block = primary_node
-        .propose_parameter_signed(
-            &public_dev_key,
-            burst_governance::GovernableParam::BrnRate,
-            123,
-        )
-        .await?;
-    for node in &nodes {
-        node.wait_confirmed(&proposal_block.hash, Duration::from_secs(40))
-            .await?;
-    }
-    let proposal_id = parse_hash(&proposal_block.hash)?.into_tx_hash();
-    let params = primary_node.rpc_call("protocol_params", json!({})).await?;
-    let endorsement_cost: u128 = params["governance_endorsement_cost"]
-        .as_str()
-        .ok_or("missing governance endorsement cost")?
-        .parse()?;
-    let supported = primary_node
-        .endorse_proposal_signed(&public_dev_key, proposal_id, endorsement_cost)
-        .await?;
-    for node in &nodes {
-        node.wait_confirmed(&supported.hash, Duration::from_secs(40))
-            .await?;
-    }
-    let before = snapshot(primary_node, genesis_address.as_str()).await?;
-    let duplicate = primary_node
-        .endorse_proposal_signed(&public_dev_key, proposal_id, endorsement_cost)
-        .await
-        .unwrap_err();
-    assert!(
-        duplicate.to_string().contains("already endorsed"),
-        "{duplicate}"
-    );
-    assert_eq!(snapshot(primary_node, genesis_address.as_str()).await?, before);
-    let before_bob = snapshot(primary_node, bob.address.as_str()).await?;
-    let unauthorized = primary_node
-        .withdraw_proposal_signed(&bob.primary_keys, proposal_id)
-        .await
-        .unwrap_err();
-    assert!(
-        unauthorized.to_string().contains("only the proposer"),
-        "{unauthorized}"
-    );
-    assert_eq!(snapshot(primary_node, bob.address.as_str()).await?, before_bob);
-    let withdrawn = primary_node
-        .withdraw_proposal_signed(&public_dev_key, proposal_id)
-        .await?;
-    for node in &nodes {
-        node.wait_confirmed(&withdrawn.hash, Duration::from_secs(40))
-            .await?;
-        let proposal = node
-            .rpc_call(
-                "governance_proposal_info",
-                json!({"hash":proposal_id.to_string()}),
+    let governance = if experimental {
+        let proposal_block = primary_node
+            .propose_parameter_signed(
+                &public_dev_key,
+                burst_governance::GovernableParam::BrnRate,
+                123,
             )
             .await?;
-        assert_eq!(proposal["phase"], "Withdrawn");
-    }
-    println!("PASS signed governance proposal, paid endorsement, duplicate protection and authorized withdrawal");
+        for node in &nodes {
+            node.wait_confirmed(&proposal_block.hash, Duration::from_secs(40))
+                .await?;
+        }
+        let proposal_id = parse_hash(&proposal_block.hash)?.into_tx_hash();
+        let params = primary_node.rpc_call("protocol_params", json!({})).await?;
+        let endorsement_cost: u128 = params["governance_endorsement_cost"]
+            .as_str()
+            .ok_or("missing governance endorsement cost")?
+            .parse()?;
+        let supported = primary_node
+            .endorse_proposal_signed(&public_dev_key, proposal_id, endorsement_cost)
+            .await?;
+        for node in &nodes {
+            node.wait_confirmed(&supported.hash, Duration::from_secs(40))
+                .await?;
+        }
+        let before = snapshot(primary_node, genesis_address.as_str()).await?;
+        let duplicate = primary_node
+            .endorse_proposal_signed(&public_dev_key, proposal_id, endorsement_cost)
+            .await
+            .unwrap_err();
+        assert!(
+            duplicate.to_string().contains("already endorsed"),
+            "{duplicate}"
+        );
+        assert_eq!(
+            snapshot(primary_node, genesis_address.as_str()).await?,
+            before
+        );
+        let before_bob = snapshot(primary_node, bob.address.as_str()).await?;
+        let unauthorized = primary_node
+            .withdraw_proposal_signed(&bob.primary_keys, proposal_id)
+            .await
+            .unwrap_err();
+        assert!(
+            unauthorized.to_string().contains("only the proposer"),
+            "{unauthorized}"
+        );
+        assert_eq!(
+            snapshot(primary_node, bob.address.as_str()).await?,
+            before_bob
+        );
+        let withdrawn = primary_node
+            .withdraw_proposal_signed(&public_dev_key, proposal_id)
+            .await?;
+        for node in &nodes {
+            node.wait_confirmed(&withdrawn.hash, Duration::from_secs(40))
+                .await?;
+            let proposal = node
+                .rpc_call(
+                    "governance_proposal_info",
+                    json!({"hash":proposal_id.to_string()}),
+                )
+                .await?;
+            assert_eq!(proposal["phase"], "Withdrawn");
+        }
+        println!("PASS signed governance proposal, paid endorsement, duplicate protection and authorized withdrawal");
+        primary_node
+            .rpc_call(
+                "governance_proposal_info",
+                json!({"hash": proposal_id.to_string()}),
+            )
+            .await?
+    } else {
+        for node in &nodes {
+            let before = snapshot(node, genesis_address.as_str()).await?;
+            let error = node
+                .propose_parameter_signed(
+                    &public_dev_key,
+                    burst_governance::GovernableParam::BrnRate,
+                    123,
+                )
+                .await
+                .expect_err("default artifact must reject gated governance");
+            assert!(
+                error.to_string().contains(
+                    "governance requires certified activation; unavailable behind the release gate"
+                ),
+                "{error}"
+            );
+            assert_eq!(snapshot(node, genesis_address.as_str()).await?, before);
+        }
+        println!(
+            "PASS default governance release gate preserves balances and frontiers on all nodes"
+        );
+        json!({"release_gated": true})
+    };
     // Default artifacts reject both operations at their release gate. The
     // experimental artifact must instead reject an uncertified vote on merit.
     // A valid challenge is not a negative test when challenges are enabled.
@@ -648,12 +698,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         snapshots.push(expected);
     }
     if let Ok(path) = std::env::var("BURST_VALIDATION_REPORT") {
-        let governance = primary_node
-            .rpc_call(
-                "governance_proposal_info",
-                json!({"hash":proposal_id.to_string()}),
-            )
-            .await?;
         std::fs::write(
             path,
             serde_json::to_vec_pretty(&json!({"wallets":snapshots,"governance":governance}))?,
@@ -682,4 +726,38 @@ async fn snapshot(node: &NodeClient, address: &str) -> Result<Value, Box<dyn std
         .rpc_call("account_pending", json!({"account":address}))
         .await?;
     Ok(json!({"account":account,"brn":brn,"portfolio":portfolio,"pending":pending}))
+}
+
+async fn endorse(node: &NodeClient, account: &str) -> Result<Value, Box<dyn std::error::Error>> {
+    let token = std::env::var("BURST_RPC_ADMIN_TOKEN")?;
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()?;
+    let body = json!({"action": "genesis_endorse", "account": account});
+    for supplied in [None, Some("00".repeat(32))] {
+        let mut request = http.post(node.node_url()).json(&body);
+        if let Some(token) = supplied {
+            request = request.bearer_auth(token);
+        }
+        assert_eq!(
+            request.send().await?.status(),
+            reqwest::StatusCode::UNAUTHORIZED
+        );
+    }
+    let reply: Value = http
+        .post(node.node_url())
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    if let Some(error) = reply.get("error") {
+        return Err(format!("creator endorsement failed: {error}").into());
+    }
+    reply
+        .get("result")
+        .cloned()
+        .ok_or_else(|| "missing endorsement result".into())
 }

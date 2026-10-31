@@ -86,7 +86,9 @@ pub(super) async fn run(
         workers.push((
             shutdown,
             tokio::spawn(async move {
-                node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+                node.start_with_services(burst_daemon::start_public_services)
+                    .await
+                    .unwrap();
                 node.stop().await.unwrap();
             }),
         ));

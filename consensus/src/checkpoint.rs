@@ -526,15 +526,26 @@ mod tests {
             assert_eq!(roster.humans(), humans);
             for representative in 1..=7 {
                 let representative = address(representative);
-                assert_eq!(roster.weight(&representative), humans.iter()
-                    .filter(|entry| entry.representative == representative).count() as u64);
+                assert_eq!(
+                    roster.weight(&representative),
+                    humans
+                        .iter()
+                        .filter(|entry| entry.representative == representative)
+                        .count() as u64
+                );
             }
             for invalid_human in [false, true] {
                 let mut invalid = humans.clone();
                 let last = invalid.last_mut().unwrap();
-                if invalid_human { last.human = WalletAddress::new("brst_invalid"); }
-                else { last.representative = WalletAddress::new("brst_invalid"); }
-                assert_eq!(HumanRoster::new(invalid).unwrap_err(), CheckpointError::InvalidRoster);
+                if invalid_human {
+                    last.human = WalletAddress::new("brst_invalid");
+                } else {
+                    last.representative = WalletAddress::new("brst_invalid");
+                }
+                assert_eq!(
+                    HumanRoster::new(invalid).unwrap_err(),
+                    CheckpointError::InvalidRoster
+                );
             }
         }
     }

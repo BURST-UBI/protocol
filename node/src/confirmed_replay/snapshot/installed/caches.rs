@@ -1,5 +1,5 @@
-use super::*;
 use super::economics::EconomicRead;
+use super::*;
 use bincode::Options;
 use burst_store_lmdb::block_undo::UndoTable;
 use serde::{de::DeserializeOwned, Serialize};
@@ -23,9 +23,11 @@ fn equivalent<T: Serialize>(actual: &T, expected: &T) -> Result<(), StoreError> 
     Ok(())
 }
 
-pub(super) fn verify_read_with_poll(input: EconomicRead<'_, '_>, state: &crate::confirmed_replay::ConfirmedReplay,
-    poll: &dyn Fn(&'static str) -> Result<(), StoreError>)
-    -> Result<(), StoreError> {
+pub(super) fn verify_read_with_poll(
+    input: EconomicRead<'_, '_>,
+    state: &crate::confirmed_replay::ConfirmedReplay,
+    poll: &dyn Fn(&'static str) -> Result<(), StoreError>,
+) -> Result<(), StoreError> {
     let view = input.view();
     compare(
         &input.read(UndoTable::BrnMeta, b"protocol_params")?,
@@ -46,9 +48,15 @@ pub(super) fn verify_read_with_poll(input: EconomicRead<'_, '_>, state: &crate::
     } else {
         let actual = input.verification_snapshot()?;
         if !super::super::canonical::equivalent_verification(
-            actual.snapshot_view(), state.verification.snapshot_view(), view.storage_directory(),
-        ).map_err(|error| invalid(format!("verification snapshot: {error}")))? {
-            return Err(invalid("verification snapshot: persisted engine differs from applied replay"));
+            actual.snapshot_view(),
+            state.verification.snapshot_view(),
+            view.storage_directory(),
+        )
+        .map_err(|error| invalid(format!("verification snapshot: {error}")))?
+        {
+            return Err(invalid(
+                "verification snapshot: persisted engine differs from applied replay",
+            ));
         }
     }
     verify_lifecycle_view_with_poll(&view, &state.lifecycle_metadata, poll)?;
@@ -62,42 +70,61 @@ pub(super) fn verify_read_with_poll(input: EconomicRead<'_, '_>, state: &crate::
         // then compare persisted records individually.
         let canonical_failure = std::cell::RefCell::new(None);
         let checked = super::super::canonical::encode_governance_with_poll(
-            &governance.governance, &mut std::io::sink(), Some(view.storage_directory()),
-            &|| poll("metadata:governance-canonical").map_err(|error| {
-                let message = error.to_string();
-                *canonical_failure.borrow_mut() = Some(error);
-                super::super::invalid(message)
-            }),
+            &governance.governance,
+            &mut std::io::sink(),
+            Some(view.storage_directory()),
+            &|| {
+                poll("metadata:governance-canonical").map_err(|error| {
+                    let message = error.to_string();
+                    *canonical_failure.borrow_mut() = Some(error);
+                    super::super::invalid(message)
+                })
+            },
         );
-        if let Some(error) = canonical_failure.into_inner() { return Err(error); }
+        if let Some(error) = canonical_failure.into_inner() {
+            return Err(error);
+        }
         checked.map_err(invalid)?;
         crate::governance_storage::verify_records_view(&view, &governance.governance, poll)?;
     } else {
         if !super::super::canonical::equivalent_governance(
-            &input.governance()?
+            &input
+                .governance()?
                 .ok_or_else(|| invalid("missing applied governance state"))?,
-            &governance.governance, view.storage_directory(),
-        ).map_err(invalid)? {
+            &governance.governance,
+            view.storage_directory(),
+        )
+        .map_err(invalid)?
+        {
             return Err(invalid("persisted engine differs from applied replay"));
         }
     }
     let bytes = input.read(UndoTable::Meta, b"consti_engine")?;
-    let actual = bincode::DefaultOptions::new().with_fixint_encoding()
-        .with_limit(bytes.len() as u64).reject_trailing_bytes()
-        .deserialize(&bytes).map_err(invalid)?;
+    let actual = bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .with_limit(bytes.len() as u64)
+        .reject_trailing_bytes()
+        .deserialize(&bytes)
+        .map_err(invalid)?;
     if !super::super::canonical::equivalent_constitution(
-        &actual, &governance.constitution, view.storage_directory(),
-    ).map_err(invalid)? {
+        &actual,
+        &governance.constitution,
+        view.storage_directory(),
+    )
+    .map_err(invalid)?
+    {
         return Err(invalid("persisted engine differs from applied replay"));
     }
     poll("metadata:delegation-snapshot")?;
     // The persisted delegation format contains the forward graph. Reverse
     // indexes are derived and key-ballot receipts are checked separately.
     compare_delegation(
-        &input.read(UndoTable::Meta, burst_governance::DelegationEngine::meta_key().as_bytes())?,
+        &input.read(
+            UndoTable::Meta,
+            burst_governance::DelegationEngine::meta_key().as_bytes(),
+        )?,
         &governance.delegation,
     )
-
 }
 
 pub(super) fn verify_verification_records_view(
@@ -107,43 +134,70 @@ pub(super) fn verify_verification_records_view(
 ) -> Result<(), StoreError> {
     // Check canonical encoding and total size before comparing records.
     let canonical_failure = std::cell::RefCell::new(None);
-    let checked = super::super::canonical::validate_verification_with_poll(expected, &|| poll("metadata:verification-canonical").map_err(|error| {
+    let checked = super::super::canonical::validate_verification_with_poll(expected, &|| {
+        poll("metadata:verification-canonical").map_err(|error| {
             let message = error.to_string();
             *canonical_failure.borrow_mut() = Some(error);
             super::super::invalid(message)
-        }));
-    if let Some(error) = canonical_failure.into_inner() { return Err(error); }
+        })
+    });
+    if let Some(error) = canonical_failure.into_inner() {
+        return Err(error);
+    }
     checked.map_err(invalid)?;
     let mut expected_count = 0usize;
     let mut failure = None;
     let counted = expected.visit_record_keys(|_| {
         poll("metadata:verification-expected").map_err(|error| {
-            let message = error.to_string(); failure = Some(error); message
+            let message = error.to_string();
+            failure = Some(error);
+            message
         })?;
-        expected_count = expected_count.checked_add(1).ok_or("verification record count overflow")?;
+        expected_count = expected_count
+            .checked_add(1)
+            .ok_or("verification record count overflow")?;
         Ok(())
     });
-    if let Some(error) = failure { return Err(error); }
+    if let Some(error) = failure {
+        return Err(error);
+    }
     counted.map_err(invalid)?;
     let rules = expected.rules_record();
     let mut actual_count = 0usize;
     view.visit_verification_records_with_poll(64 << 20, poll, |key, actual| {
         poll("metadata:verification-record")?;
-        let record = expected.record_at_storage_key(key).map_err(invalid)?
+        let record = expected
+            .record_at_storage_key(key)
+            .map_err(invalid)?
             .ok_or_else(|| invalid("persisted verification record has no replayed origin"))?;
-        let expected = record.into_snapshot_fragment(&rules, 64 << 20).map_err(invalid)?;
-        equivalent(actual, &expected).map_err(|error| invalid(format!("verification snapshot: {error}")))?;
-        actual_count = actual_count.checked_add(1).ok_or_else(|| invalid("verification record count overflow"))?;
+        let expected = record
+            .into_snapshot_fragment(&rules, 64 << 20)
+            .map_err(invalid)?;
+        equivalent(actual, &expected)
+            .map_err(|error| invalid(format!("verification snapshot: {error}")))?;
+        actual_count = actual_count
+            .checked_add(1)
+            .ok_or_else(|| invalid("verification record count overflow"))?;
         Ok(())
     })?;
-    if actual_count != expected_count { return Err(invalid("persisted verification inventory differs from applied replay")); }
+    if actual_count != expected_count {
+        return Err(invalid(
+            "persisted verification inventory differs from applied replay",
+        ));
+    }
     Ok(())
 }
 
-fn compare_delegation(bytes: &[u8], expected: &burst_governance::DelegationEngine) -> Result<(), StoreError> {
-    let actual = bincode::DefaultOptions::new().with_fixint_encoding()
-        .with_limit(bytes.len() as u64).reject_trailing_bytes()
-        .deserialize(bytes).map_err(invalid)?;
+fn compare_delegation(
+    bytes: &[u8],
+    expected: &burst_governance::DelegationEngine,
+) -> Result<(), StoreError> {
+    let actual = bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .with_limit(bytes.len() as u64)
+        .reject_trailing_bytes()
+        .deserialize(bytes)
+        .map_err(invalid)?;
     if !expected.matches_snapshot(&actual) {
         return Err(invalid("persisted engine differs from applied replay"));
     }
@@ -205,13 +259,22 @@ mod tests {
 
     #[test]
     fn delegation_comparison_checks_forward_graph_scope_depth_and_strict_encoding() {
-        use burst_governance::{DelegationEngine, vote_delegation::{DelegationSnapshot, DelegationScope}};
+        use burst_governance::{
+            vote_delegation::{DelegationScope, DelegationSnapshot},
+            DelegationEngine,
+        };
         use burst_types::WalletAddress;
         let owner = WalletAddress::new("brst_delegation_owner");
         let target = WalletAddress::new("brst_delegation_target");
         let mut engine = DelegationEngine::new(4);
         engine.delegate(&owner, &target).unwrap();
-        engine.delegate_scoped(&owner, &target, DelegationScope::Category("economic".into())).unwrap();
+        engine
+            .delegate_scoped(
+                &owner,
+                &target,
+                DelegationScope::Category("economic".into()),
+            )
+            .unwrap();
         let bytes = engine.save_state();
         compare_delegation(&bytes, &engine).unwrap();
         let snapshot: DelegationSnapshot = bincode::deserialize(&bytes).unwrap();
@@ -219,16 +282,27 @@ mod tests {
             let mut changed = snapshot.clone();
             match case {
                 0 => changed.max_depth += 1,
-                1 => { changed.delegations.clear(); }
-                2 => { changed.delegations.insert(owner.clone(), owner.clone()); }
-                3 => { changed.scoped_delegations.clear(); }
-                _ => { changed.scoped_delegations.insert((target.clone(), DelegationScope::Global), owner.clone()); }
+                1 => {
+                    changed.delegations.clear();
+                }
+                2 => {
+                    changed.delegations.insert(owner.clone(), owner.clone());
+                }
+                3 => {
+                    changed.scoped_delegations.clear();
+                }
+                _ => {
+                    changed
+                        .scoped_delegations
+                        .insert((target.clone(), DelegationScope::Global), owner.clone());
+                }
             }
             assert!(compare_delegation(&bincode::serialize(&changed).unwrap(), &engine).is_err());
         }
-        let mut trailing = bytes.clone(); trailing.push(0);
+        let mut trailing = bytes.clone();
+        trailing.push(0);
         assert!(compare_delegation(&trailing, &engine).is_err());
-        assert!(compare_delegation(&bytes[..bytes.len()-1], &engine).is_err());
+        assert!(compare_delegation(&bytes[..bytes.len() - 1], &engine).is_err());
     }
 
     #[test]
@@ -251,12 +325,19 @@ mod tests {
             .put_meta("checkpoint_round/v1/local", b"journal")
             .unwrap();
         let polls = std::cell::Cell::new(0);
-        assert!(verify_lifecycle_view_with_poll(&batch.read_view(), &expected, &|stage| {
-            assert_eq!(stage, "metadata:lifecycle-row");
-            polls.set(polls.get() + 1);
-            if polls.get() == 3 { return Err(StoreError::Backend("lifecycle checkpoint sentinel".into())); }
-            Ok(())
-        }).unwrap_err().to_string().contains("lifecycle checkpoint sentinel"));
+        assert!(
+            verify_lifecycle_view_with_poll(&batch.read_view(), &expected, &|stage| {
+                assert_eq!(stage, "metadata:lifecycle-row");
+                polls.set(polls.get() + 1);
+                if polls.get() == 3 {
+                    return Err(StoreError::Backend("lifecycle checkpoint sentinel".into()));
+                }
+                Ok(())
+            })
+            .unwrap_err()
+            .to_string()
+            .contains("lifecycle checkpoint sentinel")
+        );
         assert_eq!(polls.get(), 3);
         verify_lifecycle(&batch, &expected).unwrap();
         let key = "verification_receipt/00000000";

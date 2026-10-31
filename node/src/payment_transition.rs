@@ -211,7 +211,11 @@ mod tests {
         fixture.create_holdings();
         let mut block = fixture.next(BlockType::ChangeRepresentative, 104);
         sign(&mut block);
-        assert!(CapturedPayment::capture_read(&fixture.store, &block, &fixture.params).unwrap().is_none());
+        assert!(
+            CapturedPayment::capture_read(&fixture.store, &block, &fixture.params)
+                .unwrap()
+                .is_none()
+        );
         let mut batch = fixture.store.tx_begin_write().unwrap();
         let initial = restore(&batch, &fixture.params).unwrap();
         crate::graph_storage::stage_replayed(&mut batch, &initial.trst.merger_graph).unwrap();
@@ -221,45 +225,91 @@ mod tests {
         let store = Arc::new(fixture.store);
         let view = store.tx_begin_read().unwrap();
         let expiry = fixture.params.trst_expiry_secs;
-        assert!(store.cached_payment_engines(&view, expiry, 131_072, 64 << 20).unwrap().is_some());
-        assert!(store.cached_payment_engines(&view, expiry + 1, 131_072, 64 << 20).unwrap().is_none());
-        assert!(store.cached_payment_engines(&view, expiry, 0, 64 << 20).is_err());
-        assert!(store.cached_payment_engines(&view, expiry, 131_072, 0).is_err());
+        assert!(store
+            .cached_payment_engines(&view, expiry, 131_072, 64 << 20)
+            .unwrap()
+            .is_some());
+        assert!(store
+            .cached_payment_engines(&view, expiry + 1, 131_072, 64 << 20)
+            .unwrap()
+            .is_none());
+        assert!(store
+            .cached_payment_engines(&view, expiry, 0, 64 << 20)
+            .is_err());
+        assert!(store
+            .cached_payment_engines(&view, expiry, 131_072, 0)
+            .is_err());
         let other_dir = tempfile::tempdir().unwrap();
         let other = LmdbStore::open(other_dir.path(), 32, 16 << 20).unwrap();
-        assert!(other.cached_payment_engines(&view, expiry, 131_072, 64 << 20).unwrap().is_none());
+        assert!(other
+            .cached_payment_engines(&view, expiry, 131_072, 64 << 20)
+            .unwrap()
+            .is_none());
         drop(view);
         // A live writer must neither block the worker nor leak its uncommitted cutoff.
         let mut writer = store.tx_begin_write().unwrap();
-        writer.put_meta(crate::confirmed_replay::installation::CUTOFF_KEY, &105u64.to_be_bytes()).unwrap();
+        writer
+            .put_meta(
+                crate::confirmed_replay::installation::CUTOFF_KEY,
+                &105u64.to_be_bytes(),
+            )
+            .unwrap();
         let worker_store = store.clone();
         let worker_block = block.clone();
         let params = fixture.params.clone();
-        let mut task = tokio::task::spawn_blocking(move || CapturedPayment::capture_read(
-            &worker_store, &worker_block, &params));
+        let mut task = tokio::task::spawn_blocking(move || {
+            CapturedPayment::capture_read(&worker_store, &worker_block, &params)
+        });
         let captured = tokio::time::timeout(Duration::from_secs(2), &mut task).await;
         drop(writer);
-        let prepared = captured.expect("readonly capture waited for the writer")
-            .unwrap().unwrap().expect("warm capture missing").prepare().unwrap();
+        let prepared = captured
+            .expect("readonly capture waited for the writer")
+            .unwrap()
+            .unwrap()
+            .expect("warm capture missing")
+            .prepare()
+            .unwrap();
         // A changed authoritative cutoff rejects the already prepared candidate.
         let mut writer = store.tx_begin_write().unwrap();
-        writer.put_meta(crate::confirmed_replay::installation::CUTOFF_KEY, &105u64.to_be_bytes()).unwrap();
-        assert!(matches!(prepared.stage(&mut writer, &fixture.params), Err(PreparedStageError::BeforeWrite(_))));
+        writer
+            .put_meta(
+                crate::confirmed_replay::installation::CUTOFF_KEY,
+                &105u64.to_be_bytes(),
+            )
+            .unwrap();
+        assert!(matches!(
+            prepared.stage(&mut writer, &fixture.params),
+            Err(PreparedStageError::BeforeWrite(_))
+        ));
         assert!(writer.get_block(&block.hash).is_err());
         drop(writer);
         let view = store.tx_begin_read().unwrap();
         let mut writer = store.tx_begin_write().unwrap();
         writer.put_meta("readonly-generation-test", &[1]).unwrap();
         writer.commit().unwrap();
-        assert!(store.cached_payment_engines(&view, expiry, 131_072, 64 << 20).unwrap().is_none());
+        assert!(store
+            .cached_payment_engines(&view, expiry, 131_072, 64 << 20)
+            .unwrap()
+            .is_none());
         drop(view);
-        assert!(CapturedPayment::capture_read(&store, &block, &fixture.params).unwrap().is_some());
+        assert!(
+            CapturedPayment::capture_read(&store, &block, &fixture.params)
+                .unwrap()
+                .is_some()
+        );
         let mut writer = store.tx_begin_write().unwrap();
         writer.put_brn_meta(b"rate_history", b"corrupted").unwrap();
         writer.commit().unwrap();
-        assert!(CapturedPayment::capture_read(&store, &block, &fixture.params).unwrap().is_none());
+        assert!(
+            CapturedPayment::capture_read(&store, &block, &fixture.params)
+                .unwrap()
+                .is_none()
+        );
         let writer = store.tx_begin_write().unwrap();
-        assert!(matches!(CapturedPayment::capture(&writer, &block, &fixture.params), Err(PreparedStageError::Abort(_))));
+        assert!(matches!(
+            CapturedPayment::capture(&writer, &block, &fixture.params),
+            Err(PreparedStageError::Abort(_))
+        ));
     }
 
     #[tokio::test]
@@ -304,10 +354,15 @@ mod tests {
         let head = first.previous;
         let store = Arc::new(fixture.store);
         let queue = Arc::new(crate::priority_queue::BlockPriorityQueue::new(3));
-        for block in [first, second] { assert!(queue.push(block).await); }
+        for block in [first, second] {
+            assert!(queue.push(block).await);
+        }
         let processor = crate::block_processor::BlockProcessor::new(0, BlockHash::new([1; 32]));
         let mut validation = crate::block_validation::BlockValidationQueue::with_workers(
-            queue.clone(), processor.authentication_rules(), 2);
+            queue.clone(),
+            processor.authentication_rules(),
+            2,
+        );
         validation.set_preparation(store.clone(), fixture.params.clone());
         let gate = Arc::new((Mutex::new(false), Condvar::new()));
         let worker_gate = gate.clone();
@@ -315,13 +370,17 @@ mod tests {
         validation.before_prepare = Some(Arc::new(move || {
             started.send(()).unwrap();
             let ready = worker_gate.0.lock().unwrap();
-            let (ready, _) = worker_gate.1.wait_timeout_while(ready, Duration::from_secs(5),
-                |ready| !*ready).unwrap();
+            let (ready, _) = worker_gate
+                .1
+                .wait_timeout_while(ready, Duration::from_secs(5), |ready| !*ready)
+                .unwrap();
             assert!(*ready, "preparation worker was not released");
         }));
         let collect = async {
             let mut received = Vec::new();
-            for _ in 0..3 { received.push(validation.next().await.unwrap()); }
+            for _ in 0..3 {
+                received.push(validation.next().await.unwrap());
+            }
             received
         };
         tokio::pin!(collect);
@@ -341,7 +400,10 @@ mod tests {
         *gate.0.lock().unwrap() = true;
         gate.1.notify_all();
         let received = collect.await;
-        assert!(observed.try_recv().is_err(), "unsigned candidate reached preparation");
+        assert!(
+            observed.try_recv().is_err(),
+            "unsigned candidate reached preparation"
+        );
         let mut prepared = Vec::new();
         let mut owners = Vec::new();
         for mut item in received {
@@ -352,23 +414,37 @@ mod tests {
                 assert!(item.result().is_ok());
                 assert!(item.preparation_fault.is_none());
                 assert!(item.preparation_time > Duration::ZERO);
-                assert_eq!(item.worker_time(), item.authentication_time() + item.preparation_time);
-                prepared.push(item.prepared.take().expect("eligible signed candidate prepared"));
+                assert_eq!(
+                    item.worker_time(),
+                    item.authentication_time() + item.preparation_time
+                );
+                prepared.push(
+                    item.prepared
+                        .take()
+                        .expect("eligible signed candidate prepared"),
+                );
                 owners.push(item);
             }
         }
         for prepared in prepared {
             let mut batch = store.tx_begin_write().unwrap();
-            prepared.stage(&mut batch, &fixture.params).unwrap().unwrap();
+            prepared
+                .stage(&mut batch, &fixture.params)
+                .unwrap()
+                .unwrap();
             batch.commit().unwrap();
         }
         let mut batch = store.tx_begin_write().unwrap();
         for item in &owners {
-            assert_eq!(batch.get_account(&item.block().account).unwrap().head, item.block().hash);
+            assert_eq!(
+                batch.get_account(&item.block().account).unwrap().head,
+                item.block().hash
+            );
         }
         drop(owners);
         let head = batch.get_account(&fixture.address).unwrap().head;
-        let mut successor: StateBlock = bincode::deserialize(&batch.get_block(&head).unwrap()).unwrap();
+        let mut successor: StateBlock =
+            bincode::deserialize(&batch.get_block(&head).unwrap()).unwrap();
         successor.previous = head;
         successor.timestamp = Timestamp::new(107);
         sign(&mut successor);
@@ -377,20 +453,30 @@ mod tests {
         let queue = Arc::new(crate::priority_queue::BlockPriorityQueue::new(1));
         assert!(queue.push(successor.clone()).await);
         let mut validation = crate::block_validation::BlockValidationQueue::with_workers(
-            queue, processor.authentication_rules(), 1);
+            queue,
+            processor.authentication_rules(),
+            1,
+        );
         validation.set_preparation(store.clone(), fixture.params.clone());
         let fault = validation.next().await.unwrap();
         assert!(fault.result().is_ok());
         assert!(fault.prepared.is_none());
-        assert!(fault.preparation_fault.is_none(), "dirty cache must defer to authoritative admission");
+        assert!(
+            fault.preparation_fault.is_none(),
+            "dirty cache must defer to authoritative admission"
+        );
         assert!(fault.preparation_time > Duration::ZERO);
         let batch = store.tx_begin_write().unwrap();
-        assert!(matches!(crate::economic_candidate::prepared::CapturedPayment::capture(
-            &batch, &successor, &fixture.params),
-            Err(crate::economic_candidate::prepared::PreparedStageError::Abort(_))));
+        assert!(matches!(
+            crate::economic_candidate::prepared::CapturedPayment::capture(
+                &batch,
+                &successor,
+                &fixture.params
+            ),
+            Err(crate::economic_candidate::prepared::PreparedStageError::Abort(_))
+        ));
         assert!(batch.get_block(&successor.hash).is_err());
         assert_eq!(batch.get_account(&fixture.address).unwrap().head, head);
-
     }
 
     #[tokio::test]
@@ -414,7 +500,10 @@ mod tests {
         let store = Arc::new(fixture.store);
         let processor = crate::block_processor::BlockProcessor::new(0, BlockHash::new([1; 32]));
         let mut validation = crate::block_validation::BlockValidationQueue::with_workers(
-            queue.clone(), processor.authentication_rules(), 3);
+            queue.clone(),
+            processor.authentication_rules(),
+            3,
+        );
         validation.set_preparation(store.clone(), fixture.params.clone());
         let gate = Arc::new((Mutex::new(false), Condvar::new()));
         let worker_gate = gate.clone();
@@ -422,8 +511,10 @@ mod tests {
         validation.before_prepare = Some(Arc::new(move || {
             started.send(()).unwrap();
             let ready = worker_gate.0.lock().unwrap();
-            let (ready, _) = worker_gate.1.wait_timeout_while(ready, Duration::from_secs(5),
-                |ready| !*ready).unwrap();
+            let (ready, _) = worker_gate
+                .1
+                .wait_timeout_while(ready, Duration::from_secs(5), |ready| !*ready)
+                .unwrap();
             assert!(*ready, "preparation worker was not released");
         }));
         let mut next = Box::pin(validation.next());
@@ -445,17 +536,28 @@ mod tests {
         // whether it will commit. Competing work must not wait behind that guard.
         let mut siblings = Vec::new();
         for _ in 0..2 {
-            let other = tokio::time::timeout(Duration::from_secs(2), validation.next()).await.unwrap().unwrap();
+            let other = tokio::time::timeout(Duration::from_secs(2), validation.next())
+                .await
+                .unwrap()
+                .unwrap();
             assert!(other.result().is_ok());
             assert!(other.prepared.is_none());
-            assert!(Arc::ptr_eq(owner._preparation_reservation.as_ref().unwrap(),
-                other._preparation_reservation.as_ref().unwrap()));
+            assert!(Arc::ptr_eq(
+                owner._preparation_reservation.as_ref().unwrap(),
+                other._preparation_reservation.as_ref().unwrap()
+            ));
             assert_eq!(other.preparation_time, Duration::ZERO);
             siblings.push(other);
         }
         assert!(observed.try_recv().is_err(), "competing preparation ran");
         let mut batch = store.tx_begin_write().unwrap();
-        owner.prepared.take().unwrap().stage(&mut batch, &fixture.params).unwrap().unwrap();
+        owner
+            .prepared
+            .take()
+            .unwrap()
+            .stage(&mut batch, &fixture.params)
+            .unwrap()
+            .unwrap();
         batch.commit().unwrap();
         let mut successor = owner.block().clone();
         successor.previous = successor.hash;
@@ -466,7 +568,10 @@ mod tests {
         validation.set_preparation(store.clone(), fixture.params.clone());
         assert!(queue.push(successor.clone()).await);
         let deferred = validation.next().await.unwrap();
-        assert!(deferred.prepared.is_none(), "queued siblings lost their reservation");
+        assert!(
+            deferred.prepared.is_none(),
+            "queued siblings lost their reservation"
+        );
         assert!(deferred._preparation_reservation.is_some());
         assert!(observed.try_recv().is_err());
         let mut batch = store.tx_begin_write().unwrap();
@@ -479,7 +584,10 @@ mod tests {
         sign(&mut successor);
         assert!(queue.push(successor.clone()).await);
         let next = validation.next().await.unwrap();
-        assert!(next.prepared.is_some(), "drained account did not release its reservation");
+        assert!(
+            next.prepared.is_some(),
+            "drained account did not release its reservation"
+        );
         assert!(next._preparation_reservation.is_some());
         assert_eq!(next.block().hash, successor.hash);
         assert_eq!(observed.try_recv().unwrap(), ());
@@ -497,8 +605,12 @@ mod tests {
         crate::trst_storage::stage_replayed_stable(&mut batch, &initial.trst).unwrap();
         let mut orchestrator = burst_verification::VerificationOrchestrator::new();
         orchestrator.initialize_genesis(&fixture.address);
-        batch.put_meta(crate::endorsement_commit::SNAPSHOT_KEY,
-            &orchestrator.snapshot().encode().unwrap()).unwrap();
+        batch
+            .put_meta(
+                crate::endorsement_commit::SNAPSHOT_KEY,
+                &orchestrator.snapshot().encode().unwrap(),
+            )
+            .unwrap();
         crate::bootstrap_phase::initialize(&mut batch, &fixture.params).unwrap();
         batch.commit().unwrap();
         let mut block = fixture.next(BlockType::Endorse, 100);
@@ -514,49 +626,99 @@ mod tests {
             let batch = fixture.store.tx_begin_write().unwrap();
             let before = restore(&batch, &fixture.params).unwrap();
             let capture = if prepared {
-                Some(CapturedPayment::capture(&batch, &block, &fixture.params).unwrap().unwrap())
-            } else { None };
+                Some(
+                    CapturedPayment::capture(&batch, &block, &fixture.params)
+                        .unwrap()
+                        .unwrap(),
+                )
+            } else {
+                None
+            };
             batch.commit().unwrap();
             let candidate = capture.map(|capture| capture.prepare().unwrap());
             let mut batch = fixture.store.tx_begin_write().unwrap();
             let mut engines = StagedEngines::new(&before.brn, &before.trst);
             if let Some(candidate) = candidate {
-                let state = candidate.stage(&mut batch, &fixture.params).unwrap().unwrap();
+                let state = candidate
+                    .stage(&mut batch, &fixture.params)
+                    .unwrap()
+                    .unwrap();
                 engines.adopt_persisted(state.brn, state.trst);
             } else {
-                crate::economic_candidate::stage(&mut batch, &block, &fixture.params, &mut engines).unwrap();
+                crate::economic_candidate::stage(&mut batch, &block, &fixture.params, &mut engines)
+                    .unwrap();
             }
             let mut orchestrator = crate::endorsement_commit::restore(&batch).unwrap();
-            crate::endorsement_commit::apply_staged(&mut batch, &block, 10,
-                burst_types::NetworkId::Dev, &fixture.params, &mut orchestrator, &mut engines).unwrap();
+            crate::endorsement_commit::apply_staged(
+                &mut batch,
+                &block,
+                10,
+                burst_types::NetworkId::Dev,
+                &fixture.params,
+                &mut orchestrator,
+                &mut engines,
+            )
+            .unwrap();
             engines.persist(&mut batch).unwrap();
             let state = restore(&batch, &fixture.params).unwrap();
-            assert_eq!(batch.get_account(&target).unwrap().state, burst_types::WalletState::Verified);
+            assert_eq!(
+                batch.get_account(&target).unwrap().state,
+                burst_types::WalletState::Verified
+            );
             let observed = (
                 bincode::serialize(state.brn.get_wallet(&fixture.address).unwrap()).unwrap(),
                 bincode::serialize(state.brn.get_wallet(&target).unwrap()).unwrap(),
                 state.trst.save_wallets(),
                 bincode::serialize(&batch.get_account(&target).unwrap()).unwrap(),
             );
-            if let Some(expected) = &expected { assert_eq!(&observed, expected); }
-            else { expected = Some(observed); }
-            if commit { batch.commit().unwrap(); } else { drop(batch); }
+            if let Some(expected) = &expected {
+                assert_eq!(&observed, expected);
+            } else {
+                expected = Some(observed);
+            }
+            if commit {
+                batch.commit().unwrap();
+            } else {
+                drop(batch);
+            }
             let batch = fixture.store.tx_begin_write().unwrap();
             assert_eq!(batch.get_account(&target).is_ok(), commit);
-            assert_eq!(restore(&batch, &fixture.params).unwrap().brn.get_wallet(&target).is_some(), commit);
-            assert_eq!(crate::endorsement_commit::restore(&batch).unwrap().get_state(&target).is_some(), commit);
+            assert_eq!(
+                restore(&batch, &fixture.params)
+                    .unwrap()
+                    .brn
+                    .get_wallet(&target)
+                    .is_some(),
+                commit
+            );
+            assert_eq!(
+                crate::endorsement_commit::restore(&batch)
+                    .unwrap()
+                    .get_state(&target)
+                    .is_some(),
+                commit
+            );
         }
         drop(fixture.store);
         let store = LmdbStore::open(fixture.directory.path(), 32, 32 * 1024 * 1024).unwrap();
         let mut batch = store.tx_begin_write().unwrap();
         let state = restore(&batch, &fixture.params).unwrap();
-        assert_eq!(bincode::serialize(state.brn.get_wallet(&target).unwrap()).unwrap(), expected.unwrap().1);
+        assert_eq!(
+            bincode::serialize(state.brn.get_wallet(&target).unwrap()).unwrap(),
+            expected.unwrap().1
+        );
         batch.rewind_block(&block.hash).unwrap();
         let state = restore(&batch, &fixture.params).unwrap();
         assert!(state.brn.get_wallet(&target).is_none());
         assert!(batch.get_account(&target).is_err());
-        assert!(crate::endorsement_commit::restore(&batch).unwrap().get_state(&target).is_none());
-        assert_eq!(batch.get_account(&fixture.address).unwrap().head, block.previous);
+        assert!(crate::endorsement_commit::restore(&batch)
+            .unwrap()
+            .get_state(&target)
+            .is_none());
+        assert_eq!(
+            batch.get_account(&fixture.address).unwrap().head,
+            block.previous
+        );
         batch.commit().unwrap();
     }
 
@@ -564,76 +726,129 @@ mod tests {
     fn prepared_burn_rebases_unrelated_burn_matches_serial_and_rewinds_after_reopen() {
         use crate::economic_candidate::prepared::CapturedPayment;
         for changed_portfolio in [false, true] {
-        let fixture = Fixture::new();
-        fixture.create_holdings();
-        let other = burst_crypto::derive_address(&PublicKey([77; 32]));
-        let mut batch = fixture.store.tx_begin_write().unwrap();
-        let initial = restore(&batch, &fixture.params).unwrap();
-        crate::graph_storage::stage_replayed(&mut batch, &initial.trst.merger_graph).unwrap();
-        crate::trst_storage::stage_replayed_stable(&mut batch, &initial.trst).unwrap();
-        batch.commit().unwrap();
-        let mut block = fixture.next(BlockType::Burn, 104);
-        block.brn_spent += 7;
-        block.link = BlockHash::new(burst_crypto::decode_address(fixture.address.as_str()).unwrap());
-        sign(&mut block);
-        authenticate(&block, &fixture.params, block.timestamp).unwrap();
-        let batch = fixture.store.tx_begin_write().unwrap();
-        let strict = CapturedPayment::capture(&batch, &block, &fixture.params).unwrap().unwrap().prepare().unwrap();
-        let abort = CapturedPayment::capture(&batch, &block, &fixture.params).unwrap().unwrap();
-        let commit = CapturedPayment::capture(&batch, &block, &fixture.params).unwrap().unwrap();
-        batch.commit().unwrap();
-        let abort = abort.prepare().unwrap();
-        let commit = commit.prepare().unwrap();
-        // Optionally change the acting portfolio without advancing its frontier.
-        let mut batch = fixture.store.tx_begin_write().unwrap();
-        let current = restore(&batch, &fixture.params).unwrap();
-        let mut staged = StagedEngines::new(&current.brn, &current.trst);
-        let trst = staged.trst_mut();
-        let holder = if changed_portfolio { fixture.address.clone() } else { other.clone() };
-        let token = trst.mint(TxHash::new([79; 32]), holder.clone(), 20,
-            holder, Timestamp::new(104)).unwrap();
-        if changed_portfolio { trst.track_token(token); }
-        let before = (trst.save_wallets(), trst.merger_graph.to_bytes(), bincode::serialize(current.brn.get_wallet(&fixture.address).unwrap()).unwrap());
-        staged.persist(&mut batch).unwrap();
-        batch.commit().unwrap();
-        if changed_portfolio {
+            let fixture = Fixture::new();
+            fixture.create_holdings();
+            let other = burst_crypto::derive_address(&PublicKey([77; 32]));
             let mut batch = fixture.store.tx_begin_write().unwrap();
-            assert!(matches!(strict.stage(&mut batch, &fixture.params),
+            let initial = restore(&batch, &fixture.params).unwrap();
+            crate::graph_storage::stage_replayed(&mut batch, &initial.trst.merger_graph).unwrap();
+            crate::trst_storage::stage_replayed_stable(&mut batch, &initial.trst).unwrap();
+            batch.commit().unwrap();
+            let mut block = fixture.next(BlockType::Burn, 104);
+            block.brn_spent += 7;
+            block.link =
+                BlockHash::new(burst_crypto::decode_address(fixture.address.as_str()).unwrap());
+            sign(&mut block);
+            authenticate(&block, &fixture.params, block.timestamp).unwrap();
+            let batch = fixture.store.tx_begin_write().unwrap();
+            let strict = CapturedPayment::capture(&batch, &block, &fixture.params)
+                .unwrap()
+                .unwrap()
+                .prepare()
+                .unwrap();
+            let abort = CapturedPayment::capture(&batch, &block, &fixture.params)
+                .unwrap()
+                .unwrap();
+            let commit = CapturedPayment::capture(&batch, &block, &fixture.params)
+                .unwrap()
+                .unwrap();
+            batch.commit().unwrap();
+            let abort = abort.prepare().unwrap();
+            let commit = commit.prepare().unwrap();
+            // Optionally change the acting portfolio without advancing its frontier.
+            let mut batch = fixture.store.tx_begin_write().unwrap();
+            let current = restore(&batch, &fixture.params).unwrap();
+            let mut staged = StagedEngines::new(&current.brn, &current.trst);
+            let trst = staged.trst_mut();
+            let holder = if changed_portfolio {
+                fixture.address.clone()
+            } else {
+                other.clone()
+            };
+            let token = trst
+                .mint(
+                    TxHash::new([79; 32]),
+                    holder.clone(),
+                    20,
+                    holder,
+                    Timestamp::new(104),
+                )
+                .unwrap();
+            if changed_portfolio {
+                trst.track_token(token);
+            }
+            let before = (
+                trst.save_wallets(),
+                trst.merger_graph.to_bytes(),
+                bincode::serialize(current.brn.get_wallet(&fixture.address).unwrap()).unwrap(),
+            );
+            staged.persist(&mut batch).unwrap();
+            batch.commit().unwrap();
+            if changed_portfolio {
+                let mut batch = fixture.store.tx_begin_write().unwrap();
+                assert!(matches!(strict.stage(&mut batch, &fixture.params),
                 Err(crate::economic_candidate::prepared::PreparedStageError::BeforeWrite(error))
                 if error.contains("prepared TRST portfolio dependency changed")));
-            assert!(batch.get_block(&block.hash).is_err());
-        }
-        let expected = {
-            let mut batch = fixture.store.tx_begin_write().unwrap();
-            let state = apply(&mut batch, &block, &fixture.params, block.timestamp).unwrap();
-            (state.trst.save_wallets(), state.trst.merger_graph.to_bytes(),
-                bincode::serialize(&batch.get_account(&fixture.address).unwrap()).unwrap(), bincode::serialize(state.brn.get_wallet(&fixture.address).unwrap()).unwrap())
-        };
-        for (prepared, publish) in [(abort, false), (commit, true)] {
-            let mut batch = fixture.store.tx_begin_write().unwrap();
-            let state = prepared.stage_revalidated(&mut batch, &fixture.params).unwrap().unwrap().state;
-            assert_eq!(bincode::serialize(state.brn.get_wallet(&fixture.address).unwrap()).unwrap(), expected.3);
-            assert_eq!(state.trst.save_wallets(), expected.0);
-            assert_eq!(state.trst.merger_graph.to_bytes(), expected.1);
-            assert_eq!(bincode::serialize(&batch.get_account(&fixture.address).unwrap()).unwrap(), expected.2);
-            if publish { batch.commit().unwrap(); } else { drop(batch); }
-            let batch = fixture.store.tx_begin_write().unwrap();
-            assert_eq!(batch.get_block(&block.hash).is_ok(), publish);
-        }
-        drop(fixture.store);
-        let store = LmdbStore::open(fixture.directory.path(), 32, 32 * 1024 * 1024).unwrap();
-        let mut batch = store.tx_begin_write().unwrap();
-        let restored = restore(&batch, &fixture.params).unwrap();
-        assert_eq!(bincode::serialize(restored.brn.get_wallet(&fixture.address).unwrap()).unwrap(), expected.3);
-        assert_eq!(restored.trst.save_wallets(), expected.0);
-        assert_eq!(restored.trst.merger_graph.to_bytes(), expected.1);
-        batch.rewind_block(&block.hash).unwrap();
-        let restored = restore(&batch, &fixture.params).unwrap();
-        assert_eq!(bincode::serialize(restored.brn.get_wallet(&fixture.address).unwrap()).unwrap(), before.2);
-        assert_eq!(restored.trst.save_wallets(), before.0);
-        assert_eq!(restored.trst.merger_graph.to_bytes(), before.1);
-        assert_eq!(batch.get_account(&fixture.address).unwrap().head, block.previous);
-        batch.commit().unwrap();
+                assert!(batch.get_block(&block.hash).is_err());
+            }
+            let expected = {
+                let mut batch = fixture.store.tx_begin_write().unwrap();
+                let state = apply(&mut batch, &block, &fixture.params, block.timestamp).unwrap();
+                (
+                    state.trst.save_wallets(),
+                    state.trst.merger_graph.to_bytes(),
+                    bincode::serialize(&batch.get_account(&fixture.address).unwrap()).unwrap(),
+                    bincode::serialize(state.brn.get_wallet(&fixture.address).unwrap()).unwrap(),
+                )
+            };
+            for (prepared, publish) in [(abort, false), (commit, true)] {
+                let mut batch = fixture.store.tx_begin_write().unwrap();
+                let state = prepared
+                    .stage_revalidated(&mut batch, &fixture.params)
+                    .unwrap()
+                    .unwrap()
+                    .state;
+                assert_eq!(
+                    bincode::serialize(state.brn.get_wallet(&fixture.address).unwrap()).unwrap(),
+                    expected.3
+                );
+                assert_eq!(state.trst.save_wallets(), expected.0);
+                assert_eq!(state.trst.merger_graph.to_bytes(), expected.1);
+                assert_eq!(
+                    bincode::serialize(&batch.get_account(&fixture.address).unwrap()).unwrap(),
+                    expected.2
+                );
+                if publish {
+                    batch.commit().unwrap();
+                } else {
+                    drop(batch);
+                }
+                let batch = fixture.store.tx_begin_write().unwrap();
+                assert_eq!(batch.get_block(&block.hash).is_ok(), publish);
+            }
+            drop(fixture.store);
+            let store = LmdbStore::open(fixture.directory.path(), 32, 32 * 1024 * 1024).unwrap();
+            let mut batch = store.tx_begin_write().unwrap();
+            let restored = restore(&batch, &fixture.params).unwrap();
+            assert_eq!(
+                bincode::serialize(restored.brn.get_wallet(&fixture.address).unwrap()).unwrap(),
+                expected.3
+            );
+            assert_eq!(restored.trst.save_wallets(), expected.0);
+            assert_eq!(restored.trst.merger_graph.to_bytes(), expected.1);
+            batch.rewind_block(&block.hash).unwrap();
+            let restored = restore(&batch, &fixture.params).unwrap();
+            assert_eq!(
+                bincode::serialize(restored.brn.get_wallet(&fixture.address).unwrap()).unwrap(),
+                before.2
+            );
+            assert_eq!(restored.trst.save_wallets(), before.0);
+            assert_eq!(restored.trst.merger_graph.to_bytes(), before.1);
+            assert_eq!(
+                batch.get_account(&fixture.address).unwrap().head,
+                block.previous
+            );
+            batch.commit().unwrap();
         }
     }
 
@@ -647,7 +862,10 @@ mod tests {
         let mut batch = fixture.store.tx_begin_write().unwrap();
         let mut initial = restore(&batch, &fixture.params).unwrap();
         for id in other_ids {
-            let token = initial.trst.mint(id, other.clone(), 20, other.clone(), Timestamp::new(100)).unwrap();
+            let token = initial
+                .trst
+                .mint(id, other.clone(), 20, other.clone(), Timestamp::new(100))
+                .unwrap();
             initial.trst.track_token(token);
         }
         crate::graph_storage::stage_replayed(&mut batch, &initial.trst.merger_graph).unwrap();
@@ -658,8 +876,12 @@ mod tests {
         sign(&mut block);
         authenticate(&block, &fixture.params, block.timestamp).unwrap();
         let batch = fixture.store.tx_begin_write().unwrap();
-        let abort = CapturedPayment::capture(&batch, &block, &fixture.params).unwrap().unwrap();
-        let commit = CapturedPayment::capture(&batch, &block, &fixture.params).unwrap().unwrap();
+        let abort = CapturedPayment::capture(&batch, &block, &fixture.params)
+            .unwrap()
+            .unwrap();
+        let commit = CapturedPayment::capture(&batch, &block, &fixture.params)
+            .unwrap()
+            .unwrap();
         batch.commit().unwrap();
         let abort = abort.prepare().unwrap();
         let commit = commit.prepare().unwrap();
@@ -668,8 +890,17 @@ mod tests {
         let current = restore(&batch, &fixture.params).unwrap();
         let mut staged = StagedEngines::new(&current.brn, &current.trst);
         let trst = staged.trst_mut();
-        let inputs = trst.wallets[&other].select_merge_inputs(&other_ids).unwrap();
-        let token = trst.merge(&inputs, other.clone(), TxHash::new([79; 32]), Timestamp::new(104)).unwrap();
+        let inputs = trst.wallets[&other]
+            .select_merge_inputs(&other_ids)
+            .unwrap();
+        let token = trst
+            .merge(
+                &inputs,
+                other.clone(),
+                TxHash::new([79; 32]),
+                Timestamp::new(104),
+            )
+            .unwrap();
         trst.bulk_untrack(&other, &other_ids.into_iter().collect());
         trst.track_token(token);
         let before = (trst.save_wallets(), trst.merger_graph.to_bytes());
@@ -678,16 +909,29 @@ mod tests {
         let expected = {
             let mut batch = fixture.store.tx_begin_write().unwrap();
             let state = apply(&mut batch, &block, &fixture.params, block.timestamp).unwrap();
-            (state.trst.save_wallets(), state.trst.merger_graph.to_bytes(),
-                bincode::serialize(&batch.get_account(&fixture.address).unwrap()).unwrap())
+            (
+                state.trst.save_wallets(),
+                state.trst.merger_graph.to_bytes(),
+                bincode::serialize(&batch.get_account(&fixture.address).unwrap()).unwrap(),
+            )
         };
         for (prepared, publish) in [(abort, false), (commit, true)] {
             let mut batch = fixture.store.tx_begin_write().unwrap();
-            let state = prepared.stage(&mut batch, &fixture.params).unwrap().unwrap();
+            let state = prepared
+                .stage(&mut batch, &fixture.params)
+                .unwrap()
+                .unwrap();
             assert_eq!(state.trst.save_wallets(), expected.0);
             assert_eq!(state.trst.merger_graph.to_bytes(), expected.1);
-            assert_eq!(bincode::serialize(&batch.get_account(&fixture.address).unwrap()).unwrap(), expected.2);
-            if publish { batch.commit().unwrap(); } else { drop(batch); }
+            assert_eq!(
+                bincode::serialize(&batch.get_account(&fixture.address).unwrap()).unwrap(),
+                expected.2
+            );
+            if publish {
+                batch.commit().unwrap();
+            } else {
+                drop(batch);
+            }
             let batch = fixture.store.tx_begin_write().unwrap();
             assert_eq!(batch.get_block(&block.hash).is_ok(), publish);
         }
@@ -701,7 +945,10 @@ mod tests {
         let restored = restore(&batch, &fixture.params).unwrap();
         assert_eq!(restored.trst.save_wallets(), before.0);
         assert_eq!(restored.trst.merger_graph.to_bytes(), before.1);
-        assert_eq!(batch.get_account(&fixture.address).unwrap().head, block.previous);
+        assert_eq!(
+            batch.get_account(&fixture.address).unwrap().head,
+            block.previous
+        );
         batch.commit().unwrap();
     }
 
@@ -721,7 +968,9 @@ mod tests {
             let batch = fixture.store.tx_begin_write().unwrap();
             restore(&batch, &fixture.params).unwrap();
             batch.commit().unwrap();
-            let captured = CapturedPayment::capture_read(&fixture.store, &block, &fixture.params).unwrap().unwrap();
+            let captured = CapturedPayment::capture_read(&fixture.store, &block, &fixture.params)
+                .unwrap()
+                .unwrap();
             captured.prepare().unwrap()
         };
         let prepared = prepare();
@@ -733,7 +982,10 @@ mod tests {
         batch.put_account_info(&account, false).unwrap();
         batch.commit().unwrap();
         let mut batch = fixture.store.tx_begin_write().unwrap();
-        assert!(matches!(prepared.stage(&mut batch, &fixture.params), Err(PreparedStageError::BeforeWrite(_))));
+        assert!(matches!(
+            prepared.stage(&mut batch, &fixture.params),
+            Err(PreparedStageError::BeforeWrite(_))
+        ));
         apply(&mut batch, &block, &fixture.params, block.timestamp).unwrap();
         drop(batch);
         for stale_account in [false, true] {
@@ -745,10 +997,14 @@ mod tests {
                 account.confirmation_height += 1;
                 batch.put_account_info(&account, false).unwrap();
             }
-            assert!(matches!(CapturedPayment::capture(&batch, &block, &fixture.params),
-                Err(PreparedStageError::Abort(_))));
-            assert!(matches!(prepared.stage_revalidated(&mut batch, &fixture.params),
-                Err(PreparedStageError::Abort(_))));
+            assert!(matches!(
+                CapturedPayment::capture(&batch, &block, &fixture.params),
+                Err(PreparedStageError::Abort(_))
+            ));
+            assert!(matches!(
+                prepared.stage_revalidated(&mut batch, &fixture.params),
+                Err(PreparedStageError::Abort(_))
+            ));
             assert!(batch.get_block(&block.hash).is_err());
             drop(batch);
         }
@@ -757,11 +1013,17 @@ mod tests {
         let prepared = prepare();
         let mut batch = fixture.store.tx_begin_write().unwrap();
         batch.put_meta("prepared-write-failure", &[1]).unwrap();
-        assert!(matches!(prepared.stage_revalidated(&mut batch, &fixture.params), Err(PreparedStageError::Abort(_))));
+        assert!(matches!(
+            prepared.stage_revalidated(&mut batch, &fixture.params),
+            Err(PreparedStageError::Abort(_))
+        ));
         assert!(batch.commit().is_err());
         let batch = fixture.store.tx_begin_write().unwrap();
         assert!(batch.get_block(&block.hash).is_err());
-        assert_eq!(batch.get_account(&fixture.address).unwrap().head, block.previous);
+        assert_eq!(
+            batch.get_account(&fixture.address).unwrap().head,
+            block.previous
+        );
     }
 
     #[test]
@@ -777,53 +1039,91 @@ mod tests {
             crate::trst_storage::stage_replayed_stable(&mut batch, &initial.trst).unwrap();
             batch.commit().unwrap();
             let mut send = fixture.next(BlockType::Send, 104);
-            send.link = BlockHash::new(burst_crypto::decode_address(fixture.address.as_str()).unwrap());
+            send.link =
+                BlockHash::new(burst_crypto::decode_address(fixture.address.as_str()).unwrap());
             send.origin = origin;
             send.trst_balance -= 5;
             fixture.commit(&mut send);
             let mut claim = fixture.next(kind.clone(), 105);
             claim.link = send.hash;
-            if kind == BlockType::Receive { claim.trst_balance += 5; }
+            if kind == BlockType::Receive {
+                claim.trst_balance += 5;
+            }
             sign(&mut claim);
             authenticate(&claim, &fixture.params, claim.timestamp).unwrap();
             let prepare = || {
                 let batch = fixture.store.tx_begin_write().unwrap();
                 restore(&batch, &fixture.params).unwrap();
                 batch.commit().unwrap();
-                let captured = CapturedPayment::capture_read(&fixture.store, &claim, &fixture.params).unwrap().unwrap();
+                let captured =
+                    CapturedPayment::capture_read(&fixture.store, &claim, &fixture.params)
+                        .unwrap()
+                        .unwrap();
                 captured.prepare().unwrap()
             };
             for mutation in 0..3 {
                 let prepared = prepare();
                 let mut batch = fixture.store.tx_begin_write().unwrap();
                 if mutation == 0 {
-                    batch.delete_pending(&fixture.address, send.hash.as_bytes()).unwrap();
+                    batch
+                        .delete_pending(&fixture.address, send.hash.as_bytes())
+                        .unwrap();
                 } else {
-                    let mut pending = batch.get_pending(&fixture.address, &send.hash.into_tx_hash()).unwrap();
-                    if mutation == 1 { pending.return_credit = true; }
-                    else {
+                    let mut pending = batch
+                        .get_pending(&fixture.address, &send.hash.into_tx_hash())
+                        .unwrap();
+                    if mutation == 1 {
+                        pending.return_credit = true;
+                    } else {
                         let mut split = pending.provenance[0].clone();
                         split.amount = 1;
                         pending.provenance[0].amount -= 1;
                         pending.provenance.push(split);
                     }
-                    batch.put_pending(&fixture.address, send.hash.as_bytes(), &bincode::serialize(&pending).unwrap()).unwrap();
+                    batch
+                        .put_pending(
+                            &fixture.address,
+                            send.hash.as_bytes(),
+                            &bincode::serialize(&pending).unwrap(),
+                        )
+                        .unwrap();
                 }
-                assert!(matches!(prepared.stage(&mut batch, &fixture.params),
-                    Err(crate::economic_candidate::prepared::PreparedStageError::BeforeWrite(_))));
+                assert!(matches!(
+                    prepared.stage(&mut batch, &fixture.params),
+                    Err(crate::economic_candidate::prepared::PreparedStageError::BeforeWrite(_))
+                ));
                 assert!(batch.get_block(&claim.hash).is_err());
                 assert_eq!(batch.get_account(&fixture.address).unwrap().head, send.hash);
                 drop(batch);
                 let batch = fixture.store.tx_begin_write().unwrap();
-                assert_eq!(batch.get_pending(&fixture.address, &send.hash.into_tx_hash()).unwrap().amount, 5);
+                assert_eq!(
+                    batch
+                        .get_pending(&fixture.address, &send.hash.into_tx_hash())
+                        .unwrap()
+                        .amount,
+                    5
+                );
             }
             let output = |batch: &LmdbWriteTransaction<'_>, state: &PaymentState| {
-                assert!(batch.get_pending(&fixture.address, &send.hash.into_tx_hash()).is_err());
+                assert!(batch
+                    .get_pending(&fixture.address, &send.hash.into_tx_hash())
+                    .is_err());
                 let returned = if kind == BlockType::RejectReceive {
-                    Some(batch.get_pending(&fixture.address, &claim.hash.into_tx_hash()).unwrap())
-                } else { None };
-                bincode::serialize(&(batch.get_account(&fixture.address).unwrap(),
-                    state.trst.save_wallets(), state.brn.get_wallet(&fixture.address), returned)).unwrap()
+                    Some(
+                        batch
+                            .get_pending(&fixture.address, &claim.hash.into_tx_hash())
+                            .unwrap(),
+                    )
+                } else {
+                    None
+                };
+                bincode::serialize(&(
+                    batch.get_account(&fixture.address).unwrap(),
+                    state.trst.save_wallets(),
+                    state.brn.get_wallet(&fixture.address),
+                    returned,
+                ))
+                .unwrap()
             };
             let expected = {
                 let mut batch = fixture.store.tx_begin_write().unwrap();
@@ -834,17 +1134,37 @@ mod tests {
                 let prepared = prepare();
                 let stale = prepare();
                 let mut batch = fixture.store.tx_begin_write().unwrap();
-                let state = prepared.stage(&mut batch, &fixture.params).unwrap().unwrap();
+                let state = prepared
+                    .stage(&mut batch, &fixture.params)
+                    .unwrap()
+                    .unwrap();
                 assert_eq!(output(&batch, &state), expected);
-                if commit { batch.commit().unwrap(); } else { drop(batch); }
+                if commit {
+                    batch.commit().unwrap();
+                } else {
+                    drop(batch);
+                }
                 let mut batch = fixture.store.tx_begin_write().unwrap();
                 if commit {
-                    assert!(matches!(stale.stage(&mut batch, &fixture.params),
-                        Err(crate::economic_candidate::prepared::PreparedStageError::BeforeWrite(_))));
-                    assert_eq!(batch.get_account(&fixture.address).unwrap().head, claim.hash);
+                    assert!(matches!(
+                        stale.stage(&mut batch, &fixture.params),
+                        Err(
+                            crate::economic_candidate::prepared::PreparedStageError::BeforeWrite(_)
+                        )
+                    ));
+                    assert_eq!(
+                        batch.get_account(&fixture.address).unwrap().head,
+                        claim.hash
+                    );
                 } else {
                     assert_eq!(batch.get_account(&fixture.address).unwrap().head, send.hash);
-                    assert_eq!(batch.get_pending(&fixture.address, &send.hash.into_tx_hash()).unwrap().amount, 5);
+                    assert_eq!(
+                        batch
+                            .get_pending(&fixture.address, &send.hash.into_tx_hash())
+                            .unwrap()
+                            .amount,
+                        5
+                    );
                 }
             }
         }
@@ -859,8 +1179,20 @@ mod tests {
         let other_origin = TxHash::new([77; 32]);
         let mut batch = fixture.store.tx_begin_write().unwrap();
         let mut initial = restore(&batch, &fixture.params).unwrap();
-        initial.brn.track_wallet(other.clone(), burst_brn::BrnWalletState::new(Timestamp::new(0)));
-        let token = initial.trst.mint(other_origin, other.clone(), 20, other.clone(), Timestamp::new(100)).unwrap();
+        initial.brn.track_wallet(
+            other.clone(),
+            burst_brn::BrnWalletState::new(Timestamp::new(0)),
+        );
+        let token = initial
+            .trst
+            .mint(
+                other_origin,
+                other.clone(),
+                20,
+                other.clone(),
+                Timestamp::new(100),
+            )
+            .unwrap();
         initial.trst.track_token(token);
         ledger_updater::persist_brn(&mut batch, &initial.brn).unwrap();
         crate::graph_storage::stage_replayed(&mut batch, &initial.trst.merger_graph).unwrap();
@@ -873,8 +1205,12 @@ mod tests {
         sign(&mut send);
         authenticate(&send, &fixture.params, send.timestamp).unwrap();
         let batch = fixture.store.tx_begin_write().unwrap();
-        let capture = CapturedPayment::capture(&batch, &send, &fixture.params).unwrap().unwrap();
-        let stale = CapturedPayment::capture(&batch, &send, &fixture.params).unwrap().unwrap();
+        let capture = CapturedPayment::capture(&batch, &send, &fixture.params)
+            .unwrap()
+            .unwrap();
+        let stale = CapturedPayment::capture(&batch, &send, &fixture.params)
+            .unwrap()
+            .unwrap();
         batch.commit().unwrap();
         let prepared = capture.prepare().unwrap();
         let stale = stale.prepare().unwrap();
@@ -882,26 +1218,49 @@ mod tests {
         let mut batch = fixture.store.tx_begin_write().unwrap();
         let current = restore(&batch, &fixture.params).unwrap();
         let mut changed = StagedEngines::new(&current.brn, &current.trst);
-        changed.brn_mut().get_wallet_mut(&other).unwrap().total_burned = 3;
-        changed.trst_mut().debit_wallet_with_provenance(&other, &other_origin, 4);
+        changed
+            .brn_mut()
+            .get_wallet_mut(&other)
+            .unwrap()
+            .total_burned = 3;
+        changed
+            .trst_mut()
+            .debit_wallet_with_provenance(&other, &other_origin, 4);
         changed.persist(&mut batch).unwrap();
         batch.commit().unwrap();
         let expected = {
             let mut batch = fixture.store.tx_begin_write().unwrap();
             let result = apply(&mut batch, &send, &fixture.params, send.timestamp).unwrap();
-            (result.trst.save_wallets(), bincode::serialize(result.brn.get_wallet(&other).unwrap()).unwrap())
+            (
+                result.trst.save_wallets(),
+                bincode::serialize(result.brn.get_wallet(&other).unwrap()).unwrap(),
+            )
         };
         let mut batch = fixture.store.tx_begin_write().unwrap();
-        let state = prepared.stage(&mut batch, &fixture.params).unwrap().unwrap();
+        let state = prepared
+            .stage(&mut batch, &fixture.params)
+            .unwrap()
+            .unwrap();
         assert_eq!(state.trst.save_wallets(), expected.0);
-        assert_eq!(bincode::serialize(state.brn.get_wallet(&other).unwrap()).unwrap(), expected.1);
+        assert_eq!(
+            bincode::serialize(state.brn.get_wallet(&other).unwrap()).unwrap(),
+            expected.1
+        );
         assert_eq!(state.trst.transferable_balance_snapshot(&other), Some(16));
         batch.commit().unwrap();
         let mut batch = fixture.store.tx_begin_write().unwrap();
-        assert!(matches!(stale.stage(&mut batch, &fixture.params),
-                        Err(crate::economic_candidate::prepared::PreparedStageError::BeforeWrite(_))));
+        assert!(matches!(
+            stale.stage(&mut batch, &fixture.params),
+            Err(crate::economic_candidate::prepared::PreparedStageError::BeforeWrite(_))
+        ));
         assert_eq!(batch.get_account(&fixture.address).unwrap().head, send.hash);
-        assert_eq!(batch.get_pending(&fixture.address, &send.hash.into_tx_hash()).unwrap().amount, 5);
+        assert_eq!(
+            batch
+                .get_pending(&fixture.address, &send.hash.into_tx_hash())
+                .unwrap()
+                .amount,
+            5
+        );
     }
 
     #[test]
@@ -926,8 +1285,12 @@ mod tests {
         let mut altered = block.clone();
         altered.timestamp = Timestamp::new(101);
         assert!(inputs.recheck(&batch, &altered, &fixture.params).is_err());
-        batch.put_meta(burst_store::meta::PAYMENT_EPOCH_KEY,
-            BlockHash::new([99; 32]).as_bytes()).unwrap();
+        batch
+            .put_meta(
+                burst_store::meta::PAYMENT_EPOCH_KEY,
+                BlockHash::new([99; 32]).as_bytes(),
+            )
+            .unwrap();
         assert!(inputs.recheck(&batch, &block, &fixture.params).is_err());
         drop(batch);
         let mut burn = fixture.next(BlockType::Burn, 100);
@@ -940,9 +1303,17 @@ mod tests {
         sign(&mut receive);
         let mut batch = fixture.store.tx_begin_write().unwrap();
         let inputs = LedgerInputs::capture(&batch, &receive, &fixture.params).unwrap();
-        let mut pending = batch.get_pending(&fixture.address, &burn.hash.into_tx_hash()).unwrap();
+        let mut pending = batch
+            .get_pending(&fixture.address, &burn.hash.into_tx_hash())
+            .unwrap();
         pending.amount += 1;
-        batch.put_pending(&fixture.address, burn.hash.as_bytes(), &bincode::serialize(&pending).unwrap()).unwrap();
+        batch
+            .put_pending(
+                &fixture.address,
+                burn.hash.as_bytes(),
+                &bincode::serialize(&pending).unwrap(),
+            )
+            .unwrap();
         assert!(inputs.recheck(&batch, &receive, &fixture.params).is_err());
         drop(batch);
         let batch = fixture.store.tx_begin_write().unwrap();
@@ -954,91 +1325,124 @@ mod tests {
     fn grouped_prepared_payments_reopen_and_rewind_each_block_independently() {
         use crate::economic_candidate::prepared::CapturedPayment;
         for stale_follower in [false, true] {
-        let fixture = Fixture::new();
-        fixture.create_holdings();
-        let mut batch = fixture.store.tx_begin_write().unwrap();
-        let initial = restore(&batch, &fixture.params).unwrap();
-        crate::graph_storage::stage_replayed(&mut batch, &initial.trst.merger_graph).unwrap();
-        crate::trst_storage::stage_replayed_stable(&mut batch, &initial.trst).unwrap();
-        batch.commit().unwrap();
-        let mut first = fixture.next(BlockType::Burn, 104);
-        first.brn_spent += 7;
-        first.link = BlockHash::new(burst_crypto::decode_address(fixture.address.as_str()).unwrap());
-        sign(&mut first);
-        let key = burst_crypto::keypair_from_seed(&[17; 32]);
-        let other = burst_crypto::derive_address(&key.public);
-        let mut open = first.clone();
-        open.block_type = BlockType::Open;
-        open.account = other.clone();
-        open.representative = other.clone();
-        open.previous = BlockHash::ZERO;
-        open.link = BlockHash::ZERO;
-        open.brn_spent = 0;
-        open.trst_balance = 0;
-        open.hash = open.compute_hash();
-        open.signature = burst_crypto::sign_message(open.hash.as_bytes(), &key.private);
-        let mut batch = fixture.store.tx_begin_write().unwrap();
-        apply(&mut batch, &open, &fixture.params, open.timestamp).unwrap();
-        batch.commit().unwrap();
-        let mut second = open.clone();
-        second.block_type = BlockType::ChangeRepresentative;
-        second.previous = open.hash;
-        second.timestamp = Timestamp::new(105);
-        second.representative = fixture.address.clone();
-        second.hash = second.compute_hash();
-        second.signature = burst_crypto::sign_message(second.hash.as_bytes(), &key.private);
-        let batch = fixture.store.tx_begin_write().unwrap();
-        let before = restore(&batch, &fixture.params).unwrap();
-        let prepare = |block: &StateBlock| {
-            authenticate(block, &fixture.params, block.timestamp).unwrap();
-            CapturedPayment::capture(&batch, block, &fixture.params).unwrap().unwrap().prepare().unwrap()
-        };
-        let first_prepared = prepare(&first);
-        let second_prepared = prepare(&second);
-        batch.commit().unwrap();
-        if stale_follower {
+            let fixture = Fixture::new();
+            fixture.create_holdings();
             let mut batch = fixture.store.tx_begin_write().unwrap();
-            let mut account = batch.get_account(&second.account).unwrap();
-            account.confirmation_height = account.block_count;
-            batch.put_account_info(&account, false).unwrap();
+            let initial = restore(&batch, &fixture.params).unwrap();
+            crate::graph_storage::stage_replayed(&mut batch, &initial.trst.merger_graph).unwrap();
+            crate::trst_storage::stage_replayed_stable(&mut batch, &initial.trst).unwrap();
             batch.commit().unwrap();
-        }
-        let generation = fixture.store.env().info().last_txn_id;
-        let mut group = fixture.store.tx_begin_block_group().unwrap();
-        first_prepared.stage(&mut group, &fixture.params).unwrap().unwrap();
-        second_prepared.stage_revalidated(&mut group, &fixture.params).unwrap().unwrap();
-        group.commit().unwrap();
-        assert_eq!(fixture.store.env().info().last_txn_id, generation + 1);
-        drop(fixture.store);
-        let store = LmdbStore::open(fixture.directory.path(), 32, 32 << 20).unwrap();
-        let batch = store.tx_begin_write().unwrap();
-        assert_eq!(batch.get_account(&first.account).unwrap().head, first.hash);
-        assert_eq!(batch.get_account(&second.account).unwrap().head, second.hash);
-        for block in [&first, &second] {
-            let undo = batch.block_undo(&block.hash).unwrap().unwrap();
-            assert_eq!(undo.account, block.account);
-            assert_eq!(undo.height, batch.get_account(&block.account).unwrap().block_count);
-        }
-        drop(batch);
-        let mut batch = store.tx_begin_write().unwrap();
-        batch.rewind_block(&second.hash).unwrap();
-        batch.commit().unwrap();
-        let mut batch = store.tx_begin_write().unwrap();
-        assert_eq!(batch.get_account(&first.account).unwrap().head, first.hash);
-        assert_eq!(batch.get_account(&second.account).unwrap().head, open.hash);
-        if stale_follower {
-            assert_eq!(batch.get_account(&second.account).unwrap().confirmation_height, 1);
-        }
-        batch.rewind_block(&first.hash).unwrap();
-        batch.commit().unwrap();
-        let batch = store.tx_begin_write().unwrap();
-        let restored = restore(&batch, &fixture.params).unwrap();
-        assert_eq!(restored.trst.save_wallets(), before.trst.save_wallets());
-        assert_eq!(restored.trst.merger_graph.to_bytes(), before.trst.merger_graph.to_bytes());
-        assert_eq!(bincode::serialize(restored.brn.get_wallet(&first.account).unwrap()).unwrap(),
-            bincode::serialize(before.brn.get_wallet(&first.account).unwrap()).unwrap());
-        assert_eq!(batch.get_account(&first.account).unwrap().head, first.previous);
-        assert!(batch.get_pending(&first.account, &first.hash.into_tx_hash()).is_err());
+            let mut first = fixture.next(BlockType::Burn, 104);
+            first.brn_spent += 7;
+            first.link =
+                BlockHash::new(burst_crypto::decode_address(fixture.address.as_str()).unwrap());
+            sign(&mut first);
+            let key = burst_crypto::keypair_from_seed(&[17; 32]);
+            let other = burst_crypto::derive_address(&key.public);
+            let mut open = first.clone();
+            open.block_type = BlockType::Open;
+            open.account = other.clone();
+            open.representative = other.clone();
+            open.previous = BlockHash::ZERO;
+            open.link = BlockHash::ZERO;
+            open.brn_spent = 0;
+            open.trst_balance = 0;
+            open.hash = open.compute_hash();
+            open.signature = burst_crypto::sign_message(open.hash.as_bytes(), &key.private);
+            let mut batch = fixture.store.tx_begin_write().unwrap();
+            apply(&mut batch, &open, &fixture.params, open.timestamp).unwrap();
+            batch.commit().unwrap();
+            let mut second = open.clone();
+            second.block_type = BlockType::ChangeRepresentative;
+            second.previous = open.hash;
+            second.timestamp = Timestamp::new(105);
+            second.representative = fixture.address.clone();
+            second.hash = second.compute_hash();
+            second.signature = burst_crypto::sign_message(second.hash.as_bytes(), &key.private);
+            let batch = fixture.store.tx_begin_write().unwrap();
+            let before = restore(&batch, &fixture.params).unwrap();
+            let prepare = |block: &StateBlock| {
+                authenticate(block, &fixture.params, block.timestamp).unwrap();
+                CapturedPayment::capture(&batch, block, &fixture.params)
+                    .unwrap()
+                    .unwrap()
+                    .prepare()
+                    .unwrap()
+            };
+            let first_prepared = prepare(&first);
+            let second_prepared = prepare(&second);
+            batch.commit().unwrap();
+            if stale_follower {
+                let mut batch = fixture.store.tx_begin_write().unwrap();
+                let mut account = batch.get_account(&second.account).unwrap();
+                account.confirmation_height = account.block_count;
+                batch.put_account_info(&account, false).unwrap();
+                batch.commit().unwrap();
+            }
+            let generation = fixture.store.env().info().last_txn_id;
+            let mut group = fixture.store.tx_begin_block_group().unwrap();
+            first_prepared
+                .stage(&mut group, &fixture.params)
+                .unwrap()
+                .unwrap();
+            second_prepared
+                .stage_revalidated(&mut group, &fixture.params)
+                .unwrap()
+                .unwrap();
+            group.commit().unwrap();
+            assert_eq!(fixture.store.env().info().last_txn_id, generation + 1);
+            drop(fixture.store);
+            let store = LmdbStore::open(fixture.directory.path(), 32, 32 << 20).unwrap();
+            let batch = store.tx_begin_write().unwrap();
+            assert_eq!(batch.get_account(&first.account).unwrap().head, first.hash);
+            assert_eq!(
+                batch.get_account(&second.account).unwrap().head,
+                second.hash
+            );
+            for block in [&first, &second] {
+                let undo = batch.block_undo(&block.hash).unwrap().unwrap();
+                assert_eq!(undo.account, block.account);
+                assert_eq!(
+                    undo.height,
+                    batch.get_account(&block.account).unwrap().block_count
+                );
+            }
+            drop(batch);
+            let mut batch = store.tx_begin_write().unwrap();
+            batch.rewind_block(&second.hash).unwrap();
+            batch.commit().unwrap();
+            let mut batch = store.tx_begin_write().unwrap();
+            assert_eq!(batch.get_account(&first.account).unwrap().head, first.hash);
+            assert_eq!(batch.get_account(&second.account).unwrap().head, open.hash);
+            if stale_follower {
+                assert_eq!(
+                    batch
+                        .get_account(&second.account)
+                        .unwrap()
+                        .confirmation_height,
+                    1
+                );
+            }
+            batch.rewind_block(&first.hash).unwrap();
+            batch.commit().unwrap();
+            let batch = store.tx_begin_write().unwrap();
+            let restored = restore(&batch, &fixture.params).unwrap();
+            assert_eq!(restored.trst.save_wallets(), before.trst.save_wallets());
+            assert_eq!(
+                restored.trst.merger_graph.to_bytes(),
+                before.trst.merger_graph.to_bytes()
+            );
+            assert_eq!(
+                bincode::serialize(restored.brn.get_wallet(&first.account).unwrap()).unwrap(),
+                bincode::serialize(before.brn.get_wallet(&first.account).unwrap()).unwrap()
+            );
+            assert_eq!(
+                batch.get_account(&first.account).unwrap().head,
+                first.previous
+            );
+            assert!(batch
+                .get_pending(&first.account, &first.hash.into_tx_hash())
+                .is_err());
         }
     }
 
@@ -1058,23 +1462,48 @@ mod tests {
         send.trst_balance -= 5;
         sign(&mut send);
         let batch = fixture.store.tx_begin_write().unwrap();
-        let first_prepared = CapturedPayment::capture(&batch, &send, &fixture.params).unwrap().unwrap().prepare().unwrap();
-        let second_prepared = CapturedPayment::capture(&batch, &send, &fixture.params).unwrap().unwrap().prepare().unwrap();
+        let first_prepared = CapturedPayment::capture(&batch, &send, &fixture.params)
+            .unwrap()
+            .unwrap()
+            .prepare()
+            .unwrap();
+        let second_prepared = CapturedPayment::capture(&batch, &send, &fixture.params)
+            .unwrap()
+            .unwrap()
+            .prepare()
+            .unwrap();
         batch.commit().unwrap();
         let generation = fixture.store.env().info().last_txn_id;
         let mut group = fixture.store.tx_begin_block_group().unwrap();
-        first_prepared.stage(&mut group, &fixture.params).unwrap().unwrap();
-        assert!(matches!(second_prepared.stage_revalidated(&mut group, &fixture.params), Err(PreparedStageError::BeforeWrite(_))));
+        first_prepared
+            .stage(&mut group, &fixture.params)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            second_prepared.stage_revalidated(&mut group, &fixture.params),
+            Err(PreparedStageError::BeforeWrite(_))
+        ));
         drop(group); // The admission caller aborts before serial isolation.
         assert_eq!(fixture.store.env().info().last_txn_id, generation);
         let mut batch = fixture.store.tx_begin_write().unwrap();
-        assert_eq!(batch.get_account(&send.account).unwrap().head, send.previous);
+        assert_eq!(
+            batch.get_account(&send.account).unwrap().head,
+            send.previous
+        );
         assert!(batch.block_undo(&send.hash).unwrap().is_none());
-        assert!(batch.get_pending(&send.account, &send.hash.into_tx_hash()).is_err());
+        assert!(batch
+            .get_pending(&send.account, &send.hash.into_tx_hash())
+            .is_err());
         apply(&mut batch, &send, &fixture.params, send.timestamp).unwrap();
         batch.commit().unwrap();
         let batch = fixture.store.tx_begin_write().unwrap();
-        assert_eq!(batch.get_pending(&send.account, &send.hash.into_tx_hash()).unwrap().amount, 5);
+        assert_eq!(
+            batch
+                .get_pending(&send.account, &send.hash.into_tx_hash())
+                .unwrap()
+                .amount,
+            5
+        );
     }
 
     struct Fixture {
@@ -1509,11 +1938,8 @@ mod tests {
             if uses_row_storage {
                 let state = restore(&batch, &fixture.params).unwrap();
                 crate::trst_storage::stage_rows_for_test(&mut batch, &state.trst).unwrap();
-                crate::graph_storage::stage_rows_for_test(
-                    &mut batch,
-                    &state.trst.merger_graph,
-                )
-                .unwrap();
+                crate::graph_storage::stage_rows_for_test(&mut batch, &state.trst.merger_graph)
+                    .unwrap();
             }
             batch.commit().unwrap();
         }
@@ -1618,7 +2044,10 @@ mod tests {
         let batch = store.tx_begin_write().unwrap();
         assert_eq!(batch.get_account(&address).unwrap().head, replacement.hash);
         let state = restore(&batch, &params).unwrap();
-        assert_eq!(crate::trst_storage::uses_row_storage(&batch).unwrap(), uses_row_storage);
+        assert_eq!(
+            crate::trst_storage::uses_row_storage(&batch).unwrap(),
+            uses_row_storage
+        );
         assert_eq!(batch.uses_graph_records().unwrap(), uses_row_storage);
         for (address, bytes) in &unrelated {
             assert_eq!(

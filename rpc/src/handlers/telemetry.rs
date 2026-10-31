@@ -25,7 +25,12 @@ pub(super) fn read(
         let trst = engine.blocking_lock();
         (trst.wallets.clone(), trst.expiry_secs)
     };
-    let mut summary = Summary { accounts: 0, verified: 0, unverified: 0, holdings: [0; 3] };
+    let mut summary = Summary {
+        accounts: 0,
+        verified: 0,
+        unverified: 0,
+        holdings: [0; 3],
+    };
     visit(&mut |account| {
         summary.accounts += 1;
         summary.verified += u64::from(account.state.is_verified());
@@ -39,7 +44,8 @@ pub(super) fn read(
                 } else {
                     0
                 };
-                summary.holdings[index] = summary.holdings[index].checked_add(token.amount)
+                summary.holdings[index] = summary.holdings[index]
+                    .checked_add(token.amount)
                     .ok_or_else(|| StoreError::Corruption("TRST total overflow".into()))?;
             }
         }
@@ -59,9 +65,12 @@ mod tests {
         now: Timestamp,
     ) -> Result<[u128; 3], RpcError> {
         read(engine, now, |visit| {
-            for account in accounts { visit(AccountInfo::unopened(account.clone()))?; }
+            for account in accounts {
+                visit(AccountInfo::unopened(account.clone()))?;
+            }
             Ok(())
-        }).map(|summary| summary.holdings)
+        })
+        .map(|summary| summary.holdings)
     }
 
     #[test]
@@ -81,21 +90,33 @@ mod tests {
                 visited += 1;
             }
             Ok(())
-        }).unwrap();
-        assert_eq!((summary.accounts, summary.verified, summary.unverified), (10_000, 2500, 2500));
+        })
+        .unwrap();
+        assert_eq!(
+            (summary.accounts, summary.verified, summary.unverified),
+            (10_000, 2500, 2500)
+        );
         assert_eq!(visited, 10_000);
         assert_eq!(summary.holdings, [0; 3]);
         let result = read(&engine, Timestamp::new(1), |visit| {
             visit(AccountInfo::unopened(WalletAddress::new("brst_first")))?;
             Err(StoreError::Corruption("broken account row".into()))
         });
-        assert!(matches!(result, Err(RpcError::Store(message)) if message.contains("broken account row")));
+        assert!(
+            matches!(result, Err(RpcError::Store(message)) if message.contains("broken account row"))
+        );
     }
 
-
     fn holding(engine: &mut TrstEngine, id: u8, wallet: &WalletAddress, at: u64, revoked: bool) {
-        let mut token = engine.mint(TxHash::new([id; 32]), wallet.clone(),
-            id as u128, wallet.clone(), Timestamp::new(at)).unwrap();
+        let mut token = engine
+            .mint(
+                TxHash::new([id; 32]),
+                wallet.clone(),
+                id as u128,
+                wallet.clone(),
+                Timestamp::new(at),
+            )
+            .unwrap();
         if revoked {
             token.state = TrstState::Revoked;
             token.revoked_origin = Some(token.origin);
@@ -116,14 +137,29 @@ mod tests {
         let engine = tokio::sync::Mutex::new(engine);
         let accounts = [&account];
         let iter = accounts.into_iter().inspect(|_| {
-            let mut live = engine.try_lock().expect("holdings scan must release live lock");
+            let mut live = engine
+                .try_lock()
+                .expect("holdings scan must release live lock");
             live.expiry_secs = 1;
             holding(&mut live, 5, &account, 200, false);
         });
-        assert_eq!(holdings_totals(&engine, iter, Timestamp::new(200)).unwrap(), [1, 2, 3]);
-        assert_eq!(holdings_totals(&engine, accounts.into_iter(), Timestamp::new(200)).unwrap(), [5, 3, 3]);
-        assert_eq!(holdings_totals(&engine, [&WalletAddress::new("brst_missing")].into_iter(),
-            Timestamp::new(200)).unwrap(), [0, 0, 0]);
+        assert_eq!(
+            holdings_totals(&engine, iter, Timestamp::new(200)).unwrap(),
+            [1, 2, 3]
+        );
+        assert_eq!(
+            holdings_totals(&engine, accounts.into_iter(), Timestamp::new(200)).unwrap(),
+            [5, 3, 3]
+        );
+        assert_eq!(
+            holdings_totals(
+                &engine,
+                [&WalletAddress::new("brst_missing")].into_iter(),
+                Timestamp::new(200)
+            )
+            .unwrap(),
+            [0, 0, 0]
+        );
     }
 
     #[test]
@@ -133,8 +169,12 @@ mod tests {
         holding(&mut engine, 1, &account, 100, false);
         holding(&mut engine, 2, &account, 100, false);
         engine.wallets.get_mut(&account).unwrap().tokens[0].amount = u128::MAX;
-        let error = holdings_totals(&tokio::sync::Mutex::new(engine), [&account].into_iter(),
-            Timestamp::new(100)).unwrap_err();
+        let error = holdings_totals(
+            &tokio::sync::Mutex::new(engine),
+            [&account].into_iter(),
+            Timestamp::new(100),
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("TRST total overflow"));
     }
 }
@@ -143,13 +183,22 @@ pub(super) fn signing_clock(
     clock: Option<&burst_network::trusted_clock::TrustedClock>,
 ) -> burst_rpc_messages::node::SigningClockStatus {
     use burst_rpc_messages::node::SigningClockStatus;
-    let Some(clock) = clock else { return SigningClockStatus::Disabled; };
+    let Some(clock) = clock else {
+        return SigningClockStatus::Disabled;
+    };
     match clock.reading() {
         Ok(time) => match time.now.checked_add(time.error_bound) {
-            Some(latest) => SigningClockStatus::Ready { earliest: time.now, latest },
-            None => SigningClockStatus::Unavailable { reason: "signing-time bound overflow".into() },
+            Some(latest) => SigningClockStatus::Ready {
+                earliest: time.now,
+                latest,
+            },
+            None => SigningClockStatus::Unavailable {
+                reason: "signing-time bound overflow".into(),
+            },
         },
-        Err(error) => SigningClockStatus::Unavailable { reason: error.to_string() },
+        Err(error) => SigningClockStatus::Unavailable {
+            reason: error.to_string(),
+        },
     }
 }
 
@@ -162,6 +211,9 @@ mod clock_tests {
     fn missing_or_unsampled_clock_never_reports_ready() {
         assert_eq!(signing_clock(None), SigningClockStatus::Disabled);
         let clock = burst_network::trusted_clock::TrustedClock::new(4).unwrap();
-        assert!(matches!(signing_clock(Some(&clock)), SigningClockStatus::Unavailable { .. }));
+        assert!(matches!(
+            signing_clock(Some(&clock)),
+            SigningClockStatus::Unavailable { .. }
+        ));
     }
 }

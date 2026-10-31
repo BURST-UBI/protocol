@@ -23,7 +23,10 @@ impl RecoveryBase {
         self.verify_view(&batch.read_view())
     }
 
-    pub(super) fn verify_view(&self, batch: &burst_store_lmdb::read_view::LedgerReadView<'_>) -> Result<(), StoreError> {
+    pub(super) fn verify_view(
+        &self,
+        batch: &burst_store_lmdb::read_view::LedgerReadView<'_>,
+    ) -> Result<(), StoreError> {
         match self {
             Self::Archive(commitment) => commitment.verify(|key| batch.get_meta(key)),
             Self::Genesis if batch.get_meta(BASE_KEY)?.is_none() => Ok(()),
@@ -40,7 +43,8 @@ impl RecoverySource {
         directory: &std::path::Path,
         check: &dyn Fn(&'static str) -> Result<(), StoreError>,
     ) -> Result<(Self, RecoveryBase), StoreError> {
-        let genesis = crate::checkpoint_replay::ReplayedCheckpoint::genesis_anchor(network, params)?;
+        let genesis =
+            crate::checkpoint_replay::ReplayedCheckpoint::genesis_anchor(network, params)?;
         match super::super::read_base_at_until(get, &genesis, directory, check)? {
             Some((snapshot, commitment)) => Ok((
                 Self::Archive(Box::new(snapshot)),

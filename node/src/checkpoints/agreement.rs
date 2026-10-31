@@ -1,7 +1,5 @@
 //! Durable checkpoint round transitions authorized by confirmed-history replay.
 
-#[cfg(test)]
-pub(crate) use reconciliation::{reconcile_recovery_journals};
 use bincode::Options;
 use burst_consensus::checkpoint::{
     Checkpoint, CheckpointAnchor, CheckpointCertificate, CheckpointSignature,
@@ -11,6 +9,8 @@ use burst_crypto::{blake2b_256, derive_address, public_from_private, sign_messag
 use burst_store::{meta::MetaStore, StoreError};
 use burst_store_lmdb::LmdbStore;
 use burst_types::{PrivateKey, ProtocolParams, WalletAddress};
+#[cfg(test)]
+pub(crate) use reconciliation::reconcile_recovery_journals;
 use serde::{Deserialize, Serialize};
 
 use crate::checkpoint_replay::{
@@ -31,7 +31,9 @@ pub use compact::{
     recover_compact_selections_from_peers,
 };
 mod replay;
-pub(crate) use reconciliation::{reconcile_recovery_journals_view_with_poll, reconcile_snapshot_journals};
+pub(crate) use reconciliation::{
+    reconcile_recovery_journals_view_with_poll, reconcile_snapshot_journals,
+};
 pub use replay::{ReplayInput, ReplayManifest, ReplayedCandidate};
 
 pub enum Command<'a> {
@@ -104,11 +106,12 @@ impl Snapshot {
     fn validate_manifests(&self, anchor: &CheckpointAnchor) -> Result<(), StoreError> {
         self.validate_manifest_coverage()?;
         for manifest in self.manifests.iter().flatten() {
-            anchor.validate_successor(manifest.checkpoint()).map_err(invalid)?;
+            anchor
+                .validate_successor(manifest.checkpoint())
+                .map_err(invalid)?;
         }
         Ok(())
     }
-
 }
 
 fn state_key(
@@ -753,16 +756,26 @@ mod tests {
         assert!(reconcile_recovery_journals(&batch, [Ok(anchor.clone())]).is_err());
         reconcile_snapshot_journals(&batch, [anchor.clone(), next.clone()].into_iter().map(Ok))
             .unwrap();
-        for at in ["journal:round-index", "journal:round-authority", "journal:round-signer"] {
+        for at in [
+            "journal:round-index",
+            "journal:round-authority",
+            "journal:round-signer",
+        ] {
             let reached = std::cell::Cell::new(false);
-            assert!(reconcile_recovery_journals_view_with_poll(&batch.read_view(),
-                [Ok(anchor.clone()), Ok(next.clone())], &|stage| {
+            assert!(reconcile_recovery_journals_view_with_poll(
+                &batch.read_view(),
+                [Ok(anchor.clone()), Ok(next.clone())],
+                &|stage| {
                     if stage == at {
                         reached.set(true);
                         return Err(StoreError::Backend("round checkpoint sentinel".into()));
                     }
                     Ok(())
-                }).unwrap_err().to_string().contains("round checkpoint sentinel"));
+                }
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("round checkpoint sentinel"));
             assert!(reached.get(), "checkpoint not reached: {at}");
         }
         assert!(reconcile_snapshot_journals(
@@ -948,21 +961,41 @@ mod tests {
         let saved = store.meta_store().get_meta(&name).unwrap();
         let snapshot = decode(&saved, &anchor, &representative).unwrap();
         assert_eq!(snapshot.manifests.as_ref().unwrap().len(), 2);
-        retention::visit_round(&name, &saved, anchor.network(), anchor.genesis_hash(), |row| {
-            assert_eq!(row.key, name);
-            assert_eq!(row.height, 1);
-            assert_eq!(row.representative, representative.as_str());
-            assert_eq!(row.state, &snapshot.state);
-            assert_eq!(row.manifests, snapshot.manifests.as_deref());
-            Ok(())
-        }).unwrap();
-        let mut missing = Snapshot { version: 3, state: snapshot.state.clone(), manifests: None, checksum: [0; 32] };
+        retention::visit_round(
+            &name,
+            &saved,
+            anchor.network(),
+            anchor.genesis_hash(),
+            |row| {
+                assert_eq!(row.key, name);
+                assert_eq!(row.height, 1);
+                assert_eq!(row.representative, representative.as_str());
+                assert_eq!(row.state, &snapshot.state);
+                assert_eq!(row.manifests, snapshot.manifests.as_deref());
+                Ok(())
+            },
+        )
+        .unwrap();
+        let mut missing = Snapshot {
+            version: 3,
+            state: snapshot.state.clone(),
+            manifests: None,
+            checksum: [0; 32],
+        };
         missing.checksum = missing.checksum().unwrap();
         let bytes = bincode::serialize(&missing).unwrap();
-        assert!(decode(&bytes, &anchor, &representative).is_ok(), "legacy recovery remains supported");
-        assert!(retention::visit_round(&name, &bytes, anchor.network(), anchor.genesis_hash(), |_| {
-            panic!("missing manifests cannot complete retention")
-        }).is_err());
+        assert!(
+            decode(&bytes, &anchor, &representative).is_ok(),
+            "legacy recovery remains supported"
+        );
+        assert!(retention::visit_round(
+            &name,
+            &bytes,
+            anchor.network(),
+            anchor.genesis_hash(),
+            |_| { panic!("missing manifests cannot complete retention") }
+        )
+        .is_err());
 
         for incomplete in [vec![ma.clone()], vec![mb.clone()]] {
             assert!(transition(
@@ -1062,33 +1095,101 @@ mod tests {
         state.accept_proposal(&anchor, &p).unwrap();
         let checkpoint = p.body.checkpoint;
         let heads = vec![crate::confirmed_history::HistoryHead {
-            account: representative.clone(), height: 7, hash: BlockHash::new([42; 32]),
+            account: representative.clone(),
+            height: 7,
+            hash: BlockHash::new([42; 32]),
         }];
         let variants = [
-            ReplayManifest::Selection(CheckpointManifest { checkpoint: checkpoint.clone(), heads: heads.clone(), target: representative.clone() }),
-            ReplayManifest::ChallengeOutcome(crate::checkpoint_outcome::ChallengeOutcomeManifest { checkpoint: checkpoint.clone(), heads: heads.clone(), target: representative.clone() }),
-            ReplayManifest::Roster(crate::checkpoint_roster::RosterManifest { checkpoint: checkpoint.clone(), heads: heads.clone() }),
-            ReplayManifest::Activation(crate::checkpoint_activation::ActivationManifest { checkpoint: checkpoint.clone(), heads: heads.clone(), activation: crate::checkpoint_activation::ActivationProof { selection: BlockHash::new([43; 32]), value: [44; 32], proof: vec![45, 46], round: 47 } }),
-            ReplayManifest::Deadline(crate::checkpoint_deadline::DeadlineManifest { checkpoint: checkpoint.clone(), heads: heads.clone() }),
-            ReplayManifest::Governance(crate::checkpoint_governance::GovernanceManifest { checkpoint: checkpoint.clone(), heads, proposals: vec![burst_types::TxHash::new([48; 32])] }),
+            ReplayManifest::Selection(CheckpointManifest {
+                checkpoint: checkpoint.clone(),
+                heads: heads.clone(),
+                target: representative.clone(),
+            }),
+            ReplayManifest::ChallengeOutcome(crate::checkpoint_outcome::ChallengeOutcomeManifest {
+                checkpoint: checkpoint.clone(),
+                heads: heads.clone(),
+                target: representative.clone(),
+            }),
+            ReplayManifest::Roster(crate::checkpoint_roster::RosterManifest {
+                checkpoint: checkpoint.clone(),
+                heads: heads.clone(),
+            }),
+            ReplayManifest::Activation(crate::checkpoint_activation::ActivationManifest {
+                checkpoint: checkpoint.clone(),
+                heads: heads.clone(),
+                activation: crate::checkpoint_activation::ActivationProof {
+                    selection: BlockHash::new([43; 32]),
+                    value: [44; 32],
+                    proof: vec![45, 46],
+                    round: 47,
+                },
+            }),
+            ReplayManifest::Deadline(crate::checkpoint_deadline::DeadlineManifest {
+                checkpoint: checkpoint.clone(),
+                heads: heads.clone(),
+            }),
+            ReplayManifest::Governance(crate::checkpoint_governance::GovernanceManifest {
+                checkpoint: checkpoint.clone(),
+                heads,
+                proposals: vec![burst_types::TxHash::new([48; 32])],
+            }),
         ];
         let name = state_key(&anchor, &representative).unwrap();
         for manifest in variants {
-            let mut snapshot = Snapshot { version: 3, state: state.clone(), manifests: Some(vec![manifest.clone()]), checksum: [0; 32] };
+            let mut snapshot = Snapshot {
+                version: 3,
+                state: state.clone(),
+                manifests: Some(vec![manifest.clone()]),
+                checksum: [0; 32],
+            };
             snapshot.checksum = snapshot.checksum().unwrap();
             let bytes = bincode::serialize(&snapshot).unwrap();
-            retention::visit_round(&name, &bytes, anchor.network(), anchor.genesis_hash(), |row| {
-                assert_eq!(row.state, &state);
-                assert_eq!(row.manifests, Some(&[manifest.clone()][..]));
-                Ok(())
-            }).unwrap();
-            for key in [name.replace("/v1/", "/v2/"), format!("{}/01", name.rsplit_once('/').unwrap().0), name.replace("/dev/", "/live/")] {
-                assert!(retention::visit_round(&key, &bytes, anchor.network(), anchor.genesis_hash(), |_| Ok(())).is_err());
+            retention::visit_round(
+                &name,
+                &bytes,
+                anchor.network(),
+                anchor.genesis_hash(),
+                |row| {
+                    assert_eq!(row.state, &state);
+                    assert_eq!(row.manifests, Some(&[manifest.clone()][..]));
+                    Ok(())
+                },
+            )
+            .unwrap();
+            for key in [
+                name.replace("/v1/", "/v2/"),
+                format!("{}/01", name.rsplit_once('/').unwrap().0),
+                name.replace("/dev/", "/live/"),
+            ] {
+                assert!(retention::visit_round(
+                    &key,
+                    &bytes,
+                    anchor.network(),
+                    anchor.genesis_hash(),
+                    |_| Ok(())
+                )
+                .is_err());
             }
-            let mut corrupted = bytes.clone(); *corrupted.last_mut().unwrap() ^= 1;
-            assert!(retention::visit_round(&name, &corrupted, anchor.network(), anchor.genesis_hash(), |_| Ok(())).is_err());
-            snapshot.manifests = Some(Vec::new()); snapshot.checksum = snapshot.checksum().unwrap();
-            assert!(retention::visit_round(&name, &bincode::serialize(&snapshot).unwrap(), anchor.network(), anchor.genesis_hash(), |_| Ok(())).is_err());
+            let mut corrupted = bytes.clone();
+            *corrupted.last_mut().unwrap() ^= 1;
+            assert!(retention::visit_round(
+                &name,
+                &corrupted,
+                anchor.network(),
+                anchor.genesis_hash(),
+                |_| Ok(())
+            )
+            .is_err());
+            snapshot.manifests = Some(Vec::new());
+            snapshot.checksum = snapshot.checksum().unwrap();
+            assert!(retention::visit_round(
+                &name,
+                &bincode::serialize(&snapshot).unwrap(),
+                anchor.network(),
+                anchor.genesis_hash(),
+                |_| Ok(())
+            )
+            .is_err());
         }
     }
 
@@ -1130,11 +1231,21 @@ mod tests {
             blake2b_256(&bincode::serialize(&(&legacy.state, &legacy.manifests)).unwrap());
         let bytes = bincode::serialize(&legacy).unwrap();
         let retained_key = state_key(&anchor, &representative).unwrap();
-        retention::visit_round(&retained_key, &bytes, anchor.network(), anchor.genesis_hash(), |row| {
-            assert_eq!(row.state, &state);
-            assert_eq!(row.manifests, Some(&[ReplayManifest::Selection(manifest.clone())][..]));
-            Ok(())
-        }).unwrap();
+        retention::visit_round(
+            &retained_key,
+            &bytes,
+            anchor.network(),
+            anchor.genesis_hash(),
+            |row| {
+                assert_eq!(row.state, &state);
+                assert_eq!(
+                    row.manifests,
+                    Some(&[ReplayManifest::Selection(manifest.clone())][..])
+                );
+                Ok(())
+            },
+        )
+        .unwrap();
 
         let dir = tempfile::tempdir().unwrap();
         let store = open(dir.path());

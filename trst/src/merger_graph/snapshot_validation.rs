@@ -1,23 +1,43 @@
 use super::*;
 
-fn index_size(index: &SharedMap<TxHash, EdgeList>, poll: &dyn Fn(&'static str) -> Result<(), String>) -> Result<usize, String> {
+fn index_size(
+    index: &SharedMap<TxHash, EdgeList>,
+    poll: &dyn Fn(&'static str) -> Result<(), String>,
+) -> Result<usize, String> {
     index.values().try_fold(0usize, |total, edges| {
         poll("trst:graph-index")?;
-        if edges.is_empty() { return Err("empty merger graph reverse index".into()); }
-        total.checked_add(edges.len()).ok_or_else(|| "merger graph edge count overflow".into())
+        if edges.is_empty() {
+            return Err("empty merger graph reverse index".into());
+        }
+        total
+            .checked_add(edges.len())
+            .ok_or_else(|| "merger graph edge count overflow".into())
     })
 }
 
 /// Check node identity, bounded positive inputs, total amount and revocation
 /// totals. Repeated origins are allowed. This does not establish source ownership
 /// or recompute whether each revoked contribution follows from its ancestry.
-pub(super) fn validate_node(hash: &TxHash, node: &MergeNode, revoked_origins: &SharedSet<TxHash>) -> Result<(), String> {
+pub(super) fn validate_node(
+    hash: &TxHash,
+    node: &MergeNode,
+    revoked_origins: &SharedSet<TxHash>,
+) -> Result<(), String> {
     validate_node_with_poll(hash, node, revoked_origins, &|_| Ok(()))
 }
 
-pub(super) fn validate_node_with_poll(hash: &TxHash, node: &MergeNode, revoked_origins: &SharedSet<TxHash>, poll: &dyn Fn(&'static str) -> Result<(), String>) -> Result<(), String> {
-    if *hash == TxHash::ZERO || *hash != node.merge_tx || node.total_amount == 0
-        || node.source_origins.is_empty() || node.source_origins.len() > crate::MAX_MERGE_SOURCES {
+pub(super) fn validate_node_with_poll(
+    hash: &TxHash,
+    node: &MergeNode,
+    revoked_origins: &SharedSet<TxHash>,
+    poll: &dyn Fn(&'static str) -> Result<(), String>,
+) -> Result<(), String> {
+    if *hash == TxHash::ZERO
+        || *hash != node.merge_tx
+        || node.total_amount == 0
+        || node.source_origins.is_empty()
+        || node.source_origins.len() > crate::MAX_MERGE_SOURCES
+    {
         return Err("invalid merger graph node".into());
     }
     let mut total = 0u128;
@@ -26,18 +46,26 @@ pub(super) fn validate_node_with_poll(hash: &TxHash, node: &MergeNode, revoked_o
         if source.origin == TxHash::ZERO || source.amount == 0 {
             return Err("invalid merger graph source".into());
         }
-        total = total.checked_add(source.amount).ok_or("merger graph source total overflow")?;
+        total = total
+            .checked_add(source.amount)
+            .ok_or("merger graph source total overflow")?;
     }
-    if total != node.total_amount { return Err("merger graph source total mismatch".into()); }
+    if total != node.total_amount {
+        return Err("merger graph source total mismatch".into());
+    }
     let mut revoked = 0u128;
     for (origin, amount) in &node.revoked_contribs {
         poll("trst:graph-contribution")?;
         if *amount == 0 || !revoked_origins.contains(origin) {
             return Err("invalid merger graph revocation contribution".into());
         }
-        revoked = revoked.checked_add(*amount).ok_or("merger graph revocation total overflow")?;
+        revoked = revoked
+            .checked_add(*amount)
+            .ok_or("merger graph revocation total overflow")?;
     }
-    if revoked > total { return Err("merger graph revocation exceeds its amount".into()); }
+    if revoked > total {
+        return Err("merger graph revocation exceeds its amount".into());
+    }
     Ok(())
 }
 
@@ -53,7 +81,10 @@ impl MergerGraph {
     /// absent from merge_nodes is treated as a burn origin; its registration is
     /// checked by the combined engine validator, not by this graph-only pass.
     /// Revision records and their hashes are validated separately.
-    pub(super) fn validate_structure_with_poll(&self, poll: &dyn Fn(&'static str) -> Result<(), String>) -> Result<(), String> {
+    pub(super) fn validate_structure_with_poll(
+        &self,
+        poll: &dyn Fn(&'static str) -> Result<(), String>,
+    ) -> Result<(), String> {
         let origin_edges = index_size(&self.origin_to_merges, poll)?;
         let downstream_edges = index_size(&self.merge_to_downstream, poll)?;
         let mut expected_origins = 0usize;
@@ -72,24 +103,38 @@ impl MergerGraph {
             while start < sources.len() {
                 let origin = sources[start];
                 let mut end = start + 1;
-                while end < sources.len() && sources[end] == origin { end += 1; }
+                while end < sources.len() && sources[end] == origin {
+                    end += 1;
+                }
                 let count = end - start;
-                if !self.origin_to_merges.get(&origin)
-                    .is_some_and(|edges| edges.has_multiplicity(hash, count)) {
-                    return Err("missing or incorrect merger graph reverse edge multiplicity".into());
+                if !self
+                    .origin_to_merges
+                    .get(&origin)
+                    .is_some_and(|edges| edges.has_multiplicity(hash, count))
+                {
+                    return Err(
+                        "missing or incorrect merger graph reverse edge multiplicity".into(),
+                    );
                 }
                 if self.merge_nodes.contains_key(&origin) {
-                    if !self.merge_to_downstream.get(&origin)
-                        .is_some_and(|edges| edges.has_multiplicity(hash, count)) {
-                        return Err("missing or incorrect merger graph downstream edge multiplicity".into());
+                    if !self
+                        .merge_to_downstream
+                        .get(&origin)
+                        .is_some_and(|edges| edges.has_multiplicity(hash, count))
+                    {
+                        return Err(
+                            "missing or incorrect merger graph downstream edge multiplicity".into(),
+                        );
                     }
                     indegree += count;
                 }
                 start = end;
             }
-            expected_origins = expected_origins.checked_add(sources.len())
+            expected_origins = expected_origins
+                .checked_add(sources.len())
                 .ok_or("merger graph edge count overflow")?;
-            expected_downstream = expected_downstream.checked_add(indegree)
+            expected_downstream = expected_downstream
+                .checked_add(indegree)
                 .ok_or("merger graph edge count overflow")?;
             indegrees.insert(*hash, indegree);
         }
@@ -105,7 +150,9 @@ impl MergerGraph {
         let mut ready = VecDeque::new();
         for (hash, count) in &indegrees {
             poll("trst:graph-ready")?;
-            if *count == 0 { ready.push_back(*hash); }
+            if *count == 0 {
+                ready.push_back(*hash);
+            }
         }
         let mut visited = 0usize;
         while let Some(hash) = ready.pop_front() {
@@ -227,7 +274,9 @@ mod tests {
     fn indexed_fanout_validates_multiplicity_and_excludes_unexpected_pairs() {
         let mut graph = MergerGraph::new();
         merge(&mut graph, 10, &[(1, 100)]);
-        for child in 20..40 { merge(&mut graph, child, &[(10, 1), (10, 2), (1, 3)]); }
+        for child in 20..40 {
+            merge(&mut graph, child, &[(10, 1), (10, 2), (1, 3)]);
+        }
         assert!(graph.validate_structure().is_ok());
         // Exercise the maximum bounded input scratch size and duplicate counts.
         merge(&mut graph, 40, &vec![(10, 1); crate::MAX_MERGE_SOURCES]);
@@ -237,7 +286,9 @@ mod tests {
         let result = graph.validate_structure_with_poll(&|stage| {
             if stage == "trst:graph-child" {
                 visits.set(visits.get() + 1);
-                if visits.get() == 2 { return Err("fanout cancellation".into()); }
+                if visits.get() == 2 {
+                    return Err("fanout cancellation".into());
+                }
             }
             Ok(())
         });
@@ -247,14 +298,34 @@ mod tests {
         for mutation in 0..5 {
             let mut changed = graph.clone();
             match mutation {
-                0 => { changed.origin_to_merges.get_mut(&hash(10)).unwrap().pop(); }
-                1 => { changed.merge_to_downstream.get_mut(&hash(10)).unwrap().push(hash(20)); }
-                2 => { changed.origin_to_merges.insert(hash(99), vec![hash(20)].into()); }
-                3 => { changed.merge_to_downstream.insert(hash(1), vec![hash(20)].into()); }
+                0 => {
+                    changed.origin_to_merges.get_mut(&hash(10)).unwrap().pop();
+                }
+                1 => {
+                    changed
+                        .merge_to_downstream
+                        .get_mut(&hash(10))
+                        .unwrap()
+                        .push(hash(20));
+                }
+                2 => {
+                    changed
+                        .origin_to_merges
+                        .insert(hash(99), vec![hash(20)].into());
+                }
+                3 => {
+                    changed
+                        .merge_to_downstream
+                        .insert(hash(1), vec![hash(20)].into());
+                }
                 _ => {
                     // Same global edge total cannot conceal a wrong pair count.
                     changed.origin_to_merges.get_mut(&hash(10)).unwrap().pop();
-                    changed.origin_to_merges.get_mut(&hash(10)).unwrap().push(hash(21));
+                    changed
+                        .origin_to_merges
+                        .get_mut(&hash(10))
+                        .unwrap()
+                        .push(hash(21));
                 }
             }
             assert!(changed.validate_structure().is_err(), "mutation {mutation}");

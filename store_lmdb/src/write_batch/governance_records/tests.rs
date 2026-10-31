@@ -54,34 +54,59 @@ fn typed_recovery_matches_aggregate_publication_and_preserves_revision_failure_a
         let dir = tempfile::tempdir().unwrap();
         let store = crate::LmdbStore::open(dir.path(), 32, 16 << 20).unwrap();
         let mut batch = store.tx_begin_write().unwrap();
-        if keyed { batch.initialize_governance_records(&before).unwrap(); }
-        else { batch.put_brn_meta(b"governance_engine", &bincode::serialize(&before).unwrap()).unwrap(); }
+        if keyed {
+            batch.initialize_governance_records(&before).unwrap();
+        } else {
+            batch
+                .put_brn_meta(b"governance_engine", &bincode::serialize(&before).unwrap())
+                .unwrap();
+        }
         batch.put_meta(&revision, &13u128.to_be_bytes()).unwrap();
         batch.commit().unwrap();
         let expected = {
             let mut batch = store.tx_begin_write().unwrap();
-            batch.put_brn_meta(b"governance_engine", &bincode::serialize(&after).unwrap()).unwrap();
-            (batch.checkpoint_metadata(b"governance_").unwrap(),
-             batch.undo_value(UndoTable::BrnMeta, b"governance_engine").unwrap())
+            batch
+                .put_brn_meta(b"governance_engine", &bincode::serialize(&after).unwrap())
+                .unwrap();
+            (
+                batch.checkpoint_metadata(b"governance_").unwrap(),
+                batch
+                    .undo_value(UndoTable::BrnMeta, b"governance_engine")
+                    .unwrap(),
+            )
         };
         {
             let mut batch = store.tx_begin_write().unwrap();
             batch.publish_recovered_governance(&after).unwrap();
-            assert_eq!(batch.checkpoint_metadata(b"governance_").unwrap(), expected.0);
-            assert_eq!(batch.undo_value(UndoTable::BrnMeta, b"governance_engine").unwrap(), expected.1);
+            assert_eq!(
+                batch.checkpoint_metadata(b"governance_").unwrap(),
+                expected.0
+            );
+            assert_eq!(
+                batch
+                    .undo_value(UndoTable::BrnMeta, b"governance_engine")
+                    .unwrap(),
+                expected.1
+            );
             let revision_before = batch.get_meta(&revision).unwrap();
             batch.publish_recovered_governance(&after).unwrap();
             assert_eq!(batch.get_meta(&revision).unwrap(), revision_before);
             // Dropping the writer must leave the original projection intact.
         }
         let mut batch = store.tx_begin_write().unwrap();
-        assert_eq!(batch.get_meta(&revision).unwrap(), Some(13u128.to_be_bytes().to_vec()));
+        assert_eq!(
+            batch.get_meta(&revision).unwrap(),
+            Some(13u128.to_be_bytes().to_vec())
+        );
         batch.publish_recovered_governance(&after).unwrap();
         batch.commit().unwrap();
         drop(store);
         let store = crate::LmdbStore::open(dir.path(), 32, 16 << 20).unwrap();
         let mut batch = store.tx_begin_write().unwrap();
-        assert_eq!(batch.checkpoint_metadata(b"governance_").unwrap(), expected.0);
+        assert_eq!(
+            batch.checkpoint_metadata(b"governance_").unwrap(),
+            expected.0
+        );
         if keyed {
             batch.put_meta(&revision, &u128::MAX.to_be_bytes()).unwrap();
             batch.commit().unwrap();
@@ -90,7 +115,10 @@ fn typed_recovery_matches_aggregate_publication_and_preserves_revision_failure_a
             assert!(batch.commit().is_err());
             let batch = store.tx_begin_write().unwrap();
             assert_eq!(batch.read_governance_records().unwrap(), after);
-            assert_eq!(batch.get_meta(&revision).unwrap(), Some(u128::MAX.to_be_bytes().to_vec()));
+            assert_eq!(
+                batch.get_meta(&revision).unwrap(),
+                Some(u128::MAX.to_be_bytes().to_vec())
+            );
         }
     }
 }
@@ -208,77 +236,83 @@ fn with_key_ballot(engine: &GovernanceEngine, proposal: u8, owner: &str) -> Gove
 #[test]
 fn rollback_conflicts_with_later_ballots_only_in_the_same_proposal() {
     for recovered in [false, true] {
-    for same_proposal in [true, false] {
-        let dir = tempfile::tempdir().unwrap();
-        let store = crate::LmdbStore::open(dir.path(), 32, 16 << 20).unwrap();
-        let mut before = state();
-        let mut second = before.get_proposal(&TxHash::new([1; 32])).unwrap().clone();
-        second.hash = TxHash::new([2; 32]);
-        before
-            .submit_proposal(second, 0, true, &ProtocolParams::default())
-            .unwrap();
-        let after = with_key_ballot(&before, 1, "brst_first_ballot");
-        let later_proposal = if same_proposal { 1 } else { 2 };
-        let later = with_key_ballot(&after, later_proposal, "brst_later_ballot");
-        let block = BlockHash::new([9; 32]);
-        let owner = WalletAddress::new("brst_governance");
-        let mut batch = store.tx_begin_write().unwrap();
-        batch.initialize_governance_records(&before).unwrap();
-        batch.commit().unwrap();
-        let mut batch = store.tx_begin_write().unwrap();
-        batch.begin_block_undo(block, owner.clone(), 1).unwrap();
-        let mut account = AccountInfo::unopened(owner.clone());
-        account.head = block;
-        account.block_count = 1;
-        batch
-            .put_block_with_account(&block, b"block", &owner, 1)
-            .unwrap();
-        batch.put_account_info(&account, false).unwrap();
-        batch.put_frontier(&owner, &block).unwrap();
-        batch
-            .apply_governance_record_delta(&before, &after)
-            .unwrap();
-        batch.commit().unwrap();
-        let mut batch = store.tx_begin_write().unwrap();
-        if recovered {
-            let original = batch.block_undo(&block).unwrap().unwrap();
-            let replayed = aggregate_journal(original, &before, &after);
-            let projected = batch.project_recovered_governance_undo(replayed).unwrap();
-            assert!(projected.changes.iter().any(|row| row.key.starts_with(PROPOSAL_REVISION_PREFIX.as_bytes())));
-            assert!(!projected.changes.iter().any(|row| row.table == UndoTable::BrnMeta && row.key == b"governance_engine"));
-            batch.replace_checkpoint_undo(&[projected]).unwrap();
-        }
-        batch.apply_governance_record_delta(&after, &later).unwrap();
-        let key = format!("{PROPOSAL_REVISION_PREFIX}{}", TxHash::new([1; 32]));
-        let revision = batch.get_meta(&key).unwrap();
-        batch.apply_governance_record_delta(&later, &later).unwrap();
-        assert_eq!(
-            batch.get_meta(&key).unwrap(),
-            revision,
-            "no-op must not change conflict guard"
-        );
-        batch.commit().unwrap();
-        let mut batch = store.tx_begin_write().unwrap();
-        if same_proposal {
-            assert!(batch.rewind_block(&block).is_err());
-            assert!(batch.commit().is_err());
+        for same_proposal in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = crate::LmdbStore::open(dir.path(), 32, 16 << 20).unwrap();
+            let mut before = state();
+            let mut second = before.get_proposal(&TxHash::new([1; 32])).unwrap().clone();
+            second.hash = TxHash::new([2; 32]);
+            before
+                .submit_proposal(second, 0, true, &ProtocolParams::default())
+                .unwrap();
+            let after = with_key_ballot(&before, 1, "brst_first_ballot");
+            let later_proposal = if same_proposal { 1 } else { 2 };
+            let later = with_key_ballot(&after, later_proposal, "brst_later_ballot");
+            let block = BlockHash::new([9; 32]);
+            let owner = WalletAddress::new("brst_governance");
+            let mut batch = store.tx_begin_write().unwrap();
+            batch.initialize_governance_records(&before).unwrap();
+            batch.commit().unwrap();
+            let mut batch = store.tx_begin_write().unwrap();
+            batch.begin_block_undo(block, owner.clone(), 1).unwrap();
+            let mut account = AccountInfo::unopened(owner.clone());
+            account.head = block;
+            account.block_count = 1;
+            batch
+                .put_block_with_account(&block, b"block", &owner, 1)
+                .unwrap();
+            batch.put_account_info(&account, false).unwrap();
+            batch.put_frontier(&owner, &block).unwrap();
+            batch
+                .apply_governance_record_delta(&before, &after)
+                .unwrap();
+            batch.commit().unwrap();
+            let mut batch = store.tx_begin_write().unwrap();
+            if recovered {
+                let original = batch.block_undo(&block).unwrap().unwrap();
+                let replayed = aggregate_journal(original, &before, &after);
+                let projected = batch.project_recovered_governance_undo(replayed).unwrap();
+                assert!(projected
+                    .changes
+                    .iter()
+                    .any(|row| row.key.starts_with(PROPOSAL_REVISION_PREFIX.as_bytes())));
+                assert!(!projected
+                    .changes
+                    .iter()
+                    .any(|row| row.table == UndoTable::BrnMeta && row.key == b"governance_engine"));
+                batch.replace_checkpoint_undo(&[projected]).unwrap();
+            }
+            batch.apply_governance_record_delta(&after, &later).unwrap();
+            let key = format!("{PROPOSAL_REVISION_PREFIX}{}", TxHash::new([1; 32]));
+            let revision = batch.get_meta(&key).unwrap();
+            batch.apply_governance_record_delta(&later, &later).unwrap();
             assert_eq!(
-                store
-                    .tx_begin_write()
-                    .unwrap()
-                    .read_governance_records()
-                    .unwrap(),
-                later
-            );
-        } else {
-            batch.rewind_block(&block).unwrap();
-            assert_eq!(
-                batch.read_governance_records().unwrap(),
-                with_key_ballot(&before, 2, "brst_later_ballot")
+                batch.get_meta(&key).unwrap(),
+                revision,
+                "no-op must not change conflict guard"
             );
             batch.commit().unwrap();
+            let mut batch = store.tx_begin_write().unwrap();
+            if same_proposal {
+                assert!(batch.rewind_block(&block).is_err());
+                assert!(batch.commit().is_err());
+                assert_eq!(
+                    store
+                        .tx_begin_write()
+                        .unwrap()
+                        .read_governance_records()
+                        .unwrap(),
+                    later
+                );
+            } else {
+                batch.rewind_block(&block).unwrap();
+                assert_eq!(
+                    batch.read_governance_records().unwrap(),
+                    with_key_ballot(&before, 2, "brst_later_ballot")
+                );
+                batch.commit().unwrap();
+            }
         }
-    }
     }
 }
 
@@ -432,11 +466,29 @@ fn aggregate_overlay_tracks_keyed_then_global_undo_without_writing() {
     // Unrelated journal families and tables must not enter reconstruction or
     // consume its encoded byte budget, even with identical key prefixes.
     for index in 0..4096 {
-        overlay.insert((UndoTable::Meta, format!("unrelated/{index:05}").into_bytes()), Some(vec![0; 16]));
-        overlay.insert((UndoTable::BrnMeta, format!("governance_state/v1/{index:05}").into_bytes()), Some(vec![0; 16]));
+        overlay.insert(
+            (
+                UndoTable::Meta,
+                format!("unrelated/{index:05}").into_bytes(),
+            ),
+            Some(vec![0; 16]),
+        );
+        overlay.insert(
+            (
+                UndoTable::BrnMeta,
+                format!("governance_state/v1/{index:05}").into_bytes(),
+            ),
+            Some(vec![0; 16]),
+        );
     }
-    let padded = batch.governance_undo_snapshot_with_overlay(&overlay, 64 << 20).unwrap().unwrap();
-    assert_eq!(bincode::deserialize::<GovernanceEngine>(&padded).unwrap(), before);
+    let padded = batch
+        .governance_undo_snapshot_with_overlay(&overlay, 64 << 20)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        bincode::deserialize::<GovernanceEngine>(&padded).unwrap(),
+        before
+    );
     assert_eq!(batch.read_governance_records().unwrap(), live);
     assert!(batch
         .governance_undo_snapshot_with_overlay(&overlay, 1)
@@ -827,7 +879,9 @@ fn committed_cache_tracks_writer_generations_and_never_publishes_aborts() {
     let dir = tempfile::tempdir().unwrap();
     let store = crate::LmdbStore::open(dir.path(), 32, 16 << 20).unwrap();
     let mut batch = store.tx_begin_write().unwrap();
-    batch.put_meta(burst_store::meta::PAYMENT_EPOCH_KEY, &[1; 32]).unwrap();
+    batch
+        .put_meta(burst_store::meta::PAYMENT_EPOCH_KEY, &[1; 32])
+        .unwrap();
     batch.initialize_governance_records(&state()).unwrap();
     let original = batch.read_governance_records().unwrap();
     batch.commit().unwrap();
@@ -935,28 +989,71 @@ fn pinned_governance_electorate_and_parameters_remain_one_view() {
     batch.initialize_governance_records(&before).unwrap();
     batch.put_account_info(&account, false).unwrap();
     batch.put_brn_meta(b"protocol_params", b"before").unwrap();
-    batch.put_meta("delegation_engine_state", b"before").unwrap();
+    batch
+        .put_meta("delegation_engine_state", b"before")
+        .unwrap();
     let cached = batch.read_governance_records().unwrap();
     batch.commit().unwrap();
     let old = store.tx_begin_read().unwrap();
-    assert!(cached.shares_record_storage_with(&store.read_governance_snapshot(&old).unwrap().unwrap()));
+    assert!(
+        cached.shares_record_storage_with(&store.read_governance_snapshot(&old).unwrap().unwrap())
+    );
     let mut batch = store.tx_begin_write().unwrap();
-    batch.apply_governance_record_delta(&before, &after).unwrap();
+    batch
+        .apply_governance_record_delta(&before, &after)
+        .unwrap();
     account.state = WalletState::Unverified;
     batch.put_account_info(&account, false).unwrap();
     batch.put_brn_meta(b"protocol_params", b"after").unwrap();
     batch.put_meta("delegation_engine_state", b"after").unwrap();
     batch.commit().unwrap();
     assert_eq!(store.read_governance_snapshot(&old).unwrap(), Some(before));
-    assert_eq!(store.account_store().all_verified_addresses_txn(&old).unwrap(), vec![account.address]);
-    assert_eq!(store.brn_store().get_meta_txn(&old, b"protocol_params").unwrap(), Some(b"before".to_vec()));
-    assert_eq!(store.meta_store().get_meta_txn(&old, "delegation_engine_state").unwrap(), Some(b"before".to_vec()));
+    assert_eq!(
+        store
+            .account_store()
+            .all_verified_addresses_txn(&old)
+            .unwrap(),
+        vec![account.address]
+    );
+    assert_eq!(
+        store
+            .brn_store()
+            .get_meta_txn(&old, b"protocol_params")
+            .unwrap(),
+        Some(b"before".to_vec())
+    );
+    assert_eq!(
+        store
+            .meta_store()
+            .get_meta_txn(&old, "delegation_engine_state")
+            .unwrap(),
+        Some(b"before".to_vec())
+    );
     drop(old); // LMDB permits one active read slot per thread.
     let mut new = store.tx_begin_read().unwrap();
-    assert_eq!(store.read_governance_snapshot(&new).unwrap(), Some(after.clone()));
-    assert!(store.account_store().all_verified_addresses_txn(&new).unwrap().is_empty());
-    assert_eq!(store.brn_store().get_meta_txn(&new, b"protocol_params").unwrap(), Some(b"after".to_vec()));
-    assert_eq!(store.meta_store().get_meta_txn(&new, "delegation_engine_state").unwrap(), Some(b"after".to_vec()));
+    assert_eq!(
+        store.read_governance_snapshot(&new).unwrap(),
+        Some(after.clone())
+    );
+    assert!(store
+        .account_store()
+        .all_verified_addresses_txn(&new)
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        store
+            .brn_store()
+            .get_meta_txn(&new, b"protocol_params")
+            .unwrap(),
+        Some(b"after".to_vec())
+    );
+    assert_eq!(
+        store
+            .meta_store()
+            .get_meta_txn(&new, "delegation_engine_state")
+            .unwrap(),
+        Some(b"after".to_vec())
+    );
     // Unknown acquisition identity must decode this view, not reuse a newer cache.
     new.generation = None;
     assert_eq!(store.read_governance_snapshot(&new).unwrap(), Some(after));
@@ -964,31 +1061,51 @@ fn pinned_governance_electorate_and_parameters_remain_one_view() {
 
 #[test]
 fn pinned_governance_preserves_format_guards_and_corruption_visibility() {
-    use burst_store::{MetaStore, BrnStore};
+    use burst_store::{BrnStore, MetaStore};
     let dir = tempfile::tempdir().unwrap();
     let store = crate::LmdbStore::open(dir.path(), 32, 16 << 20).unwrap();
     let read = || store.read_governance_snapshot(&store.tx_begin_read().unwrap());
     assert_eq!(read().unwrap(), None);
     let engine = state();
-    store.brn_store().put_meta(b"governance_engine", &bincode::serialize(&engine).unwrap()).unwrap();
+    store
+        .brn_store()
+        .put_meta(b"governance_engine", &bincode::serialize(&engine).unwrap())
+        .unwrap();
     assert_eq!(read().unwrap(), Some(engine.clone()));
-    store.meta_store().put_meta("governance_records_format", &[1]).unwrap();
+    store
+        .meta_store()
+        .put_meta("governance_records_format", &[1])
+        .unwrap();
     assert!(read().is_err());
     let mut raw = store.env().write_txn().unwrap();
-    store.brn_meta_db.delete(&mut raw, b"governance_engine").unwrap();
+    store
+        .brn_meta_db
+        .delete(&mut raw, b"governance_engine")
+        .unwrap();
     raw.commit().unwrap();
     assert_eq!(read().unwrap(), None);
     let mut batch = store.tx_begin_write().unwrap();
-    batch.replace_checkpoint_governance_records(&engine).unwrap();
+    batch
+        .replace_checkpoint_governance_records(&engine)
+        .unwrap();
     batch.commit().unwrap();
     let old = store.tx_begin_read().unwrap();
-    store.meta_store().put_meta("governance_state/v1/0", b"corrupt").unwrap();
+    store
+        .meta_store()
+        .put_meta("governance_state/v1/0", b"corrupt")
+        .unwrap();
     assert_eq!(store.read_governance_snapshot(&old).unwrap(), Some(engine));
     drop(old);
     assert!(read().is_err());
-    store.meta_store().delete_meta("governance_records_format").unwrap();
+    store
+        .meta_store()
+        .delete_meta("governance_records_format")
+        .unwrap();
     assert!(read().is_err());
-    store.meta_store().put_meta("governance_records_format", &[9]).unwrap();
+    store
+        .meta_store()
+        .put_meta("governance_records_format", &[9])
+        .unwrap();
     assert!(read().is_err());
 }
 
@@ -1005,16 +1122,27 @@ fn cold_pinned_governance_reads_publish_only_known_nonolder_snapshots() {
 
     let mut old = store.tx_begin_read().unwrap();
     let generation = old.generation.take().unwrap();
-    assert_eq!(store.read_governance_snapshot(&old).unwrap(), Some(before.clone()));
-    assert!(store.governance_cache.lock().unwrap().is_none(), "unknown identity must not publish");
+    assert_eq!(
+        store.read_governance_snapshot(&old).unwrap(),
+        Some(before.clone())
+    );
+    assert!(
+        store.governance_cache.lock().unwrap().is_none(),
+        "unknown identity must not publish"
+    );
     old.generation = Some(generation);
     let cold = store.read_governance_snapshot(&old).unwrap().unwrap();
     assert_eq!(cold, before);
     let warm = store.read_governance_snapshot(&old).unwrap().unwrap();
-    assert!(cold.shares_record_storage_with(&warm), "second read must reuse decoded records");
+    assert!(
+        cold.shares_record_storage_with(&warm),
+        "second read must reuse decoded records"
+    );
 
     let mut batch = store.tx_begin_write().unwrap();
-    batch.apply_governance_record_delta(&before, &after).unwrap();
+    batch
+        .apply_governance_record_delta(&before, &after)
+        .unwrap();
     let writer = batch.read_governance_records().unwrap();
     batch.commit().unwrap();
     let newer_generation = store.governance_cache.lock().unwrap().as_ref().unwrap().0;
@@ -1023,7 +1151,10 @@ fn cold_pinned_governance_reads_publish_only_known_nonolder_snapshots() {
     {
         let cache = store.governance_cache.lock().unwrap();
         let (id, cached) = cache.as_ref().unwrap();
-        assert_eq!(*id, newer_generation, "old decode must not evict newer state");
+        assert_eq!(
+            *id, newer_generation,
+            "old decode must not evict newer state"
+        );
         assert!(cached.shares_record_storage_with(&writer));
     }
     drop(old);
@@ -1033,13 +1164,27 @@ fn cold_pinned_governance_reads_publish_only_known_nonolder_snapshots() {
     assert!(read.shares_record_storage_with(&writer));
 }
 
-
-fn aggregate_journal(mut journal: crate::block_undo::BlockUndo, before: &GovernanceEngine, after: &GovernanceEngine) -> crate::block_undo::BlockUndo {
-    journal.changes.retain(|row| !(row.table == UndoTable::Meta &&
-        (row.key.starts_with(GovernanceRecord::STORAGE_PREFIX.as_bytes()) || row.key.starts_with(PROPOSAL_REVISION_PREFIX.as_bytes()))));
-    journal.changes.push(crate::block_undo::UndoChange { table: UndoTable::BrnMeta, key: b"governance_engine".to_vec(),
-        before: Some(bincode::serialize(before).unwrap()), after: Some(bincode::serialize(after).unwrap()) });
-    journal.changes.sort_by(|a,b| (a.table,&a.key).cmp(&(b.table,&b.key)));
+fn aggregate_journal(
+    mut journal: crate::block_undo::BlockUndo,
+    before: &GovernanceEngine,
+    after: &GovernanceEngine,
+) -> crate::block_undo::BlockUndo {
+    journal.changes.retain(|row| {
+        !(row.table == UndoTable::Meta
+            && (row
+                .key
+                .starts_with(GovernanceRecord::STORAGE_PREFIX.as_bytes())
+                || row.key.starts_with(PROPOSAL_REVISION_PREFIX.as_bytes())))
+    });
+    journal.changes.push(crate::block_undo::UndoChange {
+        table: UndoTable::BrnMeta,
+        key: b"governance_engine".to_vec(),
+        before: Some(bincode::serialize(before).unwrap()),
+        after: Some(bincode::serialize(after).unwrap()),
+    });
+    journal
+        .changes
+        .sort_by(|a, b| (a.table, &a.key).cmp(&(b.table, &b.key)));
     journal
 }
 
@@ -1050,9 +1195,14 @@ fn recovered_journal_allocates_revisions_atomically_and_preserves_fallbacks() {
     let store = crate::LmdbStore::open(dir.path(), 32, 128 << 20).unwrap();
     let before = state();
     let after = changed(&before, 7);
-    let empty = || BlockUndo { block: BlockHash::new([42;32]), account: WalletAddress::new("brst_recovered"), height: 1, changes: vec![] };
+    let empty = || BlockUndo {
+        block: BlockHash::new([42; 32]),
+        account: WalletAddress::new("brst_recovered"),
+        height: 1,
+        changes: vec![],
+    };
     let journal = aggregate_journal(empty(), &before, &after);
-    let key = format!("{PROPOSAL_REVISION_PREFIX}{}", TxHash::new([1;32]));
+    let key = format!("{PROPOSAL_REVISION_PREFIX}{}", TxHash::new([1; 32]));
     let mut batch = store.tx_begin_write().unwrap();
     batch.initialize_governance_records(&after).unwrap();
     batch.put_meta(&key, &13u128.to_be_bytes()).unwrap();
@@ -1060,28 +1210,71 @@ fn recovered_journal_allocates_revisions_atomically_and_preserves_fallbacks() {
     {
         let mut batch = store.tx_begin_write().unwrap();
         let prepared = prepare_governance_undo(&empty(), &before, &after).unwrap();
-        assert!(prepared.changes().iter().all(|row| row.table == UndoTable::Meta
-            && row.key.starts_with(GovernanceRecord::STORAGE_PREFIX.as_bytes())));
-        assert_eq!(batch.get_meta(&key).unwrap(), Some(13u128.to_be_bytes().to_vec()));
-        let first = batch.stage_recovered_governance_undo(empty(), prepared).unwrap();
-        let row = first.changes.iter().find(|row| row.key == key.as_bytes()).unwrap();
+        assert!(prepared
+            .changes()
+            .iter()
+            .all(|row| row.table == UndoTable::Meta
+                && row
+                    .key
+                    .starts_with(GovernanceRecord::STORAGE_PREFIX.as_bytes())));
+        assert_eq!(
+            batch.get_meta(&key).unwrap(),
+            Some(13u128.to_be_bytes().to_vec())
+        );
+        let first = batch
+            .stage_recovered_governance_undo(empty(), prepared)
+            .unwrap();
+        let row = first
+            .changes
+            .iter()
+            .find(|row| row.key == key.as_bytes())
+            .unwrap();
         assert_eq!(row.before.as_deref(), Some(13u128.to_be_bytes().as_slice()));
         assert_eq!(row.after.as_deref(), Some(14u128.to_be_bytes().as_slice()));
-        let second = batch.project_recovered_governance_undo(journal.clone()).unwrap();
-        let row = second.changes.iter().find(|row| row.key == key.as_bytes()).unwrap();
+        let second = batch
+            .project_recovered_governance_undo(journal.clone())
+            .unwrap();
+        let row = second
+            .changes
+            .iter()
+            .find(|row| row.key == key.as_bytes())
+            .unwrap();
         assert_eq!(row.before.as_deref(), Some(14u128.to_be_bytes().as_slice()));
         assert_eq!(row.after.as_deref(), Some(15u128.to_be_bytes().as_slice()));
         // No journal installation and no commit: all allocated guards abort.
     }
     let mut batch = store.tx_begin_write().unwrap();
-    assert_eq!(batch.get_meta(&key).unwrap(), Some(13u128.to_be_bytes().to_vec()));
+    assert_eq!(
+        batch.get_meta(&key).unwrap(),
+        Some(13u128.to_be_bytes().to_vec())
+    );
     let global = aggregate_journal(empty(), &before, &with_pending_effect(&after));
-    assert_eq!(batch.project_recovered_governance_undo(global.clone()).unwrap(), global);
+    assert_eq!(
+        batch
+            .project_recovered_governance_undo(global.clone())
+            .unwrap(),
+        global
+    );
     let mut full = empty();
-    full.changes = (0u32..65_535).map(|n| UndoChange { table: UndoTable::Pending, key: n.to_be_bytes().to_vec(), before: None, after: Some(vec![1]) }).collect();
+    full.changes = (0u32..65_535)
+        .map(|n| UndoChange {
+            table: UndoTable::Pending,
+            key: n.to_be_bytes().to_vec(),
+            before: None,
+            after: Some(vec![1]),
+        })
+        .collect();
     let full = aggregate_journal(full, &before, &after);
-    assert_eq!(batch.project_recovered_governance_undo(full.clone()).unwrap(), full);
-    assert_eq!(batch.get_meta(&key).unwrap(), Some(13u128.to_be_bytes().to_vec()));
+    assert_eq!(
+        batch
+            .project_recovered_governance_undo(full.clone())
+            .unwrap(),
+        full
+    );
+    assert_eq!(
+        batch.get_meta(&key).unwrap(),
+        Some(13u128.to_be_bytes().to_vec())
+    );
     batch.put_meta(&key, &u128::MAX.to_be_bytes()).unwrap();
     batch.commit().unwrap();
     let mut batch = store.tx_begin_write().unwrap();
@@ -1089,7 +1282,10 @@ fn recovered_journal_allocates_revisions_atomically_and_preserves_fallbacks() {
     assert!(batch.commit().is_err());
     drop(store);
     let store = crate::LmdbStore::open(dir.path(), 32, 128 << 20).unwrap();
-    assert_eq!(store.tx_begin_write().unwrap().get_meta(&key).unwrap(), Some(u128::MAX.to_be_bytes().to_vec()));
+    assert_eq!(
+        store.tx_begin_write().unwrap().get_meta(&key).unwrap(),
+        Some(u128::MAX.to_be_bytes().to_vec())
+    );
 }
 
 #[test]
@@ -1102,7 +1298,11 @@ fn lifecycle_gates_reject_unknown_undo_and_revision_namespaces_atomically() {
         let mut batch = store.tx_begin_write().unwrap();
         batch.put_meta(&key, &9u128.to_be_bytes()).unwrap();
         batch.commit().unwrap();
-        let before = store.tx_begin_write().unwrap().checkpoint_metadata(b"").unwrap();
+        let before = store
+            .tx_begin_write()
+            .unwrap()
+            .checkpoint_metadata(b"")
+            .unwrap();
         let mut batch = store.tx_begin_write().unwrap();
         batch.put_meta("must_abort", b"staged").unwrap();
         assert!(batch.initialize_governance_records(&expected).is_err());
@@ -1114,18 +1314,28 @@ fn lifecycle_gates_reject_unknown_undo_and_revision_namespaces_atomically() {
         batch.commit().unwrap();
     }
     let mut batch = store.tx_begin_write().unwrap();
-    batch.put_meta("governance_revision-other", b"unrelated").unwrap();
+    batch
+        .put_meta("governance_revision-other", b"unrelated")
+        .unwrap();
     batch.initialize_governance_records(&expected).unwrap();
     batch.commit().unwrap();
     for version in ["v1", "v2"] {
         let key = format!("block_undo/{version}/retained");
         let mut batch = store.tx_begin_write().unwrap();
-        batch.put_meta(&key, b"unrecognized journal evidence").unwrap();
+        batch
+            .put_meta(&key, b"unrecognized journal evidence")
+            .unwrap();
         batch.commit().unwrap();
-        let before = store.tx_begin_write().unwrap().checkpoint_metadata(b"").unwrap();
+        let before = store
+            .tx_begin_write()
+            .unwrap()
+            .checkpoint_metadata(b"")
+            .unwrap();
         let mut batch = store.tx_begin_write().unwrap();
         batch.put_meta("must_abort", b"staged").unwrap();
-        assert!(batch.replace_checkpoint_governance_records(&changed(&expected, 7)).is_err());
+        assert!(batch
+            .replace_checkpoint_governance_records(&changed(&expected, 7))
+            .is_err());
         assert!(batch.commit().is_err());
         let mut batch = store.tx_begin_write().unwrap();
         assert_eq!(batch.checkpoint_metadata(b"").unwrap(), before);
@@ -1136,11 +1346,13 @@ fn lifecycle_gates_reject_unknown_undo_and_revision_namespaces_atomically() {
     let mut batch = store.tx_begin_write().unwrap();
     batch.put_meta("block_undo-other", b"unrelated").unwrap();
     let replacement = changed(&expected, 7);
-    batch.replace_checkpoint_governance_records(&replacement).unwrap();
+    batch
+        .replace_checkpoint_governance_records(&replacement)
+        .unwrap();
     batch.commit().unwrap();
     drop(store);
     let store = crate::LmdbStore::open(dir.path(), 32, 16 << 20).unwrap();
-    let mut batch = store.tx_begin_write().unwrap();
+    let batch = store.tx_begin_write().unwrap();
     assert_eq!(batch.read_governance_records().unwrap(), replacement);
     for key in ["block_undo-other", "governance_revision-other"] {
         assert_eq!(batch.get_meta(key).unwrap(), Some(b"unrelated".to_vec()));
@@ -1158,11 +1370,17 @@ fn captured_governance_reader_preserves_rows_across_live_format_corruption() {
     writer.commit().unwrap();
     let reader = store.tx_begin_read().unwrap();
     let view = store.read_view(&reader).unwrap();
-    assert_eq!(bincode::serialize(&view.read_governance_records().unwrap()).unwrap(), before);
+    assert_eq!(
+        bincode::serialize(&view.read_governance_records().unwrap()).unwrap(),
+        before
+    );
     let mut writer = store.tx_begin_write().unwrap();
     writer.put_meta(MODE_KEY, &[99]).unwrap();
     writer.commit().unwrap();
-    assert_eq!(bincode::serialize(&view.read_governance_records().unwrap()).unwrap(), before);
+    assert_eq!(
+        bincode::serialize(&view.read_governance_records().unwrap()).unwrap(),
+        before
+    );
     let writer = store.tx_begin_write().unwrap();
     assert!(writer.read_governance_records().is_err());
     assert!(writer.read_view().read_governance_records().is_err());

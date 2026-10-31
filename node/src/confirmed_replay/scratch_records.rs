@@ -1,5 +1,5 @@
-use crate::confirmed_replay::scratch_file::ScratchFile as File;
 use super::scratch_index::{FixedScratchCursor, FixedScratchIndex, FixedSortedIndexBuilder};
+use crate::confirmed_replay::scratch_file::ScratchFile as File;
 use bincode::Options;
 use burst_store::StoreError;
 use serde::{de::DeserializeOwned, Serialize};
@@ -48,27 +48,38 @@ impl<T: Serialize + DeserializeOwned> RecordsCursor<T> {
         max_bytes: u64,
         mut visit: impl FnMut([u8; 32], T) -> Result<(), E>,
     ) -> Result<RecordsPage, E> {
-        if self.failed { return Err(invalid("scratch records traversal already failed").into()); }
+        if self.failed {
+            return Err(invalid("scratch records traversal already failed").into());
+        }
         self.failed = true;
         if max_nodes == 0 || max_bytes == 0 {
             return Err(invalid("invalid scratch records traversal budget").into());
         }
         self.records.check_storage()?;
-        let mut page = RecordsPage { nodes: 0, rows: 0, bytes: 0, done: false };
+        let mut page = RecordsPage {
+            nodes: 0,
+            rows: 0,
+            bytes: 0,
+            done: false,
+        };
         loop {
             if let Some((key, location, digest)) = self.pending {
                 let length = u64::from_be_bytes(location[8..16].try_into().map_err(invalid)?);
                 if length > max_bytes {
                     return Err(invalid("scratch record exceeds page byte budget").into());
                 }
-                if length > max_bytes - page.bytes { break; }
+                if length > max_bytes - page.bytes {
+                    break;
+                }
                 let row = self.records.read_indexed(location, digest)?;
                 visit(key, row)?;
                 self.pending = None;
                 page.rows += 1;
                 page.bytes += length;
             }
-            if self.indexes_done || max_nodes == page.nodes { break; }
+            if self.indexes_done || max_nodes == page.nodes {
+                break;
+            }
             // One node at a time avoids prefetching an unbounded number of rows
             // before their independently authenticated encoded sizes are known.
             let next = self.indexes.visit_next_with(1, |key, descriptor| {
@@ -145,7 +156,9 @@ impl<T: Serialize + DeserializeOwned> ScratchRecordsBuilder<T> {
         self.entries.sort_unstable_by_key(|entry| entry.0);
         self.records.index = FixedScratchIndex::from_sorted(
             &self.directory,
-            self.entries.iter().map(|(key, location, digest)| (*key, descriptor(*location, *digest))),
+            self.entries
+                .iter()
+                .map(|(key, location, digest)| (*key, descriptor(*location, *digest))),
         )?;
         Ok(self.records)
     }
@@ -163,23 +176,41 @@ pub(super) struct SortedRecordsBuilder<T> {
 }
 
 impl<T: Serialize + DeserializeOwned> SortedRecordsBuilder<T> {
-    pub(super) fn new(directory: &Path, max_rows: usize, max_bytes: u64) -> Result<Self, StoreError> {
-        Ok(Self { records: ScratchRecords::new(directory)?,
+    pub(super) fn new(
+        directory: &Path,
+        max_rows: usize,
+        max_bytes: u64,
+    ) -> Result<Self, StoreError> {
+        Ok(Self {
+            records: ScratchRecords::new(directory)?,
             index: FixedSortedIndexBuilder::new(directory)?,
-            count: 0, max_rows, max_bytes, failed: false })
+            count: 0,
+            max_rows,
+            max_bytes,
+            failed: false,
+        })
     }
 
     pub(super) fn push(&mut self, key: [u8; 32], row: &T) -> Result<(), StoreError> {
-        if self.failed { return Err(invalid("ordered record builder already failed")); }
+        if self.failed {
+            return Err(invalid("ordered record builder already failed"));
+        }
         self.failed = true;
-        if self.count >= self.max_rows { return Err(invalid("ordered records exceed row budget")); }
+        if self.count >= self.max_rows {
+            return Err(invalid("ordered records exceed row budget"));
+        }
         let mut storage = self.records.storage.lock().map_err(invalid)?;
         storage.check_storage()?;
         let length = bincode::serialized_size(row).map_err(invalid)?;
-        let end = storage.length.checked_add(length).filter(|end| *end <= self.max_bytes)
+        let end = storage
+            .length
+            .checked_add(length)
+            .filter(|end| *end <= self.max_bytes)
             .ok_or_else(|| invalid("ordered records exceed byte budget"))?;
         let bytes = bincode::serialize(row).map_err(invalid)?;
-        if bytes.len() as u64 != length { return Err(invalid("ordered record changed encoded length")); }
+        if bytes.len() as u64 != length {
+            return Err(invalid("ordered record changed encoded length"));
+        }
         let mut location = [0; 32];
         location[..8].copy_from_slice(&storage.length.to_be_bytes());
         location[8..16].copy_from_slice(&length.to_be_bytes());
@@ -189,14 +220,17 @@ impl<T: Serialize + DeserializeOwned> SortedRecordsBuilder<T> {
         storage.max_record_bytes = storage.max_record_bytes.max(length);
         storage.failed = false;
         drop(storage);
-        self.index.push(key, descriptor(location, burst_crypto::blake2b_256(&bytes)))?;
+        self.index
+            .push(key, descriptor(location, burst_crypto::blake2b_256(&bytes)))?;
         self.count += 1;
         self.failed = false;
         Ok(())
     }
 
     pub(super) fn finish(mut self) -> Result<ScratchRecords<T>, StoreError> {
-        if self.failed { return Err(invalid("ordered record builder already failed")); }
+        if self.failed {
+            return Err(invalid("ordered record builder already failed"));
+        }
         self.records.check_storage()?;
         self.records.index = self.index.finish()?;
         Ok(self.records)
@@ -227,24 +261,35 @@ pub(super) struct ScratchSequenceBuilder<T> {
 
 impl<T: Serialize + DeserializeOwned> ScratchSequenceBuilder<T> {
     pub(super) fn push(&mut self, record: &T) -> Result<(), StoreError> {
-        let next = self.length.checked_add(1)
+        let next = self
+            .length
+            .checked_add(1)
             .ok_or_else(|| invalid("scratch sequence overflow"))?;
-        self.records.push(ScratchSequence::<T>::key(self.length), record)?;
+        self.records
+            .push(ScratchSequence::<T>::key(self.length), record)?;
         self.length = next;
         Ok(())
     }
 
     #[cfg(test)]
-    pub(super) fn len(&self) -> u64 { self.length }
+    pub(super) fn len(&self) -> u64 {
+        self.length
+    }
 
     pub(super) fn finish(self) -> Result<ScratchSequence<T>, StoreError> {
-        Ok(ScratchSequence { records: self.records.finish()?, length: self.length })
+        Ok(ScratchSequence {
+            records: self.records.finish()?,
+            length: self.length,
+        })
     }
 }
 
 impl<T: Serialize + DeserializeOwned> ScratchSequence<T> {
-    pub(super) fn builder(directory: &Path, max_rows: usize, max_bytes: u64)
-        -> Result<ScratchSequenceBuilder<T>, StoreError> {
+    pub(super) fn builder(
+        directory: &Path,
+        max_rows: usize,
+        max_bytes: u64,
+    ) -> Result<ScratchSequenceBuilder<T>, StoreError> {
         Ok(ScratchSequenceBuilder {
             records: SortedRecordsBuilder::new(directory, max_rows, max_bytes)?,
             length: 0,
@@ -292,16 +337,25 @@ impl<T: Serialize + DeserializeOwned> ScratchSequence<T> {
         Ok(())
     }
 
-    pub(super) fn len(&self) -> u64 { self.length }
+    pub(super) fn len(&self) -> u64 {
+        self.length
+    }
 
     pub(super) fn get(&self, index: u64) -> Result<T, StoreError> {
-        if index >= self.length { return Err(invalid("scratch sequence position out of bounds")); }
-        self.records.get(&Self::key(index))?
+        if index >= self.length {
+            return Err(invalid("scratch sequence position out of bounds"));
+        }
+        self.records
+            .get(&Self::key(index))?
             .ok_or_else(|| invalid("missing scratch sequence record"))
     }
 
     pub(super) fn iter(&self) -> SequenceIter<T> {
-        SequenceIter { cursor: Some(self.records.cursor()), position: 0, length: self.length }
+        SequenceIter {
+            cursor: Some(self.records.cursor()),
+            position: 0,
+            length: self.length,
+        }
     }
 }
 
@@ -317,7 +371,9 @@ impl<T: Serialize + DeserializeOwned> Iterator for SequenceIter<T> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let result = (|| {
-            let Some(state) = self.cursor.as_mut() else { return Ok(None); };
+            let Some(state) = self.cursor.as_mut() else {
+                return Ok(None);
+            };
             let scan = match state {
                 Ok(scan) => scan,
                 Err(error) => return Err(error.clone()),
@@ -325,7 +381,9 @@ impl<T: Serialize + DeserializeOwned> Iterator for SequenceIter<T> {
             loop {
                 let mut row = None;
                 let page = scan.visit_next::<StoreError>(1, u64::MAX, |key, value| {
-                    if self.position >= self.length || key != ScratchSequence::<T>::key(self.position) {
+                    if self.position >= self.length
+                        || key != ScratchSequence::<T>::key(self.position)
+                    {
                         return Err(invalid("scratch sequence traversal differs from position"));
                     }
                     self.position += 1;
@@ -335,13 +393,21 @@ impl<T: Serialize + DeserializeOwned> Iterator for SequenceIter<T> {
                 if page.done && self.position != self.length {
                     return Err(invalid("incomplete scratch sequence traversal"));
                 }
-                if page.done || row.is_some() { return Ok(row); }
+                if page.done || row.is_some() {
+                    return Ok(row);
+                }
             }
         })();
         match result {
             Ok(Some(row)) => Some(Ok(row)),
-            Ok(None) => { self.cursor = None; None }
-            Err(error) => { self.cursor = None; Some(Err(error)) }
+            Ok(None) => {
+                self.cursor = None;
+                None
+            }
+            Err(error) => {
+                self.cursor = None;
+                Some(Err(error))
+            }
         }
     }
 }
@@ -421,7 +487,9 @@ impl<T: Serialize + DeserializeOwned> ScratchRecords<T> {
 
     pub(crate) fn get(&self, key: &[u8; 32]) -> Result<Option<T>, StoreError> {
         self.check_storage()?;
-        let Some(value) = self.index.get(key)? else { return Ok(None); };
+        let Some(value) = self.index.get(key)? else {
+            return Ok(None);
+        };
         let (location, digest) = split_descriptor(value);
         self.read_indexed(location, digest).map(Some)
     }
@@ -461,13 +529,23 @@ impl<T: Serialize + DeserializeOwned> ScratchRecords<T> {
     }
 
     pub(super) fn cursor(&self) -> Result<RecordsCursor<T>, StoreError> {
-        Ok(RecordsCursor { records: self.fork()?, indexes: self.index.cursor()?,
-            pending: None, indexes_done: false, failed: false })
+        Ok(RecordsCursor {
+            records: self.fork()?,
+            indexes: self.index.cursor()?,
+            pending: None,
+            indexes_done: false,
+            failed: false,
+        })
     }
 
     pub(super) fn cursor_after(&self, after: [u8; 32]) -> Result<RecordsCursor<T>, StoreError> {
-        Ok(RecordsCursor { records: self.fork()?, indexes: self.index.cursor_after(after)?,
-            pending: None, indexes_done: false, failed: false })
+        Ok(RecordsCursor {
+            records: self.fork()?,
+            indexes: self.index.cursor_after(after)?,
+            pending: None,
+            indexes_done: false,
+            failed: false,
+        })
     }
 
     pub(super) fn visit_with<E: From<StoreError>>(
@@ -560,7 +638,10 @@ mod tests {
         }
         let mut sequence = builder.finish().unwrap();
         assert_eq!(sequence.len(), 4096);
-        assert_eq!(sequence.iter().collect::<Result<Vec<_>, _>>().unwrap(), (0..4096).collect::<Vec<u64>>());
+        assert_eq!(
+            sequence.iter().collect::<Result<Vec<_>, _>>().unwrap(),
+            (0..4096).collect::<Vec<u64>>()
+        );
         assert!(sequence.get(4096).is_err());
         let mut fork = sequence.fork().unwrap();
         sequence.push(&9000).unwrap();
@@ -581,7 +662,10 @@ mod tests {
             assert!(builder.finish().is_err());
             assert_eq!(limit.used_temporary_bytes().unwrap(), 0);
         }
-        let empty = ScratchSequence::<u64>::builder(directory.path(), 0, 0).unwrap().finish().unwrap();
+        let empty = ScratchSequence::<u64>::builder(directory.path(), 0, 0)
+            .unwrap()
+            .finish()
+            .unwrap();
         assert_eq!(empty.len(), 0);
         assert!(empty.get(0).is_err());
     }
@@ -592,12 +676,18 @@ mod tests {
         for (keys, length) in [(vec![0, 2], 2), (vec![0], 2), (vec![0, 1], 1)] {
             let mut sequence = ScratchSequence::<u64>::new(directory.path()).unwrap();
             for key in keys {
-                sequence.records.put(ScratchSequence::<u64>::key(key), &key).unwrap();
+                sequence
+                    .records
+                    .put(ScratchSequence::<u64>::key(key), &key)
+                    .unwrap();
             }
             sequence.length = length;
             let mut rows = sequence.iter();
             assert!(rows.by_ref().any(|row| row.is_err()));
-            assert!(rows.next().is_none(), "failed iteration must stay exhausted");
+            assert!(
+                rows.next().is_none(),
+                "failed iteration must stay exhausted"
+            );
         }
         let mut sequence = ScratchSequence::new(directory.path()).unwrap();
         sequence.push(&42u64).unwrap();
@@ -627,11 +717,20 @@ mod tests {
         parent.push(&900).unwrap();
         child.push(&901).unwrap();
         let expected: Vec<_> = (0..128).chain([900]).collect();
-        assert_eq!(parent.iter().collect::<Result<Vec<_>, _>>().unwrap(), expected);
+        assert_eq!(
+            parent.iter().collect::<Result<Vec<_>, _>>().unwrap(),
+            expected
+        );
         drop(parent);
-        assert_eq!(pinned.collect::<Result<Vec<_>, _>>().unwrap(), (0..128).collect::<Vec<u64>>());
+        assert_eq!(
+            pinned.collect::<Result<Vec<_>, _>>().unwrap(),
+            (0..128).collect::<Vec<u64>>()
+        );
         let expected: Vec<_> = (0..128).chain([901]).collect();
-        assert_eq!(child.iter().collect::<Result<Vec<_>, _>>().unwrap(), expected);
+        assert_eq!(
+            child.iter().collect::<Result<Vec<_>, _>>().unwrap(),
+            expected
+        );
         child.truncate_for_test();
         assert!(child.fork().is_err());
         assert!(child.check_storage().is_err());
@@ -752,11 +851,22 @@ mod bulk_tests {
     #[test]
     fn single_descriptor_tree_preserves_full_digest_with_bounded_storage() {
         let directory = tempfile::tempdir().unwrap();
-        let limit = crate::confirmed_replay::scratch_file::ScratchLimit::acquire(directory.path(), 1 << 20).unwrap();
-        let rows: Vec<_> = (0u64..4096).map(|n| (burst_crypto::blake2b_256(&n.to_be_bytes()), n)).collect();
-        let mut records = ScratchRecords::from_rows(directory.path(), rows.clone(), rows.len(), 4096 * 8).unwrap();
-        assert_eq!(limit.used_temporary_bytes().unwrap(), 4096 * (186 + 8) - 102);
-        for (key, value) in &rows { assert_eq!(records.get(key).unwrap(), Some(*value)); }
+        let limit =
+            crate::confirmed_replay::scratch_file::ScratchLimit::acquire(directory.path(), 1 << 20)
+                .unwrap();
+        let rows: Vec<_> = (0u64..4096)
+            .map(|n| (burst_crypto::blake2b_256(&n.to_be_bytes()), n))
+            .collect();
+        let mut records =
+            ScratchRecords::from_rows(directory.path(), rows.clone(), rows.len(), 4096 * 8)
+                .unwrap();
+        assert_eq!(
+            limit.used_temporary_bytes().unwrap(),
+            4096 * (186 + 8) - 102
+        );
+        for (key, value) in &rows {
+            assert_eq!(records.get(key).unwrap(), Some(*value));
+        }
         let pinned = records.fork().unwrap();
         records.put(rows[0].0, &9000).unwrap();
         assert_eq!(pinned.get(&rows[0].0).unwrap(), Some(0));
@@ -826,22 +936,32 @@ mod bulk_tests {
 mod cursor_tests {
     use super::*;
 
-    fn key(n: u8) -> [u8; 32] { [n; 32] }
+    fn key(n: u8) -> [u8; 32] {
+        [n; 32]
+    }
 
     #[test]
     fn record_pages_bound_nodes_and_bytes_without_rescans_or_fork_leaks() {
         let directory = tempfile::tempdir().unwrap();
-        let rows: Vec<_> = (0..19u8).map(|n| (key(n), vec![n; 1 + usize::from(n) * 3])).collect();
-        let mut records = ScratchRecords::from_rows(directory.path(), rows.clone(), 19, 4096).unwrap();
+        let rows: Vec<_> = (0..19u8)
+            .map(|n| (key(n), vec![n; 1 + usize::from(n) * 3]))
+            .collect();
+        let mut records =
+            ScratchRecords::from_rows(directory.path(), rows.clone(), 19, 4096).unwrap();
         let mut cursor = records.cursor().unwrap();
         let mut single = records.cursor().unwrap();
         let mut singles = Vec::new();
         loop {
-            let page = single.visit_next::<StoreError>(1, 4096, |key, row| {
-                singles.push((key, row)); Ok(())
-            }).unwrap();
+            let page = single
+                .visit_next::<StoreError>(1, 4096, |key, row| {
+                    singles.push((key, row));
+                    Ok(())
+                })
+                .unwrap();
             assert!(page.nodes <= 1 && page.rows <= 1);
-            if page.done { break; }
+            if page.done {
+                break;
+            }
         }
         assert_eq!(singles, rows);
         records.put(key(0), &vec![99; 70]).unwrap();
@@ -850,44 +970,75 @@ mod cursor_tests {
         let mut nodes = 0;
         let mut bytes = 0;
         loop {
-            let page = cursor.visit_next::<StoreError>(5, 70, |key, row| {
-                output.push((key, row)); Ok(())
-            }).unwrap();
+            let page = cursor
+                .visit_next::<StoreError>(5, 70, |key, row| {
+                    output.push((key, row));
+                    Ok(())
+                })
+                .unwrap();
             assert!(page.nodes <= 5 && page.bytes <= 70);
             nodes += page.nodes;
             bytes += page.bytes;
-            if page.done { break; }
+            if page.done {
+                break;
+            }
             assert!(page.nodes > 0 || page.rows > 0);
         }
         assert_eq!(output, rows);
         assert_eq!(nodes, 2 * rows.len() - 1);
-        assert_eq!(bytes, rows.iter().map(|(_, row)| bincode::serialized_size(row).unwrap()).sum::<u64>());
-        let end = cursor.visit_next::<StoreError>(2, 70, |_, _| panic!("exhausted")).unwrap();
+        assert_eq!(
+            bytes,
+            rows.iter()
+                .map(|(_, row)| bincode::serialized_size(row).unwrap())
+                .sum::<u64>()
+        );
+        let end = cursor
+            .visit_next::<StoreError>(2, 70, |_, _| panic!("exhausted"))
+            .unwrap();
         assert!(end.done && end.nodes == 0 && end.rows == 0 && end.bytes == 0);
     }
 
     #[test]
     fn record_pages_reject_oversize_callbacks_index_mismatch_and_payload_corruption() {
         let directory = tempfile::tempdir().unwrap();
-        let mut records = ScratchRecords::from_rows(directory.path(), [(key(1), vec![1u8; 32])], 1, 4096).unwrap();
+        let mut records =
+            ScratchRecords::from_rows(directory.path(), [(key(1), vec![1u8; 32])], 1, 4096)
+                .unwrap();
         let mut cursor = records.cursor().unwrap();
-        assert!(cursor.visit_next::<StoreError>(2, 8, |_, _| panic!("oversized row decoded")).is_err());
-        assert!(cursor.visit_next::<StoreError>(2, 4096, |_, _| Ok(())).is_err());
+        assert!(cursor
+            .visit_next::<StoreError>(2, 8, |_, _| panic!("oversized row decoded"))
+            .is_err());
+        assert!(cursor
+            .visit_next::<StoreError>(2, 4096, |_, _| Ok(()))
+            .is_err());
         let mut cursor = records.cursor().unwrap();
-        assert!(cursor.visit_next::<StoreError>(2, 4096, |_, _| Err(invalid("callback"))).is_err());
-        assert!(cursor.visit_next::<StoreError>(2, 4096, |_, _| Ok(())).is_err());
+        assert!(cursor
+            .visit_next::<StoreError>(2, 4096, |_, _| Err(invalid("callback")))
+            .is_err());
+        assert!(cursor
+            .visit_next::<StoreError>(2, 4096, |_, _| Ok(()))
+            .is_err());
         let mut corrupt = records.cursor().unwrap();
         {
             let mut storage = records.storage.lock().unwrap();
             storage.file.seek(SeekFrom::Start(8)).unwrap();
             storage.file.write_all(&[255]).unwrap();
         }
-        assert!(corrupt.visit_next::<StoreError>(2, 4096, |_, _| panic!("corrupt bytes")).is_err());
-        assert!(corrupt.visit_next::<StoreError>(2, 4096, |_, _| Ok(())).is_err());
-        records.index = FixedScratchIndex::from_sorted(directory.path(), [(key(2), [3; 48])]).unwrap();
+        assert!(corrupt
+            .visit_next::<StoreError>(2, 4096, |_, _| panic!("corrupt bytes"))
+            .is_err());
+        assert!(corrupt
+            .visit_next::<StoreError>(2, 4096, |_, _| Ok(()))
+            .is_err());
+        records.index =
+            FixedScratchIndex::from_sorted(directory.path(), [(key(2), [3; 48])]).unwrap();
         let mut mismatch = records.cursor().unwrap();
-        assert!(mismatch.visit_next::<StoreError>(2, 4096, |_, _| panic!("foreign index key")).is_err());
-        assert!(mismatch.visit_next::<StoreError>(2, 4096, |_, _| Ok(())).is_err());
+        assert!(mismatch
+            .visit_next::<StoreError>(2, 4096, |_, _| panic!("foreign index key"))
+            .is_err());
+        assert!(mismatch
+            .visit_next::<StoreError>(2, 4096, |_, _| Ok(()))
+            .is_err());
     }
 }
 
@@ -898,31 +1049,68 @@ mod ordered_tests {
     #[test]
     fn ordered_builder_preserves_rows_and_poisons_invalid_or_incomplete_builds() {
         let directory = tempfile::tempdir().unwrap();
-        let rows: Vec<_> = (0..64u8).map(|n| ([n; 32], vec![n; usize::from(n) + 1])).collect();
-        let bytes = rows.iter().map(|(_, row)| bincode::serialized_size(row).unwrap()).sum();
+        let rows: Vec<_> = (0..64u8)
+            .map(|n| ([n; 32], vec![n; usize::from(n) + 1]))
+            .collect();
+        let bytes = rows
+            .iter()
+            .map(|(_, row)| bincode::serialized_size(row).unwrap())
+            .sum();
         let mut builder = SortedRecordsBuilder::new(directory.path(), rows.len(), bytes).unwrap();
-        for (key, row) in &rows { builder.push(*key, row).unwrap(); }
+        for (key, row) in &rows {
+            builder.push(*key, row).unwrap();
+        }
         let records = builder.finish().unwrap();
         let mut actual = Vec::new();
-        records.visit(|key, row| { actual.push((key, row)); Ok(()) }).unwrap();
+        records
+            .visit(|key, row| {
+                actual.push((key, row));
+                Ok(())
+            })
+            .unwrap();
         assert_eq!(actual, rows);
-        for (key, row) in &rows { assert_eq!(records.get(key).unwrap(), Some(row.clone())); }
-        for after in [[0;32], [17;32], [63;32], [255;32]] {
+        for (key, row) in &rows {
+            assert_eq!(records.get(key).unwrap(), Some(row.clone()));
+        }
+        for after in [[0; 32], [17; 32], [63; 32], [255; 32]] {
             let mut cursor = records.cursor_after(after).unwrap();
             let mut selected = Vec::new();
-            while !cursor.visit_next::<StoreError>(7, 80, |key, row| { selected.push((key,row)); Ok(()) }).unwrap().done {}
-            assert_eq!(selected, rows.iter().filter(|(key,_)| *key > after).cloned().collect::<Vec<_>>());
+            while !cursor
+                .visit_next::<StoreError>(7, 80, |key, row| {
+                    selected.push((key, row));
+                    Ok(())
+                })
+                .unwrap()
+                .done
+            {}
+            assert_eq!(
+                selected,
+                rows.iter()
+                    .filter(|(key, _)| *key > after)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            );
         }
         for (first, next, limit, byte_limit) in [
-            (2, 2, 2, 4096), (2, 1, 2, 4096), (1, 2, 1, 4096), (1, 2, 2, 9),
+            (2, 2, 2, 4096),
+            (2, 1, 2, 4096),
+            (1, 2, 1, 4096),
+            (1, 2, 2, 9),
         ] {
-            let mut builder = SortedRecordsBuilder::new(directory.path(), limit, byte_limit).unwrap();
+            let mut builder =
+                SortedRecordsBuilder::new(directory.path(), limit, byte_limit).unwrap();
             builder.push([first; 32], &vec![1u8]).unwrap();
             assert!(builder.push([next; 32], &vec![2u8]).is_err());
             assert!(builder.push([3; 32], &vec![3u8]).is_err());
-            assert!(builder.finish().is_err(), "failed ordered input must not publish a prefix");
+            assert!(
+                builder.finish().is_err(),
+                "failed ordered input must not publish a prefix"
+            );
         }
-        let empty = SortedRecordsBuilder::<Vec<u8>>::new(directory.path(), 0, 0).unwrap().finish().unwrap();
+        let empty = SortedRecordsBuilder::<Vec<u8>>::new(directory.path(), 0, 0)
+            .unwrap()
+            .finish()
+            .unwrap();
         empty.visit(|_, _| panic!("empty builder")).unwrap();
         let mut broken = SortedRecordsBuilder::new(directory.path(), 2, 4096).unwrap();
         broken.push([1; 32], &vec![1u8]).unwrap();

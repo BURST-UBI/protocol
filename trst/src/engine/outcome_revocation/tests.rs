@@ -66,7 +66,9 @@ fn reward_invalidation_and_identity_revocation_are_independent_in_both_orders() 
         }
         assert_eq!(engine.transferable_balance(&address(5), time(120)), Some(0));
         let mut engine = restart(&engine);
-        let restored = engine.restore_by_originator(&address(1), time(130)).unwrap();
+        let restored = engine
+            .restore_by_originator(&address(1), time(130))
+            .unwrap();
         assert_eq!(restored.iter().map(|event| event.amount).sum::<u128>(), 60);
         assert_eq!(
             engine.transferable_balance(&address(5), time(130)),
@@ -124,7 +126,9 @@ fn removing_outcome_cause_does_not_clear_identity_or_another_outcome() {
             keep_identity
         );
         let mut engine = restart(&engine);
-        engine.restore_by_originator(&address(1), time(150)).unwrap();
+        engine
+            .restore_by_originator(&address(1), time(150))
+            .unwrap();
         assert_eq!(
             engine.transferable_balance(&address(5), time(150)),
             Some(100)
@@ -145,7 +149,9 @@ fn pending_merged_rewards_keep_their_cut_through_delivery_and_expiry() {
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].cut(&origin, 100), 40);
     let mut engine = restart(&engine);
-    engine.restore_by_originator(&address(1), time(120)).unwrap();
+    engine
+        .restore_by_originator(&address(1), time(120))
+        .unwrap();
     let revoked = engine.receive_token(merged, time(130));
     assert_eq!(
         revoked
@@ -225,59 +231,114 @@ fn invalid_requests_are_atomic_and_cause_snapshots_are_checked() {
     assert!(inconsistent.validate_bases().is_err());
 }
 
-
 #[test]
 fn ordered_origin_snapshot_matches_sorted_reference_with_overlapping_holds() {
     for held in [false, true] {
         let (mut engine, _) = merged();
         // Reverse insertion and shared ownership exercise canonical origin order.
         for n in (10..140).rev() {
-            let token = engine.mint(hash(n), address(5), 1, address(1), time(100)).unwrap();
+            let token = engine
+                .mint(hash(n), address(5), 1, address(1), time(100))
+                .unwrap();
             engine.track_token(token);
         }
         if held {
-            engine.invalidate_outcome_origins(cause(9), &[(address(1), hash(1))]).unwrap();
+            engine
+                .invalidate_outcome_origins(cause(9), &[(address(1), hash(1))])
+                .unwrap();
         }
         let original = engine.clone();
         let mut reference = engine.clone();
-        let mut ordered: Vec<_> = reference.wallet_origins.get(&address(1)).unwrap().iter().copied().collect();
+        let mut ordered: Vec<_> = reference
+            .wallet_origins
+            .get(&address(1))
+            .unwrap()
+            .iter()
+            .copied()
+            .collect();
         ordered.sort_by_key(|origin| *origin.as_bytes());
         for origin in &ordered {
-            if let Some(hold) = reference.outcome_invalidations.get_mut(origin) { hold.wallet_revoked = true; }
+            if let Some(hold) = reference.outcome_invalidations.get_mut(origin) {
+                hold.wallet_revoked = true;
+            }
         }
         let (expected_events, expected_pending) = reference.revoke_origins(ordered.clone());
         let (events, pending) = engine.revoke_with_pending_effects(&address(1));
-        let images = |events: &[RevocationEvent]| events.iter().map(|e|
-            (e.holder.clone(), e.token_id, e.revoked_origin, e.revoked_amount, e.total_amount)).collect::<Vec<_>>();
+        let images = |events: &[RevocationEvent]| {
+            events
+                .iter()
+                .map(|e| {
+                    (
+                        e.holder.clone(),
+                        e.token_id,
+                        e.revoked_origin,
+                        e.revoked_amount,
+                        e.total_amount,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
         assert_eq!(images(&events), images(&expected_events));
-        assert_eq!(pending.iter().map(|p| (p.origin, &p.taints)).collect::<Vec<_>>(),
-            expected_pending.iter().map(|p| (p.origin, &p.taints)).collect::<Vec<_>>());
+        assert_eq!(
+            pending
+                .iter()
+                .map(|p| (p.origin, &p.taints))
+                .collect::<Vec<_>>(),
+            expected_pending
+                .iter()
+                .map(|p| (p.origin, &p.taints))
+                .collect::<Vec<_>>()
+        );
         assert_eq!(engine.save_wallets(), reference.save_wallets());
-        assert_eq!(engine.merger_graph.to_bytes(), reference.merger_graph.to_bytes());
-        assert!(engine.wallet_origins.shares_storage_with(&original.wallet_origins));
+        assert_eq!(
+            engine.merger_graph.to_bytes(),
+            reference.merger_graph.to_bytes()
+        );
+        assert!(engine
+            .wallet_origins
+            .shares_storage_with(&original.wallet_origins));
         ordered.retain(|origin| {
             if let Some(hold) = reference.outcome_invalidations.get_mut(origin) {
                 hold.wallet_revoked = false;
                 false
-            } else { true }
+            } else {
+                true
+            }
         });
         let expected = reference.restore_origins(ordered, time(130)).unwrap();
-        let actual = engine.restore_by_originator(&address(1), time(130)).unwrap();
-        let images = |events: &[RestorationEvent]| events.iter().map(|e|
-            (e.holder.clone(), e.token_id, e.amount)).collect::<Vec<_>>();
+        let actual = engine
+            .restore_by_originator(&address(1), time(130))
+            .unwrap();
+        let images = |events: &[RestorationEvent]| {
+            events
+                .iter()
+                .map(|e| (e.holder.clone(), e.token_id, e.amount))
+                .collect::<Vec<_>>()
+        };
         assert_eq!(images(&actual), images(&expected));
         assert_eq!(engine.save_wallets(), reference.save_wallets());
-        assert_eq!(engine.merger_graph.to_bytes(), reference.merger_graph.to_bytes());
-        assert!(engine.wallet_origins.shares_storage_with(&original.wallet_origins));
+        assert_eq!(
+            engine.merger_graph.to_bytes(),
+            reference.merger_graph.to_bytes()
+        );
+        assert!(engine
+            .wallet_origins
+            .shares_storage_with(&original.wallet_origins));
         if held {
-            engine.restore_outcome_origins(cause(9), &[(address(1), hash(1))], time(140)).unwrap();
-            reference.restore_outcome_origins(cause(9), &[(address(1), hash(1))], time(140)).unwrap();
+            engine
+                .restore_outcome_origins(cause(9), &[(address(1), hash(1))], time(140))
+                .unwrap();
+            reference
+                .restore_outcome_origins(cause(9), &[(address(1), hash(1))], time(140))
+                .unwrap();
             assert_eq!(engine.save_wallets(), reference.save_wallets());
-            assert_eq!(engine.merger_graph.to_bytes(), reference.merger_graph.to_bytes());
+            assert_eq!(
+                engine.merger_graph.to_bytes(),
+                reference.merger_graph.to_bytes()
+            );
         }
     }
 }
-
 
 #[test]
 #[ignore = "explicit capped-host overlapping-origin mutation phase diagnostic; not release throughput"]
@@ -297,10 +358,22 @@ fn overlapping_origin_revocation_phase_cost() {
         let mut engine = TrstEngine::with_expiry(100);
         let mut parents = Vec::new();
         for origin in 1..=origins + 1 {
-            let (amount, owner) = if origin <= origins { (7, victim.clone()) }
-                else { (11, holder.clone()) };
-            parents.push(engine.mint(id(origin), holder.clone(), amount * population as u128,
-                owner, time(100)).unwrap());
+            let (amount, owner) = if origin <= origins {
+                (7, victim.clone())
+            } else {
+                (11, holder.clone())
+            };
+            parents.push(
+                engine
+                    .mint(
+                        id(origin),
+                        holder.clone(),
+                        amount * population as u128,
+                        owner,
+                        time(100),
+                    )
+                    .unwrap(),
+            );
         }
         let mut next_id = origins + 2;
         for n in 0..population {
@@ -308,15 +381,29 @@ fn overlapping_origin_revocation_phase_cost() {
             let mut remaining = Vec::new();
             for (index, parent) in parents.into_iter().enumerate() {
                 let amount = if index < origins as usize { 7 } else { 11 };
-                let (input, change) = engine.transfer(&parent, &holder, holder.clone(), amount,
-                    id(next_id), id(next_id + 1), time(100)).unwrap();
+                let (input, change) = engine
+                    .transfer(
+                        &parent,
+                        &holder,
+                        holder.clone(),
+                        amount,
+                        id(next_id),
+                        id(next_id + 1),
+                        time(100),
+                    )
+                    .unwrap();
                 next_id += 2;
                 inputs.push(input);
-                if n + 1 < population { remaining.push(change.unwrap()); }
-                else { assert!(change.is_none()); }
+                if n + 1 < population {
+                    remaining.push(change.unwrap());
+                } else {
+                    assert!(change.is_none());
+                }
             }
             assert_eq!(inputs.len(), origins as usize + 1);
-            let merged = engine.merge(&inputs, holder.clone(), id(next_id), time(100)).unwrap();
+            let merged = engine
+                .merge(&inputs, holder.clone(), id(next_id), time(100))
+                .unwrap();
             next_id += 1;
             engine.track_token(merged);
             parents = remaining;
@@ -344,23 +431,37 @@ fn overlapping_origin_revocation_phase_cost() {
             assert!(split[..4].iter().sum::<u128>() <= split[4]);
             assert_eq!(phases.len(), origins as usize);
             let totals = phases.iter().fold([0u128; 4], |mut totals, phase| {
-                for i in 0..4 { totals[i] += phase[i]; }
+                for i in 0..4 {
+                    totals[i] += phase[i];
+                }
                 totals
             });
             assert!(totals.iter().sum::<u128>() <= total_ns);
             assert!(split[4] + split[5] <= totals[2]);
-            assert!(split[4] > 0 && split[5] > 0, "retained split path must be measured");
+            assert!(
+                split[4] > 0 && split[5] > 0,
+                "retained split path must be measured"
+            );
             assert_eq!(events.len(), (origins * population) as usize);
             assert!(events.iter().all(|event| event.revoked_amount == 7));
-            assert_eq!(engine.transferable_balance_snapshot(&holder), Some(11 * population as u128));
+            assert_eq!(
+                engine.transferable_balance_snapshot(&holder),
+                Some(11 * population as u128)
+            );
             assert_eq!(before.save_wallets(), before_bytes);
             let raw = restart(&engine);
             assert_eq!(raw.merger_graph.to_bytes(), engine.merger_graph.to_bytes());
-            assert_eq!(raw.transferable_balance_snapshot(&holder), Some(11 * population as u128));
+            assert_eq!(
+                raw.transferable_balance_snapshot(&holder),
+                Some(11 * population as u128)
+            );
             let restored = engine.restore_by_originator(&victim, time(100)).unwrap();
             assert_eq!(restored.len(), events.len());
             assert!(restored.iter().all(|event| event.amount == 7));
-            assert_eq!(engine.transferable_balance_snapshot(&holder), Some((7 * origins as u128 + 11) * population as u128));
+            assert_eq!(
+                engine.transferable_balance_snapshot(&holder),
+                Some((7 * origins as u128 + 11) * population as u128)
+            );
             let raw = restart(&engine);
             assert_eq!(raw.merger_graph.to_bytes(), engine.merger_graph.to_bytes());
             println!("overlap_mutation_phases origins={origins} population={population} sample={sample} total_ns={total_ns} graph_ns={} whole_ns={} split_ns={} pending_ns={}",

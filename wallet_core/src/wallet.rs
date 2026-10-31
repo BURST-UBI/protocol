@@ -7,7 +7,6 @@ use crate::error::WalletError;
 use serde::Deserialize;
 use std::time::Duration;
 
-
 /// HTTP client for BURST's action-based JSON RPC.
 ///
 /// Uses native HTTP or browser Fetch with the same typed RPC and signing API.
@@ -39,7 +38,9 @@ impl NodeClient {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn native_http(local_address: Option<std::net::IpAddr>) -> Result<reqwest::Client, WalletError> {
+    fn native_http(
+        local_address: Option<std::net::IpAddr>,
+    ) -> Result<reqwest::Client, WalletError> {
         reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .connect_timeout(Duration::from_secs(10))
@@ -107,7 +108,9 @@ impl NodeClient {
                 )));
             }
 
-            let json = burst_http_client::read_json(response).await.map_err(WalletError::Node)?;
+            let json = burst_http_client::read_json(response)
+                .await
+                .map_err(WalletError::Node)?;
             json
         };
         #[cfg(target_arch = "wasm32")]
@@ -139,8 +142,13 @@ impl NodeClient {
         account: &str,
     ) -> Result<AccountBalanceResponse, WalletError> {
         let result = self
-            .rpc_call("account_balance", serde_json::to_value(burst_rpc_messages::accounts::AccountBalanceRequest { account: account.into() })
-                .map_err(|e| WalletError::Node(e.to_string()))?)
+            .rpc_call(
+                "account_balance",
+                serde_json::to_value(burst_rpc_messages::accounts::AccountBalanceRequest {
+                    account: account.into(),
+                })
+                .map_err(|e| WalletError::Node(e.to_string()))?,
+            )
             .await?;
 
         let resp: AccountBalanceResponse = serde_json::from_value(result)
@@ -296,7 +304,6 @@ pub struct WorkGenerateResponse {
     #[serde(default)]
     pub hash: String,
 }
-
 
 /// Local keys and cached account fields. Offline constructors initialize the
 /// cache as unverified with zero deductions; this is not a network-state claim.
@@ -464,9 +471,13 @@ impl Wallet {
             "deactivated" => WalletState::Deactivated,
             _ => return Err(WalletError::Node("unknown verification state".into())),
         };
-        let burned = info.total_brn_burned.parse::<u128>()
+        let burned = info
+            .total_brn_burned
+            .parse::<u128>()
             .map_err(|_| WalletError::Node("invalid total_brn_burned".into()))?;
-        let staked = info.total_brn_staked.parse::<u128>()
+        let staked = info
+            .total_brn_staked
+            .parse::<u128>()
             .map_err(|_| WalletError::Node("invalid total_brn_staked".into()))?;
         self.state = state;
         self.verified_at = info.verified_at.map(Timestamp::new);
@@ -484,7 +495,11 @@ impl Wallet {
     /// before deducting returned stakes awaiting acknowledgment.
     /// Returns zero when `verified_at` is absent. Does not check `state`; a cached
     /// timestamp on a deactivated account still produces an estimate.
-    pub fn estimate_brn_balance(&self, now: Timestamp, brn_rate: u128) -> Result<u128, WalletError> {
+    pub fn estimate_brn_balance(
+        &self,
+        now: Timestamp,
+        brn_rate: u128,
+    ) -> Result<u128, WalletError> {
         match self.verified_at {
             Some(verified_at) => crate::balance::estimate_balance(
                 verified_at,
@@ -583,14 +598,20 @@ mod tests {
         let recovered = Wallet::from_mnemonic(&phrase).unwrap();
         assert_eq!(phrase.split_whitespace().count(), 24);
         assert_eq!(created.address, recovered.address);
-        assert_eq!(created.primary_keys.private.0, recovered.primary_keys.private.0);
+        assert_eq!(
+            created.primary_keys.private.0,
+            recovered.primary_keys.private.0
+        );
     }
 
     #[test]
     fn mnemonic_account_zero_matches_known_signing_seed() {
         let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
         let recovered = Wallet::from_mnemonic(phrase).unwrap();
-        let signing_seed = [159, 14, 68, 76, 105, 247, 122, 73, 189, 11, 232, 157, 185, 44, 56, 254, 113, 62, 9, 99, 22, 92, 202, 18, 250, 245, 113, 45, 118, 87, 18, 15];
+        let signing_seed = [
+            159, 14, 68, 76, 105, 247, 122, 73, 189, 11, 232, 157, 185, 44, 56, 254, 113, 62, 9,
+            99, 22, 92, 202, 18, 250, 245, 113, 45, 118, 87, 18, 15,
+        ];
         let direct = Wallet::from_seed(&signing_seed);
         assert_eq!(recovered.address, direct.address);
         assert_eq!(recovered.primary_keys.private.0, signing_seed);
@@ -608,10 +629,16 @@ mod tests {
             "trst_balance": "0", "verification_state": "deactivated",
             "total_brn_burned": "12", "total_brn_staked": "34",
             "verified_at": 10, "block_count": 0, "representative": ""
-        })).unwrap();
+        }))
+        .unwrap();
         wallet.apply_account_info(info.clone()).unwrap();
         assert_eq!(wallet.state, WalletState::Deactivated);
-        for field in ["address", "verification_state", "total_brn_burned", "total_brn_staked"] {
+        for field in [
+            "address",
+            "verification_state",
+            "total_brn_burned",
+            "total_brn_staked",
+        ] {
             let mut invalid = info.clone();
             match field {
                 "address" => invalid.address = "different".into(),
@@ -698,7 +725,10 @@ mod tests {
     #[test]
     fn test_wallet_brn_balance_unverified() {
         let wallet = Wallet::create().unwrap();
-        assert_eq!(wallet.estimate_brn_balance(Timestamp::now(), 10).unwrap(), 0);
+        assert_eq!(
+            wallet.estimate_brn_balance(Timestamp::now(), 10).unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -708,7 +738,9 @@ mod tests {
         wallet.verified_at = Some(Timestamp::new(1000));
 
         // 500 seconds at 10 raw units per second = 5000 raw units.
-        let balance = wallet.estimate_brn_balance(Timestamp::new(1500), 10).unwrap();
+        let balance = wallet
+            .estimate_brn_balance(Timestamp::new(1500), 10)
+            .unwrap();
         assert_eq!(balance, 5000);
     }
 
@@ -721,7 +753,9 @@ mod tests {
         wallet.total_brn_staked = 1000;
 
         // 500s × rate 10 = 5000 - 2000 burned - 1000 staked = 2000
-        let balance = wallet.estimate_brn_balance(Timestamp::new(1500), 10).unwrap();
+        let balance = wallet
+            .estimate_brn_balance(Timestamp::new(1500), 10)
+            .unwrap();
         assert_eq!(balance, 2000);
     }
 
@@ -747,7 +781,6 @@ mod tests {
     }
 }
 
-
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod rpc_contract_tests {
     use super::*;
@@ -772,10 +805,14 @@ mod rpc_contract_tests {
                 }
             };
             let headers = String::from_utf8_lossy(&request[..body_start]);
-            let length: usize = headers.lines().find_map(|line| {
-                let (key, value) = line.split_once(':')?;
-                key.eq_ignore_ascii_case("content-length").then(|| value.trim().parse().unwrap())
-            }).unwrap();
+            let length: usize = headers
+                .lines()
+                .find_map(|line| {
+                    let (key, value) = line.split_once(':')?;
+                    key.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse().unwrap())
+                })
+                .unwrap();
             assert!(length < 4096);
             while request.len() < body_start + length {
                 let mut bytes = [0; 1024];
@@ -783,17 +820,24 @@ mod rpc_contract_tests {
                 assert_ne!(count, 0);
                 request.extend_from_slice(&bytes[..count]);
             }
-            let value: serde_json::Value = serde_json::from_slice(&request[body_start..body_start+length]).unwrap();
+            let value: serde_json::Value =
+                serde_json::from_slice(&request[body_start..body_start + length]).unwrap();
             assert_eq!(value["action"], "account_balance");
             let decoded: AccountBalanceRequest = serde_json::from_value(value).unwrap();
             assert_eq!(decoded.account, "contract-test-account");
-            let response = AccountBalanceResponse { brn_balance: u128::MAX.to_string(), trst_balance: "9007199254740993".into() };
+            let response = AccountBalanceResponse {
+                brn_balance: u128::MAX.to_string(),
+                trst_balance: "9007199254740993".into(),
+            };
             let body = serde_json::to_string(&serde_json::json!({"result": response})).unwrap();
             let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
             socket.write_all(response.as_bytes()).await.unwrap();
         });
         let client = NodeClient::new(format!("http://{address}")).unwrap();
-        let balance = client.account_balance("contract-test-account").await.unwrap();
+        let balance = client
+            .account_balance("contract-test-account")
+            .await
+            .unwrap();
         assert_eq!(balance.brn_balance, u128::MAX.to_string());
         assert_eq!(balance.trst_balance, "9007199254740993");
         server.await.unwrap();

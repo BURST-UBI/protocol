@@ -93,7 +93,10 @@ impl ConfirmedReplay {
         #[cfg(test)]
         let report = |stage: &str, batch: &LmdbWriteTransaction<'_>| {
             if std::env::var_os("BURST_SNAPSHOT_INSTALL_STAGE_LOG").is_some() {
-                eprintln!("snapshot-economics stage={stage} elapsed_ms={}", started.elapsed().as_millis());
+                eprintln!(
+                    "snapshot-economics stage={stage} elapsed_ms={}",
+                    started.elapsed().as_millis()
+                );
                 crate::paged_metadata::report_metadata_pages(batch, stage);
             }
         };
@@ -114,7 +117,8 @@ impl ConfirmedReplay {
         #[cfg(test)]
         report("installed-authority", batch);
         crate::payment_authority::storage::write(
-            batch, &authority_bytes(anchor, self.cutoff.as_secs())?,
+            batch,
+            &authority_bytes(anchor, self.cutoff.as_secs())?,
         )?;
         #[cfg(test)]
         report("installed-cutoff", batch);

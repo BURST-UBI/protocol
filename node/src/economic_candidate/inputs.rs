@@ -16,9 +16,10 @@ pub(crate) struct LedgerInputs {
 
 impl LedgerInputs {
     pub(crate) fn capture(
-        batch: &impl crate::verification_commit::dependencies::view::DependencyView, block: &StateBlock, params: &ProtocolParams,
+        batch: &impl crate::verification_commit::dependencies::view::DependencyView,
+        block: &StateBlock,
+        params: &ProtocolParams,
     ) -> Result<Self, String> {
-
         let account = ledger_updater::predecessor_account(batch, block)?;
         let previous: Option<StateBlock> = if block.previous.is_zero() {
             None
@@ -48,7 +49,11 @@ impl LedgerInputs {
             .map_err(str::to_owned)?;
         let previous_brn_spent = previous.as_ref().map_or(0, |p| p.brn_spent);
         if let Some(previous) = &previous {
-            BlockProcessor::validate_balance_transition(block, previous_brn_spent, previous.trst_balance)?;
+            BlockProcessor::validate_balance_transition(
+                block,
+                previous_brn_spent,
+                previous.trst_balance,
+            )?;
         }
         let claims = matches!(
             block.block_type,
@@ -64,28 +69,43 @@ impl LedgerInputs {
             None
         };
         BlockProcessor::validate_open_block(block, pending.as_ref().map(|p| p.amount))?;
-        Ok(Self { account, previous, previous_brn_spent, pending,
-            block_hash: block.compute_hash(), params_hash: params.params_hash() })
+        Ok(Self {
+            account,
+            previous,
+            previous_brn_spent,
+            pending,
+            block_hash: block.compute_hash(),
+            params_hash: params.params_hash(),
+        })
     }
 
     pub(super) fn context<'a>(&'a self, params: &'a ProtocolParams) -> EconomicContext<'a> {
-        EconomicContext { account: self.account.as_ref(), previous_brn_spent: self.previous_brn_spent,
-            pending: self.pending.as_ref(), params }
+        EconomicContext {
+            account: self.account.as_ref(),
+            previous_brn_spent: self.previous_brn_spent,
+            pending: self.pending.as_ref(),
+            params,
+        }
     }
 
     /// Revalidate the exact economic reads before staging a prepared result.
     /// Engine roots, complete authority rules and lifecycle reads are separate
     /// dependencies: this method alone cannot authorize parallel publication.
     pub(crate) fn recheck(
-        &self, batch: &LmdbWriteTransaction<'_>, block: &StateBlock, params: &ProtocolParams,
+        &self,
+        batch: &LmdbWriteTransaction<'_>,
+        block: &StateBlock,
+        params: &ProtocolParams,
     ) -> Result<(), String> {
         if block.compute_hash() != self.block_hash || params.params_hash() != self.params_hash {
             return Err("prepared economic block or parameters changed".into());
         }
         // Repeats installed-epoch/cutoff, predecessor and signing-grant checks.
         let current = Self::capture(batch, block, params)?;
-        let encode = |input: &Self| bincode::serialize(
-            &(&input.account, &input.previous, &input.pending)).map_err(|e| e.to_string());
+        let encode = |input: &Self| {
+            bincode::serialize(&(&input.account, &input.previous, &input.pending))
+                .map_err(|e| e.to_string())
+        };
         if encode(self)? != encode(&current)? {
             return Err("prepared economic ledger dependency changed".into());
         }

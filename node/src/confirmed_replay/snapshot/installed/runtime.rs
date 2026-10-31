@@ -34,7 +34,8 @@ impl super::economics::AppliedEconomics {
         }
         self.state
             .trst
-            .set_expiry_period(self.state.params.trst_expiry_secs, cache_at).map_err(invalid)?;
+            .set_expiry_period(self.state.params.trst_expiry_secs, cache_at)
+            .map_err(invalid)?;
         if !staged_trst.wallet_snapshot_eq(&self.state.trst)
             || staged_trst.merger_graph != self.state.trst.merger_graph
         {
@@ -62,8 +63,7 @@ impl super::economics::AppliedEconomics {
                 expected.expired_trst = 0;
                 expected.revoked_trst = 0;
             }
-            if actual != expected
-            {
+            if actual != expected {
                 return Err(invalid(
                     "recovery runtime differs from staged account caches",
                 ));

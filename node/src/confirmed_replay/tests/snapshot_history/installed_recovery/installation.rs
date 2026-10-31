@@ -73,8 +73,13 @@ async fn compact_installation_prepares_only_the_next_epoch_without_writes() {
             crate::checkpoint_store::chain::load(&local, NetworkId::Dev, &fixture.params).is_err()
         );
         let (round_key, round_bytes) = crate::checkpoint_agreement::retention::empty_round_fixture(
-            current.anchor(), &address(0));
-        local.meta_store().put_meta(&round_key, &round_bytes).unwrap();
+            current.anchor(),
+            &address(0),
+        );
+        local
+            .meta_store()
+            .put_meta(&round_key, &round_bytes)
+            .unwrap();
         let local = Arc::new(local);
         let before = local
             .tx_begin_write()
@@ -99,8 +104,11 @@ async fn compact_installation_prepares_only_the_next_epoch_without_writes() {
             assert!(candidate.is_none());
         } else {
             let candidate = candidate.unwrap();
-            assert_eq!(candidate.reused_accepted_successor(), height == 2,
-                "only the exact immediate accepted successor may bypass replay");
+            assert_eq!(
+                candidate.reused_accepted_successor(),
+                height == 2,
+                "only the exact immediate accepted successor may bypass replay"
+            );
             let expected = if height == 1 { &next } else { &latest };
             assert_eq!(candidate.anchor().hash(), expected.anchor().hash());
             compact::assert_same(candidate.state(), expected.state());
@@ -146,9 +154,15 @@ async fn compact_installation_rechecks_the_writer_after_preparation() {
         ] {
             let (_dir, local) = cemented::sparse(&old, &source);
             copy_installed_records(&local, &source, &fixture, &bytes);
-            let (round_key, round_bytes) = crate::checkpoint_agreement::retention::empty_round_fixture(
-                old.anchor(), &address(0));
-            local.meta_store().put_meta(&round_key, &round_bytes).unwrap();
+            let (round_key, round_bytes) =
+                crate::checkpoint_agreement::retention::empty_round_fixture(
+                    old.anchor(),
+                    &address(0),
+                );
+            local
+                .meta_store()
+                .put_meta(&round_key, &round_bytes)
+                .unwrap();
             let local = Arc::new(local);
             let service = WitnessService::start(source.clone(), local.clone(), 0).await;
             let metadata = installed::recover_metadata_from_peers(
@@ -162,11 +176,27 @@ async fn compact_installation_rechecks_the_writer_after_preparation() {
             .unwrap();
             if before_prepare {
                 local.meta_store().put_meta(&key, &[99; 32]).unwrap();
-                let before = local.tx_begin_write().unwrap().checkpoint_metadata(b"").unwrap();
-                assert!(metadata.prepare_next_from_peers(local.clone(), service.registry.clone()).await.is_err(),
-                    "changed input before accepted reuse: {key}");
+                let before = local
+                    .tx_begin_write()
+                    .unwrap()
+                    .checkpoint_metadata(b"")
+                    .unwrap();
+                assert!(
+                    metadata
+                        .prepare_next_from_peers(local.clone(), service.registry.clone())
+                        .await
+                        .is_err(),
+                    "changed input before accepted reuse: {key}"
+                );
                 service.stop().await;
-                assert_eq!(local.tx_begin_write().unwrap().checkpoint_metadata(b"").unwrap(), before);
+                assert_eq!(
+                    local
+                        .tx_begin_write()
+                        .unwrap()
+                        .checkpoint_metadata(b"")
+                        .unwrap(),
+                    before
+                );
                 continue;
             }
             let candidate = metadata

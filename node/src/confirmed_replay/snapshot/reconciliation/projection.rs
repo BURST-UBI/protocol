@@ -118,7 +118,10 @@ impl<'db> ProjectedSnapshot<'db> {
         #[cfg(test)]
         let report = |stage: &str, batch: &LmdbWriteTransaction<'_>| {
             if std::env::var_os("BURST_SNAPSHOT_INSTALL_STAGE_LOG").is_some() {
-                eprintln!("snapshot-install stage={stage} elapsed_ms={}", started.elapsed().as_millis());
+                eprintln!(
+                    "snapshot-install stage={stage} elapsed_ms={}",
+                    started.elapsed().as_millis()
+                );
                 crate::paged_metadata::report_metadata_pages(batch, stage);
             }
         };

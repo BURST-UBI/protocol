@@ -11,17 +11,16 @@
 
 pub mod ballot;
 pub mod content;
-pub mod vote_delegation;
 pub mod engine;
 pub mod error;
-pub mod signing_delegation;
 pub mod params;
-mod proposal_preview;
 pub mod proposal;
+mod proposal_preview;
 pub mod record_references;
+pub mod signing_delegation;
 mod timing;
+pub mod vote_delegation;
 
-pub use vote_delegation::{DelegationEngine, DelegationScope, DelegationSnapshot, ScopedDelegation};
 pub use engine::GovernanceEngine;
 pub use error::GovernanceError;
 pub use params::GovernableParam;
@@ -29,3 +28,6 @@ pub use proposal::{
     GovernancePhase, Proposal, ProposalContent, ORV_EVICT_MARKER, ORV_REINSTATE_MARKER,
 };
 pub use timing::GovernanceTiming;
+pub use vote_delegation::{
+    DelegationEngine, DelegationScope, DelegationSnapshot, ScopedDelegation,
+};

@@ -11,9 +11,9 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 
 use burst_consensus::{ActiveElections, OnlineWeightSampler, RepWeightCache};
 use burst_crypto::{decode_address, verify_signature};
-use burst_network::{MessageDedup, PeerManager, PeerTelemetry};
 use burst_network::admission::{ConnectionPermit, PeerAdmission, PeerLimits};
 use burst_network::bandwidth::{BandwidthLimits, SharedBandwidth};
+use burst_network::{MessageDedup, PeerManager, PeerTelemetry};
 use burst_store::account::AccountStore;
 use burst_store::block::BlockStore;
 use burst_store_lmdb::LmdbStore;
@@ -36,13 +36,17 @@ pub(crate) fn trace_final_vote_transport(payload: &[u8], stage: &str, endpoint: 
     if !*ENABLED.get_or_init(|| std::env::var_os("BURST_FINALITY_STAGE_LOG").is_some()) {
         return;
     }
-    let Ok(message) = WireMessage::decode(payload) else { return; };
+    let Ok(message) = WireMessage::decode(payload) else {
+        return;
+    };
     let vote = match &message {
         WireMessage::Vote(vote) => vote,
         WireMessage::ConfirmAck(ack) => &ack.vote,
         _ => return,
     };
-    if !vote.is_final { return; }
+    if !vote.is_final {
+        return;
+    }
     let envelope = MessageDedup::hash_message(payload);
     tracing::debug!(stage, endpoint, ?envelope, voter = %vote.voter,
         sequence = vote.sequence, timestamp = vote.timestamp, hashes = ?vote.block_hashes,
@@ -88,8 +92,10 @@ const CHANNEL_QUEUE_CAPACITY: usize = burst_network::egress::BULK_QUEUE_CAPACITY
 /// selected first; both classes share per-peer and node-wide bandwidth budgets.
 /// The writer sends length-prefixed frames and exits on timeout or write failure.
 fn spawn_channel_writer(
-    writer: OwnedWriteHalf, peer_id: String,
-    shared: Arc<SharedBandwidth>, admission: Arc<ConnectionPermit>,
+    writer: OwnedWriteHalf,
+    peer_id: String,
+    shared: Arc<SharedBandwidth>,
+    admission: Arc<ConnectionPermit>,
 ) -> (burst_network::egress::Sender, tokio::task::JoinHandle<()>) {
     burst_network::egress::spawn(writer, shared, admission, move |payload, stage| {
         trace_final_vote_transport(payload, stage, &peer_id);
@@ -182,15 +188,27 @@ impl ConnectionRegistry {
         }
     }
 
-    pub(crate) fn configure_network_limits(&mut self, max_peers: usize, peers: PeerLimits, bandwidth: &BandwidthLimits) {
+    pub(crate) fn configure_network_limits(
+        &mut self,
+        max_peers: usize,
+        peers: PeerLimits,
+        bandwidth: &BandwidthLimits,
+    ) {
         assert!(self.channels.is_empty() && self.dialing.is_empty());
         self.admission = PeerAdmission::new(max_peers, peers);
         self.bandwidth = Arc::new(SharedBandwidth::new(bandwidth));
     }
 
-    pub(crate) fn admit(&self, address: std::net::IpAddr, direction: Direction) -> Option<Arc<ConnectionPermit>> {
-        if self.closed { return None; }
-        self.admission.acquire(address, direction == Direction::Outbound)
+    pub(crate) fn admit(
+        &self,
+        address: std::net::IpAddr,
+        direction: Direction,
+    ) -> Option<Arc<ConnectionPermit>> {
+        if self.closed {
+            return None;
+        }
+        self.admission
+            .acquire(address, direction == Direction::Outbound)
     }
 
     /// Open ordinary traffic only after startup has published its runtime state.
@@ -270,7 +288,10 @@ impl ConnectionRegistry {
         elections: Arc<RwLock<ActiveElections>>,
         weights: Arc<RwLock<RepWeightCache>>,
     ) {
-        assert!(self.vote_dispatch.is_none(), "vote dispatcher already started");
+        assert!(
+            self.vote_dispatch.is_none(),
+            "vote dispatcher already started"
+        );
         let (dispatcher, task) = vote_dispatch::spawn(elections, weights);
         self.vote_dispatch = Some(dispatcher);
         self.track_task(task);
@@ -393,7 +414,9 @@ impl ConnectionRegistry {
     }
 
     pub(crate) fn source_ip(&self, peer_id: &str) -> Option<std::net::IpAddr> {
-        self.channels.get(peer_id).map(|channel| channel.admission.bucket())
+        self.channels
+            .get(peer_id)
+            .map(|channel| channel.admission.bucket())
     }
 
     /// Reserve an address string unless connected, reserved, cooling down, or
@@ -427,10 +450,21 @@ impl ConnectionRegistry {
         if self.closed {
             return 0;
         }
-        let Some(admission) = writer.peer_addr().ok().and_then(|addr| self.admit(addr.ip(), Direction::Outbound)) else { return 0; };
+        let Some(admission) = writer
+            .peer_addr()
+            .ok()
+            .and_then(|addr| self.admit(addr.ip(), Direction::Outbound))
+        else {
+            return 0;
+        };
         let conn_id = self.next_conn_id;
         self.next_conn_id += 1;
-        let (outbound, writer_task) = spawn_channel_writer(writer, peer_id.clone(), self.bandwidth.clone(), admission.clone());
+        let (outbound, writer_task) = spawn_channel_writer(
+            writer,
+            peer_id.clone(),
+            self.bandwidth.clone(),
+            admission.clone(),
+        );
         self.track_task(writer_task);
         self.channels.insert(
             peer_id,
@@ -467,10 +501,19 @@ impl ConnectionRegistry {
     }
 
     pub(crate) fn register_admitted(
-        &mut self, peer_node_id: String, direction: Direction, writer: OwnedWriteHalf,
-        our_node_id: &str, admission: Arc<ConnectionPermit>,
+        &mut self,
+        peer_node_id: String,
+        direction: Direction,
+        writer: OwnedWriteHalf,
+        our_node_id: &str,
+        admission: Arc<ConnectionPermit>,
     ) -> Option<u64> {
-        if self.closed || !admission.matches(writer.peer_addr().ok()?.ip(), direction == Direction::Outbound) {
+        if self.closed
+            || !admission.matches(
+                writer.peer_addr().ok()?.ip(),
+                direction == Direction::Outbound,
+            )
+        {
             return None;
         }
         let peer_id = peer_node_id.clone();
@@ -512,7 +555,12 @@ impl ConnectionRegistry {
         } else {
             None
         };
-        let (outbound, writer_task) = spawn_channel_writer(writer, peer_id.clone(), self.bandwidth.clone(), admission.clone());
+        let (outbound, writer_task) = spawn_channel_writer(
+            writer,
+            peer_id.clone(),
+            self.bandwidth.clone(),
+            admission.clone(),
+        );
         self.track_task(writer_task);
         self.channels.insert(
             peer_id,
@@ -564,7 +612,9 @@ impl ConnectionRegistry {
         }
         if self.closed
             || (self.recovering
-                && !WireMessage::decode(&payload).ok().is_some_and(|message| self.permits(&message)))
+                && !WireMessage::decode(&payload)
+                    .ok()
+                    .is_some_and(|message| self.permits(&message)))
         {
             return false;
         }
@@ -579,7 +629,7 @@ impl ConnectionRegistry {
                         false
                     }
                 }
-            },
+            }
             None => false,
         }
     }
@@ -704,13 +754,21 @@ pub fn spawn_peer_read_loop(
     tokio::spawn(async move {
         // Retain admission until both socket halves and registry ownership end.
         let _admission = admission;
-        if !connection_registry.read().await.channels.get(&peer_id)
-            .is_some_and(|channel| channel.conn_id == conn_id) { return; }
+        if !connection_registry
+            .read()
+            .await
+            .channels
+            .get(&peer_id)
+            .is_some_and(|channel| channel.conn_id == conn_id)
+        {
+            return;
+        }
         // Offer peer addresses on connection rather than waiting for keepalive.
         {
             let self_peers: Vec<String> = {
                 let peers = peer_manager.read().await;
-                peers.random_peers_with_self(8)
+                peers
+                    .random_peers_with_self(8)
                     .iter()
                     .map(|a| format!("{}:{}", a.ip, a.port))
                     .collect()
@@ -776,7 +834,9 @@ async fn touch_peer_second(
     last_touched: &mut Option<u64>,
     now: u64,
 ) {
-    if *last_touched == Some(now) { return; }
+    if *last_touched == Some(now) {
+        return;
+    }
     manager.write().await.touch(peer_id, now);
     // Commit the local cursor only after the write: cancellation must not hide
     // the next attempt, and a backward clock change must still be recorded.
@@ -851,7 +911,11 @@ async fn peer_read_loop(
 
             profile.stage(Stage::Permit);
             if stage_log {
-                trace_final_vote_transport(&body, "frame_received", &store.env().path().to_string_lossy());
+                trace_final_vote_transport(
+                    &body,
+                    "frame_received",
+                    &store.env().path().to_string_lossy(),
+                );
             }
             #[cfg(test)]
             if connection_registry
@@ -878,8 +942,11 @@ async fn peer_read_loop(
                 let mut dedup = message_dedup.lock().await;
                 // Admission may defer a block until its committee or dependencies
                 // arrive. Suppress immediate loops, not later identical retries.
-                if dedup.apply_digest_with_window(&msg_hash, Duration::from_secs(1), std::time::Instant::now())
-                {
+                if dedup.apply_digest_with_window(
+                    &msg_hash,
+                    Duration::from_secs(1),
+                    std::time::Instant::now(),
+                ) {
                     tracing::trace!(
                         peer = %peer_id,
                         "dropped duplicate message"
@@ -913,14 +980,23 @@ async fn peer_read_loop(
                         hash = %block.hash,
                         "received block from peer"
                     );
-                    match enqueue_network_block(&store.block_store(), block_queue, *block, source_ip).await {
+                    match enqueue_network_block(
+                        &store.block_store(),
+                        block_queue,
+                        *block,
+                        source_ip,
+                    )
+                    .await
+                    {
                         Some(true) => {
                             let mut peers = peer_manager.write().await;
                             peers.reward(peer_id, 1);
                         }
                         Some(false) => tracing::warn!(peer = %peer_id,
                             "block priority queue full, dropping block"),
-                        None => tracing::debug!(peer = %peer_id, "ignored already stored network block"),
+                        None => {
+                            tracing::debug!(peer = %peer_id, "ignored already stored network block")
+                        }
                     }
                 }
                 Ok(WireMessage::Vote(vote)) => {
@@ -950,7 +1026,11 @@ async fn peer_read_loop(
                     }
                     profile.stage(Stage::Dispatch);
                     if stage_log {
-                        trace_final_vote_transport(&body, "authenticated", &store.env().path().to_string_lossy());
+                        trace_final_vote_transport(
+                            &body,
+                            "authenticated",
+                            &store.env().path().to_string_lossy(),
+                        );
                         for hash in &vote.block_hashes {
                             tracing::debug!(receiver = ?store.env().path(), %hash,
                                 voter = %vote.voter, is_final = vote.is_final,
@@ -960,11 +1040,27 @@ async fn peer_read_loop(
                     }
                     if stage_log {
                         tracing::Instrument::instrument(
-                            dispatch_authenticated(peer_id, &vote, active_elections, rep_weights, connection_registry, &mut profile),
+                            dispatch_authenticated(
+                                peer_id,
+                                &vote,
+                                active_elections,
+                                rep_weights,
+                                connection_registry,
+                                &mut profile,
+                            ),
                             tracing::debug_span!("vote_receiver", receiver = ?store.env().path()),
-                        ).await?;
+                        )
+                        .await?;
                     } else {
-                        dispatch_authenticated(peer_id, &vote, active_elections, rep_weights, connection_registry, &mut profile).await?;
+                        dispatch_authenticated(
+                            peer_id,
+                            &vote,
+                            active_elections,
+                            rep_weights,
+                            connection_registry,
+                            &mut profile,
+                        )
+                        .await?;
                     }
                     // Dispatch locally before awaiting relay and historical recovery.
                     profile.stage(Stage::Relay);
@@ -1026,7 +1122,11 @@ async fn peer_read_loop(
                     }
                     profile.stage(Stage::Dispatch);
                     if stage_log {
-                        trace_final_vote_transport(&body, "authenticated", &store.env().path().to_string_lossy());
+                        trace_final_vote_transport(
+                            &body,
+                            "authenticated",
+                            &store.env().path().to_string_lossy(),
+                        );
                         for hash in &ack.vote.block_hashes {
                             tracing::debug!(receiver = ?store.env().path(), %hash,
                                 voter = %ack.vote.voter, is_final = ack.vote.is_final,
@@ -1036,11 +1136,27 @@ async fn peer_read_loop(
                     }
                     if stage_log {
                         tracing::Instrument::instrument(
-                            dispatch_authenticated(peer_id, &ack.vote, active_elections, rep_weights, connection_registry, &mut profile),
+                            dispatch_authenticated(
+                                peer_id,
+                                &ack.vote,
+                                active_elections,
+                                rep_weights,
+                                connection_registry,
+                                &mut profile,
+                            ),
                             tracing::debug_span!("vote_receiver", receiver = ?store.env().path()),
-                        ).await?;
+                        )
+                        .await?;
                     } else {
-                        dispatch_authenticated(peer_id, &ack.vote, active_elections, rep_weights, connection_registry, &mut profile).await?;
+                        dispatch_authenticated(
+                            peer_id,
+                            &ack.vote,
+                            active_elections,
+                            rep_weights,
+                            connection_registry,
+                            &mut profile,
+                        )
+                        .await?;
                     }
                     // Dispatch locally before awaiting relay and historical recovery.
                     profile.stage(Stage::Relay);
@@ -1101,7 +1217,9 @@ async fn peer_read_loop(
                             |start_account, count| match account_store
                                 .accounts_page(Some(start_account), count as usize)
                             {
-                                Ok(accounts) => accounts.into_iter().map(|a| (a.address, a.head)).collect(),
+                                Ok(accounts) => {
+                                    accounts.into_iter().map(|a| (a.address, a.head)).collect()
+                                }
                                 Err(_) => Vec::new(),
                             },
                         );
@@ -1274,17 +1392,16 @@ async fn peer_read_loop(
                 match vote {
                     Ok(Some(vote)) => {
                         tracing::debug!(peer = %peer_id, %hash, voter = %vote.voter, is_final = vote.is_final, "replying with reserved consensus vote");
-                        let reply =
-                            WireMessage::ConfirmAck(crate::wire_message::ConfirmAckMsg {
-                                vote: crate::wire_message::WireVote {
-                                    voter: vote.voter,
-                                    block_hashes: vec![vote.block_hash],
-                                    is_final: vote.is_final,
-                                    timestamp: vote.timestamp,
-                                    sequence: vote.sequence,
-                                    signature: vote.signature,
-                                },
-                            });
+                        let reply = WireMessage::ConfirmAck(crate::wire_message::ConfirmAckMsg {
+                            vote: crate::wire_message::WireVote {
+                                voter: vote.voter,
+                                block_hashes: vec![vote.block_hash],
+                                is_final: vote.is_final,
+                                timestamp: vote.timestamp,
+                                sequence: vote.sequence,
+                                signature: vote.signature,
+                            },
+                        });
                         if let Ok(bytes) = reply.encode() {
                             connection_registry.read().await.send(peer_id, bytes);
                         }
@@ -1309,14 +1426,24 @@ fn is_vote_signature_valid_cached(
     vote: &crate::wire_message::WireVote,
     verified: &mut MessageDedup,
 ) -> bool {
-    if vote.block_hashes.is_empty() || vote.block_hashes.len() > 8 { return false; }
+    if vote.block_hashes.is_empty() || vote.block_hashes.len() > 8 {
+        return false;
+    }
     let mut signed = burst_consensus::vote_signing_payload(
-        &vote.voter, vote.is_final, vote.timestamp, vote.sequence, &vote.block_hashes,
+        &vote.voter,
+        vote.is_final,
+        vote.timestamp,
+        vote.sequence,
+        &vote.block_hashes,
     );
     signed.extend_from_slice(&vote.signature.0);
     let hash = MessageDedup::hash_message(&signed);
-    if verified.contains(&hash) { return true; }
-    if !is_vote_signature_valid(vote) { return false; }
+    if verified.contains(&hash) {
+        return true;
+    }
+    if !is_vote_signature_valid(vote) {
+        return false;
+    }
     verified.apply_digest(&hash);
     true
 }
@@ -1363,7 +1490,10 @@ async fn dispatch_authenticated(
     let dispatcher = {
         let registry = registry.read().await;
         if registry.closed {
-            return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "connection registry closed"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "connection registry closed",
+            ));
         }
         registry.vote_dispatch.clone()
     };
@@ -1398,9 +1528,9 @@ async fn dispatch_vote_profiled(
     // Skip votes known to have no effect without waiting for the write lock.
     // If the read lock is busy, use normal routing.
     if let Ok(active) = active_elections.try_read() {
-        if vote.block_hashes.iter().all(|hash| active.signed_vote_has_no_effect(
-            hash, &vote.voter, vote.is_final, vote.sequence,
-        )) {
+        if vote.block_hashes.iter().all(|hash| {
+            active.signed_vote_has_no_effect(hash, &vote.voter, vote.is_final, vote.sequence)
+        }) {
             return;
         }
     }
@@ -1473,7 +1603,9 @@ async fn enqueue_network_block(
     block: burst_ledger::StateBlock,
     source_ip: std::net::IpAddr,
 ) -> Option<bool> {
-    if store.exists(&block.hash).unwrap_or(false) { return None; }
+    if store.exists(&block.hash).unwrap_or(false) {
+        return None;
+    }
     Some(queue.push_from_peer(block, source_ip).await)
 }
 
@@ -1527,14 +1659,39 @@ mod tests {
         let store = burst_nullables::NullStore::new();
         let queue = BlockPriorityQueue::new(1);
         let original = crate::genesis_state::block(
-            burst_types::NetworkId::Dev, &burst_types::ProtocolParams::default());
-        store.put_block(&original.hash, &bincode::serialize(&original).unwrap()).unwrap();
-        assert_eq!(enqueue_network_block(&store, &queue, original.clone(), "127.0.0.1".parse().unwrap()).await, None);
+            burst_types::NetworkId::Dev,
+            &burst_types::ProtocolParams::default(),
+        );
+        store
+            .put_block(&original.hash, &bincode::serialize(&original).unwrap())
+            .unwrap();
+        assert_eq!(
+            enqueue_network_block(
+                &store,
+                &queue,
+                original.clone(),
+                "127.0.0.1".parse().unwrap()
+            )
+            .await,
+            None
+        );
         assert!(queue.is_empty().await);
         store.delete_block(&original.hash).unwrap();
-        assert_eq!(enqueue_network_block(&store, &queue, original.clone(), "127.0.0.1".parse().unwrap()).await, Some(true));
+        assert_eq!(
+            enqueue_network_block(
+                &store,
+                &queue,
+                original.clone(),
+                "127.0.0.1".parse().unwrap()
+            )
+            .await,
+            Some(true)
+        );
         assert_eq!(queue.pop().await.hash, original.hash);
-        assert_eq!(enqueue_network_block(&store, &queue, original, "127.0.0.1".parse().unwrap()).await, Some(true));
+        assert_eq!(
+            enqueue_network_block(&store, &queue, original, "127.0.0.1".parse().unwrap()).await,
+            Some(true)
+        );
     }
 
     #[tokio::test]
@@ -1542,20 +1699,49 @@ mod tests {
         use super::*;
         let manager = RwLock::new(PeerManager::new(4));
         assert!(manager.write().await.register_connection(
-            "peer".into(), burst_messages::PeerAddress { ip: "127.0.0.1".into(), port: 7000 }, true, 0));
+            "peer".into(),
+            burst_messages::PeerAddress {
+                ip: "127.0.0.1".into(),
+                port: 7000
+            },
+            true,
+            0
+        ));
         let mut touched = None;
         touch_peer_second(&manager, "peer", &mut touched, 10).await;
         let held = manager.write().await;
         // An unchanged timestamp needs neither a read nor a write lock.
-        tokio::time::timeout(Duration::from_millis(100),
-            touch_peer_second(&manager, "peer", &mut touched, 10)).await.unwrap();
-        assert!(tokio::time::timeout(Duration::from_millis(10),
-            touch_peer_second(&manager, "peer", &mut touched, 11)).await.is_err());
-        assert_eq!(touched, Some(10), "cancelled write must not advance the cursor");
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            touch_peer_second(&manager, "peer", &mut touched, 10),
+        )
+        .await
+        .unwrap();
+        assert!(tokio::time::timeout(
+            Duration::from_millis(10),
+            touch_peer_second(&manager, "peer", &mut touched, 11)
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            touched,
+            Some(10),
+            "cancelled write must not advance the cursor"
+        );
         drop(held);
         for now in [11, 9] {
             touch_peer_second(&manager, "peer", &mut touched, now).await;
-            assert_eq!(manager.read().await.iter_connected().next().unwrap().1.last_seen_secs, now);
+            assert_eq!(
+                manager
+                    .read()
+                    .await
+                    .iter_connected()
+                    .next()
+                    .unwrap()
+                    .1
+                    .last_seen_secs,
+                now
+            );
         }
         // A new reader starts without a cursor, including after reconnect.
         touched = None;
@@ -1571,15 +1757,23 @@ mod tests {
         let mut generator = burst_consensus::VoteGenerator::new(rep.clone(), key.private.0);
         let signed = generator.generate_final_vote(BlockHash::new([1; 32]));
         let vote = crate::wire_message::WireVote {
-            voter: rep, block_hashes: vec![signed.block_hash], is_final: true,
-            timestamp: signed.timestamp, sequence: signed.sequence, signature: signed.signature,
+            voter: rep,
+            block_hashes: vec![signed.block_hash],
+            is_final: true,
+            timestamp: signed.timestamp,
+            sequence: signed.sequence,
+            signature: signed.signature,
         };
         let mut cache = MessageDedup::new(2);
         let mut bad = vote.clone();
         bad.signature.0[0] ^= 1;
-        for _ in 0..2 { assert!(!is_vote_signature_valid_cached(&bad, &mut cache)); }
+        for _ in 0..2 {
+            assert!(!is_vote_signature_valid_cached(&bad, &mut cache));
+        }
         assert!(cache.is_empty());
-        for _ in 0..3 { assert!(is_vote_signature_valid_cached(&vote, &mut cache)); }
+        for _ in 0..3 {
+            assert!(is_vote_signature_valid_cached(&vote, &mut cache));
+        }
         assert_eq!(cache.len(), 1);
         for field in 0..6 {
             let mut changed = vote.clone();
@@ -1755,15 +1949,33 @@ mod tests {
     async fn pending_admission_transfers_to_socket_and_releases_after_writer_stops() {
         use super::*;
         let mut registry = ConnectionRegistry::new();
-        registry.configure_network_limits(4, PeerLimits { per_ip: 1, per_subnet: 4, outbound_reserved: 1 }, &BandwidthLimits::default());
+        registry.configure_network_limits(
+            4,
+            PeerLimits {
+                per_ip: 1,
+                per_subnet: 4,
+                outbound_reserved: 1,
+            },
+            &BandwidthLimits::default(),
+        );
         let (client, server) = socket_pair().await;
         let ip = server.peer_addr().unwrap().ip();
         let permit = registry.admit(ip, Direction::Inbound).unwrap();
         assert!(registry.admit(ip, Direction::Inbound).is_none());
-        assert!(registry.register_admitted("peer".into(), Direction::Inbound, server.into_split().1, "local", permit).is_some());
+        assert!(registry
+            .register_admitted(
+                "peer".into(),
+                Direction::Inbound,
+                server.into_split().1,
+                "local",
+                permit
+            )
+            .is_some());
         assert!(registry.admit(ip, Direction::Inbound).is_none());
         assert!(registry.remove("peer"));
-        for task in registry.take_tasks() { task.await.unwrap(); }
+        for task in registry.take_tasks() {
+            task.await.unwrap();
+        }
         assert!(registry.admit(ip, Direction::Inbound).is_some());
         drop(client);
     }
@@ -1774,17 +1986,24 @@ mod tests {
         let mut registry = ConnectionRegistry::new();
         let (mut client, server) = socket_pair().await;
         assert_ne!(registry.insert("peer".into(), server.into_split().1), 0);
-        for _ in 0..CHANNEL_QUEUE_CAPACITY { assert!(registry.send("peer", vec![0; 8])); }
+        for _ in 0..CHANNEL_QUEUE_CAPACITY {
+            assert!(registry.send("peer", vec![0; 8]));
+        }
         assert!(!registry.send("peer", vec![0; 8]));
         let control = WireMessage::TelemetryReq.encode().unwrap();
         assert!(registry.send("peer", control.clone()));
         let mut header = [0; 4];
-        tokio::time::timeout(Duration::from_secs(2), client.read_exact(&mut header)).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(2), client.read_exact(&mut header))
+            .await
+            .unwrap()
+            .unwrap();
         let mut body = vec![0; u32::from_be_bytes(header) as usize];
         client.read_exact(&mut body).await.unwrap();
         assert_eq!(body, control);
         registry.close();
-        for task in registry.take_tasks() { let _ = task.await; }
+        for task in registry.take_tasks() {
+            let _ = task.await;
+        }
     }
 
     async fn socket_pair() -> (tokio::net::TcpStream, tokio::net::TcpStream) {
@@ -1907,7 +2126,8 @@ mod tests {
             // A request must not hold up following frames while signing is busy.
             let held_signer = generator.lock().await;
             let request = WireMessage::ConfirmReq(crate::wire_message::ConfirmReqMsg {
-                block_hashes: vec![BlockHash::new([77; 32])], remaining_hops: 0,
+                block_hashes: vec![BlockHash::new([77; 32])],
+                remaining_hops: 0,
             });
             for operational in [false, true] {
                 if operational {
@@ -2039,30 +2259,49 @@ mod tests {
             let keys = burst_crypto::keypair_from_seed(&[19; 32]);
             let voter = burst_crypto::derive_address(&keys.public);
             let weights = Arc::new(RwLock::new(RepWeightCache::new()));
-            weights.write().await.rebuild_from_accounts([(true, voter.clone())].into_iter());
+            weights
+                .write()
+                .await
+                .rebuild_from_accounts([(true, voter.clone())].into_iter());
             let hash = BlockHash::new([1; 32]);
             let mut active = ActiveElections::new(2, weights.read().await.total_weight());
-            active.register_candidate(hash, hash, Timestamp::new(unix_now_secs())).unwrap();
+            active
+                .register_candidate(hash, hash, Timestamp::new(unix_now_secs()))
+                .unwrap();
             let elections = Arc::new(RwLock::new(active));
-            registry.write().await.start_vote_dispatch(elections.clone(), weights.clone());
+            registry
+                .write()
+                .await
+                .start_vote_dispatch(elections.clone(), weights.clone());
             let peers = RwLock::new(PeerManager::new(4));
             let dedup = Mutex::new(MessageDedup::new(100));
             let sampler = Mutex::new(OnlineWeightSampler::new(60));
             let generator = Arc::new(Mutex::new(burst_consensus::VoteGenerator::new(
-                voter.clone(), [0; 32],
+                voter.clone(),
+                [0; 32],
             )));
             let (feedback, _received) = mpsc::channel(4);
             let (mut client, server) = socket_pair().await;
             let (reader, writer) = server.into_split();
             registry.write().await.insert("peer".into(), writer);
             let mut vote = crate::wire_message::WireVote {
-                voter, block_hashes: vec![hash], is_final: true,
-                timestamp: unix_now_secs() * 1000, sequence: 1,
+                voter,
+                block_hashes: vec![hash],
+                is_final: true,
+                timestamp: unix_now_secs() * 1000,
+                sequence: 1,
                 signature: burst_types::Signature([0; 64]),
             };
-            vote.signature = burst_crypto::sign_message(&burst_consensus::vote_signing_payload(
-                &vote.voter, vote.is_final, vote.timestamp, vote.sequence, &vote.block_hashes,
-            ), &keys.private);
+            vote.signature = burst_crypto::sign_message(
+                &burst_consensus::vote_signing_payload(
+                    &vote.voter,
+                    vote.is_final,
+                    vote.timestamp,
+                    vote.sequence,
+                    &vote.block_hashes,
+                ),
+                &keys.private,
+            );
             let message = if acknowledged {
                 WireMessage::ConfirmAck(crate::wire_message::ConfirmAckMsg { vote })
             } else {
@@ -2073,23 +2312,49 @@ mod tests {
                 let bytes = message.encode().unwrap();
                 client.write_u32(bytes.len() as u32).await.unwrap();
                 client.write_all(&bytes).await.unwrap();
-                while !elections.read().await.get_election(&hash).unwrap().is_confirmed() {
+                while !elections
+                    .read()
+                    .await
+                    .get_election(&hash)
+                    .unwrap()
+                    .is_confirmed()
+                {
                     tokio::task::yield_now().await;
                 }
                 assert_eq!(held_relay.len(), 0);
                 drop(held_relay);
                 client.shutdown().await.unwrap();
             };
-            let reading = peer_read_loop("peer", reader, &queue, &elections, &weights,
-                &peers, &dedup, &sampler, &registry, &store, BlockHash::ZERO,
-                &feedback, &generator);
+            let reading = peer_read_loop(
+                "peer",
+                reader,
+                &queue,
+                &elections,
+                &weights,
+                &peers,
+                &dedup,
+                &sampler,
+                &registry,
+                &store,
+                BlockHash::ZERO,
+                &feedback,
+                &generator,
+            );
             let (_, result) = tokio::time::timeout(Duration::from_secs(5), async {
                 tokio::join!(traffic, reading)
-            }).await.unwrap();
+            })
+            .await
+            .unwrap();
             assert!(result.is_err());
-            assert_eq!(dedup.lock().await.len(), 1, "relay still runs after local dispatch");
+            assert_eq!(
+                dedup.lock().await.len(),
+                1,
+                "relay still runs after local dispatch"
+            );
             registry.write().await.close();
-            for task in registry.write().await.take_tasks() { let _ = task.await; }
+            for task in registry.write().await.take_tasks() {
+                let _ = task.await;
+            }
         }
     }
 
@@ -2102,32 +2367,71 @@ mod tests {
         let hash = BlockHash::new([39; 32]);
         let now = Timestamp::new(unix_now_secs());
         let weights = RwLock::new(RepWeightCache::new());
-        weights.write().await.rebuild_from_accounts([(true, voter.clone())].into_iter());
+        weights
+            .write()
+            .await
+            .rebuild_from_accounts([(true, voter.clone())].into_iter());
         let weight = weights.read().await.weight(&voter);
         let mut active = ActiveElections::new(2, weight * 10);
         active.register_candidate(hash, hash, now).unwrap();
-        active.route_signed_vote(burst_consensus::VoteInfo::new(voter.clone(), hash,
-            weight, false, now, 10), now).unwrap();
+        active
+            .route_signed_vote(
+                burst_consensus::VoteInfo::new(voter.clone(), hash, weight, false, now, 10),
+                now,
+            )
+            .unwrap();
         let elections = RwLock::new(active);
-        let mut vote = WireVote { voter, block_hashes: vec![hash], is_final: false,
-            timestamp: now.as_secs() * 1_000, sequence: 10, signature: burst_types::Signature([0; 64]) };
+        let mut vote = WireVote {
+            voter,
+            block_hashes: vec![hash],
+            is_final: false,
+            timestamp: now.as_secs() * 1_000,
+            sequence: 10,
+            signature: burst_types::Signature([0; 64]),
+        };
         let sign = |vote: &mut WireVote| {
-            vote.signature = burst_crypto::sign_message(&burst_consensus::vote_signing_payload(
-                &vote.voter, vote.is_final, vote.timestamp, vote.sequence, &vote.block_hashes), &keys.private);
+            vote.signature = burst_crypto::sign_message(
+                &burst_consensus::vote_signing_payload(
+                    &vote.voter,
+                    vote.is_final,
+                    vote.timestamp,
+                    vote.sequence,
+                    &vote.block_hashes,
+                ),
+                &keys.private,
+            );
             assert!(is_vote_signature_valid(vote));
         };
         sign(&mut vote);
         let held = elections.read().await;
-        tokio::time::timeout(Duration::from_secs(1), dispatch_vote("peer", &vote, &elections, &weights))
-            .await.expect("redundant authenticated soft vote must not acquire the writer");
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            dispatch_vote("peer", &vote, &elections, &weights),
+        )
+        .await
+        .expect("redundant authenticated soft vote must not acquire the writer");
         vote.is_final = true;
         sign(&mut vote);
         let routing = dispatch_vote("peer", &vote, &elections, &weights);
         tokio::pin!(routing);
-        assert!(tokio::time::timeout(Duration::from_millis(20), &mut routing).await.is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut routing)
+                .await
+                .is_err()
+        );
         drop(held);
-        tokio::time::timeout(Duration::from_secs(1), routing).await.unwrap();
-        assert!(elections.read().await.get_election(&hash).unwrap().last_votes[&vote.voter].is_final);
+        tokio::time::timeout(Duration::from_secs(1), routing)
+            .await
+            .unwrap();
+        assert!(
+            elections
+                .read()
+                .await
+                .get_election(&hash)
+                .unwrap()
+                .last_votes[&vote.voter]
+                .is_final
+        );
     }
 
     #[tokio::test]
@@ -2152,9 +2456,16 @@ mod tests {
             sequence: 1,
             signature: burst_types::Signature([0; 64]),
         };
-        vote.signature = burst_crypto::sign_message(&burst_consensus::vote_signing_payload(
-            &vote.voter, vote.is_final, vote.timestamp, vote.sequence, &vote.block_hashes,
-        ), &keys.private);
+        vote.signature = burst_crypto::sign_message(
+            &burst_consensus::vote_signing_payload(
+                &vote.voter,
+                vote.is_final,
+                vote.timestamp,
+                vote.sequence,
+                &vote.block_hashes,
+            ),
+            &keys.private,
+        );
         let mut verified = MessageDedup::new(2);
         assert!(is_vote_signature_valid_cached(&vote, &mut verified));
         assert!(relay_vote("first", &vote, &registry, &dedup).await);
@@ -2164,8 +2475,15 @@ mod tests {
             .await
             .register_candidate(hash, hash, Timestamp::new(unix_now_secs()))
             .unwrap();
-        assert!(elections.read().await.get_election(&hash).unwrap().is_confirmed(),
-            "authenticated early vote must be replayed without a network retry");
+        assert!(
+            elections
+                .read()
+                .await
+                .get_election(&hash)
+                .unwrap()
+                .is_confirmed(),
+            "authenticated early vote must be replayed without a network retry"
+        );
         assert!(is_vote_signature_valid_cached(&vote, &mut verified));
         assert_eq!(verified.len(), 1);
         assert!(!relay_vote("second", &vote, &registry, &dedup).await);
@@ -2324,7 +2642,6 @@ mod tests {
         // High node: rejects its own outbound, keeps the peer's inbound.
         assert!(!prefer_new_on_conflict(high, low, Direction::Outbound));
         assert!(prefer_new_on_conflict(high, low, Direction::Inbound));
-
     }
 
     #[test]

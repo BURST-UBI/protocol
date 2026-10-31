@@ -13,7 +13,11 @@ pub(super) fn interval(period: Duration) -> Interval {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{future::Future, pin::pin, task::{Context, Poll, Waker}};
+    use std::{
+        future::Future,
+        pin::pin,
+        task::{Context, Poll, Waker},
+    };
 
     #[tokio::test]
     async fn overdue_repairs_coalesce_without_consuming_event_notifications() {
@@ -26,7 +30,10 @@ mod tests {
             timer.reset_at(tokio::time::Instant::now() - period * 4 - period / 2);
             timer.tick().await;
             let mut next = pin!(timer.tick());
-            assert!(matches!(next.as_mut().poll(&mut Context::from_waker(Waker::noop())), Poll::Pending));
+            assert!(matches!(
+                next.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+                Poll::Pending
+            ));
         }
         let ready = tokio::sync::Notify::new();
         ready.notify_one();

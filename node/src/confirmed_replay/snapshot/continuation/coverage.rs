@@ -22,9 +22,16 @@ impl CompactSelectionCoverage {
     }
 
     pub(crate) fn covers_local_promises(
-        &self, batch: &LmdbWriteTransaction<'_>, representative: &WalletAddress,
+        &self,
+        batch: &LmdbWriteTransaction<'_>,
+        representative: &WalletAddress,
     ) -> Result<bool, StoreError> {
-        batch.covers_consensus_votes(representative, &self.cut.parent, &self.cut.parent, &self.cut.included)
+        batch.covers_consensus_votes(
+            representative,
+            &self.cut.parent,
+            &self.cut.parent,
+            &self.cut.included,
+        )
     }
 
     pub(crate) fn seal_local_votes(
@@ -76,9 +83,10 @@ impl CompactCutCoverage {
     /// durable reservation: signing must repeat it alongside promise checks.
     /// This scans all local accounts and durable pending-confirmation targets.
     pub fn check_installed_cut(&self, batch: &LmdbWriteTransaction<'_>) -> Result<(), StoreError> {
-        use crate::confirmed_replay::installation::{CUTOFF_KEY};
+        use crate::confirmed_replay::installation::CUTOFF_KEY;
         if batch.payment_epoch()? != self.parent
-            || crate::payment_authority::storage::read_at(|key| batch.get_meta(key))?.as_deref() != Some(self.authority.as_slice())
+            || crate::payment_authority::storage::read_at(|key| batch.get_meta(key))?.as_deref()
+                != Some(self.authority.as_slice())
             || batch.get_meta(CUTOFF_KEY)?.as_deref() != Some(self.cutoff.to_be_bytes().as_slice())
             || batch
                 .get_meta(burst_store::meta::PAYMENT_VOTE_LIMIT_KEY)?

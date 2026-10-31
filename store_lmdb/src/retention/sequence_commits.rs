@@ -7,13 +7,19 @@ pub(crate) struct SequenceCommits {
 }
 impl SequenceCommits {
     pub(crate) fn record(&mut self, before: usize, after: usize) {
-        if before.checked_add(1) != Some(after) { self.interval = None; return; }
-        let start = self.interval.filter(|(_, end)| *end == before)
+        if before.checked_add(1) != Some(after) {
+            self.interval = None;
+            return;
+        }
+        let start = self
+            .interval
+            .filter(|(_, end)| *end == before)
             .map_or(before, |(start, _)| start);
         self.interval = Some((start, after));
     }
     pub(crate) fn covers(&self, before: usize, after: usize) -> bool {
-        self.interval.is_some_and(|(start, end)| start <= before && before <= after && end == after)
+        self.interval
+            .is_some_and(|(start, end)| start <= before && before <= after && end == after)
     }
 }
 
@@ -24,7 +30,9 @@ mod tests {
     fn sequence_intervals_require_contiguous_native_commits() {
         let mut commits = SequenceCommits::default();
         assert!(!commits.covers(0, 1));
-        for generation in 0..100_000 { commits.record(generation, generation + 1); }
+        for generation in 0..100_000 {
+            commits.record(generation, generation + 1);
+        }
         assert!(commits.covers(0, 100_000));
         assert!(commits.covers(99_999, 100_000));
         assert!(!commits.covers(100_001, 100_000));

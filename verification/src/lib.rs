@@ -4,8 +4,6 @@
 //! state. Evidence assessment is separate from vote counting and settlement.
 
 mod attempts;
-mod tracked_map;
-pub mod shared;
 pub mod bootstrap;
 pub mod challenge;
 pub mod committee;
@@ -15,9 +13,11 @@ pub mod method;
 pub mod orchestrator;
 pub mod outcomes;
 pub mod selection_request;
+pub mod shared;
 pub mod state;
-pub mod voting;
+mod tracked_map;
 pub mod votes;
+pub mod voting;
 
 /// Global switch for certified selection. Experimental builds can enable it
 /// on Dev and Test through `checkpoint_selection_enabled`.

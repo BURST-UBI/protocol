@@ -94,7 +94,9 @@ async fn delegation_fork(encrypted: bool) {
             (delegate, preference)
         };
         let task = tokio::spawn(async move {
-            node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+            node.start_with_services(burst_daemon::start_public_services)
+                .await
+                .unwrap();
             node.stop().await.unwrap();
         });
         let result = tokio::time::timeout(Duration::from_secs(60), async {
@@ -158,7 +160,10 @@ async fn delegation_fork(encrypted: bool) {
         let delegation = restarted.delegation_engine.clone();
         let shutdown = restarted.shutdown.clone();
         let task = tokio::spawn(async move {
-            restarted.start_with_services(burst_daemon::start_public_services).await.unwrap();
+            restarted
+                .start_with_services(burst_daemon::start_public_services)
+                .await
+                .unwrap();
             restarted.stop().await.unwrap();
         });
         let result = tokio::time::timeout(Duration::from_secs(30), async {

@@ -3,9 +3,9 @@
 
 use super::{canonical, invalid, Blob, ReplayError, WalletAddress};
 use bincode::Options;
+use canonical::{Field, MapSource};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{borrow::Cow, io::Write};
-use canonical::{Field, MapSource};
 
 pub(super) struct WalletMap<'a, M> {
     pub map: &'a M,
@@ -16,13 +16,25 @@ impl<M: MapSource<Key = WalletAddress>> Field for WalletMap<'_, M> {
     fn encode_field(&self, output: &mut dyn Write) -> Result<(), ReplayError> {
         self.encode_field_at(output, None, 1)
     }
-    fn encode_field_at(&self, output: &mut dyn Write, directory: Option<&std::path::Path>, depth: usize)
-        -> Result<(), ReplayError>
-    {
-        if !self.compact { return canonical::Map(self.map).encode_field_at(output, directory, depth); }
-        canonical::encode_map_with_keys(self.map, output, directory, depth,
-            |key, output, depth| canonical::encode_at_depth(&Address(Cow::Borrowed(key)), output, depth),
-            |value, output, _| write_value(value, output))
+    fn encode_field_at(
+        &self,
+        output: &mut dyn Write,
+        directory: Option<&std::path::Path>,
+        depth: usize,
+    ) -> Result<(), ReplayError> {
+        if !self.compact {
+            return canonical::Map(self.map).encode_field_at(output, directory, depth);
+        }
+        canonical::encode_map_with_keys(
+            self.map,
+            output,
+            directory,
+            depth,
+            |key, output, depth| {
+                canonical::encode_at_depth(&Address(Cow::Borrowed(key)), output, depth)
+            },
+            |value, output, _| write_value(value, output),
+        )
     }
 }
 
@@ -35,13 +47,27 @@ impl Field for Metadata<'_, '_> {
     fn encode_field(&self, output: &mut dyn Write) -> Result<(), ReplayError> {
         self.encode_field_at(output, None, 1)
     }
-    fn encode_field_at(&self, output: &mut dyn Write, directory: Option<&std::path::Path>, depth: usize)
-        -> Result<(), ReplayError>
-    {
-        if !self.compact { return canonical::BlobMap(self.map).encode_field_at(output, directory, depth); }
-        canonical::encode_map_with_keys(self.map, output, directory, depth,
-            |key, output, depth| canonical::encode_at_depth(&MetadataKey(Cow::Borrowed(key)), output, depth),
-            |value, output, depth| canonical::Bytes(&value.0).encode_field_at(output, directory, depth))
+    fn encode_field_at(
+        &self,
+        output: &mut dyn Write,
+        directory: Option<&std::path::Path>,
+        depth: usize,
+    ) -> Result<(), ReplayError> {
+        if !self.compact {
+            return canonical::BlobMap(self.map).encode_field_at(output, directory, depth);
+        }
+        canonical::encode_map_with_keys(
+            self.map,
+            output,
+            directory,
+            depth,
+            |key, output, depth| {
+                canonical::encode_at_depth(&MetadataKey(Cow::Borrowed(key)), output, depth)
+            },
+            |value, output, depth| {
+                canonical::Bytes(&value.0).encode_field_at(output, directory, depth)
+            },
+        )
     }
 }
 
@@ -52,12 +78,24 @@ pub(super) struct Verification<'a, 'b> {
 
 impl Field for Verification<'_, '_> {
     fn encode_field(&self, output: &mut dyn Write) -> Result<(), ReplayError> {
-        if self.compact { write_value(&self.state.snapshot_view(), output) }
-        else { canonical::VerificationField(self.state.snapshot_view(), &|| Ok(())).encode_field(output) }
+        if self.compact {
+            write_value(&self.state.snapshot_view(), output)
+        } else {
+            canonical::VerificationField(self.state.snapshot_view(), &|| Ok(()))
+                .encode_field(output)
+        }
     }
-    fn encode_field_in(&self, output: &mut dyn Write, directory: Option<&std::path::Path>) -> Result<(), ReplayError> {
-        if self.compact { self.encode_field(output) }
-        else { canonical::VerificationField(self.state.snapshot_view(), &|| Ok(())).encode_field_in(output, directory) }
+    fn encode_field_in(
+        &self,
+        output: &mut dyn Write,
+        directory: Option<&std::path::Path>,
+    ) -> Result<(), ReplayError> {
+        if self.compact {
+            self.encode_field(output)
+        } else {
+            canonical::VerificationField(self.state.snapshot_view(), &|| Ok(()))
+                .encode_field_in(output, directory)
+        }
     }
 }
 
@@ -80,7 +118,9 @@ impl<'de, T: DeserializeOwned> Deserialize<'de> for Value<T> {
                 read_value(bytes).map_err(E::custom)
             }
         }
-        deserializer.deserialize_any(Visitor(std::marker::PhantomData)).map(Self)
+        deserializer
+            .deserialize_any(Visitor(std::marker::PhantomData))
+            .map(Self)
     }
 }
 
@@ -90,8 +130,13 @@ pub(super) fn read_wallet_map<'de, D: serde::Deserializer<'de>, T: DeserializeOw
     struct Visitor<T>(std::marker::PhantomData<T>);
     impl<'de, T: DeserializeOwned> serde::de::Visitor<'de> for Visitor<T> {
         type Value = std::collections::HashMap<WalletAddress, T>;
-        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("snapshot wallet records") }
-        fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("snapshot wallet records")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> Result<Self::Value, A::Error> {
             use serde::de::Error;
             let mut rows = std::collections::HashMap::new();
             while let Some(key) = map.next_key::<Address<'_>>()? {
@@ -106,20 +151,28 @@ pub(super) fn read_wallet_map<'de, D: serde::Deserializer<'de>, T: DeserializeOw
     deserializer.deserialize_map(Visitor(std::marker::PhantomData))
 }
 
-pub(super) fn read_accounts<'de, 'a, D: serde::Deserializer<'de>>(deserializer: D)
-    -> Result<Cow<'a, std::collections::HashMap<WalletAddress, burst_store::account::AccountInfo>>, D::Error>
-{
+pub(super) fn read_accounts<'de, 'a, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<
+    Cow<'a, std::collections::HashMap<WalletAddress, burst_store::account::AccountInfo>>,
+    D::Error,
+> {
     read_wallet_map(deserializer).map(Cow::Owned)
 }
 
-pub(super) fn read_metadata<'de, 'a, D: serde::Deserializer<'de>>(deserializer: D)
-    -> Result<std::collections::HashMap<String, Blob<'a>>, D::Error>
-{
+pub(super) fn read_metadata<'de, 'a, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<std::collections::HashMap<String, Blob<'a>>, D::Error> {
     struct Visitor<'a>(std::marker::PhantomData<&'a ()>);
     impl<'de, 'a> serde::de::Visitor<'de> for Visitor<'a> {
         type Value = std::collections::HashMap<String, Blob<'a>>;
-        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("snapshot lifecycle metadata") }
-        fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("snapshot lifecycle metadata")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> Result<Self::Value, A::Error> {
             use serde::de::Error;
             let mut rows = std::collections::HashMap::new();
             while let Some(key) = map.next_key::<MetadataKey<'_>>()? {
@@ -146,17 +199,24 @@ pub(super) fn write_value<T: Serialize + ?Sized>(
     value: &T,
     output: &mut dyn Write,
 ) -> Result<(), ReplayError> {
-    let length = options().serialized_size(value).map_err(|error| invalid(error.to_string()))?;
+    let length = options()
+        .serialized_size(value)
+        .map_err(|error| invalid(error.to_string()))?;
     let length = usize::try_from(length).map_err(|error| invalid(error.to_string()))?;
     let mut header = Vec::new();
     canonical::collection_header(0x40, length, &mut header)?;
-    if length.checked_add(header.len()).is_none_or(|bytes|
-        bytes as u64 > burst_consensus::snapshot::MAX_SNAPSHOT_BYTES)
+    if length
+        .checked_add(header.len())
+        .is_none_or(|bytes| bytes as u64 > burst_consensus::snapshot::MAX_SNAPSHOT_BYTES)
     {
         return Err(invalid("snapshot record exceeds byte limit"));
     }
-    output.write_all(&header).map_err(|error| invalid(error.to_string()))?;
-    options().serialize_into(output, value).map_err(|error| invalid(error.to_string()))
+    output
+        .write_all(&header)
+        .map_err(|error| invalid(error.to_string()))?;
+    options()
+        .serialize_into(output, value)
+        .map_err(|error| invalid(error.to_string()))
 }
 
 const IDENTITY_PREFIXES: [&str; 3] = [
@@ -172,7 +232,9 @@ pub(super) struct MetadataKey<'a>(pub Cow<'a, str>);
 impl Serialize for MetadataKey<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         for (index, prefix) in IDENTITY_PREFIXES.iter().enumerate() {
-            let Some(suffix) = self.0.strip_prefix(prefix) else { continue; };
+            let Some(suffix) = self.0.strip_prefix(prefix) else {
+                continue;
+            };
             if index < 2 {
                 if let Some(bytes) = burst_crypto::decode_address(suffix) {
                     return ((index + 1) as u8, Blob(Cow::Borrowed(&bytes))).serialize(serializer);
@@ -183,7 +245,10 @@ impl Serialize for MetadataKey<'_> {
                 for (offset, byte) in bytes.iter_mut().enumerate() {
                     match u8::from_str_radix(&suffix[offset * 2..offset * 2 + 2], 16) {
                         Ok(value) => *byte = value,
-                        Err(_) => { valid = false; break; }
+                        Err(_) => {
+                            valid = false;
+                            break;
+                        }
                     }
                 }
                 if valid && burst_types::BlockHash::new(bytes).to_string() == suffix {
@@ -206,12 +271,25 @@ impl<'de> Deserialize<'de> for MetadataKey<'_> {
             fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<String, E> {
                 Ok(value.to_owned())
             }
-            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<String, A::Error> {
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<String, A::Error> {
                 use serde::de::Error;
-                let tag: u8 = seq.next_element()?.ok_or_else(|| A::Error::custom("missing identity key tag"))?;
-                if !(1..=3).contains(&tag) { return Err(A::Error::custom("unknown identity key tag")); }
-                let blob: Blob<'_> = seq.next_element()?.ok_or_else(|| A::Error::custom("missing identity key suffix"))?;
-                let bytes: [u8; 32] = blob.0.as_ref().try_into().map_err(|_| A::Error::custom("invalid identity key suffix length"))?;
+                let tag: u8 = seq
+                    .next_element()?
+                    .ok_or_else(|| A::Error::custom("missing identity key tag"))?;
+                if !(1..=3).contains(&tag) {
+                    return Err(A::Error::custom("unknown identity key tag"));
+                }
+                let blob: Blob<'_> = seq
+                    .next_element()?
+                    .ok_or_else(|| A::Error::custom("missing identity key suffix"))?;
+                let bytes: [u8; 32] = blob
+                    .0
+                    .as_ref()
+                    .try_into()
+                    .map_err(|_| A::Error::custom("invalid identity key suffix length"))?;
                 if seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
                     return Err(A::Error::custom("trailing identity key fields"));
                 }
@@ -220,10 +298,15 @@ impl<'de> Deserialize<'de> for MetadataKey<'_> {
                 } else {
                     burst_crypto::derive_address(&burst_types::PublicKey(bytes)).to_string()
                 };
-                Ok(format!("{}{suffix}", IDENTITY_PREFIXES[usize::from(tag - 1)]))
+                Ok(format!(
+                    "{}{suffix}",
+                    IDENTITY_PREFIXES[usize::from(tag - 1)]
+                ))
             }
         }
-        deserializer.deserialize_any(Visitor).map(|value| Self(Cow::Owned(value)))
+        deserializer
+            .deserialize_any(Visitor)
+            .map(|value| Self(Cow::Owned(value)))
     }
 }
 
@@ -231,7 +314,10 @@ pub(super) fn read_value<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, ReplayE
     if bytes.len() as u64 > burst_consensus::snapshot::MAX_SNAPSHOT_BYTES {
         return Err(invalid("snapshot record exceeds byte limit"));
     }
-    options().with_limit(bytes.len() as u64).deserialize(bytes).map_err(|error| invalid(error.to_string()))
+    options()
+        .with_limit(bytes.len() as u64)
+        .deserialize(bytes)
+        .map_err(|error| invalid(error.to_string()))
 }
 
 /// Full checksum-validated addresses have a reversible 32-byte representation.
@@ -256,16 +342,22 @@ impl<'de> Deserialize<'de> for Address<'_> {
                 f.write_str("a 32-byte address key or an unchanged address string")
             }
             fn visit_bytes<E: serde::de::Error>(self, bytes: &[u8]) -> Result<Self::Value, E> {
-                let key = bytes.try_into().map_err(|_| E::custom("invalid address key length"))?;
+                let key = bytes
+                    .try_into()
+                    .map_err(|_| E::custom("invalid address key length"))?;
                 Ok(burst_crypto::derive_address(&burst_types::PublicKey(key)))
             }
             fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
                 // WalletAddress's derived decoder preserves the original string,
                 // including legacy values. Context validation remains separate.
-                ciborium::Value::Text(value.to_owned()).deserialized().map_err(E::custom)
+                ciborium::Value::Text(value.to_owned())
+                    .deserialized()
+                    .map_err(E::custom)
             }
         }
-        deserializer.deserialize_any(Visitor).map(|value| Self(Cow::Owned(value)))
+        deserializer
+            .deserialize_any(Visitor)
+            .map(|value| Self(Cow::Owned(value)))
     }
 }
 
@@ -345,7 +437,11 @@ mod tests {
             format!("{}{wallet}", IDENTITY_PREFIXES[0]),
             format!("{}{wallet}", IDENTITY_PREFIXES[1]),
             format!("{}{hash}", IDENTITY_PREFIXES[2]),
-            format!("{}{}", IDENTITY_PREFIXES[2], hash.to_string().to_uppercase()),
+            format!(
+                "{}{}",
+                IDENTITY_PREFIXES[2],
+                hash.to_string().to_uppercase()
+            ),
             format!("{}é", IDENTITY_PREFIXES[2]),
             "verification_identity_source/v1/brst_fixture".into(),
             "unrecognized/v99/identity".into(),
@@ -376,9 +472,23 @@ mod tests {
         let mut verification = burst_verification::VerificationOrchestrator::new();
         verification.initialize_genesis(&wallet);
         for (name, old, new) in [
-            ("account", canonical::encode(&account).unwrap().len(), options().serialized_size(&account).unwrap() as usize),
-            ("brn_wallet", canonical::encode(&brn).unwrap().len(), options().serialized_size(&brn).unwrap() as usize),
-            ("verification_one_wallet", canonical::encode(&verification.snapshot()).unwrap().len(), options().serialized_size(&verification.snapshot_view()).unwrap() as usize),
+            (
+                "account",
+                canonical::encode(&account).unwrap().len(),
+                options().serialized_size(&account).unwrap() as usize,
+            ),
+            (
+                "brn_wallet",
+                canonical::encode(&brn).unwrap().len(),
+                options().serialized_size(&brn).unwrap() as usize,
+            ),
+            (
+                "verification_one_wallet",
+                canonical::encode(&verification.snapshot()).unwrap().len(),
+                options()
+                    .serialized_size(&verification.snapshot_view())
+                    .unwrap() as usize,
+            ),
         ] {
             eprintln!("compact size field={name} legacy_cbor={old} varint_payload={new}");
             assert!(new < old);
@@ -387,27 +497,45 @@ mod tests {
         write_value(&verification.snapshot_view(), &mut bytes).unwrap();
         let blob: Blob<'_> = ciborium::from_reader(bytes.as_slice()).unwrap();
         let restored: burst_verification::OrchestratorSnapshot = read_value(&blob.0).unwrap();
-        assert_eq!(canonical::encode(&restored).unwrap(), canonical::encode(&verification.snapshot()).unwrap());
+        assert_eq!(
+            canonical::encode(&restored).unwrap(),
+            canonical::encode(&verification.snapshot()).unwrap()
+        );
     }
 
     #[test]
     fn compact_wallet_maps_preserve_legacy_and_spilled_records() {
         #[derive(Deserialize)]
-        struct Rows(#[serde(deserialize_with = "read_wallet_map")] std::collections::HashMap<WalletAddress, AccountInfo>);
+        struct Rows(
+            #[serde(deserialize_with = "read_wallet_map")]
+            std::collections::HashMap<WalletAddress, AccountInfo>,
+        );
         for count in [0, 2, 4097] {
-            let rows: std::collections::HashMap<_, _> = (0u64..count).map(|index| {
-                let mut key = [73; 32];
-                key[..8].copy_from_slice(&index.to_le_bytes());
-                let address = burst_crypto::derive_address(&burst_types::PublicKey(key));
-                (address.clone(), AccountInfo::unopened(address))
-            }).collect();
+            let rows: std::collections::HashMap<_, _> = (0u64..count)
+                .map(|index| {
+                    let mut key = [73; 32];
+                    key[..8].copy_from_slice(&index.to_le_bytes());
+                    let address = burst_crypto::derive_address(&burst_types::PublicKey(key));
+                    (address.clone(), AccountInfo::unopened(address))
+                })
+                .collect();
             for compact in [false, true] {
                 let mut bytes = Vec::new();
-                WalletMap { map: &rows, compact }.encode_field(&mut bytes).unwrap();
+                WalletMap {
+                    map: &rows,
+                    compact,
+                }
+                .encode_field(&mut bytes)
+                .unwrap();
                 let decoded: Rows = ciborium::from_reader(bytes.as_slice()).unwrap();
                 assert_eq!(decoded.0, rows);
                 let mut encoded = Vec::new();
-                WalletMap { map: &decoded.0, compact }.encode_field(&mut encoded).unwrap();
+                WalletMap {
+                    map: &decoded.0,
+                    compact,
+                }
+                .encode_field(&mut encoded)
+                .unwrap();
                 assert_eq!(encoded, bytes);
             }
         }
@@ -417,8 +545,10 @@ mod tests {
     #[ignore = "explicit capped-host 100000-row body sizing; not signed population qualification"]
     fn compact_hundred_thousand_wallet_body_fits_and_roundtrips() {
         let params = burst_types::ProtocolParams::default();
-        let mut state = super::super::SnapshotContinuation::from_genesis(burst_types::NetworkId::Dev, &params)
-            .unwrap().into_state();
+        let mut state =
+            super::super::SnapshotContinuation::from_genesis(burst_types::NetworkId::Dev, &params)
+                .unwrap()
+                .into_state();
         let representative = state.accounts.keys().next().unwrap().clone();
         for index in 1u64..100_000 {
             let mut key = [83; 32];
@@ -432,19 +562,34 @@ mod tests {
             account.confirmation_height = 1;
             account.representative = representative.clone();
             state.accounts.insert(address.clone(), account);
-            state.brn.wallets.insert(address.clone(), burst_brn::BrnWalletState::new(Timestamp::new(300_000 + index)));
+            state.brn.wallets.insert(
+                address.clone(),
+                burst_brn::BrnWalletState::new(Timestamp::new(300_000 + index)),
+            );
             state.verification.initialize_genesis(&address);
             for prefix in &IDENTITY_PREFIXES[..2] {
-                state.lifecycle_metadata.insert(format!("{prefix}{address}"), key.to_vec());
+                state
+                    .lifecycle_metadata
+                    .insert(format!("{prefix}{address}"), key.to_vec());
             }
-            state.lifecycle_metadata.insert(format!("{}{}", IDENTITY_PREFIXES[2], BlockHash::new(key)), key.to_vec());
+            state.lifecycle_metadata.insert(
+                format!("{}{}", IDENTITY_PREFIXES[2], BlockHash::new(key)),
+                key.to_vec(),
+            );
         }
         let bytes = state.snapshot_bytes().unwrap();
-        eprintln!("compact body wallets=100000 bytes={} limit={}", bytes.len(), burst_consensus::snapshot::MAX_SNAPSHOT_BYTES);
+        eprintln!(
+            "compact body wallets=100000 bytes={} limit={}",
+            bytes.len(),
+            burst_consensus::snapshot::MAX_SNAPSHOT_BYTES
+        );
         assert!((bytes.len() as u64) <= burst_consensus::snapshot::MAX_SNAPSHOT_BYTES);
         let decoded: super::super::State<'_> = ciborium::from_reader(bytes.as_slice()).unwrap();
         assert_eq!(decoded.accounts.as_ref(), &state.accounts);
-        assert_eq!(decoded.lifecycle_metadata.len(), state.lifecycle_metadata.len());
+        assert_eq!(
+            decoded.lifecycle_metadata.len(),
+            state.lifecycle_metadata.len()
+        );
         for (key, value) in &decoded.lifecycle_metadata {
             assert_eq!(value.0.as_ref(), state.lifecycle_metadata[key]);
         }

@@ -1,12 +1,11 @@
 use burst_store::account::AccountInfo;
-use burst_types::{
-    BlockHash, NetworkId, ProtocolParams, Timestamp, WalletAddress, WalletState,
-};
+use burst_types::{BlockHash, NetworkId, ProtocolParams, Timestamp, WalletAddress, WalletState};
 
 /// The running node's genesis contents, derived only from configured public inputs.
 pub(crate) fn block(network: NetworkId, params: &ProtocolParams) -> burst_ledger::StateBlock {
     burst_ledger::genesis::configured_genesis_block(
-        crate::genesis_key::genesis_address(network), params,
+        crate::genesis_key::genesis_address(network),
+        params,
     )
 }
 

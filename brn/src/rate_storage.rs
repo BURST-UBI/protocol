@@ -31,17 +31,24 @@ pub fn row_value(segment: &RateSegment) -> [u8; 24] {
 
 /// Full replacement must reject malformed segment ends instead of silently
 /// repairing them by omitting those ends from the local row representation.
-pub fn encode(history: &RateHistory) -> Result<impl Iterator<Item = (Vec<u8>, [u8; 24])> + '_, BrnError> {
+pub fn encode(
+    history: &RateHistory,
+) -> Result<impl Iterator<Item = (Vec<u8>, [u8; 24])> + '_, BrnError> {
     let mut segments = history.segments().iter().peekable();
-    if segments.peek().is_none() { return Err(invalid()); }
+    if segments.peek().is_none() {
+        return Err(invalid());
+    }
     while let Some(segment) = segments.next() {
         match segments.peek() {
-            Some(next) if segment.end == Some(next.start) && next.start >= segment.start => {},
-            None if segment.end.is_none() => {},
+            Some(next) if segment.end == Some(next.start) && next.start >= segment.start => {}
+            None if segment.end.is_none() => {}
             _ => return Err(invalid()),
         }
     }
-    Ok(history.segments().iter().enumerate()
+    Ok(history
+        .segments()
+        .iter()
+        .enumerate()
         .map(|(index, segment)| (row_key(index as u64), row_value(segment))))
 }
 
@@ -56,23 +63,36 @@ pub fn decode_stored<K: AsRef<[u8]>, V: AsRef<[u8]>>(
     let mut rows = rows.into_iter();
     match header {
         Some(header) => {
-            if legacy.is_some() { return Err(invalid()); }
+            if legacy.is_some() {
+                return Err(invalid());
+            }
             decode(header, rows).map(Some)
         }
         None => {
-            if rows.next().transpose()?.is_some() { return Err(invalid()); }
-            legacy.map(|bytes| bincode::deserialize(bytes)
-                .map_err(|error| BrnError::Other(error.to_string()))).transpose()
+            if rows.next().transpose()?.is_some() {
+                return Err(invalid());
+            }
+            legacy
+                .map(|bytes| {
+                    bincode::deserialize(bytes).map_err(|error| BrnError::Other(error.to_string()))
+                })
+                .transpose()
         }
     }
 }
 
-pub fn read_snapshot(snapshot: &dyn burst_store::brn::BrnSnapshot) -> Result<Option<RateHistory>, BrnError> {
+pub fn read_snapshot(
+    snapshot: &dyn burst_store::brn::BrnSnapshot,
+) -> Result<Option<RateHistory>, BrnError> {
     let error = |error: burst_store::StoreError| BrnError::Other(error.to_string());
-    decode_stored(snapshot.get_meta(b"rate_history").map_err(error)?,
+    decode_stored(
+        snapshot.get_meta(b"rate_history").map_err(error)?,
         snapshot.get_meta(HEADER).map_err(error)?,
-        snapshot.meta_entries(ROW_PREFIX).map_err(error)?
-            .map(|row| row.map_err(error)))
+        snapshot
+            .meta_entries(ROW_PREFIX)
+            .map_err(error)?
+            .map(|row| row.map_err(error)),
+    )
 }
 
 /// Require exactly the declared nonempty sequence of rows, starting at index
@@ -83,26 +103,39 @@ pub fn decode<K: AsRef<[u8]>, V: AsRef<[u8]>>(
     rows: impl IntoIterator<Item = Result<(K, V), BrnError>>,
 ) -> Result<RateHistory, BrnError> {
     let count = u64::from_be_bytes(header.try_into().map_err(|_| invalid())?);
-    if count == 0 { return Err(invalid()); }
+    if count == 0 {
+        return Err(invalid());
+    }
     let mut segments: Vec<RateSegment> = Vec::new();
     let mut expected = 0u64;
     for row in rows {
         let (key, value) = row?;
         let key = key.as_ref();
         let value = value.as_ref();
-        if expected >= count || key.strip_prefix(ROW_PREFIX) != Some(expected.to_be_bytes().as_slice()) || value.len() != 24 {
+        if expected >= count
+            || key.strip_prefix(ROW_PREFIX) != Some(expected.to_be_bytes().as_slice())
+            || value.len() != 24
+        {
             return Err(invalid());
         }
         let start = Timestamp::new(u64::from_be_bytes(value[..8].try_into().unwrap()));
         let rate = u128::from_be_bytes(value[8..].try_into().unwrap());
         if let Some(previous) = segments.last_mut() {
-            if start < previous.start { return Err(invalid()); }
+            if start < previous.start {
+                return Err(invalid());
+            }
             previous.end = Some(start);
         }
-        segments.push(RateSegment { rate, start, end: None });
+        segments.push(RateSegment {
+            rate,
+            start,
+            end: None,
+        });
         expected = expected.checked_add(1).ok_or_else(invalid)?;
     }
-    if expected != count { return Err(invalid()); }
+    if expected != count {
+        return Err(invalid());
+    }
     Ok(RateHistory::from_segments(segments))
 }
 
@@ -111,7 +144,8 @@ mod tests {
     use super::*;
 
     fn rows(history: &RateHistory) -> Vec<(Vec<u8>, Vec<u8>)> {
-        encode(history).unwrap()
+        encode(history)
+            .unwrap()
             .map(|(key, value)| (key, value.to_vec()))
             .collect()
     }
@@ -127,14 +161,22 @@ mod tests {
         let baseline = rows(&before);
         let mut after = before.clone();
         after.apply_rate_change(0, Timestamp::new(10)).unwrap();
-        after.apply_rate_change(11, Timestamp::new(u64::MAX)).unwrap();
+        after
+            .apply_rate_change(11, Timestamp::new(u64::MAX))
+            .unwrap();
         let appended = after.appended_rows_start(&before).unwrap();
         assert_eq!(appended, 2);
         let encoded = rows(&after);
         assert_eq!(&encoded[..appended], &baseline);
         let restored = restore(4, encoded.clone()).unwrap();
-        assert_eq!(bincode::serialize(&restored).unwrap(), bincode::serialize(&after).unwrap());
-        assert_eq!(restored.total_accrued_checked(Timestamp::new(10), Timestamp::new(u64::MAX)), Some(0));
+        assert_eq!(
+            bincode::serialize(&restored).unwrap(),
+            bincode::serialize(&after).unwrap()
+        );
+        assert_eq!(
+            restored.total_accrued_checked(Timestamp::new(10), Timestamp::new(u64::MAX)),
+            Some(0)
+        );
         // Deleting appended rows and restoring the count reconstructs the old
         // open final segment; no previous rate row needs rewriting on undo.
         assert_eq!(restore(2, encoded[..2].to_vec()).unwrap(), before);
@@ -146,7 +188,9 @@ mod tests {
         let clone = before.clone();
         assert_eq!(clone.appended_rows_start(&before), Some(1));
         let mut independent = RateHistory::new(3, Timestamp::EPOCH);
-        independent.apply_rate_change(5, Timestamp::new(10)).unwrap();
+        independent
+            .apply_rate_change(5, Timestamp::new(10))
+            .unwrap();
         assert_eq!(independent.appended_rows_start(&before), None);
         let mut after = before.clone();
         after.apply_rate_change(5, Timestamp::new(10)).unwrap();
@@ -155,7 +199,8 @@ mod tests {
         next.apply_rate_change(8, Timestamp::new(11)).unwrap();
         assert_eq!(next.appended_rows_start(&after), Some(2));
         assert_eq!(next.appended_rows_start(&before), None);
-        let restored: RateHistory = bincode::deserialize(&bincode::serialize(&after).unwrap()).unwrap();
+        let restored: RateHistory =
+            bincode::deserialize(&bincode::serialize(&after).unwrap()).unwrap();
         assert_eq!(restored.appended_rows_start(&before), None);
         assert_eq!(after.appended_rows_start(&before), Some(1));
     }
@@ -188,8 +233,16 @@ mod tests {
         let mut invalid = valid.clone();
         invalid[1].1[..8].copy_from_slice(&9u64.to_be_bytes());
         assert!(restore(2, invalid).is_err());
-        assert!(decode(&2u64.to_be_bytes(), valid.into_iter().map(Ok)
-            .chain(std::iter::once(Err::<(Vec<u8>, Vec<u8>), _>(super::invalid())))).is_err());
+        assert!(decode(
+            &2u64.to_be_bytes(),
+            valid
+                .into_iter()
+                .map(Ok)
+                .chain(std::iter::once(Err::<(Vec<u8>, Vec<u8>), _>(
+                    super::invalid()
+                )))
+        )
+        .is_err());
     }
 
     #[test]
@@ -198,7 +251,11 @@ mod tests {
         let mut history = RateHistory::new(3, Timestamp::new(10));
         history.apply_rate_change(5, Timestamp::new(20)).unwrap();
         let valid: Vec<_> = history.segments().iter().cloned().collect();
-        for (index, end) in [(0, None), (0, Some(Timestamp::new(19))), (1, Some(Timestamp::new(30)))] {
+        for (index, end) in [
+            (0, None),
+            (0, Some(Timestamp::new(19))),
+            (1, Some(Timestamp::new(30))),
+        ] {
             let mut invalid = valid.clone();
             invalid[index].end = end;
             assert!(encode(&RateHistory::from_segments(invalid)).is_err());

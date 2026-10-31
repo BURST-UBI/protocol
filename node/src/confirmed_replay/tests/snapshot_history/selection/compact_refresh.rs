@@ -50,7 +50,9 @@ async fn compact_worker_refreshes_an_expired_unsigned_candidate_on_its_timer() {
             .unwrap();
         let coverage = base.prepare_next_selection(tail, &[]).unwrap().unwrap();
         let seed = (0..9)
-            .find(|seed| address(*seed) == *base.anchor().proposer(if stale_finality { 0 } else { 1 }))
+            .find(|seed| {
+                address(*seed) == *base.anchor().proposer(if stale_finality { 0 } else { 1 })
+            })
             .unwrap();
         let key = Arc::new(burst_crypto::keypair_from_seed(&[seed; 32]).private);
         let local = Arc::new(local);
@@ -95,7 +97,9 @@ async fn compact_worker_refreshes_an_expired_unsigned_candidate_on_its_timer() {
             .unwrap();
         let promised_replay = if case == 2 {
             Some(Arc::new(recovered.fork(local.env().path()).unwrap()))
-        } else { None };
+        } else {
+            None
+        };
         let service = WitnessService::start(Arc::new(source), local.clone(), 0).await;
         let session = Session::from_compact_candidate(
             Settings {
@@ -118,14 +122,29 @@ async fn compact_worker_refreshes_an_expired_unsigned_candidate_on_its_timer() {
             let block = fixture.blocks.last().unwrap();
             cemented::append(&local, block, case != 2);
             if case == 2 {
-                local.meta_store().reserve_consensus_vote_at(
-                    &base.anchor().hash(), &address(seed), &block.account, &block.previous,
-                    &block.hash, true, 0, Some(block.timestamp.as_secs()),
-                ).unwrap();
+                local
+                    .meta_store()
+                    .reserve_consensus_vote_at(
+                        &base.anchor().hash(),
+                        &address(seed),
+                        &block.account,
+                        &block.previous,
+                        &block.hash,
+                        true,
+                        0,
+                        Some(block.timestamp.as_secs()),
+                    )
+                    .unwrap();
             }
             Some(block.hash)
-        } else { None };
-        let promises = local.tx_begin_write().unwrap().checkpoint_metadata(b"consensus_final/").unwrap();
+        } else {
+            None
+        };
+        let promises = local
+            .tx_begin_write()
+            .unwrap()
+            .checkpoint_metadata(b"consensus_final/")
+            .unwrap();
         let (_sender, receiver) = tokio::sync::mpsc::channel(checkpoint_service::INBOX_CAPACITY);
         let stop = Arc::new(crate::shutdown::ShutdownController::new());
         let worker = tokio::spawn(checkpoint_service::run(
@@ -157,31 +176,65 @@ async fn compact_worker_refreshes_an_expired_unsigned_candidate_on_its_timer() {
         if let Some(recovered) = promised_replay {
             let mut changed = fixture.blocks.last().unwrap().clone();
             changed.signature.0[0] ^= 1;
-            local.block_store().put_block(&changed.hash, &bincode::serialize(&changed).unwrap()).unwrap();
-            let result = recovered.discover_promised_candidate_from_peers(
-                local.clone(), service.registry.clone(),
-                SigningClock { now: CUTOFF + 4, error_bound: 0 }, address(seed),
-            ).await;
-            let Err(error) = result else { panic!("promised replay accepted an invalid signature"); };
-            assert!(error.to_string().contains("invalid signed snapshot tail block"), "{error}");
+            local
+                .block_store()
+                .put_block(&changed.hash, &bincode::serialize(&changed).unwrap())
+                .unwrap();
+            let result = recovered
+                .discover_promised_candidate_from_peers(
+                    local.clone(),
+                    service.registry.clone(),
+                    SigningClock {
+                        now: CUTOFF + 4,
+                        error_bound: 0,
+                    },
+                    address(seed),
+                )
+                .await;
+            let Err(error) = result else {
+                panic!("promised replay accepted an invalid signature");
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("invalid signed snapshot tail block"),
+                "{error}"
+            );
             let original = fixture.blocks.last().unwrap();
-            local.block_store().put_block(&original.hash, &bincode::serialize(original).unwrap()).unwrap();
+            local
+                .block_store()
+                .put_block(&original.hash, &bincode::serialize(original).unwrap())
+                .unwrap();
         }
         service.stop().await;
         let checkpoint = result.expect("worker kept its expired candidate instead of refreshing");
-        assert_eq!(checkpoint.cutoff, CUTOFF + if stale_finality { 4 } else { 31 });
+        assert_eq!(
+            checkpoint.cutoff,
+            CUTOFF + if stale_finality { 4 } else { 31 }
+        );
         if let Some(hash) = advanced {
             assert!(local.block_store().get_block(&hash).is_ok());
             let saved = checkpoint_agreement::read_state(&local, base.anchor(), &address(seed))
-                .unwrap().unwrap();
+                .unwrap()
+                .unwrap();
             assert!(saved.valid_proof().is_none());
             assert!(saved.decision().is_none());
-            assert_eq!(local.tx_begin_write().unwrap().checkpoint_metadata(b"consensus_final/").unwrap(), promises);
+            assert_eq!(
+                local
+                    .tx_begin_write()
+                    .unwrap()
+                    .checkpoint_metadata(b"consensus_final/")
+                    .unwrap(),
+                promises
+            );
             if case == 2 {
                 let block = fixture.blocks.last().unwrap();
                 let account = local.account_store().get_account(&block.account).unwrap();
-                assert_eq!(account.confirmation_height + 1, account.block_count,
-                    "replaying a promised extension must not publish confirmation");
+                assert_eq!(
+                    account.confirmation_height + 1,
+                    account.block_count,
+                    "replaying a promised extension must not publish confirmation"
+                );
             }
         }
         assert_ne!(checkpoint, original.checkpoint);
@@ -312,9 +365,13 @@ fn compact_refresh_preserves_journal_and_late_prepare_priority_after_restart() {
     assert_ne!(proposal.body.checkpoint, original.checkpoint);
     let before = driver.state().unwrap();
     assert!(driver.compact_candidate_refresh_signer().unwrap().is_none());
-    assert!(!driver.replace_unsigned_compact_candidate(
-        checkpoint_agreement::CompactReplayCandidate::Selection(Box::new(coverage(CUTOFF + 91))),
-    ).unwrap());
+    assert!(!driver
+        .replace_unsigned_compact_candidate(
+            checkpoint_agreement::CompactReplayCandidate::Selection(Box::new(coverage(
+                CUTOFF + 91
+            ))),
+        )
+        .unwrap());
     assert!(!driver
         .replace_compact_selection(
             coverage(CUTOFF + 91),
@@ -346,9 +403,13 @@ fn compact_refresh_preserves_journal_and_late_prepare_priority_after_restart() {
     driver.receive(catch_up(2), None).unwrap();
     assert!(driver.state().unwrap().unwrap().valid_proof().is_some());
     assert!(driver.compact_candidate_refresh_signer().unwrap().is_none());
-    assert!(!driver.replace_unsigned_compact_candidate(
-        checkpoint_agreement::CompactReplayCandidate::Selection(Box::new(coverage(CUTOFF + 91))),
-    ).unwrap());
+    assert!(!driver
+        .replace_unsigned_compact_candidate(
+            checkpoint_agreement::CompactReplayCandidate::Selection(Box::new(coverage(
+                CUTOFF + 91
+            ))),
+        )
+        .unwrap());
     let before = local
         .tx_begin_write()
         .unwrap()

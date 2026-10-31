@@ -48,7 +48,10 @@ async fn compact_live_snapshot_crash_child() {
     let installer = node.snapshot_installer();
     let store = node.store.clone();
     assert!(STORE.set(store.clone()).is_ok());
-    let running = tokio::spawn(async move { node.start_with_services(burst_daemon::start_public_services).await });
+    let running = tokio::spawn(async move {
+        node.start_with_services(burst_daemon::start_public_services)
+            .await
+    });
     tokio::time::timeout(Duration::from_secs(90), async {
         loop {
             assert!(

@@ -63,9 +63,13 @@ impl Reader {
         let params = self.initial_params.clone();
         let preparation = self.preparation.clone();
         let (cursor, _guard) = tokio::task::spawn_blocking(move || {
-            let prepared = preparation.lock().map_err(|error| error.to_string())?
+            let prepared = preparation
+                .lock()
+                .map_err(|error| error.to_string())?
                 .prepare(&store, network, &params, Request::Account(account))?;
-            let Prepared::Account(cursor) = prepared.as_ref() else { unreachable!("account preparation") };
+            let Prepared::Account(cursor) = prepared.as_ref() else {
+                unreachable!("account preparation")
+            };
             let cursor = cursor.clone();
             Ok::<_, String>((cursor, guard))
         })
@@ -117,7 +121,9 @@ impl Reader {
         }
         let account = WalletAddress::new(&query.account);
         // indexed_slot already validated the account and hash encoding.
-        let previous = query.previous.parse::<BlockHash>()
+        let previous = query
+            .previous
+            .parse::<BlockHash>()
             .map_err(|error| error.to_string())?;
         let successor = self.successor(account, previous).await?;
         Ok(burst_types::payment_recovery::SlotReview {
@@ -140,10 +146,16 @@ impl Reader {
         let params = self.initial_params.clone();
         let preparation = self.preparation.clone();
         let (mut cursor, _guard) = tokio::task::spawn_blocking(move || {
-            let prepared = preparation.lock().map_err(|error| error.to_string())?
+            let prepared = preparation
+                .lock()
+                .map_err(|error| error.to_string())?
                 .prepare(&store, network, &params, Request::Account(account))?;
-            let Prepared::Account(cursor) = prepared.as_ref() else { unreachable!("account preparation") };
-            let cursor = cursor.clone().ok_or("confirmed slot account history is unavailable")?;
+            let Prepared::Account(cursor) = prepared.as_ref() else {
+                unreachable!("account preparation")
+            };
+            let cursor = cursor
+                .clone()
+                .ok_or("confirmed slot account history is unavailable")?;
             Ok::<_, String>((cursor, guard))
         })
         .await
@@ -216,13 +228,17 @@ impl Reader {
         let params = self.initial_params.clone();
         let preparation = self.preparation.clone();
         let (prepared, _guard) = tokio::task::spawn_blocking(move || {
-            let prepared = preparation.lock().map_err(|error| error.to_string())?
+            let prepared = preparation
+                .lock()
+                .map_err(|error| error.to_string())?
                 .prepare(&store, network, &params, Request::Batch(wanted))?;
             Ok::<_, String>((prepared, guard))
         })
         .await
         .map_err(|error| error.to_string())??;
-        let Prepared::Batch(batch) = prepared.as_ref() else { unreachable!("batch preparation") };
+        let Prepared::Batch(batch) = prepared.as_ref() else {
+            unreachable!("batch preparation")
+        };
         let Some((cursors, committed)) = batch else {
             return Ok(Vec::new());
         };
@@ -255,7 +271,9 @@ impl PageWalkBudget {
         if self.remaining_blocks() == 0 {
             return Err("historical page walk limit exceeded".into());
         }
-        self.bytes = self.bytes.checked_add(bytes)
+        self.bytes = self
+            .bytes
+            .checked_add(bytes)
             .filter(|total| *total <= witness::MAX_WALK_BYTES as u64)
             .ok_or("historical page byte limit exceeded")?;
         self.blocks += 1;

@@ -15,18 +15,24 @@ impl LmdbEnvironment {
         &self,
         view: &LmdbReadTransaction<'_>,
     ) -> Result<Option<GovernanceEngine>, StoreError> {
-        let mode = self.meta_db.get(&view.txn, b"governance_records_format")
+        let mode = self
+            .meta_db
+            .get(&view.txn, b"governance_records_format")
             .map_err(LmdbError::from)?;
-        let aggregate = self.brn_meta_db.get(&view.txn, b"governance_engine")
+        let aggregate = self
+            .brn_meta_db
+            .get(&view.txn, b"governance_engine")
             .map_err(LmdbError::from)?;
         match mode {
             Some([1]) => {
                 if aggregate.is_some() {
                     return Err(invalid("mixed aggregate and keyed governance state"));
                 }
-                let mut rows = self.meta_db.prefix_iter(
-                    &view.txn, GovernanceRecord::STORAGE_NAMESPACE.as_bytes(),
-                ).map_err(LmdbError::from)?.peekable();
+                let mut rows = self
+                    .meta_db
+                    .prefix_iter(&view.txn, GovernanceRecord::STORAGE_NAMESPACE.as_bytes())
+                    .map_err(LmdbError::from)?
+                    .peekable();
                 // Keyed mode may intentionally have no engine after rollback.
                 match rows.peek() {
                     None => return Ok(None),
@@ -45,7 +51,8 @@ impl LmdbEnvironment {
                     let (key, bytes) = row.map_err(|error| error.to_string())?;
                     let key = std::str::from_utf8(key).map_err(|error| error.to_string())?;
                     GovernanceRecord::from_storage_entry(key, bytes)
-                })).map_err(invalid)?;
+                }))
+                .map_err(invalid)?;
                 if let Some(generation) = view.generation {
                     let mut cache = self.governance_cache.lock().unwrap();
                     // A slow old reader must not evict a newer writer/read view.
@@ -58,21 +65,33 @@ impl LmdbEnvironment {
             }
             Some(_) => Err(invalid("unsupported governance record format")),
             None => {
-                for prefix in [GovernanceRecord::STORAGE_NAMESPACE, "governance_revision/v1/"] {
-                    if let Some(row) = self.meta_db.prefix_iter(&view.txn, prefix.as_bytes())
-                        .map_err(LmdbError::from)?.next()
+                for prefix in [
+                    GovernanceRecord::STORAGE_NAMESPACE,
+                    "governance_revision/v1/",
+                ] {
+                    if let Some(row) = self
+                        .meta_db
+                        .prefix_iter(&view.txn, prefix.as_bytes())
+                        .map_err(LmdbError::from)?
+                        .next()
                     {
                         row.map_err(LmdbError::from)?;
                         return Err(invalid("governance rows exist without a format marker"));
                     }
                 }
-                let Some(bytes) = aggregate else { return Ok(None) };
+                let Some(bytes) = aggregate else {
+                    return Ok(None);
+                };
                 if bytes.len() > 64 << 20 {
                     return Err(invalid("governance snapshot exceeds byte limit"));
                 }
-                bincode::DefaultOptions::new().with_fixint_encoding()
-                    .with_limit(bytes.len() as u64).reject_trailing_bytes()
-                    .deserialize(bytes).map(Some).map_err(invalid)
+                bincode::DefaultOptions::new()
+                    .with_fixint_encoding()
+                    .with_limit(bytes.len() as u64)
+                    .reject_trailing_bytes()
+                    .deserialize(bytes)
+                    .map(Some)
+                    .map_err(invalid)
             }
         }
     }

@@ -40,11 +40,21 @@ impl MessageDedup {
     /// Suppress a hash until its deadline, then allow a retry and renew the
     /// window. Duplicate arrivals do not extend it. Existing entries without
     /// deadlines remain suppressed until eviction; dependencies are not checked.
-    pub fn apply_digest_with_window(&mut self, hash: &[u8; 32], window: Duration, now: Instant) -> bool {
+    pub fn apply_digest_with_window(
+        &mut self,
+        hash: &[u8; 32],
+        window: Duration,
+        now: Instant,
+    ) -> bool {
         self.apply_digest_inner(hash, Some(now + window), now)
     }
 
-    fn apply_digest_inner(&mut self, hash: &[u8; 32], expires: Option<Instant>, now: Instant) -> bool {
+    fn apply_digest_inner(
+        &mut self,
+        hash: &[u8; 32],
+        expires: Option<Instant>,
+        now: Instant,
+    ) -> bool {
         if let Some(previous) = self.hashes.get_mut(hash) {
             if previous.is_none_or(|deadline| now < deadline) {
                 return true;
@@ -67,9 +77,9 @@ impl MessageDedup {
 
     /// Check suppression at the current time without inserting or refreshing.
     pub fn contains(&self, hash: &[u8; 32]) -> bool {
-        self.hashes.get(hash).is_some_and(|deadline| {
-            deadline.is_none_or(|expires| Instant::now() < expires)
-        })
+        self.hashes
+            .get(hash)
+            .is_some_and(|deadline| deadline.is_none_or(|expires| Instant::now() < expires))
     }
 
     /// Compute the Blake2b-256 digest of the supplied bytes.

@@ -50,12 +50,7 @@ pub fn project_transition(
         let mut budget = recorder.budget();
         normalized::visit_state_delta(before, &scoped, |key, old, new| {
             if !aggregate {
-                if recorder.preview_meta_change(
-                    &mut budget,
-                    &key,
-                    old.as_deref(),
-                    new.as_deref(),
-                ) {
+                if recorder.preview_meta_change(&mut budget, &key, old.as_deref(), new.as_deref()) {
                     pending.push(UndoChange {
                         table: UndoTable::Meta,
                         key: key.into_bytes(),

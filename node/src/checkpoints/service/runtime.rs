@@ -47,7 +47,10 @@ impl Runtime {
         let anchor = chain::next_anchor(&chain, settings.network, &settings.initial_params)?;
         let awaiting_payment_epoch = settings.store.meta_store().payment_epoch()? != anchor.hash();
         let now = Instant::now();
-        let idle = Transport::new(crate::checkpoint_transport::context_from_anchor(&anchor)?, now);
+        let idle = Transport::new(
+            crate::checkpoint_transport::context_from_anchor(&anchor)?,
+            now,
+        );
         let previous = Self::last_decision(chain.last(), now)?;
         Ok(Self {
             settings,
@@ -81,7 +84,9 @@ impl Runtime {
             key,
             initial,
         )?;
-        if crate::checkpoint_transport::context_from_anchor(driver.anchor())? != crate::checkpoint_transport::context_from_anchor(&self.anchor)? {
+        if crate::checkpoint_transport::context_from_anchor(driver.anchor())?
+            != crate::checkpoint_transport::context_from_anchor(&self.anchor)?
+        {
             return Err(invalid(
                 "checkpoint parent advanced during session recovery",
             ));
@@ -155,7 +160,10 @@ impl Runtime {
             let anchor =
                 chain::next_anchor(&chain, self.settings.network, &self.settings.initial_params)?;
             let previous = Self::last_decision(chain.last(), now)?;
-            self.idle = Transport::new(crate::checkpoint_transport::context_from_anchor(&anchor)?, now);
+            self.idle = Transport::new(
+                crate::checkpoint_transport::context_from_anchor(&anchor)?,
+                now,
+            );
             self.anchor = anchor;
             self.session = None;
             self.previous = previous;

@@ -9,7 +9,10 @@ impl WalletPortfolio {
         self.validate_snapshot_with_poll(&|_| Ok(()))
     }
 
-    pub(super) fn validate_snapshot_with_poll(&self, poll: &dyn Fn(&'static str) -> Result<(), String>) -> Result<(), String> {
+    pub(super) fn validate_snapshot_with_poll(
+        &self,
+        poll: &dyn Fn(&'static str) -> Result<(), String>,
+    ) -> Result<(), String> {
         let mut ids = HashSet::new();
         self.validate_snapshot_with_ids_with_poll(|_, token| ids.insert(token.id), poll)
     }
@@ -24,8 +27,10 @@ impl WalletPortfolio {
         self.validate_snapshot_with_ids_with_poll(insert_id, &|_| Ok(()))
     }
 
-    fn validate_snapshot_with_ids_with_poll(&self,
-        mut insert_id: impl FnMut(usize, &TrstToken) -> bool, poll: &dyn Fn(&'static str) -> Result<(), String>,
+    fn validate_snapshot_with_ids_with_poll(
+        &self,
+        mut insert_id: impl FnMut(usize, &TrstToken) -> bool,
+        poll: &dyn Fn(&'static str) -> Result<(), String>,
     ) -> Result<(), String> {
         let mut active = 0u128;
         let mut previous = None;
@@ -85,7 +90,10 @@ mod tests {
     fn checked_basis_validation_can_stop_between_empty_wallets() {
         let mut engine = TrstEngine::with_expiry(100);
         for id in 0..3 {
-            engine.wallets.insert(WalletAddress::new(format!("brst_empty_{id}")), WalletPortfolio::default().into());
+            engine.wallets.insert(
+                WalletAddress::new(format!("brst_empty_{id}")),
+                WalletPortfolio::default().into(),
+            );
         }
         engine.validate_bases().unwrap();
         let before = engine.save_wallets();
@@ -93,7 +101,9 @@ mod tests {
         let result = engine.validate_bases_with_poll(&|stage| {
             if stage == "trst:basis-wallet" {
                 visits.set(visits.get() + 1);
-                if visits.get() == 2 { return Err("empty wallet cancellation".into()); }
+                if visits.get() == 2 {
+                    return Err("empty wallet cancellation".into());
+                }
             }
             Ok(())
         });
@@ -112,7 +122,9 @@ mod tests {
         let result = engine.rebuild_indexes_with_poll(&|stage| {
             if stage == "trst:index-token" {
                 visits.set(visits.get() + 1);
-                if visits.get() == 2 { return Err("index cancellation".into()); }
+                if visits.get() == 2 {
+                    return Err("index cancellation".into());
+                }
             }
             Ok(())
         });
@@ -188,7 +200,9 @@ mod tests {
                     engine.revoke_by_originator(&owner);
                 }
                 2 => {
-                    engine.restore_by_originator(&owner, Timestamp::new(205)).unwrap();
+                    engine
+                        .restore_by_originator(&owner, Timestamp::new(205))
+                        .unwrap();
                 }
                 3 => {
                     engine.set_expiry_period(200, Timestamp::new(205)).unwrap();

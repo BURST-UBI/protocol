@@ -28,30 +28,51 @@ impl Session {
         registry: Arc<RwLock<ConnectionRegistry>>,
         clock: Clock,
     ) -> Result<Self, StoreError> {
-        let session = self.refresh_unsigned_candidate(registry.clone(), clock.clone()).await?;
+        let session = self
+            .refresh_unsigned_candidate(registry.clone(), clock.clone())
+            .await?;
         session.refresh_compact_selection(registry, clock).await
     }
 
     async fn refresh_unsigned_candidate(
-        self, registry: Arc<RwLock<ConnectionRegistry>>, clock: Clock,
+        self,
+        registry: Arc<RwLock<ConnectionRegistry>>,
+        clock: Clock,
     ) -> Result<Self, StoreError> {
-        let Some(signing_clock) = clock() else { return Ok(self); };
+        let Some(signing_clock) = clock() else {
+            return Ok(self);
+        };
         let (mut session, signer) = tokio::task::spawn_blocking(move || {
             let signer = if Instant::now() >= self.proposal_retry
-                && (self.driver.is_proposer() || Instant::now() >= self.resume_at) {
+                && (self.driver.is_proposer() || Instant::now() >= self.resume_at)
+            {
                 self.driver.compact_candidate_refresh_signer()
-            } else { Ok(None) };
+            } else {
+                Ok(None)
+            };
             (self, signer)
-        }).await.map_err(|error| StoreError::Corruption(error.to_string()))?;
-        let Some(signer) = signer? else { return Ok(session); };
+        })
+        .await
+        .map_err(|error| StoreError::Corruption(error.to_string()))?;
+        let Some(signer) = signer? else {
+            return Ok(session);
+        };
         // Also throttle non-proposers: their unsigned timeout/resume input needs
         // current coverage, but failed replay must not run on every timer tick.
         session.proposal_retry = Instant::now() + Duration::from_secs(1);
-        let context = session.compact_context.as_ref().expect("compact session context");
+        let context = session
+            .compact_context
+            .as_ref()
+            .expect("compact session context");
         let result = super::preparation::discover(
-            context.base.clone(), context.store.clone(), registry, signing_clock,
-            signer, session.step_timeout,
-        ).await;
+            context.base.clone(),
+            context.store.clone(),
+            registry,
+            signing_clock,
+            signer,
+            session.step_timeout,
+        )
+        .await;
         let (candidate, guard) = match result {
             Ok((Some(candidate), guard)) => (candidate, guard),
             Ok((None, _)) => return Ok(session),
@@ -67,14 +88,20 @@ impl Session {
                     session.proposal_retry = Instant::now();
                 }
                 Ok(false) => (),
-                Err(error) => tracing::debug!(%error, "unsigned compact candidate replacement deferred"),
+                Err(error) => {
+                    tracing::debug!(%error, "unsigned compact candidate replacement deferred")
+                }
             }
             session
-        }).await.map_err(|error| StoreError::Corruption(error.to_string()))
+        })
+        .await
+        .map_err(|error| StoreError::Corruption(error.to_string()))
     }
 
     async fn refresh_compact_selection(
-        self, registry: Arc<RwLock<ConnectionRegistry>>, clock: Clock,
+        self,
+        registry: Arc<RwLock<ConnectionRegistry>>,
+        clock: Clock,
     ) -> Result<Self, StoreError> {
         let observed_clock = clock.clone();
         let (session, cut) = tokio::task::spawn_blocking(move || {
@@ -285,9 +312,14 @@ impl Session {
             StartMode::Discover(None) => return Ok(None),
             StartMode::Discover(Some(clock)) => {
                 let (candidate, guard) = super::preparation::discover(
-                    recovered.clone(), settings.store.clone(), registry, clock,
-                    representative, step_timeout,
-                ).await?;
+                    recovered.clone(),
+                    settings.store.clone(),
+                    registry,
+                    clock,
+                    representative,
+                    step_timeout,
+                )
+                .await?;
                 vote_deferral = guard;
                 let Some(candidate) = candidate else {
                     return Ok(None);

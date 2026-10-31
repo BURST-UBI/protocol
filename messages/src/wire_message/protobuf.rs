@@ -91,7 +91,7 @@ impl WireMessage {
     /// Encode a Protobuf envelope without the four-byte TCP length prefix.
     /// Enforce the envelope size limit; this does not validate payload semantics.
     pub fn encode(&self) -> Result<Vec<u8>, ProtocolError> {
-        use proto::envelope::Body as Body;
+        use proto::envelope::Body;
         let body = match self {
             Self::Block(block) => Body::Block(proto::BytesPayload {
                 data: bincode::serialize(block).map_err(invalid)?,
@@ -119,21 +119,25 @@ impl WireMessage {
                 block_version: value.block_version.into(),
                 wire_version: value.wire_version.into(),
             }),
-            Self::VerificationRequest(value) => Body::VerificationRequest(proto::VerificationRequest {
-                target: value.target.as_str().into(),
-                endorser: value.endorser.as_str().into(),
-            }),
+            Self::VerificationRequest(value) => {
+                Body::VerificationRequest(proto::VerificationRequest {
+                    target: value.target.as_str().into(),
+                    endorser: value.endorser.as_str().into(),
+                })
+            }
             Self::VerificationVote(value) => Body::VerificationVote(proto::VerificationVote {
                 target: value.target.as_str().into(),
                 voter: value.voter.as_str().into(),
                 vote: value.vote.into(),
                 signature: value.signature.clone(),
             }),
-            Self::GovernanceProposal(value) => Body::GovernanceProposal(proto::GovernanceProposal {
-                proposal_hash: value.proposal_hash.as_bytes().to_vec(),
-                proposer: value.proposer.as_str().into(),
-                content: value.content.clone(),
-            }),
+            Self::GovernanceProposal(value) => {
+                Body::GovernanceProposal(proto::GovernanceProposal {
+                    proposal_hash: value.proposal_hash.as_bytes().to_vec(),
+                    proposer: value.proposer.as_str().into(),
+                    content: value.content.clone(),
+                })
+            }
             Self::GovernanceVote(value) => Body::GovernanceVote(proto::GovernanceVote {
                 proposal_hash: value.proposal_hash.as_bytes().to_vec(),
                 voter: value.voter.as_str().into(),
@@ -215,7 +219,7 @@ impl WireMessage {
         if envelope.wire_version != u32::from(burst_types::PROTOCOL_VERSION) {
             return Err(invalid("incompatible wire version"));
         }
-        use proto::envelope::Body as Body;
+        use proto::envelope::Body;
         Ok(
             match envelope
                 .body
@@ -298,7 +302,9 @@ impl WireMessage {
                 }),
                 Body::Bootstrap(value) => Self::Bootstrap(read_bootstrap(value)?),
                 Body::CheckpointSync(value) => Self::CheckpointSync(read_sync(value)?),
-                Body::CheckpointAgreement(value) => Self::CheckpointAgreement(read_agreement(value)?),
+                Body::CheckpointAgreement(value) => {
+                    Self::CheckpointAgreement(read_agreement(value)?)
+                }
                 Body::GovernanceContent(value) => Self::GovernanceContent(read_content(value)?),
             },
         )
@@ -328,7 +334,7 @@ impl WireMessage {
 }
 
 fn bootstrap(value: &BootstrapMessage) -> proto::Bootstrap {
-    use proto::bootstrap::Body as Body;
+    use proto::bootstrap::Body;
     let (id, body) = match value {
         BootstrapMessage::AscPullReq { id, payload } => (
             *id,
@@ -387,7 +393,7 @@ fn bootstrap(value: &BootstrapMessage) -> proto::Bootstrap {
     }
 }
 fn read_bootstrap(value: proto::Bootstrap) -> Result<BootstrapMessage, ProtocolError> {
-    use proto::bootstrap::Body as Body;
+    use proto::bootstrap::Body;
     let id = value.id;
     Ok(
         match value
@@ -440,7 +446,7 @@ fn read_bootstrap(value: proto::Bootstrap) -> Result<BootstrapMessage, ProtocolE
     )
 }
 fn sync(value: &Sync) -> proto::CheckpointSync {
-    use proto::checkpoint_sync::Body as Body;
+    use proto::checkpoint_sync::Body;
     proto::CheckpointSync {
         body: Some(match value {
             Sync::TipRequest { nonce } => Body::TipRequest(proto::TipRequest { nonce: *nonce }),
@@ -548,7 +554,7 @@ fn sync(value: &Sync) -> proto::CheckpointSync {
     }
 }
 fn read_sync(value: proto::CheckpointSync) -> Result<Sync, ProtocolError> {
-    use proto::checkpoint_sync::Body as Body;
+    use proto::checkpoint_sync::Body;
     Ok(
         match value
             .body
@@ -615,7 +621,7 @@ fn read_sync(value: proto::CheckpointSync) -> Result<Sync, ProtocolError> {
     )
 }
 fn agreement(value: &AgreementPacket) -> proto::Agreement {
-    use proto::agreement::Body as Body;
+    use proto::agreement::Body;
     proto::Agreement {
         context: Some(proto::AgreementContext {
             network: network_number(value.context.network),
@@ -647,7 +653,7 @@ fn agreement(value: &AgreementPacket) -> proto::Agreement {
     }
 }
 fn read_agreement(value: proto::Agreement) -> Result<AgreementPacket, ProtocolError> {
-    use proto::agreement::Body as Body;
+    use proto::agreement::Body;
     let context = value
         .context
         .ok_or_else(|| invalid("missing agreement context"))?;
@@ -680,7 +686,7 @@ fn read_agreement(value: proto::Agreement) -> Result<AgreementPacket, ProtocolEr
     })
 }
 fn content(value: &Content) -> proto::Content {
-    use proto::content::Body as Body;
+    use proto::content::Body;
     proto::Content {
         body: Some(match value {
             Content::Request { proposal, offset } => Body::Request(proto::ContentRequest {
@@ -698,7 +704,7 @@ fn content(value: &Content) -> proto::Content {
     }
 }
 fn read_content(value: proto::Content) -> Result<Content, ProtocolError> {
-    use proto::content::Body as Body;
+    use proto::content::Body;
     Ok(
         match value.body.ok_or_else(|| invalid("missing content body"))? {
             Body::Request(v) => Content::Request {

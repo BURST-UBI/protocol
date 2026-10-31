@@ -1,5 +1,5 @@
-use crate::checkpoint_store::record_storage;
 use super::*;
+use crate::checkpoint_store::record_storage;
 use std::collections::BTreeSet;
 
 /// Walk one archived record per scheduling turn, retaining only its key.
@@ -34,9 +34,13 @@ impl ArchivedRefresh {
             self.cursor = None;
             return Ok(None);
         };
-        let bytes = record_storage::decode_stored(&key, &bytes,
+        let bytes = record_storage::decode_stored(
+            &key,
+            &bytes,
             |name| store.meta_store().get_meta_txn(&txn, name),
-            |hash| store.read_view(&txn)?.checkpoint_head_node(hash), MAX_RECORD_BYTES as usize)?;
+            |hash| store.read_view(&txn)?.checkpoint_head_node(hash),
+            MAX_RECORD_BYTES as usize,
+        )?;
         let record = chain::decode_record(&bytes)?;
         let checkpoint = &record.certificate().checkpoint;
         if checkpoint.network != network
@@ -50,8 +54,12 @@ impl ArchivedRefresh {
         let missing = match &record {
             chain::ParsedRecord::Selection(selection) => {
                 selection.beacon.is_none()
-                    && record_storage::get_txn(&store.meta_store(), &txn, &archive_selection::beacon_key(checkpoint.hash()))?
-                        .is_none()
+                    && record_storage::get_txn(
+                        &store.meta_store(),
+                        &txn,
+                        &archive_selection::beacon_key(checkpoint.hash()),
+                    )?
+                    .is_none()
             }
             _ => false,
         };
@@ -71,8 +79,7 @@ pub(crate) fn selection_refresh_heights(
     let prefix = prefix(&genesis);
     let txn = store.tx_begin_read()?;
     let tip = decode_tip(
-        record_storage::get_txn(&store.meta_store(), &txn, &format!("{prefix}/head"))?
-            .as_deref(),
+        record_storage::get_txn(&store.meta_store(), &txn, &format!("{prefix}/head"))?.as_deref(),
     )?;
     let records = inventory::read(store, &txn, &prefix, tip)?;
     drop(txn);
@@ -100,6 +107,10 @@ fn missing_stored_beacon(
     epoch: burst_types::BlockHash,
 ) -> Result<bool, StoreError> {
     let txn = store.tx_begin_read()?;
-    Ok(record_storage::get_txn(&store.meta_store(), &txn, &archive_selection::beacon_key(epoch))?
-        .is_none())
+    Ok(record_storage::get_txn(
+        &store.meta_store(),
+        &txn,
+        &archive_selection::beacon_key(epoch),
+    )?
+    .is_none())
 }

@@ -8,21 +8,21 @@ use burst_types::{BlockHash, Timestamp};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-mod installation;
 mod capture;
-pub(crate) use capture::{recover_retirement_catalogue, recover_checkpoint_authority};
-mod source;
-mod retention;
+mod installation;
+pub(crate) use capture::{recover_checkpoint_authority, recover_retirement_catalogue};
 mod resolution;
+mod retention;
+mod source;
+pub(crate) use installation::CompactPreparation;
+pub use installation::PreparedCompactInstallation;
 pub(crate) use resolution::BodyOrigin;
 #[cfg(test)]
 pub(crate) use resolution::ResolvedBody;
-#[cfg(test)]
-pub(crate) use retention::{SignerRecord, PaymentPromise};
-pub use retention::RecoveredTrstReferences;
 pub(crate) use retention::OwnedRetirement;
-pub(crate) use installation::CompactPreparation;
-pub use installation::PreparedCompactInstallation;
+pub use retention::RecoveredTrstReferences;
+#[cfg(test)]
+pub(crate) use retention::{PaymentPromise, SignerRecord};
 use source::{RecoveryBase, RecoverySource};
 
 /// Authenticated installed metadata and cemented governance, not permission to
@@ -64,14 +64,16 @@ impl PreparedRecoveryProjection {
         Ok(())
     }
 
-    pub(crate) fn stage(self, store: &LmdbStore) -> Result<RecoveredIndexProjection<'_>, StoreError> {
+    pub(crate) fn stage(
+        self,
+        store: &LmdbStore,
+    ) -> Result<RecoveredIndexProjection<'_>, StoreError> {
         let mut transaction = store.tx_begin_write()?;
         transaction.require_clean_checkpoint_boundary()?;
         self.metadata.verify_unchanged(&transaction)?;
         self.derived.rows.verify_format(&transaction)?;
-        let economic_changes = super::changes::finality::reconcile(
-            &transaction, self.derived.records.iter(),
-        )?;
+        let economic_changes =
+            super::changes::finality::reconcile(&transaction, self.derived.records.iter())?;
         transaction.replace_checkpoint_token_indexes(&self.metadata.economics.mint_indexes())?;
         Ok(RecoveredIndexProjection {
             #[cfg(test)]
@@ -122,9 +124,8 @@ impl RecoveredUndoProjection<'_> {
             // Journals and runtime are already authenticated and staged together.
             // Activate their storage format in this commit, as fresh installation
             // does, instead of rewriting the same state in a second transaction.
-            self.transaction.publish_normalized_recovered_verification(
-                &self.runtime.verification,
-            )?;
+            self.transaction
+                .publish_normalized_recovered_verification(&self.runtime.verification)?;
         }
         self.transaction.commit()?;
         Ok((self.runtime, self.recovery))
@@ -267,7 +268,6 @@ impl<'db> RecoveredIndexProjection<'db> {
 }
 
 impl RecoveredInstalledMetadata {
-
     /// Expiry lookups can have been cleaned locally or reflect earlier governed
     /// periods. Rebuild all mint lookups from replay, never from live holdings.
     /// Dropping the result aborts every write; no admission or signing is enabled.
@@ -300,7 +300,8 @@ impl RecoveredInstalledMetadata {
         store: &LmdbStore,
         cache_at: Timestamp,
     ) -> Result<RecoveredIndexProjection<'_>, StoreError> {
-        self.prepare_token_indexes_for_storage(store, cache_at, true)?.stage(store)
+        self.prepare_token_indexes_for_storage(store, cache_at, true)?
+            .stage(store)
     }
 
     /// Prepare replay-derived scratch records for retention inspection and later
@@ -325,7 +326,9 @@ impl RecoveredInstalledMetadata {
 
     #[cfg(test)]
     pub(crate) fn prepare_token_indexes_view(
-        self, store: &LmdbStore, view: &burst_store_lmdb::LmdbReadTransaction<'_>,
+        self,
+        store: &LmdbStore,
+        view: &burst_store_lmdb::LmdbReadTransaction<'_>,
         cache_at: Timestamp,
     ) -> Result<PreparedRecoveryProjection, StoreError> {
         self.prepare_token_indexes_view_until(store, view, cache_at, &|_| false)?
@@ -333,18 +336,32 @@ impl RecoveredInstalledMetadata {
     }
 
     pub(crate) fn prepare_token_indexes_view_until(
-        self, store: &LmdbStore, view: &burst_store_lmdb::LmdbReadTransaction<'_>,
-        cache_at: Timestamp, cancelled: &dyn Fn(&'static str) -> bool,
+        self,
+        store: &LmdbStore,
+        view: &burst_store_lmdb::LmdbReadTransaction<'_>,
+        cache_at: Timestamp,
+        cancelled: &dyn Fn(&'static str) -> bool,
     ) -> Result<Option<PreparedRecoveryProjection>, StoreError> {
-        self.prepare_token_indexes_read(store, cache_at, false, Some(&store.read_view(view)?), cancelled)
+        self.prepare_token_indexes_read(
+            store,
+            cache_at,
+            false,
+            Some(&store.read_view(view)?),
+            cancelled,
+        )
     }
 
     fn prepare_token_indexes_read(
-        self, store: &LmdbStore, cache_at: Timestamp, migrate_holdings: bool,
+        self,
+        store: &LmdbStore,
+        cache_at: Timestamp,
+        migrate_holdings: bool,
         captured: Option<&burst_store_lmdb::read_view::LedgerReadView<'_>>,
         cancelled: &dyn Fn(&'static str) -> bool,
     ) -> Result<Option<PreparedRecoveryProjection>, StoreError> {
-        if cancelled("retirement-capture:projection-start") { return Ok(None); }
+        if cancelled("retirement-capture:projection-start") {
+            return Ok(None);
+        }
         let (
             stable_holdings,
             rate_records,
@@ -353,9 +370,16 @@ impl RecoveredInstalledMetadata {
             keyed_governance,
             provisional,
         ) = {
-            let writer = if captured.is_none() { Some(store.tx_begin_write()?) } else { None };
+            let writer = if captured.is_none() {
+                Some(store.tx_begin_write()?)
+            } else {
+                None
+            };
             let batch = match captured {
-                Some(view) => { self.verify_view(view)?; view.clone() }
+                Some(view) => {
+                    self.verify_view(view)?;
+                    view.clone()
+                }
                 None => {
                     let writer = writer.as_ref().expect("live projection has a writer");
                     self.verify_unchanged(writer)?;
@@ -365,12 +389,16 @@ impl RecoveredInstalledMetadata {
             let mut provisional = std::collections::HashSet::new();
             for account in batch.account_entries()? {
                 let account = account?;
-                if cancelled("retirement-capture:projection-account") { return Ok(None); }
+                if cancelled("retirement-capture:projection-account") {
+                    return Ok(None);
+                }
                 if account.confirmation_height > account.block_count {
                     return Err(invalid("confirmation exceeds account height"));
                 }
                 for previous_height in account.confirmation_height..account.block_count {
-                    if cancelled("retirement-capture:projection-height") { return Ok(None); }
+                    if cancelled("retirement-capture:projection-height") {
+                        return Ok(None);
+                    }
                     let height = previous_height + 1;
                     let hash = batch
                         .block_at_height(&account.address, height)?
@@ -406,8 +434,15 @@ impl RecoveredInstalledMetadata {
             keyed_governance || migrate_holdings,
             keyed_governance,
             &|| cancelled("retirement-capture:rollback-transition"),
-        )? else { return Ok(None); };
-        Ok(Some(PreparedRecoveryProjection { metadata: self, derived, cache_at }))
+        )?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(PreparedRecoveryProjection {
+            metadata: self,
+            derived,
+            cache_at,
+        }))
     }
 
     pub fn recovered(&self) -> &RecoveredSnapshot {
@@ -502,20 +537,34 @@ impl RecoveredInstalledMetadata {
     /// Recheck under the caller's writer before any eventual publication. This
     /// neither commits the writer nor validates the remaining startup state.
     pub fn verify_unchanged(&self, batch: &LmdbWriteTransaction<'_>) -> Result<(), StoreError> {
-        if self.verified_cut.lock().map_err(|_| invalid("recovery verification lock poisoned"))?
-            .as_ref().is_some_and(|cut| batch.matches_clean_storage_cut(cut)) {
+        if self
+            .verified_cut
+            .lock()
+            .map_err(|_| invalid("recovery verification lock poisoned"))?
+            .as_ref()
+            .is_some_and(|cut| batch.matches_clean_storage_cut(cut))
+        {
             return Ok(());
         }
-        if self.verified_view.lock().map_err(|_| invalid("recovery verification lock poisoned"))?
-            .as_ref().is_some_and(|cut| batch.matches_clean_storage_cut(cut)) {
+        if self
+            .verified_view
+            .lock()
+            .map_err(|_| invalid("recovery verification lock poisoned"))?
+            .as_ref()
+            .is_some_and(|cut| batch.matches_clean_storage_cut(cut))
+        {
             return Ok(());
         }
         let started = std::time::Instant::now();
         let mut previous = started;
         let mut report = |stage: &'static str| {
             let now = std::time::Instant::now();
-            tracing::debug!(stage, elapsed_us = now.duration_since(previous).as_micros(),
-                total_us = now.duration_since(started).as_micros(), "recovery publication checked dependency");
+            tracing::debug!(
+                stage,
+                elapsed_us = now.duration_since(previous).as_micros(),
+                total_us = now.duration_since(started).as_micros(),
+                "recovery publication checked dependency"
+            );
             previous = now;
         };
         self.base_commitment.verify(batch)?;
@@ -534,18 +583,25 @@ impl RecoveredInstalledMetadata {
             .continuation
             .verify_installed_metadata_in(batch, &self.cemented)?;
         report("installed");
-        *self.verified_cut.lock().map_err(|_| invalid("recovery verification lock poisoned"))? =
+        *self
+            .verified_cut
+            .lock()
+            .map_err(|_| invalid("recovery verification lock poisoned"))? =
             batch.clean_storage_cut();
         Ok(())
     }
     /// Verify and cache this exact committed view. A later writer may reuse the
     /// result only if it still matches that view; otherwise it rechecks dependencies.
-    pub(crate) fn verify_view(&self, batch: &burst_store_lmdb::read_view::LedgerReadView<'_>) -> Result<(), StoreError> {
+    pub(crate) fn verify_view(
+        &self,
+        batch: &burst_store_lmdb::read_view::LedgerReadView<'_>,
+    ) -> Result<(), StoreError> {
         self.verify_view_with_poll(batch, &|_| Ok(()))
     }
 
     pub(crate) fn verify_view_until(
-        &self, batch: &burst_store_lmdb::read_view::LedgerReadView<'_>,
+        &self,
+        batch: &burst_store_lmdb::read_view::LedgerReadView<'_>,
         cancelled: &dyn Fn(&'static str) -> bool,
     ) -> Result<bool, StoreError> {
         let stopped = std::cell::Cell::new(false);
@@ -556,13 +612,21 @@ impl RecoveredInstalledMetadata {
             }
             Ok(())
         });
-        if stopped.get() { return Ok(false); }
+        if stopped.get() {
+            return Ok(false);
+        }
         result.map(|()| true)
     }
 
-    fn verify_view_with_poll(&self, batch: &burst_store_lmdb::read_view::LedgerReadView<'_>, poll: &dyn Fn(&'static str) -> Result<(), StoreError>) -> Result<(), StoreError> {
+    fn verify_view_with_poll(
+        &self,
+        batch: &burst_store_lmdb::read_view::LedgerReadView<'_>,
+        poll: &dyn Fn(&'static str) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
         poll("metadata:verify-start")?;
-        if self.has_verified_view(batch)? { return Ok(()); }
+        if self.has_verified_view(batch)? {
+            return Ok(());
+        }
         self.base_commitment.verify_view(batch)?;
         poll("metadata:record-observations")?;
         self.recovered.verify_records_view_with_poll(batch, poll)?;
@@ -576,19 +640,28 @@ impl RecoveredInstalledMetadata {
             .continuation
             .verify_installed_metadata_view_with_poll(batch, &self.cemented, poll)?;
         poll("metadata:verification-complete")?;
-        *self.verified_view.lock().map_err(|_| invalid("captured verification lock poisoned"))? =
+        *self
+            .verified_view
+            .lock()
+            .map_err(|_| invalid("captured verification lock poisoned"))? =
             batch.clean_storage_cut();
         Ok(())
     }
 
     pub(in crate::confirmed_replay) fn has_verified_view(
-        &self, batch: &burst_store_lmdb::read_view::LedgerReadView<'_>,
+        &self,
+        batch: &burst_store_lmdb::read_view::LedgerReadView<'_>,
     ) -> Result<bool, StoreError> {
-        let Some(current) = batch.clean_storage_cut() else { return Ok(false); };
-        Ok(self.verified_view.lock().map_err(|_| invalid("captured verification lock poisoned"))?
-            .as_ref().is_some_and(|cut| cut.same_committed_view(&current)))
+        let Some(current) = batch.clean_storage_cut() else {
+            return Ok(false);
+        };
+        Ok(self
+            .verified_view
+            .lock()
+            .map_err(|_| invalid("captured verification lock poisoned"))?
+            .as_ref()
+            .is_some_and(|cut| cut.same_committed_view(&current)))
     }
-
 }
 
 /// Read the base and installed epoch from one database view, authenticate that
@@ -601,8 +674,12 @@ pub fn recover_metadata_from_peers(
     network: NetworkId,
     initial_params: ProtocolParams,
     registry: Arc<RwLock<ConnectionRegistry>>,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<RecoveredInstalledMetadata>, StoreError>> + Send>>
-{
+) -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = Result<Option<RecoveredInstalledMetadata>, StoreError>>
+            + Send,
+    >,
+> {
     // Keep the recovery state machine off callers' async frames. It carries
     // ledger candidates across several independent peer waits.
     Box::pin(recover_metadata_with_cache(
@@ -648,7 +725,9 @@ impl RecoveryControl {
         &self,
         request: impl std::future::Future<Output = Result<T, StoreError>>,
     ) -> Result<Option<T>, StoreError> {
-        let Some(shutdown) = &self.shutdown else { return request.await.map(Some); };
+        let Some(shutdown) = &self.shutdown else {
+            return request.await.map(Some);
+        };
         let mut stop = shutdown.subscribe();
         tokio::select! {
             biased;
@@ -666,7 +745,10 @@ impl RecoveryControl {
             .shutdown
             .as_ref()
             .is_some_and(|stop| stop.is_requested())
-            || self.parent_shutdown.as_ref().is_some_and(|stop| stop.is_requested());
+            || self
+                .parent_shutdown
+                .as_ref()
+                .is_some_and(|stop| stop.is_requested());
         if cancelled {
             tracing::debug!(stage, "private installed recovery stopped at checkpoint");
         }
@@ -683,15 +765,19 @@ pub(crate) async fn recover_metadata_until_shutdown(
     registry: Arc<RwLock<ConnectionRegistry>>,
     shutdown: Arc<crate::shutdown::ShutdownController>,
 ) -> Result<StartupRecovery, StoreError> {
-    recover_metadata_with_durable_inputs(store, network, initial_params, registry, shutdown, None).await
+    recover_metadata_with_durable_inputs(store, network, initial_params, registry, shutdown, None)
+        .await
 }
 
 /// On requested shutdown, await the current phase before returning Cancelled.
 /// Keep polling this future through shutdown so blocking workers are joined;
 /// dropping it early does not wait for those workers.
 pub(crate) async fn recover_metadata_with_durable_inputs(
-    store: Arc<LmdbStore>, network: NetworkId, initial_params: ProtocolParams,
-    registry: Arc<RwLock<ConnectionRegistry>>, shutdown: Arc<crate::shutdown::ShutdownController>,
+    store: Arc<LmdbStore>,
+    network: NetworkId,
+    initial_params: ProtocolParams,
+    registry: Arc<RwLock<ConnectionRegistry>>,
+    shutdown: Arc<crate::shutdown::ShutdownController>,
     durable_inputs: Option<(crate::confirmed_replay::scratch_file::ScratchLimit, usize)>,
 ) -> Result<StartupRecovery, StoreError> {
     let control = RecoveryControl {
@@ -801,7 +887,9 @@ async fn authenticate_metadata(
         }
         let poll = source_control
             .capture_limits
-            .map(|limits| crate::body_retirement::capture_budget::CapturePoll::start(&source, limits))
+            .map(|limits| {
+                crate::body_retirement::capture_budget::CapturePoll::start(&source, limits)
+            })
             .transpose()?;
         if poll.as_ref().is_some_and(|poll| poll.cancelled()) {
             return Ok(None);
@@ -965,8 +1053,15 @@ async fn authenticate_metadata(
     if control.checkpoint("private-recovery:progress") {
         return Ok(None);
     }
-    Ok(Some(RecoverySeed { recovered, base_commitment, epoch, initial_hash,
-        journal_params, projections, started }))
+    Ok(Some(RecoverySeed {
+        recovered,
+        base_commitment,
+        epoch,
+        initial_hash,
+        journal_params,
+        projections,
+        started,
+    }))
 }
 
 fn recover_metadata<'a>(
@@ -977,14 +1072,33 @@ fn recover_metadata<'a>(
     cached: Option<ReplayCache>,
     progress: Option<&'a mut Option<ReplayCache>>,
     control: RecoveryControl,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<RecoveredInstalledMetadata>, StoreError>> + Send + 'a>> {
+) -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = Result<Option<RecoveredInstalledMetadata>, StoreError>>
+            + Send
+            + 'a,
+    >,
+> {
     Box::pin(async move {
         let Some(seed) = Box::pin(authenticate_metadata(
-            store.clone(), network, initial_params, registry.clone(), cached, progress, control.clone(),
-        )).await? else { return Ok(None); };
+            store.clone(),
+            network,
+            initial_params,
+            registry.clone(),
+            cached,
+            progress,
+            control.clone(),
+        ))
+        .await?
+        else {
+            return Ok(None);
+        };
         // Authentication and projection replay have large polling frames in debug
         // builds. Run them as separate stages rather than nesting those frames.
-        Box::pin(recover_authenticated_metadata(store, network, registry, control, seed)).await
+        Box::pin(recover_authenticated_metadata(
+            store, network, registry, control, seed,
+        ))
+        .await
     })
 }
 
@@ -995,8 +1109,15 @@ async fn recover_authenticated_metadata(
     control: RecoveryControl,
     seed: RecoverySeed,
 ) -> Result<Option<RecoveredInstalledMetadata>, StoreError> {
-    let RecoverySeed { recovered, base_commitment, epoch, initial_hash,
-        journal_params, projections, started } = seed;
+    let RecoverySeed {
+        recovered,
+        base_commitment,
+        epoch,
+        initial_hash,
+        journal_params,
+        projections,
+        started,
+    } = seed;
     let tails_started = std::time::Instant::now();
     let source = store.clone();
     let shared = projections.clone();
@@ -1053,12 +1174,17 @@ async fn recover_authenticated_metadata(
                 return Ok(None);
             }
             let started = std::time::Instant::now();
-            let Some(retained) = control.peer_wait(witness::fetch_plan_reusing(
-                &registry,
-                &recovered.continuation,
-                plan.witness_plan(),
-                &authenticated,
-            )).await? else { return Ok(None); };
+            let Some(retained) = control
+                .peer_wait(witness::fetch_plan_reusing(
+                    &registry,
+                    &recovered.continuation,
+                    plan.witness_plan(),
+                    &authenticated,
+                ))
+                .await?
+            else {
+                return Ok(None);
+            };
             tracing::debug!(
                 elapsed_ms = started.elapsed().as_millis(),
                 witnesses = retained.len(),
@@ -1072,12 +1198,17 @@ async fn recover_authenticated_metadata(
             let applied_retained = if same_witnesses {
                 None
             } else {
-                let Some(proofs) = control.peer_wait(witness::fetch_plan_reusing(
-                    &registry,
-                    &recovered.continuation,
-                    applied_plan.witness_plan(),
-                    retained.clone(),
-                )).await? else { return Ok(None); };
+                let Some(proofs) = control
+                    .peer_wait(witness::fetch_plan_reusing(
+                        &registry,
+                        &recovered.continuation,
+                        applied_plan.witness_plan(),
+                        retained.clone(),
+                    ))
+                    .await?
+                else {
+                    return Ok(None);
+                };
                 Some(proofs)
             };
             if control.checkpoint("private-recovery:applied-witnesses") {
@@ -1086,8 +1217,16 @@ async fn recover_authenticated_metadata(
             let inventory_started = std::time::Instant::now();
             // Keep paged verification state out of the enclosing recovery frame.
             let Some((recovered, inventory)) = Box::pin(super::retained::verify(
-                Arc::clone(&store), recovered, &registry, control.clone(), authenticated,
-            )).await? else { return Ok(None); };
+                Arc::clone(&store),
+                recovered,
+                &registry,
+                control.clone(),
+                authenticated,
+            ))
+            .await?
+            else {
+                return Ok(None);
+            };
             tracing::debug!(
                 elapsed_ms = inventory_started.elapsed().as_millis(),
                 "installed recovery verified retained inventory"
@@ -1123,8 +1262,18 @@ async fn recover_authenticated_metadata(
         return Ok(None);
     }
     let Some((recovered, accepted)) = Box::pin(recover_journal_authority(
-        recovered, &store, network, journal_params, &registry, base_commitment, &control,
-    )).await? else { return Ok(None); };
+        recovered,
+        &store,
+        network,
+        journal_params,
+        &registry,
+        base_commitment,
+        &control,
+    ))
+    .await?
+    else {
+        return Ok(None);
+    };
     tokio::task::spawn_blocking(move || {
         if control.checkpoint("private-recovery:before-economics") {
             return Ok(None);
@@ -1210,9 +1359,13 @@ async fn recover_authenticated_metadata(
 }
 
 async fn recover_journal_authority(
-    recovered: RecoveredSnapshot, store: &Arc<LmdbStore>, network: NetworkId,
-    journal_params: ProtocolParams, registry: &Arc<RwLock<ConnectionRegistry>>,
-    base_commitment: RecoveryBase, control: &RecoveryControl,
+    recovered: RecoveredSnapshot,
+    store: &Arc<LmdbStore>,
+    network: NetworkId,
+    journal_params: ProtocolParams,
+    registry: &Arc<RwLock<ConnectionRegistry>>,
+    base_commitment: RecoveryBase,
+    control: &RecoveryControl,
 ) -> Result<Option<(RecoveredSnapshot, Option<RecoveredSnapshot>)>, StoreError> {
     let epoch = recovered.continuation.anchor().hash();
     let accepted_started = std::time::Instant::now();
@@ -1273,19 +1426,31 @@ mod cancellation_tests {
     #[tokio::test]
     async fn peer_wait_closes_pending_response_on_shutdown() {
         let shutdown = Arc::new(crate::shutdown::ShutdownController::new());
-        let control = RecoveryControl { shutdown: Some(shutdown.clone()), probe: None, ..Default::default() };
+        let control = RecoveryControl {
+            shutdown: Some(shutdown.clone()),
+            probe: None,
+            ..Default::default()
+        };
         let (response, received) = tokio::sync::oneshot::channel::<()>();
         let (started, entered) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
-            control.peer_wait(async {
-                started.send(()).unwrap();
-                received.await.map_err(invalid)
-            }).await
+            control
+                .peer_wait(async {
+                    started.send(()).unwrap();
+                    received.await.map_err(invalid)
+                })
+                .await
         });
         entered.await.unwrap();
         shutdown.shutdown();
-        assert!(tokio::time::timeout(std::time::Duration::from_secs(1), task)
-            .await.unwrap().unwrap().unwrap().is_none());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .is_none()
+        );
         assert!(response.is_closed());
     }
 
@@ -1293,25 +1458,42 @@ mod cancellation_tests {
     async fn peer_wait_preserves_results_errors_and_preexisting_shutdown() {
         let control = RecoveryControl::default();
         assert_eq!(control.peer_wait(async { Ok(7) }).await.unwrap(), Some(7));
-        assert!(control.peer_wait::<()>(async { Err(invalid("witness failed")) })
-            .await.unwrap_err().to_string().contains("witness failed"));
+        assert!(control
+            .peer_wait::<()>(async { Err(invalid("witness failed")) })
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("witness failed"));
         let shutdown = Arc::new(crate::shutdown::ShutdownController::new());
         shutdown.shutdown();
-        let control = RecoveryControl { shutdown: Some(shutdown), probe: None, ..Default::default() };
+        let control = RecoveryControl {
+            shutdown: Some(shutdown),
+            probe: None,
+            ..Default::default()
+        };
         let polled = std::sync::atomic::AtomicBool::new(false);
-        let result = control.peer_wait(async {
-            polled.store(true, std::sync::atomic::Ordering::Relaxed);
-            Ok(())
-        }).await.unwrap();
+        let result = control
+            .peer_wait(async {
+                polled.store(true, std::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            })
+            .await
+            .unwrap();
         assert!(result.is_none());
         assert!(!polled.load(std::sync::atomic::Ordering::Relaxed));
         let parent = Arc::new(crate::shutdown::ShutdownController::new());
         let local = Arc::new(crate::shutdown::ShutdownController::new());
-        let control = RecoveryControl { shutdown: Some(local.clone()),
-            parent_shutdown: Some(parent.clone()), ..Default::default() };
+        let control = RecoveryControl {
+            shutdown: Some(local.clone()),
+            parent_shutdown: Some(parent.clone()),
+            ..Default::default()
+        };
         assert!(!control.checkpoint("before-parent-stop"));
         parent.shutdown();
         assert!(control.checkpoint("after-parent-stop"));
-        assert!(!local.is_requested(), "checkpoint detection must not require the async relay to run");
+        assert!(
+            !local.is_requested(),
+            "checkpoint detection must not require the async relay to run"
+        );
     }
 }

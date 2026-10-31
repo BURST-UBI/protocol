@@ -35,7 +35,9 @@ async fn restart(config: &NodeConfig, owner: &WalletAddress, origin: TxHash) -> 
     let engine = node.trst_engine.clone();
     let shutdown = node.shutdown.clone();
     let task = tokio::spawn(async move {
-        node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+        node.start_with_services(burst_daemon::start_public_services)
+            .await
+            .unwrap();
         node.stop().await.unwrap();
     });
     let snapshot = tokio::time::timeout(Duration::from_secs(20), async {
@@ -116,7 +118,10 @@ async fn repeated_startup_preserves_independent_outcome_and_identity_revocations
             );
             assert_eq!(restored.merger_graph.to_bytes(), graph);
             let mut reverified = restored.clone();
-            assert!(reverified.restore_by_originator(&owner, now).unwrap().is_empty());
+            assert!(reverified
+                .restore_by_originator(&owner, now)
+                .unwrap()
+                .is_empty());
             assert!(reverified.merger_graph.is_origin_revoked(&origin));
             assert!(restored
                 .restore_outcome_origins(first, &origins, now)
@@ -137,7 +142,8 @@ async fn repeated_startup_preserves_independent_outcome_and_identity_revocations
             if identity_revoked {
                 assert_eq!(
                     restored
-                        .restore_by_originator(&owner, now).unwrap()
+                        .restore_by_originator(&owner, now)
+                        .unwrap()
                         .iter()
                         .map(|event| event.amount)
                         .sum::<u128>(),
@@ -165,10 +171,13 @@ async fn repeated_startup_preserves_independent_outcome_and_identity_revocations
         let mut batch = node.store.tx_begin_write().unwrap();
         burst_node::ledger_updater::persist_economics(&mut batch, &brn, &inconsistent).unwrap();
         batch.commit().unwrap();
-        let error = tokio::time::timeout(Duration::from_secs(5), node.start_with_services(burst_daemon::start_public_services))
-            .await
-            .expect("inconsistent snapshot should fail before services start")
-            .unwrap_err();
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            node.start_with_services(burst_daemon::start_public_services),
+        )
+        .await
+        .expect("inconsistent snapshot should fail before services start")
+        .unwrap_err();
         assert!(
             error
                 .to_string()

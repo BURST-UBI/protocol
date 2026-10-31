@@ -630,8 +630,13 @@ fn is_block_confirmed_in(
     if account_info.confirmation_height == 0 {
         return false;
     }
-    confirmed_successor::confirmed(blocks, block_hash, account, account_info.confirmation_height)
-        .unwrap_or(false)
+    confirmed_successor::confirmed(
+        blocks,
+        block_hash,
+        account,
+        account_info.confirmation_height,
+    )
+    .unwrap_or(false)
 }
 
 /// Deserialize stored block bytes to a `StateBlock`, trying JSON then bincode.
@@ -1052,7 +1057,8 @@ pub async fn handle_work_generate(
             .threshold_for(kind);
     let difficulty = parse_difficulty(&req.difficulty, required)?.max(required);
     crate::work_budget::check_difficulty(difficulty, required)?;
-    let result = crate::work_budget::generate(state.work_generator.clone(), block_hash, difficulty).await?;
+    let result =
+        crate::work_budget::generate(state.work_generator.clone(), block_hash, difficulty).await?;
 
     let base_difficulty = state.current_params()?.min_work_difficulty;
     let multiplier = if base_difficulty > 0 {
@@ -1750,7 +1756,6 @@ async fn genesis_endorse_locked(
     })?;
     let link = BlockHash::new(target_pubkey);
 
-
     let genesis_account = state
         .account_store
         .get_account(&genesis_address)
@@ -1851,8 +1856,7 @@ fn require_bootstrap_window(
     verified_count: u64,
     threshold: u32,
 ) -> Result<(), RpcError> {
-    if !phase.permits_creator(verified_count, threshold)
-    {
+    if !phase.permits_creator(verified_count, threshold) {
         return Err(RpcError::InvalidRequest(
             "genesis bootstrap has ended; use normal endorsements and verifier votes".into(),
         ));
@@ -1943,11 +1947,8 @@ fn build_and_sign_block(
     };
     let threshold =
         burst_work::WorkThresholds::with_base(min_work_difficulty).threshold_for(work_kind);
-    let nonce = crate::work_budget::generate_blocking(
-        work_generator,
-        &block.work_root(),
-        threshold,
-    )?;
+    let nonce =
+        crate::work_budget::generate_blocking(work_generator, &block.work_root(), threshold)?;
     block.work = nonce.0;
 
     Ok(block)
@@ -2667,15 +2668,22 @@ async fn verifier_opt(
 
 /// Advisory review data; block admission checks authority in the ledger writer.
 pub async fn handle_bootstrap_status(
-    _params: serde_json::Value, state: &RpcState,
+    _params: serde_json::Value,
+    state: &RpcState,
 ) -> Result<serde_json::Value, RpcError> {
     use burst_verification::bootstrap::{BootstrapPhase, MAX_BOOTSTRAP_HUMANS};
-    let creator = state.block_processor.bootstrap_creator().map_err(RpcError::Server)?;
+    let creator = state
+        .block_processor
+        .bootstrap_creator()
+        .map_err(RpcError::Server)?;
     let bytes = state.brn_store.get_meta(BootstrapPhase::KEY)?;
     let phase = BootstrapPhase::decode(bytes.as_deref())
         .map_err(|error| RpcError::Server(error.to_string()))?;
     let count = state.account_store.verified_account_count()?;
-    let threshold = state.current_params()?.bootstrap_exit_threshold.min(MAX_BOOTSTRAP_HUMANS);
+    let threshold = state
+        .current_params()?
+        .bootstrap_exit_threshold
+        .min(MAX_BOOTSTRAP_HUMANS);
     Ok(serde_json::json!({
         "creator": creator.as_str(), "verified_count": count, "threshold": threshold,
         "active": phase.permits_creator(count, threshold),

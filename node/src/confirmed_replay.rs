@@ -178,11 +178,18 @@ impl ConfirmedReplay {
             }
             if block.block_type == BlockType::Endorse {
                 if block.account == genesis.account
-                    && verified_count < u64::from(initial_params.bootstrap_exit_threshold.min(burst_verification::bootstrap::MAX_BOOTSTRAP_HUMANS))
+                    && verified_count
+                        < u64::from(
+                            initial_params
+                                .bootstrap_exit_threshold
+                                .min(burst_verification::bootstrap::MAX_BOOTSTRAP_HUMANS),
+                        )
                 {
                     let target = crate::block_economics::wallet_from_link(&block.link)
                         .ok_or_else(|| invalid("endorsement target is invalid"))?;
-                    if target == genesis.account || bootstrap_endorsements.insert(target, block.hash).is_some() {
+                    if target == genesis.account
+                        || bootstrap_endorsements.insert(target, block.hash).is_some()
+                    {
                         return Err(invalid("duplicate or self bootstrap verification"));
                     }
                     verified_count += 1;
@@ -625,8 +632,12 @@ impl ConfirmedReplay {
         let previous_brn_spent = previous.as_ref().map_or(0, |block| block.brn_spent);
         let previous_trst_balance = previous.as_ref().map_or(0, |block| block.trst_balance);
         if previous.is_some() {
-            BlockProcessor::validate_balance_transition(block, previous_brn_spent, previous_trst_balance)
-                .map_err(invalid)?;
+            BlockProcessor::validate_balance_transition(
+                block,
+                previous_brn_spent,
+                previous_trst_balance,
+            )
+            .map_err(invalid)?;
         }
         let consumes_pending = matches!(
             block.block_type,
@@ -663,8 +674,8 @@ impl ConfirmedReplay {
             &mut self.trst,
         )
         .map_err(invalid)?;
-        let updated =
-            ledger_updater::account_after_block(block, account, previous_brn_spent).map_err(invalid)?;
+        let updated = ledger_updater::account_after_block(block, account, previous_brn_spent)
+            .map_err(invalid)?;
         use crate::verification_commit::ledger::Ledger;
         let mut ledger = crate::verification_commit::ledger::ReplayedLedger {
             bootstrap: &mut self.bootstrap_phase,
@@ -1053,9 +1064,9 @@ mod tests {
     mod compact_heights;
     mod deadline_recovery;
     mod delayed_prepare;
+    pub(crate) mod electorate;
     mod governance;
     mod historical_transfer;
-    mod electorate;
     mod live_clock;
     mod live_selection;
     mod pending_expiry;
@@ -2066,9 +2077,12 @@ mod tests {
                 "a stored beacon must not be fetched again after restart"
             );
         });
-        let service =
-            snapshot_history::installed_recovery::WitnessService::start(store.clone(), store.clone(), 0)
-                .await;
+        let service = snapshot_history::installed_recovery::WitnessService::start(
+            store.clone(),
+            store.clone(),
+            0,
+        )
+        .await;
         let startup = crate::confirmed_replay::snapshot::installed::recover_current_tip_with_cache(
             store.clone(),
             NetworkId::Dev,
@@ -2125,13 +2139,9 @@ mod tests {
                 .unwrap();
             assert_eq!(pending.certificate(), &certificate);
             assert!(pending.beacon().is_none());
-            let bytes = store
-                .meta_store()
-                .get_meta(crate::endorsement_commit::SNAPSHOT_KEY)
-                .unwrap();
-            *live.lock().await = VerificationOrchestrator::restore(
-                burst_verification::OrchestratorSnapshot::decode(&bytes).unwrap(),
-            );
+            let restored =
+                crate::verification_storage::load(&store.tx_begin_write().unwrap()).unwrap();
+            *live.lock().await = restored;
             assert_eq!(
                 live.lock().await.selection_request(&address(20)),
                 frozen.as_ref()
@@ -2170,12 +2180,9 @@ mod tests {
         let context = live.lock().await.selection_context(&address(20));
         assert_eq!(context.is_some(), install_committee);
         if install_committee {
-            let bytes = store
-                .meta_store()
-                .get_meta(crate::endorsement_commit::SNAPSHOT_KEY)
-                .unwrap();
-            let restored = burst_verification::OrchestratorSnapshot::decode(&bytes).unwrap();
-            *live.lock().await = VerificationOrchestrator::restore(restored);
+            let restored =
+                crate::verification_storage::load(&store.tx_begin_write().unwrap()).unwrap();
+            *live.lock().await = restored;
             assert_eq!(live.lock().await.selection_context(&address(20)), context);
         }
         let shutdown = Arc::new(crate::shutdown::ShutdownController::new());

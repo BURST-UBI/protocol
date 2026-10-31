@@ -13,7 +13,9 @@ impl SnapshotContinuation {
     }
 
     pub(super) fn replayed_heads_at(
-        &self, tail: &SnapshotTail, cutoff: u64,
+        &self,
+        tail: &SnapshotTail,
+        cutoff: u64,
     ) -> Result<Vec<HistoryHead>, ReplayError> {
         if tail.context() != self.context || cutoff < self.anchor.cutoff() || cutoff > tail.cutoff()
         {

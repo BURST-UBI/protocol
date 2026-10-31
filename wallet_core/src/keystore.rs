@@ -110,12 +110,15 @@ pub fn decrypt_keystore(keystore: &KeystoreFile, password: &str) -> Result<[u8; 
     }
 
     let crypto = &keystore.crypto;
-    if crypto.cipher != "aes-256-gcm" || crypto.kdf != "argon2id"
+    if crypto.cipher != "aes-256-gcm"
+        || crypto.kdf != "argon2id"
         || crypto.kdf_params.memory_kib != V1_ARGON2_MEMORY_KIB
         || crypto.kdf_params.iterations != V1_ARGON2_ITERATIONS
         || crypto.kdf_params.parallelism != V1_ARGON2_PARALLELISM
     {
-        return Err(WalletError::Key("unsupported version 1 keystore profile".into()));
+        return Err(WalletError::Key(
+            "unsupported version 1 keystore profile".into(),
+        ));
     }
 
     let salt = hex_decode(&keystore.crypto.salt)
@@ -258,11 +261,21 @@ mod tests {
 
     #[test]
     fn unsupported_profiles_are_rejected_before_decoding_or_derivation() {
-        let base = KeystoreFile { version: 1, crypto: KeystoreCrypto {
-            cipher: "aes-256-gcm".into(), kdf: "argon2id".into(),
-            kdf_params: KdfParams { memory_kib: V1_ARGON2_MEMORY_KIB, iterations: V1_ARGON2_ITERATIONS, parallelism: V1_ARGON2_PARALLELISM },
-            salt: "invalid".into(), nonce: "invalid".into(), ciphertext: "invalid".into(),
-        }};
+        let base = KeystoreFile {
+            version: 1,
+            crypto: KeystoreCrypto {
+                cipher: "aes-256-gcm".into(),
+                kdf: "argon2id".into(),
+                kdf_params: KdfParams {
+                    memory_kib: V1_ARGON2_MEMORY_KIB,
+                    iterations: V1_ARGON2_ITERATIONS,
+                    parallelism: V1_ARGON2_PARALLELISM,
+                },
+                salt: "invalid".into(),
+                nonce: "invalid".into(),
+                ciphertext: "invalid".into(),
+            },
+        };
         for field in 0..5 {
             let mut invalid = base.clone();
             match field {
@@ -272,7 +285,10 @@ mod tests {
                 3 => invalid.crypto.kdf_params.iterations = 1,
                 _ => invalid.crypto.kdf_params.parallelism = 2,
             }
-            assert!(decrypt_keystore(&invalid, "test").unwrap_err().to_string().contains("unsupported version 1 keystore profile"));
+            assert!(decrypt_keystore(&invalid, "test")
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported version 1 keystore profile"));
         }
     }
 

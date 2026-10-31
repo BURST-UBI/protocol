@@ -7,8 +7,14 @@ impl WalletPortfolio {
     /// This selects inputs without checking merge count, state or provenance.
     pub fn select_merge_inputs(&self, ids: &[TxHash]) -> Result<Vec<TrstToken>, String> {
         if let Some(root) = self.indexed() {
-            return ids.iter().map(|id| root.get(id).cloned()
-                .ok_or_else(|| format!("merge input {id} is not held by this wallet"))).collect();
+            return ids
+                .iter()
+                .map(|id| {
+                    root.get(id)
+                        .cloned()
+                        .ok_or_else(|| format!("merge input {id} is not held by this wallet"))
+                })
+                .collect();
         }
         let mut selected: HashMap<_, Option<&TrstToken>> =
             ids.iter().map(|id| (*id, None)).collect();
@@ -111,7 +117,8 @@ mod tests {
                 })
                 .collect(),
             ..Default::default()
-        }.into()
+        }
+        .into()
     }
 
     #[test]
@@ -157,7 +164,12 @@ mod tests {
         let mut engine = TrstEngine::new();
         let holder = WalletAddress::new("brst_holder");
         let other = WalletAddress::new("brst_other");
-        for (index, mut token) in portfolio(512).into_canonical().tokens.into_iter().enumerate() {
+        for (index, mut token) in portfolio(512)
+            .into_canonical()
+            .tokens
+            .into_iter()
+            .enumerate()
+        {
             token.origin = TxHash::new([(index % 128) as u8; 32]);
             token.revoked_origin =
                 (index % 3 == 0).then_some(TxHash::new([(index % 17) as u8; 32]));

@@ -70,17 +70,26 @@ impl GovernanceEngine {
         params: &ProtocolParams,
     ) -> Option<Timestamp> {
         let deadline = match projected.phase {
-            GovernancePhase::Proposal => self.timing(projected, params)
-                .and_then(|timing| timing.proposal_end(projected.created_at)).ok(),
-            GovernancePhase::Exploration => projected.exploration_started_at.and_then(|started|
-                self.timing(projected, params).and_then(|timing| timing.counting_at(started)).ok()),
-            GovernancePhase::Cooldown => projected.activation_at.or_else(||
-                projected.cooldown_started_at.map(|started| Timestamp::new(
-                    started.as_secs().saturating_add(params.governance_cooldown_duration_secs)))),
+            GovernancePhase::Proposal => self
+                .timing(projected, params)
+                .and_then(|timing| timing.proposal_end(projected.created_at))
+                .ok(),
+            GovernancePhase::Exploration => projected.exploration_started_at.and_then(|started| {
+                self.timing(projected, params)
+                    .and_then(|timing| timing.counting_at(started))
+                    .ok()
+            }),
+            GovernancePhase::Cooldown => projected.activation_at.or_else(|| {
+                projected.cooldown_started_at.map(|started| {
+                    Timestamp::new(
+                        started
+                            .as_secs()
+                            .saturating_add(params.governance_cooldown_duration_secs),
+                    )
+                })
+            }),
             _ => return None,
         };
         Some(deadline.filter(|at| *at > now).unwrap_or(now))
     }
-
-
 }

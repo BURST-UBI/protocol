@@ -31,7 +31,10 @@ pub fn reviewed_merge_sources(
     let mut by_id = std::collections::HashMap::new();
     for batch in batches {
         if let Some(id) = batch["id"].as_str() {
-            by_id.entry(id).and_modify(|value| *value = None).or_insert(Some(batch));
+            by_id
+                .entry(id)
+                .and_modify(|value| *value = None)
+                .or_insert(Some(batch));
         }
     }
     let mut seen = std::collections::HashSet::new();
@@ -45,7 +48,10 @@ pub fn reviewed_merge_sources(
             if !seen.insert(id) {
                 return Err("A batch was selected more than once.".into());
             }
-            let current = by_id.get(selection.id.as_str()).copied().flatten()
+            let current = by_id
+                .get(selection.id.as_str())
+                .copied()
+                .flatten()
                 .ok_or("Selected batches changed. Refresh and review again.")?;
             let current: MergeSelection = serde_json::from_value(current.clone())
                 .map_err(|_| "The node returned an invalid batch.".to_string())?;
@@ -109,12 +115,22 @@ mod tests {
     use super::*;
     #[test]
     fn merge_review_rejects_duplicate_changed_and_overflowing_batches() {
-        let selected: Vec<MergeSelection> = (1..=2).map(|byte| MergeSelection {
-            id: TxHash::new([byte; 32]).to_string(), amount: "1".into(),
-            expiry_at: Some(100), status: "active".into(),
-        }).collect();
-        let batches: Vec<_> = selected.iter().map(|s| serde_json::to_value(s).unwrap()).collect();
-        assert_eq!(reviewed_merge_sources(&batches, &selected).unwrap().len(), 2);
+        let selected: Vec<MergeSelection> = (1..=2)
+            .map(|byte| MergeSelection {
+                id: TxHash::new([byte; 32]).to_string(),
+                amount: "1".into(),
+                expiry_at: Some(100),
+                status: "active".into(),
+            })
+            .collect();
+        let batches: Vec<_> = selected
+            .iter()
+            .map(|s| serde_json::to_value(s).unwrap())
+            .collect();
+        assert_eq!(
+            reviewed_merge_sources(&batches, &selected).unwrap().len(),
+            2
+        );
         let mut duplicate = batches.clone();
         duplicate.push(batches[0].clone());
         assert!(reviewed_merge_sources(&duplicate, &selected).is_err());
@@ -122,10 +138,15 @@ mod tests {
         changed[0]["amount"] = serde_json::json!("2");
         assert!(reviewed_merge_sources(&changed, &selected).is_err());
         assert!(reviewed_merge_sources(&batches[1..], &selected).is_err());
-        assert!(reviewed_merge_sources(&batches, &[selected[0].clone(), selected[0].clone()]).is_err());
+        assert!(
+            reviewed_merge_sources(&batches, &[selected[0].clone(), selected[0].clone()]).is_err()
+        );
         let mut overflow = selected;
         overflow[0].amount = u128::MAX.to_string();
-        let batches: Vec<_> = overflow.iter().map(|s| serde_json::to_value(s).unwrap()).collect();
+        let batches: Vec<_> = overflow
+            .iter()
+            .map(|s| serde_json::to_value(s).unwrap())
+            .collect();
         assert!(reviewed_merge_sources(&batches, &overflow).is_err());
     }
 

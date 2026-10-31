@@ -55,12 +55,8 @@ fn outcome_vote_fence_rejects_stale_cut_and_survives_signer_recovery() {
             .is_none()
     );
     // A rejected cut must not leave a fence behind or consume signing sequence.
-    assert_eq!(
-        generate_vote(&store, &mut generator, tail, true)
-            .unwrap()
-            .sequence,
-        2
-    );
+    let retransmitted = generate_vote(&store, &mut generator, tail, true).unwrap();
+    assert_eq!(retransmitted.to_bytes(), final_vote.to_bytes());
     let proposal = checkpoint_agreement::apply_candidates(
         &store,
         &anchor,
@@ -74,7 +70,7 @@ fn outcome_vote_fence_rejects_stale_cut_and_survives_signer_recovery() {
     for final_vote in [false, true] {
         assert!(generate_vote(&store, &mut generator, tail, final_vote).is_err());
     }
-    assert_eq!(generator.sequence(), 2);
+    assert_eq!(generator.sequence(), final_vote.sequence);
     assert_eq!(
         CertifiedCheckpoint::stored_tip(&store, NetworkId::Dev, &fixture.params).unwrap(),
         2
@@ -107,7 +103,7 @@ fn outcome_vote_fence_rejects_stale_cut_and_survives_signer_recovery() {
             .meta_store()
             .get_meta(&format!("consensus_sequence/v1/{}", address(seed)))
             .unwrap(),
-        2u64.to_be_bytes()
+        final_vote.sequence.to_be_bytes()
     );
     // Exercise the storage boundary only; live economic installation remains gated.
     let next = current.manifest().checkpoint.hash();

@@ -78,7 +78,10 @@ fn reconcile_journals(
         if index.is_none() {
             index = Some(JournalIndex::new(batch.storage_directory())?);
         }
-        index.as_mut().unwrap().push(number, WalletAddress::new(representative))?;
+        index
+            .as_mut()
+            .unwrap()
+            .push(number, WalletAddress::new(representative))?;
     }
     let mut journals = index.as_ref().map_or(0, JournalIndex::len);
     let mut current = genesis;
@@ -89,10 +92,13 @@ fn reconcile_journals(
             index.visit(height, |representative| {
                 poll("journal:round-signer")?;
                 if current.roster().weight(representative) == 0 {
-                    return Err(invalid("checkpoint journal signer is outside its electorate"));
+                    return Err(invalid(
+                        "checkpoint journal signer is outside its electorate",
+                    ));
                 }
                 let key = format!("{prefix}{representative}/{height}");
-                let bytes = batch.get_meta(&key)?
+                let bytes = batch
+                    .get_meta(&key)?
                     .ok_or_else(|| invalid("indexed checkpoint journal disappeared"))?;
                 journals = journals
                     .checked_sub(1)

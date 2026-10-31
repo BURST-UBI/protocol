@@ -28,8 +28,11 @@ impl SnapshotContinuation {
     /// only proposal input: callers must independently verify the cemented floor,
     /// current observations and promises. This does not install or confirm it.
     pub(in crate::confirmed_replay::snapshot) fn prepare_next_replayed_candidate(
-        &self, store: &LmdbStore, history: &SnapshotTail,
-        selections: &(impl SelectionSource + ?Sized), clock: SigningClock,
+        &self,
+        store: &LmdbStore,
+        history: &SnapshotTail,
+        selections: &(impl SelectionSource + ?Sized),
+        clock: SigningClock,
     ) -> Result<Option<CompactReplayCandidate>, ReplayError> {
         self.check_selection_receipts(selections)?;
         let Some(safe_cut) = clock
@@ -68,7 +71,10 @@ impl SnapshotContinuation {
                     state: discovery.state.clone(),
                 };
                 result = self.discover_lifecycle_from_replay(
-                    &safe_tail, selections, candidate, &safe_blocks,
+                    &safe_tail,
+                    selections,
+                    candidate,
+                    &safe_blocks,
                 )?;
             } else {
                 let tail = tail_at(lifecycle_cut)?;

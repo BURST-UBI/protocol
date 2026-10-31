@@ -71,7 +71,10 @@ impl LmdbMetaStore {
     /// Return retry coordination for a rejected file-growth limit. This method
     /// does not wait or retry; callers release application locks before waiting.
     pub fn put_fork_candidate_with_content_retry(
-        &self, hash: &BlockHash, bytes: &[u8], content: Option<&[u8]>,
+        &self,
+        hash: &BlockHash,
+        bytes: &[u8],
+        content: Option<&[u8]>,
     ) -> Result<(), ForkCandidateWriteError> {
         let mut outcome = None;
         let mut retry = None;
@@ -131,9 +134,14 @@ impl LmdbMetaStore {
             Ok(())
         })();
         result.map_err(|error| {
-            let pressure = outcome.filter(|outcome| outcome.was_rejected()).map(|outcome| {
-                (outcome.watch(), retry.expect("guarded fork writer reserved retry before mutation"))
-            });
+            let pressure = outcome
+                .filter(|outcome| outcome.was_rejected())
+                .map(|outcome| {
+                    (
+                        outcome.watch(),
+                        retry.expect("guarded fork writer reserved retry before mutation"),
+                    )
+                });
             ForkCandidateWriteError { error, pressure }
         })
     }
@@ -201,11 +209,17 @@ mod tests {
         let hash = BlockHash::new([7; 32]);
         let content = vec![9; MAX_CONTENT_BYTES];
         let mut writer = store.tx_begin_write().unwrap();
-        let limit = writer.limit_file_extent(store.env().real_disk_size().unwrap() as usize + (64 << 10)).unwrap();
+        let limit = writer
+            .limit_file_extent(store.env().real_disk_size().unwrap() as usize + (64 << 10))
+            .unwrap();
         let reader = store.tx_begin_read().unwrap();
         drop(writer);
         let generation = store.env().info().last_txn_id;
-        let failure = match store.meta_store().put_fork_candidate_with_content_retry(&hash, b"candidate", Some(&content)) {
+        let failure = match store.meta_store().put_fork_candidate_with_content_retry(
+            &hash,
+            b"candidate",
+            Some(&content),
+        ) {
             Err(failure) => failure,
             Ok(()) => panic!("fork content unexpectedly fit the capture ceiling"),
         };
@@ -221,10 +235,23 @@ mod tests {
         let mut writer = store.tx_begin_write().unwrap();
         assert!(writer.try_limit_file_extent(8 << 20).unwrap().is_none());
         drop(writer);
-        assert!(store.meta_store().put_fork_candidate_with_content_retry(&hash, b"candidate", Some(&content)).is_ok());
-        assert_eq!(store.meta_store().fork_candidate(&hash).unwrap(), Some(b"candidate".to_vec()));
-        assert_eq!(store.meta_store().fork_content(&hash).unwrap(), Some(content));
-        let failure = match store.meta_store().put_fork_candidate_with_content_retry(&hash, b"different", None) {
+        assert!(store
+            .meta_store()
+            .put_fork_candidate_with_content_retry(&hash, b"candidate", Some(&content))
+            .is_ok());
+        assert_eq!(
+            store.meta_store().fork_candidate(&hash).unwrap(),
+            Some(b"candidate".to_vec())
+        );
+        assert_eq!(
+            store.meta_store().fork_content(&hash).unwrap(),
+            Some(content)
+        );
+        let failure = match store.meta_store().put_fork_candidate_with_content_retry(
+            &hash,
+            b"different",
+            None,
+        ) {
             Err(failure) => failure,
             Ok(()) => panic!("immutable fork payload was replaced"),
         };

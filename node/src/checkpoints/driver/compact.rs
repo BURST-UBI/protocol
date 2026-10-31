@@ -85,17 +85,33 @@ impl CheckpointDriver {
 
     /// Only unsigned candidates may be recaptured after local finality
     /// advances. A failed coverage check requests replay, never authorizes signing.
-    pub(crate) fn compact_candidate_refresh_signer(&self) -> Result<Option<WalletAddress>, StoreError> {
-        if !self.has_unsigned_compact_candidate()? { return Ok(None); }
-        let candidate = self.compact.as_ref().unwrap().iter()
+    pub(crate) fn compact_candidate_refresh_signer(
+        &self,
+    ) -> Result<Option<WalletAddress>, StoreError> {
+        if !self.has_unsigned_compact_candidate()? {
+            return Ok(None);
+        }
+        let candidate = self
+            .compact
+            .as_ref()
+            .unwrap()
+            .iter()
             .find(|candidate| candidate.input().manifest() == self.initial)
             .ok_or_else(|| invalid("compact initial candidate is missing"))?;
         let batch = self.store.tx_begin_write()?;
-        match candidate.input().check_signing_parent(&batch, &self.anchor).and_then(|()| {
-            if candidate.input().covers_local_promises(&batch, &self.representative)? {
-                Ok(())
-            } else { Err(invalid("unsigned candidate omits local final promises")) }
-        }) {
+        match candidate
+            .input()
+            .check_signing_parent(&batch, &self.anchor)
+            .and_then(|()| {
+                if candidate
+                    .input()
+                    .covers_local_promises(&batch, &self.representative)?
+                {
+                    Ok(())
+                } else {
+                    Err(invalid("unsigned candidate omits local final promises"))
+                }
+            }) {
             Ok(()) => Ok(None),
             Err(error) => {
                 tracing::debug!(%error, "unsigned compact candidate needs fresh coverage");
@@ -105,9 +121,12 @@ impl CheckpointDriver {
     }
 
     pub(crate) fn replace_unsigned_compact_candidate(
-        &mut self, candidate: CompactReplayCandidate,
+        &mut self,
+        candidate: CompactReplayCandidate,
     ) -> Result<bool, StoreError> {
-        if !self.has_unsigned_compact_candidate()? { return Ok(false); }
+        if !self.has_unsigned_compact_candidate()? {
+            return Ok(false);
+        }
         let manifest = candidate.input().manifest();
         self.cache_compact_candidate(candidate)?;
         self.initial = manifest;

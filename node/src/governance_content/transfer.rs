@@ -170,7 +170,10 @@ impl Transfers {
         entries.retain(|_, entry| now.duration_since(entry.created_at) < TTL);
         let mut requests = Vec::new();
         let mut ready = Vec::new();
-        for entry in entries.values_mut().filter(|entry| now >= entry.next_attempt_at) {
+        for entry in entries
+            .values_mut()
+            .filter(|entry| now >= entry.next_attempt_at)
+        {
             match &mut entry.state {
                 ContentState::Pending {
                     offset,

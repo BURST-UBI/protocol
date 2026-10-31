@@ -1,14 +1,14 @@
 use super::*;
 use crate::confirmed_replay::scratch_index::ScratchIndex;
 mod root_pages;
-use root_pages::{RootPages, RootCursor};
 use crate::confirmed_replay::snapshot::SelectionSource;
 use burst_types::BlockHash;
+use root_pages::{RootCursor, RootPages};
 
+mod closure;
+mod observed;
 mod replayed;
 mod root_builder;
-mod observed;
-mod closure;
 pub(crate) use closure::{BodyClosureLimits, OwnedRetirement};
 
 #[derive(Clone, Copy)]
@@ -39,7 +39,11 @@ struct RootRows {
 }
 impl RootRows {
     fn new(directory: &std::path::Path) -> Result<Self, StoreError> {
-        Ok(Self { index: ScratchIndex::new(directory)?, base: None, directory: directory.to_owned() })
+        Ok(Self {
+            index: ScratchIndex::new(directory)?,
+            base: None,
+            directory: directory.to_owned(),
+        })
     }
     fn decode(value: [u8; 32]) -> Result<u16, StoreError> {
         let sources = u16::from_be_bytes([value[0], value[1]]);
@@ -49,7 +53,12 @@ impl RootRows {
         Ok(sources)
     }
     fn get(&self, key: &[u8; 32]) -> Result<Option<u16>, StoreError> {
-        let base = self.base.as_ref().map(|base| base.get(key)).transpose()?.flatten();
+        let base = self
+            .base
+            .as_ref()
+            .map(|base| base.get(key))
+            .transpose()?
+            .flatten();
         let added = self.index.get(key)?.map(Self::decode).transpose()?;
         Ok(match (base, added) {
             (None, None) => None,
@@ -62,17 +71,32 @@ impl RootRows {
         Self::decode(value)?;
         let existed = self.get(&key)?.is_some();
         self.index.insert(key, value)?;
-        if compact { self.index.compact_if_amplified(&self.directory)?; }
+        if compact {
+            self.index.compact_if_amplified(&self.directory)?;
+        }
         Ok(existed)
     }
-    fn visit(&self, mut visit: impl FnMut([u8; 32], u16) -> Result<(), StoreError>) -> Result<(), StoreError> {
+    fn visit(
+        &self,
+        mut visit: impl FnMut([u8; 32], u16) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
         let mut cursor = self.cursor()?;
-        while !cursor.visit_next(128, |key, value| visit(key, Self::decode(value)?))?.done {}
+        while !cursor
+            .visit_next(128, |key, value| visit(key, Self::decode(value)?))?
+            .done
+        {}
         Ok(())
     }
-    fn cursor(&self) -> Result<RootCursor, StoreError> { RootCursor::new(self.base.as_ref(), self.index.cursor()?) }
+    fn cursor(&self) -> Result<RootCursor, StoreError> {
+        RootCursor::new(self.base.as_ref(), self.index.cursor()?)
+    }
     #[cfg(test)]
-    fn truncate_for_test(&self) { self.index.truncate_for_test(); if let Some(base) = &self.base { base.truncate_for_test(); } }
+    fn truncate_for_test(&self) {
+        self.index.truncate_for_test();
+        if let Some(base) = &self.base {
+            base.truncate_for_test();
+        }
+    }
 }
 
 struct Roots {
@@ -100,7 +124,9 @@ impl Roots {
     fn finish_bulk(mut self) -> Result<Self, StoreError> {
         if let Some(builder) = self.bulk.take() {
             let (rows, count) = builder.finish()?;
-            if self.max_count.is_some_and(|max| count > max) { return Err(invalid("body roots exceed budget")); }
+            if self.max_count.is_some_and(|max| count > max) {
+                return Err(invalid("body roots exceed budget"));
+            }
             self.rows = rows;
             self.count = count;
         }
@@ -109,15 +135,31 @@ impl Roots {
     fn add(&mut self, hash: BlockHash, source: Source) -> Result<(), StoreError> {
         self.add_with_compaction(hash, source, true)
     }
-    fn add_until(&mut self, hash: BlockHash, source: Source, cancelled: &dyn Fn() -> bool) -> Result<(), StoreError> {
-        if cancelled() { return Err(invalid("body root collection cancelled")); }
+    fn add_until(
+        &mut self,
+        hash: BlockHash,
+        source: Source,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), StoreError> {
+        if cancelled() {
+            return Err(invalid("body root collection cancelled"));
+        }
         self.add_with_compaction(hash, source, false)?;
-        if !self.rows.index.compact_until(&self.rows.directory, cancelled)? {
+        if !self
+            .rows
+            .index
+            .compact_until(&self.rows.directory, cancelled)?
+        {
             return Err(invalid("body root compaction cancelled"));
         }
         Ok(())
     }
-    fn add_with_compaction(&mut self, hash: BlockHash, source: Source, compact: bool) -> Result<(), StoreError> {
+    fn add_with_compaction(
+        &mut self,
+        hash: BlockHash,
+        source: Source,
+        compact: bool,
+    ) -> Result<(), StoreError> {
         let source = self.source_override.unwrap_or(source);
         if hash.is_zero() {
             return Err(invalid("zero required body root"));
@@ -180,7 +222,9 @@ impl Roots {
         &self,
         mut visit: impl FnMut(BlockHash) -> Result<(), StoreError>,
     ) -> Result<(), StoreError> {
-        if self.bulk.is_some() { return Err(invalid("body roots not finalized")); }
+        if self.bulk.is_some() {
+            return Err(invalid("body roots not finalized"));
+        }
         let mut count = 0u64;
         self.rows.visit(|key, sources| {
             let hash = BlockHash::new(key);
@@ -220,40 +264,51 @@ impl PreparedRecoveryProjection {
 
     #[cfg(test)]
     pub(crate) fn body_requirements<'proof, 'db>(
-        &'proof self, store: &'db LmdbStore,
+        &'proof self,
+        store: &'db LmdbStore,
     ) -> Result<BodyRequirements<'proof, 'db>, StoreError> {
         BodyRequirements::collect_with_projection(self.metadata.trst_references(store)?, Some(self))
     }
 
     #[cfg(test)]
     pub(crate) fn body_requirements_view<'proof, 'db>(
-        &'proof self, store: &'db LmdbStore,
+        &'proof self,
+        store: &'db LmdbStore,
         view: &'db burst_store_lmdb::LmdbReadTransaction<'db>,
     ) -> Result<BodyRequirements<'proof, 'db>, StoreError> {
-        BodyRequirements::collect_with_projection(self.metadata.trst_references_view(store, view)?, Some(self))
+        BodyRequirements::collect_with_projection(
+            self.metadata.trst_references_view(store, view)?,
+            Some(self),
+        )
     }
     pub(crate) fn body_requirements_view_until<'proof, 'db>(
-        &'proof self, store: &'db LmdbStore,
+        &'proof self,
+        store: &'db LmdbStore,
         view: &'db burst_store_lmdb::LmdbReadTransaction<'db>,
         cancelled: impl Fn() -> bool,
         compaction_cancelled: std::sync::Arc<dyn Fn(&'static str) -> bool + Send + Sync>,
     ) -> Result<Option<BodyRequirements<'proof, 'db>>, StoreError> {
-        if cancelled() { return Ok(None); }
-        let cancellation = std::sync::Arc::new(root_builder::Cancellation::new(compaction_cancelled));
+        if cancelled() {
+            return Ok(None);
+        }
+        let cancellation =
+            std::sync::Arc::new(root_builder::Cancellation::new(compaction_cancelled));
         let result = BodyRequirements::collect_with_projection_until(
-            self.metadata.trst_references_view(store, view)?, Some(self), &cancelled, Some(cancellation.clone()),
+            self.metadata.trst_references_view(store, view)?,
+            Some(self),
+            &cancelled,
+            Some(cancellation.clone()),
         );
-        if cancellation.stopped() { return Ok(None); }
+        if cancellation.stopped() {
+            return Ok(None);
+        }
         result
     }
-
 }
 
 impl<'proof, 'db> BodyRequirements<'proof, 'db> {
     #[cfg(test)]
-    pub(super) fn collect(
-        cut: RecoveredTrstReferences<'proof, 'db>,
-    ) -> Result<Self, StoreError> {
+    pub(super) fn collect(cut: RecoveredTrstReferences<'proof, 'db>) -> Result<Self, StoreError> {
         Self::collect_with_projection(cut, None)
     }
     #[cfg(test)]
@@ -272,9 +327,15 @@ impl<'proof, 'db> BodyRequirements<'proof, 'db> {
         cancelled: &impl Fn() -> bool,
         compaction: Option<std::sync::Arc<root_builder::Cancellation>>,
     ) -> Result<Option<Self>, StoreError> {
-        if cancelled() { return Ok(None); }
+        if cancelled() {
+            return Ok(None);
+        }
         let mut roots = Roots::new_bulk(cut.store.env().path())?;
-        roots.bulk.as_mut().expect("new bulk root builder").cancellation = compaction;
+        roots
+            .bulk
+            .as_mut()
+            .expect("new bulk root builder")
+            .cancellation = compaction;
         roots.add(
             cut.metadata
                 .recovered()
@@ -287,7 +348,9 @@ impl<'proof, 'db> BodyRequirements<'proof, 'db> {
             ($reader:expr, $visit:expr) => {{
                 let mut reader = $reader;
                 loop {
-                    if cancelled() { return Ok(None); }
+                    if cancelled() {
+                        return Ok(None);
+                    }
                     if reader.visit_next_page(100, 64 << 20, $visit)?.done {
                         break;
                     }
@@ -295,7 +358,9 @@ impl<'proof, 'db> BodyRequirements<'proof, 'db> {
             }};
         }
         loop {
-            if cancelled() { return Ok(None); }
+            if cancelled() {
+                return Ok(None);
+            }
             if cut.visit_next_page(100, 64 << 20, |r| roots.trst(r))?.done {
                 break;
             }
@@ -372,13 +437,20 @@ impl<'proof, 'db> BodyRequirements<'proof, 'db> {
         let archive = cut.metadata.applied.tail().archive();
         let mut interrupted = false;
         let result = archive.visit_input::<StoreError>(|block| {
-            if cancelled() { interrupted = true; return Err(invalid("root collection cancelled")); }
+            if cancelled() {
+                interrupted = true;
+                return Err(invalid("root collection cancelled"));
+            }
             roots.replay_block(block)
         });
-        if interrupted { return Ok(None); }
+        if interrupted {
+            return Ok(None);
+        }
         result?;
         for hash in &cut.metadata.economics.state.replay_dependencies {
-            if cancelled() { return Ok(None); }
+            if cancelled() {
+                return Ok(None);
+            }
             roots.add(*hash, Source::Replay)?;
         }
         for receipt in cut
@@ -389,13 +461,17 @@ impl<'proof, 'db> BodyRequirements<'proof, 'db> {
             .selection_receipts
             .iter()
         {
-            if cancelled() { return Ok(None); }
+            if cancelled() {
+                return Ok(None);
+            }
             for head in receipt.map_err(invalid)?.heads() {
                 roots.add(head.hash, Source::Replay)?;
             }
         }
         for selection in cut.signer_selections().iter_selections() {
-            if cancelled() { return Ok(None); }
+            if cancelled() {
+                return Ok(None);
+            }
             for head in selection.map_err(invalid)?.heads() {
                 roots.add(head.hash, Source::Replay)?;
             }
@@ -407,17 +483,30 @@ impl<'proof, 'db> BodyRequirements<'proof, 'db> {
             roots.source_override = Some(Source::Undo);
             let mut interrupted = false;
             let result = projection.visit_replayed_changes(|record| {
-                if cancelled() { interrupted = true; return Err(invalid("root collection cancelled")); }
+                if cancelled() {
+                    interrupted = true;
+                    return Err(invalid("root collection cancelled"));
+                }
                 roots.replayed_change(record, anchor.network(), anchor.genesis_hash())
             });
-            if interrupted { return Ok(None); }
+            if interrupted {
+                return Ok(None);
+            }
             result?;
             roots.source_override = None;
         }
-        if cancelled() { return Ok(None); }
+        if cancelled() {
+            return Ok(None);
+        }
         let roots = roots.finish_bulk()?;
-        if cancelled() { return Ok(None); }
-        Ok(Some(Self { cut, roots, rollback_checked: projection.is_some() }))
+        if cancelled() {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            cut,
+            roots,
+            rollback_checked: projection.is_some(),
+        }))
     }
     pub(crate) fn has_root(&self, hash: BlockHash) -> Result<bool, StoreError> {
         Ok(self.roots.rows.get(hash.as_bytes())?.is_some())
@@ -437,7 +526,10 @@ impl<'proof, 'db> BodyRequirements<'proof, 'db> {
         mut visit: impl FnMut(BlockHash, Option<ResolvedBody>) -> Result<(), StoreError>,
     ) -> Result<(), StoreError> {
         self.roots.visit(|hash| {
-            let body = self.cut.metadata.resolve_body(self.cut.store, self.cut.reader.view(), &hash)?;
+            let body =
+                self.cut
+                    .metadata
+                    .resolve_body(self.cut.store, self.cut.reader.view(), &hash)?;
             visit(hash, body)
         })
     }
@@ -459,9 +551,13 @@ mod tests {
         use crate::confirmed_replay::scratch_file::ScratchLimit;
         let directory = tempfile::tempdir().unwrap();
         let limit = ScratchLimit::acquire(directory.path(), 3 << 20).unwrap();
-        let keys: Vec<_> = (0..4096u64).map(|n| BlockHash::new(burst_crypto::blake2b_256(&n.to_be_bytes()))).collect();
+        let keys: Vec<_> = (0..4096u64)
+            .map(|n| BlockHash::new(burst_crypto::blake2b_256(&n.to_be_bytes())))
+            .collect();
         let mut roots = Roots::new(directory.path()).unwrap();
-        for hash in &keys[..64] { roots.add(*hash, Source::State).unwrap(); }
+        for hash in &keys[..64] {
+            roots.add(*hash, Source::State).unwrap();
+        }
         let mut seed = roots.rows.cursor().unwrap();
         for hash in &keys {
             roots.add(*hash, Source::State).unwrap();
@@ -473,19 +569,29 @@ mod tests {
             roots.add(*hash, Source::State).unwrap();
             assert_eq!(roots.rows.get(hash.as_bytes()).unwrap(), Some(5));
         }
-        assert_eq!(limit.used_temporary_bytes().unwrap(), before, "duplicate flags must not rewrite indexes");
+        assert_eq!(
+            limit.used_temporary_bytes().unwrap(),
+            before,
+            "duplicate flags must not rewrite indexes"
+        );
         let mut seen = std::collections::HashSet::new();
-        while !seed.visit_next(7, |key, flags| {
-            assert_eq!(RootRows::decode(flags)?, 1);
-            assert!(keys[..64].contains(&BlockHash::new(key)));
-            assert!(seen.insert(key));
-            Ok(())
-        }).unwrap().done {}
+        while !seed
+            .visit_next(7, |key, flags| {
+                assert_eq!(RootRows::decode(flags)?, 1);
+                assert!(keys[..64].contains(&BlockHash::new(key)));
+                assert!(seen.insert(key));
+                Ok(())
+            })
+            .unwrap()
+            .done
+        {}
         assert_eq!(seen.len(), 64);
-        assert!(RootRows::decode([0;32]).is_err());
-        let mut malformed = [0;32]; malformed[1] = 128;
+        assert!(RootRows::decode([0; 32]).is_err());
+        let mut malformed = [0; 32];
+        malformed[1] = 128;
         assert!(RootRows::decode(malformed).is_err());
-        malformed[1] = 1; malformed[31] = 1;
+        malformed[1] = 1;
+        malformed[31] = 1;
         assert!(RootRows::decode(malformed).is_err());
         roots.rows.truncate_for_test();
         assert!(roots.visit(|_| Ok(())).is_err());
@@ -558,7 +664,10 @@ mod tests {
         block.hash = block.compute_hash();
         roots.replay_block(&block).unwrap();
         for hash in [previous, source, target, release, intermediate, block.hash] {
-            assert_eq!(roots.rows.get(hash.as_bytes()).unwrap(), Some(Source::Replay as u16));
+            assert_eq!(
+                roots.rows.get(hash.as_bytes()).unwrap(),
+                Some(Source::Replay as u16)
+            );
         }
         assert_eq!(roots.count, 6);
         assert!(roots.rows.get(block.link.as_bytes()).unwrap().is_none());

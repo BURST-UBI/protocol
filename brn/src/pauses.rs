@@ -12,13 +12,25 @@ pub struct PauseHistory {
 }
 
 impl PauseHistory {
-    pub fn len(&self) -> usize { self.rows.len() }
-    pub fn is_empty(&self) -> bool { self.rows.is_empty() }
-    pub fn iter(&self) -> impl ExactSizeIterator<Item = &Interval> { self.rows.values() }
-    pub fn last(&self) -> Option<&Interval> { self.rows.get(&self.len().checked_sub(1)?) }
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = &Interval> {
+        self.rows.values()
+    }
+    pub fn last(&self) -> Option<&Interval> {
+        self.rows.get(&self.len().checked_sub(1)?)
+    }
     /// Append without validating the interval against earlier entries.
-    pub fn push(&mut self, interval: Interval) { self.rows.insert(self.len(), interval); }
-    pub fn clear(&mut self) { self.rows.clear(); }
+    pub fn push(&mut self, interval: Interval) {
+        self.rows.insert(self.len(), interval);
+    }
+    pub fn clear(&mut self) {
+        self.rows.clear();
+    }
 
     /// Compare by sequence position, skipping shared tree nodes. Independently
     /// loaded histories may require a full comparison. Callback errors stop
@@ -33,7 +45,10 @@ impl PauseHistory {
             match change {
                 DiffItem::Add(key, value) => emit(*key, None, Some(value))?,
                 DiffItem::Remove(key, value) => emit(*key, Some(value), None)?,
-                DiffItem::Update { old: (_, old), new: (key, new) } => emit(*key, Some(old), Some(new))?,
+                DiffItem::Update {
+                    old: (_, old),
+                    new: (key, new),
+                } => emit(*key, Some(old), Some(new))?,
             }
         }
         Ok(())
@@ -42,12 +57,16 @@ impl PauseHistory {
 
 impl From<Vec<Interval>> for PauseHistory {
     fn from(intervals: Vec<Interval>) -> Self {
-        Self { rows: intervals.into_iter().enumerate().collect() }
+        Self {
+            rows: intervals.into_iter().enumerate().collect(),
+        }
     }
 }
 
 impl PartialEq<Vec<Interval>> for PauseHistory {
-    fn eq(&self, other: &Vec<Interval>) -> bool { self.iter().eq(other.iter()) }
+    fn eq(&self, other: &Vec<Interval>) -> bool {
+        self.iter().eq(other.iter())
+    }
 }
 
 impl Serialize for PauseHistory {

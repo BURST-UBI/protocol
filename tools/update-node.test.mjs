@@ -8,6 +8,7 @@ import { spawnSync } from 'node:child_process';
 
 const updater = new URL('./update-node.sh', import.meta.url).pathname;
 const installer = readFileSync(new URL('../install.sh', import.meta.url), 'utf8');
+assert(installer.indexOf("# Detect platform") > installer.indexOf("xml_text()"), "installer helper boundaries must exist");
 const source = readFileSync(updater, 'utf8');
 const body = 'new verified binary';
 const hash = createHash('sha256').update(body).digest('hex');
@@ -105,7 +106,7 @@ test('macOS update does not start a stopped job or trust a failed status query',
 });
 
 test('installer escapes TOML, launchd XML and systemd path arguments', () => {
-  const helpers = installer.slice(installer.indexOf('xml_text()'), installer.indexOf('# ── Detect platform'));
+  const helpers = installer.slice(installer.indexOf('xml_text()'), installer.indexOf('# Detect platform'));
   const value = 'space & <xml> "quote" \\slash %specifier ${BURST_PATH}';
   for (const [helper, expected] of [
     ['xml_text', 'space &amp; &lt;xml&gt; &quot;quote&quot; \\slash %specifier'],

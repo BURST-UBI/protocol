@@ -104,7 +104,11 @@ impl RateHistory {
     /// Unrelated/restored histories require a complete comparison or replacement.
     pub fn appended_rows_start(&self, before: &Self) -> Option<usize> {
         if Arc::ptr_eq(&self.segments, &before.segments)
-            || self.append_base.as_ref().is_some_and(|base| Arc::ptr_eq(base, &before.segments)) {
+            || self
+                .append_base
+                .as_ref()
+                .is_some_and(|base| Arc::ptr_eq(base, &before.segments))
+        {
             Some(before.segments.len())
         } else {
             None
@@ -178,9 +182,9 @@ impl RateHistory {
             let end_segment = &self.segments[end_index];
             // An interval contained in one segment needs no prefix subtraction.
             if verified_at >= end_segment.start {
-                return end_segment.rate.checked_mul(u128::from(
-                    now.as_secs() - verified_at.as_secs(),
-                ));
+                return end_segment
+                    .rate
+                    .checked_mul(u128::from(now.as_secs() - verified_at.as_secs()));
             }
             let end = end_total.add(Accrued::product(
                 end_segment.rate,
@@ -372,7 +376,6 @@ impl BrnWalletState {
 mod tests {
     use super::*;
 
-
     #[test]
     fn historical_query_does_not_accrue_future_part_of_closed_segment() {
         let mut history = RateHistory::new(10, Timestamp::new(0));
@@ -461,7 +464,6 @@ mod tests {
         assert_eq!(h.current_rate(), 0);
         assert_eq!(h.total_accrued(Timestamp::new(0), Timestamp::new(1000)), 0);
     }
-
 
     #[test]
     fn wallet_state_basic_balance() {

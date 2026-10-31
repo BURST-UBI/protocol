@@ -37,7 +37,9 @@ pub(crate) fn stage(
 ) -> Result<StagedBlockEffects, String> {
     if block.block_type == BlockType::Epoch {
         let phase = crate::bootstrap_phase::read(batch)?;
-        let count = batch.verified_account_count().map_err(|error| error.to_string())?;
+        let count = batch
+            .verified_account_count()
+            .map_err(|error| error.to_string())?;
         if !phase.permits_creator(count, params.bootstrap_exit_threshold) {
             return Err("creator epoch authority has ended".into());
         }
@@ -45,8 +47,12 @@ pub(crate) fn stage(
     let inputs = inputs::LedgerInputs::capture(batch, block, params)?;
     let economics = apply_with_engines(block, inputs.context(params), engines)?;
     crate::ledger_updater::stage_block(
-        batch, block, inputs.account.as_ref(), inputs.previous_brn_spent,
-        economics.pending.as_ref(), economics.indices.as_ref(),
+        batch,
+        block,
+        inputs.account.as_ref(),
+        inputs.previous_brn_spent,
+        economics.pending.as_ref(),
+        economics.indices.as_ref(),
     )?;
     Ok(economics)
 }
@@ -119,7 +125,12 @@ fn apply_with_engines(
                     .checked_sub(context.previous_brn_spent)
                     .ok_or("BRN spend decreased")?
             };
-            crate::limits::check_wallet_spending_limit(account, amount, block.timestamp, context.params)?;
+            crate::limits::check_wallet_spending_limit(
+                account,
+                amount,
+                block.timestamp,
+                context.params,
+            )?;
         }
     }
     if let Some(amount) = send_amount {

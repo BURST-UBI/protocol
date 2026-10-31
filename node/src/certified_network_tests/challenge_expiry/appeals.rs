@@ -180,7 +180,9 @@ async fn run_round(
             .unwrap();
             let snapshot = {
                 let batch = store.tx_begin_write().unwrap();
-                crate::verification_storage::load(&batch).unwrap().snapshot()
+                crate::verification_storage::load(&batch)
+                    .unwrap()
+                    .snapshot()
             };
             for address in &addresses[2..4] {
                 let until = snapshot.penalized_verifiers[address];

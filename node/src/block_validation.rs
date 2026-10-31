@@ -7,7 +7,7 @@ use std::{collections::VecDeque, sync::Arc};
 use tokio::task::{JoinError, JoinHandle};
 
 use crate::{
-    block_processor::{BlockAuthentication, AuthenticationRules},
+    block_processor::{AuthenticationRules, BlockAuthentication},
     priority_queue::BlockPriorityQueue,
 };
 
@@ -25,7 +25,10 @@ pub(crate) struct InFlightPayload {
 
 impl Drop for InFlightPayload {
     fn drop(&mut self) {
-        self.owners.lock().expect("in-flight payload lock poisoned").remove(&self.payload);
+        self.owners
+            .lock()
+            .expect("in-flight payload lock poisoned")
+            .remove(&self.payload);
     }
 }
 
@@ -39,7 +42,10 @@ pub(crate) struct BlockValidationQueue {
     gathering: Option<usize>,
     ready: VecDeque<Result<BlockAuthentication, JoinError>>,
     preparation_accounts: crate::account_work_pool::AccountWorkPool,
-    preparation: Option<(Arc<burst_store_lmdb::LmdbStore>, burst_types::ProtocolParams)>,
+    preparation: Option<(
+        Arc<burst_store_lmdb::LmdbStore>,
+        burst_types::ProtocolParams,
+    )>,
     #[cfg(test)]
     pub(crate) before_prepare: Option<Arc<dyn Fn() + Send + Sync>>,
     pending: VecDeque<JoinHandle<BlockAuthentication>>,
@@ -81,7 +87,8 @@ impl BlockValidationQueue {
             // One delivered candidate retains its account reservation through
             // admission while up to `workers` jobs prepare the following work.
             preparation_accounts: crate::account_work_pool::AccountWorkPool::new(
-                workers.checked_add(1).expect("worker count overflow")),
+                workers.checked_add(1).expect("worker count overflow"),
+            ),
             #[cfg(test)]
             before_prepare: None,
             #[cfg(test)]
@@ -104,10 +111,18 @@ impl BlockValidationQueue {
         // invalid variant must not suppress a correctly signed candidate.
         let in_flight = if let Ok(encoded) = bincode::serialize(&block) {
             let payload = burst_crypto::blake2b_256(&encoded);
-            if !self.in_flight.lock().expect("in-flight payload lock poisoned").insert(payload) {
+            if !self
+                .in_flight
+                .lock()
+                .expect("in-flight payload lock poisoned")
+                .insert(payload)
+            {
                 return;
             }
-            Some(Arc::new(InFlightPayload { payload, owners: self.in_flight.clone() }))
+            Some(Arc::new(InFlightPayload {
+                payload,
+                owners: self.in_flight.clone(),
+            }))
         } else {
             None
         };
@@ -115,14 +130,21 @@ impl BlockValidationQueue {
         let preparation = self.preparation.clone();
         // Reserve in dequeue order. Awaiting a same-account guard in a worker
         // could deadlock FIFO delivery if a later worker acquired it first.
-        let reservation = preparation.as_ref()
-            .filter(|_| crate::economic_candidate::prepared::CapturedPayment::eligible(&block.block_type))
-            .and_then(|_| self.preparation_accounts.try_reserve(block.account.as_str()));
+        let reservation = preparation
+            .as_ref()
+            .filter(|_| {
+                crate::economic_candidate::prepared::CapturedPayment::eligible(&block.block_type)
+            })
+            .and_then(|_| {
+                self.preparation_accounts
+                    .try_reserve(block.account.as_str())
+            });
         #[cfg(test)]
         let prepare_hook = self.before_prepare.clone();
         #[cfg(test)]
         let hook = self.before_authenticate.clone();
-        let dispatched = std::env::var_os("BURST_FINALITY_STAGE_LOG").map(|_| std::time::Instant::now());
+        let dispatched =
+            std::env::var_os("BURST_FINALITY_STAGE_LOG").map(|_| std::time::Instant::now());
         let queue_id = Arc::as_ptr(&self.queue) as usize;
         self.pending.push_back(tokio::task::spawn_blocking(move || {
             if let Some(dispatched) = dispatched {
@@ -171,12 +193,15 @@ impl BlockValidationQueue {
     }
 
     pub(crate) fn set_preparation(
-        &mut self, store: Arc<burst_store_lmdb::LmdbStore>, params: burst_types::ProtocolParams,
+        &mut self,
+        store: Arc<burst_store_lmdb::LmdbStore>,
+        params: burst_types::ProtocolParams,
     ) {
         if self.preparation.is_none() {
             self.ready_limit = PREPARATION_WINDOW;
             self.preparation_accounts = crate::account_work_pool::AccountWorkPool::new(
-                PREPARATION_WINDOW + self.workers + 1);
+                PREPARATION_WINDOW + self.workers + 1,
+            );
         }
         // The admission loop refreshes parameters after checkpoint activation.
         // Pending/ready candidates keep their original reservations and captured
@@ -192,21 +217,34 @@ impl BlockValidationQueue {
 
     #[cfg(test)]
     pub(crate) fn install_completed_heads(&mut self, heads: Vec<JoinHandle<BlockAuthentication>>) {
-        assert!(self.pending.is_empty() && self.ready.is_empty(), "probe must not reorder queued work");
-        assert!(heads.iter().all(JoinHandle::is_finished), "probe accepts completed authentication only");
+        assert!(
+            self.pending.is_empty() && self.ready.is_empty(),
+            "probe must not reorder queued work"
+        );
+        assert!(
+            heads.iter().all(JoinHandle::is_finished),
+            "probe accepts completed authentication only"
+        );
         self.pending.extend(heads);
     }
 
     fn refill_now(&mut self) {
         // Bound examined entries too: committed duplicates do not occupy worker
         // slots and must not turn an opportunistic refill into an ingress scan.
-        let capacity = if self.ready_limit == 1 { self.workers } else {
-            self.gathering.map_or(self.workers, |target|
-                self.workers.min(target.saturating_sub(self.ready.len())))
+        let capacity = if self.ready_limit == 1 {
+            self.workers
+        } else {
+            self.gathering.map_or(self.workers, |target| {
+                self.workers.min(target.saturating_sub(self.ready.len()))
+            })
         };
         for _ in 0..self.ready_limit.max(capacity) {
-            if self.pending.len() >= capacity { break; }
-            let Some(block) = self.queue.try_pop_retained_now() else { break; };
+            if self.pending.len() >= capacity {
+                break;
+            }
+            let Some(block) = self.queue.try_pop_retained_now() else {
+                break;
+            };
             self.schedule(block);
         }
     }
@@ -214,18 +252,32 @@ impl BlockValidationQueue {
     /// Take only the completed FIFO head. This never waits for a later worker or
     /// removes an unfinished handle, so control messages can still win selection.
     pub(crate) fn try_next_ready(&mut self) -> Option<Result<BlockAuthentication, JoinError>> {
-        if self.gathering.is_some() { return None; }
+        if self.gathering.is_some() {
+            return None;
+        }
         if let Some(result) = self.ready.pop_front() {
-            if self.ready.is_empty() && result.is_ok() { self.refill_now(); }
+            if self.ready.is_empty() && result.is_ok() {
+                self.refill_now();
+            }
             return Some(result);
         }
-        use std::{future::Future, pin::Pin, task::{Context, Poll, Waker}};
+        use std::{
+            future::Future,
+            pin::Pin,
+            task::{Context, Poll, Waker},
+        };
         let head = self.pending.front_mut()?;
-        if !head.is_finished() { return None; }
+        if !head.is_finished() {
+            return None;
+        }
         let Poll::Ready(result) = Pin::new(head).poll(&mut Context::from_waker(Waker::noop()))
-            else { return None; };
+        else {
+            return None;
+        };
         self.pending.pop_front();
-        if result.is_ok() { self.refill_now(); }
+        if result.is_ok() {
+            self.refill_now();
+        }
         Some(result)
     }
 
@@ -235,7 +287,9 @@ impl BlockValidationQueue {
     pub(crate) async fn next(&mut self) -> Result<BlockAuthentication, JoinError> {
         if self.gathering.is_none() {
             if let Some(result) = self.ready.pop_front() {
-                if self.ready.is_empty() && result.is_ok() { self.refill_now(); }
+                if self.ready.is_empty() && result.is_ok() {
+                    self.refill_now();
+                }
                 return result;
             }
             while self.pending.is_empty() {
@@ -249,18 +303,24 @@ impl BlockValidationQueue {
         }
         while self.ready.len() < self.gathering.expect("active preparation window") {
             self.refill_now();
-            let Some(head) = self.pending.front_mut() else { break; };
+            let Some(head) = self.pending.front_mut() else {
+                break;
+            };
             // Completed results remain owned by the queue across cancellation.
             // At most `workers` blocking jobs run, even for a larger window.
             let result = head.await;
             self.pending.pop_front();
             let failed = result.is_err();
             self.ready.push_back(result);
-            if failed { break; }
+            if failed {
+                break;
+            }
         }
         self.gathering = None;
         let result = self.ready.pop_front().expect("scheduled work");
-        if self.ready.is_empty() && result.is_ok() { self.refill_now(); }
+        if self.ready.is_empty() && result.is_ok() {
+            self.refill_now();
+        }
         result
     }
 }

@@ -10,7 +10,11 @@ pub struct SnapshotView<'a> {
 }
 impl ConstiEngine {
     pub fn snapshot_view(&self) -> SnapshotView<'_> {
-        SnapshotView { amendments: &self.amendments, votes: &self.votes,
-            document: &self.document, conflicts: &self.conflicts }
+        SnapshotView {
+            amendments: &self.amendments,
+            votes: &self.votes,
+            document: &self.document,
+            conflicts: &self.conflicts,
+        }
     }
 }

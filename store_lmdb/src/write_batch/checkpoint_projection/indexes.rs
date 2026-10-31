@@ -63,39 +63,76 @@ mod tests {
     fn undo_encoding_stream_matches_collecting_oracle_and_never_repairs() {
         use crate::block_undo::{BlockUndo, UndoChange};
         let dir = tempfile::tempdir().unwrap();
-        let store = LmdbStore::open(dir.path(),32,16 << 20).unwrap();
+        let store = LmdbStore::open(dir.path(), 32, 16 << 20).unwrap();
         let mut batch = store.tx_begin_write().unwrap();
         for n in 1..=3 {
-            let hash = BlockHash::new([n;32]);
-            let undo = BlockUndo { block: hash, account: WalletAddress::new("brst_owner"), height: n as u64,
-                changes: vec![UndoChange { table: UndoTable::Meta, key: b"test_value".to_vec(),
-                    before: None, after: Some(vec![n]) }] };
-            batch.put_raw(UndoTable::Meta, &crate::block_undo::key(&hash), &bincode::serialize(&undo).unwrap()).unwrap();
+            let hash = BlockHash::new([n; 32]);
+            let undo = BlockUndo {
+                block: hash,
+                account: WalletAddress::new("brst_owner"),
+                height: n as u64,
+                changes: vec![UndoChange {
+                    table: UndoTable::Meta,
+                    key: b"test_value".to_vec(),
+                    before: None,
+                    after: Some(vec![n]),
+                }],
+            };
+            batch
+                .put_raw(
+                    UndoTable::Meta,
+                    &crate::block_undo::key(&hash),
+                    &bincode::serialize(&undo).unwrap(),
+                )
+                .unwrap();
         }
         let baseline = batch.checkpoint_metadata(b"block_undo/").unwrap();
         for (key, bytes) in &baseline {
-            let hash = BlockHash::new(key.strip_prefix(crate::block_undo::PREFIX).unwrap().try_into().unwrap());
+            let hash = BlockHash::new(
+                key.strip_prefix(crate::block_undo::PREFIX)
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+            );
             BlockUndo::decode(&hash, bytes).unwrap();
         }
         let mut polls = 0;
-        assert!(batch.read_view().verify_checkpoint_undo_encoding_with_poll(|stage| {
-            assert_eq!(stage, "storage:undo-row");
-            polls += 1;
-            if polls == 2 { return Err(StoreError::Backend("undo checkpoint sentinel".into())); }
-            Ok(())
-        }).unwrap_err().to_string().contains("undo checkpoint sentinel"));
+        assert!(batch
+            .read_view()
+            .verify_checkpoint_undo_encoding_with_poll(|stage| {
+                assert_eq!(stage, "storage:undo-row");
+                polls += 1;
+                if polls == 2 {
+                    return Err(StoreError::Backend("undo checkpoint sentinel".into()));
+                }
+                Ok(())
+            })
+            .unwrap_err()
+            .to_string()
+            .contains("undo checkpoint sentinel"));
         assert_eq!(polls, 2);
         assert_eq!(batch.checkpoint_metadata(b"block_undo/").unwrap(), baseline);
         batch.verify_checkpoint_undo_encoding().unwrap();
-        for (key, bytes) in [(b"block_undo/v2/unknown".to_vec(),baseline[0].1.clone()),
-            (crate::block_undo::key(&BlockHash::new([1;32])),baseline[1].1.clone()),
-            (crate::block_undo::key(&BlockHash::new([1;32])), { let mut bytes=baseline[0].1.clone(); bytes.push(0); bytes })] {
-            batch.put_raw(UndoTable::Meta,&key,&bytes).unwrap();
+        for (key, bytes) in [
+            (b"block_undo/v2/unknown".to_vec(), baseline[0].1.clone()),
+            (
+                crate::block_undo::key(&BlockHash::new([1; 32])),
+                baseline[1].1.clone(),
+            ),
+            (crate::block_undo::key(&BlockHash::new([1; 32])), {
+                let mut bytes = baseline[0].1.clone();
+                bytes.push(0);
+                bytes
+            }),
+        ] {
+            batch.put_raw(UndoTable::Meta, &key, &bytes).unwrap();
             let before = batch.checkpoint_metadata(b"block_undo/").unwrap();
             assert!(batch.verify_checkpoint_undo_encoding().is_err());
-            assert_eq!(batch.checkpoint_metadata(b"block_undo/").unwrap(),before);
-            batch.delete_raw(UndoTable::Meta,&key).unwrap();
-            for (key, bytes) in &baseline { batch.put_raw(UndoTable::Meta,key,bytes).unwrap(); }
+            assert_eq!(batch.checkpoint_metadata(b"block_undo/").unwrap(), before);
+            batch.delete_raw(UndoTable::Meta, &key).unwrap();
+            for (key, bytes) in &baseline {
+                batch.put_raw(UndoTable::Meta, key, bytes).unwrap();
+            }
             batch.verify_checkpoint_undo_encoding().unwrap();
         }
     }
@@ -278,13 +315,18 @@ mod tests {
             .unwrap();
         for target in ["storage:lookup-account", "storage:lookup-pending"] {
             let mut reached = false;
-            assert!(batch.read_view().verify_checkpoint_lookup_indexes_with_poll(|stage| {
-                if stage == target {
-                    reached = true;
-                    return Err(StoreError::Backend("lookup checkpoint sentinel".into()));
-                }
-                Ok(())
-            }).unwrap_err().to_string().contains("lookup checkpoint sentinel"));
+            assert!(batch
+                .read_view()
+                .verify_checkpoint_lookup_indexes_with_poll(|stage| {
+                    if stage == target {
+                        reached = true;
+                        return Err(StoreError::Backend("lookup checkpoint sentinel".into()));
+                    }
+                    Ok(())
+                })
+                .unwrap_err()
+                .to_string()
+                .contains("lookup checkpoint sentinel"));
             assert!(reached, "checkpoint not reached: {target}");
         }
         batch.verify_checkpoint_lookup_indexes().unwrap();
@@ -371,7 +413,8 @@ impl crate::read_view::LedgerReadView<'_> {
     /// There is no aggregate row or byte limit. Pending decoding and index lookups
     /// between polls are synchronous; this is not a hard deadline.
     pub fn verify_checkpoint_lookup_indexes_with_poll(
-        &self, mut checkpoint: impl FnMut(&'static str) -> Result<(), StoreError>,
+        &self,
+        mut checkpoint: impl FnMut(&'static str) -> Result<(), StoreError>,
     ) -> Result<(), StoreError> {
         let mut expected_frontiers = 0u64;
         for account in self.account_entries()? {

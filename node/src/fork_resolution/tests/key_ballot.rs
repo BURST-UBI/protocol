@@ -143,7 +143,9 @@ async fn journey(wire: bool, ballot_fork: bool) {
             tasks.push((
                 peer.shutdown.clone(),
                 tokio::spawn(async move {
-                    peer.start_with_services(burst_daemon::start_public_services).await.unwrap();
+                    peer.start_with_services(burst_daemon::start_public_services)
+                        .await
+                        .unwrap();
                     peer.stop().await.unwrap();
                 }),
             ));
@@ -260,7 +262,9 @@ async fn journey(wire: bool, ballot_fork: bool) {
         tasks.push((
             shutdown,
             tokio::spawn(async move {
-                node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+                node.start_with_services(burst_daemon::start_public_services)
+                    .await
+                    .unwrap();
                 node.stop().await.unwrap();
             }),
         ));
@@ -348,11 +352,7 @@ async fn journey(wire: bool, ballot_fork: bool) {
                 assert!(!store.block_store().exists(&ballot_block.hash).unwrap());
                 assert_eq!(
                     store.account_store().get_account(&recipient).unwrap().head,
-                    if ballot_fork {
-                        winner.hash
-                    } else {
-                        open.hash
-                    }
+                    if ballot_fork { winner.hash } else { open.hash }
                 );
                 assert_eq!(
                     governance.lock().await.key_ballot(
@@ -383,7 +383,10 @@ async fn journey(wire: bool, ballot_fork: bool) {
             let governance = restarted.governance.clone();
             let shutdown = restarted.shutdown.clone();
             let task = tokio::spawn(async move {
-                restarted.start_with_services(burst_daemon::start_public_services).await.unwrap();
+                restarted
+                    .start_with_services(burst_daemon::start_public_services)
+                    .await
+                    .unwrap();
                 restarted.stop().await.unwrap();
             });
             let result = tokio::time::timeout(Duration::from_secs(30), async {

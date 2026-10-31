@@ -28,8 +28,11 @@ impl BrnEngine {
     /// snapshot and retained stake IDs; this only checks encoding and nonzero.
     /// A coordinated rewind may lower the value.
     pub fn restore_stake_sequence(&mut self, bytes: &[u8]) -> Result<(), BrnError> {
-        let next = u64::from_be_bytes(bytes.try_into()
-            .map_err(|_| BrnError::Other("invalid persisted stake sequence".into()))?);
+        let next = u64::from_be_bytes(
+            bytes
+                .try_into()
+                .map_err(|_| BrnError::Other("invalid persisted stake sequence".into()))?,
+        );
         if next == 0 {
             return Err(BrnError::Other("invalid persisted stake sequence".into()));
         }
@@ -303,27 +306,41 @@ impl BrnEngine {
     /// Restore from the supplied storage view, using normalized wallet rows when
     /// available. The backend provides snapshot consistency. Layout and rate
     /// checks do not establish wallet eligibility or economic validity.
-    pub fn load_from_snapshot(snapshot: &dyn burst_store::brn::BrnSnapshot) -> Result<Self, BrnError> {
+    pub fn load_from_snapshot(
+        snapshot: &dyn burst_store::brn::BrnSnapshot,
+    ) -> Result<Self, BrnError> {
         let id_bytes = snapshot
             .get_meta(b"next_stake_id")
             .map_err(|e| BrnError::Other(e.to_string()))?;
         let rates = crate::rate_storage::read_snapshot(snapshot)?;
-        if let Some(headers) = snapshot.wallet_record_headers().map_err(|error| BrnError::Other(error.to_string()))? {
-            let mut engine = Self::from_decoded_entries(id_bytes, rates,
-                std::iter::empty::<Result<(WalletAddress, &[u8]), BrnError>>())?;
+        if let Some(headers) = snapshot
+            .wallet_record_headers()
+            .map_err(|error| BrnError::Other(error.to_string()))?
+        {
+            let mut engine = Self::from_decoded_entries(
+                id_bytes,
+                rates,
+                std::iter::empty::<Result<(WalletAddress, &[u8]), BrnError>>(),
+            )?;
             for row in headers {
                 let (address, header) = row.map_err(|error| BrnError::Other(error.to_string()))?;
-                if id_bytes.is_none() { return Err(BrnError::Other("incomplete persisted BRN metadata".into())); }
+                if id_bytes.is_none() {
+                    return Err(BrnError::Other("incomplete persisted BRN metadata".into()));
+                }
                 let prefix = crate::wallet_storage::row_prefix(&address)?;
-                let children = snapshot.meta_entries(&prefix)
+                let children = snapshot
+                    .meta_entries(&prefix)
                     .map_err(|error| BrnError::Other(error.to_string()))?;
-                let records = std::iter::once(Ok((crate::wallet_storage::HEADER, header)))
-                    .chain(children.map(|row| {
-                        let (key, value) = row.map_err(|error| BrnError::Other(error.to_string()))?;
-                        let key = key.strip_prefix(prefix.as_slice())
+                let records = std::iter::once(Ok((crate::wallet_storage::HEADER, header))).chain(
+                    children.map(|row| {
+                        let (key, value) =
+                            row.map_err(|error| BrnError::Other(error.to_string()))?;
+                        let key = key
+                            .strip_prefix(prefix.as_slice())
                             .ok_or_else(|| BrnError::Other("foreign BRN wallet record".into()))?;
                         Ok((key, value))
-                    }));
+                    }),
+                );
                 let wallet = crate::wallet_storage::decode(records)?
                     .ok_or_else(|| BrnError::Other("missing BRN wallet header".into()))?;
                 if engine.wallets.insert(address, wallet).is_some() {
@@ -358,8 +375,9 @@ impl BrnEngine {
         rate_bytes: Option<&[u8]>,
         entries: impl IntoIterator<Item = Result<(WalletAddress, B), BrnError>>,
     ) -> Result<Self, BrnError> {
-        let rates = rate_bytes.map(|bytes| bincode::deserialize(bytes)
-            .map_err(|e| BrnError::Other(e.to_string()))).transpose()?;
+        let rates = rate_bytes
+            .map(|bytes| bincode::deserialize(bytes).map_err(|e| BrnError::Other(e.to_string())))
+            .transpose()?;
         Self::from_decoded_entries(id_bytes, rates, entries)
     }
 
@@ -370,8 +388,11 @@ impl BrnEngine {
         entries: impl IntoIterator<Item = Result<(WalletAddress, B), BrnError>>,
     ) -> Result<Self, BrnError> {
         let next_stake_id = match id_bytes {
-            Some(bytes) => u64::from_be_bytes(bytes.try_into()
-                .map_err(|_| BrnError::Other("invalid persisted stake sequence".into()))?),
+            Some(bytes) => u64::from_be_bytes(
+                bytes
+                    .try_into()
+                    .map_err(|_| BrnError::Other("invalid persisted stake sequence".into()))?,
+            ),
             None => 1,
         };
         if id_bytes.is_some() != rates.is_some() {
@@ -664,18 +685,30 @@ mod tests {
         let mut engine = make_engine(10);
         let staker = test_address(1);
         let mut state = BrnWalletState::new(test_timestamp(1000));
-        let mut stake = engine.stake(&staker, &mut state, 1,
-            StakeKind::Challenge { target_wallet: test_address(99) },
-            test_timestamp(1100)).unwrap();
+        let mut stake = engine
+            .stake(
+                &staker,
+                &mut state,
+                1,
+                StakeKind::Challenge {
+                    target_wallet: test_address(99),
+                },
+                test_timestamp(1100),
+            )
+            .unwrap();
         state.total_burned = u128::MAX;
         let before = state.clone();
         let stake_before = bincode::serialize(&stake).unwrap();
-        assert!(matches!(engine.forfeit_stake(&staker, &mut state, &mut stake),
-            Err(BrnError::Overflow)));
+        assert!(matches!(
+            engine.forfeit_stake(&staker, &mut state, &mut stake),
+            Err(BrnError::Overflow)
+        ));
         assert_eq!(state, before);
         assert_eq!(bincode::serialize(&stake).unwrap(), stake_before);
         state.total_burned = u128::MAX - 1;
-        engine.forfeit_stake(&staker, &mut state, &mut stake).unwrap();
+        engine
+            .forfeit_stake(&staker, &mut state, &mut stake)
+            .unwrap();
         assert_eq!(state.total_burned, u128::MAX);
         assert_eq!(state.total_staked, 0);
         assert!(stake.resolved);

@@ -11,10 +11,16 @@ pub(super) struct Accrued {
 
 impl Accrued {
     fn from_parts(high: u64, low: u128) -> Self {
-        Self { high, low_high: (low >> 64) as u64, low_low: low as u64 }
+        Self {
+            high,
+            low_high: (low >> 64) as u64,
+            low_low: low as u64,
+        }
     }
 
-    fn low(self) -> u128 { (u128::from(self.low_high) << 64) | u128::from(self.low_low) }
+    fn low(self) -> u128 {
+        (u128::from(self.low_high) << 64) | u128::from(self.low_low)
+    }
 
     pub(super) fn product(rate: u128, seconds: u64) -> Self {
         let lower = (rate as u64 as u128) * u128::from(seconds);
@@ -33,7 +39,10 @@ impl Accrued {
 
     pub(super) fn difference(self, earlier: Self) -> Option<u128> {
         let (low, borrow) = self.low().overflowing_sub(earlier.low());
-        let high = self.high.checked_sub(earlier.high)?.checked_sub(u64::from(borrow))?;
+        let high = self
+            .high
+            .checked_sub(earlier.high)?
+            .checked_sub(u64::from(borrow))?;
         (high == 0).then_some(low)
     }
 }
@@ -41,7 +50,9 @@ impl Accrued {
 /// Index accrual at each segment start. Adjacent boundaries must match and the
 /// final segment must be open. Equal starts retain the last segment at that time;
 /// an empty history produces an empty index. This does not validate rate policy.
-pub(super) fn build(segments: &[RateSegment]) -> Option<imbl::OrdMap<burst_types::Timestamp, (usize, Accrued)>> {
+pub(super) fn build(
+    segments: &[RateSegment],
+) -> Option<imbl::OrdMap<burst_types::Timestamp, (usize, Accrued)>> {
     let mut prefix = imbl::OrdMap::new();
     let mut accrued = Accrued::default();
     for (index, segment) in segments.iter().enumerate() {
@@ -86,8 +97,11 @@ mod tests {
     fn prefix_layout_uses_three_limbs_without_alignment_padding() {
         assert_eq!(std::mem::size_of::<Accrued>(), 24);
         assert_eq!(std::mem::size_of::<(usize, Accrued)>(), 32);
-        assert_eq!(Accrued::product(u128::MAX, u64::MAX).difference(
-            Accrued::product(u128::MAX, u64::MAX - 1)), Some(u128::MAX));
+        assert_eq!(
+            Accrued::product(u128::MAX, u64::MAX)
+                .difference(Accrued::product(u128::MAX, u64::MAX - 1)),
+            Some(u128::MAX)
+        );
     }
 
     proptest! {
@@ -184,25 +198,38 @@ mod tests {
     fn large_shared_append_preserves_untouched_chunks_and_encoded_history() {
         let mut history = RateHistory::new(3, Timestamp::EPOCH);
         for at in 1..4096 {
-            history.apply_rate_change(3 + u128::from(at % 7), Timestamp::new(at)).unwrap();
+            history
+                .apply_rate_change(3 + u128::from(at % 7), Timestamp::new(at))
+                .unwrap();
         }
         let original = bincode::serialize(&history).unwrap();
         let mut candidate = history.clone();
-        candidate.apply_rate_change(17, Timestamp::new(4096)).unwrap();
+        candidate
+            .apply_rate_change(17, Timestamp::new(4096))
+            .unwrap();
         assert!(std::ptr::eq(&history.segments[0], &candidate.segments[0]));
-        assert!(std::ptr::eq(&history.accrued.as_ref().as_ref().unwrap()[&Timestamp::EPOCH],
-            &candidate.accrued.as_ref().as_ref().unwrap()[&Timestamp::EPOCH]));
+        assert!(std::ptr::eq(
+            &history.accrued.as_ref().as_ref().unwrap()[&Timestamp::EPOCH],
+            &candidate.accrued.as_ref().as_ref().unwrap()[&Timestamp::EPOCH]
+        ));
         assert_eq!(bincode::serialize(&history).unwrap(), original);
         let legacy: Vec<RateSegment> = bincode::deserialize(&original).unwrap();
-        assert_eq!(legacy, history.segments().iter().cloned().collect::<Vec<_>>());
+        assert_eq!(
+            legacy,
+            history.segments().iter().cloned().collect::<Vec<_>>()
+        );
         assert_eq!(history.segments.last().unwrap().end, None);
         assert_eq!(candidate.segments[4095].end, Some(Timestamp::new(4096)));
         for (from, until) in [(0, 4100), (4094, 4100), (4096, 4097)] {
-            assert_eq!(candidate.total_accrued_checked(Timestamp::new(from), Timestamp::new(until)),
-                scan(&candidate, from, until));
+            assert_eq!(
+                candidate.total_accrued_checked(Timestamp::new(from), Timestamp::new(until)),
+                scan(&candidate, from, until)
+            );
         }
         let before_invalid = bincode::serialize(&candidate).unwrap();
-        assert!(candidate.apply_rate_change(1, Timestamp::new(4095)).is_err());
+        assert!(candidate
+            .apply_rate_change(1, Timestamp::new(4095))
+            .is_err());
         assert_eq!(bincode::serialize(&candidate).unwrap(), before_invalid);
     }
 
@@ -256,13 +283,25 @@ mod tests {
         history.apply_rate_change(0, Timestamp::new(30)).unwrap();
         for from in [0, 9, 10, 11, 19, 20, 21, 29, 30, 31] {
             for until in [0, 9, 10, 11, 12, 19, 20, 21, 29, 30, 31, 100] {
-                assert_eq!(history.total_accrued_checked(Timestamp::new(from), Timestamp::new(until)),
-                    scan(&history, from, until), "{from}..{until}");
+                assert_eq!(
+                    history.total_accrued_checked(Timestamp::new(from), Timestamp::new(until)),
+                    scan(&history, from, until),
+                    "{from}..{until}"
+                );
             }
         }
-        assert_eq!(history.total_accrued_checked(Timestamp::new(10), Timestamp::new(11)), Some(u128::MAX));
-        assert_eq!(history.total_accrued_checked(Timestamp::new(10), Timestamp::new(12)), None);
-        assert_eq!(history.total_accrued_checked(Timestamp::new(20), Timestamp::new(21)), Some(7));
+        assert_eq!(
+            history.total_accrued_checked(Timestamp::new(10), Timestamp::new(11)),
+            Some(u128::MAX)
+        );
+        assert_eq!(
+            history.total_accrued_checked(Timestamp::new(10), Timestamp::new(12)),
+            None
+        );
+        assert_eq!(
+            history.total_accrued_checked(Timestamp::new(20), Timestamp::new(21)),
+            Some(7)
+        );
     }
 
     fn rate_pause_case(rate_count: usize, pause_count: usize) {
@@ -275,15 +314,28 @@ mod tests {
         }
         fn memory() -> [u64; 2] {
             let status = std::fs::read_to_string("/proc/self/status").unwrap();
-            ["VmRSS:", "VmHWM:"].map(|prefix| status.lines().find(|line| line.starts_with(prefix))
-                .unwrap().split_whitespace().nth(1).unwrap().parse().unwrap())
+            ["VmRSS:", "VmHWM:"].map(|prefix| {
+                status
+                    .lines()
+                    .find(|line| line.starts_with(prefix))
+                    .unwrap()
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap()
+                    .parse()
+                    .unwrap()
+            })
         }
         let horizon = ((rate_count * 10).max((pause_count + 1) * 20)) as u64;
         let (history, construction_ms) = timed(|| {
             let mut history = RateHistory::new(100, Timestamp::EPOCH);
             for index in 1..rate_count {
-                history.apply_rate_change(100 + (index % 97) as u128,
-                    Timestamp::new(index as u64 * horizon / rate_count as u64)).unwrap();
+                history
+                    .apply_rate_change(
+                        100 + (index % 97) as u128,
+                        Timestamp::new(index as u64 * horizon / rate_count as u64),
+                    )
+                    .unwrap();
             }
             history
         });
@@ -298,9 +350,12 @@ mod tests {
         }
         let pause_construction_ms = pause_started.elapsed().as_secs_f64() * 1000.0;
         let pause_memory_built = memory();
-        let (pause_bytes, pause_encode_ms) = timed(|| bincode::serialize(&wallet.paused_intervals).unwrap());
-        let (legacy_pauses, legacy_decode_ms) = timed(|| bincode::deserialize::<Vec<(Timestamp, Timestamp)>>(&pause_bytes).unwrap());
-        let (decoded_pauses, pause_decode_ms) = timed(|| bincode::deserialize::<crate::pauses::PauseHistory>(&pause_bytes).unwrap());
+        let (pause_bytes, pause_encode_ms) =
+            timed(|| bincode::serialize(&wallet.paused_intervals).unwrap());
+        let (legacy_pauses, legacy_decode_ms) =
+            timed(|| bincode::deserialize::<Vec<(Timestamp, Timestamp)>>(&pause_bytes).unwrap());
+        let (decoded_pauses, pause_decode_ms) =
+            timed(|| bincode::deserialize::<crate::pauses::PauseHistory>(&pause_bytes).unwrap());
         assert_eq!(decoded_pauses, wallet.paused_intervals);
         assert_eq!(bincode::serialize(&legacy_pauses).unwrap(), pause_bytes);
         let mut clone_ms = Vec::new();
@@ -316,9 +371,13 @@ mod tests {
             legacy_clone_ms.push(elapsed);
             shared.total_burned = 1;
             let mut count = 0;
-            let (_, elapsed) = timed(|| crate::wallet_storage::visit_delta(Some(&wallet), Some(&shared), |_, _, _| {
-                count += 1; Ok(())
-            }).unwrap());
+            let (_, elapsed) = timed(|| {
+                crate::wallet_storage::visit_delta(Some(&wallet), Some(&shared), |_, _, _| {
+                    count += 1;
+                    Ok(())
+                })
+                .unwrap()
+            });
             scalar_delta_ms.push(elapsed);
             assert_eq!(count, 1);
             let interval = (Timestamp::new(horizon + 10), Timestamp::new(horizon + 20));
@@ -327,9 +386,13 @@ mod tests {
             let (_, elapsed) = timed(|| legacy.push(black_box(interval)));
             legacy_append_ms.push(elapsed);
             count = 0;
-            let (_, elapsed) = timed(|| crate::wallet_storage::visit_delta(Some(&wallet), Some(&shared), |_, _, _| {
-                count += 1; Ok(())
-            }).unwrap());
+            let (_, elapsed) = timed(|| {
+                crate::wallet_storage::visit_delta(Some(&wallet), Some(&shared), |_, _, _| {
+                    count += 1;
+                    Ok(())
+                })
+                .unwrap()
+            });
             append_delta_ms.push(elapsed);
             assert_eq!(count, 2);
             assert_eq!(shared.paused_intervals, legacy);
@@ -339,7 +402,8 @@ mod tests {
         wallet.total_staked = 11;
         assert_eq!(wallet.paused_intervals.len(), pause_count);
         let bytes = bincode::serialize(&history).unwrap();
-        let (restored, restoration_ms) = timed(|| bincode::deserialize::<RateHistory>(&bytes).unwrap());
+        let (restored, restoration_ms) =
+            timed(|| bincode::deserialize::<RateHistory>(&bytes).unwrap());
         assert_eq!(restored, history);
         let mut reference = history.clone();
         // Both paths share wallet pause arithmetic; only rate lookup differs.
@@ -349,37 +413,60 @@ mod tests {
         let mut indexed_ms = Vec::new();
         for stopped in [false, true] {
             let mut state = wallet.clone();
-            if stopped { state.stop_accrual(Timestamp::new(horizon - step / 4)); }
+            if stopped {
+                state.stop_accrual(Timestamp::new(horizon - step / 4));
+            }
             let now = Timestamp::new(horizon + step);
             let expected = state.available_balance_checked(&reference, now);
             assert!(expected.is_some());
             assert_eq!(state.available_balance_checked(&history, now), expected);
             assert_eq!(state.available_balance_checked(&restored, now), expected);
-            let (previous, elapsed) = timed(|| (0..3).map(|_| black_box(state.available_balance_checked(
-                black_box(&reference), black_box(now)))).collect::<Vec<_>>());
+            let (previous, elapsed) = timed(|| {
+                (0..3)
+                    .map(|_| {
+                        black_box(
+                            state.available_balance_checked(black_box(&reference), black_box(now)),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            });
             previous_ms.push(elapsed);
-            let (current, elapsed) = timed(|| (0..3).map(|_| black_box(state.available_balance_checked(
-                black_box(&history), black_box(now)))).collect::<Vec<_>>());
+            let (current, elapsed) = timed(|| {
+                (0..3)
+                    .map(|_| {
+                        black_box(
+                            state.available_balance_checked(black_box(&history), black_box(now)),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            });
             indexed_ms.push(elapsed);
             assert_eq!(previous, vec![expected; 3]);
             assert_eq!(current, previous);
         }
         let before_append_memory = memory();
         let mut appended = history.clone();
-        let (_, shared_append_ms) = timed(|| appended.apply_rate_change(17,
-            Timestamp::new(horizon + 1)).unwrap());
+        let (_, shared_append_ms) = timed(|| {
+            appended
+                .apply_rate_change(17, Timestamp::new(horizon + 1))
+                .unwrap()
+        });
         let after_append_memory = memory();
         assert_eq!(history.segments().len(), rate_count);
         assert_eq!(appended.segments().len(), rate_count + 1);
-        assert_eq!(appended.total_accrued_checked(Timestamp::EPOCH, Timestamp::new(horizon + 11)),
-            scan(&history, 0, horizon + 1).and_then(|value| value.checked_add(170)));
+        assert_eq!(
+            appended.total_accrued_checked(Timestamp::EPOCH, Timestamp::new(horizon + 11)),
+            scan(&history, 0, horizon + 1).and_then(|value| value.checked_add(170))
+        );
         println!("rate_pause_cost {{\"rates\":{rate_count},\"pauses\":{pause_count},\"construction_ms\":{construction_ms},\"restoration_ms\":{restoration_ms},\"previous_ms\":{previous_ms:?},\"indexed_ms\":{indexed_ms:?},\"shared_append_ms\":{shared_append_ms},\"history_bytes\":{},\"before_append_memory_kib\":{before_append_memory:?},\"after_append_memory_kib\":{after_append_memory:?}}}", bytes.len());
     }
 
     #[test]
     fn rate_pause_diagnostic_preserves_active_stopped_and_restored_balances() {
         for rates in [1, 12] {
-            for pauses in [0, 5] { rate_pause_case(rates, pauses); }
+            for pauses in [0, 5] {
+                rate_pause_case(rates, pauses);
+            }
         }
         let history = RateHistory::new(u128::MAX, Timestamp::EPOCH);
         let mut reference = history.clone();
@@ -388,20 +475,30 @@ mod tests {
         wallet.stop_accrual(Timestamp::new(1));
         wallet.resume_accrual(Timestamp::new(2));
         for now in [0, 1, 2, 3, 4] {
-            assert_eq!(wallet.available_balance_checked(&history, Timestamp::new(now)),
-                wallet.available_balance_checked(&reference, Timestamp::new(now)));
+            assert_eq!(
+                wallet.available_balance_checked(&history, Timestamp::new(now)),
+                wallet.available_balance_checked(&reference, Timestamp::new(now))
+            );
         }
-        assert_eq!(wallet.available_balance_checked(&history, Timestamp::new(3)), None);
+        assert_eq!(
+            wallet.available_balance_checked(&history, Timestamp::new(3)),
+            None
+        );
     }
 
     #[test]
     #[ignore = "explicit capped-host rate and pause history diagnostic"]
     fn rate_pause_scaling() {
-        let rates = std::env::var("BURST_RATE_PROBE_SEGMENTS").unwrap().parse().unwrap();
-        let pauses = std::env::var("BURST_RATE_PROBE_PAUSES").unwrap().parse().unwrap();
+        let rates = std::env::var("BURST_RATE_PROBE_SEGMENTS")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let pauses = std::env::var("BURST_RATE_PROBE_PAUSES")
+            .unwrap()
+            .parse()
+            .unwrap();
         assert!([10, 1000, 100000].contains(&rates));
         assert!([0, 1000, 100000].contains(&pauses));
         rate_pause_case(rates, pauses);
     }
-
 }

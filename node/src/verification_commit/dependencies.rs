@@ -5,9 +5,7 @@ use super::ledger::Ledger;
 use bincode::Options;
 use burst_ledger::{BlockType, StateBlock};
 use burst_store::{account::AccountInfo, StoreError};
-use burst_store_lmdb::{
-    block_undo::{BlockUndo, UndoTable},
-};
+use burst_store_lmdb::block_undo::{BlockUndo, UndoTable};
 use burst_types::{BlockHash, WalletAddress};
 
 pub(crate) mod view;

@@ -48,9 +48,16 @@ impl CompactActivationCoverage {
     }
 
     pub(crate) fn covers_local_promises(
-        &self, batch: &burst_store_lmdb::LmdbWriteTransaction<'_>, representative: &WalletAddress,
+        &self,
+        batch: &burst_store_lmdb::LmdbWriteTransaction<'_>,
+        representative: &WalletAddress,
     ) -> Result<bool, StoreError> {
-        batch.covers_consensus_votes(representative, &self.cut.parent, &self.cut.parent, &self.cut.included)
+        batch.covers_consensus_votes(
+            representative,
+            &self.cut.parent,
+            &self.cut.parent,
+            &self.cut.included,
+        )
     }
 
     pub(crate) fn seal_local_votes(

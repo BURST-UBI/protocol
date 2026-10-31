@@ -1,8 +1,11 @@
 //! Transactional fork installation by the block-processing task.
 use crate::{
-    block_processor::BlockProcessor, bounded_backlog::BoundedBacklog, ledger_cache::LedgerCache,
+    block_processor::BlockProcessor,
+    bounded_backlog::BoundedBacklog,
     economic_candidate::{Engines, StagedEngines},
-    local_broadcaster::LocalBroadcaster, payment_transition, rollback_plan,
+    ledger_cache::LedgerCache,
+    local_broadcaster::LocalBroadcaster,
+    payment_transition, rollback_plan,
 };
 use bincode::Options;
 use burst_consensus::{ActiveElections, PriorityScheduler, RepWeightCache};
@@ -176,13 +179,8 @@ fn apply_candidate(
             .map_err(StoreError::Corruption)
         })
         .transpose()?;
-    let effects = crate::economic_candidate::stage(
-        batch,
-        block,
-        params,
-        &mut staged,
-    )
-    .map_err(StoreError::Corruption)?;
+    let effects = crate::economic_candidate::stage(batch, block, params, &mut staged)
+        .map_err(StoreError::Corruption)?;
     if crate::governance_content::is_full(block) {
         let content = governance_input
             .and_then(|input| input.content)
@@ -205,12 +203,7 @@ fn apply_candidate(
         governance
             .as_mut()
             .ok_or_else(|| invalid("governance fork execution is unavailable"))?
-            .apply_staged(
-                batch,
-                block,
-                &effects.effect,
-                &mut staged,
-            )
+            .apply_staged(batch, block, &effects.effect, &mut staged)
             .map_err(StoreError::Corruption)?;
     }
     crate::bootstrap_phase::observe(batch, params).map_err(StoreError::Corruption)?;
@@ -246,8 +239,16 @@ pub(crate) fn evaluate(
     verification: bool,
     governance_input: Option<GovernanceInput<'_>>,
 ) -> Result<Option<BlockHash>, StoreError> {
-    evaluate_retry(store, block, params, now, network, verification, governance_input)
-        .map_err(|failure| failure.error)
+    evaluate_retry(
+        store,
+        block,
+        params,
+        now,
+        network,
+        verification,
+        governance_input,
+    )
+    .map_err(|failure| failure.error)
 }
 
 pub(crate) fn evaluate_retry(
@@ -268,17 +269,18 @@ pub(crate) fn evaluate_retry(
         let Some(target) = competitor(&batch, block)? else {
             return Ok(None);
         };
-        let (candidate, _) = rollback_plan::stage_with(&mut batch, target, block, |batch, block| {
-            apply_candidate(
-                batch,
-                block,
-                params,
-                network,
-                verification,
-                Some(now),
-                governance_input,
-            )
-        })?;
+        let (candidate, _) =
+            rollback_plan::stage_with(&mut batch, target, block, |batch, block| {
+                apply_candidate(
+                    batch,
+                    block,
+                    params,
+                    network,
+                    verification,
+                    Some(now),
+                    governance_input,
+                )
+            })?;
         require_supported_branch(
             &candidate.removed,
             verification,
@@ -288,9 +290,14 @@ pub(crate) fn evaluate_retry(
         Ok(Some(target))
     })();
     result.map_err(|error| {
-        let pressure = outcome.filter(|outcome| outcome.was_rejected()).map(|outcome| {
-            (outcome.watch(), retry.expect("guarded fork evaluation reserved retry before staging"))
-        });
+        let pressure = outcome
+            .filter(|outcome| outcome.was_rejected())
+            .map(|outcome| {
+                (
+                    outcome.watch(),
+                    retry.expect("guarded fork evaluation reserved retry before staging"),
+                )
+            });
         burst_store_lmdb::ForkCandidateWriteError { error, pressure }
     })
 }

@@ -94,12 +94,17 @@ mod tests {
         after.insert(10_000);
         assert_eq!(after.len(), before.len());
         assert_ne!(before, after);
-        assert_eq!(after.changed_keys(&before).copied().collect::<Vec<_>>(), vec![5_000, 10_000]);
+        assert_eq!(
+            after.changed_keys(&before).copied().collect::<Vec<_>>(),
+            vec![5_000, 10_000]
+        );
         assert!(before.contains(&5_000));
         let legacy: std::collections::HashSet<u64> = (0..10_000).collect();
-        let decoded: SharedSet<u64> = bincode::deserialize(&bincode::serialize(&legacy).unwrap()).unwrap();
+        let decoded: SharedSet<u64> =
+            bincode::deserialize(&bincode::serialize(&legacy).unwrap()).unwrap();
         assert_eq!(decoded, before);
-        let roundtrip: std::collections::HashSet<u64> = bincode::deserialize(&bincode::serialize(&before).unwrap()).unwrap();
+        let roundtrip: std::collections::HashSet<u64> =
+            bincode::deserialize(&bincode::serialize(&before).unwrap()).unwrap();
         assert_eq!(roundtrip, legacy);
         let rebuilt: SharedSet<_> = after.iter().copied().collect();
         assert_eq!(rebuilt, after);

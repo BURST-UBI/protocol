@@ -15,7 +15,7 @@ use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
 mod authentication;
-pub(crate) use authentication::{signing_key, BlockAuthentication, AuthenticationRules};
+pub(crate) use authentication::{signing_key, AuthenticationRules, BlockAuthentication};
 
 /// Result of processing a single block through the pipeline.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -930,17 +930,23 @@ impl BlockProcessor {
                 }
             }
             BlockType::Epoch => {
-                if block.brn_spent != previous_brn_spent || block.trst_balance != previous_trst_balance {
+                if block.brn_spent != previous_brn_spent
+                    || block.trst_balance != previous_trst_balance
+                {
                     return Err("epoch block cannot change balances".into());
                 }
             }
             BlockType::GovernanceActivation => {
-                if block.brn_spent != previous_brn_spent || block.trst_balance != previous_trst_balance {
+                if block.brn_spent != previous_brn_spent
+                    || block.trst_balance != previous_trst_balance
+                {
                     return Err("governance activation block cannot change balances".into());
                 }
             }
             BlockType::RejectReceive => {
-                if block.brn_spent != previous_brn_spent || block.trst_balance != previous_trst_balance {
+                if block.brn_spent != previous_brn_spent
+                    || block.trst_balance != previous_trst_balance
+                {
                     return Err("reject-receive block cannot change balances".into());
                 }
             }
@@ -1243,7 +1249,6 @@ mod tests {
             )
         );
     }
-
 
     #[test]
     fn legacy_delegation_record_cannot_bypass_signature_verification() {
@@ -1579,7 +1584,6 @@ mod tests {
         assert_eq!(frontier.get_head(&test_account()), Some(&send2.hash));
     }
 
-
     #[test]
     fn duplicate_block_detected() {
         let mut processor = test_processor(0);
@@ -1612,7 +1616,6 @@ mod tests {
         assert_eq!(processor.recently_processed_count(), 0);
     }
 
-
     #[test]
     fn reject_block_with_insufficient_work() {
         let min_difficulty = u64::MAX; // impossibly high
@@ -1643,7 +1646,6 @@ mod tests {
         assert_eq!(result, ProcessResult::Accepted);
     }
 
-
     #[test]
     fn reject_block_with_zero_signature() {
         let mut processor = test_processor(0);
@@ -1668,7 +1670,6 @@ mod tests {
         let result = processor.process(&block, &mut frontier);
         assert_eq!(result, ProcessResult::Accepted);
     }
-
 
     #[test]
     fn gap_detected_for_unknown_account() {
@@ -1745,7 +1746,6 @@ mod tests {
         assert_eq!(processor.unchecked_count(), 0);
     }
 
-
     #[test]
     fn fork_detected_when_previous_mismatches_frontier() {
         let mut processor = test_processor(0);
@@ -1816,7 +1816,6 @@ mod tests {
         let result = processor.process(&send2, &mut frontier);
         assert_eq!(result, ProcessResult::Fork);
     }
-
 
     #[test]
     fn different_opening_blocks_compete_at_the_zero_predecessor() {
@@ -1896,7 +1895,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn reject_non_open_block_with_zero_previous() {
         let mut processor = test_processor(0);
@@ -1947,7 +1945,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn frontier_not_updated_on_rejection() {
         let mut processor = test_processor(0);
@@ -1987,7 +1984,6 @@ mod tests {
         assert_eq!(frontier.get_head(&test_account()), Some(&head_after));
     }
 
-
     #[test]
     fn gap_block_processed_after_predecessor() {
         let mut processor = test_processor(0);
@@ -2025,7 +2021,6 @@ mod tests {
         );
         assert_eq!(frontier.get_head(&test_account()), Some(&send2.hash));
     }
-
 
     fn make_epoch_block(previous: BlockHash, account: WalletAddress) -> StateBlock {
         let mut block = StateBlock {
@@ -2140,7 +2135,6 @@ mod tests {
         assert_eq!(result, ProcessResult::Accepted);
         assert_eq!(frontier.get_head(&test_account()), Some(&send.hash));
     }
-
 
     #[test]
     fn accept_block_with_valid_ed25519_signature() {
@@ -2375,7 +2369,6 @@ mod tests {
             ProcessResult::Rejected("invalid signature".into())
         );
     }
-
 
     #[test]
     fn balance_validation_send_valid() {
@@ -2645,7 +2638,6 @@ mod tests {
         assert_eq!(result, Err("epoch block cannot change balances".into()));
     }
 
-
     #[test]
     fn persistent_rollback_cannot_delete_a_block_or_rewrite_the_frontier() {
         let directory = tempfile::tempdir().unwrap();
@@ -2765,12 +2757,7 @@ mod tests {
         assert_eq!(processor.recently_processed_count(), 0);
     }
 
-
-    fn make_receive_block(
-        previous: BlockHash,
-        source: BlockHash,
-        difficulty: u64,
-    ) -> StateBlock {
+    fn make_receive_block(previous: BlockHash, source: BlockHash, difficulty: u64) -> StateBlock {
         let mut block = StateBlock {
             signing_grant: burst_types::BlockHash::ZERO,
             delegation_payload: Vec::new(),
@@ -2898,7 +2885,6 @@ mod tests {
         assert_eq!(result, ProcessResult::Accepted);
     }
 
-
     fn make_block_context(source: BlockSource) -> BlockContext {
         let block = make_open_block(0);
         BlockContext {
@@ -2975,7 +2961,6 @@ mod tests {
         let first = q.dequeue().unwrap();
         assert_eq!(first.source, BlockSource::Local);
     }
-
 
     fn store_block(store: &burst_nullables::NullStore, block: &StateBlock) {
         let bytes = bincode::serialize(block).unwrap();

@@ -87,7 +87,8 @@ pub trait AccountStore {
 
     /// Eligible addresses without requiring full account payloads from indexed stores.
     fn all_verified_addresses(&self) -> Result<Vec<WalletAddress>, StoreError> {
-        self.all_verified_accounts().map(|rows| rows.into_iter().map(|account| account.address).collect())
+        self.all_verified_accounts()
+            .map(|rows| rows.into_iter().map(|account| account.address).collect())
     }
 
     /// Visit accounts in one consistent read view when supported by the backend.

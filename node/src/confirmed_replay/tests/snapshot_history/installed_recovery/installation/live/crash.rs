@@ -51,7 +51,9 @@ async fn compact_live_crash_child() {
     node.block_processor.lock().await.test_time = Some(Arc::new(AtomicU64::new(now)));
     node.verification_fixture_clock = Some(Arc::new(|| None));
     node.checkpoint_publication_probe = Some(pause);
-    let result = node.start_with_services(burst_daemon::start_public_services).await;
+    let result = node
+        .start_with_services(burst_daemon::start_public_services)
+        .await;
     panic!(
         "compact crash child exited before its boundary: {result:?}; {:?}",
         node.shutdown.failure()

@@ -141,7 +141,10 @@ pub(crate) async fn run(
             _ = stopped.recv() => return,
             _ = interval.tick() => (),
         }
-        let revision = store.tx_begin_read().ok().and_then(|view| view.generation());
+        let revision = store
+            .tx_begin_read()
+            .ok()
+            .and_then(|view| view.generation());
         if revision.is_some() && completed_revision == revision {
             continue;
         }
@@ -319,8 +322,13 @@ pub(crate) async fn run(
         // Environment metadata can precede the snapshot visible to readers.
         // An unknown or changed read cut cannot certify an idle queue.
         if !pending && revision.is_some() {
-            let after = store.tx_begin_read().ok().and_then(|view| view.generation());
-            if after == revision { completed_revision = revision; }
+            let after = store
+                .tx_begin_read()
+                .ok()
+                .and_then(|view| view.generation());
+            if after == revision {
+                completed_revision = revision;
+            }
         }
     }
 }

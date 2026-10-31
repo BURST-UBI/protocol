@@ -83,7 +83,9 @@ async fn roster_updates_without_a_committee_and_recovers_on_a_fresh_node() {
         workers.push((
             node.shutdown.clone(),
             tokio::spawn(async move {
-                node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+                node.start_with_services(burst_daemon::start_public_services)
+                    .await
+                    .unwrap();
                 node.stop().await.unwrap();
             }),
         ));
@@ -206,7 +208,9 @@ async fn roster_updates_without_a_committee_and_recovers_on_a_fresh_node() {
         workers.push((
             node.shutdown.clone(),
             tokio::spawn(async move {
-                node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+                node.start_with_services(burst_daemon::start_public_services)
+                    .await
+                    .unwrap();
                 node.stop().await.unwrap();
             }),
         ));

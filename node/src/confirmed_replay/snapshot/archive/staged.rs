@@ -8,13 +8,22 @@ pub(in crate::confirmed_replay::snapshot) enum Authority {
 }
 
 impl AuthoritySource for Authority {
-    fn authenticated_steps(&self, base: &CheckpointAnchor) -> Box<dyn Iterator<Item = Result<source::AuthenticatedStep, ReplayError>> + '_> {
+    fn authenticated_steps(
+        &self,
+        base: &CheckpointAnchor,
+    ) -> Box<dyn Iterator<Item = Result<source::AuthenticatedStep, ReplayError>> + '_> {
         match self {
             Self::Memory(steps) => steps.authenticated_steps(base),
             Self::File(history) => AuthoritySource::authenticated_steps(history.as_ref(), base),
         }
     }
-    fn entries(&self, base: &CheckpointAnchor) -> Box<dyn Iterator<Item = Result<super::super::installed::authority_history::Entry, ReplayError>> + '_> {
+    fn entries(
+        &self,
+        base: &CheckpointAnchor,
+    ) -> Box<
+        dyn Iterator<Item = Result<super::super::installed::authority_history::Entry, ReplayError>>
+            + '_,
+    > {
         match self {
             Self::Memory(steps) => steps.entries(base),
             Self::File(history) => AuthoritySource::entries(history.as_ref(), base),

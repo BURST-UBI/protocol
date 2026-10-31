@@ -693,10 +693,8 @@ pub(crate) fn load(
     let prefix = prefix(&anchor);
     let meta = store.meta_store();
     let txn = store.tx_begin_read()?;
-    let tip = decode_tip(
-        record_storage::get_txn(&meta, &txn, &format!("{prefix}/head"))?
-            .as_deref(),
-    )?;
+    let tip =
+        decode_tip(record_storage::get_txn(&meta, &txn, &format!("{prefix}/head"))?.as_deref())?;
     if tip > MAX_CHECKPOINTS {
         return Err(invalid(
             "full checkpoint history requires incremental replay",

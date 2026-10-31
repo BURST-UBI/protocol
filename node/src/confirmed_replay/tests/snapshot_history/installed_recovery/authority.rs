@@ -12,7 +12,13 @@ fn verification_tamper_row(store: &LmdbStore) -> (String, Vec<u8>) {
         (String::from_utf8(key).unwrap(), value)
     } else {
         let key = crate::endorsement_commit::SNAPSHOT_KEY;
-        (key.to_owned(), batch.get_meta(key).unwrap().expect("fixture verification snapshot"))
+        (
+            key.to_owned(),
+            batch
+                .get_meta(key)
+                .unwrap()
+                .expect("fixture verification snapshot"),
+        )
     }
 }
 
@@ -79,13 +85,42 @@ async fn batched_recovery_beacons_publish_only_after_complete_authentication() {
             .unwrap()
             .beacon()
             .is_none());
-        assert_eq!(cache.recovered.selections.refresh_cursor().unwrap().next(&store).unwrap(),
-            Some(missing_height), "failed batches must not publish hint updates");
+        assert_eq!(
+            cache
+                .recovered
+                .selections
+                .refresh_cursor()
+                .unwrap()
+                .next(&store)
+                .unwrap(),
+            Some(missing_height),
+            "failed batches must not publish hint updates"
+        );
     }
     let mut single = cache.recovered.fork(store.env().path()).unwrap();
-    single.selections.attach_beacon(hash, beacon.clone()).unwrap();
-    assert_eq!(single.selections.refresh_cursor().unwrap().next(&store).unwrap(), None);
-    assert_eq!(cache.recovered.selections.refresh_cursor().unwrap().next(&store).unwrap(), Some(missing_height));
+    single
+        .selections
+        .attach_beacon(hash, beacon.clone())
+        .unwrap();
+    assert_eq!(
+        single
+            .selections
+            .refresh_cursor()
+            .unwrap()
+            .next(&store)
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        cache
+            .recovered
+            .selections
+            .refresh_cursor()
+            .unwrap()
+            .next(&store)
+            .unwrap(),
+        Some(missing_height)
+    );
     cache
         .recovered
         .selections
@@ -136,10 +171,21 @@ async fn batched_recovery_beacons_publish_only_after_complete_authentication() {
     // Scheduling owns only small derived rows; it does not decode damaged receipts.
     cache.recovered.selections.truncate_for_test();
     assert!(cache.recovered.selections.read_selection(index).is_err());
-    assert_eq!(cache.recovered.selections.refresh_cursor().unwrap().next(&store).unwrap(), None);
-    assert_eq!(original_hints.next(&store).unwrap(), Some(missing_height),
-        "existing hint cursors keep their frozen view after enrichment");
-
+    assert_eq!(
+        cache
+            .recovered
+            .selections
+            .refresh_cursor()
+            .unwrap()
+            .next(&store)
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        original_hints.next(&store).unwrap(),
+        Some(missing_height),
+        "existing hint cursors keep their frozen view after enrichment"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -949,7 +995,9 @@ async fn recovery_progress_survives_failed_journal_checks_without_authorizing_th
         checked.shares_projection(&restored),
         "exactly restored contents may reuse a revalidated shared projection"
     );
-    restored.verify_unchanged(&local.tx_begin_write().unwrap()).unwrap();
+    restored
+        .verify_unchanged(&local.tx_begin_write().unwrap())
+        .unwrap();
     compact::assert_same(restored.recovered().continuation.state(), old.state());
     local
         .meta_store()
@@ -2216,7 +2264,11 @@ async fn assert_previous_decision(start_with_full_history: bool, corrupt: bool) 
         .unwrap()
         .unwrap();
     service.registry.write().await.remove("catchup");
-    assert!(service.stop().await > 0);
+    let requests = service.stop().await;
+    if start_with_full_history {
+        assert!(requests > 0);
+    }
+    // A sparse startup may relay its authenticated local decision directly.
     result.expect("compact previous decision was not relayed");
     assert_eq!(
         local
@@ -2233,14 +2285,26 @@ async fn compact_runtime_rotates_only_after_checked_economic_installation() {
     use crate::checkpoint_service::{compact_runtime::CompactRuntime, Settings};
     // Separate installation from replay checks: the combined fixture poll frame
     // otherwise nests 775KiB of temporaries above recovery on the test thread.
-    let (fixture, directories, local, service, old, next, mut runtime,
-        mut behind, cache, handoff, shared, initial) = tokio::spawn(async move {
+    let (
+        fixture,
+        directories,
+        local,
+        service,
+        old,
+        next,
+        mut runtime,
+        mut behind,
+        cache,
+        handoff,
+        shared,
+        initial,
+    ) = tokio::spawn(async move {
         let (fixture, _source_dir, source, manifest, certificate) = selection::setup();
         let bytes = archive(&source, &fixture, manifest.checkpoint.parent);
         let old =
             authenticate(&source, &fixture.params, manifest.checkpoint.parent).into_continuation();
-        let next =
-            authenticate(&source, &fixture.params, certificate.checkpoint.hash()).into_continuation();
+        let next = authenticate(&source, &fixture.params, certificate.checkpoint.hash())
+            .into_continuation();
         let (_dir, local) = cemented::sparse(&old, &source);
         copy_installed_records(&local, &source, &fixture, &bytes);
         let local = Arc::new(local);
@@ -2369,16 +2433,44 @@ async fn compact_runtime_rotates_only_after_checked_economic_installation() {
             )
             .unwrap()
             .is_none());
-        assert!(shared.selection_refresh(&other, NetworkId::Dev, initial, None).unwrap().is_none());
-        assert!(shared.selection_refresh(&local, NetworkId::Test, initial, None).unwrap().is_none());
-        assert!(shared.selection_refresh(&local, NetworkId::Dev, BlockHash::new([99; 32]), None).unwrap().is_none());
-        let (hint_epoch, _) = shared.selection_refresh(&local, NetworkId::Dev, initial, None)
-            .unwrap().expect("committed replay supplies selection hints");
+        assert!(shared
+            .selection_refresh(&other, NetworkId::Dev, initial, None)
+            .unwrap()
+            .is_none());
+        assert!(shared
+            .selection_refresh(&local, NetworkId::Test, initial, None)
+            .unwrap()
+            .is_none());
+        assert!(shared
+            .selection_refresh(&local, NetworkId::Dev, BlockHash::new([99; 32]), None)
+            .unwrap()
+            .is_none());
+        let (hint_epoch, _) = shared
+            .selection_refresh(&local, NetworkId::Dev, initial, None)
+            .unwrap()
+            .expect("committed replay supplies selection hints");
         assert_eq!(hint_epoch, next.anchor().hash());
-        assert!(shared.selection_refresh(&local, NetworkId::Dev, initial, Some(hint_epoch)).unwrap().is_none());
-        (fixture, (_source_dir, _dir), local, service, old, next, runtime,
-            behind, cache, handoff, shared, initial)
-    }).await.unwrap();
+        assert!(shared
+            .selection_refresh(&local, NetworkId::Dev, initial, Some(hint_epoch))
+            .unwrap()
+            .is_none());
+        (
+            fixture,
+            (_source_dir, _dir),
+            local,
+            service,
+            old,
+            next,
+            runtime,
+            behind,
+            cache,
+            handoff,
+            shared,
+            initial,
+        )
+    })
+    .await
+    .unwrap();
     tokio::spawn(async move {
         let reused = shared
             .replay(
@@ -2552,7 +2644,9 @@ async fn compact_runtime_rotates_only_after_checked_economic_installation() {
         // A pinned-reader miss must not evict a newer shared projection. Once the
         // exact contents are restored, reuse is valid only after the normal guards.
         assert!(restored_handoff.uses_committed_projection(&handoff));
-        restored_handoff.verify_unchanged(&local.tx_begin_write().unwrap()).unwrap();
+        restored_handoff
+            .verify_unchanged(&local.tx_begin_write().unwrap())
+            .unwrap();
         compact::assert_same(
             restored_handoff.recovered().continuation.state(),
             next.state(),
@@ -2611,7 +2705,9 @@ async fn compact_runtime_rotates_only_after_checked_economic_installation() {
             installed
         );
         drop(directories);
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -2669,8 +2765,13 @@ async fn compact_worker_authority_uses_installed_descendants_and_rechecks_handof
             service.registry.write().await.recovery_probe = Some(|stage| {
                 if stage == "private-recovery:confirmed-witnesses" {
                     if let Some(store) = CHANGE_EPOCH.lock().unwrap().take() {
-                        store.meta_store().put_meta(burst_store::meta::PAYMENT_EPOCH_KEY,
-                            BlockHash::new([77; 32]).as_bytes()).unwrap();
+                        store
+                            .meta_store()
+                            .put_meta(
+                                burst_store::meta::PAYMENT_EPOCH_KEY,
+                                BlockHash::new([77; 32]).as_bytes(),
+                            )
+                            .unwrap();
                     }
                 }
             });
@@ -2714,7 +2815,10 @@ async fn compact_worker_authority_uses_installed_descendants_and_rechecks_handof
         };
         assert_eq!(unchanged(before), unchanged(after), "handoff case {case}");
         if case == 7 {
-            assert!(CHANGE_EPOCH.lock().unwrap().is_none(), "epoch change was not exercised");
+            assert!(
+                CHANGE_EPOCH.lock().unwrap().is_none(),
+                "epoch change was not exercised"
+            );
         }
     }
 }

@@ -1,5 +1,5 @@
-use crate::confirmed_replay::scratch_file::ScratchFile as File;
 use super::*;
+use crate::confirmed_replay::scratch_file::ScratchFile as File;
 use bincode::Options;
 use std::{
     io::{Read, Seek, SeekFrom, Write},

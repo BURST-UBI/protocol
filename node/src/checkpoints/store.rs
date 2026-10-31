@@ -20,9 +20,9 @@ mod export_recovery;
 pub(crate) mod historical;
 pub(crate) use export_recovery::ExportRecovery;
 mod inventory;
-pub(crate) mod record_storage;
 mod mode;
 mod publication;
+pub(crate) mod record_storage;
 pub(crate) use mode::uses_incremental_replay;
 mod refresh;
 pub(crate) use refresh::{selection_refresh_heights, ArchivedRefresh};
@@ -234,7 +234,11 @@ impl CertifiedCheckpoint {
     ) -> Result<u64, StoreError> {
         let anchor = ReplayedCheckpoint::genesis_anchor(network, initial_params)?;
         let txn = store.tx_begin_read()?;
-        let bytes = record_storage::get_txn(&store.meta_store(), &txn, &format!("{}/head", prefix(&anchor)))?;
+        let bytes = record_storage::get_txn(
+            &store.meta_store(),
+            &txn,
+            &format!("{}/head", prefix(&anchor)),
+        )?;
         decode_tip(bytes.as_deref())
     }
 
@@ -283,9 +287,11 @@ impl CertifiedCheckpoint {
                 match chain::decode_record(&bytes)? {
                     chain::ParsedRecord::Selection(mut record) => {
                         let epoch = record.certificate.checkpoint.hash();
-                        if let Some(beacon) =
-                            record_storage::get_txn(&meta, &txn, &archive_selection::beacon_key(epoch))?
-                        {
+                        if let Some(beacon) = record_storage::get_txn(
+                            &meta,
+                            &txn,
+                            &archive_selection::beacon_key(epoch),
+                        )? {
                             use crate::confirmed_replay::snapshot::installed;
                             let base = installed::read_base(
                                 |key| record_storage::get_txn(&meta, &txn, key),
@@ -326,7 +332,8 @@ impl CertifiedCheckpoint {
                                     };
                                     let batch = store.tx_begin_write()?;
                                     if !recovered.uses_snapshot_archive()
-                                        && record_storage::get_batch(&batch, installed::BASE_KEY)?.is_some()
+                                        && record_storage::get_batch(&batch, installed::BASE_KEY)?
+                                            .is_some()
                                     {
                                         return Err(StoreError::StaleRead(
                                             "snapshot base appeared during export".into(),
@@ -411,7 +418,8 @@ impl CertifiedCheckpoint {
                 else {
                     return Ok(None);
                 };
-                if let Some(bytes) = record_storage::get_txn(&meta,
+                if let Some(bytes) = record_storage::get_txn(
+                    &meta,
                     &txn,
                     &archive_selection::beacon_key(selection.certificate().checkpoint.hash()),
                 )? {
@@ -598,11 +606,11 @@ impl CertifiedCheckpoint {
         let (bytes, retired) = match record_storage::get_batch(&batch, &key)? {
             Some(bytes) => (bytes, false),
             None => (
-                record_storage::get_batch(&batch, &archived_record_key(
-                        &self.parent,
-                        self.record.certificate.checkpoint.height,
-                    ))?
-                    .ok_or_else(|| invalid("checkpoint decision is not persisted"))?,
+                record_storage::get_batch(
+                    &batch,
+                    &archived_record_key(&self.parent, self.record.certificate.checkpoint.height),
+                )?
+                .ok_or_else(|| invalid("checkpoint decision is not persisted"))?,
                 true,
             ),
         };
@@ -615,9 +623,10 @@ impl CertifiedCheckpoint {
                 "checkpoint decision changed before beacon persistence",
             ));
         }
-        if let Some(bytes) = record_storage::get_batch(&batch, &archive_selection::beacon_key(
-            self.record.certificate.checkpoint.hash(),
-        ))? {
+        if let Some(bytes) = record_storage::get_batch(
+            &batch,
+            &archive_selection::beacon_key(self.record.certificate.checkpoint.hash()),
+        )? {
             archive_selection::merge_beacon(
                 &mut stored.beacon,
                 archive_selection::decode_beacon(&bytes)?,
@@ -656,16 +665,17 @@ impl CertifiedCheckpoint {
         );
         let bytes = match record_storage::get_batch(&batch, &key)? {
             Some(bytes) => bytes,
-            None => record_storage::get_batch(&batch, &archived_record_key(
-                    &self.parent,
-                    self.record.certificate.checkpoint.height,
-                ))?
-                .ok_or_else(|| invalid("selection certificate is not persisted"))?,
+            None => record_storage::get_batch(
+                &batch,
+                &archived_record_key(&self.parent, self.record.certificate.checkpoint.height),
+            )?
+            .ok_or_else(|| invalid("selection certificate is not persisted"))?,
         };
         let mut stored = decode(&bytes)?;
-        if let Some(bytes) = record_storage::get_batch(&batch, &archive_selection::beacon_key(
-            self.record.certificate.checkpoint.hash(),
-        ))? {
+        if let Some(bytes) = record_storage::get_batch(
+            &batch,
+            &archive_selection::beacon_key(self.record.certificate.checkpoint.hash()),
+        )? {
             let beacon = archive_selection::decode_beacon(&bytes)?;
             self.replay
                 .request()
@@ -718,7 +728,8 @@ impl CertifiedCheckpoint {
         start: u64,
     ) -> Result<Option<burst_types::BlockHash>, StoreError> {
         let prefix = prefix(&self.parent);
-        let tip = decode_tip(record_storage::get_batch(&batch, &format!("{prefix}/head"))?.as_deref())?;
+        let tip =
+            decode_tip(record_storage::get_batch(&batch, &format!("{prefix}/head"))?.as_deref())?;
         if tip < self.certificate().checkpoint.height {
             return Err(invalid("selection chain tip precedes its certificate"));
         }
@@ -727,19 +738,24 @@ impl CertifiedCheckpoint {
         {
             return Ok(None);
         }
-        let installed =
-            crate::payment_authority::PaymentAuthority::read_at(|key| record_storage::get_batch(&batch, key))?
-                .ok_or_else(|| invalid("installed payment authority disappeared"))?;
+        let installed = crate::payment_authority::PaymentAuthority::read_at(|key| {
+            record_storage::get_batch(&batch, key)
+        })?
+        .ok_or_else(|| invalid("installed payment authority disappeared"))?;
         publication::parameter_hash(
             &self.certificate().checkpoint,
             start,
             tip,
             &installed,
             |height| {
-                let bytes = match record_storage::get_batch(&batch, &format!("{prefix}/{height}"))? {
+                let bytes = match record_storage::get_batch(&batch, &format!("{prefix}/{height}"))?
+                {
                     Some(bytes) => bytes,
-                    None => record_storage::get_batch(&batch, &archived_record_key(&self.parent, height))?
-                        .ok_or_else(|| invalid("selection chain record is missing"))?,
+                    None => record_storage::get_batch(
+                        &batch,
+                        &archived_record_key(&self.parent, height),
+                    )?
+                    .ok_or_else(|| invalid("selection chain record is missing"))?,
                 };
                 let record = chain::decode_record(&bytes)?;
                 Ok(record.certificate().checkpoint.clone())

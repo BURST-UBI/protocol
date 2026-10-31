@@ -9,7 +9,12 @@ pub(crate) struct RevisionIndex {
 }
 
 fn count(map: &mut SharedMap<TxHash, usize>, key: TxHash, add: bool) -> Result<(), String> {
-    crate::dependency_counts::adjust(map, key, add, "revision dependency count overflow or underflow")
+    crate::dependency_counts::adjust(
+        map,
+        key,
+        add,
+        "revision dependency count overflow or underflow",
+    )
 }
 
 impl RevisionIndex {
@@ -18,15 +23,20 @@ impl RevisionIndex {
         Self::new_with_poll(graph, &|_| Ok(()))
     }
 
-    pub(crate) fn new_with_poll(graph: &MergerGraph, poll: &dyn Fn(&'static str) -> Result<(), String>) -> Result<Self, String> {
+    pub(crate) fn new_with_poll(
+        graph: &MergerGraph,
+        poll: &dyn Fn(&'static str) -> Result<(), String>,
+    ) -> Result<Self, String> {
         let (merges, references) = Self::build_counts_with_poll(graph, poll)?;
         Ok(Self { merges, references })
     }
 
     /// Count records and references without checking target existence, hashes or
     /// cycles. The poll callback can cancel construction without publishing a result.
-    pub(crate) fn build_counts_with_poll<C: crate::dependency_counts::Counts>(graph: &MergerGraph,
-        poll: &dyn Fn(&'static str) -> Result<(), String>) -> Result<(C, C), String> {
+    pub(crate) fn build_counts_with_poll<C: crate::dependency_counts::Counts>(
+        graph: &MergerGraph,
+        poll: &dyn Fn(&'static str) -> Result<(), String>,
+    ) -> Result<(C, C), String> {
         let mut merges = C::default();
         let mut references = C::default();
         let error = "revision dependency count overflow or underflow";
@@ -53,7 +63,9 @@ impl RevisionIndex {
         Ok((merges, references))
     }
 
-    pub(crate) fn has_merge(&self, merge: &TxHash) -> bool { self.merges.contains_key(merge) }
+    pub(crate) fn has_merge(&self, merge: &TxHash) -> bool {
+        self.merges.contains_key(merge)
+    }
 
     pub(crate) fn references(&self, revision: &TxHash) -> bool {
         self.references.contains_key(revision)
@@ -61,7 +73,9 @@ impl RevisionIndex {
 
     fn revision(&mut self, revision: &RevocationRevision, add: bool) -> Result<(), String> {
         count(&mut self.merges, revision.merge_tx, add)?;
-        if revision.previous != TxHash::ZERO { count(&mut self.references, revision.previous, add)?; }
+        if revision.previous != TxHash::ZERO {
+            count(&mut self.references, revision.previous, add)?;
+        }
         Ok(())
     }
 
@@ -78,19 +92,41 @@ impl RevisionIndex {
     /// dependency counts; it neither validates nor authorizes the graph change.
     /// Work follows changed keys. Errors discard the candidate and leave this
     /// index unchanged; success returns a new index without installing it.
-    pub(crate) fn updated(&self, before: &MergerGraph, after: &MergerGraph) -> Result<Self, String> {
+    pub(crate) fn updated(
+        &self,
+        before: &MergerGraph,
+        after: &MergerGraph,
+    ) -> Result<Self, String> {
         let mut candidate = self.clone();
         for id in after.revisions.changed_keys(&before.revisions) {
-            if let Some(old) = before.revisions.get(id) { candidate.revision(old, false)?; }
-            if let Some(new) = after.revisions.get(id) { candidate.revision(new, true)?; }
+            if let Some(old) = before.revisions.get(id) {
+                candidate.revision(old, false)?;
+            }
+            if let Some(new) = after.revisions.get(id) {
+                candidate.revision(new, true)?;
+            }
         }
-        for merge in after.current_revisions.changed_keys(&before.current_revisions) {
-            if let Some(old) = before.current_revisions.get(merge) { count(&mut candidate.references, *old, false)?; }
-            if let Some(new) = after.current_revisions.get(merge) { count(&mut candidate.references, *new, true)?; }
+        for merge in after
+            .current_revisions
+            .changed_keys(&before.current_revisions)
+        {
+            if let Some(old) = before.current_revisions.get(merge) {
+                count(&mut candidate.references, *old, false)?;
+            }
+            if let Some(new) = after.current_revisions.get(merge) {
+                count(&mut candidate.references, *new, true)?;
+            }
         }
-        for merge in after.source_revisions.changed_keys(&before.source_revisions) {
-            if let Some(old) = before.source_revisions.get(merge) { candidate.sources(old, false)?; }
-            if let Some(new) = after.source_revisions.get(merge) { candidate.sources(new, true)?; }
+        for merge in after
+            .source_revisions
+            .changed_keys(&before.source_revisions)
+        {
+            if let Some(old) = before.source_revisions.get(merge) {
+                candidate.sources(old, false)?;
+            }
+            if let Some(new) = after.source_revisions.get(merge) {
+                candidate.sources(new, true)?;
+            }
         }
         Ok(candidate)
     }
@@ -99,12 +135,26 @@ impl RevisionIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn id(n: u8) -> TxHash { TxHash::new([n; 32]) }
+    fn id(n: u8) -> TxHash {
+        TxHash::new([n; 32])
+    }
     fn baseline() -> MergerGraph {
         let mut graph = MergerGraph::new();
-        graph.record_merge(MergeNode { merge_tx: id(10), source_origins: vec![
-            MergeSource { origin: id(1), amount: 5 }, MergeSource { origin: id(2), amount: 5 }],
-            total_amount: 10, revoked_contribs: HashMap::new() });
+        graph.record_merge(MergeNode {
+            merge_tx: id(10),
+            source_origins: vec![
+                MergeSource {
+                    origin: id(1),
+                    amount: 5,
+                },
+                MergeSource {
+                    origin: id(2),
+                    amount: 5,
+                },
+            ],
+            total_amount: 10,
+            revoked_contribs: HashMap::new(),
+        });
         graph.apply_revocation(id(1));
         graph
     }
@@ -113,14 +163,25 @@ mod tests {
     fn transient_revision_counts_match_persistent_construction() {
         let mut graph = baseline();
         for n in 11..20 {
-            graph.record_merge(MergeNode { merge_tx: id(n),
-                source_origins: vec![MergeSource { origin: id(10), amount: 1 }],
-                total_amount: 1, revoked_contribs: HashMap::new() });
+            graph.record_merge(MergeNode {
+                merge_tx: id(n),
+                source_origins: vec![MergeSource {
+                    origin: id(10),
+                    amount: 1,
+                }],
+                total_amount: 1,
+                revoked_contribs: HashMap::new(),
+            });
         }
         let full = RevisionIndex::new(&graph).unwrap();
-        let (merges, references) = RevisionIndex::build_counts_with_poll::<HashMap<TxHash, usize>>(&graph, &|_| Ok(())).unwrap();
+        let (merges, references) =
+            RevisionIndex::build_counts_with_poll::<HashMap<TxHash, usize>>(&graph, &|_| Ok(()))
+                .unwrap();
         assert_eq!(merges, full.merges.iter().map(|(k, v)| (*k, *v)).collect());
-        assert_eq!(references, full.references.iter().map(|(k, v)| (*k, *v)).collect());
+        assert_eq!(
+            references,
+            full.references.iter().map(|(k, v)| (*k, *v)).collect()
+        );
         assert!(references.values().any(|count| *count > 1));
     }
 
@@ -132,9 +193,21 @@ mod tests {
         let initial = RevisionIndex::new(&before).unwrap();
         assert_eq!(initial.references.get(&first), Some(&1));
         let mut graph = before.clone();
-        graph.record_merge(MergeNode { merge_tx: id(11), source_origins: vec![
-            MergeSource { origin: id(10), amount: 1 }, MergeSource { origin: id(10), amount: 1 }],
-            total_amount: 2, revoked_contribs: HashMap::new() });
+        graph.record_merge(MergeNode {
+            merge_tx: id(11),
+            source_origins: vec![
+                MergeSource {
+                    origin: id(10),
+                    amount: 1,
+                },
+                MergeSource {
+                    origin: id(10),
+                    amount: 1,
+                },
+            ],
+            total_amount: 2,
+            revoked_contribs: HashMap::new(),
+        });
         let index = initial.updated(&before, &graph).unwrap();
         assert_eq!(index, RevisionIndex::new(&graph).unwrap());
         assert_eq!(index.references.get(&first), Some(&3));
@@ -162,12 +235,28 @@ mod tests {
         let before = baseline();
         let first = before.current_revisions[&id(10)];
         let mut graph = before.clone();
-        graph.record_merge(MergeNode { merge_tx: id(11), source_origins: vec![
-            MergeSource { origin: id(10), amount: 1 }], total_amount: 1, revoked_contribs: HashMap::new() });
+        graph.record_merge(MergeNode {
+            merge_tx: id(11),
+            source_origins: vec![MergeSource {
+                origin: id(10),
+                amount: 1,
+            }],
+            total_amount: 1,
+            revoked_contribs: HashMap::new(),
+        });
         let index = RevisionIndex::new(&graph).unwrap();
         let mut rows = Vec::new();
-        graph.visit_record_delta(&before, |old, new| { assert!(old.is_none()); rows.push(new.unwrap()); Ok(()) }).unwrap();
-        let (rewound, _) = graph.remove_appended_records(&rows, &index).unwrap().unwrap();
+        graph
+            .visit_record_delta(&before, |old, new| {
+                assert!(old.is_none());
+                rows.push(new.unwrap());
+                Ok(())
+            })
+            .unwrap();
+        let (rewound, _) = graph
+            .remove_appended_records(&rows, &index)
+            .unwrap()
+            .unwrap();
         let next = index.updated(&graph, &rewound).unwrap();
         assert_eq!(next, RevisionIndex::new(&before).unwrap());
         assert_eq!(next.references.get(&first), Some(&1));

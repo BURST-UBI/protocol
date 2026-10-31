@@ -52,7 +52,11 @@ impl TrstToken {
     pub(crate) fn normalized_state(&self, expiry_secs: u64, now: Timestamp) -> TrstState {
         match self.state {
             TrstState::Active | TrstState::Expired => {
-                if self.is_expired(now, expiry_secs) { TrstState::Expired } else { TrstState::Active }
+                if self.is_expired(now, expiry_secs) {
+                    TrstState::Expired
+                } else {
+                    TrstState::Active
+                }
             }
             state => state,
         }
@@ -60,13 +64,29 @@ impl TrstToken {
 
     pub(crate) fn eq_at(&self, other: &Self, expiry_secs: u64, now: Timestamp) -> bool {
         // Keep this exhaustive: any new persisted token field must participate.
-        let Self { basis, id, amount, origin, link, holder, origin_timestamp,
-            effective_origin_timestamp, state: _, origin_wallet, revoked_origin } = self;
-        *basis == other.basis && *id == other.id && *amount == other.amount
-            && *origin == other.origin && *link == other.link && *holder == other.holder
+        let Self {
+            basis,
+            id,
+            amount,
+            origin,
+            link,
+            holder,
+            origin_timestamp,
+            effective_origin_timestamp,
+            state: _,
+            origin_wallet,
+            revoked_origin,
+        } = self;
+        *basis == other.basis
+            && *id == other.id
+            && *amount == other.amount
+            && *origin == other.origin
+            && *link == other.link
+            && *holder == other.holder
             && *origin_timestamp == other.origin_timestamp
             && *effective_origin_timestamp == other.effective_origin_timestamp
-            && *origin_wallet == other.origin_wallet && *revoked_origin == other.revoked_origin
+            && *origin_wallet == other.origin_wallet
+            && *revoked_origin == other.revoked_origin
             && self.normalized_state(expiry_secs, now) == other.normalized_state(expiry_secs, now)
     }
 
@@ -83,7 +103,9 @@ impl TrstToken {
         visit(Token(self.link))?;
         visit(Graph(self.origin))?;
         self.basis.visit_retention_references(&mut visit)?;
-        if let Some(origin) = self.revoked_origin { visit(Graph(origin))?; }
+        if let Some(origin) = self.revoked_origin {
+            visit(Graph(origin))?;
+        }
         std::ops::ControlFlow::Continue(())
     }
 
@@ -200,20 +222,44 @@ mod retention_tests {
                 (TrstBasis::Single(h(4)), Some(Graph(h(4)))),
             ] {
                 let token = TrstToken {
-                    basis, id: h(1), amount: 10, origin: h(3), link: h(2),
+                    basis,
+                    id: h(1),
+                    amount: 10,
+                    origin: h(3),
+                    link: h(2),
                     holder: WalletAddress::new("brst_holder"),
-                    origin_timestamp: Timestamp::new(1), effective_origin_timestamp: Timestamp::new(1),
-                    state, origin_wallet: WalletAddress::new("brst_origin"), revoked_origin: Some(h(5)),
+                    origin_timestamp: Timestamp::new(1),
+                    effective_origin_timestamp: Timestamp::new(1),
+                    state,
+                    origin_wallet: WalletAddress::new("brst_origin"),
+                    revoked_origin: Some(h(5)),
                 };
-                let mut expected = vec![Account(&token.holder), Account(&token.origin_wallet),
-                    Token(h(1)), Token(h(2)), Graph(h(3))];
+                let mut expected = vec![
+                    Account(&token.holder),
+                    Account(&token.origin_wallet),
+                    Token(h(1)),
+                    Token(h(2)),
+                    Graph(h(3)),
+                ];
                 expected.extend(reference);
                 expected.push(Graph(h(5)));
                 let mut seen = Vec::new();
-                assert_eq!(token.visit_retention_references(|r| { seen.push(r); ControlFlow::<()>::Continue(()) }), ControlFlow::Continue(()));
+                assert_eq!(
+                    token.visit_retention_references(|r| {
+                        seen.push(r);
+                        ControlFlow::<()>::Continue(())
+                    }),
+                    ControlFlow::Continue(())
+                );
                 assert_eq!(seen, expected);
                 let mut calls = 0;
-                assert_eq!(token.visit_retention_references(|_| { calls += 1; ControlFlow::Break("stop") }), ControlFlow::Break("stop"));
+                assert_eq!(
+                    token.visit_retention_references(|_| {
+                        calls += 1;
+                        ControlFlow::Break("stop")
+                    }),
+                    ControlFlow::Break("stop")
+                );
                 assert_eq!(calls, 1);
             }
         }

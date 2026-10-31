@@ -205,12 +205,18 @@ fn run_graph_fixture(merges: u64, shared_parent: bool) {
     );
 }
 
-
 fn graph_memory(stage: &str) {
     let status = std::fs::read_to_string("/proc/self/status").unwrap();
     let value = |prefix: &str| -> u64 {
-        status.lines().find(|line| line.starts_with(prefix)).unwrap()
-            .split_whitespace().nth(1).unwrap().parse().unwrap()
+        status
+            .lines()
+            .find(|line| line.starts_with(prefix))
+            .unwrap()
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .parse()
+            .unwrap()
     };
     println!("graph_process_memory {{\"stage\":\"{stage}\",\"rss_kib\":{},\"hwm_kib\":{},\"anon_kib\":{},\"file_kib\":{}}}",
         value("VmRSS:"), value("VmHWM:"), value("RssAnon:"), value("RssFile:"));
@@ -221,19 +227,27 @@ fn prepare_retained_graph(directory: &std::path::Path, merges: u64) {
     std::fs::create_dir(directory).unwrap();
     let (graph, _) = graph_fixture(merges, false);
     let expected = snapshot_identity(&graph);
-    if merges == 70_000 { assert!(expected.0 > 64 * 1024 * 1024); }
+    if merges == 70_000 {
+        assert!(expected.0 > 64 * 1024 * 1024);
+    }
     let store = LmdbStore::open(&directory.join("ledger"), 32, 2usize << 30).unwrap();
     let mut batch = store.tx_begin_write().unwrap();
     stage_rows_for_test(&mut batch, &graph).unwrap();
     batch.commit().unwrap();
     store.force_sync().unwrap();
-    std::fs::write(directory.join("identity.bin"), bincode::serialize(&(merges, expected)).unwrap()).unwrap();
+    std::fs::write(
+        directory.join("identity.bin"),
+        bincode::serialize(&(merges, expected)).unwrap(),
+    )
+    .unwrap();
 }
 
 fn recover_retained_graph(directory: &std::path::Path, reader_phases: bool) {
     let (merges, expected): (u64, (u64, Vec<u8>)) =
         bincode::deserialize(&std::fs::read(directory.join("identity.bin")).unwrap()).unwrap();
-    if merges == 70_000 { assert!(expected.0 > 64 * 1024 * 1024); }
+    if merges == 70_000 {
+        assert!(expected.0 > 64 * 1024 * 1024);
+    }
     graph_memory("before_open");
     let store = LmdbStore::open(&directory.join("ledger"), 32, 2usize << 30).unwrap();
     let batch = store.tx_begin_write().unwrap();
@@ -244,20 +258,37 @@ fn recover_retained_graph(directory: &std::path::Path, reader_phases: bool) {
         let mut reader = burst_trst::merger_graph::GraphRecordReader::default();
         // Same record decoder and reader used by read_merger_graph; retain its
         // full finish validation and the independent snapshot digest below.
-        for row in batch.checkpoint_metadata_entries(GraphRecord::STORAGE_PREFIX.as_bytes()).unwrap() {
+        for row in batch
+            .checkpoint_metadata_entries(GraphRecord::STORAGE_PREFIX.as_bytes())
+            .unwrap()
+        {
             let (key, bytes) = row.unwrap();
-            reader.push(GraphRecord::from_storage_entry(std::str::from_utf8(key).unwrap(), bytes).unwrap()).unwrap();
+            reader
+                .push(
+                    GraphRecord::from_storage_entry(std::str::from_utf8(key).unwrap(), bytes)
+                        .unwrap(),
+                )
+                .unwrap();
         }
-        println!("graph_process_decode_ms {}", start.elapsed().as_secs_f64() * 1000.0);
+        println!(
+            "graph_process_decode_ms {}",
+            start.elapsed().as_secs_f64() * 1000.0
+        );
         graph_memory("before_reader_finish");
         let finish_start = Instant::now();
         let graph = reader.finish().unwrap();
-        println!("graph_process_finish_ms {}", finish_start.elapsed().as_secs_f64() * 1000.0);
+        println!(
+            "graph_process_finish_ms {}",
+            finish_start.elapsed().as_secs_f64() * 1000.0
+        );
         graph
     } else {
         load(&batch).unwrap()
     };
-    println!("graph_process_load_ms {}", start.elapsed().as_secs_f64() * 1000.0);
+    println!(
+        "graph_process_load_ms {}",
+        start.elapsed().as_secs_f64() * 1000.0
+    );
     graph_memory("after_load");
     assert_eq!(snapshot_identity(&graph), expected);
     graph_memory("after_digest");
@@ -281,13 +312,18 @@ fn retained_graph_fixture_recovers_matching_identity() {
 #[test]
 #[ignore = "explicit capped-host one-time retained graph baseline generation"]
 fn prepare_large_retained_graph_memory_fixture() {
-    let directory = std::path::PathBuf::from(std::env::var_os("BURST_GRAPH_MEMORY_FIXTURE").unwrap());
+    let directory =
+        std::path::PathBuf::from(std::env::var_os("BURST_GRAPH_MEMORY_FIXTURE").unwrap());
     prepare_retained_graph(&directory, 70_000);
 }
 
 #[test]
 #[ignore = "explicit capped-host fresh-process recovery of retained graph baseline"]
 fn recover_large_retained_graph_memory_fixture() {
-    let directory = std::path::PathBuf::from(std::env::var_os("BURST_GRAPH_MEMORY_FIXTURE").unwrap());
-    recover_retained_graph(&directory, std::env::var_os("BURST_GRAPH_READER_PHASES").is_some());
+    let directory =
+        std::path::PathBuf::from(std::env::var_os("BURST_GRAPH_MEMORY_FIXTURE").unwrap());
+    recover_retained_graph(
+        &directory,
+        std::env::var_os("BURST_GRAPH_READER_PHASES").is_some(),
+    );
 }

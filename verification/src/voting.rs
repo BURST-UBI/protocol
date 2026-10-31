@@ -393,28 +393,60 @@ mod tests {
     fn large_panel_tally_preserves_rounding_and_revote_rules_without_overflow() {
         for count in [429_496, 429_497, 1_000_000] {
             let mut state = VerificationState {
-                target: test_addr("target"), phase: VerificationPhase::Voting,
-                endorsements: Vec::new().into(), endorser_set: Default::default(),
-                selected_verifiers: Vec::new().into(), revote_count: 0,
-                excluded_verifiers: Default::default(), started_at: Timestamp::new(1),
-                votes: (0..count).map(|n| VerifierVote {
-                    verifier: WalletAddress::new(format!("brst_large_panel_{n}")),
-                    vote: Vote::Legitimate, stake_amount: 1, timestamp: Timestamp::new(2),
-                }).collect(),
+                target: test_addr("target"),
+                phase: VerificationPhase::Voting,
+                endorsements: Vec::new().into(),
+                endorser_set: Default::default(),
+                selected_verifiers: Vec::new().into(),
+                revote_count: 0,
+                excluded_verifiers: Default::default(),
+                started_at: Timestamp::new(1),
+                votes: (0..count)
+                    .map(|n| VerifierVote {
+                        verifier: WalletAddress::new(format!("brst_large_panel_{n}")),
+                        vote: Vote::Legitimate,
+                        stake_amount: 1,
+                        timestamp: Timestamp::new(2),
+                    })
+                    .collect(),
             };
             let voting = VerificationVoting;
-            assert!(matches!(voting.tally(&state, 10_000, 0), VotingOutcome::Verified));
-            assert!(matches!(voting.tally(&state, 10_001, 0), VotingOutcome::Failed));
+            assert!(matches!(
+                voting.tally(&state, 10_000, 0),
+                VotingOutcome::Verified
+            ));
+            assert!(matches!(
+                voting.tally(&state, 10_001, 0),
+                VotingOutcome::Failed
+            ));
             state.votes.last_mut().unwrap().vote = Vote::Neither;
-            assert!(matches!(voting.tally(&state, 9_999, 0), VotingOutcome::Verified));
-            assert!(matches!(voting.tally(&state, 10_000, 0), VotingOutcome::Failed));
-            assert!(matches!(voting.tally(&state, 10_000, 1), VotingOutcome::Revote));
+            assert!(matches!(
+                voting.tally(&state, 9_999, 0),
+                VotingOutcome::Verified
+            ));
+            assert!(matches!(
+                voting.tally(&state, 10_000, 0),
+                VotingOutcome::Failed
+            ));
+            assert!(matches!(
+                voting.tally(&state, 10_000, 1),
+                VotingOutcome::Revote
+            ));
             state.revote_count = 1;
-            assert!(matches!(voting.tally(&state, 10_000, 1), VotingOutcome::Failed));
+            assert!(matches!(
+                voting.tally(&state, 10_000, 1),
+                VotingOutcome::Failed
+            ));
             state.votes.truncate(3);
             state.votes[2].vote = Vote::Illegitimate;
-            assert!(matches!(voting.tally(&state, 6_666, 1), VotingOutcome::Verified));
-            assert!(matches!(voting.tally(&state, 6_667, 1), VotingOutcome::Failed));
+            assert!(matches!(
+                voting.tally(&state, 6_666, 1),
+                VotingOutcome::Verified
+            ));
+            assert!(matches!(
+                voting.tally(&state, 6_667, 1),
+                VotingOutcome::Failed
+            ));
             state.votes.clear();
             assert!(matches!(voting.tally(&state, 0, 0), VotingOutcome::Revote));
         }

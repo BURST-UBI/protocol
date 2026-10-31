@@ -3,11 +3,11 @@
 //! amounts. Ledger authentication and graph-provenance checks belong to callers.
 
 use super::{holding, validate, Row, TrstToken, WalletPortfolio};
-use crate::engine::{ConsumedProvenance, RevocationEvent, RestorationEvent};
+use crate::engine::{ConsumedProvenance, RestorationEvent, RevocationEvent};
 use crate::{MergerGraph, Shared, SharedMap};
 use burst_types::{Timestamp, TrstBasis, TrstState, TxHash, WalletAddress};
-use std::collections::HashMap;
 use imbl::{OrdMap, OrdSet};
+use std::collections::HashMap;
 use std::ops::Bound::{Excluded, Unbounded};
 
 type Order = (Timestamp, u128);
@@ -41,14 +41,25 @@ pub struct IndexedPortfolio {
 }
 
 impl IndexedPortfolio {
-    pub(crate) fn cached_balance(&self) -> u128 { self.balance }
+    pub(crate) fn cached_balance(&self) -> u128 {
+        self.balance
+    }
 
-    pub(crate) fn cached_expiry(&self) -> Option<Timestamp> { self.earliest_expiry() }
+    pub(crate) fn cached_expiry(&self) -> Option<Timestamp> {
+        self.earliest_expiry()
+    }
 
-    pub(crate) fn expiry_period(&self) -> u64 { self.expiry_secs }
+    pub(crate) fn expiry_period(&self) -> u64 {
+        self.expiry_secs
+    }
 
-    pub(crate) fn counter_window(&self, now: Timestamp) -> Option<((u128, u128), Option<Timestamp>)> {
-        self.counters.period_window(now.as_secs(), self.expiry_secs).map(|(totals, next)| (totals, next.map(Timestamp::new)))
+    pub(crate) fn counter_window(
+        &self,
+        now: Timestamp,
+    ) -> Option<((u128, u128), Option<Timestamp>)> {
+        self.counters
+            .period_window(now.as_secs(), self.expiry_secs)
+            .map(|(totals, next)| (totals, next.map(Timestamp::new)))
     }
 
     /// Read the candidate clock without changing either root. Only due active
@@ -58,27 +69,47 @@ impl IndexedPortfolio {
     pub(crate) fn candidate_balances(&self, origin: &TxHash, now: Timestamp) -> (u128, u128) {
         let mut balance = self.balance;
         let mut origin_balance = self.origin_active_balance(origin);
-        for (_, id) in self.active_times.iter().take_while(|(at, _)| at.has_expired(self.expiry_secs, now)) {
+        for (_, id) in self
+            .active_times
+            .iter()
+            .take_while(|(at, _)| at.has_expired(self.expiry_secs, now))
+        {
             let token = self.get(id).expect("indexed active expiry");
             balance -= token.amount;
-            if token.origin == *origin { origin_balance -= token.amount; }
+            if token.origin == *origin {
+                origin_balance -= token.amount;
+            }
         }
         (balance, origin_balance)
     }
 
     /// Active timestamps are ordered before adding the governed period, so
     /// saturated deadlines retain the canonical effective-time / ID ordering.
-    pub(crate) fn select_expiry_merge_group(&self, now: Timestamp, expiry_secs: u64) -> Vec<TrstToken> {
-        if now.as_secs() == u64::MAX { return Vec::new(); }
+    pub(crate) fn select_expiry_merge_group(
+        &self,
+        now: Timestamp,
+        expiry_secs: u64,
+    ) -> Vec<TrstToken> {
+        if now.as_secs() == u64::MAX {
+            return Vec::new();
+        }
         let lower = match now.as_secs().checked_sub(expiry_secs) {
-            Some(last_expired) => Excluded((Timestamp::new(last_expired), TxHash::new([u8::MAX; 32]))),
+            Some(last_expired) => {
+                Excluded((Timestamp::new(last_expired), TxHash::new([u8::MAX; 32])))
+            }
             None => Unbounded,
         };
         let mut selected = Vec::new();
         let mut cutoff = None;
-        for (at, id) in self.active_times.range((lower, Unbounded)).take(crate::engine::MAX_MERGE_SOURCES) {
+        for (at, id) in self
+            .active_times
+            .range((lower, Unbounded))
+            .take(crate::engine::MAX_MERGE_SOURCES)
+        {
             let end = *cutoff.get_or_insert_with(|| at.as_secs().saturating_add(expiry_secs / 10));
-            if at.as_secs() > end { break; }
+            if at.as_secs() > end {
+                break;
+            }
             selected.push(self.get(id).expect("indexed active holding").clone());
         }
         selected
@@ -94,14 +125,18 @@ impl IndexedPortfolio {
 
     pub(crate) fn same_canonical_state(&self, other: &Self) -> bool {
         // Holder/period are local validation context, not canonical fields.
-        if self.balance != other.balance || self.earliest_expiry() != other.earliest_expiry()
+        if self.balance != other.balance
+            || self.earliest_expiry() != other.earliest_expiry()
             || self.rows.len() != other.rows.len()
-            || self.order.get_min().map(|(_, id)| id) != other.order.get_min().map(|(_, id)| id) {
+            || self.order.get_min().map(|(_, id)| id) != other.order.get_min().map(|(_, id)| id)
+        {
             return false;
         }
-        self.rows.changed_keys(&other.rows).all(|id| match (self.rows.get(id), other.rows.get(id)) {
-            (Some(a), Some(b)) => a.token == b.token && a.next == b.next,
-            _ => false,
+        self.rows.changed_keys(&other.rows).all(|id| {
+            match (self.rows.get(id), other.rows.get(id)) {
+                (Some(a), Some(b)) => a.token == b.token && a.next == b.next,
+                _ => false,
+            }
         })
     }
 
@@ -115,20 +150,30 @@ impl IndexedPortfolio {
     ) -> Result<Self, String> {
         validate(&holder, portfolio)?;
         let mut result = Self {
-            holder, expiry_secs, rows: SharedMap::default(), order: OrdMap::new(),
-            active_times: OrdSet::new(), balance: 0,
+            holder,
+            expiry_secs,
+            rows: SharedMap::default(),
+            order: OrdMap::new(),
+            active_times: OrdSet::new(),
+            balance: 0,
             counters: counters::Counters::default(),
-            origins: OrdMap::new(), revoked_origins: OrdMap::new(),
-            origin_balances: OrdMap::new(), split_members: OrdMap::new(),
+            origins: OrdMap::new(),
+            revoked_origins: OrdMap::new(),
+            origin_balances: OrdMap::new(),
+            split_members: OrdMap::new(),
             next_order: portfolio.tokens.len() as u128,
         };
         for (n, token) in portfolio.tokens.iter().enumerate() {
             let order = (token.origin_timestamp, n as u128);
             result.order.insert(order, token.id);
-            result.rows.insert(token.id, Holding {
-                order, token: token.clone().into(),
-                next: portfolio.tokens.get(n + 1).map(|next| next.id),
-            });
+            result.rows.insert(
+                token.id,
+                Holding {
+                    order,
+                    token: token.clone().into(),
+                    next: portfolio.tokens.get(n + 1).map(|next| next.id),
+                },
+            );
             result.add_membership(order, token);
             result.add_token_totals(token)?;
         }
@@ -149,7 +194,10 @@ impl IndexedPortfolio {
     /// Non-revoked holdings of one origin in canonical portfolio order.
     /// Expired holdings remain members, matching the engine's holder index.
     pub fn origin_tokens<'a>(&'a self, origin: &TxHash) -> impl Iterator<Item = &'a TrstToken> {
-        self.origins.get(origin).into_iter().flat_map(|set| set.iter())
+        self.origins
+            .get(origin)
+            .into_iter()
+            .flat_map(|set| set.iter())
             .map(|key| self.get(&self.order[key]).expect("indexed origin holding"))
     }
 
@@ -164,10 +212,18 @@ impl IndexedPortfolio {
     }
 
     fn split_tokens(&self, merge: TxHash, revoked: TxHash) -> impl Iterator<Item = &TrstToken> {
-        let mut general = self.split_members.get(&(merge, None)).into_iter()
-            .flat_map(|members| members.iter()).peekable();
-        let mut single = self.split_members.get(&(merge, Some(revoked))).into_iter()
-            .flat_map(|members| members.iter()).peekable();
+        let mut general = self
+            .split_members
+            .get(&(merge, None))
+            .into_iter()
+            .flat_map(|members| members.iter())
+            .peekable();
+        let mut single = self
+            .split_members
+            .get(&(merge, Some(revoked)))
+            .into_iter()
+            .flat_map(|members| members.iter())
+            .peekable();
         // Both disjoint sets use the original portfolio order, including ties.
         std::iter::from_fn(move || {
             let order = match (general.peek(), single.peek()) {
@@ -183,7 +239,10 @@ impl IndexedPortfolio {
 
     /// Revoked chunks tagged with this burn origin, including merged holdings.
     pub fn revoked_tokens<'a>(&'a self, origin: &TxHash) -> impl Iterator<Item = &'a TrstToken> {
-        self.revoked_origins.get(origin).into_iter().flat_map(|set| set.iter())
+        self.revoked_origins
+            .get(origin)
+            .into_iter()
+            .flat_map(|set| set.iter())
             .map(|key| self.get(&self.order[key]).expect("indexed revoked holding"))
     }
 
@@ -205,25 +264,38 @@ impl IndexedPortfolio {
         amount: u128,
     ) -> Result<(Self, Vec<ConsumedProvenance>), String> {
         let mut result = self.clone();
-        if amount == 0 { return Ok((result, Vec::new())); }
+        if amount == 0 {
+            return Ok((result, Vec::new()));
+        }
         let mut remaining = amount;
         let mut portions: HashMap<TrstBasis, ConsumedProvenance> = HashMap::new();
         for token in self.origin_tokens(origin) {
-            if remaining == 0 { break; }
-            if token.state != TrstState::Active { continue; }
+            if remaining == 0 {
+                break;
+            }
+            if token.state != TrstState::Active {
+                continue;
+            }
             let take = token.amount.min(remaining);
             match portions.get_mut(&token.basis) {
                 Some(portion) => {
-                    portion.amount = portion.amount.checked_add(take)
+                    portion.amount = portion
+                        .amount
+                        .checked_add(take)
                         .ok_or("TRST consumed provenance overflow")?;
                 }
                 None => {
-                    portions.insert(token.basis, ConsumedProvenance {
-                        basis: token.basis, amount: take, origin: token.origin,
-                        origin_wallet: token.origin_wallet.clone(),
-                        origin_timestamp: token.origin_timestamp,
-                        effective_origin_timestamp: token.effective_origin_timestamp,
-                    });
+                    portions.insert(
+                        token.basis,
+                        ConsumedProvenance {
+                            basis: token.basis,
+                            amount: take,
+                            origin: token.origin,
+                            origin_wallet: token.origin_wallet.clone(),
+                            origin_timestamp: token.origin_timestamp,
+                            effective_origin_timestamp: token.effective_origin_timestamp,
+                        },
+                    );
                 }
             }
             remaining -= take;
@@ -243,18 +315,26 @@ impl IndexedPortfolio {
     /// Apply an authorized whole-origin revocation to this portfolio only.
     /// Graph revocation, holder indexes and pending transfers remain the caller's
     /// atomic transition; merged proportional cuts require their separate path.
-    pub fn with_revoked_origin(&self, origin: &TxHash) -> Result<(Self, Vec<RevocationEvent>), String> {
+    pub fn with_revoked_origin(
+        &self,
+        origin: &TxHash,
+    ) -> Result<(Self, Vec<RevocationEvent>), String> {
         let mut result = self.clone();
         let mut events = Vec::new();
         for token in self.origin_tokens(origin) {
-            if !matches!(token.state, TrstState::Active | TrstState::Expired) { continue; }
+            if !matches!(token.state, TrstState::Active | TrstState::Expired) {
+                continue;
+            }
             let mut revoked = token.clone();
             revoked.state = TrstState::Revoked;
             revoked.revoked_origin = Some(*origin);
             result.replace_owned(revoked)?;
             events.push(RevocationEvent {
-                holder: self.holder.clone(), token_id: token.id, revoked_origin: *origin,
-                revoked_amount: token.amount, total_amount: token.amount,
+                holder: self.holder.clone(),
+                token_id: token.id,
+                revoked_origin: *origin,
+                revoked_amount: token.amount,
+                total_amount: token.amount,
             });
         }
         Ok((result, events))
@@ -264,7 +344,9 @@ impl IndexedPortfolio {
     /// Preserve composition bases and use the current governed expiry period.
     /// The caller must first resolve graph/outcome invalidation authorization.
     pub fn with_restored_origin(
-        &self, origin: &TxHash, now: Timestamp,
+        &self,
+        origin: &TxHash,
+        now: Timestamp,
     ) -> Result<(Self, Vec<RestorationEvent>), String> {
         let mut result = self.clone();
         let mut events = Vec::new();
@@ -273,10 +355,14 @@ impl IndexedPortfolio {
             restored.revoked_origin = None;
             restored.state = if token.is_expired(now, self.expiry_secs) {
                 TrstState::Expired
-            } else { TrstState::Active };
+            } else {
+                TrstState::Active
+            };
             result.replace_owned(restored)?;
             events.push(RestorationEvent {
-                holder: self.holder.clone(), token_id: token.id, amount: token.amount,
+                holder: self.holder.clone(),
+                token_id: token.id,
+                amount: token.amount,
             });
         }
         Ok((result, events))
@@ -292,7 +378,13 @@ impl IndexedPortfolio {
         revoked_origin: TxHash,
         tainted: u128,
     ) -> Result<(Self, MergerGraph, Vec<RevocationEvent>), String> {
-        self.with_split_revocation_cached(graph, merge, revoked_origin, tainted, &mut HashMap::new())
+        self.with_split_revocation_cached(
+            graph,
+            merge,
+            revoked_origin,
+            tainted,
+            &mut HashMap::new(),
+        )
     }
 
     /// Answers are scoped to one revoked origin and immutable revision records.
@@ -305,27 +397,39 @@ impl IndexedPortfolio {
         tainted: u128,
         answers: &mut HashMap<TxHash, bool>,
     ) -> Result<(Self, MergerGraph, Vec<RevocationEvent>), String> {
-        if !graph.contains_merge(merge) { return Err("TRST split origin is not a merge".into()); }
+        if !graph.contains_merge(merge) {
+            return Err("TRST split origin is not a merge".into());
+        }
         let mut result = self.clone();
         let basis_graph = graph;
         let mut graph = graph.clone();
         let mut events = Vec::new();
         for token in self.split_tokens(*merge, revoked_origin) {
-            if !matches!(token.state, TrstState::Active | TrstState::Expired) { continue; }
+            if !matches!(token.state, TrstState::Active | TrstState::Expired) {
+                continue;
+            }
             #[cfg(test)]
             let basis_started = std::time::Instant::now();
             if !graph.valid_basis(merge, token.basis) {
                 return Err("invalid TRST split composition basis".into());
             }
             let cut = basis_graph.basis_cut_cached(
-                merge, token.basis, token.amount, &revoked_origin, tainted, answers);
+                merge,
+                token.basis,
+                token.amount,
+                &revoked_origin,
+                tainted,
+                answers,
+            );
             #[cfg(test)]
             crate::engine::SPLIT_PHASES.with(|slot| {
                 if let Some(totals) = slot.borrow_mut().as_mut() {
                     totals[0] += basis_started.elapsed().as_nanos();
                 }
             });
-            if cut == 0 { continue; }
+            if cut == 0 {
+                continue;
+            }
             let mut remainder = token.clone();
             if cut >= token.amount {
                 remainder.state = TrstState::Revoked;
@@ -365,10 +469,14 @@ impl IndexedPortfolio {
                 result.insert_owned(TrstToken {
                     basis: TrstBasis::Single(revoked_origin),
                     id: crate::engine::split_token_id(&token.id, &revoked_origin),
-                    amount: cut, origin: *merge, link: token.id, holder: self.holder.clone(),
+                    amount: cut,
+                    origin: *merge,
+                    link: token.id,
+                    holder: self.holder.clone(),
                     origin_timestamp: token.origin_timestamp,
                     effective_origin_timestamp: token.effective_origin_timestamp,
-                    state: TrstState::Revoked, origin_wallet: token.origin_wallet.clone(),
+                    state: TrstState::Revoked,
+                    origin_wallet: token.origin_wallet.clone(),
                     revoked_origin: Some(revoked_origin),
                 })?;
                 #[cfg(test)]
@@ -379,8 +487,11 @@ impl IndexedPortfolio {
                 });
             }
             events.push(RevocationEvent {
-                holder: self.holder.clone(), token_id: token.id, revoked_origin,
-                revoked_amount: cut, total_amount: token.amount,
+                holder: self.holder.clone(),
+                token_id: token.id,
+                revoked_origin,
+                revoked_amount: cut,
+                total_amount: token.amount,
             });
         }
         Ok((result, graph, events))
@@ -388,7 +499,10 @@ impl IndexedPortfolio {
 
     fn add_membership(&mut self, order: Order, token: &TrstToken) {
         if token.revoked_origin.is_none() {
-            self.split_members.entry(Self::split_key(token)).or_default().insert(order);
+            self.split_members
+                .entry(Self::split_key(token))
+                .or_default()
+                .insert(order);
         }
         let (index, origin) = match token.revoked_origin {
             Some(tag) => (&mut self.revoked_origins, tag),
@@ -402,9 +516,14 @@ impl IndexedPortfolio {
     fn remove_membership(&mut self, order: Order, token: &TrstToken) {
         if token.revoked_origin.is_none() {
             let key = Self::split_key(token);
-            let members = self.split_members.get_mut(&key).expect("indexed split membership");
+            let members = self
+                .split_members
+                .get_mut(&key)
+                .expect("indexed split membership");
             members.remove(&order);
-            if members.is_empty() { self.split_members.remove(&key); }
+            if members.is_empty() {
+                self.split_members.remove(&key);
+            }
         }
         let (index, origin) = match token.revoked_origin {
             Some(tag) => (&mut self.revoked_origins, tag),
@@ -412,7 +531,9 @@ impl IndexedPortfolio {
         };
         let members = index.get_mut(&origin).expect("indexed origin membership");
         members.remove(&order);
-        if members.is_empty() { index.remove(&origin); }
+        if members.is_empty() {
+            index.remove(&origin);
+        }
     }
 
     pub(crate) fn iter_canonical_tokens(&self) -> impl Iterator<Item = &TrstToken> {
@@ -423,24 +544,35 @@ impl IndexedPortfolio {
     /// and deadline. No expiry transition or graph validation is performed.
     pub fn to_portfolio(&self) -> WalletPortfolio {
         WalletPortfolio::from_parts(
-            self.order.values().map(|id| (*self.rows[id].token).clone()).collect(),
-            self.balance, self.earliest_expiry())
+            self.order
+                .values()
+                .map(|id| (*self.rows[id].token).clone())
+                .collect(),
+            self.balance,
+            self.earliest_expiry(),
+        )
     }
 
     fn earliest_expiry(&self) -> Option<Timestamp> {
-        self.active_times.get_min().map(|(at, _)| Timestamp::new(at.as_secs().saturating_add(self.expiry_secs)))
+        self.active_times
+            .get_min()
+            .map(|(at, _)| Timestamp::new(at.as_secs().saturating_add(self.expiry_secs)))
     }
 
     fn header(&self) -> Row {
         Row::Header {
-            holder: self.holder.clone(), count: self.rows.len() as u64,
+            holder: self.holder.clone(),
+            count: self.rows.len() as u64,
             head: self.order.get_min().map(|(_, id)| *id),
-            cached_transferable: self.balance, earliest_expiry: self.earliest_expiry(),
+            cached_transferable: self.balance,
+            earliest_expiry: self.earliest_expiry(),
         }
     }
 
     fn check_token(&self, token: &TrstToken) -> Result<(), String> {
-        if token.holder != self.holder { return Err("stable portfolio owner mismatch".into()); }
+        if token.holder != self.holder {
+            return Err("stable portfolio owner mismatch".into());
+        }
         if (token.state == TrstState::Revoked) != token.revoked_origin.is_some() {
             return Err("inconsistent TRST revocation state".into());
         }
@@ -448,8 +580,11 @@ impl IndexedPortfolio {
     }
 
     fn remove_token_totals(&mut self, token: &TrstToken) {
-        self.counters.remove(token.effective_origin_timestamp.as_secs(),
-            token.amount, token.state == TrstState::Revoked);
+        self.counters.remove(
+            token.effective_origin_timestamp.as_secs(),
+            token.amount,
+            token.state == TrstState::Revoked,
+        );
         self.remove_active_summary(token);
     }
 
@@ -457,28 +592,40 @@ impl IndexedPortfolio {
         if token.state == TrstState::Active {
             self.balance -= token.amount;
             let balance = self.origin_active_balance(&token.origin) - token.amount;
-            if balance == 0 { self.origin_balances.remove(&token.origin); }
-            else { self.origin_balances.insert(token.origin, balance); }
-            self.active_times.remove(&(token.effective_origin_timestamp, token.id));
+            if balance == 0 {
+                self.origin_balances.remove(&token.origin);
+            } else {
+                self.origin_balances.insert(token.origin, balance);
+            }
+            self.active_times
+                .remove(&(token.effective_origin_timestamp, token.id));
         }
     }
 
     fn add_token_totals(&mut self, token: &TrstToken) -> Result<(), String> {
         self.add_active_summary(token)?;
-        self.counters.insert(token.effective_origin_timestamp.as_secs(),
-            token.amount, token.state == TrstState::Revoked);
+        self.counters.insert(
+            token.effective_origin_timestamp.as_secs(),
+            token.amount,
+            token.state == TrstState::Revoked,
+        );
         Ok(())
     }
 
     fn add_active_summary(&mut self, token: &TrstToken) -> Result<(), String> {
         if token.state == TrstState::Active {
-            let total = self.balance.checked_add(token.amount)
+            let total = self
+                .balance
+                .checked_add(token.amount)
                 .ok_or("TRST holding balance overflow")?;
-            let balance = self.origin_active_balance(&token.origin).checked_add(token.amount)
+            let balance = self
+                .origin_active_balance(&token.origin)
+                .checked_add(token.amount)
                 .ok_or("TRST origin balance overflow")?;
             self.balance = total;
             self.origin_balances.insert(token.origin, balance);
-            self.active_times.insert((token.effective_origin_timestamp, token.id));
+            self.active_times
+                .insert((token.effective_origin_timestamp, token.id));
         }
         Ok(())
     }
@@ -514,7 +661,8 @@ impl IndexedPortfolio {
 
     /// Share the original cut once; discard the entire candidate on any error.
     pub(crate) fn with_inserted_batch(
-        &self, tokens: impl IntoIterator<Item = TrstToken>,
+        &self,
+        tokens: impl IntoIterator<Item = TrstToken>,
     ) -> Result<Self, String> {
         let mut result = self.clone();
         for token in tokens {
@@ -540,9 +688,13 @@ impl IndexedPortfolio {
     // may change their candidate before failing and must remain private.
     fn insert_owned(&mut self, token: TrstToken) -> Result<(), String> {
         self.check_token(&token)?;
-        if self.rows.contains_key(&token.id) { return Err("duplicate TRST holding".into()); }
+        if self.rows.contains_key(&token.id) {
+            return Err("duplicate TRST holding".into());
+        }
         self.add_token_totals(&token)?;
-        if self.next_order == u128::MAX { self.relabel(); }
+        if self.next_order == u128::MAX {
+            self.relabel();
+        }
         let key = (token.origin_timestamp, self.next_order);
         self.next_order += 1;
         let previous = self.order.get_prev(&key).map(|(_, id)| *id);
@@ -552,7 +704,14 @@ impl IndexedPortfolio {
         }
         self.order.insert(key, token.id);
         self.add_membership(key, &token);
-        self.rows.insert(token.id, Holding { order: key, token: token.into(), next });
+        self.rows.insert(
+            token.id,
+            Holding {
+                order: key,
+                token: token.into(),
+                next,
+            },
+        );
         Ok(())
     }
 
@@ -570,12 +729,15 @@ impl IndexedPortfolio {
         if old.order.0 != token.origin_timestamp {
             return Err("TRST payload replacement changes ordering timestamp".into());
         }
-        if *old.token == token { return Ok(()); }
+        if *old.token == token {
+            return Ok(());
+        }
         let old = old.clone();
         self.remove_token_totals(&old.token);
         self.add_token_totals(&token)?;
         let same_membership = old.token.revoked_origin == token.revoked_origin
-            && (token.revoked_origin.is_some() || Self::split_key(&old.token) == Self::split_key(&token));
+            && (token.revoked_origin.is_some()
+                || Self::split_key(&old.token) == Self::split_key(&token));
         if !same_membership {
             self.remove_membership(old.order, &old.token);
             self.add_membership(old.order, &token);
@@ -597,10 +759,16 @@ impl IndexedPortfolio {
         let old = self.rows.get(id).cloned().ok_or("TRST holding not found")?;
         self.remove_token_totals(&old.token);
         self.remove_membership(old.order, &old.token);
-        let previous = self.order.range((Unbounded, Excluded(old.order)))
-            .next_back().map(|(_, id)| *id);
+        let previous = self
+            .order
+            .range((Unbounded, Excluded(old.order)))
+            .next_back()
+            .map(|(_, id)| *id);
         if let Some(previous) = previous {
-            self.rows.get_mut(&previous).expect("indexed predecessor").next = old.next;
+            self.rows
+                .get_mut(&previous)
+                .expect("indexed predecessor")
+                .next = old.next;
         }
         self.order.remove(&old.order);
         self.rows.remove(id);
@@ -613,9 +781,13 @@ impl IndexedPortfolio {
         let mut result = self.clone();
         let mut expired = 0u128;
         while let Some(&(at, id)) = result.active_times.get_min() {
-            if !at.has_expired(self.expiry_secs, now) { break; }
+            if !at.has_expired(self.expiry_secs, now) {
+                break;
+            }
             let mut token = result.get(&id).expect("indexed active expiry").clone();
-            expired = expired.checked_add(token.amount).ok_or("TRST expired balance overflow")?;
+            expired = expired
+                .checked_add(token.amount)
+                .ok_or("TRST expired balance overflow")?;
             token.state = TrstState::Expired;
             result.replace_owned(token)?;
         }
@@ -627,14 +799,17 @@ impl IndexedPortfolio {
     /// counters share their root across period changes and clock normalization.
     pub fn with_expiry_period(&self, expiry_secs: u64, now: Timestamp) -> Result<Self, String> {
         #[cfg(test)]
-        let probe = std::env::var_os("BURST_PERIOD_STAGE_TIMING")
-            .map(|_| std::time::Instant::now());
+        let probe =
+            std::env::var_os("BURST_PERIOD_STAGE_TIMING").map(|_| std::time::Instant::now());
         let mut result = self.clone();
         result.expiry_secs = expiry_secs;
         let state_at = |token: &TrstToken| match token.state {
             TrstState::Active | TrstState::Expired => {
-                if token.is_expired(now, expiry_secs) { TrstState::Expired }
-                else { TrstState::Active }
+                if token.is_expired(now, expiry_secs) {
+                    TrstState::Expired
+                } else {
+                    TrstState::Active
+                }
             }
             other => other,
         };
@@ -648,7 +823,8 @@ impl IndexedPortfolio {
             changed_count += usize::from(state != token.state);
             if state == TrstState::Active {
                 active_count += 1;
-                final_balance = final_balance.checked_add(token.amount)
+                final_balance = final_balance
+                    .checked_add(token.amount)
                     .ok_or("TRST holding balance overflow")?;
                 resurrect |= token.state == TrstState::Expired;
             }
@@ -674,7 +850,9 @@ impl IndexedPortfolio {
                     }
                     let mut token = (*row.token).clone();
                     token.state = state;
-                    if rebuild { result.add_active_summary(&token)?; }
+                    if rebuild {
+                        result.add_active_summary(&token)?;
+                    }
                     result.rows.get_mut(id).expect("existing holding").token = token.into();
                 } else if rebuild {
                     result.add_active_summary(&row.token)?;
@@ -686,7 +864,9 @@ impl IndexedPortfolio {
         // though the checked final balance fits.
         if !rebuild && resurrect {
             for (_, row) in &self.rows {
-                if row.token.state == TrstState::Expired && state_at(&row.token) == TrstState::Active {
+                if row.token.state == TrstState::Expired
+                    && state_at(&row.token) == TrstState::Active
+                {
                     let mut active = (*row.token).clone();
                     active.state = TrstState::Active;
                     result.add_active_summary(&active)?;
@@ -715,16 +895,22 @@ impl IndexedPortfolio {
         mut visit: impl FnMut(Option<Row>, Option<Row>) -> Result<(), E>,
     ) -> Result<(), E> {
         if self.holder != before.holder || self.expiry_secs != before.expiry_secs {
-            return Err(invalid("indexed delta requires the same holder and governed period".into()));
+            return Err(invalid(
+                "indexed delta requires the same holder and governed period".into(),
+            ));
         }
         let old = before.header();
         let new = self.header();
-        if old != new { visit(Some(old), Some(new))?; }
+        if old != new {
+            visit(Some(old), Some(new))?;
+        }
         for id in self.rows.changed_keys(&before.rows) {
             let encode = |row: &Holding| holding(&self.holder, &row.token, row.next);
             let old = before.rows.get(id).map(encode);
             let new = self.rows.get(id).map(encode);
-            if old != new { visit(old, new)?; }
+            if old != new {
+                visit(old, new)?;
+            }
         }
         Ok(())
     }

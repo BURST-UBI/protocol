@@ -68,7 +68,9 @@ impl Running {
         let installer = node.snapshot_installer();
         let registry = node.connection_registry.clone();
         let task = tokio::spawn(async move {
-            let result = node.start_with_services(burst_daemon::start_public_services).await;
+            let result = node
+                .start_with_services(burst_daemon::start_public_services)
+                .await;
             if let Err(error) = &result {
                 eprintln!("compact live node exited: {error}");
             }

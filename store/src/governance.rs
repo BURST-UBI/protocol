@@ -18,13 +18,22 @@ pub trait GovernanceStore {
     /// `offset` skips matching keys; keyset callers use zero. The default loads
     /// and sorts every proposal hash before selecting the requested page.
     fn proposal_hash_page(
-        &self, after: Option<&TxHash>, offset: u64, limit: usize,
+        &self,
+        after: Option<&TxHash>,
+        offset: u64,
+        limit: usize,
     ) -> Result<Vec<TxHash>, StoreError> {
-        if limit == 0 { return Ok(Vec::new()); }
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         let mut hashes = self.all_proposal_hashes()?;
         hashes.sort_unstable();
-        Ok(hashes.into_iter().filter(|hash| after.is_none_or(|key| hash > key))
-            .skip(usize::try_from(offset).unwrap_or(usize::MAX)).take(limit).collect())
+        Ok(hashes
+            .into_iter()
+            .filter(|hash| after.is_none_or(|key| hash > key))
+            .skip(usize::try_from(offset).unwrap_or(usize::MAX))
+            .take(limit)
+            .collect())
     }
 
     /// Store a vote on a proposal.

@@ -37,8 +37,14 @@ pub(super) fn setup_with(
     setup_fixture(Fixture::selection_with(configure))
 }
 
-pub(super) fn setup_fixture(fixture: Fixture) -> (
-    Fixture, tempfile::TempDir, LmdbStore, CheckpointManifest, CheckpointCertificate,
+pub(super) fn setup_fixture(
+    fixture: Fixture,
+) -> (
+    Fixture,
+    tempfile::TempDir,
+    LmdbStore,
+    CheckpointManifest,
+    CheckpointCertificate,
 ) {
     let (dir, store, heads) = fixture.store();
     let roster = PreparedRoster::prepare_next(&store, NetworkId::Dev, &fixture.params, CUTOFF - 1)
@@ -207,7 +213,9 @@ fn compact_selection_vote_coverage_rechecks_promises_without_fencing() {
     coverage
         .check_local_promises(&suffix.tx_begin_write().unwrap(), &representative)
         .unwrap();
-    assert!(coverage.covers_local_promises(&suffix.tx_begin_write().unwrap(), &representative).unwrap());
+    assert!(coverage
+        .covers_local_promises(&suffix.tx_begin_write().unwrap(), &representative)
+        .unwrap());
     assert_eq!(
         suffix
             .tx_begin_write()
@@ -239,7 +247,9 @@ fn compact_selection_vote_coverage_rechecks_promises_without_fencing() {
         .check_local_promises(&suffix.tx_begin_write().unwrap(), &representative)
         .unwrap_err();
     assert!(error.to_string().contains("omits a durable final vote"));
-    assert!(!coverage.covers_local_promises(&suffix.tx_begin_write().unwrap(), &representative).unwrap());
+    assert!(!coverage
+        .covers_local_promises(&suffix.tx_begin_write().unwrap(), &representative)
+        .unwrap());
     assert_eq!(
         suffix
             .tx_begin_write()

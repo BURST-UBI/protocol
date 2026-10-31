@@ -1,7 +1,7 @@
 //! Optional, live group-to-group trust. Registered endpoints are never replaced
 //! by a response, and discovering a group is not itself a reason to trust it.
 
-use crate::{GroupEvaluation, GroupClient, GroupError, GroupRegistry, MemberStatus};
+use crate::{GroupClient, GroupError, GroupEvaluation, GroupRegistry, MemberStatus};
 use serde::Deserialize;
 use std::collections::{BTreeSet, VecDeque};
 use std::time::Duration;
@@ -26,9 +26,15 @@ struct Endorsements {
 
 impl GroupClient {
     pub async fn verify_member_through_groups(
-        &self, registry: &GroupRegistry, root: &str, wallet_id: &str, max_hops: u8,
+        &self,
+        registry: &GroupRegistry,
+        root: &str,
+        wallet_id: &str,
+        max_hops: u8,
     ) -> Result<Option<MembershipPath>, GroupError> {
-        self.evaluation().verify_member_through_groups(registry, root, wallet_id, max_hops).await
+        self.evaluation()
+            .verify_member_through_groups(registry, root, wallet_id, max_hops)
+            .await
     }
 }
 
@@ -125,7 +131,6 @@ impl GroupEvaluation<'_> {
             None => Ok(None),
         }
     }
-
 }
 
 impl GroupClient {

@@ -47,13 +47,20 @@ thread_local! {
 }
 
 impl SelectionRequest {
-    pub(crate) fn storage_pool(&self) -> &[WalletAddress] { &self.pool }
+    pub(crate) fn storage_pool(&self) -> &[WalletAddress] {
+        &self.pool
+    }
 
     pub(crate) fn storage_header(&self) -> Self {
         Self {
-            target: self.target.clone(), trigger: self.trigger, attempt: self.attempt,
-            cutoff: self.cutoff, params_hash: self.params_hash, pool: Vec::new(),
-            count: self.count, round: self.round,
+            target: self.target.clone(),
+            trigger: self.trigger,
+            attempt: self.attempt,
+            cutoff: self.cutoff,
+            params_hash: self.params_hash,
+            pool: Vec::new(),
+            count: self.count,
+            round: self.round,
         }
     }
 
@@ -381,30 +388,66 @@ mod tests {
         let (mut orchestrator, params, request) = pending();
         let (parent, certificate) = certificate(&request);
         assert!(orchestrator.selection_context(&address(99)).is_none());
-        let context = orchestrator.install_selection(&address(99), &parent, &certificate, &output()).unwrap();
+        let context = orchestrator
+            .install_selection(&address(99), &parent, &certificate, &output())
+            .unwrap();
         let bytes = orchestrator.snapshot().encode().unwrap();
         COMMITMENT_CALLS.with(|calls| calls.set(0));
         for _ in 0..100 {
             assert_eq!(orchestrator.selection_context(&address(99)), Some(context));
-            orchestrator.validate_certified_vote(&address(99), &address(1), context,
-                params.params_hash(), Timestamp::new(GENESIS)).unwrap();
+            orchestrator
+                .validate_certified_vote(
+                    &address(99),
+                    &address(1),
+                    context,
+                    params.params_hash(),
+                    Timestamp::new(GENESIS),
+                )
+                .unwrap();
         }
         assert_eq!(COMMITMENT_CALLS.with(|calls| calls.get()), 0);
         assert_eq!(orchestrator.snapshot().encode().unwrap(), bytes);
-        let restored = VerificationOrchestrator::restore(OrchestratorSnapshot::decode(&bytes).unwrap());
+        let restored =
+            VerificationOrchestrator::restore(OrchestratorSnapshot::decode(&bytes).unwrap());
         COMMITMENT_CALLS.with(|calls| calls.set(0));
-        for _ in 0..100 { assert_eq!(restored.selection_context(&address(99)), Some(context)); }
+        for _ in 0..100 {
+            assert_eq!(restored.selection_context(&address(99)), Some(context));
+        }
         assert_eq!(COMMITMENT_CALLS.with(|calls| calls.get()), 1);
         assert_eq!(restored.snapshot().encode().unwrap(), bytes);
-        assert!(restored.validate_certified_vote(&address(99), &address(1), BlockHash::ZERO,
-            params.params_hash(), Timestamp::new(GENESIS)).is_err());
-        assert!(restored.validate_certified_vote(&address(99), &address(1), context,
-            BlockHash::ZERO, Timestamp::new(GENESIS)).is_err());
-        assert!(restored.validate_certified_vote(&address(99), &address(1), context,
-            params.params_hash(), Timestamp::new(GENESIS - 1)).is_err());
+        assert!(restored
+            .validate_certified_vote(
+                &address(99),
+                &address(1),
+                BlockHash::ZERO,
+                params.params_hash(),
+                Timestamp::new(GENESIS)
+            )
+            .is_err());
+        assert!(restored
+            .validate_certified_vote(
+                &address(99),
+                &address(1),
+                context,
+                BlockHash::ZERO,
+                Timestamp::new(GENESIS)
+            )
+            .is_err());
+        assert!(restored
+            .validate_certified_vote(
+                &address(99),
+                &address(1),
+                context,
+                params.params_hash(),
+                Timestamp::new(GENESIS - 1)
+            )
+            .is_err());
         let mut wrong_checkpoint = certificate.checkpoint.clone();
         wrong_checkpoint.selection_root = BlockHash::ZERO;
-        assert_eq!(request.vote_context(&wrong_checkpoint), Err(SelectionError::WrongCheckpoint));
+        assert_eq!(
+            request.vote_context(&wrong_checkpoint),
+            Err(SelectionError::WrongCheckpoint)
+        );
     }
 
     #[test]

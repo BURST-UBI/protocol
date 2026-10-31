@@ -12,7 +12,8 @@ pub fn compute_balance_from_state(
     now: Timestamp,
     rates: &RateHistory,
 ) -> Result<u128, WalletError> {
-    state.available_balance_checked(rates, now)
+    state
+        .available_balance_checked(rates, now)
         .ok_or_else(|| WalletError::Other("invalid BRN accounting or accrual overflow".into()))
 }
 
@@ -72,12 +73,21 @@ mod tests {
         rates.apply_rate_change(20, Timestamp::new(50)).unwrap();
         let mut state = BrnWalletState::new(Timestamp::EPOCH);
         state.stop_accrual(Timestamp::new(20));
-        assert_eq!(compute_balance_from_state(&state, Timestamp::new(100), &rates).unwrap(), 200);
+        assert_eq!(
+            compute_balance_from_state(&state, Timestamp::new(100), &rates).unwrap(),
+            200
+        );
         state.resume_accrual(Timestamp::new(80));
-        assert_eq!(compute_balance_from_state(&state, Timestamp::new(100), &rates).unwrap(), 600);
+        assert_eq!(
+            compute_balance_from_state(&state, Timestamp::new(100), &rates).unwrap(),
+            600
+        );
         state.total_burned = 100;
         state.total_staked = 200;
-        assert_eq!(compute_balance_from_state(&state, Timestamp::new(100), &rates).unwrap(), 300);
+        assert_eq!(
+            compute_balance_from_state(&state, Timestamp::new(100), &rates).unwrap(),
+            300
+        );
         state.total_burned = 601;
         assert!(compute_balance_from_state(&state, Timestamp::new(100), &rates).is_err());
     }
@@ -167,8 +177,13 @@ mod tests {
     #[test]
     fn history_balance_saturates_on_large_deductions() {
         let history = RateHistory::new(1, Timestamp::new(0));
-        let balance =
-            estimate_balance_with_history(Timestamp::new(0), Timestamp::new(10), &history, 100, 100);
+        let balance = estimate_balance_with_history(
+            Timestamp::new(0),
+            Timestamp::new(10),
+            &history,
+            100,
+            100,
+        );
         assert_eq!(balance.unwrap(), 0);
     }
 

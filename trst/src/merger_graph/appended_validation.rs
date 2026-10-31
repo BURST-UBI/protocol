@@ -16,14 +16,22 @@ fn appended_edges(
         let new = after.get(parent).unwrap_or(&empty);
         new.visit_appended(old, |_, child, _| {
             let key = (*parent, child);
-            let count = expected.get_mut(&key).ok_or("unexpected appended merger edge")?;
+            let count = expected
+                .get_mut(&key)
+                .ok_or("unexpected appended merger edge")?;
             *count -= 1;
-            if *count == 0 { expected.remove(&key); }
+            if *count == 0 {
+                expected.remove(&key);
+            }
             Ok(())
         })?;
-        if new.is_empty() { return Err("empty merger graph reverse index".into()); }
+        if new.is_empty() {
+            return Err("empty merger graph reverse index".into());
+        }
     }
-    if !expected.is_empty() { return Err("missing appended merger edge".into()); }
+    if !expected.is_empty() {
+        return Err("missing appended merger edge".into());
+    }
     Ok(())
 }
 
@@ -33,30 +41,43 @@ impl MergerGraph {
     /// Revocations, revisions and edits to old nodes require fresh preparation.
     /// Returns a new graph without changing either branch. None means this path
     /// cannot validate the changes; it is not permission to install them unchecked.
-    pub(crate) fn rebase_appends(&self, before: &Self, after: &Self) -> Result<Option<Self>, String> {
+    pub(crate) fn rebase_appends(
+        &self,
+        before: &Self,
+        after: &Self,
+    ) -> Result<Option<Self>, String> {
         if self.shares_storage_with(before) && after.shares_storage_with(before) {
             return Ok(Some(self.clone()));
         }
-        if self.validated_append_ids(before)?.is_none() { return Ok(None); }
-        let Some(added) = after.validated_append_ids(before)? else { return Ok(None) };
+        if self.validated_append_ids(before)?.is_none() {
+            return Ok(None);
+        }
+        let Some(added) = after.validated_append_ids(before)? else {
+            return Ok(None);
+        };
         let mut rebased = self.clone();
         for id in added {
             if self.merge_nodes.contains_key(&id) {
                 return Err("prepared merge ID already exists".into());
             }
-            rebased.merge_nodes.insert(id, after.merge_nodes[&id].clone());
+            rebased
+                .merge_nodes
+                .insert(id, after.merge_nodes[&id].clone());
             if let Some(bases) = after.source_revisions.get(&id) {
                 rebased.source_revisions.insert(id, bases.clone());
             }
         }
         fn append(
             current: &mut SharedMap<TxHash, EdgeList>,
-            before: &SharedMap<TxHash, EdgeList>, after: &SharedMap<TxHash, EdgeList>,
+            before: &SharedMap<TxHash, EdgeList>,
+            after: &SharedMap<TxHash, EdgeList>,
         ) -> Result<(), String> {
             for parent in after.changed_keys(before) {
                 let empty = EdgeList::default();
                 let old = before.get(parent).unwrap_or(&empty);
-                let new = after.get(parent).ok_or("prepared merge removes reverse edges")?;
+                let new = after
+                    .get(parent)
+                    .ok_or("prepared merge removes reverse edges")?;
                 // Preserve arrival order, including repeated parent occurrences.
                 new.visit_appended(old, |_, child, _| {
                     current.entry(*parent).or_default().push(child);
@@ -65,8 +86,16 @@ impl MergerGraph {
             }
             Ok(())
         }
-        append(&mut rebased.origin_to_merges, &before.origin_to_merges, &after.origin_to_merges)?;
-        append(&mut rebased.merge_to_downstream, &before.merge_to_downstream, &after.merge_to_downstream)?;
+        append(
+            &mut rebased.origin_to_merges,
+            &before.origin_to_merges,
+            &after.origin_to_merges,
+        )?;
+        append(
+            &mut rebased.merge_to_downstream,
+            &before.merge_to_downstream,
+            &after.merge_to_downstream,
+        )?;
         // Concurrent appends must not reinterpret a prepared burn as a merge,
         // or promote an existing burn source to the candidate's new merge ID.
         if rebased.validated_append_ids(self)?.is_none() {
@@ -81,21 +110,30 @@ impl MergerGraph {
         self.revocation_counts_with_poll(&|_| Ok(()))
     }
 
-    pub(crate) fn revocation_counts_with_poll(&self, poll: &dyn Fn(&'static str) -> Result<(), String>) -> Result<SharedMap<TxHash, usize>, String> {
+    pub(crate) fn revocation_counts_with_poll(
+        &self,
+        poll: &dyn Fn(&'static str) -> Result<(), String>,
+    ) -> Result<SharedMap<TxHash, usize>, String> {
         self.build_revocation_counts_with_poll(poll)
     }
 
     /// Count contribution entries, not their amounts. This scans every merge node
     /// and contribution; it does not validate the entries being counted.
-    pub(crate) fn build_revocation_counts_with_poll<C: crate::dependency_counts::Counts>(&self,
-        poll: &dyn Fn(&'static str) -> Result<(), String>) -> Result<C, String> {
+    pub(crate) fn build_revocation_counts_with_poll<C: crate::dependency_counts::Counts>(
+        &self,
+        poll: &dyn Fn(&'static str) -> Result<(), String>,
+    ) -> Result<C, String> {
         let mut counts = C::default();
         for node in self.merge_nodes.values() {
             poll("trst:revocation-count-node")?;
             for origin in node.revoked_contribs.keys() {
                 poll("trst:revocation-count-origin")?;
-                crate::dependency_counts::adjust(&mut counts, *origin, true,
-                    "revocation contribution count overflow")?;
+                crate::dependency_counts::adjust(
+                    &mut counts,
+                    *origin,
+                    true,
+                    "revocation contribution count overflow",
+                )?;
             }
         }
         Ok(counts)
@@ -104,12 +142,24 @@ impl MergerGraph {
     /// Return updated counts for the supplied added nodes. The caller must pass
     /// each newly counted ID once; repeated IDs would be counted repeatedly.
     pub(crate) fn add_revocation_counts(
-        &self, before: &SharedMap<TxHash, usize>, ids: impl IntoIterator<Item = TxHash>,
+        &self,
+        before: &SharedMap<TxHash, usize>,
+        ids: impl IntoIterator<Item = TxHash>,
     ) -> Result<SharedMap<TxHash, usize>, String> {
         let mut counts = before.clone();
         for id in ids {
-            for origin in self.merge_nodes.get(&id).ok_or("missing counted merge")?.revoked_contribs.keys() {
-                let count = counts.get(origin).copied().unwrap_or(0).checked_add(1)
+            for origin in self
+                .merge_nodes
+                .get(&id)
+                .ok_or("missing counted merge")?
+                .revoked_contribs
+                .keys()
+            {
+                let count = counts
+                    .get(origin)
+                    .copied()
+                    .unwrap_or(0)
+                    .checked_add(1)
                     .ok_or("revocation contribution count overflow")?;
                 counts.insert(*origin, count);
             }
@@ -123,27 +173,62 @@ impl MergerGraph {
     /// requires full validation. This does not authorize the revocation or replay
     /// its amount calculations from ledger history.
     pub(crate) fn validated_revocation_transition(
-        &self, before: &Self, before_counts: &SharedMap<TxHash, usize>,
+        &self,
+        before: &Self,
+        before_counts: &SharedMap<TxHash, usize>,
     ) -> Result<Option<SharedMap<TxHash, usize>>, String> {
-        if !self.origin_to_merges.shares_storage_with(&before.origin_to_merges)
-            || !self.merge_to_downstream.shares_storage_with(&before.merge_to_downstream)
-            || !self.source_revisions.shares_storage_with(&before.source_revisions) {
+        if !self
+            .origin_to_merges
+            .shares_storage_with(&before.origin_to_merges)
+            || !self
+                .merge_to_downstream
+                .shares_storage_with(&before.merge_to_downstream)
+            || !self
+                .source_revisions
+                .shares_storage_with(&before.source_revisions)
+        {
             return Ok(None);
         }
         let mut counts = before_counts.clone();
         for id in self.merge_nodes.changed_keys(&before.merge_nodes) {
             let (Some(old), Some(new)) = (before.merge_nodes.get(id), self.merge_nodes.get(id))
-                else { return Ok(None) };
-            if old.merge_tx != new.merge_tx || old.total_amount != new.total_amount
-                || old.source_origins != new.source_origins { return Ok(None); }
-            snapshot_validation::validate_node(id, new, &self.revoked_origins)?;
-            for origin in old.revoked_contribs.keys().filter(|o| !new.revoked_contribs.contains_key(o)) {
-                let count = counts.get(origin).copied().unwrap_or(0).checked_sub(1)
-                    .ok_or("revocation contribution count underflow")?;
-                if count == 0 { counts.remove(origin); } else { counts.insert(*origin, count); }
+            else {
+                return Ok(None);
+            };
+            if old.merge_tx != new.merge_tx
+                || old.total_amount != new.total_amount
+                || old.source_origins != new.source_origins
+            {
+                return Ok(None);
             }
-            for origin in new.revoked_contribs.keys().filter(|o| !old.revoked_contribs.contains_key(o)) {
-                let count = counts.get(origin).copied().unwrap_or(0).checked_add(1)
+            snapshot_validation::validate_node(id, new, &self.revoked_origins)?;
+            for origin in old
+                .revoked_contribs
+                .keys()
+                .filter(|o| !new.revoked_contribs.contains_key(o))
+            {
+                let count = counts
+                    .get(origin)
+                    .copied()
+                    .unwrap_or(0)
+                    .checked_sub(1)
+                    .ok_or("revocation contribution count underflow")?;
+                if count == 0 {
+                    counts.remove(origin);
+                } else {
+                    counts.insert(*origin, count);
+                }
+            }
+            for origin in new
+                .revoked_contribs
+                .keys()
+                .filter(|o| !old.revoked_contribs.contains_key(o))
+            {
+                let count = counts
+                    .get(origin)
+                    .copied()
+                    .unwrap_or(0)
+                    .checked_add(1)
                     .ok_or("revocation contribution count overflow")?;
                 counts.insert(*origin, count);
             }
@@ -159,7 +244,10 @@ impl MergerGraph {
             }
             self.validate_revision(id, &self.revisions[id])?;
         }
-        for merge in self.current_revisions.changed_keys(&before.current_revisions) {
+        for merge in self
+            .current_revisions
+            .changed_keys(&before.current_revisions)
+        {
             if let Some(revision) = self.current_revisions.get(merge) {
                 self.validate_current_revision(merge, revision)?;
             }
@@ -173,10 +261,17 @@ impl MergerGraph {
     /// Shared subtrees avoid rescanning. Reverse-edge checks can still compare a
     /// full prefix when internal slot layouts differ. Returned IDs are sorted by
     /// hash, not by ancestry or transaction order.
-    pub(crate) fn validated_append_ids(&self, before: &Self) -> Result<Option<Vec<TxHash>>, String> {
-        if !self.revoked_origins.shares_storage_with(&before.revoked_origins)
+    pub(crate) fn validated_append_ids(
+        &self,
+        before: &Self,
+    ) -> Result<Option<Vec<TxHash>>, String> {
+        if !self
+            .revoked_origins
+            .shares_storage_with(&before.revoked_origins)
             || !self.revisions.shares_storage_with(&before.revisions)
-            || !self.current_revisions.shares_storage_with(&before.current_revisions)
+            || !self
+                .current_revisions
+                .shares_storage_with(&before.current_revisions)
         {
             return Ok(None);
         }
@@ -212,7 +307,10 @@ impl MergerGraph {
             }
             indegrees.insert(*id, degree);
         }
-        let mut ready: Vec<_> = indegrees.iter().filter_map(|(id, count)| (*count == 0).then_some(*id)).collect();
+        let mut ready: Vec<_> = indegrees
+            .iter()
+            .filter_map(|(id, count)| (*count == 0).then_some(*id))
+            .collect();
         let mut visited = 0;
         while let Some(id) = ready.pop() {
             visited += 1;
@@ -220,23 +318,39 @@ impl MergerGraph {
                 for child in next {
                     let count = indegrees.get_mut(child).expect("new child");
                     *count -= 1;
-                    if *count == 0 { ready.push(*child); }
+                    if *count == 0 {
+                        ready.push(*child);
+                    }
                 }
             }
         }
-        if visited != added.len() { return Err("cyclic appended merger graph".into()); }
+        if visited != added.len() {
+            return Err("cyclic appended merger graph".into());
+        }
         appended_edges(&before.origin_to_merges, &self.origin_to_merges, origins)?;
-        appended_edges(&before.merge_to_downstream, &self.merge_to_downstream, downstream)?;
+        appended_edges(
+            &before.merge_to_downstream,
+            &self.merge_to_downstream,
+            downstream,
+        )?;
         for id in self.source_revisions.changed_keys(&before.source_revisions) {
-            if !added.contains(id) { return Ok(None); }
-            let Some(sources) = self.source_revisions.get(id) else { return Ok(None) };
+            if !added.contains(id) {
+                return Ok(None);
+            }
+            let Some(sources) = self.source_revisions.get(id) else {
+                return Ok(None);
+            };
             let node = self.merge_nodes.get(id).expect("added revised node");
             if sources.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
                 return Err("noncanonical merge source revisions".into());
             }
             for (index, basis) in sources {
-                if *basis == TrstBasis::Entire || !node.source_origins.get(*index)
-                    .is_some_and(|source| self.valid_basis(&source.origin, *basis)) {
+                if *basis == TrstBasis::Entire
+                    || !node
+                        .source_origins
+                        .get(*index)
+                        .is_some_and(|source| self.valid_basis(&source.origin, *basis))
+                {
                     return Err("invalid merge source revision".into());
                 }
             }
@@ -250,11 +364,22 @@ impl MergerGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn id(n: u8) -> TxHash { TxHash::new([n; 32]) }
+    fn id(n: u8) -> TxHash {
+        TxHash::new([n; 32])
+    }
     fn node(n: u8, sources: &[(u8, u128)]) -> MergeNode {
-        MergeNode { merge_tx: id(n), source_origins: sources.iter()
-            .map(|(origin, amount)| MergeSource { origin: id(*origin), amount: *amount }).collect(),
-            total_amount: sources.iter().map(|(_, amount)| amount).sum(), revoked_contribs: HashMap::new() }
+        MergeNode {
+            merge_tx: id(n),
+            source_origins: sources
+                .iter()
+                .map(|(origin, amount)| MergeSource {
+                    origin: id(*origin),
+                    amount: *amount,
+                })
+                .collect(),
+            total_amount: sources.iter().map(|(_, amount)| amount).sum(),
+            revoked_contribs: HashMap::new(),
+        }
     }
     #[test]
     fn prepared_appends_preserve_shared_parents_order_and_reject_changed_context() {
@@ -276,7 +401,11 @@ mod tests {
         changed.merge_nodes.get_mut(&id(10)).unwrap().total_amount += 1;
         assert!(current.rebase_appends(&before, &changed).unwrap().is_none());
         let mut changed = after.clone();
-        changed.origin_to_merges.get_mut(&id(1)).unwrap().push(id(99));
+        changed
+            .origin_to_merges
+            .get_mut(&id(1))
+            .unwrap()
+            .push(id(99));
         assert!(current.rebase_appends(&before, &changed).is_err());
         // Both inputs can independently be valid while their union promotes a
         // burn identifier used only by the other concurrent append.
@@ -293,8 +422,14 @@ mod tests {
         current.record_merge_with_bases(node(200, &[(11, 1)]), vec![before.current_basis(&id(11))]);
         let rebased = current.rebase_appends(&before, &after).unwrap().unwrap();
         rebased.validate_persisted().unwrap();
-        assert_eq!(rebased.source_revisions[&id(100)], after.source_revisions[&id(100)]);
-        assert_eq!(rebased.source_revisions[&id(200)], current.source_revisions[&id(200)]);
+        assert_eq!(
+            rebased.source_revisions[&id(100)],
+            after.source_revisions[&id(100)]
+        );
+        assert_eq!(
+            rebased.source_revisions[&id(200)],
+            current.source_revisions[&id(200)]
+        );
     }
 
     #[test]
@@ -302,19 +437,33 @@ mod tests {
         let before = baseline();
         let mut after = before.clone();
         after.apply_revocation(id(1));
-        assert!(after.validated_revocation_transition(&before, &before.revocation_counts().unwrap()).unwrap().is_some());
+        assert!(after
+            .validated_revocation_transition(&before, &before.revocation_counts().unwrap())
+            .unwrap()
+            .is_some());
         let mut restored = after.clone();
         restored.apply_restoration(&id(1));
-        assert!(restored.validated_revocation_transition(&after, &after.revocation_counts().unwrap()).unwrap().is_some());
+        assert!(restored
+            .validated_revocation_transition(&after, &after.revocation_counts().unwrap())
+            .unwrap()
+            .is_some());
         let mut corrupt = after.clone();
         corrupt.revoked_origins.remove(&id(1));
-        assert!(corrupt.validated_revocation_transition(&before, &before.revocation_counts().unwrap()).is_err());
+        assert!(corrupt
+            .validated_revocation_transition(&before, &before.revocation_counts().unwrap())
+            .is_err());
         let mut removed = restored.clone();
         removed.revisions.clear();
-        assert!(!removed.validated_revocation_transition(&after, &after.revocation_counts().unwrap()).unwrap().is_some());
+        assert!(!removed
+            .validated_revocation_transition(&after, &after.revocation_counts().unwrap())
+            .unwrap()
+            .is_some());
         let mut changed = before.clone();
         changed.merge_nodes.get_mut(&id(10)).unwrap().source_origins[0].amount += 1;
-        assert!(!changed.validated_revocation_transition(&before, &before.revocation_counts().unwrap()).unwrap().is_some());
+        assert!(!changed
+            .validated_revocation_transition(&before, &before.revocation_counts().unwrap())
+            .unwrap()
+            .is_some());
     }
 
     #[test]
@@ -324,11 +473,16 @@ mod tests {
         let counts = before.revocation_counts().unwrap();
         let mut missing = before.clone();
         missing.revoked_origins.remove(&id(1));
-        assert!(missing.validated_revocation_transition(&before, &counts).is_err());
+        assert!(missing
+            .validated_revocation_transition(&before, &counts)
+            .is_err());
         assert!(missing.validate_persisted().is_err());
         let mut restored = before.clone();
         restored.apply_restoration(&id(1));
-        let next = restored.validated_revocation_transition(&before, &counts).unwrap().unwrap();
+        let next = restored
+            .validated_revocation_transition(&before, &counts)
+            .unwrap()
+            .unwrap();
         assert_eq!(next, restored.revocation_counts().unwrap());
         assert!(next.is_empty());
         for bad_head in [false, true] {
@@ -340,15 +494,21 @@ mod tests {
                 revision.previous = id(99);
                 corrupt.revisions.insert(revision.hash(), revision);
             }
-            assert!(corrupt.validated_revocation_transition(&before, &counts).is_err());
+            assert!(corrupt
+                .validated_revocation_transition(&before, &counts)
+                .is_err());
             assert!(corrupt.validate_persisted().is_err());
         }
-        assert!(restored.validated_revocation_transition(&before, &SharedMap::default()).is_err());
+        assert!(restored
+            .validated_revocation_transition(&before, &SharedMap::default())
+            .is_err());
     }
 
     fn baseline() -> MergerGraph {
         let mut graph = MergerGraph::new();
-        for n in 10..50 { graph.record_merge(node(n, &[(1, 1), (2, 1)])); }
+        for n in 10..50 {
+            graph.record_merge(node(n, &[(1, 1), (2, 1)]));
+        }
         graph.validate_persisted().unwrap();
         graph
     }
@@ -362,7 +522,10 @@ mod tests {
     fn appended_batches_match_full_validation_with_repeated_edges_and_revision_bases() {
         let before = baseline();
         let after = appended(&before);
-        assert_eq!(after.validated_append_ids(&before).unwrap(), Some(vec![id(100), id(101)]));
+        assert_eq!(
+            after.validated_append_ids(&before).unwrap(),
+            Some(vec![id(100), id(101)])
+        );
         after.validate_persisted().unwrap();
         assert_eq!(before.validated_append_ids(&before).unwrap(), Some(vec![]));
         let mut revoked = before.clone();
@@ -370,7 +533,10 @@ mod tests {
         revoked.validate_persisted().unwrap();
         let mut after = revoked.clone();
         after.record_merge_with_bases(node(100, &[(10, 1)]), vec![revoked.current_basis(&id(10))]);
-        assert_eq!(after.validated_append_ids(&revoked).unwrap(), Some(vec![id(100)]));
+        assert_eq!(
+            after.validated_append_ids(&revoked).unwrap(),
+            Some(vec![id(100)])
+        );
         after.validate_persisted().unwrap();
     }
     #[test]
@@ -381,14 +547,32 @@ mod tests {
             let mut after = appended(&before);
             match mutation {
                 0 => after.origin_to_merges.get_mut(&id(1)).unwrap().push(id(77)),
-                1 => { after.origin_to_merges.get_mut(&id(1)).unwrap().pop(); }
-                2 => { after.merge_to_downstream.remove(&id(10)); }
-                3 => { after.merge_nodes.get_mut(&id(100)).unwrap().total_amount += 1; }
-                4 => { after.source_revisions.insert(id(100), vec![(99, TrstBasis::Single(id(2)))]); }
-                _ => { after.origin_to_merges.insert(id(2), EdgeList::default()); }
+                1 => {
+                    after.origin_to_merges.get_mut(&id(1)).unwrap().pop();
+                }
+                2 => {
+                    after.merge_to_downstream.remove(&id(10));
+                }
+                3 => {
+                    after.merge_nodes.get_mut(&id(100)).unwrap().total_amount += 1;
+                }
+                4 => {
+                    after
+                        .source_revisions
+                        .insert(id(100), vec![(99, TrstBasis::Single(id(2)))]);
+                }
+                _ => {
+                    after.origin_to_merges.insert(id(2), EdgeList::default());
+                }
             }
-            assert!(after.validated_append_ids(&before).is_err(), "mutation={mutation}");
-            assert!(after.validate_persisted().is_err(), "full mutation={mutation}");
+            assert!(
+                after.validated_append_ids(&before).is_err(),
+                "mutation={mutation}"
+            );
+            assert!(
+                after.validate_persisted().is_err(),
+                "full mutation={mutation}"
+            );
             assert_eq!(before.to_bytes(), saved);
         }
     }
@@ -412,7 +596,10 @@ mod tests {
         after.record_merge(node(100, &[(101, 1)]));
         after.record_merge(node(101, &[(100, 1)]));
         after.record_downstream(id(101), id(100));
-        assert!(after.validated_append_ids(&before).unwrap_err().contains("cyclic"));
+        assert!(after
+            .validated_append_ids(&before)
+            .unwrap_err()
+            .contains("cyclic"));
         assert!(after.validate_persisted().unwrap_err().contains("cyclic"));
     }
 }

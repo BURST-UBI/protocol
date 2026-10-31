@@ -12,16 +12,38 @@ pub(crate) struct RevocationUndo {
 impl MergerGraph {
     fn revocation_record(&self, template: &GraphRecord) -> Option<GraphRecord> {
         match template {
-            GraphRecord::Contribution { merge, origin, .. } => self.merge_nodes.get(merge)?
-                .revoked_contribs.get(origin).map(|amount| GraphRecord::Contribution {
-                    merge: *merge, origin: *origin, amount: *amount }),
-            GraphRecord::RevokedOrigin(origin) => self.revoked_origins.contains(origin)
+            GraphRecord::Contribution { merge, origin, .. } => self
+                .merge_nodes
+                .get(merge)?
+                .revoked_contribs
+                .get(origin)
+                .map(|amount| GraphRecord::Contribution {
+                    merge: *merge,
+                    origin: *origin,
+                    amount: *amount,
+                }),
+            GraphRecord::RevokedOrigin(origin) => self
+                .revoked_origins
+                .contains(origin)
                 .then_some(GraphRecord::RevokedOrigin(*origin)),
-            GraphRecord::Revision { hash, .. } => self.revisions.get(hash).map(|r| GraphRecord::Revision {
-                hash: *hash, merge: r.merge_tx, previous: r.previous, origin: r.origin,
-                revoked: r.revoked, remaining: r.remaining }),
-            GraphRecord::CurrentRevision { merge, .. } => self.current_revisions.get(merge)
-                .map(|revision| GraphRecord::CurrentRevision { merge: *merge, revision: *revision }),
+            GraphRecord::Revision { hash, .. } => {
+                self.revisions.get(hash).map(|r| GraphRecord::Revision {
+                    hash: *hash,
+                    merge: r.merge_tx,
+                    previous: r.previous,
+                    origin: r.origin,
+                    revoked: r.revoked,
+                    remaining: r.remaining,
+                })
+            }
+            GraphRecord::CurrentRevision { merge, .. } => {
+                self.current_revisions
+                    .get(merge)
+                    .map(|revision| GraphRecord::CurrentRevision {
+                        merge: *merge,
+                        revision: *revision,
+                    })
+            }
             _ => None,
         }
     }
@@ -46,9 +68,17 @@ impl MergerGraph {
         let mut seen = HashSet::new();
         let mut removed = Vec::new();
         for (old, new) in changes {
-            let row = old.as_ref().or(new.as_ref()).ok_or("empty graph undo change")?;
-            if !matches!(row, GraphRecord::Contribution { .. } | GraphRecord::RevokedOrigin(_)
-                | GraphRecord::Revision { .. } | GraphRecord::CurrentRevision { .. }) {
+            let row = old
+                .as_ref()
+                .or(new.as_ref())
+                .ok_or("empty graph undo change")?;
+            if !matches!(
+                row,
+                GraphRecord::Contribution { .. }
+                    | GraphRecord::RevokedOrigin(_)
+                    | GraphRecord::Revision { .. }
+                    | GraphRecord::CurrentRevision { .. }
+            ) {
                 return Ok(None);
             }
             let key = row.key();
@@ -60,38 +90,56 @@ impl MergerGraph {
             }
             match row {
                 GraphRecord::Contribution { merge, origin, .. } => {
-                    let node = candidate.merge_nodes.get_mut(merge).ok_or("graph undo contribution lacks node")?;
+                    let node = candidate
+                        .merge_nodes
+                        .get_mut(merge)
+                        .ok_or("graph undo contribution lacks node")?;
                     if let Some(GraphRecord::Contribution { amount, .. }) = new {
                         node.revoked_contribs.insert(*origin, *amount);
-                    } else { node.revoked_contribs.remove(origin); }
+                    } else {
+                        node.revoked_contribs.remove(origin);
+                    }
                 }
                 GraphRecord::RevokedOrigin(origin) => {
-                    if new.is_some() { candidate.revoked_origins.insert(*origin); }
-                    else { candidate.revoked_origins.remove(origin); }
+                    if new.is_some() {
+                        candidate.revoked_origins.insert(*origin);
+                    } else {
+                        candidate.revoked_origins.remove(origin);
+                    }
                 }
                 GraphRecord::Revision { hash, .. } => {
-                    if new.is_some() { return Ok(None); }
+                    if new.is_some() {
+                        return Ok(None);
+                    }
                     candidate.revisions.remove(hash);
                     removed.push(*hash);
                 }
                 GraphRecord::CurrentRevision { merge, .. } => {
                     if let Some(GraphRecord::CurrentRevision { revision, .. }) = new {
                         candidate.current_revisions.insert(*merge, *revision);
-                    } else { candidate.current_revisions.remove(merge); }
+                    } else {
+                        candidate.current_revisions.remove(merge);
+                    }
                 }
                 _ => unreachable!("supported rows checked above"),
             }
         }
-        if candidate.revoked_origins.contains(&TxHash::ZERO) { return Err("invalid revoked origin".into()); }
+        if candidate.revoked_origins.contains(&TxHash::ZERO) {
+            return Err("invalid revoked origin".into());
+        }
         // Reuse the fixed-topology contribution proof. Retaining old revision
         // metadata in this temporary context avoids assuming the yet-unproved
         // deletion is valid. Its dependency proof is checked separately below.
         let mut contribution_context = candidate.clone();
         contribution_context.revisions = self.revisions.clone();
         contribution_context.current_revisions = self.current_revisions.clone();
-        let counts = contribution_context.validated_revocation_transition(self, contributions)?
+        let counts = contribution_context
+            .validated_revocation_transition(self, contributions)?
             .ok_or("graph undo changed fixed topology")?;
-        for merge in candidate.current_revisions.changed_keys(&self.current_revisions) {
+        for merge in candidate
+            .current_revisions
+            .changed_keys(&self.current_revisions)
+        {
             if let Some(revision) = candidate.current_revisions.get(merge) {
                 candidate.validate_current_revision(merge, revision)?;
             }
@@ -102,35 +150,70 @@ impl MergerGraph {
                 return Err("graph undo would orphan a revision dependency".into());
             }
         }
-        Ok(Some(RevocationUndo { graph: candidate, contributions: counts,
-            revisions: index, removed_revisions: removed }))
+        Ok(Some(RevocationUndo {
+            graph: candidate,
+            contributions: counts,
+            revisions: index,
+            removed_revisions: removed,
+        }))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn id(n: u8) -> TxHash { TxHash::new([n; 32]) }
+    fn id(n: u8) -> TxHash {
+        TxHash::new([n; 32])
+    }
     fn base() -> MergerGraph {
         let mut graph = MergerGraph::new();
-        graph.record_merge(MergeNode { merge_tx: id(10), source_origins: vec![
-            MergeSource { origin: id(1), amount: 5 }, MergeSource { origin: id(2), amount: 5 }],
-            total_amount: 10, revoked_contribs: HashMap::new() });
+        graph.record_merge(MergeNode {
+            merge_tx: id(10),
+            source_origins: vec![
+                MergeSource {
+                    origin: id(1),
+                    amount: 5,
+                },
+                MergeSource {
+                    origin: id(2),
+                    amount: 5,
+                },
+            ],
+            total_amount: 10,
+            revoked_contribs: HashMap::new(),
+        });
         graph
     }
-    fn inverse(before: &MergerGraph, after: &MergerGraph) -> Vec<(Option<GraphRecord>, Option<GraphRecord>)> {
+    fn inverse(
+        before: &MergerGraph,
+        after: &MergerGraph,
+    ) -> Vec<(Option<GraphRecord>, Option<GraphRecord>)> {
         let mut rows = Vec::new();
-        after.visit_record_delta(before, |old, new| { rows.push((new, old)); Ok(()) }).unwrap();
+        after
+            .visit_record_delta(before, |old, new| {
+                rows.push((new, old));
+                Ok(())
+            })
+            .unwrap();
         rows
     }
-    fn undo(current: &MergerGraph, rows: &[(Option<GraphRecord>, Option<GraphRecord>)]) -> Result<Option<RevocationUndo>, String> {
-        current.rewind_revocation_records(rows, &current.revocation_counts()?, &RevisionIndex::new(current)?)
+    fn undo(
+        current: &MergerGraph,
+        rows: &[(Option<GraphRecord>, Option<GraphRecord>)],
+    ) -> Result<Option<RevocationUndo>, String> {
+        current.rewind_revocation_records(
+            rows,
+            &current.revocation_counts()?,
+            &RevisionIndex::new(current)?,
+        )
     }
     #[test]
     fn revocation_and_restoration_inverse_match_full_graph_validation() {
         let original = base();
-        let mut revoked = original.clone(); revoked.apply_revocation(id(1));
-        let mut restored = revoked.clone(); restored.apply_restoration(&id(1));
+        let mut revoked = original.clone();
+        revoked.apply_revocation(id(1));
+        let mut restored = revoked.clone();
+        restored.apply_restoration(&id(1));
         for (before, current) in [(&original, &revoked), (&revoked, &restored)] {
             let rows = inverse(before, current);
             let saved = current.to_bytes();
@@ -145,23 +228,42 @@ mod tests {
     }
     #[test]
     fn surviving_source_basis_and_incomplete_metadata_fail_without_mutation() {
-        let mut before = base(); before.apply_revocation(id(1));
-        let mut current = before.clone(); current.apply_restoration(&id(1));
+        let mut before = base();
+        before.apply_revocation(id(1));
+        let mut current = before.clone();
+        current.apply_restoration(&id(1));
         let rows = inverse(&before, &current);
         let mut consumed = current.clone();
-        consumed.record_merge(MergeNode { merge_tx: id(11), source_origins: vec![
-            MergeSource { origin: id(10), amount: 1 }], total_amount: 1, revoked_contribs: HashMap::new() });
+        consumed.record_merge(MergeNode {
+            merge_tx: id(11),
+            source_origins: vec![MergeSource {
+                origin: id(10),
+                amount: 1,
+            }],
+            total_amount: 1,
+            revoked_contribs: HashMap::new(),
+        });
         assert!(undo(&consumed, &rows).is_err());
-        let no_marker: Vec<_> = rows.iter().filter(|(_, restored)|
-            !matches!(restored, Some(GraphRecord::RevokedOrigin(_)))).cloned().collect();
+        let no_marker: Vec<_> = rows
+            .iter()
+            .filter(|(_, restored)| !matches!(restored, Some(GraphRecord::RevokedOrigin(_))))
+            .cloned()
+            .collect();
         assert!(undo(&current, &no_marker).is_err());
-        let mut duplicated = rows.clone(); duplicated.push(rows[0].clone());
+        let mut duplicated = rows.clone();
+        duplicated.push(rows[0].clone());
         assert!(undo(&current, &duplicated).is_err());
         let mut wrong = rows.clone();
-        let record = wrong.iter_mut().find_map(|(old, _)| match old {
-            Some(GraphRecord::Revision { remaining, .. }) => Some(remaining), _ => None }).unwrap();
+        let record = wrong
+            .iter_mut()
+            .find_map(|(old, _)| match old {
+                Some(GraphRecord::Revision { remaining, .. }) => Some(remaining),
+                _ => None,
+            })
+            .unwrap();
         *record += 1;
         assert!(undo(&current, &wrong).is_err());
-        current.validate_persisted().unwrap(); consumed.validate_persisted().unwrap();
+        current.validate_persisted().unwrap();
+        consumed.validate_persisted().unwrap();
     }
 }

@@ -38,11 +38,19 @@ pub(in crate::confirmed_replay::tests) fn sparse(
     (dir, store)
 }
 
-pub(super) fn append(store: &LmdbStore, block: &StateBlock, confirmed: bool) {
+pub(in crate::confirmed_replay::tests) fn append(
+    store: &LmdbStore,
+    block: &StateBlock,
+    confirmed: bool,
+) {
     append_batch(store, std::slice::from_ref(block), confirmed);
 }
 
-pub(super) fn append_batch(store: &LmdbStore, blocks: &[StateBlock], confirmed: bool) {
+pub(in crate::confirmed_replay::tests) fn append_batch(
+    store: &LmdbStore,
+    blocks: &[StateBlock],
+    confirmed: bool,
+) {
     let mut batch = store.tx_begin_write().unwrap();
     let mut schedule = confirmed.then(|| {
         crate::confirmed_governance::ConfirmedGovernance::load(&batch)
@@ -82,7 +90,7 @@ pub(super) fn append_batch(store: &LmdbStore, blocks: &[StateBlock], confirmed: 
     batch.commit().unwrap();
 }
 
-pub(super) fn finish(
+pub(in crate::confirmed_replay::tests) fn finish(
     base: &SnapshotContinuation,
     store: &LmdbStore,
     source: &LmdbStore,
@@ -362,8 +370,11 @@ fn compact_startup_rejects_corrupt_boundaries_and_metadata_without_repairs() {
             base.verify_installed_metadata(&local, &tail).is_err(),
             "case {case}"
         );
-        assert!(base.verify_discovery_metadata_in(&local.tx_begin_write().unwrap(), &tail).is_err(),
-            "discovery corruption case {case}");
+        assert!(
+            base.verify_discovery_metadata_in(&local.tx_begin_write().unwrap(), &tail)
+                .is_err(),
+            "discovery corruption case {case}"
+        );
         assert_eq!(
             local
                 .tx_begin_write()
@@ -633,28 +644,43 @@ fn discovery_tolerates_provisional_append_but_rechecks_confirmed_cut_and_indices
     let base = snapshot.into_continuation();
     let (_dir, local) = sparse(&base, &source);
     let checked = finish(&base, &local, &source);
-    fixture.push(0, BlockType::ChangeRepresentative, base.anchor().cutoff() + 1, |block| {
-        block.payment_epoch = base.anchor().hash();
-    });
+    fixture.push(
+        0,
+        BlockType::ChangeRepresentative,
+        base.anchor().cutoff() + 1,
+        |block| {
+            block.payment_epoch = base.anchor().hash();
+        },
+    );
     let block = fixture.blocks.last().unwrap();
     append(&local, block, false);
     assert!(base.verify_installed_metadata(&local, &checked).is_err());
-    base.verify_discovery_metadata_in(&local.tx_begin_write().unwrap(), &checked).unwrap();
+    base.verify_discovery_metadata_in(&local.tx_begin_write().unwrap(), &checked)
+        .unwrap();
 
     let mut account = local.account_store().get_account(&address(0)).unwrap();
     let valid = account.clone();
     account.head = BlockHash::new([91; 32]);
     let mut batch = local.tx_begin_write().unwrap();
-    batch.put_account(&account.address, &bincode::serialize(&account).unwrap()).unwrap();
+    batch
+        .put_account(&account.address, &bincode::serialize(&account).unwrap())
+        .unwrap();
     batch.commit().unwrap();
-    assert!(base.verify_discovery_metadata_in(&local.tx_begin_write().unwrap(), &checked).is_err());
+    assert!(base
+        .verify_discovery_metadata_in(&local.tx_begin_write().unwrap(), &checked)
+        .is_err());
 
     account = valid;
     account.confirmation_height = account.block_count;
     let mut batch = local.tx_begin_write().unwrap();
-    batch.put_account(&account.address, &bincode::serialize(&account).unwrap()).unwrap();
+    batch
+        .put_account(&account.address, &bincode::serialize(&account).unwrap())
+        .unwrap();
     batch.commit().unwrap();
-    assert!(base.verify_discovery_metadata_in(&local.tx_begin_write().unwrap(), &checked).is_err());
+    assert!(base
+        .verify_discovery_metadata_in(&local.tx_begin_write().unwrap(), &checked)
+        .is_err());
     let fresh = finish(&base, &local, &source);
-    base.verify_discovery_metadata_in(&local.tx_begin_write().unwrap(), &fresh).unwrap();
+    base.verify_discovery_metadata_in(&local.tx_begin_write().unwrap(), &fresh)
+        .unwrap();
 }

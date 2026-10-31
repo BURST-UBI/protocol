@@ -126,7 +126,9 @@ async fn merge_fork_preserves_a_cemented_consumer_of_the_same_burn_origin() {
     let elections = node.active_elections.clone();
     let shutdown = node.shutdown.clone();
     let task = tokio::spawn(async move {
-        node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+        node.start_with_services(burst_daemon::start_public_services)
+            .await
+            .unwrap();
         node.stop().await.unwrap();
     });
     let address =
@@ -137,7 +139,16 @@ async fn merge_fork_preserves_a_cemented_consumer_of_the_same_burn_origin() {
         let genesis = store.account_store().get_account(&creator).unwrap().head;
         let epoch = store.meta_store().payment_epoch().unwrap();
         let signed = |seed, kind, previous, link, brn_spent, trst_balance| {
-            block(seed, kind, previous, link, brn_spent, trst_balance, &config.params, epoch)
+            block(
+                seed,
+                kind,
+                previous,
+                link,
+                brn_spent,
+                trst_balance,
+                &config.params,
+                epoch,
+            )
         };
         let link = |seed| BlockHash::new(burst_crypto::keypair_from_seed(&[seed; 32]).public.0);
         let resign = |block: &mut StateBlock, seed| {
@@ -234,7 +245,8 @@ async fn merge_fork_preserves_a_cemented_consumer_of_the_same_burn_origin() {
         })
         .await;
         elect(&elections, &creator, &winner, Some(losing.hash)).await;
-        wait_until(|| store.account_store().get_account(&creator).unwrap().head == winner.hash).await;
+        wait_until(|| store.account_store().get_account(&creator).unwrap().head == winner.hash)
+            .await;
         assert!(!store.block_store().exists(&losing.hash).unwrap());
         assert!(store.block_store().exists(&independent.hash).unwrap());
         let engine = trst.lock().await;
@@ -265,7 +277,10 @@ async fn merge_fork_preserves_a_cemented_consumer_of_the_same_burn_origin() {
     let engine = restarted.trst_engine.clone();
     let shutdown = restarted.shutdown.clone();
     let task = tokio::spawn(async move {
-        restarted.start_with_services(burst_daemon::start_public_services).await.unwrap();
+        restarted
+            .start_with_services(burst_daemon::start_public_services)
+            .await
+            .unwrap();
         restarted.stop().await.unwrap();
     });
     let restored = tokio::time::timeout(Duration::from_secs(20), async {
@@ -310,7 +325,9 @@ async fn disjoint_payment_fork(cement_independent: bool) {
     let elections = node.active_elections.clone();
     let shutdown = node.shutdown.clone();
     let task = tokio::spawn(async move {
-        node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+        node.start_with_services(burst_daemon::start_public_services)
+            .await
+            .unwrap();
         node.stop().await.unwrap();
     });
     let address =
@@ -321,7 +338,16 @@ async fn disjoint_payment_fork(cement_independent: bool) {
         let genesis = store.account_store().get_account(&creator).unwrap().head;
         let epoch = store.meta_store().payment_epoch().unwrap();
         let signed = |seed, kind, previous, link, brn_spent, trst_balance| {
-            block(seed, kind, previous, link, brn_spent, trst_balance, &config.params, epoch)
+            block(
+                seed,
+                kind,
+                previous,
+                link,
+                brn_spent,
+                trst_balance,
+                &config.params,
+                epoch,
+            )
         };
         let link = |seed| BlockHash::new(burst_crypto::keypair_from_seed(&[seed; 32]).public.0);
         let funding = signed(0, BlockType::Burn, genesis, link(3), 100, 0);
@@ -400,7 +426,8 @@ async fn disjoint_payment_fork(cement_independent: bool) {
         })
         .await;
         elect(&elections, &creator, &winner, Some(losing.hash)).await;
-        wait_until(|| store.account_store().get_account(&creator).unwrap().head == winner.hash).await;
+        wait_until(|| store.account_store().get_account(&creator).unwrap().head == winner.hash)
+            .await;
         assert!(!store.block_store().exists(&losing.hash).unwrap());
         assert!(!store.block_store().exists(&receive.hash).unwrap());
         for (hash, bytes) in &retained {
@@ -474,7 +501,9 @@ async fn disjoint_payment_fork(cement_independent: bool) {
     let trst = node.trst_engine.clone();
     let shutdown = node.shutdown.clone();
     let task = tokio::spawn(async move {
-        node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+        node.start_with_services(burst_daemon::start_public_services)
+            .await
+            .unwrap();
         node.stop().await.unwrap();
     });
     let result = tokio::time::timeout(Duration::from_secs(30), async {
@@ -571,7 +600,9 @@ async fn verifier_preference_forks_replace_descendants_and_survive_restart() {
         let elections = node.active_elections.clone();
         let shutdown = node.shutdown.clone();
         let task = tokio::spawn(async move {
-            node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+            node.start_with_services(burst_daemon::start_public_services)
+                .await
+                .unwrap();
             node.stop().await.unwrap();
         });
         let creator = burst_node::genesis_key::genesis_address(NetworkId::Dev);
@@ -648,7 +679,9 @@ async fn verifier_preference_forks_replace_descendants_and_survive_restart() {
         let queue = node.block_queue();
         let shutdown = node.shutdown.clone();
         let task = tokio::spawn(async move {
-            node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+            node.start_with_services(burst_daemon::start_public_services)
+                .await
+                .unwrap();
             node.stop().await.unwrap();
         });
         let result = tokio::time::timeout(Duration::from_secs(10), async {
@@ -663,8 +696,10 @@ async fn verifier_preference_forks_replace_descendants_and_survive_restart() {
                 store.meta_store().payment_epoch().unwrap(),
             );
             assert!(queue.push(followup.clone()).await);
-            wait_until(|| store.account_store().get_account(&creator).unwrap().head == followup.hash)
-                .await;
+            wait_until(|| {
+                store.account_store().get_account(&creator).unwrap().head == followup.hash
+            })
+            .await;
             let account = store.account_store().get_account(&creator).unwrap();
             assert_eq!(
                 account.verifier_opted_in_at,
@@ -701,7 +736,9 @@ async fn restart_readmits_cached_fork_but_does_not_invent_a_quorum() {
     let queue = node.block_queue();
     let shutdown = node.shutdown.clone();
     let task = tokio::spawn(async move {
-        node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+        node.start_with_services(burst_daemon::start_public_services)
+            .await
+            .unwrap();
         node.stop().await.unwrap();
     });
     let creator = burst_node::genesis_key::genesis_address(NetworkId::Dev);
@@ -750,7 +787,9 @@ async fn restart_readmits_cached_fork_but_does_not_invent_a_quorum() {
     let brn = node.brn_engine.clone();
     let shutdown = node.shutdown.clone();
     let task = tokio::spawn(async move {
-        node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+        node.start_with_services(burst_daemon::start_public_services)
+            .await
+            .unwrap();
         node.stop().await.unwrap();
     });
     let root = burst_node::ledger_updater::election_root(&fork);
@@ -823,7 +862,9 @@ async fn elected_burn_replaces_received_branch_and_restart_can_receive_the_winne
     let queue = node.block_queue();
     let shutdown = node.shutdown.clone();
     let task = tokio::spawn(async move {
-        node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+        node.start_with_services(burst_daemon::start_public_services)
+            .await
+            .unwrap();
         node.stop().await.unwrap();
     });
     let creator = burst_node::genesis_key::genesis_address(NetworkId::Dev);
@@ -1127,7 +1168,10 @@ async fn elected_burn_replaces_received_branch_and_restart_can_receive_the_winne
     let restored = restarted.trst_engine.clone();
     let shutdown = restarted.shutdown.clone();
     let task = tokio::spawn(async move {
-        restarted.start_with_services(burst_daemon::start_public_services).await.unwrap();
+        restarted
+            .start_with_services(burst_daemon::start_public_services)
+            .await
+            .unwrap();
         restarted.stop().await.unwrap();
     });
     let mut late_conflict = block(

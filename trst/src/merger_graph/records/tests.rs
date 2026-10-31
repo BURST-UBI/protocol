@@ -13,11 +13,17 @@ fn edge_reconstruction_cancellation_stops_inside_one_large_parent() {
             reader.push(tx(1), position * 7, tx(10), position).unwrap();
         }
         let visits = std::cell::Cell::new(0);
-        let stop_at = if target == "trst:graph-build-parent" { 1 } else { 2 };
+        let stop_at = if target == "trst:graph-build-parent" {
+            1
+        } else {
+            2
+        };
         let result = reader.finish_with_poll(&|stage| {
             if stage == target {
                 visits.set(visits.get() + 1);
-                if visits.get() == stop_at { return Err("edge cancellation".into()); }
+                if visits.get() == stop_at {
+                    return Err("edge cancellation".into());
+                }
             }
             Ok(())
         });
@@ -68,7 +74,10 @@ fn edge_reader_rejects_duplicate_slots_and_invalid_occurrences_at_each_size() {
     };
     reader.push(record.clone()).unwrap();
     assert!(reader.push(record).is_err());
-    assert!(reader.finish().is_err(), "duplicate edge poisons publication");
+    assert!(
+        reader.finish().is_err(),
+        "duplicate edge poisons publication"
+    );
 }
 
 fn merge(graph: &mut MergerGraph, id: u8, sources: &[(u8, u128)]) {
@@ -388,20 +397,27 @@ fn one_merge_preserves_unrelated_graph_values_and_exact_record_delta() {
 #[test]
 fn compact_reader_matches_ordered_edges_across_arrival_orders() {
     for count in [1usize, 2, 8, 32] {
-        let rows: Vec<_> = (0..count).map(|i| (i as u64 * 7 + 3, tx(10 + (i % 3) as u8), (i / 3) as u64)).collect();
+        let rows: Vec<_> = (0..count)
+            .map(|i| (i as u64 * 7 + 3, tx(10 + (i % 3) as u8), (i / 3) as u64))
+            .collect();
         let expected: Vec<_> = rows.iter().map(|(_, child, _)| *child).collect();
         for reverse in [false, true] {
             for offset in 0..count {
                 let mut arrivals = rows.clone();
                 arrivals.rotate_left(offset);
-                if reverse { arrivals.reverse(); }
+                if reverse {
+                    arrivals.reverse();
+                }
                 let mut reader = EdgeReader::default();
                 for (position, child, occurrence) in arrivals {
                     reader.push(tx(1), position, child, occurrence).unwrap();
                     reader.push(tx(2), position, child, occurrence).unwrap();
                 }
                 let restored = reader.finish().unwrap();
-                assert_eq!(restored[&tx(1)].iter().copied().collect::<Vec<_>>(), expected);
+                assert_eq!(
+                    restored[&tx(1)].iter().copied().collect::<Vec<_>>(),
+                    expected
+                );
             }
         }
     }
@@ -412,15 +428,24 @@ fn checked_graph_comparison_matches_full_equality_and_cancels_inner_walks() {
     let mut graph = MergerGraph::new();
     merge(&mut graph, 20, &[(1, 40), (2, 60)]);
     graph.apply_revocation(tx(1));
-    for child in 30..50 { merge(&mut graph, child, &[(20, 10), (3, 5)]); }
+    for child in 30..50 {
+        merge(&mut graph, child, &[(20, 10), (3, 5)]);
+    }
     let independent = reload(&graph);
     let stages = std::cell::RefCell::new(BTreeMap::new());
-    assert!(graph.snapshot_eq_with_poll(&independent, &|stage| {
-        *stages.borrow_mut().entry(stage).or_insert(0usize) += 1; Ok(())
-    }).unwrap());
+    assert!(graph
+        .snapshot_eq_with_poll(&independent, &|stage| {
+            *stages.borrow_mut().entry(stage).or_insert(0usize) += 1;
+            Ok(())
+        })
+        .unwrap());
     let stages = stages.into_inner();
-    for required in ["trst:comparison-graph-edge", "trst:comparison-graph-source",
-        "trst:comparison-graph-contribution", "trst:comparison-graph-revision"] {
+    for required in [
+        "trst:comparison-graph-edge",
+        "trst:comparison-graph-source",
+        "trst:comparison-graph-contribution",
+        "trst:comparison-graph-revision",
+    ] {
         assert!(stages.contains_key(required));
     }
     for (target, count) in stages {
@@ -429,7 +454,9 @@ fn checked_graph_comparison_matches_full_equality_and_cancels_inner_walks() {
             let result = graph.snapshot_eq_with_poll(&independent, &|stage| {
                 if stage == target {
                     visits.set(visits.get() + 1);
-                    if visits.get() == stop { return Err("graph comparison stop".into()); }
+                    if visits.get() == stop {
+                        return Err("graph comparison stop".into());
+                    }
                 }
                 Ok(())
             });
@@ -444,16 +471,39 @@ fn checked_graph_comparison_matches_full_equality_and_cancels_inner_walks() {
             1 => changed.merge_to_downstream.clear(),
             2 => changed.merge_nodes.get_mut(&tx(20)).unwrap().merge_tx = tx(99),
             3 => changed.merge_nodes.get_mut(&tx(20)).unwrap().total_amount += 1,
-            4 => changed.merge_nodes.get_mut(&tx(20)).unwrap().source_origins.reverse(),
-            5 => changed.merge_nodes.get_mut(&tx(20)).unwrap().revoked_contribs.clear(),
-            6 => { changed.revoked_origins.insert(tx(99)); },
+            4 => changed
+                .merge_nodes
+                .get_mut(&tx(20))
+                .unwrap()
+                .source_origins
+                .reverse(),
+            5 => changed
+                .merge_nodes
+                .get_mut(&tx(20))
+                .unwrap()
+                .revoked_contribs
+                .clear(),
+            6 => {
+                changed.revoked_origins.insert(tx(99));
+            }
             7 => changed.revisions.clear(),
-            8 => { changed.current_revisions.insert(tx(99), tx(98)); },
-            9 => { changed.source_revisions.insert(tx(99), vec![(0, TrstBasis::Single(tx(98)))]); },
-            _ => { changed.merge_nodes.remove(&tx(20)); },
+            8 => {
+                changed.current_revisions.insert(tx(99), tx(98));
+            }
+            9 => {
+                changed
+                    .source_revisions
+                    .insert(tx(99), vec![(0, TrstBasis::Single(tx(98)))]);
+            }
+            _ => {
+                changed.merge_nodes.remove(&tx(20));
+            }
         }
         assert!(graph != changed, "no-op mutation {field}");
-        assert_eq!(graph.snapshot_eq_with_poll(&changed, &|_| Ok(())).unwrap(), graph == changed);
+        assert_eq!(
+            graph.snapshot_eq_with_poll(&changed, &|_| Ok(())).unwrap(),
+            graph == changed
+        );
     }
     assert!(graph == independent);
 }
@@ -461,8 +511,18 @@ fn checked_graph_comparison_matches_full_equality_and_cancels_inner_walks() {
 #[test]
 fn changing_edge_slot_preserves_storage_identity_and_roundtrips() {
     for mut row in [
-        GraphRecord::OriginEdge { origin: tx(1), position: 7, child: tx(2), occurrence: 3 },
-        GraphRecord::DownstreamEdge { merge: tx(1), position: 7, child: tx(2), occurrence: 3 },
+        GraphRecord::OriginEdge {
+            origin: tx(1),
+            position: 7,
+            child: tx(2),
+            occurrence: 3,
+        },
+        GraphRecord::DownstreamEdge {
+            merge: tx(1),
+            position: 7,
+            child: tx(2),
+            occurrence: 3,
+        },
     ] {
         let (key, original) = row.storage_entry().unwrap();
         let (group, slot) = row.edge_group_position().unwrap();
@@ -476,5 +536,12 @@ fn changing_edge_slot_preserves_storage_identity_and_roundtrips() {
         assert_eq!(restored.edge_group_position(), Some((group, u64::MAX)));
         assert!(restored == row);
     }
-    assert_eq!(GraphRecord::Node { hash: tx(1), total: 9 }.edge_group_position(), None);
+    assert_eq!(
+        GraphRecord::Node {
+            hash: tx(1),
+            total: 9
+        }
+        .edge_group_position(),
+        None
+    );
 }

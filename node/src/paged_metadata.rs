@@ -34,7 +34,9 @@ fn report_write(stage: &str, index: usize, bytes: usize) {
 
 #[cfg(test)]
 pub(crate) fn report_metadata_pages(batch: &LmdbWriteTransaction<'_>, stage: &str) {
-    if std::env::var_os("BURST_SNAPSHOT_INSTALL_STAGE_LOG").is_none() { return; }
+    if std::env::var_os("BURST_SNAPSHOT_INSTALL_STAGE_LOG").is_none() {
+        return;
+    }
     match batch.metadata_page_stats() {
         Ok(stats) => eprintln!(
             "snapshot-meta-live stage={stage} page_size={} branch={} leaf={} overflow={} entries={}",
@@ -65,9 +67,19 @@ pub(crate) fn is_paged(descriptor: &[u8]) -> Result<bool, StoreError> {
 /// verify the stream; callers still need the usual logical commitment check.
 pub(crate) fn page_count(descriptor: &[u8], max_bytes: usize) -> Result<usize, StoreError> {
     let stride = page_bytes(descriptor)?;
-    let size = if stride == 0 { descriptor.len() } else { length(descriptor)? };
-    if size > max_bytes { return Err(invalid("paged metadata exceeds retirement limit")); }
-    Ok(if stride == 0 { 0 } else { size.div_ceil(stride) })
+    let size = if stride == 0 {
+        descriptor.len()
+    } else {
+        length(descriptor)?
+    };
+    if size > max_bytes {
+        return Err(invalid("paged metadata exceeds retirement limit"));
+    }
+    Ok(if stride == 0 {
+        0
+    } else {
+        size.div_ceil(stride)
+    })
 }
 
 fn length(descriptor: &[u8]) -> Result<usize, StoreError> {
@@ -91,7 +103,11 @@ pub(crate) fn delete_at(
 ) -> Result<(), StoreError> {
     if let Some(descriptor) = batch.get_meta(location.descriptor_key())? {
         let stride = page_bytes(&descriptor)?;
-        let size = if stride == 0 { descriptor.len() } else { length(&descriptor)? };
+        let size = if stride == 0 {
+            descriptor.len()
+        } else {
+            length(&descriptor)?
+        };
         if size > max_bytes {
             return Err(invalid("paged metadata exceeds deletion byte limit"));
         }
@@ -106,12 +122,17 @@ pub(crate) fn delete_at(
 }
 
 pub(crate) fn write_bytes_at(
-    location: impl Location, batch: &mut LmdbWriteTransaction<'_>, bytes: &[u8],
+    location: impl Location,
+    batch: &mut LmdbWriteTransaction<'_>,
+    bytes: &[u8],
 ) -> Result<(), StoreError> {
     let mut writer = Writer::new_at(location, batch)?;
     writer.write_all(bytes).map_err(|error| {
         let message = error.to_string();
-        match error.into_inner().and_then(|error| error.downcast::<StoreError>().ok()) {
+        match error
+            .into_inner()
+            .and_then(|error| error.downcast::<StoreError>().ok())
+        {
             Some(error) => *error,
             None => invalid(message),
         }
@@ -133,7 +154,8 @@ impl Commitment {
         location: impl Location,
         get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StoreError>,
     ) -> Result<(), StoreError> {
-        let mut reader = Reader::open_at(location, get)?.ok_or_else(|| invalid("snapshot base disappeared"))?;
+        let mut reader =
+            Reader::open_at(location, get)?.ok_or_else(|| invalid("snapshot base disappeared"))?;
         if reader.commitment != *self {
             return Err(invalid("snapshot base changed during recovery"));
         }
@@ -164,7 +186,11 @@ impl<F: FnMut(&str) -> Result<Option<Vec<u8>>, StoreError>, L: Location> Reader<
         Self::open_at_bounded(location, get, usize::MAX)
     }
 
-    pub(crate) fn open_at_bounded(location: L, mut get: F, max_bytes: usize) -> Result<Option<Self>, StoreError> {
+    pub(crate) fn open_at_bounded(
+        location: L,
+        mut get: F,
+        max_bytes: usize,
+    ) -> Result<Option<Self>, StoreError> {
         let Some(descriptor) = get(location.descriptor_key())? else {
             return Ok(None);
         };
@@ -208,7 +234,9 @@ impl<F: FnMut(&str) -> Result<Option<Vec<u8>>, StoreError>, L: Location> Reader<
     }
 
     #[cfg(test)]
-    pub(crate) fn buffered_bytes(&self) -> usize { self.page.len() }
+    pub(crate) fn buffered_bytes(&self) -> usize {
+        self.page.len()
+    }
 
     pub(crate) fn commitment(&self) -> Result<Commitment, StoreError> {
         if self.failed || !self.verified {
@@ -267,7 +295,9 @@ impl<F: FnMut(&str) -> Result<Option<Vec<u8>>, StoreError>, L: Location> Read fo
 impl<F: FnMut(&str) -> Result<Option<Vec<u8>>, StoreError>, L: Location> Seek for Reader<F, L> {
     fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
         if self.failed || !self.verified {
-            return Err(io::Error::other("snapshot seeking requires a verified stream"));
+            return Err(io::Error::other(
+                "snapshot seeking requires a verified stream",
+            ));
         }
         let position = match from {
             SeekFrom::Start(position) => i128::from(position),
@@ -275,7 +305,10 @@ impl<F: FnMut(&str) -> Result<Option<Vec<u8>>, StoreError>, L: Location> Seek fo
             SeekFrom::End(delta) => self.commitment.size as i128 + i128::from(delta),
         };
         if position < 0 || position > self.commitment.size as i128 {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "snapshot seek out of bounds"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "snapshot seek out of bounds",
+            ));
         }
         let position = position as usize;
         if position == self.consumed {
@@ -287,7 +320,11 @@ impl<F: FnMut(&str) -> Result<Option<Vec<u8>>, StoreError>, L: Location> Seek fo
             let page = (self.get)(&self.location.page_key(index))
                 .map_err(|error| io::Error::other(error.to_string()))?
                 .ok_or_else(|| io::Error::other("missing installed snapshot page"))?;
-            if page.len() != self.page_bytes.min(self.commitment.size - index * self.page_bytes) {
+            if page.len()
+                != self
+                    .page_bytes
+                    .min(self.commitment.size - index * self.page_bytes)
+            {
                 return Err(io::Error::other("invalid installed snapshot page length"));
             }
             self.page = page;
@@ -295,7 +332,11 @@ impl<F: FnMut(&str) -> Result<Option<Vec<u8>>, StoreError>, L: Location> Seek fo
             self.next_page = index + 1;
             self.failed = false;
         } else {
-            self.offset = if self.page_bytes != 0 { self.page.len() } else { position };
+            self.offset = if self.page_bytes != 0 {
+                self.page.len()
+            } else {
+                position
+            };
         }
         self.consumed = position;
         Ok(position as u64)
@@ -320,7 +361,10 @@ pub(crate) struct Writer<'a, 'db, L> {
 }
 
 impl<'a, 'db, L: Location> Writer<'a, 'db, L> {
-    pub(crate) fn new_at(location: L, batch: &'a mut LmdbWriteTransaction<'db>) -> Result<Self, StoreError> {
+    pub(crate) fn new_at(
+        location: L,
+        batch: &'a mut LmdbWriteTransaction<'db>,
+    ) -> Result<Self, StoreError> {
         let previous = batch.get_meta(location.descriptor_key())?;
         let old_pages = match previous.as_deref() {
             Some(descriptor) => match page_bytes(descriptor)? {
@@ -343,7 +387,9 @@ impl<'a, 'db, L: Location> Writer<'a, 'db, L> {
     }
 
     #[cfg(test)]
-    pub(crate) fn buffered_bytes(&self) -> usize { self.page.len() }
+    pub(crate) fn buffered_bytes(&self) -> usize {
+        self.page.len()
+    }
 
     /// Recover the typed backend failure when an outer serializer erased its source.
     pub(crate) fn take_storage_error(&mut self) -> Option<StoreError> {
@@ -352,7 +398,9 @@ impl<'a, 'db, L: Location> Writer<'a, 'db, L> {
 
     pub(crate) fn finish(mut self) -> Result<(), StoreError> {
         if self.failed {
-            return Err(self.storage_error.take()
+            return Err(self
+                .storage_error
+                .take()
                 .unwrap_or_else(|| invalid("snapshot write previously failed")));
         }
         if self.size == 0 {
@@ -361,7 +409,8 @@ impl<'a, 'db, L: Location> Writer<'a, 'db, L> {
         if !self.page.is_empty() {
             #[cfg(test)]
             report_write("put-tail", self.next_page, self.page.len());
-            self.batch.put_meta(&self.location.page_key(self.next_page), &self.page)?;
+            self.batch
+                .put_meta(&self.location.page_key(self.next_page), &self.page)?;
             #[cfg(test)]
             report_write("put-tail-done", self.next_page, self.page.len());
             self.next_page += 1;
@@ -376,7 +425,8 @@ impl<'a, 'db, L: Location> Writer<'a, 'db, L> {
         descriptor.extend_from_slice(&self.digest.finalize());
         #[cfg(test)]
         report_write("descriptor", self.next_page, descriptor.len());
-        self.batch.put_meta(self.location.descriptor_key(), &descriptor)
+        self.batch
+            .put_meta(self.location.descriptor_key(), &descriptor)
     }
 }
 
@@ -433,8 +483,12 @@ mod tests {
     #[derive(Clone, Copy)]
     struct TestLocation(&'static str);
     impl Location for TestLocation {
-        fn descriptor_key(&self) -> &str { self.0 }
-        fn page_key(&self, index: usize) -> String { format!("{}/pages/{index:08x}", self.0) }
+        fn descriptor_key(&self) -> &str {
+            self.0
+        }
+        fn page_key(&self, index: usize) -> String {
+            format!("{}/pages/{index:08x}", self.0)
+        }
     }
 
     #[test]
@@ -452,14 +506,23 @@ mod tests {
         batch.commit().unwrap();
         let pinned = store.tx_begin_read().unwrap();
         for (location, byte) in [(left, 3), (right, 7)] {
-            let mut reader = Reader::open_at_bounded(location,
-                |key| store.meta_store().get_meta_txn(&pinned, key), PAGE_BYTES + 17)
-                .unwrap().unwrap();
+            let mut reader = Reader::open_at_bounded(
+                location,
+                |key| store.meta_store().get_meta_txn(&pinned, key),
+                PAGE_BYTES + 17,
+            )
+            .unwrap()
+            .unwrap();
             let mut bytes = Vec::new();
             reader.read_to_end(&mut bytes).unwrap();
             assert_eq!(bytes, vec![byte; PAGE_BYTES + 17]);
-            reader.commitment().unwrap().verify_at(location,
-                |key| store.meta_store().get_meta_txn(&pinned, key)).unwrap();
+            reader
+                .commitment()
+                .unwrap()
+                .verify_at(location, |key| {
+                    store.meta_store().get_meta_txn(&pinned, key)
+                })
+                .unwrap();
         }
     }
 
@@ -470,11 +533,16 @@ mod tests {
         descriptor.extend_from_slice(&[0; 32]);
         let location = TestLocation("test/bounded");
         let calls = std::cell::Cell::new(0);
-        assert!(Reader::open_at_bounded(location, |key| {
-            assert_eq!(key, location.descriptor_key());
-            calls.set(calls.get() + 1);
-            Ok(Some(descriptor.clone()))
-        }, 4095).is_err());
+        assert!(Reader::open_at_bounded(
+            location,
+            |key| {
+                assert_eq!(key, location.descriptor_key());
+                calls.set(calls.get() + 1);
+                Ok(Some(descriptor.clone()))
+            },
+            4095
+        )
+        .is_err());
         assert_eq!(calls.get(), 1);
         assert!(Reader::open_at_bounded(location, |_| Ok(Some(vec![1; 17])), 16).is_err());
     }
@@ -483,7 +551,9 @@ mod tests {
     fn capacity_errors_survive_serializer_erasure_and_abort_partial_pages() {
         for growth in [false, true] {
             let directory = tempfile::tempdir().unwrap();
-            let store = LmdbStore::open(directory.path(), 32, if growth { 8 << 20 } else { 1 << 20 }).unwrap();
+            let store =
+                LmdbStore::open(directory.path(), 32, if growth { 8 << 20 } else { 1 << 20 })
+                    .unwrap();
             let location = TestLocation("test/capacity");
             let original = vec![7; PAGE_BYTES + 17];
             let mut batch = store.tx_begin_write().unwrap();
@@ -498,13 +568,19 @@ mod tests {
             let erased = error.to_string();
             assert!(!erased.is_empty());
             let source = writer.take_storage_error().unwrap();
-            assert!(if growth { matches!(source, StoreError::GrowthLimit(_)) }
-                else { matches!(source, StoreError::MapFull(_)) });
+            assert!(if growth {
+                matches!(source, StoreError::GrowthLimit(_))
+            } else {
+                matches!(source, StoreError::MapFull(_))
+            });
             assert!(writer.finish().is_err());
             assert!(batch.commit().is_err());
             drop(limit);
             let txn = store.tx_begin_read().unwrap();
-            let mut reader = Reader::open_at(location, |key| store.meta_store().get_meta_txn(&txn, key)).unwrap().unwrap();
+            let mut reader =
+                Reader::open_at(location, |key| store.meta_store().get_meta_txn(&txn, key))
+                    .unwrap()
+                    .unwrap();
             let mut actual = Vec::new();
             reader.read_to_end(&mut actual).unwrap();
             assert_eq!(actual, original);

@@ -116,7 +116,9 @@ impl LmdbWriteTransaction<'_> {
         included: &HashSet<BlockHash>,
     ) -> Result<(), StoreError> {
         if !self.covers_consensus_votes(representative, expected_epoch, parent, included)? {
-            return Err(StoreError::Corruption("checkpoint cut omits a durable final vote".into()));
+            return Err(StoreError::Corruption(
+                "checkpoint cut omits a durable final vote".into(),
+            ));
         }
         Ok(())
     }
@@ -125,8 +127,11 @@ impl LmdbWriteTransaction<'_> {
     /// records encountered before that point return an error; later records are
     /// not inspected. This read does not change the journal or install a fence.
     pub fn covers_consensus_votes(
-        &self, representative: &WalletAddress, expected_epoch: &BlockHash,
-        parent: &BlockHash, included: &HashSet<BlockHash>,
+        &self,
+        representative: &WalletAddress,
+        expected_epoch: &BlockHash,
+        parent: &BlockHash,
+        included: &HashSet<BlockHash>,
     ) -> Result<bool, StoreError> {
         if included.len() > MAX_FINAL_VOTES {
             return Err(StoreError::Corruption(
@@ -160,7 +165,9 @@ impl LmdbWriteTransaction<'_> {
                 if hash.is_zero() {
                     return Err(StoreError::Corruption("invalid durable final vote".into()));
                 }
-                if !included.contains(&hash) { return Ok(false); }
+                if !included.contains(&hash) {
+                    return Ok(false);
+                }
             }
         }
         Ok(true)

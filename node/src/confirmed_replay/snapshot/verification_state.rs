@@ -1,5 +1,7 @@
 //! Checkpoint encoding borrows verification state; decoding owns restoration input.
-use burst_verification::{orchestrator::SnapshotView, OrchestratorSnapshot, VerificationOrchestrator};
+use burst_verification::{
+    orchestrator::SnapshotView, OrchestratorSnapshot, VerificationOrchestrator,
+};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub(super) enum Verification<'a> {

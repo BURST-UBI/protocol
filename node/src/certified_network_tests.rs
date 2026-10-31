@@ -23,9 +23,9 @@ mod governance_certified;
 mod governance_content;
 mod native_delegation;
 mod partition;
+mod payment_load;
 mod pending_challenge;
 mod pending_expiry;
-mod payment_load;
 mod post_challenge_recovery;
 mod roster;
 
@@ -135,8 +135,14 @@ async fn signed_block(
     block.hash = block.compute_hash();
     let signed = sign_state_block(block, &key.private);
     if std::env::var_os("BURST_FINALITY_STAGE_LOG").is_some() {
-        println!("payment_signing_stages hash={} account={} head={} state_us={} construct_sign_us={}",
-            signed.hash, address, state.head, state_elapsed.as_micros(), signing_started.elapsed().as_micros());
+        println!(
+            "payment_signing_stages hash={} account={} head={} state_us={} construct_sign_us={}",
+            signed.hash,
+            address,
+            state.head,
+            state_elapsed.as_micros(),
+            signing_started.elapsed().as_micros()
+        );
     }
     signed
 }
@@ -359,10 +365,16 @@ async fn certified_journey(mode: ChallengeMode) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "explicit capped authenticated payment-load diagnostic; not release qualification"]
 async fn certified_independent_account_payment_load() {
-    let seconds = std::env::var("BURST_PAYMENT_LOAD_SECONDS").expect("set load duration")
-        .parse::<u64>().expect("integer duration");
+    let seconds = std::env::var("BURST_PAYMENT_LOAD_SECONDS")
+        .expect("set load duration")
+        .parse::<u64>()
+        .expect("integer duration");
     assert!((2..=30).contains(&seconds));
-    certified_journey_with_load(ChallengeMode::Rejected, Some(PaymentExercise::Load(Duration::from_secs(seconds)))).await;
+    certified_journey_with_load(
+        ChallengeMode::Rejected,
+        Some(PaymentExercise::Load(Duration::from_secs(seconds))),
+    )
+    .await;
 }
 
 #[derive(Clone, Copy)]
@@ -374,17 +386,28 @@ enum PaymentExercise {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn certified_fragmented_send_round_trip() {
-    certified_journey_with_load(ChallengeMode::Rejected, Some(PaymentExercise::FragmentedSend)).await;
+    certified_journey_with_load(
+        ChallengeMode::Rejected,
+        Some(PaymentExercise::FragmentedSend),
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "explicit capped fragmented-wallet payment diagnostic; not release qualification"]
 async fn certified_fragmented_account_payment_load() {
-    let seconds = std::env::var("BURST_PAYMENT_LOAD_SECONDS").expect("set load duration")
-        .parse::<u64>().expect("integer duration");
+    let seconds = std::env::var("BURST_PAYMENT_LOAD_SECONDS")
+        .expect("set load duration")
+        .parse::<u64>()
+        .expect("integer duration");
     assert!((2..=30).contains(&seconds));
-    certified_journey_with_load(ChallengeMode::Rejected,
-        Some(PaymentExercise::FragmentedLoad(Duration::from_secs(seconds)))).await;
+    certified_journey_with_load(
+        ChallengeMode::Rejected,
+        Some(PaymentExercise::FragmentedLoad(Duration::from_secs(
+            seconds,
+        ))),
+    )
+    .await;
 }
 
 async fn certified_journey_with_load(mode: ChallengeMode, load: Option<PaymentExercise>) {
@@ -392,7 +415,9 @@ async fn certified_journey_with_load(mode: ChallengeMode, load: Option<PaymentEx
         std::env::var("BURST_PAYMENT_LOAD_ACCOUNTS").map_or(3, |value| {
             value.parse::<usize>().expect("integer account count")
         })
-    } else { 3 };
+    } else {
+        3
+    };
     assert!((3..=32).contains(&load_accounts));
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -519,7 +544,9 @@ async fn certified_journey_with_load(mode: ChallengeMode, load: Option<PaymentEx
         workers.push((
             shutdown,
             tokio::spawn(async move {
-                node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+                node.start_with_services(burst_daemon::start_public_services)
+                    .await
+                    .unwrap();
                 node.stop().await.unwrap();
             }),
         ));
@@ -539,8 +566,16 @@ async fn certified_journey_with_load(mode: ChallengeMode, load: Option<PaymentEx
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
-        let key_count = if load_accounts > 3 { load_accounts + 1 } else { 5 };
-        let funding = if load_accounts > 3 { BRN_UNIT / 32 } else { BRN_UNIT };
+        let key_count = if load_accounts > 3 {
+            load_accounts + 1
+        } else {
+            5
+        };
+        let funding = if load_accounts > 3 {
+            BRN_UNIT / 32
+        } else {
+            BRN_UNIT
+        };
         let keys: Vec<_> = (0..key_count)
             .map(|index| burst_crypto::keypair_from_seed(&[index as u8; 32]))
             .collect();
@@ -598,13 +633,44 @@ async fn certified_journey_with_load(mode: ChallengeMode, load: Option<PaymentEx
         wait_human_authority(&stores, (load_accounts + 1) as u64).await;
         if let Some(exercise) = load {
             match exercise {
-                PaymentExercise::Load(duration) => payment_load::run(&clients, &stores, &election_views,
-                    &keys[..load_accounts + 1], &params, time(20), duration, &load_failure_path, payment_load::Workload::BurnReceive).await,
-                PaymentExercise::FragmentedLoad(duration) => payment_load::run(&clients, &stores, &election_views,
-                    &keys[..load_accounts + 1], &params, time(20), duration, &load_failure_path,
-                    payment_load::Workload::FragmentedSend).await,
-                PaymentExercise::FragmentedSend => payment_load::fragmented_send_round_trip(
-                    &clients, &stores, &keys, &params, time(20)).await,
+                PaymentExercise::Load(duration) => {
+                    payment_load::run(
+                        &clients,
+                        &stores,
+                        &election_views,
+                        &keys[..load_accounts + 1],
+                        &params,
+                        time(20),
+                        duration,
+                        &load_failure_path,
+                        payment_load::Workload::BurnReceive,
+                    )
+                    .await
+                }
+                PaymentExercise::FragmentedLoad(duration) => {
+                    payment_load::run(
+                        &clients,
+                        &stores,
+                        &election_views,
+                        &keys[..load_accounts + 1],
+                        &params,
+                        time(20),
+                        duration,
+                        &load_failure_path,
+                        payment_load::Workload::FragmentedSend,
+                    )
+                    .await
+                }
+                PaymentExercise::FragmentedSend => {
+                    payment_load::fragmented_send_round_trip(
+                        &clients,
+                        &stores,
+                        &keys,
+                        &params,
+                        time(20),
+                    )
+                    .await
+                }
             }
             return None;
         }
@@ -815,8 +881,10 @@ async fn certified_journey_with_load(mode: ChallengeMode, load: Option<PaymentEx
         shutdown.shutdown();
     }
     let worker_failures = payment_load::drain_workers(
-        workers.drain(..).map(|(_, worker)| worker), Duration::from_secs(20),
-    ).await;
+        workers.drain(..).map(|(_, worker)| worker),
+        Duration::from_secs(20),
+    )
+    .await;
     if load.is_some() {
         relay_task.abort();
         let _ = relay_task.await;
@@ -824,14 +892,24 @@ async fn certified_journey_with_load(mode: ChallengeMode, load: Option<PaymentEx
             let retained = directory.keep();
             eprintln!("payment_load_retained_fixture {}", retained.display());
         }
-        assert!(worker_failures.is_empty(), "payment load workers failed: {worker_failures:?}");
-        assert!(outcome.expect("payment load fixture timed out").unwrap().is_none());
+        assert!(
+            worker_failures.is_empty(),
+            "payment load workers failed: {worker_failures:?}"
+        );
+        assert!(outcome
+            .expect("payment load fixture timed out")
+            .unwrap()
+            .is_none());
         return;
     }
-    assert!(worker_failures.is_empty(), "certified network workers failed: {worker_failures:?}");
+    assert!(
+        worker_failures.is_empty(),
+        "certified network workers failed: {worker_failures:?}"
+    );
     let completed = outcome.expect("certified verification network journey timed out");
     let (mut clients, addresses, heads, verified_at, context, activation_bytes) = completed
-        .unwrap().expect("lifecycle journey must return recovery inputs");
+        .unwrap()
+        .expect("lifecycle journey must return recovery inputs");
     let mut observer = configs[0].clone();
     observer.data_dir = directory.path().join("fresh-observer");
     observer.port = port();
@@ -855,7 +933,9 @@ async fn certified_journey_with_load(mode: ChallengeMode, load: Option<PaymentEx
         workers.push((
             shutdown,
             tokio::spawn(async move {
-                node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+                node.start_with_services(burst_daemon::start_public_services)
+                    .await
+                    .unwrap();
                 node.stop().await.unwrap();
             }),
         ));

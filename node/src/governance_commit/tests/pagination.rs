@@ -763,13 +763,15 @@ async fn telemetry_http_uses_bounded_worker_and_recovers_after_contention() {
             Err("read-only fixture".into())
         }
         fn payment_exclusion(
-            &self, query: burst_types::payment_recovery::ExclusionQuery,
+            &self,
+            query: burst_types::payment_recovery::ExclusionQuery,
         ) -> Result<burst_types::payment_recovery::ExclusionReview, String> {
             if query.payment_epoch == burst_types::BlockHash::ZERO.to_string() {
                 return Err("invalid fixture epoch".into());
             }
             Ok(burst_types::payment_recovery::ExclusionReview {
-                account: query.account, previous: query.previous,
+                account: query.account,
+                previous: query.previous,
                 payment_epoch: query.payment_epoch,
                 installed_epoch: burst_types::BlockHash::new([45; 32]).to_string(),
                 excluded: false,
@@ -818,8 +820,10 @@ async fn telemetry_http_uses_bounded_worker_and_recovers_after_contention() {
     let exclusion_params = json!({"account":verified_address.as_str(),
         "previous":burst_types::BlockHash::ZERO.to_string(),
         "payment_epoch":burst_types::BlockHash::new([44;32]).to_string()});
-    let error = client.rpc_call("payment_exclusion", exclusion_params.clone())
-        .await.unwrap_err();
+    let error = client
+        .rpc_call("payment_exclusion", exclusion_params.clone())
+        .await
+        .unwrap_err();
     assert!(error.to_string().contains("rate limited"), "{error}");
     let error = client.rpc_call("telemetry", json!({})).await.unwrap_err();
     assert!(error.to_string().contains("rate limited"), "{error}");
@@ -869,13 +873,25 @@ async fn telemetry_http_uses_bounded_worker_and_recovers_after_contention() {
         .await
         .unwrap()
         .unwrap();
-    let exclusion = client.rpc_call("payment_exclusion", exclusion_params.clone()).await.unwrap();
+    let exclusion = client
+        .rpc_call("payment_exclusion", exclusion_params.clone())
+        .await
+        .unwrap();
     assert_eq!(exclusion["excluded"], json!(false));
-    assert_eq!(exclusion["payment_epoch"], exclusion_params["payment_epoch"]);
+    assert_eq!(
+        exclusion["payment_epoch"],
+        exclusion_params["payment_epoch"]
+    );
     let mut invalid_exclusion = exclusion_params;
     invalid_exclusion["payment_epoch"] = json!(burst_types::BlockHash::ZERO.to_string());
-    let error = client.rpc_call("payment_exclusion", invalid_exclusion).await.unwrap_err();
-    assert!(error.to_string().contains("invalid fixture epoch"), "{error}");
+    let error = client
+        .rpc_call("payment_exclusion", invalid_exclusion)
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("invalid fixture epoch"),
+        "{error}"
+    );
     let result = client.rpc_call("telemetry", json!({})).await.unwrap();
     let accounts = rpc_state.account_store.all_accounts().unwrap();
     assert_eq!(result["account_count"], json!(accounts.len()));

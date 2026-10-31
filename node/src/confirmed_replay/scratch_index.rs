@@ -48,7 +48,10 @@ struct Link {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(bound(serialize = "[u8; N]: Serialize", deserialize = "[u8; N]: Deserialize<'de>"))]
+#[serde(bound(
+    serialize = "[u8; N]: Serialize",
+    deserialize = "[u8; N]: Deserialize<'de>"
+))]
 enum FixedNode<const N: usize> {
     Leaf { key: Key, value: [u8; N] },
     Branch { bit: u16, left: Link, right: Link },
@@ -143,7 +146,8 @@ impl<const N: usize> FixedScratchCursor<N> {
     /// Charge branches as well as leaves so sparse paths cannot evade the budget.
     /// A failed callback or integrity check permanently invalidates this cursor.
     pub(super) fn visit_next(
-        &mut self, max_nodes: usize,
+        &mut self,
+        max_nodes: usize,
         visit: impl FnMut(Key, [u8; N]) -> Result<(), StoreError>,
     ) -> Result<ScanPage, StoreError> {
         self.visit_next_with(max_nodes, visit)
@@ -154,13 +158,27 @@ impl<const N: usize> FixedScratchCursor<N> {
         max_nodes: usize,
         mut visit: impl FnMut(Key, [u8; N]) -> Result<(), E>,
     ) -> Result<ScanPage, E> {
-        if self.failed { return Err(invalid("scratch traversal already failed").into()); }
+        if self.failed {
+            return Err(invalid("scratch traversal already failed").into());
+        }
         self.failed = true;
-        if max_nodes == 0 { return Err(invalid("zero scratch traversal budget").into()); }
-        self.index.storage.lock().map_err(invalid)?.check_storage()?;
-        let mut page = ScanPage { nodes: 0, rows: 0, done: false };
+        if max_nodes == 0 {
+            return Err(invalid("zero scratch traversal budget").into());
+        }
+        self.index
+            .storage
+            .lock()
+            .map_err(invalid)?
+            .check_storage()?;
+        let mut page = ScanPage {
+            nodes: 0,
+            rows: 0,
+            done: false,
+        };
         while page.nodes < max_nodes {
-            let Some((link, parent_bit)) = self.pending.pop() else { break; };
+            let Some((link, parent_bit)) = self.pending.pop() else {
+                break;
+            };
             let node = {
                 let mut storage = self.index.storage.lock().map_err(invalid)?;
                 storage.check_storage()?;
@@ -177,7 +195,8 @@ impl<const N: usize> FixedScratchCursor<N> {
                 }
                 FixedNode::Leaf { key, value } => {
                     if self.previous_key.is_some_and(|previous| key <= previous)
-                        || self.count >= self.index.count {
+                        || self.count >= self.index.count
+                    {
                         return Err(invalid("invalid replay scratch index traversal").into());
                     }
                     self.previous_key = Some(key);
@@ -214,16 +233,30 @@ impl<const N: usize> FixedPairedScratchCursor<N> {
         max_nodes: usize,
         mut visit: impl FnMut(Key, [u8; N], [u8; N]) -> Result<(), E>,
     ) -> Result<ScanPage, E> {
-        if self.failed { return Err(invalid("paired scratch traversal already failed").into()); }
+        if self.failed {
+            return Err(invalid("paired scratch traversal already failed").into());
+        }
         self.failed = true;
-        if max_nodes < 2 { return Err(invalid("paired scratch traversal needs two nodes").into()); }
+        if max_nodes < 2 {
+            return Err(invalid("paired scratch traversal needs two nodes").into());
+        }
         if self.pending.is_empty() {
             self.left.storage.lock().map_err(invalid)?.check_storage()?;
-            self.right.storage.lock().map_err(invalid)?.check_storage()?;
+            self.right
+                .storage
+                .lock()
+                .map_err(invalid)?
+                .check_storage()?;
         }
-        let mut page = ScanPage { nodes: 0, rows: 0, done: false };
+        let mut page = ScanPage {
+            nodes: 0,
+            rows: 0,
+            done: false,
+        };
         while max_nodes - page.nodes >= 2 {
-            let Some((left, right, parent)) = self.pending.pop() else { break; };
+            let Some((left, right, parent)) = self.pending.pop() else {
+                break;
+            };
             let a = {
                 let mut storage = self.left.storage.lock().map_err(invalid)?;
                 storage.check_storage()?;
@@ -294,13 +327,16 @@ pub(super) struct FixedSortedIndexBuilder<const N: usize> {
 
 impl<const N: usize> FixedSortedIndexBuilder<N> {
     pub(super) fn new(directory: &Path) -> Result<Self, StoreError> {
-        Ok(Self { index: FixedScratchIndex::new(directory)?,
-            builder: crate::ordered_radix::Builder::new() })
+        Ok(Self {
+            index: FixedScratchIndex::new(directory)?,
+            builder: crate::ordered_radix::Builder::new(),
+        })
     }
 
     pub(super) fn push(&mut self, key: Key, value: [u8; N]) -> Result<(), StoreError> {
         let mut storage = self.index.storage.lock().map_err(invalid)?;
-        self.builder.push(key, value, |node| storage.append_ordered(node))
+        self.builder
+            .push(key, value, |node| storage.append_ordered(node))
     }
 
     pub(super) fn finish(mut self) -> Result<FixedScratchIndex<N>, StoreError> {
@@ -316,7 +352,8 @@ impl<const N: usize> FixedSortedIndexBuilder<N> {
 
 impl Storage {
     fn append_ordered<const N: usize>(
-        &mut self, node: crate::ordered_radix::Node<[u8; N], Link>,
+        &mut self,
+        node: crate::ordered_radix::Node<[u8; N], Link>,
     ) -> Result<Link, StoreError> {
         use crate::ordered_radix::Node;
         self.append(&match node {
@@ -336,9 +373,13 @@ pub(super) struct FixedScratchCompaction<const N: usize> {
 }
 impl<const N: usize> FixedScratchCompaction<N> {
     pub(super) fn advance(&mut self, max_nodes: usize) -> Result<ScanPage, StoreError> {
-        if self.failed { return Err(invalid("scratch compaction already failed")); }
+        if self.failed {
+            return Err(invalid("scratch compaction already failed"));
+        }
         self.failed = true;
-        let page = self.cursor.visit_next(max_nodes, |key, value| self.builder.push(key, value))?;
+        let page = self
+            .cursor
+            .visit_next(max_nodes, |key, value| self.builder.push(key, value))?;
         self.complete = page.done;
         self.failed = false;
         Ok(page)
@@ -350,7 +391,9 @@ impl<const N: usize> FixedScratchCompaction<N> {
         }
         let expected = &self.cursor.index;
         if !Arc::ptr_eq(&expected.storage, &index.storage)
-            || expected.root != index.root || expected.count != index.count {
+            || expected.root != index.root
+            || expected.count != index.count
+        {
             return Err(invalid("scratch compaction root changed"));
         }
         // Catch truncation or a failed append through another pinned owner too.
@@ -400,7 +443,9 @@ impl Storage {
         }
         let mut buffer = [0; MAX_NODE_BYTES as usize];
         let bytes = &mut buffer[..link.length as usize];
-        self.file.read_exact_at(bytes, link.offset).map_err(invalid)?;
+        self.file
+            .read_exact_at(bytes, link.offset)
+            .map_err(invalid)?;
         if burst_crypto::blake2b_256(bytes) != link.digest {
             return Err(invalid("replay scratch index digest changed"));
         }
@@ -425,7 +470,9 @@ impl Storage {
             digest: burst_crypto::blake2b_256(bytes),
         };
         self.failed = true;
-        self.file.write_all_at(bytes, self.length).map_err(invalid)?;
+        self.file
+            .write_all_at(bytes, self.length)
+            .map_err(invalid)?;
         self.length = end;
         self.failed = false;
         Ok(link)
@@ -434,7 +481,9 @@ impl Storage {
 
 impl<const N: usize> FixedScratchIndex<N> {
     pub(super) fn new(directory: &Path) -> Result<Self, StoreError> {
-        if N != 32 && N != 48 { return Err(invalid("unsupported scratch index value width")); }
+        if N != 32 && N != 48 {
+            return Err(invalid("unsupported scratch index value width"));
+        }
         Ok(Self {
             storage: Arc::new(Mutex::new(Storage {
                 file: File::new_in(directory).map_err(invalid)?,
@@ -453,7 +502,9 @@ impl<const N: usize> FixedScratchIndex<N> {
         entries: impl IntoIterator<Item = (Key, [u8; N])>,
     ) -> Result<Self, StoreError> {
         let mut builder = FixedSortedIndexBuilder::new(directory)?;
-        for (key, value) in entries { builder.push(key, value)?; }
+        for (key, value) in entries {
+            builder.push(key, value)?;
+        }
         builder.finish()
     }
 
@@ -467,32 +518,50 @@ impl<const N: usize> FixedScratchIndex<N> {
 
     /// Cancellation discards only the private builder; the original root remains
     /// readable. Callers must discard their larger incomplete operation too.
-    pub(super) fn compact_until(&mut self, directory: &Path, mut cancelled: impl FnMut() -> bool)
-        -> Result<bool, StoreError> {
-        if cancelled() { return Ok(false); }
+    pub(super) fn compact_until(
+        &mut self,
+        directory: &Path,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<bool, StoreError> {
+        if cancelled() {
+            return Ok(false);
+        }
         if let Some(mut compaction) = self.start_compaction(directory)? {
             loop {
                 let page = compaction.advance(128)?;
-                if cancelled() { return Ok(false); }
-                if page.done { break; }
+                if cancelled() {
+                    return Ok(false);
+                }
+                if page.done {
+                    break;
+                }
             }
             compaction.finish(self)?;
         }
         Ok(true)
     }
 
-    pub(super) fn start_compaction(&self, directory: &Path)
-        -> Result<Option<FixedScratchCompaction<N>>, StoreError> {
-        let live = (self.count as u64).checked_mul(138 + N as u64)
+    pub(super) fn start_compaction(
+        &self,
+        directory: &Path,
+    ) -> Result<Option<FixedScratchCompaction<N>>, StoreError> {
+        let live = (self.count as u64)
+            .checked_mul(138 + N as u64)
             .and_then(|bytes| bytes.checked_sub(if self.count == 0 { 0 } else { 102 }))
             .ok_or_else(|| invalid("scratch index live size overflow"))?;
         {
             let storage = self.storage.lock().map_err(invalid)?;
             storage.check_storage()?;
-            if storage.length <= live.saturating_mul(2) { return Ok(None); }
+            if storage.length <= live.saturating_mul(2) {
+                return Ok(None);
+            }
         }
-        Ok(Some(FixedScratchCompaction { cursor: self.cursor()?,
-            builder: FixedSortedIndexBuilder::new(directory)?, complete: false, failed: false }))
+        Ok(Some(FixedScratchCompaction {
+            cursor: self.cursor()?,
+            builder: FixedSortedIndexBuilder::new(directory)?,
+            complete: false,
+            failed: false,
+        }))
     }
 
     #[cfg(test)]
@@ -560,28 +629,41 @@ impl<const N: usize> FixedScratchIndex<N> {
         cursor.previous_key = Some(after);
         cursor.full_scan = false;
         let Some(root) = self.root else {
-            if self.count != 0 { return Err(invalid("missing scratch index root")); }
+            if self.count != 0 {
+                return Err(invalid("missing scratch index root"));
+            }
             return Ok(cursor);
         };
         let mut storage = self.storage.lock().map_err(invalid)?;
         let mut path = Vec::new();
         let (leaf, found, _) = Self::path(&mut storage, root, &after, |branch| path.push(branch))?;
-        let difference = found.iter().zip(after).enumerate().find_map(|(index, (a, b))| {
-            let bits = a ^ b;
-            (bits != 0).then(|| (index * 8 + bits.leading_zeros() as usize) as u16)
-        }).unwrap_or(256);
+        let difference = found
+            .iter()
+            .zip(after)
+            .enumerate()
+            .find_map(|(index, (a, b))| {
+                let bits = a ^ b;
+                (bits != 0).then(|| (index * 8 + bits.leading_zeros() as usize) as u16)
+            })
+            .unwrap_or(256);
         let mut parent = None;
         for branch in path {
             // Below the first differing bit, this whole subtree is on one
             // side of the boundary; compressed prefixes must not be ignored.
             if branch.bit >= difference {
-                if found > after { cursor.pending.push((branch.link, parent)); }
+                if found > after {
+                    cursor.pending.push((branch.link, parent));
+                }
                 return Ok(cursor);
             }
-            if !branch.rightward { cursor.pending.push((branch.right, Some(branch.bit))); }
+            if !branch.rightward {
+                cursor.pending.push((branch.right, Some(branch.bit)));
+            }
             parent = Some(branch.bit);
         }
-        if found > after { cursor.pending.push((leaf, parent)); }
+        if found > after {
+            cursor.pending.push((leaf, parent));
+        }
         Ok(cursor)
     }
 
@@ -607,32 +689,61 @@ impl<const N: usize> FixedScratchIndex<N> {
     }
 
     #[cfg(test)]
-    pub(super) fn paired_cursor(&self, other: &Self) -> Result<FixedPairedScratchCursor<N>, StoreError> {
+    pub(super) fn paired_cursor(
+        &self,
+        other: &Self,
+    ) -> Result<FixedPairedScratchCursor<N>, StoreError> {
         self.storage.lock().map_err(invalid)?.check_storage()?;
         other.storage.lock().map_err(invalid)?.check_storage()?;
-        if self.count != other.count { return Err(invalid("paired scratch index counts differ")); }
+        if self.count != other.count {
+            return Err(invalid("paired scratch index counts differ"));
+        }
         let pending = match (self.root, other.root) {
             (Some(left), Some(right)) => vec![(left, right, None)],
             (None, None) if self.count == 0 => Vec::new(),
             _ => return Err(invalid("paired scratch index roots differ")),
         };
-        Ok(FixedPairedScratchCursor { left: self.clone(), right: other.clone(), pending,
-            previous: None, full_scan: true, count: 0, failed: false })
+        Ok(FixedPairedScratchCursor {
+            left: self.clone(),
+            right: other.clone(),
+            pending,
+            previous: None,
+            full_scan: true,
+            count: 0,
+            failed: false,
+        })
     }
 
     #[cfg(test)]
-    pub(super) fn paired_cursor_after(&self, other: &Self, after: Key) -> Result<FixedPairedScratchCursor<N>, StoreError> {
-        if self.count != other.count { return Err(invalid("paired scratch index counts differ")); }
+    pub(super) fn paired_cursor_after(
+        &self,
+        other: &Self,
+        after: Key,
+    ) -> Result<FixedPairedScratchCursor<N>, StoreError> {
+        if self.count != other.count {
+            return Err(invalid("paired scratch index counts differ"));
+        }
         let left = self.cursor_after(after)?;
         let right = other.cursor_after(after)?;
-        if left.pending.len() != right.pending.len() { return Err(invalid("paired scratch suffix shapes differ")); }
+        if left.pending.len() != right.pending.len() {
+            return Err(invalid("paired scratch suffix shapes differ"));
+        }
         let mut pending = Vec::new();
         for ((a, parent), (b, other_parent)) in left.pending.into_iter().zip(right.pending) {
-            if parent != other_parent { return Err(invalid("paired scratch suffix branches differ")); }
+            if parent != other_parent {
+                return Err(invalid("paired scratch suffix branches differ"));
+            }
             pending.push((a, b, parent));
         }
-        Ok(FixedPairedScratchCursor { left: self.clone(), right: other.clone(), pending,
-            previous: Some(after), full_scan: false, count: 0, failed: false })
+        Ok(FixedPairedScratchCursor {
+            left: self.clone(),
+            right: other.clone(),
+            pending,
+            previous: Some(after),
+            full_scan: false,
+            count: 0,
+            failed: false,
+        })
     }
 
     #[cfg(test)]
@@ -646,7 +757,11 @@ impl<const N: usize> FixedScratchIndex<N> {
         Ok(())
     }
 
-    pub(super) fn insert(&mut self, key: Key, value: [u8; N]) -> Result<Option<[u8; N]>, StoreError> {
+    pub(super) fn insert(
+        &mut self,
+        key: Key,
+        value: [u8; N],
+    ) -> Result<Option<[u8; N]>, StoreError> {
         let mut storage = self.storage.lock().map_err(invalid)?;
         storage.check_storage()?;
         let Some(root) = self.root else {
@@ -725,7 +840,10 @@ mod tests {
     #[test]
     fn wide_leaf_codec_preserves_descriptor_and_rejects_wrong_width() {
         let value = std::array::from_fn(|i| i as u8);
-        let node = FixedNode::<48>::Leaf { key: [7; 32], value };
+        let node = FixedNode::<48>::Leaf {
+            key: [7; 32],
+            value,
+        };
         let mut buffer = [0; 128];
         let bytes = node.encode(&mut buffer);
         assert_eq!(bytes.len(), 84);
@@ -735,17 +853,24 @@ mod tests {
         assert!(matches!(FixedNode::<48>::decode(bytes).unwrap(),
             FixedNode::Leaf { key, value: decoded } if key == [7; 32] && decoded == value));
         assert!(FixedNode::<32>::decode(bytes).is_err());
-        for length in 0..bytes.len() { assert!(FixedNode::<48>::decode(&bytes[..length]).is_err()); }
-        let mut extra = bytes.to_vec(); extra.push(0);
+        for length in 0..bytes.len() {
+            assert!(FixedNode::<48>::decode(&bytes[..length]).is_err());
+        }
+        let mut extra = bytes.to_vec();
+        extra.push(0);
         assert!(FixedNode::<48>::decode(&extra).is_err());
     }
 
     #[test]
     fn fixed_node_codec_matches_legacy_bytes_and_strict_decoder() {
         use bincode::Options;
-        let legacy = |bytes: &[u8]| bincode::DefaultOptions::new()
-            .with_fixint_encoding().reject_trailing_bytes().with_limit(MAX_NODE_BYTES)
-            .deserialize::<Node>(bytes);
+        let legacy = |bytes: &[u8]| {
+            bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .reject_trailing_bytes()
+                .with_limit(MAX_NODE_BYTES)
+                .deserialize::<Node>(bytes)
+        };
         let mut random = 0x4d595df4d0f33173u64;
         let mut next = || {
             random ^= random << 13;
@@ -760,19 +885,39 @@ mod tests {
                 for bytes in key.chunks_exact_mut(8).chain(value.chunks_exact_mut(8)) {
                     bytes.copy_from_slice(&next().to_le_bytes());
                 }
-                for node in [Node::Leaf { key, value }, Node::Branch { bit,
-                    left: Link { offset: next(), length: next(), digest: key },
-                    right: Link { offset: next(), length: next(), digest: value } }] {
+                for node in [
+                    Node::Leaf { key, value },
+                    Node::Branch {
+                        bit,
+                        left: Link {
+                            offset: next(),
+                            length: next(),
+                            digest: key,
+                        },
+                        right: Link {
+                            offset: next(),
+                            length: next(),
+                            digest: value,
+                        },
+                    },
+                ] {
                     let expected = bincode::serialize(&node).unwrap();
                     let mut buffer = [0; 128];
                     assert_eq!(node.encode(&mut buffer), expected);
-                    assert_eq!(bincode::serialize(&Node::decode(&expected).unwrap()).unwrap(), expected);
+                    assert_eq!(
+                        bincode::serialize(&Node::decode(&expected).unwrap()).unwrap(),
+                        expected
+                    );
                     assert!(legacy(&expected).is_ok());
-                    for length in 0..expected.len() { assert!(Node::decode(&expected[..length]).is_err()); }
-                    let mut trailing = expected.clone(); trailing.push(0);
+                    for length in 0..expected.len() {
+                        assert!(Node::decode(&expected[..length]).is_err());
+                    }
+                    let mut trailing = expected.clone();
+                    trailing.push(0);
                     assert!(Node::decode(&trailing).is_err());
                     for tag in [2u32, 256, u32::MAX] {
-                        let mut changed = expected.clone(); changed[..4].copy_from_slice(&tag.to_le_bytes());
+                        let mut changed = expected.clone();
+                        changed[..4].copy_from_slice(&tag.to_le_bytes());
                         assert!(Node::decode(&changed).is_err());
                         assert!(legacy(&changed).is_err());
                     }
@@ -784,11 +929,15 @@ mod tests {
         for length in 0..=129 {
             for tag in 0..=2u32 {
                 let mut bytes: Vec<_> = (0..length).map(|_| next() as u8).collect();
-                if length >= 4 { bytes[..4].copy_from_slice(&tag.to_le_bytes()); }
+                if length >= 4 {
+                    bytes[..4].copy_from_slice(&tag.to_le_bytes());
+                }
                 let old = legacy(&bytes).map(|node| bincode::serialize(&node).unwrap());
                 let new = Node::decode(&bytes).map(|node| bincode::serialize(&node).unwrap());
                 assert_eq!(old.is_ok(), new.is_ok());
-                if let (Ok(old), Ok(new)) = (old, new) { assert_eq!(old, new); }
+                if let (Ok(old), Ok(new)) = (old, new) {
+                    assert_eq!(old, new);
+                }
             }
         }
     }
@@ -877,7 +1026,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let limit = ScratchLimit::acquire(directory.path(), 3 << 20).unwrap();
         let mut index = ScratchIndex::new(directory.path()).unwrap();
-        index.insert([1;32], [2;32]).unwrap();
+        index.insert([1; 32], [2; 32]).unwrap();
         let pinned = index.clone();
         for number in 0..4096u64 {
             let key = burst_crypto::blake2b_256(&number.to_be_bytes());
@@ -889,11 +1038,11 @@ mod tests {
             assert_eq!(index.get(&key).unwrap(), Some(key));
             assert_eq!(pinned.get(&key).unwrap(), None);
         }
-        assert_eq!(pinned.get(&[1;32]).unwrap(), Some([2;32]));
-        index.insert([1;32], [3;32]).unwrap();
+        assert_eq!(pinned.get(&[1; 32]).unwrap(), Some([2; 32]));
+        index.insert([1; 32], [3; 32]).unwrap();
         index.compact_if_amplified(directory.path()).unwrap();
-        assert_eq!(index.get(&[1;32]).unwrap(), Some([3;32]));
-        assert_eq!(pinned.get(&[1;32]).unwrap(), Some([2;32]));
+        assert_eq!(index.get(&[1; 32]).unwrap(), Some([3; 32]));
+        assert_eq!(pinned.get(&[1; 32]).unwrap(), Some([2; 32]));
         index.storage.lock().unwrap().file.set_len(0).unwrap();
         assert!(index.compact_if_amplified(directory.path()).is_err());
         drop(index);
@@ -922,7 +1071,9 @@ mod tests {
             assert!(page.nodes <= 7);
             pages += 1;
             nodes += page.nodes;
-            if page.done { break; }
+            if page.done {
+                break;
+            }
         }
         assert_eq!(nodes, 1023);
         assert!(pages > 100);
@@ -936,12 +1087,17 @@ mod tests {
             assert_eq!(pinned.get(&key).unwrap(), Some(key));
         }
         // A zero-budget error invalidates the compaction and prevents publication.
-        for n in 0..128u64 { index.insert([1;32], burst_crypto::blake2b_256(&n.to_be_bytes())).unwrap(); }
+        for n in 0..128u64 {
+            index
+                .insert([1; 32], burst_crypto::blake2b_256(&n.to_be_bytes()))
+                .unwrap();
+        }
         let mut pending = index.start_compaction(directory.path()).unwrap().unwrap();
         assert!(pending.advance(0).is_err());
         assert!(pending.advance(7).is_err());
         assert!(pending.finish(&mut index).is_err());
-        drop(index); drop(pinned);
+        drop(index);
+        drop(pinned);
         assert_eq!(limit.used_temporary_bytes().unwrap(), 0);
     }
 
@@ -958,7 +1114,12 @@ mod tests {
         let pinned = index.clone();
         let before = limit.used_temporary_bytes().unwrap();
         let mut calls = 0;
-        assert!(!index.compact_until(directory.path(), || { calls += 1; calls == 3 }).unwrap());
+        assert!(!index
+            .compact_until(directory.path(), || {
+                calls += 1;
+                calls == 3
+            })
+            .unwrap());
         assert_eq!(calls, 3);
         assert_eq!(limit.used_temporary_bytes().unwrap(), before);
         assert!(Arc::ptr_eq(&index.storage, &pinned.storage));
@@ -969,7 +1130,8 @@ mod tests {
         }
         assert!(index.compact_until(directory.path(), || false).unwrap());
         assert!(!Arc::ptr_eq(&index.storage, &pinned.storage));
-        drop(index); drop(pinned);
+        drop(index);
+        drop(pinned);
         assert_eq!(limit.used_temporary_bytes().unwrap(), 0);
     }
 
@@ -1161,23 +1323,48 @@ mod cursor_tests {
             let mut output = Vec::new();
             let mut nodes = 0;
             loop {
-                let page = cursor.visit_next(budget, |k, v| { output.push((k, v)); Ok(()) }).unwrap();
+                let page = cursor
+                    .visit_next(budget, |k, v| {
+                        output.push((k, v));
+                        Ok(())
+                    })
+                    .unwrap();
                 assert!(page.nodes <= budget && page.rows <= page.nodes);
                 nodes += page.nodes;
-                if page.done { break; }
+                if page.done {
+                    break;
+                }
                 assert!(page.nodes > 0);
             }
             assert_eq!(output, rows);
-            assert_eq!(nodes, 2 * rows.len() - 1, "earlier pages must not be rescanned");
-            let page = cursor.visit_next(1, |_, _| panic!("exhausted cursor")).unwrap();
+            assert_eq!(
+                nodes,
+                2 * rows.len() - 1,
+                "earlier pages must not be rescanned"
+            );
+            let page = cursor
+                .visit_next(1, |_, _| panic!("exhausted cursor"))
+                .unwrap();
             assert!(page.done && page.nodes == 0 && page.rows == 0);
         }
         let mut cursor = index.cursor().unwrap();
         let mut output = Vec::new();
-        cursor.visit_next(3, |k, v| { output.push((k, v)); Ok(()) }).unwrap();
+        cursor
+            .visit_next(3, |k, v| {
+                output.push((k, v));
+                Ok(())
+            })
+            .unwrap();
         index.insert(key(3), key(999)).unwrap();
         index.insert(key(9999), key(9999)).unwrap();
-        while !cursor.visit_next(5, |k, v| { output.push((k, v)); Ok(()) }).unwrap().done {}
+        while !cursor
+            .visit_next(5, |k, v| {
+                output.push((k, v));
+                Ok(())
+            })
+            .unwrap()
+            .done
+        {}
         assert_eq!(output, rows, "later writes cannot replace the cursor root");
         assert_eq!(index.get(&key(3)).unwrap(), Some(key(999)));
     }
@@ -1187,7 +1374,9 @@ mod cursor_tests {
         let dir = tempfile::tempdir().unwrap();
         let index = ScratchIndex::from_sorted(dir.path(), [(key(1), key(2))]).unwrap();
         let mut cursor = index.cursor().unwrap();
-        assert!(cursor.visit_next(1, |_, _| Err(invalid("callback failed"))).is_err());
+        assert!(cursor
+            .visit_next(1, |_, _| Err(invalid("callback failed")))
+            .is_err());
         assert!(cursor.visit_next(1, |_, _| Ok(())).is_err());
         let mut cursor = index.cursor().unwrap();
         assert!(cursor.visit_next(0, |_, _| Ok(())).is_err());
@@ -1195,16 +1384,30 @@ mod cursor_tests {
         let mut cursor = index.cursor().unwrap();
         {
             let mut storage = index.storage.lock().unwrap();
-            storage.file.seek(SeekFrom::Start(index.root.unwrap().offset)).unwrap();
+            storage
+                .file
+                .seek(SeekFrom::Start(index.root.unwrap().offset))
+                .unwrap();
             storage.file.write_all(&[255]).unwrap();
         }
         assert!(cursor.visit_next(1, |_, _| Ok(())).is_err());
         assert!(cursor.visit_next(1, |_, _| Ok(())).is_err());
         let empty = ScratchIndex::new(dir.path()).unwrap();
-        assert!(empty.cursor().unwrap().visit_next(1, |_, _| panic!("empty")).unwrap().done);
+        assert!(
+            empty
+                .cursor()
+                .unwrap()
+                .visit_next(1, |_, _| panic!("empty"))
+                .unwrap()
+                .done
+        );
         let mut wrong_count = empty;
         wrong_count.count = 1;
-        assert!(wrong_count.cursor().unwrap().visit_next(1, |_, _| Ok(())).is_err());
+        assert!(wrong_count
+            .cursor()
+            .unwrap()
+            .visit_next(1, |_, _| Ok(()))
+            .is_err());
     }
 }
 
@@ -1215,11 +1418,14 @@ mod suffix_tests {
     #[test]
     fn exclusive_seek_matches_ordered_ranges_across_compressed_prefixes_and_gaps() {
         let dir = tempfile::tempdir().unwrap();
-        let mut keys: Vec<Key> = (0..64u64).map(|n| burst_crypto::blake2b_256(&n.to_be_bytes())).collect();
-        keys.extend([[0;32], [255;32]]);
+        let mut keys: Vec<Key> = (0..64u64)
+            .map(|n| burst_crypto::blake2b_256(&n.to_be_bytes()))
+            .collect();
+        keys.extend([[0; 32], [255; 32]]);
         keys.sort_unstable();
         keys.dedup();
-        let index = ScratchIndex::from_sorted(dir.path(), keys.iter().map(|key| (*key, *key))).unwrap();
+        let index =
+            ScratchIndex::from_sorted(dir.path(), keys.iter().map(|key| (*key, *key))).unwrap();
         let mut boundaries = keys.clone();
         boundaries.extend((64..128u64).map(|n| burst_crypto::blake2b_256(&n.to_be_bytes())));
         for after in boundaries {
@@ -1228,24 +1434,53 @@ mod suffix_tests {
             let mut actual = Vec::new();
             let mut nodes = 0;
             loop {
-                let page = cursor.visit_next(3, |key, value| { assert_eq!(key, value); actual.push(key); Ok(()) }).unwrap();
+                let page = cursor
+                    .visit_next(3, |key, value| {
+                        assert_eq!(key, value);
+                        actual.push(key);
+                        Ok(())
+                    })
+                    .unwrap();
                 assert!(page.nodes <= 3);
                 nodes += page.nodes;
-                if page.done { break; }
+                if page.done {
+                    break;
+                }
             }
             assert_eq!(actual, expected);
-            assert!(nodes <= 2 * expected.len() + 256, "seek must not visit the discarded prefix");
+            assert!(
+                nodes <= 2 * expected.len() + 256,
+                "seek must not visit the discarded prefix"
+            );
             let mut paired = index.paired_cursor_after(&index, after).unwrap();
             let mut both = Vec::new();
-            while !paired.visit_next::<StoreError>(5, |key, a, b| {
-                assert_eq!(a, b); both.push(key); Ok(())
-            }).unwrap().done {}
+            while !paired
+                .visit_next::<StoreError>(5, |key, a, b| {
+                    assert_eq!(a, b);
+                    both.push(key);
+                    Ok(())
+                })
+                .unwrap()
+                .done
+            {}
             assert_eq!(both, expected);
         }
-        let mut last = index.cursor_after(keys[keys.len()-2]).unwrap();
-        let page = last.visit_next(1, |key, _| { assert_eq!(key, *keys.last().unwrap()); Ok(()) }).unwrap();
+        let mut last = index.cursor_after(keys[keys.len() - 2]).unwrap();
+        let page = last
+            .visit_next(1, |key, _| {
+                assert_eq!(key, *keys.last().unwrap());
+                Ok(())
+            })
+            .unwrap();
         assert!(page.done && page.nodes == 1 && page.rows == 1);
         let empty = ScratchIndex::new(dir.path()).unwrap();
-        assert!(empty.cursor_after([0;32]).unwrap().visit_next(1, |_, _| panic!("empty")).unwrap().done);
+        assert!(
+            empty
+                .cursor_after([0; 32])
+                .unwrap()
+                .visit_next(1, |_, _| panic!("empty"))
+                .unwrap()
+                .done
+        );
     }
 }

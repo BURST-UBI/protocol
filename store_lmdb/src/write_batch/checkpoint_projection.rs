@@ -5,8 +5,8 @@
 use super::*;
 use std::collections::{HashMap, HashSet};
 
-mod compact;
 mod brn;
+mod compact;
 mod indexes;
 mod overlay;
 mod undo;
@@ -62,20 +62,28 @@ impl LmdbWriteTransaction<'_> {
     /// matching provisional journals before committing this transaction.
     pub fn begin_brn_wallet_records_projection(&mut self) -> Result<(), StoreError> {
         if self.failed || self.undo.is_some() {
-            return Err(invalid("BRN wallet projection requires a projection writer"));
+            return Err(invalid(
+                "BRN wallet projection requires a projection writer",
+            ));
         }
         self.clear_checkpoint_rows(UndoTable::BrnWallets, None)?;
         self.put_brn_meta(burst_brn::wallet_storage::FORMAT_KEY, &[1])
     }
 
-    pub fn put_checkpoint_brn_wallet_header(&mut self, address: &WalletAddress, value: &[u8]) -> Result<(), StoreError> {
+    pub fn put_checkpoint_brn_wallet_header(
+        &mut self,
+        address: &WalletAddress,
+        value: &[u8],
+    ) -> Result<(), StoreError> {
         let result = (|| {
             if self.undo.is_some() || !self.uses_brn_wallet_records()? {
                 return Err(invalid("BRN wallet header requires a record projection"));
             }
             self.put_raw(UndoTable::BrnWallets, address.as_str().as_bytes(), value)
         })();
-        if result.is_err() { self.failed = true; }
+        if result.is_err() {
+            self.failed = true;
+        }
         result
     }
 
@@ -395,7 +403,10 @@ impl LmdbWriteTransaction<'_> {
             return Err(invalid("projection replacement cannot join block undo"));
         }
         if table == UndoTable::BrnWallets && prefix.is_none() {
-            self.clear_checkpoint_rows(UndoTable::BrnMeta, Some(burst_brn::wallet_storage::ROW_PREFIX))?;
+            self.clear_checkpoint_rows(
+                UndoTable::BrnMeta,
+                Some(burst_brn::wallet_storage::ROW_PREFIX),
+            )?;
         }
         let Some(prefix) = prefix else {
             self.auxiliary_cache.get_mut().invalidate_projection();
@@ -425,7 +436,10 @@ impl LmdbWriteTransaction<'_> {
                     .map_err(LmdbError::from)?;
             }
             if table == UndoTable::Accounts {
-                self.env.verified_accounts_db.clear(&mut self.txn).map_err(LmdbError::from)?;
+                self.env
+                    .verified_accounts_db
+                    .clear(&mut self.txn)
+                    .map_err(LmdbError::from)?;
             }
             if table == UndoTable::Pending {
                 self.env
@@ -488,31 +502,49 @@ impl LmdbWriteTransaction<'_> {
                 loop {
                     use std::ops::Bound;
                     let bounds = (
-                        cursor.as_deref().map_or(Bound::Included(*prefix), Bound::Excluded),
+                        cursor
+                            .as_deref()
+                            .map_or(Bound::Included(*prefix), Bound::Excluded),
                         Bound::Unbounded,
                     );
-                    let keys = self.env.meta_db.range(&self.txn, &bounds)
+                    let keys = self
+                        .env
+                        .meta_db
+                        .range(&self.txn, &bounds)
                         .map_err(LmdbError::from)?
-                        .take_while(|row| row.as_ref().map_or(true, |(key, _)| key.starts_with(prefix)))
+                        .take_while(|row| {
+                            row.as_ref()
+                                .map_or(true, |(key, _)| key.starts_with(prefix))
+                        })
                         .take(256)
                         .map(|row| {
                             let (key, _) = row.map_err(LmdbError::from)?;
                             if key.len() > MAX_BYTES / 256 {
-                                return Err(invalid("checkpoint replacement key exceeds batch limit"));
+                                return Err(invalid(
+                                    "checkpoint replacement key exceeds batch limit",
+                                ));
                             }
                             Ok((key.to_vec(), keep(key)))
                         })
                         .collect::<Result<Vec<_>, StoreError>>()?;
-                    let Some((last, _)) = keys.last() else { break; };
+                    let Some((last, _)) = keys.last() else {
+                        break;
+                    };
                     cursor = Some(last.clone());
                     for (key, retained) in keys {
-                        if !retained { self.delete_raw(UndoTable::Meta, &key)?; }
+                        if !retained {
+                            self.delete_raw(UndoTable::Meta, &key)?;
+                        }
                     }
                 }
             }
             let has_verification = self.uses_verification_records()?
-                || self.env.meta_db.get(&self.txn, b"verification_orchestrator")
-                    .map_err(LmdbError::from)?.is_some();
+                || self
+                    .env
+                    .meta_db
+                    .get(&self.txn, b"verification_orchestrator")
+                    .map_err(LmdbError::from)?
+                    .is_some();
             if has_verification && !keep(b"verification_orchestrator") {
                 self.delete_raw(UndoTable::Meta, b"verification_orchestrator")?;
             }
@@ -528,7 +560,12 @@ impl LmdbWriteTransaction<'_> {
     /// be replaced together by the caller. Never join ordinary block undo.
     pub fn clear_checkpoint_token_rows(&mut self, prefix: &[u8]) -> Result<(), StoreError> {
         let result = (|| {
-            if self.failed || !matches!(prefix, b"trst_state/v1/" | b"trst_holdings/v2/" | b"trst_graph/v1/") {
+            if self.failed
+                || !matches!(
+                    prefix,
+                    b"trst_state/v1/" | b"trst_holdings/v2/" | b"trst_graph/v1/"
+                )
+            {
                 return Err(invalid("invalid token projection namespace"));
             }
             self.clear_checkpoint_rows(UndoTable::Meta, Some(prefix))
@@ -552,39 +589,94 @@ mod tests {
         let store = LmdbStore::open(directory.path(), 32, 16 << 20).unwrap();
         let mut batch = store.tx_begin_write().unwrap();
         for index in 0..600 {
-            batch.put_meta(&format!("verification_identity_source/{index:04}"), b"old").unwrap();
+            batch
+                .put_meta(&format!("verification_identity_source/{index:04}"), b"old")
+                .unwrap();
         }
-        batch.put_meta("verification_identity_source-other", b"keep").unwrap();
-        batch.put_meta("verification_orchestrator", b"legacy").unwrap();
+        batch
+            .put_meta("verification_identity_source-other", b"keep")
+            .unwrap();
+        batch
+            .put_meta("verification_orchestrator", b"legacy")
+            .unwrap();
         batch.commit().unwrap();
         {
             let mut batch = store.tx_begin_write().unwrap();
             let visited = std::cell::Cell::new(0);
-            batch.retain_checkpoint_lifecycle(|_| {
-                visited.set(visited.get() + 1);
-                true
-            }).unwrap();
+            batch
+                .retain_checkpoint_lifecycle(|_| {
+                    visited.set(visited.get() + 1);
+                    true
+                })
+                .unwrap();
             assert_eq!(visited.get(), 601);
-            assert!(!batch.changed_value, "retaining unchanged keys must not rewrite them");
+            assert!(
+                !batch.changed_value,
+                "retaining unchanged keys must not rewrite them"
+            );
         }
         for commit in [false, true] {
             let mut batch = store.tx_begin_write().unwrap();
             let visited = std::cell::Cell::new(0);
-            batch.retain_checkpoint_lifecycle(|key| {
-                visited.set(visited.get() + 1);
-                key.ends_with(b"0")
-            }).unwrap();
+            batch
+                .retain_checkpoint_lifecycle(|key| {
+                    visited.set(visited.get() + 1);
+                    key.ends_with(b"0")
+                })
+                .unwrap();
             assert_eq!(visited.get(), 601);
-            batch.put_meta("verification_identity_source/0000", b"changed").unwrap();
-            batch.put_meta("verification_identity_source/new", b"inserted").unwrap();
-            assert_eq!(batch.checkpoint_metadata_entries(b"verification_identity_source/").unwrap().count(), 61);
-            assert_eq!(batch.get_meta("verification_identity_source-other").unwrap().unwrap(), b"keep");
-            if commit { batch.commit().unwrap(); } else { drop(batch); }
+            batch
+                .put_meta("verification_identity_source/0000", b"changed")
+                .unwrap();
+            batch
+                .put_meta("verification_identity_source/new", b"inserted")
+                .unwrap();
+            assert_eq!(
+                batch
+                    .checkpoint_metadata_entries(b"verification_identity_source/")
+                    .unwrap()
+                    .count(),
+                61
+            );
+            assert_eq!(
+                batch
+                    .get_meta("verification_identity_source-other")
+                    .unwrap()
+                    .unwrap(),
+                b"keep"
+            );
+            if commit {
+                batch.commit().unwrap();
+            } else {
+                drop(batch);
+            }
             let batch = store.tx_begin_write().unwrap();
-            assert_eq!(batch.checkpoint_metadata_entries(b"verification_identity_source/").unwrap().count(), if commit { 61 } else { 600 });
-            assert_eq!(batch.get_meta("verification_identity_source/0000").unwrap().unwrap(), if commit { b"changed".as_slice() } else { b"old".as_slice() });
-            assert_eq!(batch.get_meta("verification_orchestrator").unwrap(),
-                if commit { None } else { Some(b"legacy".to_vec()) });
+            assert_eq!(
+                batch
+                    .checkpoint_metadata_entries(b"verification_identity_source/")
+                    .unwrap()
+                    .count(),
+                if commit { 61 } else { 600 }
+            );
+            assert_eq!(
+                batch
+                    .get_meta("verification_identity_source/0000")
+                    .unwrap()
+                    .unwrap(),
+                if commit {
+                    b"changed".as_slice()
+                } else {
+                    b"old".as_slice()
+                }
+            );
+            assert_eq!(
+                batch.get_meta("verification_orchestrator").unwrap(),
+                if commit {
+                    None
+                } else {
+                    Some(b"legacy".to_vec())
+                }
+            );
         }
     }
 
@@ -626,7 +718,13 @@ mod tests {
             } else {
                 drop(batch);
                 for prefix in prefixes {
-                    assert_eq!(store.meta_store().get_meta(&format!("{prefix}0000")).unwrap(), b"old");
+                    assert_eq!(
+                        store
+                            .meta_store()
+                            .get_meta(&format!("{prefix}0000"))
+                            .unwrap(),
+                        b"old"
+                    );
                 }
             }
         }
@@ -651,22 +749,35 @@ mod tests {
             batch.get_meta("trst_state/v1-other").unwrap().unwrap(),
             b"keep"
         );
-        assert_eq!(batch.get_meta("trst_holdings/v2-other").unwrap().unwrap(), b"keep");
+        assert_eq!(
+            batch.get_meta("trst_holdings/v2-other").unwrap().unwrap(),
+            b"keep"
+        );
         assert_eq!(batch.get_meta("trst_state_format").unwrap(), Some(vec![1]));
         assert_eq!(
             batch.get_meta("checkpoint_vote/keep").unwrap().unwrap(),
             b"promise"
         );
         drop(batch);
-        for prefix in [b"".as_slice(), b"checkpoint_vote/", b"trst_state/", b"trst_holdings/", b"trst_holdings/v2"] {
+        for prefix in [
+            b"".as_slice(),
+            b"checkpoint_vote/",
+            b"trst_state/",
+            b"trst_holdings/",
+            b"trst_holdings/v2",
+        ] {
             let mut batch = store.tx_begin_write().unwrap();
             assert!(batch.clear_checkpoint_token_rows(prefix).is_err());
             assert!(batch.commit().is_err());
         }
         for prefix in prefixes {
             let mut batch = store.tx_begin_write().unwrap();
-            batch.begin_block_undo(BlockHash::new([9; 32]), WalletAddress::new("brst_test"), 1).unwrap();
-            assert!(batch.clear_checkpoint_token_rows(prefix.as_bytes()).is_err());
+            batch
+                .begin_block_undo(BlockHash::new([9; 32]), WalletAddress::new("brst_test"), 1)
+                .unwrap();
+            assert!(batch
+                .clear_checkpoint_token_rows(prefix.as_bytes())
+                .is_err());
             assert!(batch.commit().is_err());
         }
     }
@@ -1007,10 +1118,17 @@ mod observation_tests {
     #[test]
     fn whole_table_clear_invalidates_body_change_coverage() {
         let dir = tempfile::tempdir().unwrap();
-        let env = crate::LmdbEnvironment::open(dir.path(), crate::REQUIRED_DATABASES, 32 << 20).unwrap();
-        let mut observer = env.tx_begin_write().unwrap().watch_body_changes(16, 4096).unwrap();
+        let env =
+            crate::LmdbEnvironment::open(dir.path(), crate::REQUIRED_DATABASES, 32 << 20).unwrap();
+        let mut observer = env
+            .tx_begin_write()
+            .unwrap()
+            .watch_body_changes(16, 4096)
+            .unwrap();
         let mut writer = env.tx_begin_write().unwrap();
-        writer.clear_checkpoint_rows(UndoTable::Transactions, None).unwrap();
+        writer
+            .clear_checkpoint_rows(UndoTable::Transactions, None)
+            .unwrap();
         writer.commit().unwrap();
         assert!(observer.visit(&env, |_| Ok(())).is_err());
     }

@@ -96,4 +96,4 @@ pub mod checkpoint_sync;
 pub mod checkpoint_transport;
 pub mod governance_content;
 pub mod wire_message;
-pub use wire_message::{WireMessage, HandshakeMsg};
+pub use wire_message::{HandshakeMsg, WireMessage};

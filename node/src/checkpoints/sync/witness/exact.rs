@@ -3,7 +3,6 @@ use super::*;
 // Responses contain a prefix of whole block bodies within the 1 MiB body budget.
 pub(crate) use burst_messages::checkpoint_sync::MAX_HEADS;
 
-
 pub(super) fn identity(starts: &[BlockHash]) -> BlockHash {
     let mut bytes = b"BURST/witness-heads/v1\0".to_vec();
     for hash in starts {
@@ -113,7 +112,8 @@ impl Transfer {
         if self.export.as_ref().is_none_or(|cached| {
             cached.start != start
                 || cached.heads != heads.is_some()
-                || (offset == 0 && now.saturating_duration_since(cached.loaded_at) >= RETRY_INTERVAL)
+                || (offset == 0
+                    && now.saturating_duration_since(cached.loaded_at) >= RETRY_INTERVAL)
         }) {
             if self.load_attempts >= 4 {
                 tracing::debug!(%start, %peer, "historical witness database load budget exhausted");

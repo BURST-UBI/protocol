@@ -20,13 +20,16 @@ fn stage(
     return_pending: bool,
 ) -> Result<(), String> {
     #[cfg(test)]
-    let started = RETURN_PHASES.with(|slot| slot.borrow().is_some())
+    let started = RETURN_PHASES
+        .with(|slot| slot.borrow().is_some())
         .then(std::time::Instant::now);
     trst.flush_all_expired(now);
     #[cfg(test)]
     let flushed = started.map_or(0, |start| start.elapsed().as_nanos());
     let pending = if return_pending {
-        batch.expired_pending(trst.expiry_secs, now).map_err(|e| e.to_string())?
+        batch
+            .expired_pending(trst.expiry_secs, now)
+            .map_err(|e| e.to_string())?
     } else {
         Vec::new()
     };
@@ -48,7 +51,9 @@ fn stage(
         let returned = crate::block_economics::create_returned_token(&destination, &hash, &pending);
         crate::block_economics::deliver_pending(trst, &pending, returned, now)?;
         #[cfg(test)]
-        if let Some(start) = delivery_started { delivery_ns += start.elapsed().as_nanos(); }
+        if let Some(start) = delivery_started {
+            delivery_ns += start.elapsed().as_nanos();
+        }
         batch
             .delete_pending(&destination, hash.as_bytes())
             .map_err(|e| e.to_string())?;
@@ -65,22 +70,31 @@ fn stage(
     }
     #[cfg(test)]
     let returned = started.map_or(0, |start| start.elapsed().as_nanos());
-    batch.refresh_expiry_counters(trst, now).map_err(|e| e.to_string())?;
+    batch
+        .refresh_expiry_counters(trst, now)
+        .map_err(|e| e.to_string())?;
     #[cfg(test)]
     let counted = started.map_or(0, |start| start.elapsed().as_nanos());
     crate::trst_storage::persist_delta(batch, before, trst).map_err(|error| error.to_string())?;
     #[cfg(test)]
     let persisted = started.map_or(0, |start| start.elapsed().as_nanos());
-    let result = crate::graph_storage::persist_delta(batch, &before.merger_graph, &trst.merger_graph)
-        .map_err(|e| e.to_string());
+    let result =
+        crate::graph_storage::persist_delta(batch, &before.merger_graph, &trst.merger_graph)
+            .map_err(|e| e.to_string());
     #[cfg(test)]
     if let Some(start) = started {
         let finished = start.elapsed().as_nanos();
-        RETURN_PHASES.with(|slot| *slot.borrow_mut() = Some([
-            flushed, selected - flushed, delivery_ns,
-            returned - selected - delivery_ns, counted - returned,
-            persisted - counted, finished - persisted,
-        ]));
+        RETURN_PHASES.with(|slot| {
+            *slot.borrow_mut() = Some([
+                flushed,
+                selected - flushed,
+                delivery_ns,
+                returned - selected - delivery_ns,
+                counted - returned,
+                persisted - counted,
+                finished - persisted,
+            ])
+        });
     }
     result
 }
@@ -372,7 +386,8 @@ mod tests {
                 .unwrap()
                 .return_credit
         );
-        live.restore_by_originator(&sender, Timestamp::new(21)).unwrap();
+        live.restore_by_originator(&sender, Timestamp::new(21))
+            .unwrap();
         apply(&store, &mut live, Timestamp::new(21)).unwrap();
         let account = store.account_store().get_account(&sender).unwrap();
         assert_eq!(
@@ -387,7 +402,8 @@ mod tests {
             live.transferable_balance(&sender, Timestamp::new(21)),
             Some(0)
         );
-        live.set_expiry_period(u64::MAX, Timestamp::new(22)).unwrap();
+        live.set_expiry_period(u64::MAX, Timestamp::new(22))
+            .unwrap();
         apply(&store, &mut live, Timestamp::new(22)).unwrap();
         assert_eq!(
             live.transferable_balance(&sender, Timestamp::new(22)),
@@ -426,9 +442,9 @@ mod tests {
             let receiver = WalletAddress::new("brst_burst_receiver");
             let mut live = TrstEngine::with_expiry(10);
             let mut batch = store.tx_begin_write().unwrap();
-            let account = crate::genesis_state::account_to_write(
-                None, sender.clone(), BlockHash::ZERO,
-            ).unwrap();
+            let account =
+                crate::genesis_state::account_to_write(None, sender.clone(), BlockHash::ZERO)
+                    .unwrap();
             batch.put_account_info(&account, false).unwrap();
             for n in 0..population {
                 let mut bytes = [0; 32];
@@ -436,18 +452,30 @@ mod tests {
                 let hash = TxHash::new(bytes);
                 // Primary-key order opposes insertion timestamps at the sender.
                 let at = Timestamp::new(population - n);
-                live.mint(hash, receiver.clone(), 15, sender.clone(), at).unwrap();
+                live.mint(hash, receiver.clone(), 15, sender.clone(), at)
+                    .unwrap();
                 let pending = PendingInfo {
-                    return_credit: false, source: sender.clone(), amount: 15,
+                    return_credit: false,
+                    source: sender.clone(),
+                    amount: 15,
                     timestamp: at,
                     provenance: vec![PendingProvenance {
-                        basis: Default::default(), revoked_amounts: Default::default(),
-                        amount: 15, origin: hash, origin_wallet: sender.clone(),
-                        origin_timestamp: at, effective_origin_timestamp: at,
+                        basis: Default::default(),
+                        revoked_amounts: Default::default(),
+                        amount: 15,
+                        origin: hash,
+                        origin_wallet: sender.clone(),
+                        origin_timestamp: at,
+                        effective_origin_timestamp: at,
                     }],
                 };
-                batch.put_pending(&receiver, hash.as_bytes(),
-                    &bincode::serialize(&pending).unwrap()).unwrap();
+                batch
+                    .put_pending(
+                        &receiver,
+                        hash.as_bytes(),
+                        &bincode::serialize(&pending).unwrap(),
+                    )
+                    .unwrap();
             }
             crate::trst_storage::stage_stable_rows_for_test(&mut batch, &live).unwrap();
             batch.commit().unwrap();
@@ -472,22 +500,35 @@ mod tests {
             batch.commit().unwrap();
             let commit_ns = started.elapsed().as_nanos();
             live = candidate;
-            let memory: Vec<_> = std::fs::read_to_string("/proc/self/status").unwrap()
-                .lines().filter(|line| line.starts_with("VmRSS:") || line.starts_with("VmHWM:"))
-                .map(str::to_owned).collect();
+            let memory: Vec<_> = std::fs::read_to_string("/proc/self/status")
+                .unwrap()
+                .lines()
+                .filter(|line| line.starts_with("VmRSS:") || line.starts_with("VmHWM:"))
+                .map(str::to_owned)
+                .collect();
             println!("expiry_return_burst population={population} stage_ns={stage_ns} commit_ns={commit_ns} memory={memory:?}");
 
             let expected = live.save_wallets();
             apply(&store, &mut live, now).unwrap();
             assert_eq!(live.save_wallets(), expected);
-            assert_eq!(store.account_store().get_account(&sender).unwrap().expired_trst,
-                u128::from(population) * 15);
+            assert_eq!(
+                store
+                    .account_store()
+                    .get_account(&sender)
+                    .unwrap()
+                    .expired_trst,
+                u128::from(population) * 15
+            );
             let portfolio = live.get_portfolio(&sender).unwrap();
             assert_eq!(portfolio.tokens.len(), population as usize);
-            assert!(portfolio.tokens.iter().all(|token|
-                token.amount == 15 && token.state == TrstState::Expired));
-            assert!(portfolio.tokens.windows(2).all(|pair|
-                pair[0].origin_timestamp <= pair[1].origin_timestamp));
+            assert!(portfolio
+                .tokens
+                .iter()
+                .all(|token| token.amount == 15 && token.state == TrstState::Expired));
+            assert!(portfolio
+                .tokens
+                .windows(2)
+                .all(|pair| pair[0].origin_timestamp <= pair[1].origin_timestamp));
             for (index, token) in portfolio.tokens.iter().enumerate() {
                 let mut origin = [0; 32];
                 origin[..8].copy_from_slice(&(population - index as u64).to_be_bytes());
@@ -500,8 +541,11 @@ mod tests {
             assert_eq!(batch.read_trst_engine(10).unwrap().save_wallets(), expected);
             let pending = batch.all_pending().unwrap();
             assert_eq!(pending.len(), population as usize);
-            assert!(pending.iter().all(|(destination, _, row)|
-                *destination == sender && row.return_credit && row.amount == 15));
+            assert!(pending
+                .iter()
+                .all(|(destination, _, row)| *destination == sender
+                    && row.return_credit
+                    && row.amount == 15));
         }
     }
 }

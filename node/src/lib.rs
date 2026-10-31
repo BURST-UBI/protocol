@@ -4,10 +4,8 @@
 //! Applications supply public RPC and WebSocket listeners through
 //! [`BurstNode::start_with_services`].
 
-mod paged_metadata;
 mod appeal_view;
 mod backlog_scan;
-mod governance_read;
 pub mod block_processor;
 mod block_retention;
 mod block_validation;
@@ -17,6 +15,8 @@ pub mod bounded_backlog;
 mod causal_cementation;
 #[cfg(test)]
 mod certified_network_tests;
+mod governance_read;
+mod paged_metadata;
 
 pub mod config;
 mod confirmed_authority;
@@ -27,21 +27,23 @@ mod delegation_view;
 mod durable_votes;
 mod economic_candidate;
 mod endorsement_commit;
-mod verification_storage;
 pub mod error;
 mod expiry_commit;
 mod fork_resolution;
 pub mod genesis_key;
 mod genesis_state;
 mod governance_commit;
-mod governance_storage;
 pub mod governance_content;
+mod governance_storage;
 mod graph_storage;
 mod historical_dependencies;
+mod verification_storage;
 pub(crate) use confirmed_replay::retirement::worker as body_retirement;
+pub mod account_work_pool;
+pub mod block_economics;
+mod brn_storage;
 mod historical_finality;
 mod historical_lookup;
-pub mod block_economics;
 pub mod ledger_cache;
 pub mod ledger_updater;
 pub mod limits;
@@ -50,7 +52,7 @@ pub mod metrics;
 mod network_identity;
 pub mod node;
 pub mod online_weight;
-pub mod account_work_pool;
+mod ordered_radix;
 mod payment_authority;
 mod payment_epoch;
 mod payment_exclusion;
@@ -63,9 +65,7 @@ pub mod shutdown;
 pub mod snapshot_installation;
 mod submission_results;
 pub mod tracing_spans;
-mod ordered_radix;
 mod trst_storage;
-mod brn_storage;
 pub mod unchecked;
 mod verification_activation;
 mod verification_commit;
@@ -76,6 +76,8 @@ mod verification_transition;
 mod verification_vote;
 pub mod wire_message;
 
+pub use account_work_pool::AccountWorkPool;
+pub use block_economics::{process_block_economics, EconomicResult};
 pub use block_processor::{
     BlockContext, BlockProcessor, BlockSource, ProcessResult, ProcessingQueue, RollbackResult,
 };
@@ -84,7 +86,6 @@ pub use bounded_backlog::BoundedBacklog;
 pub use config::NodeConfig;
 pub use connection_registry::ConnectionRegistry;
 pub use error::NodeError;
-pub use block_economics::{process_block_economics, EconomicResult};
 pub use ledger_updater::{
     create_pending_entry, delete_pending_entry, update_account_on_block, PendingInfo,
 };
@@ -93,7 +94,6 @@ pub use local_broadcaster::LocalBroadcaster;
 pub use metrics::NodeMetrics;
 pub use node::BurstNode;
 pub use online_weight::OnlineWeightTracker;
-pub use account_work_pool::AccountWorkPool;
 pub use peer_connector::{connect_to_peer, is_peer_connected, PeerConnectorContext};
 pub use priority_queue::{work_difficulty, BlockPriorityQueue};
 pub use recently_confirmed::RecentlyConfirmed;
@@ -107,8 +107,8 @@ pub use wire_message::{
 pub(crate) mod test_rpc;
 
 pub mod transport;
-pub use transport::{connection_registry, peer_connector};
 pub(crate) use transport::peer_handshake;
+pub use transport::{connection_registry, peer_connector};
 
 pub mod checkpoints;
 pub use checkpoints::activation as checkpoint_activation;

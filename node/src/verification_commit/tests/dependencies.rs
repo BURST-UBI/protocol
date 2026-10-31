@@ -10,10 +10,12 @@ fn verification_fork_candidates_validate_votes_and_challenges_without_publicatio
         {
             let mut batch = fixture.store.tx_begin_write().unwrap();
             crate::bootstrap_phase::initialize(&mut batch, &fixture.params).unwrap();
-            batch.put_meta(
-            crate::endorsement_commit::SNAPSHOT_KEY,
-            &fixture.orchestrator.snapshot().encode().unwrap(),
-        ).unwrap();
+            batch
+                .put_meta(
+                    crate::endorsement_commit::SNAPSHOT_KEY,
+                    &fixture.orchestrator.snapshot().encode().unwrap(),
+                )
+                .unwrap();
             let genesis = batch.get_account(&address(0)).unwrap();
             crate::confirmed_authority::ConfirmedAuthority::initialize(&mut batch, &genesis)
                 .unwrap();
@@ -98,10 +100,12 @@ fn independent_endorsement_replacement_preserves_other_progress_after_reopen() {
     {
         let mut batch = fixture.store.tx_begin_write().unwrap();
         crate::bootstrap_phase::initialize(&mut batch, &fixture.params).unwrap();
-        batch.put_meta(
-            crate::endorsement_commit::SNAPSHOT_KEY,
-            &fixture.orchestrator.snapshot().encode().unwrap(),
-        ).unwrap();
+        batch
+            .put_meta(
+                crate::endorsement_commit::SNAPSHOT_KEY,
+                &fixture.orchestrator.snapshot().encode().unwrap(),
+            )
+            .unwrap();
         let genesis = batch.get_account(&address(0)).unwrap();
         crate::confirmed_authority::ConfirmedAuthority::initialize(&mut batch, &genesis).unwrap();
         batch.commit().unwrap();

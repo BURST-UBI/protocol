@@ -51,7 +51,11 @@ mod tests {
         for n in 0..4096 {
             wallets.insert(
                 WalletAddress::new(format!("brst_{n:060}")),
-                Shared::from(WalletPortfolio::from_parts(Vec::new(), 0, Some(Timestamp::new(100 + n)))),
+                Shared::from(WalletPortfolio::from_parts(
+                    Vec::new(),
+                    0,
+                    Some(Timestamp::new(100 + n)),
+                )),
             );
         }
         let mut schedule = ExpirySchedule::default();

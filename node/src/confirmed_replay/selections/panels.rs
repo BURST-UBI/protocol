@@ -41,7 +41,9 @@ impl AsRef<CertifiedCheckpoint> for Certificate<'_> {
 
 impl std::ops::Deref for Certificate<'_> {
     type Target = CertifiedCheckpoint;
-    fn deref(&self) -> &Self::Target { self.as_ref() }
+    fn deref(&self) -> &Self::Target {
+        self.as_ref()
+    }
 }
 
 impl std::ops::Deref for Panel<'_> {
@@ -205,7 +207,11 @@ pub(in crate::confirmed_replay) fn assert_scoped_reuse(certificate: &CertifiedCh
             if position != 0 {
                 return Err(invalid("missing selection"));
             }
-            Ok(if self.owned { Cow::Owned(self.certificate.clone()) } else { Cow::Borrowed(self.certificate) })
+            Ok(if self.owned {
+                Cow::Owned(self.certificate.clone())
+            } else {
+                Cow::Borrowed(self.certificate)
+            })
         }
     }
     let context = certificate
@@ -233,8 +239,10 @@ pub(in crate::confirmed_replay) fn assert_scoped_reuse(certificate: &CertifiedCh
         let first = panels.require(&context).unwrap();
         for _ in 0..32 {
             let next = panels.require(&context).unwrap();
-            assert!(std::ptr::eq(first.certificate.as_ref(), next.certificate.as_ref()),
-                "cache hit cloned the authenticated certificate payload");
+            assert!(
+                std::ptr::eq(first.certificate.as_ref(), next.certificate.as_ref()),
+                "cache hit cloned the authenticated certificate payload"
+            );
         }
         assert_eq!(
             source.reads.get(),

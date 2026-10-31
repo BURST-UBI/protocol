@@ -14,10 +14,12 @@ use tokio::{
 
 mod observer;
 
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn accepted_ahead_session_still_requests_peer_evidence() {
-    use crate::{checkpoint_driver::CheckpointDriver, checkpoint_transport::{Body, Packet}};
+    use crate::{
+        checkpoint_driver::CheckpointDriver,
+        checkpoint_transport::{Body, Packet},
+    };
     use std::time::Instant;
     let (fixture, _source_dir, source, manifest, certificate) = setup();
     let snapshot = authenticate(&source, &fixture.params, manifest.checkpoint.parent);
@@ -26,54 +28,91 @@ async fn accepted_ahead_session_still_requests_peer_evidence() {
         let snapshot = authenticate(&source, &fixture.params, manifest.checkpoint.parent);
         let retained = compact::retained(&snapshot, &fixture, &source, &[]);
         let (_dir, suffix) = suffix_store(&[]);
-        let tail = base.read_tail(&suffix, CUTOFF, &manifest.heads, retained).unwrap();
+        let tail = base
+            .read_tail(&suffix, CUTOFF, &manifest.heads, retained)
+            .unwrap();
         base.selection_vote_coverage(tail, &manifest, &[]).unwrap()
     };
     let (_directory, local) = cemented::sparse(&base, &source);
     let local = Arc::new(local);
     let anchor = base.anchor();
-    local.meta_store().put_meta(
-        &format!("checkpoint_chain/v1/dev/{}/head", anchor.genesis_hash()),
-        &anchor.height().to_be_bytes(),
-    ).unwrap();
-    let seed = (0..9).find(|seed| address(*seed) != *anchor.proposer(0)).unwrap();
+    local
+        .meta_store()
+        .put_meta(
+            &format!("checkpoint_chain/v1/dev/{}/head", anchor.genesis_hash()),
+            &anchor.height().to_be_bytes(),
+        )
+        .unwrap();
+    let seed = (0..9)
+        .find(|seed| address(*seed) != *anchor.proposer(0))
+        .unwrap();
     let driver = CheckpointDriver::new_compact_selection(
-        local.clone(), fixture.params.clone(),
+        local.clone(),
+        fixture.params.clone(),
         Arc::new(burst_crypto::keypair_from_seed(&[seed; 32]).private),
-        anchor.clone(), coverage(), Vec::new(),
-    ).unwrap();
+        anchor.clone(),
+        coverage(),
+        Vec::new(),
+    )
+    .unwrap();
     // Make the five-second resume due without a wall-clock sleep. Phase timeout
     // remains sixty seconds, so only the stale resume can reject this poll.
     let session = Session::new(
-        driver, Instant::now() - Duration::from_secs(6), Duration::from_secs(60),
-    ).unwrap();
-    crate::checkpoint_store::compact::accept_selection(
-        &local, anchor, &coverage(), &certificate,
-    ).unwrap();
-    let metadata = local.tx_begin_write().unwrap().checkpoint_metadata(b"").unwrap();
-    assert!(checkpoint_agreement::read_state(&local, anchor, &address(seed))
-        .unwrap().unwrap().decision().is_none());
+        driver,
+        Instant::now() - Duration::from_secs(6),
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    crate::checkpoint_store::compact::accept_selection(&local, anchor, &coverage(), &certificate)
+        .unwrap();
+    let metadata = local
+        .tx_begin_write()
+        .unwrap()
+        .checkpoint_metadata(b"")
+        .unwrap();
+    assert!(
+        checkpoint_agreement::read_state(&local, anchor, &address(seed))
+            .unwrap()
+            .unwrap()
+            .decision()
+            .is_none()
+    );
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let (mut peer, socket) = tokio::try_join!(
-        TcpStream::connect(listener.local_addr().unwrap()), listener.accept(),
-    ).unwrap();
+        TcpStream::connect(listener.local_addr().unwrap()),
+        listener.accept(),
+    )
+    .unwrap();
     let (_reader, writer) = socket.0.into_split();
     let registry = Arc::new(tokio::sync::RwLock::new(
         crate::connection_registry::ConnectionRegistry::new(),
     ));
-    registry.write().await.insert("evidence-peer".into(), writer);
+    registry
+        .write()
+        .await
+        .insert("evidence-peer".into(), writer);
     let (sender, receiver) = mpsc::channel(checkpoint_service::INBOX_CAPACITY);
     let context = crate::checkpoint_transport::context_from_anchor(anchor).unwrap();
     let digest = BlockHash::new([91; 32]);
-    sender.send(Incoming {
-        peer: "evidence-peer".into(),
-        packet: Packet { context, body: Body::Offer { digest, total: 1 } },
-    }).await.unwrap();
+    sender
+        .send(Incoming {
+            peer: "evidence-peer".into(),
+            packet: Packet {
+                context,
+                body: Body::Offer { digest, total: 1 },
+            },
+        })
+        .await
+        .unwrap();
     let shutdown = Arc::new(ShutdownController::new());
     let clock: Clock = Arc::new(|| None);
     let worker = tokio::spawn(checkpoint_service::run(
-        session, registry.clone(), receiver, clock, shutdown.clone(),
+        session,
+        registry.clone(),
+        receiver,
+        clock,
+        shutdown.clone(),
     ));
     let response = tokio::time::timeout(Duration::from_secs(2), async {
         let size = peer.read_u32().await.unwrap();
@@ -81,19 +120,33 @@ async fn accepted_ahead_session_still_requests_peer_evidence() {
         let mut bytes = vec![0; size as usize];
         peer.read_exact(&mut bytes).await.unwrap();
         WireMessage::decode(&bytes).unwrap()
-    }).await;
+    })
+    .await;
     shutdown.shutdown();
     tokio::time::timeout(Duration::from_secs(5), worker)
-        .await.unwrap().unwrap().unwrap();
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
     registry.write().await.close();
     assert_eq!(local.meta_store().payment_epoch().unwrap(), anchor.hash());
-    assert_eq!(local.tx_begin_write().unwrap().checkpoint_metadata(b"").unwrap(), metadata);
-    let WireMessage::CheckpointAgreement(packet) = response
-        .expect("stale signing resume blocked checkpoint evidence retrieval") else {
+    assert_eq!(
+        local
+            .tx_begin_write()
+            .unwrap()
+            .checkpoint_metadata(b"")
+            .unwrap(),
+        metadata
+    );
+    let WireMessage::CheckpointAgreement(packet) =
+        response.expect("stale signing resume blocked checkpoint evidence retrieval")
+    else {
         panic!("unexpected wire message");
     };
     assert_eq!(packet.context, context);
-    assert!(matches!(packet.body, Body::Request { digest: requested, offset: 0 } if requested == digest));
+    assert!(
+        matches!(packet.body, Body::Request { digest: requested, offset: 0 } if requested == digest)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -125,17 +125,23 @@ pub(crate) async fn drain_scheduler(
     let mut started = 0;
     for _ in 0..capacity.min(256) {
         let entry = scheduler.lock().await.pop();
-        let Some((hash, _)) = entry else { break; };
-        let block = store.block_store().get_block(&hash).ok()
+        let Some((hash, _)) = entry else {
+            break;
+        };
+        let block = store
+            .block_store()
+            .get_block(&hash)
+            .ok()
             .and_then(|bytes| bincode::deserialize::<StateBlock>(&bytes).ok());
-        let Some(block) = block.filter(|block| block.hash == hash && block.compute_hash() == hash) else {
+        let Some(block) = block.filter(|block| block.hash == hash && block.compute_hash() == hash)
+        else {
             tracing::warn!(%hash, "scheduler candidate missing or corrupt");
             continue;
         };
         let mut elections = elections.write().await;
         match register_candidate(store, &mut elections, &block, now) {
             Ok(true) => started += 1,
-            Ok(false) => {},
+            Ok(false) => {}
             Err(error) => tracing::warn!(%hash, %error, "scheduler candidate deferred"),
         }
     }
@@ -193,11 +199,21 @@ mod tests {
         queue.push(blocks[1].hash, blocks[1].account.clone(), 1);
         let queue = tokio::sync::Mutex::new(queue);
         let elections = tokio::sync::RwLock::new(burst_consensus::ActiveElections::new(5000, 1000));
-        assert_eq!(drain_scheduler(&store, &queue, &elections, 5000, Timestamp::new(100)).await, 0);
+        assert_eq!(
+            drain_scheduler(&store, &queue, &elections, 5000, Timestamp::new(100)).await,
+            0
+        );
         assert_eq!(queue.lock().await.len(), 2);
-        assert_eq!(drain_scheduler(&store, &queue, &elections, 5000, Timestamp::new(100)).await, 1);
+        assert_eq!(
+            drain_scheduler(&store, &queue, &elections, 5000, Timestamp::new(100)).await,
+            1
+        );
         assert!(queue.lock().await.is_empty());
-        assert!(elections.read().await.candidate_root(&blocks[1].hash).is_some());
+        assert!(elections
+            .read()
+            .await
+            .candidate_root(&blocks[1].hash)
+            .is_some());
     }
 
     #[tokio::test]
@@ -206,9 +222,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(LmdbStore::open(dir.path(), 32, 16 * 1024 * 1024).unwrap());
         let blocks = chain(&store, 1);
-        let queue = Arc::new(tokio::sync::Mutex::new(burst_consensus::PriorityScheduler::new(4)));
-        queue.lock().await.push(blocks[1].hash, blocks[1].account.clone(), 100);
-        let elections = Arc::new(tokio::sync::RwLock::new(burst_consensus::ActiveElections::new(4, 1000)));
+        let queue = Arc::new(tokio::sync::Mutex::new(
+            burst_consensus::PriorityScheduler::new(4),
+        ));
+        queue
+            .lock()
+            .await
+            .push(blocks[1].hash, blocks[1].account.clone(), 100);
+        let elections = Arc::new(tokio::sync::RwLock::new(
+            burst_consensus::ActiveElections::new(4, 1000),
+        ));
         let reader = elections.read().await;
         let task = tokio::spawn({
             let (store, queue, elections) = (store.clone(), queue.clone(), elections.clone());
@@ -216,15 +239,27 @@ mod tests {
         });
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
-                if queue.lock().await.is_empty() { break; }
+                if queue.lock().await.is_empty() {
+                    break;
+                }
                 tokio::task::yield_now().await;
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         assert!(!task.is_finished());
-        queue.try_lock().expect("scheduler must remain available during election wait")
+        queue
+            .try_lock()
+            .expect("scheduler must remain available during election wait")
             .push(blocks[2].hash, blocks[2].account.clone(), 1);
         drop(reader);
-        assert_eq!(tokio::time::timeout(Duration::from_secs(1), task).await.unwrap().unwrap(), 2);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), task)
+                .await
+                .unwrap()
+                .unwrap(),
+            2
+        );
     }
 
     #[test]

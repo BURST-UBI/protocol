@@ -3,17 +3,20 @@
 use super::{invalid, MAX_RECORD_BYTES};
 use crate::paged_metadata::{Commitment, Location, Reader};
 use burst_store::StoreError;
+use burst_store_lmdb::checkpoint_heads::{HeadNode, NodeHash};
 use std::borrow::Cow;
 use std::io::Read;
-use burst_store_lmdb::checkpoint_heads::{HeadNode, NodeHash};
-mod shared;
 pub(crate) mod maintenance;
-mod source;
 mod retirement;
+mod shared;
+mod source;
 
 fn is_record_key(key: &str) -> bool {
     (key.starts_with("checkpoint_chain/v1/") || key.starts_with("checkpoint_record_archive/v1/"))
-        && key.rsplit('/').next().is_some_and(|height| height.parse::<u64>().is_ok())
+        && key
+            .rsplit('/')
+            .next()
+            .is_some_and(|height| height.parse::<u64>().is_ok())
 }
 
 /// Other checkpoint metadata (tips, beacons and witness rows) keeps its encoding.
@@ -22,38 +25,67 @@ pub(crate) fn get(
     mut get_raw: impl FnMut(&str) -> Result<Option<Vec<u8>>, StoreError>,
     get_node: impl FnMut(&NodeHash) -> Result<Option<HeadNode>, StoreError>,
 ) -> Result<Option<Vec<u8>>, StoreError> {
-    let Some(stored) = get_raw(key)? else { return Ok(None); };
-    if !is_record_key(key) { return Ok(Some(stored)); }
-    Ok(Some(decode_stored(key, &stored, get_raw, get_node, MAX_RECORD_BYTES as usize)?.into_owned()))
+    let Some(stored) = get_raw(key)? else {
+        return Ok(None);
+    };
+    if !is_record_key(key) {
+        return Ok(Some(stored));
+    }
+    Ok(Some(
+        decode_stored(key, &stored, get_raw, get_node, MAX_RECORD_BYTES as usize)?.into_owned(),
+    ))
 }
 
 pub(crate) fn get_batch(
-    batch: &burst_store_lmdb::LmdbWriteTransaction<'_>, key: &str,
+    batch: &burst_store_lmdb::LmdbWriteTransaction<'_>,
+    key: &str,
 ) -> Result<Option<Vec<u8>>, StoreError> {
-    get(key, |name| batch.get_meta(name), |hash| batch.read_view().checkpoint_head_node(hash))
+    get(
+        key,
+        |name| batch.get_meta(name),
+        |hash| batch.read_view().checkpoint_head_node(hash),
+    )
 }
 
 pub(crate) fn get_txn(
     meta: &burst_store_lmdb::LmdbMetaStore,
-    txn: &burst_store_lmdb::LmdbReadTransaction<'_>, key: &str,
+    txn: &burst_store_lmdb::LmdbReadTransaction<'_>,
+    key: &str,
 ) -> Result<Option<Vec<u8>>, StoreError> {
-    get(key, |name| meta.get_meta_txn(txn, name), |hash| meta.checkpoint_head_node_txn(txn, hash))
+    get(
+        key,
+        |name| meta.get_meta_txn(txn, name),
+        |hash| meta.checkpoint_head_node_txn(txn, hash),
+    )
 }
 
 /// Compare logical bytes without assembling a second complete record. Paged
 /// and shared records are checked to the end even after a mismatch, so a
 /// replacement cannot silently repair a corrupt archived dependency.
 pub(super) fn matches_batch(
-    batch: &burst_store_lmdb::LmdbWriteTransaction<'_>, key: &str, expected: &[u8],
+    batch: &burst_store_lmdb::LmdbWriteTransaction<'_>,
+    key: &str,
+    expected: &[u8],
 ) -> Result<Option<bool>, StoreError> {
-    let Some(stored) = batch.get_meta(key)? else { return Ok(None); };
+    let Some(stored) = batch.get_meta(key)? else {
+        return Ok(None);
+    };
     if is_record_key(key) && shared::is_shared(&stored)? {
-        let mut offset = 0usize; let mut equal = true;
-        let commitment = shared::visit(key, &stored, |name| batch.get_meta(name),
-            |hash| batch.read_view().checkpoint_head_node(hash), MAX_RECORD_BYTES as usize, |bytes| {
-                let end = offset + bytes.len(); equal &= expected.get(offset..end) == Some(bytes);
-                offset = end; Ok(())
-            })?;
+        let mut offset = 0usize;
+        let mut equal = true;
+        let commitment = shared::visit(
+            key,
+            &stored,
+            |name| batch.get_meta(name),
+            |hash| batch.read_view().checkpoint_head_node(hash),
+            MAX_RECORD_BYTES as usize,
+            |bytes| {
+                let end = offset + bytes.len();
+                equal &= expected.get(offset..end) == Some(bytes);
+                offset = end;
+                Ok(())
+            },
+        )?;
         return Ok(Some(equal && commitment.size == expected.len()));
     }
     if !is_record_key(key) || !crate::paged_metadata::is_paged(&stored)? {
@@ -63,16 +95,29 @@ pub(super) fn matches_batch(
         return Ok(Some(stored == expected));
     }
     let mut first = Some(stored);
-    let mut reader = Reader::open_at_bounded(RecordLocation::new(key), |name| {
-        if name == key { Ok(first.take()) } else { batch.get_meta(name) }
-    }, MAX_RECORD_BYTES as usize)?.ok_or_else(|| invalid("checkpoint record disappeared"))?;
+    let mut reader = Reader::open_at_bounded(
+        RecordLocation::new(key),
+        |name| {
+            if name == key {
+                Ok(first.take())
+            } else {
+                batch.get_meta(name)
+            }
+        },
+        MAX_RECORD_BYTES as usize,
+    )?
+    .ok_or_else(|| invalid("checkpoint record disappeared"))?;
     let mut buffer = [0; 16 << 10];
     let mut offset = 0usize;
     let mut equal = true;
     loop {
         let count = reader.read(&mut buffer).map_err(invalid)?;
-        if count == 0 { break; }
-        let end = offset.checked_add(count).ok_or_else(|| invalid("checkpoint comparison size overflow"))?;
+        if count == 0 {
+            break;
+        }
+        let end = offset
+            .checked_add(count)
+            .ok_or_else(|| invalid("checkpoint comparison size overflow"))?;
         equal &= expected.get(offset..end) == Some(&buffer[..count]);
         offset = end;
     }
@@ -83,21 +128,33 @@ pub(super) fn matches_batch(
 /// Keep canonical record bytes unchanged; only their local representation varies.
 /// All page writes and replacement cleanup belong to the caller's writer.
 pub(super) fn put(
-    batch: &mut burst_store_lmdb::LmdbWriteTransaction<'_>, key: &str, bytes: &[u8],
+    batch: &mut burst_store_lmdb::LmdbWriteTransaction<'_>,
+    key: &str,
+    bytes: &[u8],
 ) -> Result<(), StoreError> {
-    if !is_record_key(key) { return batch.put_meta(key, bytes); }
+    if !is_record_key(key) {
+        return batch.put_meta(key, bytes);
+    }
     if bytes.is_empty() || bytes.len() as u64 > MAX_RECORD_BYTES {
         return Err(invalid("invalid checkpoint record size"));
     }
-    if matches_batch(batch, key, bytes)? == Some(true) { return Ok(()); }
+    if matches_batch(batch, key, bytes)? == Some(true) {
+        return Ok(());
+    }
     if let Some(prepared) = shared::prepare(bytes)? {
         return publish_shared(batch, key, prepared);
     }
     if let Some(stored) = batch.get_meta(key)? {
-        if shared::is_shared(&stored)? { shared::remove(batch, key, &stored)?; }
+        if shared::is_shared(&stored)? {
+            shared::remove(batch, key, &stored)?;
+        }
     }
     if bytes.len() <= crate::paged_metadata::PAGE_BYTES {
-        crate::paged_metadata::delete_at(RecordLocation::new(key), batch, MAX_RECORD_BYTES as usize)?;
+        crate::paged_metadata::delete_at(
+            RecordLocation::new(key),
+            batch,
+            MAX_RECORD_BYTES as usize,
+        )?;
         batch.put_meta(key, bytes)
     } else {
         crate::paged_metadata::write_bytes_at(RecordLocation::new(key), batch, bytes)
@@ -105,13 +162,21 @@ pub(super) fn put(
 }
 
 pub(super) fn delete(
-    batch: &mut burst_store_lmdb::LmdbWriteTransaction<'_>, key: &str,
+    batch: &mut burst_store_lmdb::LmdbWriteTransaction<'_>,
+    key: &str,
 ) -> Result<(), StoreError> {
-    if !is_record_key(key) { return batch.delete_meta(key); }
+    if !is_record_key(key) {
+        return batch.delete_meta(key);
+    }
     if let Some(stored) = batch.get_meta(key)? {
         if shared::is_shared(&stored)? {
-            inspect_stored(key, &stored, |name| batch.get_meta(name),
-                |hash| batch.read_view().checkpoint_head_node(hash), MAX_RECORD_BYTES as usize)?;
+            inspect_stored(
+                key,
+                &stored,
+                |name| batch.get_meta(name),
+                |hash| batch.read_view().checkpoint_head_node(hash),
+                MAX_RECORD_BYTES as usize,
+            )?;
             shared::remove(batch, key, &stored)?;
             batch.reclaim_checkpoint_heads(64)?;
             return Ok(());
@@ -120,12 +185,22 @@ pub(super) fn delete(
     crate::paged_metadata::delete_at(RecordLocation::new(key), batch, MAX_RECORD_BYTES as usize)
 }
 
-fn publish_shared(batch: &mut burst_store_lmdb::LmdbWriteTransaction<'_>, key: &str,
-    prepared: shared::Prepared<'_>) -> Result<(), StoreError> {
+fn publish_shared(
+    batch: &mut burst_store_lmdb::LmdbWriteTransaction<'_>,
+    key: &str,
+    prepared: shared::Prepared<'_>,
+) -> Result<(), StoreError> {
     let root = prepared.build_root(batch)?;
     if let Some(stored) = batch.get_meta(key)? {
-        if shared::is_shared(&stored)? { shared::remove(batch, key, &stored)?; }
-        else { crate::paged_metadata::delete_at(RecordLocation::new(key), batch, MAX_RECORD_BYTES as usize)?; }
+        if shared::is_shared(&stored)? {
+            shared::remove(batch, key, &stored)?;
+        } else {
+            crate::paged_metadata::delete_at(
+                RecordLocation::new(key),
+                batch,
+                MAX_RECORD_BYTES as usize,
+            )?;
+        }
     }
     prepared.publish(batch, key, root)?;
     batch.reclaim_checkpoint_heads(64)?;
@@ -135,14 +210,30 @@ fn publish_shared(batch: &mut burst_store_lmdb::LmdbWriteTransaction<'_>, key: &
 /// Convert one supported record to shared storage within the caller's transaction.
 /// This test helper reads and rewrites the complete record.
 #[cfg(test)]
-pub(super) fn normalize(batch: &mut burst_store_lmdb::LmdbWriteTransaction<'_>, key: &str)
-    -> Result<bool, StoreError> {
-    if !is_record_key(key) { return Ok(false); }
-    let Some(stored) = batch.get_meta(key)? else { return Ok(false); };
-    let bytes = decode_stored(key, &stored, |name| batch.get_meta(name),
-        |hash| batch.read_view().checkpoint_head_node(hash), MAX_RECORD_BYTES as usize)?.into_owned();
-    if shared::is_shared(&stored)? { return Ok(false); }
-    let Some(prepared) = shared::prepare(&bytes)? else { return Ok(false); };
+pub(super) fn normalize(
+    batch: &mut burst_store_lmdb::LmdbWriteTransaction<'_>,
+    key: &str,
+) -> Result<bool, StoreError> {
+    if !is_record_key(key) {
+        return Ok(false);
+    }
+    let Some(stored) = batch.get_meta(key)? else {
+        return Ok(false);
+    };
+    let bytes = decode_stored(
+        key,
+        &stored,
+        |name| batch.get_meta(name),
+        |hash| batch.read_view().checkpoint_head_node(hash),
+        MAX_RECORD_BYTES as usize,
+    )?
+    .into_owned();
+    if shared::is_shared(&stored)? {
+        return Ok(false);
+    }
+    let Some(prepared) = shared::prepare(&bytes)? else {
+        return Ok(false);
+    };
     publish_shared(batch, key, prepared)?;
     Ok(true)
 }
@@ -155,13 +246,20 @@ struct RecordLocation<'a> {
 impl<'a> RecordLocation<'a> {
     fn new(key: &'a str) -> Self {
         let identity = burst_types::BlockHash::new(burst_crypto::blake2b_256(key.as_bytes()));
-        Self { key, page_prefix: format!("checkpoint_chain/pages/v1/{identity}/") }
+        Self {
+            key,
+            page_prefix: format!("checkpoint_chain/pages/v1/{identity}/"),
+        }
     }
 }
 
 impl Location for RecordLocation<'_> {
-    fn descriptor_key(&self) -> &str { self.key }
-    fn page_key(&self, index: usize) -> String { format!("{}{index:08x}", self.page_prefix) }
+    fn descriptor_key(&self) -> &str {
+        self.key
+    }
+    fn page_key(&self, index: usize) -> String {
+        format!("{}{index:08x}", self.page_prefix)
+    }
 }
 
 /// The descriptor, pages and shared nodes must come from the same transaction.
@@ -176,7 +274,10 @@ pub(super) fn decode_stored<'a>(
     let max_bytes = max_bytes.min(MAX_RECORD_BYTES as usize);
     if shared::is_shared(descriptor)? {
         let mut bytes = Vec::new();
-        shared::visit(key, descriptor, get, get_node, max_bytes, |part| { bytes.extend_from_slice(part); Ok(()) })?;
+        shared::visit(key, descriptor, get, get_node, max_bytes, |part| {
+            bytes.extend_from_slice(part);
+            Ok(())
+        })?;
         return Ok(Cow::Owned(bytes));
     }
     if !crate::paged_metadata::is_paged(descriptor)? {
@@ -186,10 +287,18 @@ pub(super) fn decode_stored<'a>(
         return Ok(Cow::Borrowed(descriptor));
     }
     let mut first = Some(descriptor.to_vec());
-    let mut reader = Reader::open_at_bounded(RecordLocation::new(key), |name| {
-        if name == key { Ok(first.take()) } else { get(name) }
-    }, max_bytes)?
-        .ok_or_else(|| invalid("checkpoint record disappeared"))?;
+    let mut reader = Reader::open_at_bounded(
+        RecordLocation::new(key),
+        |name| {
+            if name == key {
+                Ok(first.take())
+            } else {
+                get(name)
+            }
+        },
+        max_bytes,
+    )?
+    .ok_or_else(|| invalid("checkpoint record disappeared"))?;
     let mut bytes = Vec::new();
     reader.read_to_end(&mut bytes).map_err(invalid)?;
     reader.commitment()?;
@@ -213,20 +322,34 @@ pub(super) fn inspect_stored(
         if descriptor.len() > max_bytes {
             return Err(invalid("checkpoint record exceeds logical byte limit"));
         }
-        return Ok(Commitment { size: descriptor.len(), hash: burst_crypto::blake2b_256(descriptor) });
+        return Ok(Commitment {
+            size: descriptor.len(),
+            hash: burst_crypto::blake2b_256(descriptor),
+        });
     }
     let mut first = Some(descriptor.to_vec());
-    let mut reader = Reader::open_at_bounded(RecordLocation::new(key), |name| {
-        if name == key { Ok(first.take()) } else { get(name) }
-    }, max_bytes)?.ok_or_else(|| invalid("checkpoint record disappeared"))?;
+    let mut reader = Reader::open_at_bounded(
+        RecordLocation::new(key),
+        |name| {
+            if name == key {
+                Ok(first.take())
+            } else {
+                get(name)
+            }
+        },
+        max_bytes,
+    )?
+    .ok_or_else(|| invalid("checkpoint record disappeared"))?;
     std::io::copy(&mut reader, &mut std::io::sink()).map_err(invalid)?;
     reader.commitment()
 }
 
 pub(super) fn validated_size(
-    key: &str, descriptor: &[u8],
+    key: &str,
+    descriptor: &[u8],
     get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StoreError>,
-    get_node: impl FnMut(&NodeHash) -> Result<Option<HeadNode>, StoreError>, max_bytes: usize,
+    get_node: impl FnMut(&NodeHash) -> Result<Option<HeadNode>, StoreError>,
+    max_bytes: usize,
 ) -> Result<usize, StoreError> {
     if shared::is_shared(descriptor)? || crate::paged_metadata::is_paged(descriptor)? {
         Ok(inspect_stored(key, descriptor, get, get_node, max_bytes)?.size)
@@ -258,49 +381,146 @@ mod tests {
         batch.commit().unwrap();
         let txn = store.tx_begin_read().unwrap();
         let descriptor = store.meta_store().get_meta_txn(&txn, key).unwrap().unwrap();
-        let paged = decode_stored(key, &descriptor,
-            |name| store.meta_store().get_meta_txn(&txn, name), |_| Ok(None), bytes.len()).unwrap();
-        let inline = decode_stored(key, &bytes, |_| panic!("inline record needs no pages"), |_| Ok(None), bytes.len()).unwrap();
+        let paged = decode_stored(
+            key,
+            &descriptor,
+            |name| store.meta_store().get_meta_txn(&txn, name),
+            |_| Ok(None),
+            bytes.len(),
+        )
+        .unwrap();
+        let inline = decode_stored(
+            key,
+            &bytes,
+            |_| panic!("inline record needs no pages"),
+            |_| Ok(None),
+            bytes.len(),
+        )
+        .unwrap();
         assert_eq!(paged, inline);
-        assert_eq!(burst_crypto::blake2b_256(&paged), burst_crypto::blake2b_256(&bytes));
-        let info = inspect_stored(key, &descriptor,
-            |name| store.meta_store().get_meta_txn(&txn, name), |_| Ok(None), bytes.len()).unwrap();
+        assert_eq!(
+            burst_crypto::blake2b_256(&paged),
+            burst_crypto::blake2b_256(&bytes)
+        );
+        let info = inspect_stored(
+            key,
+            &descriptor,
+            |name| store.meta_store().get_meta_txn(&txn, name),
+            |_| Ok(None),
+            bytes.len(),
+        )
+        .unwrap();
         assert_eq!(info.size, bytes.len());
         assert_eq!(info.hash, burst_crypto::blake2b_256(&bytes));
-        assert_eq!(inspect_stored(key, &bytes, |_| panic!("inline needs no pages"), |_| Ok(None), bytes.len()).unwrap().hash, info.hash);
-        assert_eq!(validated_size(key, &descriptor,
-            |name| store.meta_store().get_meta_txn(&txn, name), |_| Ok(None), bytes.len()).unwrap(), bytes.len());
-        assert!(inspect_stored(key, &descriptor, |_| panic!("reject budget before pages"), |_| Ok(None), bytes.len() - 1).is_err());
-        assert!(validated_size(key, &descriptor, |_| panic!("reject budget before pages"), |_| Ok(None), bytes.len() - 1).is_err());
+        assert_eq!(
+            inspect_stored(
+                key,
+                &bytes,
+                |_| panic!("inline needs no pages"),
+                |_| Ok(None),
+                bytes.len()
+            )
+            .unwrap()
+            .hash,
+            info.hash
+        );
+        assert_eq!(
+            validated_size(
+                key,
+                &descriptor,
+                |name| store.meta_store().get_meta_txn(&txn, name),
+                |_| Ok(None),
+                bytes.len()
+            )
+            .unwrap(),
+            bytes.len()
+        );
+        assert!(inspect_stored(
+            key,
+            &descriptor,
+            |_| panic!("reject budget before pages"),
+            |_| Ok(None),
+            bytes.len() - 1
+        )
+        .is_err());
+        assert!(validated_size(
+            key,
+            &descriptor,
+            |_| panic!("reject budget before pages"),
+            |_| Ok(None),
+            bytes.len() - 1
+        )
+        .is_err());
         assert!(inspect_stored(key, &descriptor, |_| Ok(None), |_| Ok(None), bytes.len()).is_err());
         let prefix = "checkpoint_chain/v1/dev/test";
         let fingerprint = burst_types::BlockHash::new(info.hash);
-        assert_eq!(super::super::inventory::fingerprints(&store, &txn, prefix, 1).unwrap()[&1], fingerprint);
+        assert_eq!(
+            super::super::inventory::fingerprints(&store, &txn, prefix, 1).unwrap()[&1],
+            fingerprint
+        );
 
-        assert!(decode_stored(key, &descriptor, |_| panic!("budget must reject before pages"), |_| Ok(None), bytes.len() - 1).is_err());
+        assert!(decode_stored(
+            key,
+            &descriptor,
+            |_| panic!("budget must reject before pages"),
+            |_| Ok(None),
+            bytes.len() - 1
+        )
+        .is_err());
         assert!(decode_stored(key, &descriptor, |_| Ok(None), |_| Ok(None), bytes.len()).is_err());
-        assert_eq!(get_txn(&store.meta_store(), &txn, key).unwrap().unwrap(), bytes);
+        assert_eq!(
+            get_txn(&store.meta_store(), &txn, key).unwrap().unwrap(),
+            bytes
+        );
         {
             let batch = store.tx_begin_write().unwrap();
             assert_eq!(matches_batch(&batch, key, &bytes).unwrap(), Some(true));
-            for candidate in [vec![], vec![8; bytes.len()], bytes[..bytes.len() - 1].to_vec(),
-                [bytes.as_slice(), &[9]].concat()] {
+            for candidate in [
+                vec![],
+                vec![8; bytes.len()],
+                bytes[..bytes.len() - 1].to_vec(),
+                [bytes.as_slice(), &[9]].concat(),
+            ] {
                 assert_eq!(matches_batch(&batch, key, &candidate).unwrap(), Some(false));
             }
-            assert_eq!(matches_batch(&batch, "checkpoint_chain/v1/dev/test/99", &bytes).unwrap(), None);
+            assert_eq!(
+                matches_batch(&batch, "checkpoint_chain/v1/dev/test/99", &bytes).unwrap(),
+                None
+            );
         }
         let mut aborted = store.tx_begin_write().unwrap();
-        aborted.put_meta(&RecordLocation::new(key).page_key(0), &[0; 4064]).unwrap();
+        aborted
+            .put_meta(&RecordLocation::new(key).page_key(0), &[0; 4064])
+            .unwrap();
         assert!(get_batch(&aborted, key).is_err());
-        assert_eq!(get_txn(&store.meta_store(), &txn, key).unwrap().unwrap(), bytes);
+        assert_eq!(
+            get_txn(&store.meta_store(), &txn, key).unwrap().unwrap(),
+            bytes
+        );
         drop(aborted);
         // A good descriptor cannot hide a damaged or missing final page.
-        let last = RecordLocation::new(key).page_key(bytes.len().div_ceil(crate::paged_metadata::PAGE_BYTES) - 1);
+        let last = RecordLocation::new(key)
+            .page_key(bytes.len().div_ceil(crate::paged_metadata::PAGE_BYTES) - 1);
         for missing in [false, true] {
             let mut batch = store.tx_begin_write().unwrap();
-            if missing { batch.delete_meta(&last).unwrap(); }
-            else { batch.put_meta(&last, &vec![8; bytes.len() % crate::paged_metadata::PAGE_BYTES]).unwrap(); }
-            assert!(validated_size(key, &descriptor, |name| batch.get_meta(name), |_| Ok(None), bytes.len()).is_err());
+            if missing {
+                batch.delete_meta(&last).unwrap();
+            } else {
+                batch
+                    .put_meta(
+                        &last,
+                        &vec![8; bytes.len() % crate::paged_metadata::PAGE_BYTES],
+                    )
+                    .unwrap();
+            }
+            assert!(validated_size(
+                key,
+                &descriptor,
+                |name| batch.get_meta(name),
+                |_| Ok(None),
+                bytes.len()
+            )
+            .is_err());
             // An early mismatch must not bypass a damaged or missing final page.
             let replacement = vec![3; bytes.len()];
             assert!(matches_batch(&batch, key, &replacement).is_err());
@@ -313,7 +533,10 @@ mod tests {
                     assert!(super::super::inventory::read(&store, &changed, prefix, 1).is_err());
                 }).join().unwrap();
             });
-            assert_eq!(super::super::inventory::fingerprints(&store, &txn, prefix, 1).unwrap()[&1], fingerprint);
+            assert_eq!(
+                super::super::inventory::fingerprints(&store, &txn, prefix, 1).unwrap()[&1],
+                fingerprint
+            );
         }
     }
 
@@ -330,7 +553,9 @@ mod tests {
             writer.write_all(&bytes).unwrap();
             writer.finish().unwrap();
         }
-        batch.put_meta(&format!("{prefix}/head"), &5u64.to_be_bytes()).unwrap();
+        batch
+            .put_meta(&format!("{prefix}/head"), &5u64.to_be_bytes())
+            .unwrap();
         batch.commit().unwrap();
         let txn = store.tx_begin_read().unwrap();
         assert!(super::super::inventory::read(&store, &txn, prefix, 5).is_err());
@@ -361,24 +586,45 @@ mod tests {
         put(&mut batch, archive, &bytes).unwrap();
         delete(&mut batch, active).unwrap();
         for index in 0..2 {
-            assert!(batch.get_meta(&RecordLocation::new(active).page_key(index)).unwrap().is_none());
+            assert!(batch
+                .get_meta(&RecordLocation::new(active).page_key(index))
+                .unwrap()
+                .is_none());
         }
         batch.commit().unwrap();
-        assert_eq!(get_txn(&store.meta_store(), &pinned, active).unwrap().unwrap(), bytes);
-        assert!(get_txn(&store.meta_store(), &pinned, archive).unwrap().is_none());
+        assert_eq!(
+            get_txn(&store.meta_store(), &pinned, active)
+                .unwrap()
+                .unwrap(),
+            bytes
+        );
+        assert!(get_txn(&store.meta_store(), &pinned, archive)
+            .unwrap()
+            .is_none());
         drop(pinned);
         let mut batch = store.tx_begin_write().unwrap();
         put(&mut batch, archive, b"small").unwrap();
         for index in 0..2 {
-            assert!(batch.get_meta(&RecordLocation::new(archive).page_key(index)).unwrap().is_none());
+            assert!(batch
+                .get_meta(&RecordLocation::new(archive).page_key(index))
+                .unwrap()
+                .is_none());
         }
         assert_eq!(get_batch(&batch, archive).unwrap().unwrap(), b"small");
-        assert_eq!(matches_batch(&batch, archive, b"small").unwrap(), Some(true));
-        assert_eq!(matches_batch(&batch, archive, b"other").unwrap(), Some(false));
+        assert_eq!(
+            matches_batch(&batch, archive, b"small").unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            matches_batch(&batch, archive, b"other").unwrap(),
+            Some(false)
+        );
         delete(&mut batch, archive).unwrap();
         batch.commit().unwrap();
         let reopened = store.tx_begin_read().unwrap();
-        assert!(get_txn(&store.meta_store(), &reopened, archive).unwrap().is_none());
+        assert!(get_txn(&store.meta_store(), &reopened, archive)
+            .unwrap()
+            .is_none());
     }
 }
 

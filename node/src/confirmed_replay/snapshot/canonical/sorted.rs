@@ -1,9 +1,9 @@
-use crate::confirmed_replay::scratch_file::ScratchFile as File;
 use super::*;
+use crate::confirmed_replay::scratch_file::ScratchFile as File;
 use std::{
-    io::{BufReader, BufWriter, Read, Seek, SeekFrom},
     cmp::Reverse,
     collections::BinaryHeap,
+    io::{BufReader, BufWriter, Read, Seek, SeekFrom},
 };
 
 const KEY_BYTES: usize = 1024 * 1024;
@@ -38,17 +38,32 @@ pub(super) fn encode<M: MapSource>(
     encode_key: impl Fn(&M::Key, &mut Vec<u8>) -> Result<(), ReplayError>,
     encode_value: impl Fn(&M::Value, &mut dyn Write) -> Result<(), ReplayError>,
 ) -> Result<(), ReplayError> {
-    encode_sorted(map, output, encode_value, KEY_BYTES, Scratch(directory), encode_key)
+    encode_sorted(
+        map,
+        output,
+        encode_value,
+        KEY_BYTES,
+        Scratch(directory),
+        encode_key,
+    )
 }
 
 #[cfg(test)]
 fn encode_with_budget<M: MapSource>(
-    map: &M, output: &mut dyn Write,
+    map: &M,
+    output: &mut dyn Write,
     encode_value: impl Fn(&M::Value, &mut dyn Write) -> Result<(), ReplayError>,
-    key_budget: usize, scratch: Scratch<'_>,
+    key_budget: usize,
+    scratch: Scratch<'_>,
 ) -> Result<(), ReplayError> {
-    encode_sorted(map, output, encode_value, key_budget, scratch,
-        |key, output| encode_at_depth(key, output, 2))
+    encode_sorted(
+        map,
+        output,
+        encode_value,
+        key_budget,
+        scratch,
+        |key, output| encode_at_depth(key, output, 2),
+    )
 }
 
 fn encode_sorted<M: MapSource>(
@@ -59,7 +74,9 @@ fn encode_sorted<M: MapSource>(
     scratch: Scratch<'_>,
     encode_key: impl Fn(&M::Key, &mut Vec<u8>) -> Result<(), ReplayError>,
 ) -> Result<(), ReplayError> {
-    if key_budget == 0 { return Err(invalid("zero snapshot key budget")); }
+    if key_budget == 0 {
+        return Err(invalid("zero snapshot key budget"));
+    }
     let max_runs = (MAX_SNAPSHOT_BYTES as usize).div_ceil(key_budget);
     let mut files = Vec::new();
     let mut entries: Vec<Entry> = Vec::new();
@@ -87,17 +104,23 @@ fn encode_sorted<M: MapSource>(
         offset += length as u64;
         if key_bytes_used >= key_budget {
             let run = sorted_run(std::mem::take(&mut entries), scratch)?;
-            if files.len() == max_runs { return Err(invalid("snapshot sort run count exceeds byte bound")); }
+            if files.len() == max_runs {
+                return Err(invalid("snapshot sort run count exceeds byte bound"));
+            }
             files.push(run);
             key_bytes_used = 0;
         }
     }
     if !entries.is_empty() {
-        if files.len() == max_runs { return Err(invalid("snapshot sort run count exceeds byte bound")); }
+        if files.len() == max_runs {
+            return Err(invalid("snapshot sort run count exceeds byte bound"));
+        }
         files.push(sorted_run(entries, scratch)?);
     }
     let mut data = data.into_inner().map_err(error)?;
-    let mut runs = files.into_iter().map(Run::new)
+    let mut runs = files
+        .into_iter()
+        .map(Run::new)
         .collect::<Result<Vec<_>, _>>()?;
     // Validate all keys and locations before emitting bytes, including duplicates
     // across runs. Rewind the immutable runs instead of writing a final run.
@@ -134,12 +157,18 @@ fn visit_locations(
 ) -> Result<(), ReplayError> {
     let mut heads = BinaryHeap::new();
     for (index, run) in runs.iter_mut().enumerate() {
-        if let Some(key) = run.key.take() { heads.push(Reverse((key.len(), key, index))); }
+        if let Some(key) = run.key.take() {
+            heads.push(Reverse((key.len(), key, index)));
+        }
     }
     let mut previous: Option<Vec<u8>> = None;
     while let Some(Reverse((_, key, index))) = heads.pop() {
         if let Some(previous) = &previous {
-            match previous.len().cmp(&key.len()).then_with(|| previous.cmp(&key)) {
+            match previous
+                .len()
+                .cmp(&key.len())
+                .then_with(|| previous.cmp(&key))
+            {
                 std::cmp::Ordering::Equal => return Err(invalid("duplicate snapshot map key")),
                 std::cmp::Ordering::Greater => return Err(invalid("unordered snapshot sort run")),
                 std::cmp::Ordering::Less => {}
@@ -159,15 +188,14 @@ fn visit_locations(
         visit(&key, start, length)?;
         previous = Some(key);
         run.next()?;
-        if let Some(key) = run.key.take() { heads.push(Reverse((key.len(), key, index))); }
+        if let Some(key) = run.key.take() {
+            heads.push(Reverse((key.len(), key, index)));
+        }
     }
     Ok(())
 }
 
-fn sorted_run(
-    mut entries: Vec<Entry>,
-    scratch: Scratch<'_>,
-) -> Result<File, ReplayError> {
+fn sorted_run(mut entries: Vec<Entry>, scratch: Scratch<'_>) -> Result<File, ReplayError> {
     sort_entries(&mut entries)?;
     let mut output = BufWriter::with_capacity(BUFFER_BYTES, scratch.file()?);
     for (key, (offset, length)) in entries {
@@ -243,8 +271,12 @@ impl Run {
     }
 
     #[cfg(test)]
-    fn copy_row(&mut self, output: &mut impl Write, framed: bool,
-        buffer: &mut [u8; BUFFER_BYTES]) -> Result<(), ReplayError> {
+    fn copy_row(
+        &mut self,
+        output: &mut impl Write,
+        framed: bool,
+        buffer: &mut [u8; BUFFER_BYTES],
+    ) -> Result<(), ReplayError> {
         let key = self
             .key
             .as_ref()
@@ -265,7 +297,10 @@ mod tests {
 
     #[test]
     fn reusable_copy_buffer_preserves_boundaries_and_io_errors() {
-        struct ShortReads<'a> { bytes: &'a [u8], interrupt: bool }
+        struct ShortReads<'a> {
+            bytes: &'a [u8],
+            interrupt: bool,
+        }
         impl Read for ShortReads<'_> {
             fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
                 if self.interrupt {
@@ -277,7 +312,10 @@ mod tests {
             }
         }
         let bytes: Vec<u8> = (0..BUFFER_BYTES * 2 + 17).map(|n| n as u8).collect();
-        let mut input = ShortReads { bytes: &bytes, interrupt: true };
+        let mut input = ShortReads {
+            bytes: &bytes,
+            interrupt: true,
+        };
         let mut buffer = [0; BUFFER_BYTES];
         let mut output = Vec::new();
         for length in [0, 3, BUFFER_BYTES as u64 + 1] {
@@ -286,12 +324,21 @@ mod tests {
         assert_eq!(output, bytes[..BUFFER_BYTES + 4]);
         assert_eq!(input.bytes, &bytes[BUFFER_BYTES + 4..]);
         let remaining = input.bytes.len() as u64;
-        assert!(copy_exact(&mut input, &mut output, remaining + 1, &mut buffer)
-            .unwrap_err().to_string().contains("truncated snapshot sort run"));
+        assert!(
+            copy_exact(&mut input, &mut output, remaining + 1, &mut buffer)
+                .unwrap_err()
+                .to_string()
+                .contains("truncated snapshot sort run")
+        );
         assert_eq!(output, bytes);
         let mut short = [0; 2];
-        assert!(copy_exact(&mut bytes.as_slice(), &mut short.as_mut_slice(), 3,
-            &mut buffer).is_err());
+        assert!(copy_exact(
+            &mut bytes.as_slice(),
+            &mut short.as_mut_slice(),
+            3,
+            &mut buffer
+        )
+        .is_err());
         struct Broken;
         impl Read for Broken {
             fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
@@ -299,7 +346,9 @@ mod tests {
             }
         }
         assert!(copy_exact(&mut Broken, &mut output, 1, &mut buffer)
-            .unwrap_err().to_string().contains("injected read failure"));
+            .unwrap_err()
+            .to_string()
+            .contains("injected read failure"));
     }
 
     #[test]
@@ -342,22 +391,33 @@ mod tests {
     fn merge_passes_store_large_values_once_within_shared_budget() {
         use crate::confirmed_replay::scratch_file::ScratchLimit;
         let map: std::collections::HashMap<_, _> = (0..2048u32)
-            .map(|key| (key, format!("{key:04}") + &"x".repeat(1020))).collect();
+            .map(|key| (key, format!("{key:04}") + &"x".repeat(1020)))
+            .collect();
         let expected = super::super::encode(&map).unwrap();
         let directory = tempfile::tempdir().unwrap();
         let limit = ScratchLimit::acquire(directory.path(), 3 << 20).unwrap();
         let mut actual = Vec::new();
-        encode_with_budget(&map, &mut actual,
+        encode_with_budget(
+            &map,
+            &mut actual,
             |value, mut output| encode_at_depth(value, &mut output, 2),
-            64, Scratch(Some(directory.path()))).unwrap();
+            64,
+            Scratch(Some(directory.path())),
+        )
+        .unwrap();
         assert_eq!(actual, expected);
         assert_eq!(limit.used_temporary_bytes().unwrap(), 0);
         drop(limit);
         let limit = ScratchLimit::acquire(directory.path(), 1 << 20).unwrap();
         let mut rejected = Vec::new();
-        assert!(encode_with_budget(&map, &mut rejected,
+        assert!(encode_with_budget(
+            &map,
+            &mut rejected,
             |value, mut output| encode_at_depth(value, &mut output, 2),
-            64, Scratch(Some(directory.path()))).is_err());
+            64,
+            Scratch(Some(directory.path()))
+        )
+        .is_err());
         assert!(rejected.is_empty());
         assert_eq!(limit.used_temporary_bytes().unwrap(), 0);
     }
@@ -424,47 +484,69 @@ mod tests {
         use crate::confirmed_replay::scratch_file::ScratchLimit;
         // Four key runs and their value storage must fit within 18 KiB.
         let map: std::collections::BTreeMap<_, _> = (0..4u32)
-            .map(|key| (format!("{key:04}{}", "x".repeat(4092)), key)).collect();
+            .map(|key| (format!("{key:04}{}", "x".repeat(4092)), key))
+            .collect();
         struct Source(std::collections::BTreeMap<String, u32>);
         impl MapSource for Source {
             type Key = String;
             type Value = u32;
-            fn len(&self) -> usize { self.0.len() }
-            fn entries(&self) -> impl Iterator<Item = (&String, &u32)> { self.0.iter() }
+            fn len(&self) -> usize {
+                self.0.len()
+            }
+            fn entries(&self) -> impl Iterator<Item = (&String, &u32)> {
+                self.0.iter()
+            }
         }
         let expected = super::super::encode(&map).unwrap();
         let map = Source(map);
         let directory = tempfile::tempdir().unwrap();
         let limit = ScratchLimit::acquire(directory.path(), 18 * 1024).unwrap();
         let mut actual = Vec::new();
-        encode_with_budget(&map, &mut actual,
+        encode_with_budget(
+            &map,
+            &mut actual,
             |value, mut output| encode_at_depth(value, &mut output, 2),
-            4096, Scratch(Some(directory.path()))).unwrap();
+            4096,
+            Scratch(Some(directory.path())),
+        )
+        .unwrap();
         assert_eq!(actual, expected);
         assert_eq!(limit.used_temporary_bytes().unwrap(), 0);
         let mut short = vec![0; expected.len() - 1];
-        assert!(encode_with_budget(&map, &mut short.as_mut_slice(),
+        assert!(encode_with_budget(
+            &map,
+            &mut short.as_mut_slice(),
             |value, mut output| encode_at_depth(value, &mut output, 2),
-            4096, Scratch(Some(directory.path()))).is_err());
+            4096,
+            Scratch(Some(directory.path()))
+        )
+        .is_err());
         assert_eq!(&short[..], &expected[..short.len()]);
         assert_eq!(limit.used_temporary_bytes().unwrap(), 0);
-
 
         struct Duplicate;
         impl MapSource for Duplicate {
             type Key = u8;
             type Value = u8;
-            fn len(&self) -> usize { 3 }
+            fn len(&self) -> usize {
+                3
+            }
             fn entries(&self) -> impl Iterator<Item = (&u8, &u8)> {
                 static ENTRIES: [(u8, u8); 3] = [(1, 0), (2, 0), (1, 0)];
                 ENTRIES.iter().map(|(key, value)| (key, value))
             }
         }
         let mut rejected = Vec::new();
-        assert!(encode_with_budget(&Duplicate, &mut rejected,
+        assert!(encode_with_budget(
+            &Duplicate,
+            &mut rejected,
             |value, mut output| encode_at_depth(value, &mut output, 2),
-            1, Scratch(Some(directory.path()))).unwrap_err().to_string()
-            .contains("duplicate snapshot map key"));
+            1,
+            Scratch(Some(directory.path()))
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("duplicate snapshot map key"));
         assert!(rejected.is_empty());
         assert_eq!(limit.used_temporary_bytes().unwrap(), 0);
     }
@@ -485,7 +567,8 @@ mod tests {
             assert!(visit_locations(&mut runs, 1, |_, _, _| {
                 visited = true;
                 Ok(())
-            }).is_err());
+            })
+            .is_err());
             assert!(!visited);
         }
         let mut file = File::new().unwrap();
@@ -495,7 +578,9 @@ mod tests {
         }
         let mut runs = [Run::new(file).unwrap()];
         assert!(visit_locations(&mut runs, 0, |_, _, _| Ok(()))
-            .unwrap_err().to_string().contains("unordered snapshot sort run"));
+            .unwrap_err()
+            .to_string()
+            .contains("unordered snapshot sort run"));
     }
 
     #[test]

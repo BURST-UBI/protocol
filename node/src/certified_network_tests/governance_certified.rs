@@ -210,8 +210,11 @@ async fn supported_rate_proposal(
 }
 
 async fn support_rate_proposal(
-    clients: &[NodeClient], supporter: &KeyPair, params: &ProtocolParams,
-    at: u64, proposal: &StateBlock,
+    clients: &[NodeClient],
+    supporter: &KeyPair,
+    params: &ProtocolParams,
+    at: u64,
+    proposal: &StateBlock,
 ) {
     let owner = burst_crypto::derive_address(&supporter.public);
     let tx = Transaction::ChangeRepresentative(
@@ -249,9 +252,13 @@ async fn governance_journey_from(
         .await
         .unwrap();
     let directory = tempfile::tempdir().unwrap();
-    let imported = snapshot.map(|source| query_resources::copy_snapshot(source, directory.path()))
-        .or_else(|| (scenario == Scenario::QueryResources)
-            .then(|| query_resources::copy_retained(directory.path())).flatten());
+    let imported = snapshot
+        .map(|source| query_resources::copy_snapshot(source, directory.path()))
+        .or_else(|| {
+            (scenario == Scenario::QueryResources)
+                .then(|| query_resources::copy_retained(directory.path()))
+                .flatten()
+        });
     let humans = if let Some(saved) = &imported {
         saved.population as usize
     } else if scenario == Scenario::QueryResources {
@@ -275,8 +282,11 @@ async fn governance_journey_from(
     } else {
         time(10).as_secs()
     };
-    let clock = Arc::new(AtomicU64::new(imported.as_ref().map_or(
-        base + if resumed { 20 } else { 10 }, |saved| saved.now)));
+    let clock = Arc::new(AtomicU64::new(
+        imported
+            .as_ref()
+            .map_or(base + if resumed { 20 } else { 10 }, |saved| saved.now),
+    ));
     let params = imported
         .as_ref()
         .map(|saved| saved.params.clone())
@@ -336,7 +346,9 @@ async fn governance_journey_from(
         workers.push((
             node.shutdown.clone(),
             tokio::spawn(async move {
-                node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+                node.start_with_services(burst_daemon::start_public_services)
+                    .await
+                    .unwrap();
                 node.stop().await.unwrap();
             }),
         ));
@@ -399,7 +411,9 @@ async fn governance_journey_from(
                 opening = sign_state_block(opening, &keys[index].private);
             }
             submit(&clients, &opening).await;
-            if scenario == Scenario::QueryResources && ((index + 1) % 16 == 0 || index + 1 == humans) {
+            if scenario == Scenario::QueryResources
+                && ((index + 1) % 16 == 0 || index + 1 == humans)
+            {
                 query_resources::report("human-signed-inputs", 0, index + 1, human_setup);
             }
         }
@@ -1071,12 +1085,17 @@ async fn governance_journey_from(
         let retained = directory.keep();
         eprintln!("signed_governance_retained_fixture {}", retained.display());
         stop(&mut workers).await;
-        assert!(result.expect("governance query resource journey timed out").unwrap().is_none());
+        assert!(result
+            .expect("governance query resource journey timed out")
+            .unwrap()
+            .is_none());
         return;
     }
     stop(&mut workers).await;
-    let (proposal, payment, epoch, governed, extra_proposals) =
-        result.expect("governance journey timed out").unwrap().expect("governance recovery inputs");
+    let (proposal, payment, epoch, governed, extra_proposals) = result
+        .expect("governance journey timed out")
+        .unwrap()
+        .expect("governance recovery inputs");
     if scenario == Scenario::DelayedRecovery {
         let bytes = stores[0].block_store().get_block(&proposal).unwrap();
         let proposed: StateBlock = bincode::deserialize(&bytes).unwrap();
@@ -1121,7 +1140,9 @@ async fn governance_journey_from(
         workers.push((
             node.shutdown.clone(),
             tokio::spawn(async move {
-                node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+                node.start_with_services(burst_daemon::start_public_services)
+                    .await
+                    .unwrap();
                 node.stop().await.unwrap();
             }),
         ));
@@ -1183,7 +1204,9 @@ async fn governance_journey_from(
                 workers.push((
                     node.shutdown.clone(),
                     tokio::spawn(async move {
-                        node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+                        node.start_with_services(burst_daemon::start_public_services)
+                            .await
+                            .unwrap();
                         node.stop().await.unwrap();
                     }),
                 ));
@@ -1198,7 +1221,9 @@ async fn governance_journey_from(
             workers.push((
                 node.shutdown.clone(),
                 tokio::spawn(async move {
-                    node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+                    node.start_with_services(burst_daemon::start_public_services)
+                        .await
+                        .unwrap();
                     node.stop().await.unwrap();
                 }),
             ));

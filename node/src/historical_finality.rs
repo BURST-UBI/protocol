@@ -319,7 +319,9 @@ mod tests {
         assert!(queue.push(block.clone()).await);
         assert!(cache.request(&block, authority()));
         for seed in 0..3 {
-            cache.receive_and_enqueue(&vote(seed, block.hash, true), &queue).await;
+            cache
+                .receive_and_enqueue(&vote(seed, block.hash, true), &queue)
+                .await;
         }
         assert!(cache.has_age_exception(&block.hash));
         assert!(cache.awaiting_votes().is_empty());
@@ -327,5 +329,4 @@ mod tests {
         assert_eq!(queue.len().await, 1);
         assert_eq!(queue.pop().await.hash, block.hash);
     }
-
 }

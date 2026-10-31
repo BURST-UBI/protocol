@@ -4,21 +4,20 @@ use crate::error::RpcError;
 use crate::handlers;
 
 use axum::{
-    extract::{ConnectInfo, State, DefaultBodyLimit},
-    Extension,
-    http::{header, StatusCode, HeaderMap},
+    extract::{ConnectInfo, DefaultBodyLimit, State},
+    http::{header, HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
-    Json, Router,
+    Extension, Json, Router,
 };
 use burst_types::WalletAddress;
 
+pub use crate::state::*;
 use prometheus::{Encoder, TextEncoder};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{info, warn};
-pub use crate::state::*;
 
 /// Top-level RPC server handle.
 pub struct RpcServer {
@@ -26,6 +25,7 @@ pub struct RpcServer {
     /// Address to bind to (e.g. `127.0.0.1` or `0.0.0.0`).
     pub bind: String,
     pub state: Arc<RpcState>,
+    admin_token: Option<String>,
 }
 
 /// Action name and parameters in a single JSON object.
@@ -70,7 +70,19 @@ impl RpcServer {
 
     /// Create a server bound to an explicit address with custom shared state.
     pub fn with_bind(port: u16, bind: String, state: Arc<RpcState>) -> Self {
-        Self { port, bind, state }
+        Self {
+            port,
+            bind,
+            state,
+            admin_token: None,
+        }
+    }
+
+    /// Configure admin authentication explicitly instead of reading the process environment.
+    /// The same token format and endpoint authorization checks still apply.
+    pub fn with_admin_token(mut self, token: String) -> Self {
+        self.admin_token = Some(token);
+        self
     }
 
     /// Serve requests until shutdown, then drain existing HTTP sessions.
@@ -82,14 +94,24 @@ impl RpcServer {
         shutdown: impl std::future::Future<Output = ()> + Send + 'static,
     ) -> Result<(), RpcError> {
         if !crate::security::authority_bind_allowed(&self.bind, self.state.genesis_seed.is_some()) {
-            return Err(RpcError::Server("genesis authority RPC must bind to a numeric loopback address".into()));
+            return Err(RpcError::Server(
+                "genesis authority RPC must bind to a numeric loopback address".into(),
+            ));
         }
-        let token = match std::env::var("BURST_RPC_ADMIN_TOKEN") {
-            Ok(token) => Some(token),
-            Err(std::env::VarError::NotPresent) => None,
-            Err(_) => return Err(RpcError::Server("invalid BURST_RPC_ADMIN_TOKEN encoding".into())),
+        let token = match &self.admin_token {
+            Some(token) => Some(token.clone()),
+            None => match std::env::var("BURST_RPC_ADMIN_TOKEN") {
+                Ok(token) => Some(token),
+                Err(std::env::VarError::NotPresent) => None,
+                Err(_) => {
+                    return Err(RpcError::Server(
+                        "invalid BURST_RPC_ADMIN_TOKEN encoding".into(),
+                    ))
+                }
+            },
         };
-        let security = crate::security::Security::new(token.as_deref()).map_err(RpcError::Server)?;
+        let security =
+            crate::security::Security::new(token.as_deref()).map_err(RpcError::Server)?;
         let requests = security.requests.clone();
         let app = Router::new()
             .route("/health", get(|| async { "ok" }))
@@ -98,18 +120,26 @@ impl RpcServer {
             .with_state(Arc::clone(&self.state))
             .layer(DefaultBodyLimit::max(crate::security::MAX_REQUEST_BYTES))
             .layer(Extension(security))
-            .layer(axum::middleware::from_fn(move |request: axum::extract::Request, next: axum::middleware::Next| {
-                let requests = requests.clone();
-                async move {
-                    let Ok(_permit) = requests.try_acquire_owned() else {
-                        return (StatusCode::TOO_MANY_REQUESTS, "RPC busy").into_response();
-                    };
-                    match tokio::time::timeout(std::time::Duration::from_secs(30), next.run(request)).await {
-                        Ok(response) => response,
-                        Err(_) => (StatusCode::REQUEST_TIMEOUT, "RPC deadline exceeded").into_response(),
+            .layer(axum::middleware::from_fn(
+                move |request: axum::extract::Request, next: axum::middleware::Next| {
+                    let requests = requests.clone();
+                    async move {
+                        let Ok(_permit) = requests.try_acquire_owned() else {
+                            return (StatusCode::TOO_MANY_REQUESTS, "RPC busy").into_response();
+                        };
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(30),
+                            next.run(request),
+                        )
+                        .await
+                        {
+                            Ok(response) => response,
+                            Err(_) => (StatusCode::REQUEST_TIMEOUT, "RPC deadline exceeded")
+                                .into_response(),
+                        }
                     }
-                }
-            }));
+                },
+            ));
 
         let addr = format!("{}:{}", self.bind, self.port);
         if self.bind == "0.0.0.0" {
@@ -180,9 +210,16 @@ async fn handle_rpc(
 ) -> impl IntoResponse {
     let cost = match security.authorize(&headers, &body) {
         Ok(cost) => cost,
-        Err(status) => return (status, Json(serde_json::json!({"error": if status == StatusCode::UNAUTHORIZED {
+        Err(status) => {
+            return (
+                status,
+                Json(
+                    serde_json::json!({"error": if status == StatusCode::UNAUTHORIZED {
             "admin authorization required"
-        } else { "invalid batch size" }}))),
+        } else { "invalid batch size" }}),
+                ),
+            )
+        }
     };
     let client_ip = addr.ip().to_string();
     if !state.rate_limiter.check_cost(&client_ip, cost as u32) {
@@ -299,9 +336,10 @@ async fn dispatch_action(
             let query = serde_json::from_value(params)
                 .map_err(|e| RpcError::InvalidRequest(e.to_string()))?;
             let processor = state.block_processor.clone();
-            let review = state.read_executor.run(move || {
-                processor.payment_exclusion(query).map_err(RpcError::Server)
-            }).await?;
+            let review = state
+                .read_executor
+                .run(move || processor.payment_exclusion(query).map_err(RpcError::Server))
+                .await?;
             serde_json::to_value(review).map_err(|e| RpcError::Server(e.to_string()))
         }
         "delegation_info" => handlers::handle_delegation_info(params, state).await,

@@ -5,9 +5,9 @@ use super::*;
 pub mod normalized;
 pub mod retention;
 mod visitor;
-pub use visitor::VerificationRecordVisitor;
 use bincode::Options;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+pub use visitor::VerificationRecordVisitor;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct PriorVotes(#[serde(serialize_with = "crate::state::ordered_votes")] Vec<VerifierVote>);
@@ -54,7 +54,11 @@ impl VerificationRecord {
     /// Canonical snapshot projection of one logical record plus the actual rules.
     /// Runs record identity, history and appeal checks on this fragment. It does
     /// not establish inventory completeness or authenticate its chain provenance.
-    pub fn into_snapshot_fragment(self, rules: &Self, max_snapshot_bytes: u64) -> Result<OrchestratorSnapshot, String> {
+    pub fn into_snapshot_fragment(
+        self,
+        rules: &Self,
+        max_snapshot_bytes: u64,
+    ) -> Result<OrchestratorSnapshot, String> {
         visitor::snapshot_fragment(self, rules, max_snapshot_bytes, false)
     }
 
@@ -172,16 +176,27 @@ impl VerificationOrchestrator {
     pub fn storage_replacement_scope(&self, before: &Self) -> Self {
         let mut next = self.storage_clone();
         next.states.replacement_scope(&before.states);
-        next.active_challenges.replacement_scope(&before.active_challenges);
-        next.active_appeals.replacement_scope(&before.active_appeals);
+        next.active_challenges
+            .replacement_scope(&before.active_challenges);
+        next.active_appeals
+            .replacement_scope(&before.active_appeals);
         next.prior_votes.replacement_scope(&before.prior_votes);
         next.selections.replacement_scope(&before.selections);
-        next.penalized_verifiers.replacement_scope(&before.penalized_verifiers);
-        next.attempts.votes.replacement_scope(&before.attempts.votes);
-        next.attempts.challenges.replacement_scope(&before.attempts.challenges);
-        next.neither_tracker.history.replacement_scope(&before.neither_tracker.history);
-        next.record_change_rules = Some((before.neither_tracker.penalty_threshold_bps,
-            before.neither_tracker.window_assignments));
+        next.penalized_verifiers
+            .replacement_scope(&before.penalized_verifiers);
+        next.attempts
+            .votes
+            .replacement_scope(&before.attempts.votes);
+        next.attempts
+            .challenges
+            .replacement_scope(&before.attempts.challenges);
+        next.neither_tracker
+            .history
+            .replacement_scope(&before.neither_tracker.history);
+        next.record_change_rules = Some((
+            before.neither_tracker.penalty_threshold_bps,
+            before.neither_tracker.window_assignments,
+        ));
         next
     }
 
@@ -189,9 +204,13 @@ impl VerificationOrchestrator {
     /// This does not replay signed operations or authenticate selection certificates.
     pub fn validate_storage_state(&self) -> Result<(), String> {
         self.neither_tracker.validate().map_err(|e| e.to_string())?;
-        super::appeal::validate_appeals(&self.active_appeals, &self.attempts,
-            |target| self.active_challenges.get(target), |target| self.states.get(target))
-            .map_err(|e| e.to_string())
+        super::appeal::validate_appeals(
+            &self.active_appeals,
+            &self.attempts,
+            |target| self.active_challenges.get(target),
+            |target| self.states.get(target),
+        )
+        .map_err(|e| e.to_string())
     }
 
     /// A shared image of durable state only. Pending events and a caller's
@@ -458,12 +477,18 @@ impl VerificationOrchestrator {
         mut visit: impl FnMut(VerificationRecord) -> Result<(), String>,
     ) -> Result<(), String> {
         self.visit_record_keys(|key| {
-            visit(self.record_at_storage_key(&key)?.ok_or("missing verification record")?)
+            visit(
+                self.record_at_storage_key(&key)?
+                    .ok_or("missing verification record")?,
+            )
         })
     }
 
     /// Enumerate the logical inventory without cloning target or verifier values.
-    pub fn visit_record_keys(&self, mut visit: impl FnMut(String) -> Result<(), String>) -> Result<(), String> {
+    pub fn visit_record_keys(
+        &self,
+        mut visit: impl FnMut(String) -> Result<(), String>,
+    ) -> Result<(), String> {
         visit(self.rules_record().key()?)?;
         let targets: BTreeSet<_> = self
             .states
@@ -476,7 +501,9 @@ impl VerificationOrchestrator {
             .map(|target| target.as_str())
             .collect();
         for target in targets {
-            visit(VerificationRecord::target_storage_key(&WalletAddress::new(target))?)?;
+            visit(VerificationRecord::target_storage_key(
+                &WalletAddress::new(target),
+            )?)?;
         }
         let verifiers: BTreeSet<_> = self
             .penalized_verifiers
@@ -488,7 +515,10 @@ impl VerificationOrchestrator {
             if !verifier.starts_with(WalletAddress::PREFIX) {
                 return Err("invalid verification history address".into());
             }
-            visit(VerificationRecord::address_key(2, &WalletAddress::new(verifier))?)?;
+            visit(VerificationRecord::address_key(
+                2,
+                &WalletAddress::new(verifier),
+            )?)?;
         }
         Ok(())
     }
@@ -543,7 +573,9 @@ impl VerificationRecordReader {
         rows: &BTreeMap<String, Vec<u8>>,
         max_snapshot_bytes: u64,
     ) -> Result<(), String> {
-        if self.failed { return Err("verification reader already failed".into()); }
+        if self.failed {
+            return Err("verification reader already failed".into());
+        }
         let result = normalized::target_from_rows(address, rows)
             .and_then(|record| self.push_record(record, max_snapshot_bytes, false));
         self.failed |= result.is_err();
@@ -583,8 +615,9 @@ impl VerificationRecordReader {
 
     fn push_inner(&mut self, record: VerificationRecord, physical_row: bool) -> Result<(), String> {
         record.key()?;
-        if physical_row && bincode::serialized_size(&(1u8, &record)).map_err(|e| e.to_string())?
-            > burst_types::MAX_P2P_MESSAGE_BYTES as u64
+        if physical_row
+            && bincode::serialized_size(&(1u8, &record)).map_err(|e| e.to_string())?
+                > burst_types::MAX_P2P_MESSAGE_BYTES as u64
         {
             return Err("verification record exceeds row limit".into());
         }
@@ -707,8 +740,10 @@ impl VerificationRecordReader {
 #[cfg(test)]
 pub(super) fn assert_record_roundtrip(state: &VerificationOrchestrator) {
     let expected = state.snapshot().encode().unwrap();
-    assert_eq!(bincode::serialize(&state.snapshot_view()).unwrap(),
-        bincode::serialize(&state.snapshot()).unwrap());
+    assert_eq!(
+        bincode::serialize(&state.snapshot_view()).unwrap(),
+        bincode::serialize(&state.snapshot()).unwrap()
+    );
     super::borrowed_snapshot::assert_map_views(state);
     assert_normalized_roundtrip(state);
     assert_visitor_roundtrip(state, false);
@@ -769,7 +804,10 @@ mod tests {
         for n in 0..32 {
             let address = WalletAddress::new(format!("brst_target_{n}"));
             state.initialize_genesis(&address);
-            state.attempts.votes.insert(address.clone(), Default::default());
+            state
+                .attempts
+                .votes
+                .insert(address.clone(), Default::default());
             state
                 .attempts
                 .bind_challenge(&address, BlockHash::new([n + 1; 32]));
@@ -982,10 +1020,16 @@ pub(crate) fn assert_normalized_roundtrip(state: &VerificationOrchestrator) {
     let mut rejected = false;
     normalized::visit_state_rows(state, |key, bytes| {
         reader.push(&key, &bytes)?;
-        if !rejected { rejected = short.push(&key, &bytes).is_err(); }
+        if !rejected {
+            rejected = short.push(&key, &bytes).is_err();
+        }
         Ok(())
-    }).unwrap();
-    assert_eq!(reader.finish().unwrap().snapshot().encode().unwrap(), expected);
+    })
+    .unwrap();
+    assert_eq!(
+        reader.finish().unwrap().snapshot().encode().unwrap(),
+        expected
+    );
     assert!(rejected || short.finish().is_err());
 }
 
@@ -994,16 +1038,23 @@ fn assert_visitor_roundtrip(state: &VerificationOrchestrator, normalized_rows: b
     let limit = state.snapshot().encoded_size().unwrap();
     let rules = state.rules_record();
     let mut expected = BTreeMap::new();
-    state.visit_records(|record| {
-        let key = record.key()?;
-        let fragment = record.into_snapshot_fragment(&rules, limit)?.encode().unwrap();
-        expected.insert(key, fragment);
-        Ok(())
-    }).unwrap();
+    state
+        .visit_records(|record| {
+            let key = record.key()?;
+            let fragment = record
+                .into_snapshot_fragment(&rules, limit)?
+                .encode()
+                .unwrap();
+            expected.insert(key, fragment);
+            Ok(())
+        })
+        .unwrap();
     for budget in [limit, limit - 1] {
         let mut seen = BTreeMap::new();
         let mut callback = |key: &str, snapshot: &OrchestratorSnapshot| {
-            assert!(seen.insert(key.to_owned(), snapshot.encode().unwrap()).is_none());
+            assert!(seen
+                .insert(key.to_owned(), snapshot.encode().unwrap())
+                .is_none());
             Ok(())
         };
         let result = if normalized_rows {
@@ -1012,10 +1063,15 @@ fn assert_visitor_roundtrip(state: &VerificationOrchestrator, normalized_rows: b
                 .and_then(|_| reader.finish())
         } else {
             let mut reader = VerificationRecordVisitor::new(&mut callback);
-            state.visit_records(|record| reader.push_bounded(record, budget))
+            state
+                .visit_records(|record| reader.push_bounded(record, budget))
                 .and_then(|_| reader.finish())
         };
-        if budget == limit { result.unwrap(); assert_eq!(seen, expected); }
-        else { assert!(result.is_err()); }
+        if budget == limit {
+            result.unwrap();
+            assert_eq!(seen, expected);
+        } else {
+            assert!(result.is_err());
+        }
     }
 }

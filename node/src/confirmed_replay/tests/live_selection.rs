@@ -50,9 +50,10 @@ fn setup() -> (
 }
 
 fn saved(store: &LmdbStore) -> Vec<u8> {
-    store
-        .meta_store()
-        .get_meta(crate::endorsement_commit::SNAPSHOT_KEY)
+    crate::verification_storage::load(&store.tx_begin_write().unwrap())
+        .unwrap()
+        .snapshot()
+        .encode()
         .unwrap()
 }
 

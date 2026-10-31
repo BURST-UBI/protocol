@@ -10,8 +10,8 @@ fn local_records_preserve_full_content_and_multiple_pending_amendments() {
             text: "🌍".repeat(crate::content::MAX_AMENDMENT_CHARS),
         }],
     };
-    let padding = crate::content::MAX_CONTENT_BYTES
-        - bincode::serialized_size(&content).unwrap() as usize;
+    let padding =
+        crate::content::MAX_CONTENT_BYTES - bincode::serialized_size(&content).unwrap() as usize;
     if let ProposalContent::ConstitutionalDiff { title, .. } = &mut content {
         title.push_str(&"x".repeat(padding));
     }
@@ -259,7 +259,10 @@ fn records_roundtrip_empty_buckets_effects_and_reject_misbound_data() {
     Arc::make_mut(&mut engine.pending_changes).push((crate::GovernableParam::TrstExpirySecs, 42));
     Arc::make_mut(&mut engine.pending_amendments).push(make_proposal(1000, 0).content);
     Arc::make_mut(&mut engine.pending_evictions).push((dummy_wallet(), true));
-    assert_eq!(bincode::serialize(&engine).unwrap(), bincode::serialize(&engine.snapshot_view()).unwrap());
+    assert_eq!(
+        bincode::serialize(&engine).unwrap(),
+        bincode::serialize(&engine.snapshot_view()).unwrap()
+    );
     let rows = records(&engine);
     let restored = GovernanceEngine::from_records(
         rows.iter()
@@ -309,22 +312,44 @@ fn records_roundtrip_empty_buckets_effects_and_reject_misbound_data() {
 
 #[test]
 fn pending_effect_snapshots_share_payloads_and_detach_on_mutation_and_drain() {
-    let changes = vec![(crate::GovernableParam::BrnRate, 42), (crate::GovernableParam::TrstExpirySecs, 9)];
+    let changes = vec![
+        (crate::GovernableParam::BrnRate, 42),
+        (crate::GovernableParam::TrstExpirySecs, 9),
+    ];
     let amendments = vec![ProposalContent::ConstitutionalAmendment {
-        title: "Shared amendment".into(), text: "x".repeat(128 * 1024),
+        title: "Shared amendment".into(),
+        text: "x".repeat(128 * 1024),
     }];
     let evictions = vec![(dummy_wallet(), true), (dummy_wallet(), false)];
     let mut original = GovernanceEngine::new();
     original.pending_changes = Arc::new(changes.clone());
     original.pending_amendments = Arc::new(amendments.clone());
     original.pending_evictions = Arc::new(evictions.clone());
-    assert_eq!(bincode::serialize(&original.pending_changes).unwrap(), bincode::serialize(&changes).unwrap());
-    assert_eq!(bincode::serialize(&original.pending_amendments).unwrap(), bincode::serialize(&amendments).unwrap());
-    assert_eq!(bincode::serialize(&original.pending_evictions).unwrap(), bincode::serialize(&evictions).unwrap());
+    assert_eq!(
+        bincode::serialize(&original.pending_changes).unwrap(),
+        bincode::serialize(&changes).unwrap()
+    );
+    assert_eq!(
+        bincode::serialize(&original.pending_amendments).unwrap(),
+        bincode::serialize(&amendments).unwrap()
+    );
+    assert_eq!(
+        bincode::serialize(&original.pending_evictions).unwrap(),
+        bincode::serialize(&evictions).unwrap()
+    );
     let mut snapshot = original.clone();
-    assert!(Arc::ptr_eq(&snapshot.pending_changes, &original.pending_changes));
-    assert!(Arc::ptr_eq(&snapshot.pending_amendments, &original.pending_amendments));
-    assert!(Arc::ptr_eq(&snapshot.pending_evictions, &original.pending_evictions));
+    assert!(Arc::ptr_eq(
+        &snapshot.pending_changes,
+        &original.pending_changes
+    ));
+    assert!(Arc::ptr_eq(
+        &snapshot.pending_amendments,
+        &original.pending_amendments
+    ));
+    assert!(Arc::ptr_eq(
+        &snapshot.pending_evictions,
+        &original.pending_evictions
+    ));
     Arc::make_mut(&mut snapshot.pending_changes).push((crate::GovernableParam::BrnRate, 99));
     Arc::make_mut(&mut snapshot.pending_amendments).clear();
     Arc::make_mut(&mut snapshot.pending_evictions).reverse();
@@ -362,12 +387,33 @@ fn shared_suffix_tally_preserves_direct_and_key_ballot_overrides() {
     let voters = vec![a.clone(), b.clone(), c.clone(), a.clone()];
     let proposal = make_proposal(1000, 0);
     // A resolves all the way to C; B's own direct ballot still takes precedence.
-    assert_eq!(GovernanceEngine::count_votes_with_delegation(&votes, &delegation,
-        &voters, Some(&proposal)), (2, 1, 0));
+    assert_eq!(
+        GovernanceEngine::count_votes_with_delegation(
+            &votes,
+            &delegation,
+            &voters,
+            Some(&proposal)
+        ),
+        (2, 1, 0)
+    );
     delegation.project_key_ballot(a.clone(), None);
-    assert_eq!(GovernanceEngine::count_votes_with_delegation(&votes, &delegation,
-        &voters, Some(&proposal)), (1, 1, 0));
+    assert_eq!(
+        GovernanceEngine::count_votes_with_delegation(
+            &votes,
+            &delegation,
+            &voters,
+            Some(&proposal)
+        ),
+        (1, 1, 0)
+    );
     votes.insert(a, GovernanceVote::Abstain);
-    assert_eq!(GovernanceEngine::count_votes_with_delegation(&votes, &delegation,
-        &voters, Some(&proposal)), (1, 1, 1));
+    assert_eq!(
+        GovernanceEngine::count_votes_with_delegation(
+            &votes,
+            &delegation,
+            &voters,
+            Some(&proposal)
+        ),
+        (1, 1, 1)
+    );
 }

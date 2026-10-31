@@ -18,7 +18,10 @@ use crate::write_batch::LmdbReadTransaction;
 use crate::LmdbError;
 
 pub(crate) mod inventory;
-pub use inventory::{physical_inventory_bytes, BlockPosition, IndexedBlock, IndexedBlockCursor, IndexedBlockWindow, InventoryPage};
+pub use inventory::{
+    physical_inventory_bytes, BlockPosition, IndexedBlock, IndexedBlockCursor, IndexedBlockWindow,
+    InventoryPage,
+};
 
 pub struct LmdbBlockStore {
     pub(crate) env: SharedEnv,
@@ -165,7 +168,9 @@ impl LmdbBlockStore {
             .map_err(LmdbError::from)?
             .ok_or_else(|| LmdbError::NotFound(format!("block {:?}", hash)))?;
         if val.len() > max_bytes {
-            return Err(StoreError::Corruption("block exceeds pinned read byte budget".into()));
+            return Err(StoreError::Corruption(
+                "block exceeds pinned read byte budget".into(),
+            ));
         }
         Ok(val.to_vec())
     }
@@ -243,7 +248,10 @@ impl BlockStore for LmdbBlockStore {
             let index_key = height_key_bytes.to_vec();
             // A replacement may already own this height. Removing an old
             // block must not erase the replacement's forward index.
-            if self.height_db.get(&wtxn, &index_key).map_err(LmdbError::from)?
+            if self
+                .height_db
+                .get(&wtxn, &index_key)
+                .map_err(LmdbError::from)?
                 == Some(hash.as_bytes().as_slice())
             {
                 self.height_db

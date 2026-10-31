@@ -241,20 +241,41 @@ fn parameter_storage_boundaries_are_enforced_on_both_wire_encodings() {
         for emergency in [false, true] {
             for value in [0, param.maximum_value()] {
                 let content = if emergency {
-                    ProposalContent::Emergency { description: "boundary".into(), param: param.clone(), new_value: value }
+                    ProposalContent::Emergency {
+                        description: "boundary".into(),
+                        param: param.clone(),
+                        new_value: value,
+                    }
                 } else {
-                    ProposalContent::ParameterChange { param: param.clone(), new_value: value }
+                    ProposalContent::ParameterChange {
+                        param: param.clone(),
+                        new_value: value,
+                    }
                 };
-                assert_eq!(ProposalContent::decode_content(&content.encode_content().unwrap()).unwrap(), content);
+                assert_eq!(
+                    ProposalContent::decode_content(&content.encode_content().unwrap()).unwrap(),
+                    content
+                );
                 if !emergency {
-                    assert_eq!(ProposalContent::decode_compact(&content.encode_compact().unwrap()).unwrap(), content);
+                    assert_eq!(
+                        ProposalContent::decode_compact(&content.encode_compact().unwrap())
+                            .unwrap(),
+                        content
+                    );
                 }
             }
             if let Some(value) = param.maximum_value().checked_add(1) {
                 let content = if emergency {
-                    ProposalContent::Emergency { description: "boundary".into(), param: param.clone(), new_value: value }
+                    ProposalContent::Emergency {
+                        description: "boundary".into(),
+                        param: param.clone(),
+                        new_value: value,
+                    }
                 } else {
-                    ProposalContent::ParameterChange { param: param.clone(), new_value: value }
+                    ProposalContent::ParameterChange {
+                        param: param.clone(),
+                        new_value: value,
+                    }
                 };
                 assert!(content.validate_content().is_err());
                 let raw = bincode::serialize(&content).unwrap();

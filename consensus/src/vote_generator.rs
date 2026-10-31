@@ -123,12 +123,16 @@ impl VoteGenerator {
     /// A cached signature is not authority to send: callers must revalidate its
     /// durable choice, epoch and current voting boundaries before reuse.
     pub fn cached_final_response(&self, hash: &BlockHash) -> Option<&GeneratedVote> {
-        self.final_responses.get(hash).filter(|vote| vote.voter == self.representative)
+        self.final_responses
+            .get(hash)
+            .filter(|vote| vote.voter == self.representative)
     }
 
     pub fn remember_final_response(&mut self, vote: GeneratedVote) {
         const CAPACITY: usize = 1024;
-        if !vote.is_final || vote.voter != self.representative { return; }
+        if !vote.is_final || vote.voter != self.representative {
+            return;
+        }
         if !self.final_responses.contains_key(&vote.block_hash) {
             if self.final_responses.len() == CAPACITY {
                 if let Some(oldest) = self.final_response_order.pop_front() {
@@ -140,21 +144,32 @@ impl VoteGenerator {
         self.final_responses.insert(vote.block_hash, vote);
     }
 
-    pub fn cached_soft_response(&self, account: &WalletAddress, previous: BlockHash,
-        hash: BlockHash) -> Option<&GeneratedVote> {
-        self.soft_responses.get(&(account.clone(), previous))
+    pub fn cached_soft_response(
+        &self,
+        account: &WalletAddress,
+        previous: BlockHash,
+        hash: BlockHash,
+    ) -> Option<&GeneratedVote> {
+        self.soft_responses
+            .get(&(account.clone(), previous))
             .filter(|vote| vote.voter == self.representative && vote.block_hash == hash)
     }
 
     /// Remember only the latest signed choice for an account position. A later
     /// conflicting choice or final vote must invalidate the earlier soft response.
-    pub fn remember_response_choice(&mut self, account: WalletAddress,
-        previous: BlockHash, vote: &GeneratedVote) {
+    pub fn remember_response_choice(
+        &mut self,
+        account: WalletAddress,
+        previous: BlockHash,
+        vote: &GeneratedVote,
+    ) {
         let root = (account, previous);
         if let Some(old) = self.soft_responses.remove(&root) {
             self.soft_response_order.remove(&old.sequence);
         }
-        if vote.is_final || vote.voter != self.representative { return; }
+        if vote.is_final || vote.voter != self.representative {
+            return;
+        }
         if self.soft_responses.len() == 1024 {
             if let Some((_, oldest)) = self.soft_response_order.pop_first() {
                 self.soft_responses.remove(&oldest);
@@ -254,12 +269,21 @@ mod tests {
         let previous = make_hash(8);
         let first = generator.generate_vote(make_hash(1));
         generator.remember_response_choice(account.clone(), previous, &first);
-        assert_eq!(generator.cached_soft_response(&account, previous, first.block_hash).unwrap().signature,
-            first.signature);
+        assert_eq!(
+            generator
+                .cached_soft_response(&account, previous, first.block_hash)
+                .unwrap()
+                .signature,
+            first.signature
+        );
         let fork = generator.generate_vote(make_hash(2));
         generator.remember_response_choice(account.clone(), previous, &fork);
-        assert!(generator.cached_soft_response(&account, previous, first.block_hash).is_none());
-        assert!(generator.cached_soft_response(&account, previous, fork.block_hash).is_some());
+        assert!(generator
+            .cached_soft_response(&account, previous, first.block_hash)
+            .is_none());
+        assert!(generator
+            .cached_soft_response(&account, previous, fork.block_hash)
+            .is_some());
         let final_vote = generator.generate_final_vote(fork.block_hash);
         generator.remember_response_choice(account.clone(), previous, &final_vote);
         assert!(generator.soft_responses.is_empty());
@@ -273,7 +297,9 @@ mod tests {
         }
         assert_eq!(generator.soft_responses.len(), 1024);
         assert_eq!(generator.soft_response_order.len(), 1024);
-        assert!(generator.cached_soft_response(&account, BlockHash::ZERO, first.block_hash).is_none());
+        assert!(generator
+            .cached_soft_response(&account, BlockHash::ZERO, first.block_hash)
+            .is_none());
     }
 
     #[test]

@@ -206,13 +206,18 @@ pub(crate) fn process_with_engines(
             send_block_hash: block.link,
         },
         BlockType::GovernanceEndorse => {
-            let Some(burn_amount) = block.brn_spent.checked_sub(previous_brn_spent)
-                .filter(|amount| *amount > 0) else {
+            let Some(burn_amount) = block
+                .brn_spent
+                .checked_sub(previous_brn_spent)
+                .filter(|amount| *amount > 0)
+            else {
                 return EconomicResult::Rejected {
                     reason: "governance endorsement requires a positive BRN burn".into(),
                 };
             };
-            if let Err(reason) = record_brn_burn(engines.brn_mut(), &block.account, burn_amount, now) {
+            if let Err(reason) =
+                record_brn_burn(engines.brn_mut(), &block.account, burn_amount, now)
+            {
                 return EconomicResult::Rejected {
                     reason: format!("governance endorsement BRN burn failed: {reason}"),
                 };
@@ -363,21 +368,17 @@ fn decode_governance_vote(byte: u8) -> Option<GovernanceVote> {
 fn decode_proposal_content(link: &BlockHash, origin: &TxHash) -> Option<ProposalContent> {
     let origin_bytes = *origin.as_bytes();
     if origin_bytes == burst_governance::ORV_EVICT_MARKER {
-        return wallet_from_link(link).map(|target| {
-            ProposalContent::RepresentativeEviction {
-                target,
-                evict: true,
-                reason: String::new(),
-            }
+        return wallet_from_link(link).map(|target| ProposalContent::RepresentativeEviction {
+            target,
+            evict: true,
+            reason: String::new(),
         });
     }
     if origin_bytes == burst_governance::ORV_REINSTATE_MARKER {
-        return wallet_from_link(link).map(|target| {
-            ProposalContent::RepresentativeEviction {
-                target,
-                evict: false,
-                reason: String::new(),
-            }
+        return wallet_from_link(link).map(|target| ProposalContent::RepresentativeEviction {
+            target,
+            evict: false,
+            reason: String::new(),
         });
     }
     if !origin.is_zero() {
@@ -418,20 +419,25 @@ pub(crate) fn deliver_pending(
         return Err("expiry return credit cannot deliver tokens twice".into());
     }
     validate_pending(pending)?;
-    let portions = pending.provenance.iter().enumerate().map(|(index, portion)| {
-        let mut token = template.clone();
-        if pending.provenance.len() > 1 {
-            token.id = burst_types::TxHash::new(burst_crypto::blake2b_256_multi(&[
-                b"BURST/pending-composition/v1\0",
-                template.id.as_bytes(),
-                &(index as u64).to_be_bytes(),
-            ]));
-        }
-        token.basis = portion.basis;
-        token.amount = portion.amount;
-        (token, &portion.revoked_amounts)
-    });
-    trst.receive_settled_batch(portions, now).map_err(|e| e.to_string())
+    let portions = pending
+        .provenance
+        .iter()
+        .enumerate()
+        .map(|(index, portion)| {
+            let mut token = template.clone();
+            if pending.provenance.len() > 1 {
+                token.id = burst_types::TxHash::new(burst_crypto::blake2b_256_multi(&[
+                    b"BURST/pending-composition/v1\0",
+                    template.id.as_bytes(),
+                    &(index as u64).to_be_bytes(),
+                ]));
+            }
+            token.basis = portion.basis;
+            token.amount = portion.amount;
+            (token, &portion.revoked_amounts)
+        });
+    trst.receive_settled_batch(portions, now)
+        .map_err(|e| e.to_string())
 }
 
 /// Create a `TrstToken` for a receiver based on the pending entry provenance.

@@ -102,11 +102,22 @@ fn final_support_and_later_payment_cannot_both_be_promised_in_either_order() {
             (late, support.hash)
         };
         let (first_vote, error) = if grouped {
-            let mut results = crate::durable_votes::generate_final_votes(&store, &mut generator, &[first, second]).into_iter();
-            (results.next().unwrap().unwrap(), results.next().unwrap().unwrap_err())
+            let mut results = crate::durable_votes::generate_final_votes(
+                &store,
+                &mut generator,
+                &[first, second],
+            )
+            .into_iter();
+            (
+                results.next().unwrap().unwrap(),
+                results.next().unwrap().unwrap_err(),
+            )
         } else {
-            (crate::durable_votes::generate_vote(&store, &mut generator, first, true).unwrap(),
-             crate::durable_votes::generate_vote(&store, &mut generator, second, true).unwrap_err())
+            (
+                crate::durable_votes::generate_vote(&store, &mut generator, first, true).unwrap(),
+                crate::durable_votes::generate_vote(&store, &mut generator, second, true)
+                    .unwrap_err(),
+            )
         };
         assert!(
             error.to_string().contains(if support_first {
@@ -123,7 +134,8 @@ fn final_support_and_later_payment_cannot_both_be_promised_in_either_order() {
         crate::payment_authority::initialize(&store, NetworkId::Dev, &fixture.params).unwrap();
         assert!(crate::durable_votes::generate_vote(&store, &mut generator, second, true).is_err());
         if !support_first {
-            let cached = crate::durable_votes::generate_vote(&store, &mut generator, first, true).unwrap();
+            let cached =
+                crate::durable_votes::generate_vote(&store, &mut generator, first, true).unwrap();
             assert_eq!(cached.signature, first_vote.signature);
             assert_eq!(cached.sequence, first_sequence);
             assert_eq!(generator.sequence(), first_sequence);

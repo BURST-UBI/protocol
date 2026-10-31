@@ -78,7 +78,9 @@ async fn signed_fork_and_recovery(kind: BlockType, encrypted: bool) {
             nodes.push((
                 shutdown,
                 tokio::spawn(async move {
-                    node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+                    node.start_with_services(burst_daemon::start_public_services)
+                        .await
+                        .unwrap();
                     node.stop().await.unwrap();
                 }),
             ));
@@ -226,7 +228,10 @@ async fn signed_fork_and_recovery(kind: BlockType, encrypted: bool) {
                 assert_eq!(
                     verification.lock().await.snapshot().encode().unwrap(),
                     crate::verification_storage::load(&store.tx_begin_write().unwrap())
-                        .unwrap().snapshot().encode().unwrap()
+                        .unwrap()
+                        .snapshot()
+                        .encode()
+                        .unwrap()
                 );
                 assert!(queues[0].push(loser.clone()).await);
             }
@@ -281,7 +286,10 @@ async fn signed_fork_and_recovery(kind: BlockType, encrypted: bool) {
             let transfers = restarted.governance_transfers.clone();
             let shutdown = restarted.shutdown.clone();
             let task = tokio::spawn(async move {
-                restarted.start_with_services(burst_daemon::start_public_services).await.unwrap();
+                restarted
+                    .start_with_services(burst_daemon::start_public_services)
+                    .await
+                    .unwrap();
                 restarted.stop().await.unwrap();
             });
             let checked = tokio::time::timeout(Duration::from_secs(20), async {
@@ -291,7 +299,10 @@ async fn signed_fork_and_recovery(kind: BlockType, encrypted: bool) {
                     let live = verification.lock().await.snapshot().encode().unwrap();
                     if live
                         == crate::verification_storage::load(&store.tx_begin_write().unwrap())
-                        .unwrap().snapshot().encode().unwrap()
+                            .unwrap()
+                            .snapshot()
+                            .encode()
+                            .unwrap()
                     {
                         break;
                     }

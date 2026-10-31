@@ -9,8 +9,8 @@ use burst_store_lmdb::{LmdbStore, LmdbWriteTransaction};
 use burst_types::{BlockHash, NetworkId, ProtocolParams, Timestamp};
 use serde::{Deserialize, Serialize};
 
-pub(crate) use burst_store_lmdb::confirmed_governance::{KEY, HEADER};
 use burst_store_lmdb::confirmed_governance::{Schedule, Snapshot, MAX_PROPOSALS};
+pub(crate) use burst_store_lmdb::confirmed_governance::{HEADER, KEY};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct ConfirmedGovernance {
@@ -82,11 +82,19 @@ impl ConfirmedGovernance {
             return Ok(None);
         }
         let snapshot = batch.read_confirmed_governance()?;
-        Ok(Some(Self { epoch: snapshot.epoch, params: snapshot.params, proposals: snapshot.proposals }))
+        Ok(Some(Self {
+            epoch: snapshot.epoch,
+            params: snapshot.params,
+            proposals: snapshot.proposals,
+        }))
     }
 
     fn snapshot(&self) -> Snapshot {
-        Snapshot { epoch: self.epoch, params: self.params.clone(), proposals: self.proposals.clone() }
+        Snapshot {
+            epoch: self.epoch,
+            params: self.params.clone(),
+            proposals: self.proposals.clone(),
+        }
     }
 
     pub(crate) fn promote(
@@ -303,7 +311,8 @@ impl ConfirmedGovernance {
             batch,
             tail.blocks()
                 .map(|block| block.map(std::borrow::Cow::Owned)),
-            || batch.read_confirmed_governance(), poll,
+            || batch.read_confirmed_governance(),
+            poll,
         )
     }
 
@@ -312,7 +321,12 @@ impl ConfirmedGovernance {
         batch: &LmdbWriteTransaction<'_>,
         blocks: impl IntoIterator<Item = Result<std::borrow::Cow<'a, StateBlock>, StoreError>>,
     ) -> Result<(), StoreError> {
-        self.verify_blocks_read(&batch.read_view(), blocks, || batch.read_confirmed_governance(), &|_| Ok(()))
+        self.verify_blocks_read(
+            &batch.read_view(),
+            blocks,
+            || batch.read_confirmed_governance(),
+            &|_| Ok(()),
+        )
     }
 
     fn verify_blocks_read<'a>(
@@ -335,8 +349,12 @@ impl ConfirmedGovernance {
         }
         poll("metadata:governance-tail-snapshot")?;
         if snapshot()? != self.snapshot()
-            || match batch.get_meta(KEY)? { Some(bytes) => bytes != bincode::serialize(&self.snapshot()).map_err(invalid)?, None => false }
-            || batch.get_meta(burst_store::meta::GOVERNANCE_COUNTING_LIMIT_KEY)? != Some(self.limit_bytes()?)
+            || match batch.get_meta(KEY)? {
+                Some(bytes) => bytes != bincode::serialize(&self.snapshot()).map_err(invalid)?,
+                None => false,
+            }
+            || batch.get_meta(burst_store::meta::GOVERNANCE_COUNTING_LIMIT_KEY)?
+                != Some(self.limit_bytes()?)
         {
             return Err(invalid(
                 "confirmed governance schedule differs from cemented history",

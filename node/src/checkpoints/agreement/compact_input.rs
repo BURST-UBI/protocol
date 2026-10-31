@@ -82,7 +82,9 @@ impl CompactReplayInput<'_> {
         }
     }
     pub(crate) fn covers_local_promises(
-        &self, batch: &burst_store_lmdb::LmdbWriteTransaction<'_>, representative: &WalletAddress,
+        &self,
+        batch: &burst_store_lmdb::LmdbWriteTransaction<'_>,
+        representative: &WalletAddress,
     ) -> Result<bool, StoreError> {
         match self {
             Self::Selection(value) => value.covers_local_promises(batch, representative),

@@ -12,13 +12,17 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new() -> Self { Self::with_population(3) }
+    fn new() -> Self {
+        Self::with_population(3)
+    }
 
     fn with_population(population: usize) -> Self {
         let keys: Vec<_> = (1..=population)
             .map(|n| {
                 let mut seed = [n as u8; 32];
-                if n > 255 { seed[..8].copy_from_slice(&(n as u64).to_le_bytes()); }
+                if n > 255 {
+                    seed[..8].copy_from_slice(&(n as u64).to_le_bytes());
+                }
                 burst_crypto::keypair_from_seed(&seed)
             })
             .collect();
@@ -158,7 +162,9 @@ fn key_projection_requires_verified_chain_and_live_grant_generation() {
     let downstream = fixture.grant(1, 2, parameter.clone());
     fixture.ballot(&downstream, 2);
     assert_eq!(
-        fixture.projected(&fixture.people).key_ballot(&fixture.people[0]),
+        fixture
+            .projected(&fixture.people)
+            .key_ballot(&fixture.people[0]),
         Some(Some(GovernanceVote::Yea))
     );
     for missing in [1, 2] {
@@ -169,12 +175,25 @@ fn key_projection_requires_verified_chain_and_live_grant_generation() {
             .filter(|(n, _)| *n != missing)
             .map(|(_, p)| p.clone())
             .collect();
-        assert_eq!(fixture.projected(&eligible).key_ballot(&fixture.people[0]), Some(None));
+        assert_eq!(
+            fixture.projected(&eligible).key_ballot(&fixture.people[0]),
+            Some(None)
+        );
     }
     fixture.grant(1, 2, parameter.clone());
-    assert_eq!(fixture.projected(&fixture.people).key_ballot(&fixture.people[0]), Some(None));
+    assert_eq!(
+        fixture
+            .projected(&fixture.people)
+            .key_ballot(&fixture.people[0]),
+        Some(None)
+    );
     fixture.revoke(1, KeyScope::Proposal(fixture.proposal));
-    assert_eq!(fixture.projected(&fixture.people).key_ballot(&fixture.people[0]), Some(None));
+    assert_eq!(
+        fixture
+            .projected(&fixture.people)
+            .key_ballot(&fixture.people[0]),
+        Some(None)
+    );
 }
 
 #[test]
@@ -183,22 +202,41 @@ fn key_projection_bounds_cycles_depth_and_honors_proposal_precedence() {
     let parameter = KeyScope::Parameter(GovernableParam::BrnRate);
     fixture.grant(0, 1, parameter.clone());
     fixture.grant(1, 0, parameter.clone());
-    assert_eq!(fixture.projected(&fixture.people).key_ballot(&fixture.people[0]), Some(None));
+    assert_eq!(
+        fixture
+            .projected(&fixture.people)
+            .key_ballot(&fixture.people[0]),
+        Some(None)
+    );
     let downstream = fixture.grant(1, 2, parameter.clone());
     fixture.ballot(&downstream, 2);
     fixture.state.delegation = DelegationEngine::new(1);
-    assert_eq!(fixture.projected(&fixture.people).key_ballot(&fixture.people[0]), Some(None));
+    assert_eq!(
+        fixture
+            .projected(&fixture.people)
+            .key_ballot(&fixture.people[0]),
+        Some(None)
+    );
     fixture.state.delegation = DelegationEngine::new(2);
     assert_eq!(
-        fixture.projected(&fixture.people).key_ballot(&fixture.people[0]),
+        fixture
+            .projected(&fixture.people)
+            .key_ballot(&fixture.people[0]),
         Some(Some(GovernanceVote::Yea))
     );
     fixture.revoke(0, KeyScope::Proposal(fixture.proposal));
-    assert_eq!(fixture.projected(&fixture.people).key_ballot(&fixture.people[0]), Some(None));
+    assert_eq!(
+        fixture
+            .projected(&fixture.people)
+            .key_ballot(&fixture.people[0]),
+        Some(None)
+    );
     let specific = fixture.grant(0, 2, KeyScope::Proposal(fixture.proposal));
     fixture.ballot(&specific, 2);
     assert_eq!(
-        fixture.projected(&fixture.people).key_ballot(&fixture.people[0]),
+        fixture
+            .projected(&fixture.people)
+            .key_ballot(&fixture.people[0]),
         Some(Some(GovernanceVote::Yea))
     );
 }
@@ -208,15 +246,26 @@ fn cached_prefix_projection_matches_legacy_walk_for_depth_order_and_revocation()
     fn compare(fixture: &Fixture) {
         for mask in 0..8 {
             for reverse in [false, true] {
-                let mut people: Vec<_> = fixture.people.iter().enumerate()
+                let mut people: Vec<_> = fixture
+                    .people
+                    .iter()
+                    .enumerate()
                     .filter(|(n, _)| mask & (1 << n) != 0)
-                    .map(|(_, p)| p.clone()).collect();
-                if reverse { people.reverse(); }
+                    .map(|(_, p)| p.clone())
+                    .collect();
+                if reverse {
+                    people.reverse();
+                }
                 let actual = fixture.projected(&people);
                 let eligible: HashSet<_> = people.iter().collect();
                 let param = Some(&GovernableParam::BrnRate);
                 for owner in &people {
-                    if fixture.state.scoped_grant(owner, fixture.proposal, param, &fixture.metadata).unwrap().is_none() {
+                    if fixture
+                        .state
+                        .scoped_grant(owner, fixture.proposal, param, &fixture.metadata)
+                        .unwrap()
+                        .is_none()
+                    {
                         assert_eq!(actual.key_ballot(owner), None);
                         continue;
                     }
@@ -224,20 +273,36 @@ fn cached_prefix_projection_matches_legacy_walk_for_depth_order_and_revocation()
                     let mut seen = HashSet::new();
                     let mut expected = None;
                     for _ in 0..fixture.state.delegation.max_depth() {
-                        if !eligible.contains(&current) || !seen.insert(current.clone()) { break }
-                        let Some(Some(grant)) = fixture.state.scoped_grant(
-                            &current, fixture.proposal, param, &fixture.metadata).unwrap() else { break };
+                        if !eligible.contains(&current) || !seen.insert(current.clone()) {
+                            break;
+                        }
+                        let Some(Some(grant)) = fixture
+                            .state
+                            .scoped_grant(&current, fixture.proposal, param, &fixture.metadata)
+                            .unwrap()
+                        else {
+                            break;
+                        };
                         let recipient = burst_crypto::derive_address(&grant.delegate);
-                        if !eligible.contains(&recipient) { break }
+                        if !eligible.contains(&recipient) {
+                            break;
+                        }
                         if let Some(vote) = fixture.state.governance.key_ballot(
-                            fixture.proposal, &current, grant.id().unwrap()) {
+                            fixture.proposal,
+                            &current,
+                            grant.id().unwrap(),
+                        ) {
                             expected = Some(vote);
                             break;
                         }
                         current = recipient;
                     }
-                    assert_eq!(actual.key_ballot(owner), Some(expected),
-                        "mask {mask}, reverse {reverse}, depth {}", fixture.state.delegation.max_depth());
+                    assert_eq!(
+                        actual.key_ballot(owner),
+                        Some(expected),
+                        "mask {mask}, reverse {reverse}, depth {}",
+                        fixture.state.delegation.max_depth()
+                    );
                 }
             }
         }
@@ -248,8 +313,12 @@ fn cached_prefix_projection_matches_legacy_walk_for_depth_order_and_revocation()
     let downstream = fixture.grant(1, 2, scope.clone());
     fixture.grant(2, 0, scope);
     for stage in 0..3 {
-        if stage == 1 { fixture.ballot(&downstream, 2); }
-        if stage == 2 { fixture.revoke(1, KeyScope::Proposal(fixture.proposal)); }
+        if stage == 1 {
+            fixture.ballot(&downstream, 2);
+        }
+        if stage == 2 {
+            fixture.revoke(1, KeyScope::Proposal(fixture.proposal));
+        }
         for depth in [0, 1, 2, 3, 10] {
             fixture.state.delegation = DelegationEngine::new(depth);
             compare(&fixture);
@@ -286,7 +355,10 @@ fn cut_grants_authenticate_once_and_keep_negative_results_distinct() {
                 .unwrap(),
             grant.id().unwrap()
         );
-        assert_eq!(cache.hop(&fixture.people[0], |_| true).unwrap(), Some((&fixture.people[1], grant.id().unwrap())));
+        assert_eq!(
+            cache.hop(&fixture.people[0], |_| true).unwrap(),
+            Some((&fixture.people[1], grant.id().unwrap()))
+        );
         assert!(cache.hop(&fixture.people[1], |_| true).unwrap().is_none());
         assert!(cache.hop(&fixture.people[2], |_| true).unwrap().is_none());
         assert_eq!(cache.derived_counts(), (1, 1));
@@ -307,7 +379,10 @@ fn cut_grants_authenticate_once_and_keep_negative_results_distinct() {
             &fixture.metadata,
         )
     });
-    assert!(matches!(next_cut.get(&fixture.people[0]).unwrap(), Some(None)));
+    assert!(matches!(
+        next_cut.get(&fixture.people[0]).unwrap(),
+        Some(None)
+    ));
 }
 
 #[test]
@@ -343,7 +418,9 @@ fn cut_grant_derivation_preserves_lazy_id_errors_and_recipient_checks() {
     let mut grant = fixture.grant(0, 1, KeyScope::Parameter(GovernableParam::BrnRate));
     grant.genesis = BlockHash::ZERO;
     assert!(grant.id().is_err());
-    let mut cache = grants::CutGrants::new(|_: &WalletAddress| Ok(Some(Some(grants::CutGrant::Raw(grant.clone())))));
+    let mut cache = grants::CutGrants::new(|_: &WalletAddress| {
+        Ok(Some(Some(grants::CutGrant::Raw(grant.clone()))))
+    });
     for _ in 0..3 {
         assert!(cache.hop(&fixture.people[0], |_| false).unwrap().is_none());
         assert_eq!(cache.derived_counts(), (1, 0));
@@ -354,23 +431,37 @@ fn cut_grant_derivation_preserves_lazy_id_errors_and_recipient_checks() {
     assert!(cache.hop(&fixture.people[0], |_| false).unwrap().is_none());
 }
 
-
 #[test]
 fn parameter_cache_keeps_proposal_overrides_ballots_and_cut_changes_separate() {
     let mut fixture = Fixture::new();
     let first = fixture.proposal;
-    let others: Vec<_> = (41..=44).map(|n| TxHash::new([n;32])).collect();
+    let others: Vec<_> = (41..=44).map(|n| TxHash::new([n; 32])).collect();
     for (index, hash) in others.iter().enumerate() {
-        let mut proposal = fixture.state.governance.get_proposal(&first).unwrap().clone();
+        let mut proposal = fixture
+            .state
+            .governance
+            .get_proposal(&first)
+            .unwrap()
+            .clone();
         proposal.hash = *hash;
         proposal.phase = GovernancePhase::Proposal;
         if index == 1 {
             proposal.content = ProposalContent::ParameterChange {
-                param: GovernableParam::TrstExpirySecs, new_value: 1000,
+                param: GovernableParam::TrstExpirySecs,
+                new_value: 1000,
             };
         }
-        fixture.state.governance.submit_proposal(proposal, 0, true, &fixture.state.params).unwrap();
-        fixture.state.governance.get_proposal_mut(hash).unwrap().phase = GovernancePhase::Exploration;
+        fixture
+            .state
+            .governance
+            .submit_proposal(proposal, 0, true, &fixture.state.params)
+            .unwrap();
+        fixture
+            .state
+            .governance
+            .get_proposal_mut(hash)
+            .unwrap()
+            .phase = GovernancePhase::Exploration;
     }
     let common = fixture.grant(0, 1, KeyScope::Parameter(GovernableParam::BrnRate));
     fixture.ballot(&common, 1);
@@ -383,7 +474,11 @@ fn parameter_cache_keeps_proposal_overrides_ballots_and_cut_changes_separate() {
     ] {
         let secondary = grant.decrypt(&fixture.keys[recipient].private).unwrap();
         let ballot = DelegatedBallot::sign(grant, &secondary, proposal, vote).unwrap();
-        fixture.state.governance.record_key_ballot(&ballot, Timestamp::new(101), &fixture.state.params).unwrap();
+        fixture
+            .state
+            .governance
+            .record_key_ballot(&ballot, Timestamp::new(101), &fixture.state.params)
+            .unwrap();
     }
     fixture.revoke(0, KeyScope::Proposal(others[3]));
     let mut single = fixture.state.single_projection(&fixture.metadata);
@@ -394,23 +489,45 @@ fn parameter_cache_keeps_proposal_overrides_ballots_and_cut_changes_separate() {
     let mut cut = fixture.state.projection_cut(&fixture.metadata);
     let mut retained = None;
     for (proposal, vote) in [
-        (first, Some(GovernanceVote::Yea)), (others[0], Some(GovernanceVote::Nay)),
-        (others[1], Some(GovernanceVote::Abstain)), (others[2], Some(GovernanceVote::Yea)),
+        (first, Some(GovernanceVote::Yea)),
+        (others[0], Some(GovernanceVote::Nay)),
+        (others[1], Some(GovernanceVote::Abstain)),
+        (others[2], Some(GovernanceVote::Yea)),
         (others[3], None),
     ] {
         let projected = cut.delegation(proposal, &fixture.people).unwrap();
-        let independent = fixture.state.delegation_at_cut(proposal, &fixture.people, &fixture.metadata).unwrap();
-        for person in &fixture.people { assert_eq!(projected.key_ballot(person), independent.key_ballot(person)); }
+        let independent = fixture
+            .state
+            .delegation_at_cut(proposal, &fixture.people, &fixture.metadata)
+            .unwrap();
+        for person in &fixture.people {
+            assert_eq!(projected.key_ballot(person), independent.key_ballot(person));
+        }
         assert_eq!(projected.key_ballot(&fixture.people[0]), Some(vote));
-        if proposal == first { retained = Some(projected); }
+        if proposal == first {
+            retained = Some(projected);
+        }
     }
     assert_eq!(cut.parameters.as_ref().unwrap().len(), 6); // Two parameters, not five proposal scopes.
     drop(cut);
     fixture.revoke(0, KeyScope::Parameter(GovernableParam::BrnRate));
-    assert_eq!(fixture.projected(&fixture.people).key_ballot(&fixture.people[0]), Some(None));
-    assert_eq!(retained.unwrap().key_ballot(&fixture.people[0]), Some(Some(GovernanceVote::Yea)));
-    let malformed = scoped::key(fixture.state.network, fixture.state.genesis, &fixture.people[0],
-        &KeyScope::Proposal(others[0])).unwrap();
+    assert_eq!(
+        fixture
+            .projected(&fixture.people)
+            .key_ballot(&fixture.people[0]),
+        Some(None)
+    );
+    assert_eq!(
+        retained.unwrap().key_ballot(&fixture.people[0]),
+        Some(Some(GovernanceVote::Yea))
+    );
+    let malformed = scoped::key(
+        fixture.state.network,
+        fixture.state.genesis,
+        &fixture.people[0],
+        &KeyScope::Proposal(others[0]),
+    )
+    .unwrap();
     fixture.metadata.insert(malformed, vec![0xff]);
     let mut cut = fixture.state.projection_cut(&fixture.metadata);
     assert!(cut.delegation(first, &fixture.people).is_ok());
@@ -435,8 +552,11 @@ pub(super) struct ProjectionSpan {
     started_at: Option<std::time::Instant>,
 }
 pub(super) fn projection_span(stage: usize) -> ProjectionSpan {
-    ProjectionSpan { stage, started_at: PROJECTION_STAGES.with(|slot|
-        slot.borrow().as_ref().map(|_| std::time::Instant::now())) }
+    ProjectionSpan {
+        stage,
+        started_at: PROJECTION_STAGES
+            .with(|slot| slot.borrow().as_ref().map(|_| std::time::Instant::now())),
+    }
 }
 impl Drop for ProjectionSpan {
     fn drop(&mut self) {
@@ -452,7 +572,9 @@ impl Drop for ProjectionSpan {
     }
 }
 
-pub(crate) fn measure_projection_work<T>(operation: impl FnOnce() -> T) -> (T, [usize; 8], [u128; 8]) {
+pub(crate) fn measure_projection_work<T>(
+    operation: impl FnOnce() -> T,
+) -> (T, [usize; 8], [u128; 8]) {
     PROJECTION_STAGES.with(|slot| {
         assert!(slot.borrow().is_none());
         *slot.borrow_mut() = Some(ProjectionStages::default());
@@ -474,13 +596,21 @@ fn authenticated_projection_case(population: usize, depth: usize, shape: &str, s
         let recipient = match shape {
             "none" => None,
             "sparse" => (owner % 10 == 0).then_some((owner + 1) % population),
-            "shared_vote" => Some(if owner == population - 2 { population - 1 } else { population - 2 }),
+            "shared_vote" => Some(if owner == population - 2 {
+                population - 1
+            } else {
+                population - 2
+            }),
             "cycle" => Some((owner + 1) % population),
             _ => panic!("unknown authenticated projection shape"),
         };
         if let Some(recipient) = recipient {
             edges[owner] = Some(recipient);
-            let grant = fixture.grant(owner, recipient, KeyScope::Parameter(GovernableParam::BrnRate));
+            let grant = fixture.grant(
+                owner,
+                recipient,
+                KeyScope::Parameter(GovernableParam::BrnRate),
+            );
             if shape == "shared_vote" && owner == population - 2 {
                 fixture.ballot(&grant, recipient);
                 ballot_owner = Some(owner);
@@ -489,21 +619,38 @@ fn authenticated_projection_case(population: usize, depth: usize, shape: &str, s
     }
     // Independent bounded graph expectation: every supplied grant is signed and
     // every recipient eligible. An absent grant leaves legacy fallback untouched.
-    let expected: Vec<_> = (0..population).map(|owner| {
-        edges[owner]?;
-        let mut current = owner;
-        let mut seen = HashSet::new();
-        for _ in 0..depth {
-            if !seen.insert(current) { break }
-            let Some(next) = edges[current] else { break };
-            if Some(current) == ballot_owner { return Some(Some(GovernanceVote::Yea)) }
-            current = next;
-        }
-        Some(None)
-    }).collect();
-    let expected_yea = expected.iter().filter(|vote| **vote == Some(Some(GovernanceVote::Yea))).count();
-    let target = fixture.state.governance.get_proposal(&fixture.proposal).unwrap();
-    let cutoff = fixture.state.governance.counting_time(target, &fixture.state.params).unwrap();
+    let expected: Vec<_> = (0..population)
+        .map(|owner| {
+            edges[owner]?;
+            let mut current = owner;
+            let mut seen = HashSet::new();
+            for _ in 0..depth {
+                if !seen.insert(current) {
+                    break;
+                }
+                let Some(next) = edges[current] else { break };
+                if Some(current) == ballot_owner {
+                    return Some(Some(GovernanceVote::Yea));
+                }
+                current = next;
+            }
+            Some(None)
+        })
+        .collect();
+    let expected_yea = expected
+        .iter()
+        .filter(|vote| **vote == Some(Some(GovernanceVote::Yea)))
+        .count();
+    let target = fixture
+        .state
+        .governance
+        .get_proposal(&fixture.proposal)
+        .unwrap();
+    let cutoff = fixture
+        .state
+        .governance
+        .counting_time(target, &fixture.state.params)
+        .unwrap();
     let history = BlockHash::new([17; 32]);
     let setup_ms = setup.elapsed().as_secs_f64() * 1000.0;
     for sample in 0..samples {
@@ -514,8 +661,20 @@ fn authenticated_projection_case(population: usize, depth: usize, shape: &str, s
             assert_eq!(projected.key_ballot(owner), *expected);
         }
         let electorate = BallotElectorate::new(fixture.people.as_slice());
-        let prepare = || fixture.state.governance.prepare_ballot_with_electorate(
-            &fixture.proposal, history, cutoff, &fixture.state.params, &projected, &electorate).unwrap();
+        let prepare = || {
+            fixture
+                .state
+                .governance
+                .prepare_ballot_with_electorate(
+                    &fixture.proposal,
+                    history,
+                    cutoff,
+                    &fixture.state.params,
+                    &projected,
+                    &electorate,
+                )
+                .unwrap()
+        };
         let start = Instant::now();
         let first = prepare();
         let fresh_ballot_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -524,18 +683,26 @@ fn authenticated_projection_case(population: usize, depth: usize, shape: &str, s
         let cached_ballot_ms = start.elapsed().as_secs_f64() * 1000.0;
         assert_eq!(first.next_proposal(), repeated.next_proposal());
         assert_eq!(first.commitment().unwrap(), repeated.commitment().unwrap());
-        assert_eq!(first.next_proposal().exploration_votes_yea as usize, expected_yea);
+        assert_eq!(
+            first.next_proposal().exploration_votes_yea as usize,
+            expected_yea
+        );
         assert_eq!(first.next_proposal().exploration_votes_nay, 0);
         assert_eq!(first.next_proposal().exploration_votes_abstain, 0);
         let status = std::fs::read_to_string("/proc/self/status").unwrap();
-        let memory: Vec<_> = status.lines().filter(|line|
-            line.starts_with("VmRSS:") || line.starts_with("VmHWM:")).collect();
-        println!("authenticated_projection {}", serde_json::json!({
-            "population":population, "depth":depth, "shape":shape, "sample":sample,
-            "setup_ms":setup_ms, "projection_ms":projection_ms,
-            "fresh_ballot_ms":fresh_ballot_ms, "cached_ballot_ms":cached_ballot_ms,
-            "metadata_rows":fixture.metadata.len(), "expected_yea":expected_yea, "memory":memory,
-        }));
+        let memory: Vec<_> = status
+            .lines()
+            .filter(|line| line.starts_with("VmRSS:") || line.starts_with("VmHWM:"))
+            .collect();
+        println!(
+            "authenticated_projection {}",
+            serde_json::json!({
+                "population":population, "depth":depth, "shape":shape, "sample":sample,
+                "setup_ms":setup_ms, "projection_ms":projection_ms,
+                "fresh_ballot_ms":fresh_ballot_ms, "cached_ballot_ms":cached_ballot_ms,
+                "metadata_rows":fixture.metadata.len(), "expected_yea":expected_yea, "memory":memory,
+            })
+        );
         if population == 12 || std::env::var_os("BURST_GOV_PROBE_STAGES").is_some() {
             PROJECTION_STAGES.with(|slot| {
                 assert!(slot.borrow().is_none());
@@ -546,17 +713,31 @@ fn authenticated_projection_case(population: usize, depth: usize, shape: &str, s
             let instrumented_ms = start.elapsed().as_secs_f64() * 1000.0;
             let stages = PROJECTION_STAGES.with(|slot| slot.borrow_mut().take().unwrap());
             let granted = edges.iter().filter(|edge| edge.is_some()).count();
-            assert_eq!(stages.calls, [population * 2, granted, granted, granted, granted, population, population * 2, 1]);
+            assert_eq!(
+                stages.calls,
+                [
+                    population * 2,
+                    granted,
+                    granted,
+                    granted,
+                    granted,
+                    population,
+                    population * 2,
+                    1
+                ]
+            );
             for (owner, expected) in fixture.people.iter().zip(&expected) {
                 assert_eq!(instrumented.key_ballot(owner), *expected);
             }
-            println!("authenticated_stages {}", serde_json::json!({
-                "population":population, "depth":depth, "shape":shape, "sample":sample,
-                "instrumented_ms":instrumented_ms, "stages":stages,
-                "order":["scope_key", "restore_authentication", "recipient", "grant_id", "projection_write", "owner_identity", "scope_encode_hash", "electorate_membership"],
-            }));
+            println!(
+                "authenticated_stages {}",
+                serde_json::json!({
+                    "population":population, "depth":depth, "shape":shape, "sample":sample,
+                    "instrumented_ms":instrumented_ms, "stages":stages,
+                    "order":["scope_key", "restore_authentication", "recipient", "grant_id", "projection_write", "owner_identity", "scope_encode_hash", "electorate_membership"],
+                })
+            );
         }
-
     }
 }
 
@@ -570,8 +751,14 @@ fn authenticated_projection_stages_match_independent_votes() {
 #[test]
 #[ignore = "explicit capped-host authenticated projection diagnostic"]
 fn authenticated_projection_scaling() {
-    let population = std::env::var("BURST_GOV_PROBE_POPULATION").unwrap().parse().unwrap();
-    let depth = std::env::var("BURST_GOV_PROBE_DEPTH").unwrap().parse().unwrap();
+    let population = std::env::var("BURST_GOV_PROBE_POPULATION")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let depth = std::env::var("BURST_GOV_PROBE_DEPTH")
+        .unwrap()
+        .parse()
+        .unwrap();
     let shape = std::env::var("BURST_GOV_PROBE_SHAPE").unwrap();
     assert!([100, 1000].contains(&population));
     assert!([10, 128].contains(&depth));
@@ -585,9 +772,12 @@ fn parameter_cache_population_case(population: usize, parameter_count: usize, sp
 fn parameter_cache_grant_case(population: usize, parameter_count: usize, stride: Option<usize>) {
     use std::time::Instant;
     fn memory() -> Vec<String> {
-        std::fs::read_to_string("/proc/self/status").unwrap().lines()
+        std::fs::read_to_string("/proc/self/status")
+            .unwrap()
+            .lines()
             .filter(|line| line.starts_with("VmRSS:") || line.starts_with("VmHWM:"))
-            .map(str::to_owned).collect()
+            .map(str::to_owned)
+            .collect()
     }
     let start = Instant::now();
     let mut fixture = Fixture::with_population(population);
@@ -595,24 +785,45 @@ fn parameter_cache_grant_case(population: usize, parameter_count: usize, stride:
     let mut proposals = Vec::new();
     for index in 0..parameter_count * 2 {
         let hash = TxHash::new([41 + index as u8; 32]);
-        let mut proposal = fixture.state.governance.get_proposal(&fixture.proposal).unwrap().clone();
+        let mut proposal = fixture
+            .state
+            .governance
+            .get_proposal(&fixture.proposal)
+            .unwrap()
+            .clone();
         proposal.hash = hash;
         proposal.phase = GovernancePhase::Proposal;
         proposal.content = ProposalContent::ParameterChange {
-            param: parameters[index % parameter_count].clone(), new_value: 1000,
+            param: parameters[index % parameter_count].clone(),
+            new_value: 1000,
         };
-        fixture.state.governance.submit_proposal(proposal, 0, true, &fixture.state.params).unwrap();
-        fixture.state.governance.get_proposal_mut(&hash).unwrap().phase = GovernancePhase::Exploration;
+        fixture
+            .state
+            .governance
+            .submit_proposal(proposal, 0, true, &fixture.state.params)
+            .unwrap();
+        fixture
+            .state
+            .governance
+            .get_proposal_mut(&hash)
+            .unwrap()
+            .phase = GovernancePhase::Exploration;
         proposals.push(hash);
     }
     let granted = if let Some(stride) = stride {
         for parameter in parameters {
             for owner in (0..population).step_by(stride) {
-                fixture.grant(owner, (owner + 1) % population, KeyScope::Parameter(parameter.clone()));
+                fixture.grant(
+                    owner,
+                    (owner + 1) % population,
+                    KeyScope::Parameter(parameter.clone()),
+                );
             }
         }
         population.div_ceil(stride)
-    } else { 0 };
+    } else {
+        0
+    };
     let setup_ms = start.elapsed().as_secs_f64() * 1000.0;
     let before = memory();
     let mut cut = fixture.state.projection_cut(&fixture.metadata);
@@ -624,7 +835,11 @@ fn parameter_cache_grant_case(population: usize, parameter_count: usize, stride:
             let projection = cut.delegation(*proposal, &fixture.people).unwrap();
             projection_ms += started.elapsed().as_secs_f64() * 1000.0;
             for (owner, person) in fixture.people.iter().enumerate() {
-                let expected = if stride.is_some_and(|stride| owner % stride == 0) { Some(None) } else { None };
+                let expected = if stride.is_some_and(|stride| owner % stride == 0) {
+                    Some(None)
+                } else {
+                    None
+                };
                 assert_eq!(projection.key_ballot(person), expected);
             }
             let cache = cut.parameters.as_ref().unwrap();
@@ -639,38 +854,48 @@ fn parameter_cache_grant_case(population: usize, parameter_count: usize, stride:
     assert_eq!(calls[5], population);
     let indexed = matches!(cut.records, Some(Some(_)));
     if stride == Some(1) && parameter_count > 1 {
-        assert!(!indexed, "dense metadata exceeds the electorate-sized index budget");
+        assert!(
+            !indexed,
+            "dense metadata exceeds the electorate-sized index budget"
+        );
     }
     assert_eq!(calls[6], if indexed { 0 } else { calls[0] });
     assert_eq!(calls[7], 1);
     assert_eq!(cut.owners.as_ref().unwrap().len(), population);
     let cache = cut.parameters.as_ref().unwrap();
-    assert_eq!(cache.negative_count(),
-        (population - granted) * parameter_count);
+    assert_eq!(
+        cache.negative_count(),
+        (population - granted) * parameter_count
+    );
     let (absent_owners, _, records, _) = cache.storage_counts();
     assert_eq!(absent_owners, population - granted);
     assert_eq!(records, granted * parameter_count);
-    println!("parameter_cache_population {}", serde_json::json!({
-        "population":population, "parameters":parameter_count, "proposals":proposals.len(),
-        "sparse":stride == Some(100), "grant_stride":stride, "indexed":indexed,
-        "grants":granted * parameter_count, "setup_ms":setup_ms,
-        "projection_ms":projection_ms, "calls":calls, "nanos":nanos,
-        "stage_order":["scope_key_total", "restore", "recipient", "grant_id", "projection_write", "owner_identity", "scope_encode_hash", "electorate_membership"],
-        "nested_stages":"owner_identity and scope_encode_hash are included in scope_key_total; do not add them again",
-        "owner_identities":cut.owners.as_ref().unwrap().len(),
-        "cache_entries":cache.len(), "storage_counts":cache.storage_counts(),
-        "test_key_bytes":std::mem::size_of::<(WalletAddress, GovernableParam)>(),
-        "test_value_bytes":std::mem::size_of::<grants::ScopedGrant>(),
-        "absence_owner_key_bytes":std::mem::size_of::<WalletAddress>(),
-        "absence_value_bytes":GovernableParam::ALL.len().div_ceil(64) * std::mem::size_of::<u64>(),
-        "memory_before":before, "checkpoints":checkpoints,
-    }));
+    println!(
+        "parameter_cache_population {}",
+        serde_json::json!({
+            "population":population, "parameters":parameter_count, "proposals":proposals.len(),
+            "sparse":stride == Some(100), "grant_stride":stride, "indexed":indexed,
+            "grants":granted * parameter_count, "setup_ms":setup_ms,
+            "projection_ms":projection_ms, "calls":calls, "nanos":nanos,
+            "stage_order":["scope_key_total", "restore", "recipient", "grant_id", "projection_write", "owner_identity", "scope_encode_hash", "electorate_membership"],
+            "nested_stages":"owner_identity and scope_encode_hash are included in scope_key_total; do not add them again",
+            "owner_identities":cut.owners.as_ref().unwrap().len(),
+            "cache_entries":cache.len(), "storage_counts":cache.storage_counts(),
+            "test_key_bytes":std::mem::size_of::<(WalletAddress, GovernableParam)>(),
+            "test_value_bytes":std::mem::size_of::<grants::ScopedGrant>(),
+            "absence_owner_key_bytes":std::mem::size_of::<WalletAddress>(),
+            "absence_value_bytes":GovernableParam::ALL.len().div_ceil(64) * std::mem::size_of::<u64>(),
+            "memory_before":before, "checkpoints":checkpoints,
+        })
+    );
 }
 
 #[test]
 fn parameter_cache_population_counts_distinct_scopes_and_preserves_absence() {
     for parameters in [1, 8] {
-        for sparse in [false, true] { parameter_cache_population_case(12, parameters, sparse); }
+        for sparse in [false, true] {
+            parameter_cache_population_case(12, parameters, sparse);
+        }
     }
 }
 
@@ -682,7 +907,10 @@ fn parameter_cache_dense_fallback_authenticates_each_scope_once() {
 #[test]
 #[ignore = "explicit capped-host dense parameter cache diagnostic"]
 fn parameter_cache_dense_scaling() {
-    let population = std::env::var("BURST_GOV_PROBE_POPULATION").unwrap().parse().unwrap();
+    let population = std::env::var("BURST_GOV_PROBE_POPULATION")
+        .unwrap()
+        .parse()
+        .unwrap();
     assert!([1000, 10000].contains(&population));
     parameter_cache_grant_case(population, 8, Some(1));
 }
@@ -690,9 +918,18 @@ fn parameter_cache_dense_scaling() {
 #[test]
 #[ignore = "explicit capped-host parameter cache population diagnostic"]
 fn parameter_cache_population_scaling() {
-    let population = std::env::var("BURST_GOV_PROBE_POPULATION").unwrap().parse().unwrap();
-    let parameters = std::env::var("BURST_GOV_PROBE_PARAMETERS").unwrap().parse().unwrap();
-    let sparse = std::env::var("BURST_GOV_PROBE_SPARSE").unwrap().parse().unwrap();
+    let population = std::env::var("BURST_GOV_PROBE_POPULATION")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let parameters = std::env::var("BURST_GOV_PROBE_PARAMETERS")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let sparse = std::env::var("BURST_GOV_PROBE_SPARSE")
+        .unwrap()
+        .parse()
+        .unwrap();
     assert!([1000, 100000].contains(&population));
     assert!([1, 8].contains(&parameters));
     parameter_cache_population_case(population, parameters, sparse);
@@ -702,23 +939,40 @@ fn parameter_cache_population_scaling() {
 fn parameter_cache_compacts_all_absences_without_hiding_revocations_or_errors() {
     let mut fixture = Fixture::new();
     // Every parameter discriminant must fit the absence bitset indexing.
-    let indices: HashSet<_> = GovernableParam::ALL.iter().map(|param| param.clone() as usize).collect();
+    let indices: HashSet<_> = GovernableParam::ALL
+        .iter()
+        .map(|param| param.clone() as usize)
+        .collect();
     assert_eq!(indices, (0..GovernableParam::ALL.len()).collect());
     let revoked = GovernableParam::ALL.last().unwrap().clone();
     fixture.revoke(1, KeyScope::Parameter(revoked.clone()));
     let corrupt_param = GovernableParam::TrstExpirySecs;
-    let corrupt = scoped::key(fixture.state.network, fixture.state.genesis, &fixture.people[2],
-        &KeyScope::Parameter(corrupt_param.clone())).unwrap();
+    let corrupt = scoped::key(
+        fixture.state.network,
+        fixture.state.genesis,
+        &fixture.people[2],
+        &KeyScope::Parameter(corrupt_param.clone()),
+    )
+    .unwrap();
     fixture.metadata.insert(corrupt, vec![0xff]);
     let mut cut = fixture.state.projection_cut(&fixture.metadata);
     for _ in 0..2 {
         for param in GovernableParam::ALL {
-            assert!(cut.scoped_grant(&fixture.people[0], fixture.proposal, Some(param)).unwrap().is_none());
+            assert!(cut
+                .scoped_grant(&fixture.people[0], fixture.proposal, Some(param))
+                .unwrap()
+                .is_none());
         }
-        assert!(matches!(cut.scoped_grant(&fixture.people[1], fixture.proposal, Some(&revoked)).unwrap(), Some(None)));
+        assert!(matches!(
+            cut.scoped_grant(&fixture.people[1], fixture.proposal, Some(&revoked))
+                .unwrap(),
+            Some(None)
+        ));
         // Warming absence for a different owner must not mask corrupt metadata;
         // failures are not cached as absence on the next attempt either.
-        assert!(cut.scoped_grant(&fixture.people[2], fixture.proposal, Some(&corrupt_param)).is_err());
+        assert!(cut
+            .scoped_grant(&fixture.people[2], fixture.proposal, Some(&corrupt_param))
+            .is_err());
     }
     let cache = cut.parameters.as_ref().unwrap();
     assert_eq!(cache.negative_count(), GovernableParam::ALL.len());
@@ -735,35 +989,64 @@ fn owner_identity_cache_is_lazy_cut_bound_and_preserves_errors() {
     assert!(cut.owners.as_ref().unwrap().is_empty());
     let ((), calls, _) = measure_projection_work(|| {
         for proposal in [fixture.proposal, TxHash::new([77; 32]), fixture.proposal] {
-            assert!(cut.scoped_grant(&fixture.people[0], proposal, None).unwrap().is_none());
+            assert!(cut
+                .scoped_grant(&fixture.people[0], proposal, None)
+                .unwrap()
+                .is_none());
         }
     });
     assert_eq!((calls[0], calls[5], calls[6]), (3, 1, 3));
     assert_eq!(cut.owners.as_ref().unwrap().len(), 1);
     for _ in 0..2 {
-        let shared = cut.scoped_grant(&invalid, TxHash::ZERO, None).err().unwrap();
-        let independent = fixture.state.single_projection(&fixture.metadata)
-            .scoped_grant(&invalid, TxHash::ZERO, None).err().unwrap();
+        let shared = cut
+            .scoped_grant(&invalid, TxHash::ZERO, None)
+            .err()
+            .unwrap();
+        let independent = fixture
+            .state
+            .single_projection(&fixture.metadata)
+            .scoped_grant(&invalid, TxHash::ZERO, None)
+            .err()
+            .unwrap();
         assert_eq!(shared, independent);
         assert_eq!(shared, "invalid delegation owner");
         assert!(!cut.owners.as_ref().unwrap().contains_key(&invalid));
     }
-    let shared = cut.scoped_grant(&fixture.people[0], TxHash::ZERO, None).err().unwrap();
-    let independent = fixture.state.single_projection(&fixture.metadata)
-        .scoped_grant(&fixture.people[0], TxHash::ZERO, None).err().unwrap();
+    let shared = cut
+        .scoped_grant(&fixture.people[0], TxHash::ZERO, None)
+        .err()
+        .unwrap();
+    let independent = fixture
+        .state
+        .single_projection(&fixture.metadata)
+        .scoped_grant(&fixture.people[0], TxHash::ZERO, None)
+        .err()
+        .unwrap();
     assert_eq!(shared, independent); // Warm identity cannot bypass scope validation.
     drop(cut);
     let ((), calls, _) = measure_projection_work(|| {
         let mut fresh = fixture.state.projection_cut(&fixture.metadata);
-        assert!(fresh.scoped_grant(&fixture.people[0], fixture.proposal, None).is_ok());
+        assert!(fresh
+            .scoped_grant(&fixture.people[0], fixture.proposal, None)
+            .is_ok());
         let mut single = fixture.state.single_projection(&fixture.metadata);
-        for _ in 0..2 { assert!(single.scoped_grant(&fixture.people[0], fixture.proposal, None).is_ok()); }
+        for _ in 0..2 {
+            assert!(single
+                .scoped_grant(&fixture.people[0], fixture.proposal, None)
+                .is_ok());
+        }
         assert!(single.owners.is_none());
     });
     assert_eq!(calls[5], 3); // New cut plus two independent one-off lookups.
     fixture.state.genesis = BlockHash::ZERO;
     let mut fresh = fixture.state.projection_cut(&fixture.metadata);
-    assert_eq!(fresh.scoped_grant(&invalid, TxHash::ZERO, None).err().unwrap(), "invalid delegation identity");
+    assert_eq!(
+        fresh
+            .scoped_grant(&invalid, TxHash::ZERO, None)
+            .err()
+            .unwrap(),
+        "invalid delegation identity"
+    );
     assert!(fresh.owners.as_ref().unwrap().is_empty());
 }
 
@@ -774,16 +1057,25 @@ fn membership_view_is_lazy_shared_and_bound_to_borrowed_electorate() {
     let mut cut = fixture.state.projection_cut(&fixture.metadata);
     assert!(cut.eligible.is_none());
     assert!(cut.delegation(TxHash::ZERO, &fixture.people).is_err());
-    assert!(cut.eligible.is_none(), "unknown proposal must precede population work");
+    assert!(
+        cut.eligible.is_none(),
+        "unknown proposal must precede population work"
+    );
     let (_, calls, _) = measure_projection_work(|| {
         cut.delegation(fixture.proposal, &fixture.people).unwrap();
         let original = cut.eligible.as_ref().unwrap().1.clone();
         cut.delegation(fixture.proposal, &fixture.people).unwrap();
-        assert!(std::sync::Arc::ptr_eq(&original, &cut.eligible.as_ref().unwrap().1));
+        assert!(std::sync::Arc::ptr_eq(
+            &original,
+            &cut.eligible.as_ref().unwrap().1
+        ));
         cut.delegation(fixture.proposal, &smaller).unwrap();
         assert_eq!(cut.eligible.as_ref().unwrap().1.len(), 1);
         assert_eq!(original.len(), fixture.people.len());
-        assert!(!std::sync::Arc::ptr_eq(&original, &cut.eligible.as_ref().unwrap().1));
+        assert!(!std::sync::Arc::ptr_eq(
+            &original,
+            &cut.eligible.as_ref().unwrap().1
+        ));
         cut.delegation(fixture.proposal, &fixture.people).unwrap();
     });
     assert_eq!(calls[7], 3);
@@ -795,7 +1087,11 @@ fn sparse_scope_index_matches_lazy_lookup_and_disables_on_corruption() {
     fixture.grant(0, 1, KeyScope::Parameter(GovernableParam::BrnRate));
     fixture.revoke(0, KeyScope::Proposal(fixture.proposal));
     {
-        let expected = fixture.state.single_projection(&fixture.metadata).delegation(fixture.proposal, &fixture.people).unwrap();
+        let expected = fixture
+            .state
+            .single_projection(&fixture.metadata)
+            .delegation(fixture.proposal, &fixture.people)
+            .unwrap();
         let mut cut = fixture.state.projection_cut(&fixture.metadata);
         assert!(cut.records.is_none());
         let actual = cut.delegation(fixture.proposal, &fixture.people).unwrap();
@@ -803,22 +1099,50 @@ fn sparse_scope_index_matches_lazy_lookup_and_disables_on_corruption() {
         assert_eq!(actual.save_state(), expected.save_state());
         assert_eq!(actual.key_ballot(&fixture.people[0]), Some(None));
     }
-    let unrelated = scoped::key(fixture.state.network, fixture.state.genesis, &fixture.people[2],
-        &KeyScope::Proposal(TxHash::new([89; 32]))).unwrap();
+    let unrelated = scoped::key(
+        fixture.state.network,
+        fixture.state.genesis,
+        &fixture.people[2],
+        &KeyScope::Proposal(TxHash::new([89; 32])),
+    )
+    .unwrap();
     fixture.metadata.insert(unrelated.clone(), vec![0xff]);
     {
-        let expected = fixture.state.single_projection(&fixture.metadata).delegation(fixture.proposal, &fixture.people).unwrap();
+        let expected = fixture
+            .state
+            .single_projection(&fixture.metadata)
+            .delegation(fixture.proposal, &fixture.people)
+            .unwrap();
         let mut cut = fixture.state.projection_cut(&fixture.metadata);
         let actual = cut.delegation(fixture.proposal, &fixture.people).unwrap();
-        assert!(matches!(cut.records, Some(None)), "unindexable records disable the entire shortcut");
+        assert!(
+            matches!(cut.records, Some(None)),
+            "unindexable records disable the entire shortcut"
+        );
         assert_eq!(actual.save_state(), expected.save_state());
     }
     fixture.metadata.remove(&unrelated);
-    let reached = scoped::key(fixture.state.network, fixture.state.genesis, &fixture.people[0], &KeyScope::Proposal(fixture.proposal)).unwrap();
+    let reached = scoped::key(
+        fixture.state.network,
+        fixture.state.genesis,
+        &fixture.people[0],
+        &KeyScope::Proposal(fixture.proposal),
+    )
+    .unwrap();
     fixture.metadata.insert(reached, vec![0xff]);
-    let expected = fixture.state.single_projection(&fixture.metadata).delegation(fixture.proposal, &fixture.people).err().unwrap();
+    let expected = fixture
+        .state
+        .single_projection(&fixture.metadata)
+        .delegation(fixture.proposal, &fixture.people)
+        .err()
+        .unwrap();
     let mut cut = fixture.state.projection_cut(&fixture.metadata);
-    assert_eq!(cut.delegation(fixture.proposal, &fixture.people).err().unwrap(), expected);
+    assert_eq!(
+        cut.delegation(fixture.proposal, &fixture.people)
+            .err()
+            .unwrap(),
+        expected
+    );
     assert!(matches!(cut.records, Some(None)));
 }
 
@@ -826,11 +1150,29 @@ fn sparse_scope_index_matches_lazy_lookup_and_disables_on_corruption() {
 fn empty_scope_index_preserves_invalid_owner_errors() {
     let fixture = Fixture::new();
     let people = [WalletAddress::new("brst_invalid")];
-    let expected = fixture.state.single_projection(&fixture.metadata).delegation(fixture.proposal, &people).err().unwrap();
+    let expected = fixture
+        .state
+        .single_projection(&fixture.metadata)
+        .delegation(fixture.proposal, &people)
+        .err()
+        .unwrap();
     let mut cut = fixture.state.projection_cut(&fixture.metadata);
-    assert_eq!(cut.delegation(fixture.proposal, &people).err().unwrap(), expected);
+    assert_eq!(
+        cut.delegation(fixture.proposal, &people).err().unwrap(),
+        expected
+    );
     assert!(matches!(cut.records, Some(Some(_))));
     assert!(cut.owners.as_ref().unwrap().is_empty());
-    assert_eq!(cut.scoped_grant(&people[0], TxHash::ZERO, None).err().unwrap(), "invalid delegation owner");
-    assert_eq!(cut.scoped_grant(&fixture.people[0], TxHash::ZERO, None).err().unwrap(), "zero delegation proposal");
+    assert_eq!(
+        cut.scoped_grant(&people[0], TxHash::ZERO, None)
+            .err()
+            .unwrap(),
+        "invalid delegation owner"
+    );
+    assert_eq!(
+        cut.scoped_grant(&fixture.people[0], TxHash::ZERO, None)
+            .err()
+            .unwrap(),
+        "zero delegation proposal"
+    );
 }

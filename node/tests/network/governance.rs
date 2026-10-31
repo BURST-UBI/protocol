@@ -10,8 +10,6 @@ use burst_wallet_core::{
 use serde_json::{json, Value};
 use std::time::Duration;
 
-
-
 async fn launch(
     config: NodeConfig,
 ) -> (
@@ -23,7 +21,9 @@ async fn launch(
     let shutdown = node.shutdown.clone();
     let store = node.store.clone();
     let task = tokio::spawn(async move {
-        node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+        node.start_with_services(burst_daemon::start_public_services)
+            .await
+            .unwrap();
         tokio::time::timeout(Duration::from_secs(15), node.stop())
             .await
             .expect("node shutdown timed out")
@@ -259,11 +259,7 @@ async fn signed_governance_reaches_activation_and_replays_on_a_fresh_node() {
         "123"
     );
     assert_eq!(
-        late_client
-            .signing_state(&address)
-            .await
-            .unwrap()
-            .brn_spent,
+        late_client.signing_state(&address).await.unwrap().brn_spent,
         5
     );
     let mut all_clients = clients.clone();
@@ -273,10 +269,7 @@ async fn signed_governance_reaches_activation_and_replays_on_a_fresh_node() {
     let restored = change_rate(&all_clients, &keys, 123).await;
     eprintln!("all nodes reversed zero accrual through a second paid proposal");
     for client in &all_clients {
-        assert_eq!(
-            client.signing_state(&address).await.unwrap().brn_spent,
-            15
-        );
+        assert_eq!(client.signing_state(&address).await.unwrap().brn_spent, 15);
         for proposal in [&zero, &restored] {
             let info = client
                 .rpc_call("governance_proposal_info", json!({"hash":proposal}))
@@ -322,11 +315,7 @@ async fn signed_governance_reaches_activation_and_replays_on_a_fresh_node() {
         "123"
     );
     assert_eq!(
-        clients[0]
-            .signing_state(&address)
-            .await
-            .unwrap()
-            .brn_spent,
+        clients[0].signing_state(&address).await.unwrap().brn_spent,
         15
     );
     for proposal in [&zero, &restored] {

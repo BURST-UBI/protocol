@@ -56,7 +56,9 @@ thread_local! {
 pub(crate) fn commitment(values: &[Completion]) -> Result<BlockHash, String> {
     #[cfg(test)]
     COMMITMENT_CALLS.with(|count| {
-        if let Some(value) = count.get() { count.set(Some(value + 1)); }
+        if let Some(value) = count.get() {
+            count.set(Some(value + 1));
+        }
     });
     if values.is_empty() {
         return Err("deadline checkpoint has no pending completions".into());
@@ -150,12 +152,19 @@ pub(crate) fn history_defaults_from_completions(
     origin: BlockHash,
     completions: &[Completion],
 ) -> Result<std::collections::HashMap<WalletAddress, (BlockHash, u64)>, String> {
-    let mut needed: std::collections::HashSet<_> = orchestrator.prior_panel_votes(target)
-        .iter().map(|vote| &vote.verifier).collect();
+    let mut needed: std::collections::HashSet<_> = orchestrator
+        .prior_panel_votes(target)
+        .iter()
+        .map(|vote| &vote.verifier)
+        .collect();
     let mut defaults = std::collections::HashMap::new();
     for value in completions {
-        if needed.is_empty() { break; }
-        if value.activation.target != *target || value.lifecycle != origin { continue; }
+        if needed.is_empty() {
+            break;
+        }
+        if value.activation.target != *target || value.lifecycle != origin {
+            continue;
+        }
         let mut hash = None;
         for voter in &value.absent {
             if needed.remove(voter) {
@@ -203,8 +212,12 @@ pub(crate) fn history_defaults_from_metadata(
     let mut bindings = std::collections::BTreeMap::<BlockHash, Vec<&WalletAddress>>::new();
     for vote in orchestrator.prior_panel_votes(target) {
         if let Some(bytes) = read(&voter_key(target, &vote.verifier))? {
-            let context = BlockHash::new(bytes.as_slice().try_into()
-                .map_err(|_| "invalid deadline voter binding")?);
+            let context = BlockHash::new(
+                bytes
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| "invalid deadline voter binding")?,
+            );
             bindings.entry(context).or_default().push(&vote.verifier);
         }
     }
@@ -212,13 +225,20 @@ pub(crate) fn history_defaults_from_metadata(
     for (context, voters) in bindings {
         let bytes = read(&key(context))?.ok_or("deadline voter has no completion")?;
         let value = decode(&bytes)?;
-        if value.activation.target != *target || value.activation.context != context
-            || voters.iter().any(|voter| value.absent
-                .binary_search_by(|absent| absent.as_str().cmp(voter.as_str())).is_err())
+        if value.activation.target != *target
+            || value.activation.context != context
+            || voters.iter().any(|voter| {
+                value
+                    .absent
+                    .binary_search_by(|absent| absent.as_str().cmp(voter.as_str()))
+                    .is_err()
+            })
         {
             return Err("deadline voter differs from certified completion".into());
         }
-        if value.lifecycle != origin { continue; }
+        if value.lifecycle != origin {
+            continue;
+        }
         let hash = commitment(std::slice::from_ref(&value))?;
         for voter in voters {
             defaults.insert(voter.clone(), (hash, value.activation.deadline));
@@ -305,11 +325,21 @@ mod tests {
         // Overlapping completions retain the first match and share one hash per
         // contributing completion; unrelated targets and lifecycles are ignored.
         let mut snapshot = orchestrator.snapshot();
-        let voters: Vec<_> = (0..128).map(|i| WalletAddress::new(format!("brst_voter_{i:03}"))).collect();
-        snapshot.prior_votes.insert(target.clone(), voters.iter().map(|verifier| VerifierVote {
-            verifier: verifier.clone(), vote: Vote::Neither, stake_amount: 0,
-            timestamp: Timestamp::new(20),
-        }).collect());
+        let voters: Vec<_> = (0..128)
+            .map(|i| WalletAddress::new(format!("brst_voter_{i:03}")))
+            .collect();
+        snapshot.prior_votes.insert(
+            target.clone(),
+            voters
+                .iter()
+                .map(|verifier| VerifierVote {
+                    verifier: verifier.clone(),
+                    vote: Vote::Neither,
+                    stake_amount: 0,
+                    timestamp: Timestamp::new(20),
+                })
+                .collect(),
+        );
         let orchestrator = VerificationOrchestrator::restore(snapshot);
         let mut first = value.clone();
         first.absent = voters[..96].to_vec();
@@ -323,34 +353,62 @@ mod tests {
         let mut other_target = first.clone();
         other_target.activation.target = WalletAddress::new("brst_other");
         let completions = vec![other_lifecycle, other_target, first, second];
-        let expected = history_defaults(&orchestrator, &target, SelectionLifecycle::Verification(origin), |voter| {
-            Ok(completions.iter().find(|c| c.lifecycle == origin && c.activation.target == target
-                && c.absent.contains(voter)).cloned())
-        }).unwrap();
+        let expected = history_defaults(
+            &orchestrator,
+            &target,
+            SelectionLifecycle::Verification(origin),
+            |voter| {
+                Ok(completions
+                    .iter()
+                    .find(|c| {
+                        c.lifecycle == origin
+                            && c.activation.target == target
+                            && c.absent.contains(voter)
+                    })
+                    .cloned())
+            },
+        )
+        .unwrap();
         COMMITMENT_CALLS.with(|count| count.set(Some(0)));
-        let actual = history_defaults_from_completions(&orchestrator, &target, origin, &completions).unwrap();
+        let actual =
+            history_defaults_from_completions(&orchestrator, &target, origin, &completions)
+                .unwrap();
         let calls = COMMITMENT_CALLS.with(|count| count.replace(None)).unwrap();
         assert_eq!(actual, expected);
         assert_eq!(actual.len(), 128);
         assert_eq!(calls, 2, "one commitment per contributing completion");
         assert_eq!(actual[&voters[64]].1, 20, "overlap retains the first match");
-        assert!(history_defaults_from_completions(&orchestrator, &target, BlockHash::ZERO, &completions).unwrap().is_empty());
+        assert!(history_defaults_from_completions(
+            &orchestrator,
+            &target,
+            BlockHash::ZERO,
+            &completions
+        )
+        .unwrap()
+        .is_empty());
 
         let mut metadata = std::collections::HashMap::new();
         for completion in &completions[2..] {
-            metadata.insert(key(completion.activation.context), bincode::serialize(completion).unwrap());
+            metadata.insert(
+                key(completion.activation.context),
+                bincode::serialize(completion).unwrap(),
+            );
         }
         for (i, voter) in voters.iter().enumerate() {
             let context = completions[if i < 96 { 2 } else { 3 }].activation.context;
             metadata.insert(voter_key(&target, voter), context.as_bytes().to_vec());
         }
-        for lifecycle in [SelectionLifecycle::Verification(origin), SelectionLifecycle::Challenge(origin)] {
+        for lifecycle in [
+            SelectionLifecycle::Verification(origin),
+            SelectionLifecycle::Challenge(origin),
+        ] {
             let mut completion_reads = 0;
             COMMITMENT_CALLS.with(|count| count.set(Some(0)));
             let actual = history_defaults_from_metadata(&orchestrator, &target, lifecycle, |key| {
                 completion_reads += usize::from(key.starts_with("verification_deadline/v1/"));
                 Ok(metadata.get(key).cloned())
-            }).unwrap();
+            })
+            .unwrap();
             let calls = COMMITMENT_CALLS.with(|count| count.replace(None)).unwrap();
             assert_eq!(actual, expected);
             assert_eq!(completion_reads, 2);
@@ -358,11 +416,15 @@ mod tests {
         }
         let lifecycle = SelectionLifecycle::Verification(origin);
         let read = |rows: &std::collections::HashMap<String, Vec<u8>>| {
-            history_defaults_from_metadata(&orchestrator, &target, lifecycle, |key| Ok(rows.get(key).cloned()))
+            history_defaults_from_metadata(&orchestrator, &target, lifecycle, |key| {
+                Ok(rows.get(key).cloned())
+            })
         };
         let mut invalid = metadata.clone();
         invalid.insert(voter_key(&target, &voters[0]), vec![1]);
-        assert!(read(&invalid).unwrap_err().contains("invalid deadline voter binding"));
+        assert!(read(&invalid)
+            .unwrap_err()
+            .contains("invalid deadline voter binding"));
         let context = completions[2].activation.context;
         let mut invalid = metadata.clone();
         invalid.remove(&key(context));
@@ -376,17 +438,29 @@ mod tests {
             let mut changed = completions[2].clone();
             match kind {
                 0 => changed.activation.context = BlockHash::new([44; 32]),
-                1 => { changed.absent.remove(0); },
+                1 => {
+                    changed.absent.remove(0);
+                }
                 _ => changed.absent.swap(0, 1),
             }
             let mut rows = metadata.clone();
             rows.insert(key(context), bincode::serialize(&changed).unwrap());
             assert!(read(&rows).is_err());
         }
-        assert!(history_defaults_from_metadata(&orchestrator, &target,
-            SelectionLifecycle::Verification(BlockHash::ZERO), |key| Ok(metadata.get(key).cloned())).unwrap().is_empty());
-        assert!(history_defaults_from_metadata(&orchestrator, &target, lifecycle,
-            |_| Err("read fault".into())).unwrap_err().contains("read fault"));
-
+        assert!(history_defaults_from_metadata(
+            &orchestrator,
+            &target,
+            SelectionLifecycle::Verification(BlockHash::ZERO),
+            |key| Ok(metadata.get(key).cloned())
+        )
+        .unwrap()
+        .is_empty());
+        assert!(
+            history_defaults_from_metadata(&orchestrator, &target, lifecycle, |_| Err(
+                "read fault".into()
+            ))
+            .unwrap_err()
+            .contains("read fault")
+        );
     }
 }

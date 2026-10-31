@@ -109,7 +109,9 @@ pub fn genesis_address(network: NetworkId) -> WalletAddress {
         NetworkId::Test => &TEST,
         NetworkId::Live => &LIVE,
     };
-    address.get_or_init(|| burst_crypto::derive_address(&genesis_public_key(network))).clone()
+    address
+        .get_or_init(|| burst_crypto::derive_address(&genesis_public_key(network)))
+        .clone()
 }
 
 /// Decode a 32-byte hex seed from the environment or a text file.

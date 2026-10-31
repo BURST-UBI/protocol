@@ -15,8 +15,8 @@ pub(super) fn appeal_context(
     {
         return Err("appeal reference is invalid".into());
     }
-    let target = crate::block_economics::wallet_from_link(&block.link)
-        .ok_or("appeal target is invalid")?;
+    let target =
+        crate::block_economics::wallet_from_link(&block.link).ok_or("appeal target is invalid")?;
     let latest = batch
         .get_meta(&latest_key(&target))
         .map_err(|error| error.to_string())?
@@ -66,8 +66,7 @@ pub(super) fn appeal_context(
         if source.hash != hash
             || source.compute_hash() != hash
             || source.timestamp > receipt.completed_at
-            || crate::block_economics::wallet_from_link(&source.link).as_ref()
-                != Some(&target)
+            || crate::block_economics::wallet_from_link(&source.link).as_ref() != Some(&target)
             || (is_admission
                 && (source.block_type != BlockType::Challenge
                     || ChallengeReason::from_origin(source.origin.as_bytes()) != reason))

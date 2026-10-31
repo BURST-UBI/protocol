@@ -37,28 +37,42 @@ impl<I: Iterator<Item = Result<AccountInfo, StoreError>>> AccountInventoryCaptur
     pub(super) fn new(rows: I) -> Self {
         let mut writer = HashWriter(Blake2b::new());
         writer.0.update(b"BURST/local-account-inventory/v1\0");
-        Self { rows: rows.fuse(), writer, count: 0, complete: false, failed: false }
+        Self {
+            rows: rows.fuse(),
+            writer,
+            count: 0,
+            complete: false,
+            failed: false,
+        }
     }
 
     pub(super) fn advance(&mut self, max_rows: usize) -> Result<bool, StoreError> {
         if self.failed {
-            return Err(StoreError::Corruption("account inventory capture already failed".into()));
+            return Err(StoreError::Corruption(
+                "account inventory capture already failed".into(),
+            ));
         }
         self.failed = true;
         if max_rows == 0 {
-            return Err(StoreError::Corruption("zero account inventory page budget".into()));
+            return Err(StoreError::Corruption(
+                "zero account inventory page budget".into(),
+            ));
         }
         if !self.complete {
             for _ in 0..max_rows {
-                let Some(row) = self.rows.next() else { self.complete = true; break; };
+                let Some(row) = self.rows.next() else {
+                    self.complete = true;
+                    break;
+                };
                 let row = row?;
                 let length = bincode::serialized_size(&row)
                     .map_err(|error| StoreError::Serialization(error.to_string()))?;
                 self.writer.0.update(length.to_be_bytes());
                 bincode::serialize_into(&mut self.writer, &row)
                     .map_err(|error| StoreError::Serialization(error.to_string()))?;
-                self.count = self.count.checked_add(1)
-                    .ok_or_else(|| StoreError::Corruption("account inventory count overflow".into()))?;
+                self.count = self.count.checked_add(1).ok_or_else(|| {
+                    StoreError::Corruption("account inventory count overflow".into())
+                })?;
             }
         }
         self.failed = false;
@@ -67,10 +81,15 @@ impl<I: Iterator<Item = Result<AccountInfo, StoreError>>> AccountInventoryCaptur
 
     pub(super) fn finish(mut self) -> Result<AccountInventory, StoreError> {
         if self.failed || !self.complete {
-            return Err(StoreError::Corruption("account inventory capture incomplete".into()));
+            return Err(StoreError::Corruption(
+                "account inventory capture incomplete".into(),
+            ));
         }
         self.writer.0.update(self.count.to_be_bytes());
-        Ok(AccountInventory { count: self.count, digest: self.writer.0.finalize().into() })
+        Ok(AccountInventory {
+            count: self.count,
+            digest: self.writer.0.finalize().into(),
+        })
     }
 }
 
@@ -91,9 +110,9 @@ mod tests {
 
     #[test]
     fn paged_inventory_preserves_digest_and_rejects_partial_or_failed_capture() {
-        let rows: Vec<_> = (0..301).map(|i|
-            AccountInfo::unopened(WalletAddress::new(format!("brst_account_{i}")))
-        ).collect();
+        let rows: Vec<_> = (0..301)
+            .map(|i| AccountInfo::unopened(WalletAddress::new(format!("brst_account_{i}"))))
+            .collect();
         // Compute the expected digest from length-prefixed rows, then count.
         let mut hash = Blake2b::<U32>::new();
         hash.update(b"BURST/local-account-inventory/v1\0");
@@ -103,11 +122,16 @@ mod tests {
             hash.update(bytes);
         }
         hash.update((rows.len() as u64).to_be_bytes());
-        let expected = AccountInventory { count: rows.len() as u64, digest: hash.finalize().into() };
+        let expected = AccountInventory {
+            count: rows.len() as u64,
+            digest: hash.finalize().into(),
+        };
         for page_size in [1, 3, 128, 301, 512] {
             let mut capture = AccountInventoryCapture::new(rows.clone().into_iter().map(Ok));
             let mut pages = 1;
-            while !capture.advance(page_size).unwrap() { pages += 1; }
+            while !capture.advance(page_size).unwrap() {
+                pages += 1;
+            }
             assert_eq!(pages, rows.len() / page_size + 1);
             assert!(capture.advance(page_size).unwrap());
             assert_eq!(capture.finish().unwrap(), expected);
@@ -115,10 +139,14 @@ mod tests {
         let mut partial = AccountInventoryCapture::new(rows.clone().into_iter().map(Ok));
         assert!(!partial.advance(1).unwrap());
         assert!(partial.finish().is_err());
-        let mut failed = AccountInventoryCapture::new([
-            Ok(rows[0].clone()), Err(StoreError::Corruption("injected".into())),
-            Ok(rows[1].clone()),
-        ].into_iter());
+        let mut failed = AccountInventoryCapture::new(
+            [
+                Ok(rows[0].clone()),
+                Err(StoreError::Corruption("injected".into())),
+                Ok(rows[1].clone()),
+            ]
+            .into_iter(),
+        );
         assert!(!failed.advance(1).unwrap());
         assert!(failed.advance(1).is_err());
         assert!(failed.advance(1).is_err());

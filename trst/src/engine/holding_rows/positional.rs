@@ -20,18 +20,27 @@ pub fn rewind_portfolio(
     let mut retained = 0usize;
     let mut insert = |record: WalletRecord| -> Result<(), String> {
         let (key, value) = record.storage_entry()?;
-        retained = retained.checked_add(key.len()).and_then(|n| n.checked_add(value.len()))
-            .filter(|n| *n <= max_context_bytes).ok_or("positional migration context exceeds budget")?;
+        retained = retained
+            .checked_add(key.len())
+            .and_then(|n| n.checked_add(value.len()))
+            .filter(|n| *n <= max_context_bytes)
+            .ok_or("positional migration context exceeds budget")?;
         rows.insert(key, value);
         Ok(())
     };
     if let Some(portfolio) = after {
         validate(holder, portfolio)?;
-        insert(WalletRecord::Portfolio { holder: holder.clone(),
-            cached_transferable: portfolio.cached_transferable, earliest_expiry: portfolio.earliest_expiry })?;
+        insert(WalletRecord::Portfolio {
+            holder: holder.clone(),
+            cached_transferable: portfolio.cached_transferable,
+            earliest_expiry: portfolio.earliest_expiry,
+        })?;
         for (position, token) in portfolio.tokens.iter().enumerate() {
-            insert(WalletRecord::Holding { holder: holder.clone(), position: position as u64,
-                token: Box::new(token.clone()) })?;
+            insert(WalletRecord::Holding {
+                holder: holder.clone(),
+                position: position as u64,
+                token: Box::new(token.clone()),
+            })?;
         }
     }
     let mut seen = HashSet::new();
@@ -41,18 +50,27 @@ pub fn rewind_portfolio(
         }
         for bytes in before.iter().chain(after.iter()) {
             let owner = match WalletRecord::from_storage_entry(&key, bytes)? {
-                WalletRecord::Portfolio { holder, .. } | WalletRecord::Holding { holder, .. } => holder,
+                WalletRecord::Portfolio { holder, .. } | WalletRecord::Holding { holder, .. } => {
+                    holder
+                }
                 _ => return Err("non-portfolio positional migration row".into()),
             };
-            if owner != *holder { return Err("positional migration owner mismatch".into()); }
+            if owner != *holder {
+                return Err("positional migration owner mismatch".into());
+            }
         }
         if rows.get(&key) != after.as_ref() {
             return Err("positional migration after-image differs from supplied cut".into());
         }
-        if let Some(previous) = rows.remove(&key) { retained -= key.len() + previous.len(); }
+        if let Some(previous) = rows.remove(&key) {
+            retained -= key.len() + previous.len();
+        }
         if let Some(before) = before {
-            retained = retained.checked_add(key.len()).and_then(|n| n.checked_add(before.len()))
-                .filter(|n| *n <= max_context_bytes).ok_or("positional migration context exceeds budget")?;
+            retained = retained
+                .checked_add(key.len())
+                .and_then(|n| n.checked_add(before.len()))
+                .filter(|n| *n <= max_context_bytes)
+                .ok_or("positional migration context exceeds budget")?;
             rows.insert(key, before);
         }
     }
@@ -60,7 +78,12 @@ pub fn rewind_portfolio(
     // validation preserves its exact cache; live publication still validates its
     // separately authenticated governed period using the normal reader.
     let mut reader = WalletRecordReader::new(0);
-    for (key, bytes) in rows { reader.push(WalletRecord::from_storage_entry(&key, &bytes)?)?; }
+    for (key, bytes) in rows {
+        reader.push(WalletRecord::from_storage_entry(&key, &bytes)?)?;
+    }
     let mut engine = reader.finish_checked(false)?;
-    Ok(engine.wallets.remove(holder).map(|portfolio| portfolio.into_inner()))
+    Ok(engine
+        .wallets
+        .remove(holder)
+        .map(|portfolio| portfolio.into_inner()))
 }

@@ -6,8 +6,8 @@ use burst_types::NetworkId;
 use clap::Parser;
 use std::path::PathBuf;
 
-mod snapshot;
 mod genesis_keygen;
+mod snapshot;
 
 #[cfg(windows)]
 mod service;
@@ -296,7 +296,8 @@ async fn run(
                 }
                 let started = if let Some(mut stop) = stop {
                     let shutdown = node.shutdown.clone();
-                    let mut start = Box::pin(node.start_with_services(burst_daemon::start_public_services));
+                    let mut start =
+                        Box::pin(node.start_with_services(burst_daemon::start_public_services));
                     tokio::select! {
                         result = &mut start => result,
                         _ = wait_for_stop(&mut stop) => {
@@ -333,10 +334,17 @@ mod tests {
         let data = directory.path().join("unused-ledger");
         let seed = directory.path().join("genesis.seed");
         let cli = Cli::try_parse_from([
-            "burst-daemon", "--config", missing_config.to_str().unwrap(),
-            "--data-dir", data.to_str().unwrap(), "genesis-keygen", "test",
-            "--seed-file", seed.to_str().unwrap(),
-        ]).unwrap();
+            "burst-daemon",
+            "--config",
+            missing_config.to_str().unwrap(),
+            "--data-dir",
+            data.to_str().unwrap(),
+            "genesis-keygen",
+            "test",
+            "--seed-file",
+            seed.to_str().unwrap(),
+        ])
+        .unwrap();
         run(cli, None, None).await.unwrap();
         assert!(seed.is_file());
         assert!(!missing_config.exists());
@@ -349,15 +357,22 @@ mod tests {
             vec!["burst-daemon", "genesis-keygen"],
             vec!["burst-daemon", "genesis-keygen", "test"],
             vec!["burst-daemon", "genesis-keygen", "typo", "--show-secret"],
-            vec!["burst-daemon", "genesis-keygen", "test", "--show-secret", "--seed-file", "seed"],
+            vec![
+                "burst-daemon",
+                "genesis-keygen",
+                "test",
+                "--show-secret",
+                "--seed-file",
+                "seed",
+            ],
         ] {
             assert!(Cli::try_parse_from(args).is_err());
         }
-        assert!(Cli::try_parse_from([
-            "burst-daemon", "genesis-keygen", "live", "--show-secret",
-        ]).is_ok());
+        assert!(
+            Cli::try_parse_from(["burst-daemon", "genesis-keygen", "live", "--show-secret",])
+                .is_ok()
+        );
     }
-
 
     #[test]
     fn node_supervisor_future_does_not_embed_startup_state() {

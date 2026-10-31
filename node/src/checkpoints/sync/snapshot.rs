@@ -665,7 +665,13 @@ mod tests {
             Message::SnapshotQuery { minimum_height: 2 }
         ));
         assert_eq!(request.peer, "a");
-        assert_eq!(transfer.poll(peers.clone(), now + RETRY_INTERVAL).unwrap().peer, "a");
+        assert_eq!(
+            transfer
+                .poll(peers.clone(), now + RETRY_INTERVAL)
+                .unwrap()
+                .peer,
+            "a"
+        );
         let offer = |peer: &str, height| Incoming {
             peer: peer.into(),
             message: Message::SnapshotOffer {
@@ -680,7 +686,9 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(transfer.download.is_none());
-        assert!(transfer.handle(offer("a", 1), now + RETRY_INTERVAL).is_err());
+        assert!(transfer
+            .handle(offer("a", 1), now + RETRY_INTERVAL)
+            .is_err());
         assert!(transfer.download.is_none());
         assert!(transfer.query.is_none());
         let later = now + RETRY_INTERVAL + PEER_TIMEOUT;
@@ -756,7 +764,13 @@ mod tests {
         let peers = vec!["a".into(), "b".into()];
         assert_eq!(transfer.poll(peers.clone(), now).unwrap().peer, "a");
         assert!(transfer.poll(peers.clone(), now).is_none());
-        assert_eq!(transfer.poll(peers.clone(), now + RETRY_INTERVAL).unwrap().peer, "a");
+        assert_eq!(
+            transfer
+                .poll(peers.clone(), now + RETRY_INTERVAL)
+                .unwrap()
+                .peer,
+            "a"
+        );
         assert_eq!(
             transfer
                 .poll(peers.clone(), now + PEER_TIMEOUT)
@@ -918,7 +932,10 @@ mod tests {
             assert!(transfer.handle(request(), now).unwrap().is_some());
         }
         assert!(transfer.handle(request(), now).unwrap().is_none());
-        assert!(transfer.handle(request(), now + RETRY_INTERVAL).unwrap().is_some());
+        assert!(transfer
+            .handle(request(), now + RETRY_INTERVAL)
+            .unwrap()
+            .is_some());
         for message in [
             Message::SnapshotRequest {
                 epoch,

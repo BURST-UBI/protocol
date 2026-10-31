@@ -141,8 +141,9 @@ impl PreparedInstallation {
                 .map_err(error)?;
             let cutoff = event.certificate().checkpoint.cutoff;
             let txn = store.tx_begin_read()?;
-            if crate::payment_authority::storage::read_at(|key| store.meta_store().get_meta_txn(&txn, key))?
-                != Some(authority_bytes(&anchor, cutoff)?)
+            if crate::payment_authority::storage::read_at(|key| {
+                store.meta_store().get_meta_txn(&txn, key)
+            })? != Some(authority_bytes(&anchor, cutoff)?)
                 || store
                     .meta_store()
                     .get_meta_txn(&txn, CUTOFF_KEY)?
@@ -189,8 +190,12 @@ impl PreparedInstallation {
             checkpoint.height
         );
         let read = store.tx_begin_read()?;
-        let record = crate::checkpoint_store::record_storage::get_txn(&store.meta_store(), &read, &record_key)?
-            .ok_or_else(|| error("checkpoint disappeared during installation replay"))?;
+        let record = crate::checkpoint_store::record_storage::get_txn(
+            &store.meta_store(),
+            &read,
+            &record_key,
+        )?
+        .ok_or_else(|| error("checkpoint disappeared during installation replay"))?;
         drop(read);
         // A concurrent beacon attachment may change bytes, but never the manifest.
         if !chain::record_matches(&record, event)? {
@@ -226,7 +231,9 @@ impl PreparedInstallation {
         let mut batch = store.tx_begin_write()?;
         if batch.payment_epoch()? != self.parent.hash()
             || batch.get_meta(snapshot::installed::BASE_KEY)?.is_some()
-            || crate::checkpoint_store::record_storage::get_batch(&batch, &self.record_key)?.as_deref() != Some(self.record.as_slice())
+            || crate::checkpoint_store::record_storage::get_batch(&batch, &self.record_key)?
+                .as_deref()
+                != Some(self.record.as_slice())
         {
             return Err(error("checkpoint installation became stale; replay again"));
         }
@@ -248,7 +255,9 @@ impl PreparedInstallation {
         let retired_blocks =
             batch.replace_checkpoint_ledger(self.parent.hash(), &blocks, &accounts)?;
         validate_retired(&batch, self.parent.hash(), &retired_blocks)?;
-        let governance = self.state.persist_projection_stable(&mut batch, &self.anchor)?;
+        let governance = self
+            .state
+            .persist_projection_stable(&mut batch, &self.anchor)?;
         let minority_promises = batch.advance_payment_epoch(
             &self.parent.hash(),
             &self.parent.hash(),

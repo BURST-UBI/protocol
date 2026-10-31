@@ -242,36 +242,76 @@ async fn discovered_session_defers_soft_votes_drains_finals_and_releases_on_drop
     let (fixture, _source_dir, source, expected, _) = setup();
     for seed in [0, 99] {
         let snapshot = authenticate(&source, &fixture.params, expected.checkpoint.parent);
-        let base = authenticate(&source, &fixture.params, expected.checkpoint.parent).into_continuation();
+        let base =
+            authenticate(&source, &fixture.params, expected.checkpoint.parent).into_continuation();
         let (_dir, local) = cemented::sparse(&base, &source);
-        local.meta_store().put_meta(
-            &format!("checkpoint_chain/v1/dev/{}/head", base.anchor().genesis_hash()),
-            &base.anchor().height().to_be_bytes(),
-        ).unwrap();
-        let recovered = Arc::new(snapshot.recover_stored_successors(&local, |_, _, _| unreachable!()).unwrap());
+        local
+            .meta_store()
+            .put_meta(
+                &format!(
+                    "checkpoint_chain/v1/dev/{}/head",
+                    base.anchor().genesis_hash()
+                ),
+                &base.anchor().height().to_be_bytes(),
+            )
+            .unwrap();
+        let recovered = Arc::new(
+            snapshot
+                .recover_stored_successors(&local, |_, _, _| unreachable!())
+                .unwrap(),
+        );
         let local = Arc::new(local);
-        let registry = Arc::new(RwLock::new(crate::connection_registry::ConnectionRegistry::new()));
+        let registry = Arc::new(RwLock::new(
+            crate::connection_registry::ConnectionRegistry::new(),
+        ));
         let session = Session::resume_or_discover_compact_shared(
-            Settings { store: local.clone(), network: NetworkId::Dev, initial_params: fixture.params.clone(),
-                key: Some(Arc::new(burst_crypto::keypair_from_seed(&[seed; 32]).private)) },
-            registry, recovered, Some(crate::checkpoint_replay::SigningClock { now: CUTOFF, error_bound: 0 }),
+            Settings {
+                store: local.clone(),
+                network: NetworkId::Dev,
+                initial_params: fixture.params.clone(),
+                key: Some(Arc::new(
+                    burst_crypto::keypair_from_seed(&[seed; 32]).private,
+                )),
+            },
+            registry,
+            recovered,
+            Some(crate::checkpoint_replay::SigningClock {
+                now: CUTOFF,
+                error_bound: 0,
+            }),
             Duration::from_secs(5),
-        ).await;
+        )
+        .await;
         let rep = address(seed);
         let epoch = base.anchor().hash();
         let hash = BlockHash::new([90; 32]);
-        let reserve = |final_vote| local.meta_store().reserve_consensus_vote_at(
-            &epoch, &rep, &address(99), &BlockHash::ZERO, &hash, final_vote, 0, Some(base.anchor().cutoff()),
-        );
+        let reserve = |final_vote| {
+            local.meta_store().reserve_consensus_vote_at(
+                &epoch,
+                &rep,
+                &address(99),
+                &BlockHash::ZERO,
+                &hash,
+                final_vote,
+                0,
+                Some(base.anchor().cutoff()),
+            )
+        };
         if seed == 0 {
             let session = session.unwrap().expect("pending local selection");
             let error = reserve(false).unwrap_err();
-            assert!(error.to_string().contains("new soft votes deferred"), "{error}");
+            assert!(
+                error.to_string().contains("new soft votes deferred"),
+                "{error}"
+            );
             reserve(true).unwrap();
             drop(session);
             reserve(false).unwrap();
         } else {
-            assert!(session.is_err(), "non-roster key acquired preparation authority");
+            assert!(
+                session.is_err(),
+                "non-roster key acquired preparation authority"
+            );
             reserve(false).unwrap();
         }
     }

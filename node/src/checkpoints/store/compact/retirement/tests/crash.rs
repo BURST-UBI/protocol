@@ -3,7 +3,7 @@ use std::{io::Write, os::unix::process::ExitStatusExt, process::Stdio, time::Dur
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 const CHILD: &str =
-    "checkpoint_store::compact::retirement::tests::crash::retirement_storage_crash_child";
+    "checkpoints::store::compact::retirement::tests::crash::retirement_storage_crash_child";
 const READY: &str = "BURST_RETIREMENT_STORAGE_READY";
 
 fn pause(stage: &str) {

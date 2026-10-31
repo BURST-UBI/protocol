@@ -12,9 +12,15 @@ fn roundtrip(message: WireMessage) {
     let bytes = message.encode().unwrap();
     use burst_types::TrafficClass::{Bulk, Control};
     let expected = match &message {
-        WireMessage::Vote(_) | WireMessage::ConfirmReq(_) | WireMessage::ConfirmAck(_)
-        | WireMessage::Keepalive(_) | WireMessage::Handshake(_) | WireMessage::VerificationVote(_)
-        | WireMessage::GovernanceVote(_) | WireMessage::TelemetryReq | WireMessage::TelemetryAck(_)
+        WireMessage::Vote(_)
+        | WireMessage::ConfirmReq(_)
+        | WireMessage::ConfirmAck(_)
+        | WireMessage::Keepalive(_)
+        | WireMessage::Handshake(_)
+        | WireMessage::VerificationVote(_)
+        | WireMessage::GovernanceVote(_)
+        | WireMessage::TelemetryReq
+        | WireMessage::TelemetryAck(_)
         | WireMessage::CheckpointAgreement(_) => Control,
         WireMessage::CheckpointSync(sync) => match sync {
             Sync::Chunk { .. } | Sync::SnapshotChunk { .. } | Sync::WitnessChunk { .. } => Bulk,

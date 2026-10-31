@@ -63,12 +63,16 @@ struct DialGuard {
 }
 impl Drop for DialGuard {
     fn drop(&mut self) {
-        if self.finished { return; }
+        if self.finished {
+            return;
+        }
         let registry = self.registry.clone();
         let address = self.address.clone();
         // Cancellation schedules dial-slot cleanup while the runtime is available.
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(async move { registry.write().await.end_dial(&address, false); });
+            runtime.spawn(async move {
+                registry.write().await.end_dial(&address, false);
+            });
         }
     }
 }
@@ -89,7 +93,11 @@ pub async fn connect_to_peer(
             return Err("address connected, dialing, or waiting for retry".into());
         }
     }
-    let mut guard = DialGuard { registry: ctx.connection_registry.clone(), address: addr_str.to_owned(), finished: false };
+    let mut guard = DialGuard {
+        registry: ctx.connection_registry.clone(),
+        address: addr_str.to_owned(),
+        finished: false,
+    };
     let result = tokio::time::timeout(
         CONNECT_TIMEOUT + HANDSHAKE_TIMEOUT,
         connect_to_peer_inner(addr_str, ctx),
@@ -114,21 +122,35 @@ async fn connect_to_peer_inner(
 ) -> Result<ConnectedPeer, String> {
     // Resolve first, then reserve the observed address before opening a socket.
     // The outer attempt timeout also bounds DNS and all address fallbacks.
-    let addresses = tokio::net::lookup_host(addr_str).await
+    let addresses = tokio::net::lookup_host(addr_str)
+        .await
         .map_err(|e| format!("cannot resolve {addr_str}: {e}"))?;
     let mut connected = None;
     for address in addresses.take(16) {
-        let Some(permit) = ctx.connection_registry.read().await.admit(address.ip(), Direction::Outbound) else { continue; };
-        if let Ok(Ok(stream)) = tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::TcpStream::connect(address)).await {
+        let Some(permit) = ctx
+            .connection_registry
+            .read()
+            .await
+            .admit(address.ip(), Direction::Outbound)
+        else {
+            continue;
+        };
+        if let Ok(Ok(stream)) =
+            tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::TcpStream::connect(address)).await
+        {
             connected = Some((stream, permit));
             break;
         }
     }
-    let (stream, admission) = connected.ok_or_else(|| format!("no permitted reachable address for {addr_str}"))?;
+    let (stream, admission) =
+        connected.ok_or_else(|| format!("no permitted reachable address for {addr_str}"))?;
     burst_network::connection::configure_peer_stream(&stream)
         .map_err(|e| format!("TCP setup for {addr_str} failed: {e}"))?;
     let address = stream.peer_addr().map_err(|e| e.to_string())?;
-    let peer_addr = PeerAddress { ip: address.ip().to_string(), port: address.port() };
+    let peer_addr = PeerAddress {
+        ip: address.ip().to_string(),
+        port: address.port(),
+    };
 
     let (read_half, mut write_half) = stream.into_split();
 
@@ -161,7 +183,13 @@ async fn connect_to_peer_inner(
     let conn_id = {
         let mut pm = ctx.peer_manager.write().await;
         let mut registry = ctx.connection_registry.write().await;
-        match registry.register_admitted(peer_node_id, Direction::Outbound, write_half, &our_node_id, admission.clone()) {
+        match registry.register_admitted(
+            peer_node_id,
+            Direction::Outbound,
+            write_half,
+            &our_node_id,
+            admission.clone(),
+        ) {
             Some(id) => {
                 if !pm.register_connection(peer_id.clone(), peer_addr.clone(), true, now) {
                     registry.remove_if(&peer_id, id);

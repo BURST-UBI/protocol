@@ -104,9 +104,14 @@ async fn recover_once(
     cached: &mut Option<ReplayCache>,
 ) -> Result<Option<Authority>, StoreError> {
     let recovered = installed::recover_checkpoint_authority(
-        settings.store.clone(), settings.network, settings.initial_params.clone(),
-        registry, previous.clone(), cached,
-    ).await?;
+        settings.store.clone(),
+        settings.network,
+        settings.initial_params.clone(),
+        registry,
+        previous.clone(),
+        cached,
+    )
+    .await?;
     let Some(cache) = recovered else {
         if previous.is_some() {
             return Err(StoreError::Corruption(
@@ -115,5 +120,8 @@ async fn recover_once(
         }
         return Ok(None);
     };
-    Ok(Some(Authority { base: Arc::new(cache.recovered), commitment: cache.base }))
+    Ok(Some(Authority {
+        base: Arc::new(cache.recovered),
+        commitment: cache.base,
+    }))
 }

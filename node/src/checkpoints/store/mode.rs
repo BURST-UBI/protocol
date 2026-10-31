@@ -9,7 +9,8 @@ pub(crate) fn uses_incremental_replay(
 ) -> Result<bool, StoreError> {
     let transaction = store.tx_begin_read()?;
     let meta = store.meta_store();
-    if meta.get_meta_txn(
+    if meta
+        .get_meta_txn(
             &transaction,
             crate::confirmed_replay::snapshot::installed::BASE_KEY,
         )?

@@ -399,11 +399,9 @@ pub(crate) fn persist_brn_delta(
     after
         .wallets
         .visit_changes(&before.wallets, |address, _before, after| match after {
-            Some(wallet) => {
-                batch
-                    .put_brn_wallet_state(address, wallet)
-                    .map_err(|error| error.to_string())
-            }
+            Some(wallet) => batch
+                .put_brn_wallet_state(address, wallet)
+                .map_err(|error| error.to_string()),
             None => batch
                 .delete_brn_wallet(address)
                 .map_err(|error| error.to_string()),
@@ -889,5 +887,4 @@ mod tests {
         assert!(store.block_store().get_block(&open.hash).is_err());
         assert!(store.account_store().get_account(&receiver).is_err());
     }
-
 }

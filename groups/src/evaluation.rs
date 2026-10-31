@@ -1,7 +1,10 @@
 //! Request sharing and one concurrency budget for a single payment evaluation.
 
 use crate::{GroupClient, GroupError, MemberStatus};
-use std::{collections::HashMap, sync::{Arc, Mutex}};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 use tokio::sync::{OnceCell, Semaphore};
 
 type Cached<T> = Arc<OnceCell<Result<T, GroupError>>>;
@@ -28,23 +31,47 @@ impl GroupClient {
 }
 
 impl GroupEvaluation<'_> {
-    pub async fn verify_member(&self, endpoint: &str, wallet: &str) -> Result<MemberStatus, GroupError> {
-        let cell = self.members.lock().map_err(|_| GroupError::Other("membership cache unavailable".into()))?
-            .entry((endpoint.to_owned(), wallet.to_owned())).or_default().clone();
+    pub async fn verify_member(
+        &self,
+        endpoint: &str,
+        wallet: &str,
+    ) -> Result<MemberStatus, GroupError> {
+        let cell = self
+            .members
+            .lock()
+            .map_err(|_| GroupError::Other("membership cache unavailable".into()))?
+            .entry((endpoint.to_owned(), wallet.to_owned()))
+            .or_default()
+            .clone();
         cell.get_or_init(|| async {
-            let _permit = self.requests.acquire().await
+            let _permit = self
+                .requests
+                .acquire()
+                .await
                 .map_err(|_| GroupError::Other("group evaluation closed".into()))?;
             self.client.verify_member(endpoint, wallet).await
-        }).await.clone()
+        })
+        .await
+        .clone()
     }
 
     pub(crate) async fn endorsed_groups(&self, endpoint: &str) -> Result<Vec<String>, GroupError> {
-        let cell = self.endorsements.lock().map_err(|_| GroupError::Other("endorsement cache unavailable".into()))?
-            .entry(endpoint.to_owned()).or_default().clone();
+        let cell = self
+            .endorsements
+            .lock()
+            .map_err(|_| GroupError::Other("endorsement cache unavailable".into()))?
+            .entry(endpoint.to_owned())
+            .or_default()
+            .clone();
         cell.get_or_init(|| async {
-            let _permit = self.requests.acquire().await
+            let _permit = self
+                .requests
+                .acquire()
+                .await
                 .map_err(|_| GroupError::Other("group evaluation closed".into()))?;
             self.client.endorsed_groups(endpoint).await
-        }).await.clone()
+        })
+        .await
+        .clone()
     }
 }

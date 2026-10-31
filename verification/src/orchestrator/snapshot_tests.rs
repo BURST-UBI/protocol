@@ -68,19 +68,35 @@ pub(crate) fn assert_legacy_selection_migration(
     super::records::assert_record_roundtrip(state);
     let snapshot = state.snapshot();
     for selection in snapshot.selections.values() {
-        let expected = selection.vote_context().expect("installed certified selection");
-        assert_eq!(bincode::serialize(selection).unwrap(),
+        let expected = selection
+            .vote_context()
+            .expect("installed certified selection");
+        assert_eq!(
+            bincode::serialize(selection).unwrap(),
             bincode::serialize(&(&selection.request, &selection.certified)).unwrap(),
-            "context cache must not change the legacy round wire shape");
+            "context cache must not change the legacy round wire shape"
+        );
         let mut changed = selection.clone();
         let pool = changed.replace_storage_pool(Vec::new());
-        assert_eq!(changed.vote_context(), None, "pool removal must invalidate warm identity");
+        assert_eq!(
+            changed.vote_context(),
+            None,
+            "pool removal must invalidate warm identity"
+        );
         let encoded = bincode::serialize(&changed).unwrap();
         let restored: super::SelectionRound = bincode::deserialize(&encoded).unwrap();
-        assert_eq!(restored.vote_context(), None, "decoded malformed pool must not inherit authority");
+        assert_eq!(
+            restored.vote_context(),
+            None,
+            "decoded malformed pool must not inherit authority"
+        );
         changed.replace_storage_pool(pool);
         assert_eq!(changed.vote_context(), Some(expected));
-        assert_eq!(selection.vote_context(), Some(expected), "baseline remains isolated");
+        assert_eq!(
+            selection.vote_context(),
+            Some(expected),
+            "baseline remains isolated"
+        );
     }
     let selections: HashMap<_, _> = snapshot
         .selections

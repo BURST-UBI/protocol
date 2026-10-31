@@ -59,12 +59,13 @@ async fn startup_rejects_incomplete_or_noncanonical_lifecycle_without_repairing_
         };
         for _ in 0..2 {
             let error = match BurstNode::new(config.clone()).await {
-                Ok(mut node) => {
-                    tokio::time::timeout(std::time::Duration::from_secs(10), node.start_with_services(burst_daemon::start_public_services))
-                        .await
-                        .unwrap()
-                        .unwrap_err()
-                }
+                Ok(mut node) => tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    node.start_with_services(burst_daemon::start_public_services),
+                )
+                .await
+                .unwrap()
+                .unwrap_err(),
                 Err(error) => error,
             };
             assert!(
@@ -234,7 +235,8 @@ fn broken_snapshot(mutation: u8) -> (&'static str, Vec<u8>, &'static str) {
         if mutation == 2 {
             portfolio.cached_transferable = 101;
         } else if mutation == 3 {
-            portfolio.tokens.push(portfolio.tokens[0].clone());
+            let duplicate = portfolio.tokens[0].clone();
+            portfolio.tokens.push(duplicate);
             portfolio.cached_transferable = 200;
         } else if mutation == 4 {
             portfolio.earliest_expiry = Some(Timestamp::new(999));
@@ -281,10 +283,13 @@ async fn corrupt_economic_snapshots_fail_startup_and_remain_available_for_diagno
         }
         for _ in 0..2 {
             let mut node = BurstNode::new(config.clone()).await.unwrap();
-            let error = tokio::time::timeout(std::time::Duration::from_secs(10), node.start_with_services(burst_daemon::start_public_services))
-                .await
-                .expect("corrupt snapshot startup must terminate")
-                .unwrap_err();
+            let error = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                node.start_with_services(burst_daemon::start_public_services),
+            )
+            .await
+            .expect("corrupt snapshot startup must terminate")
+            .unwrap_err();
             assert!(
                 error.to_string().contains(expected),
                 "mutation {mutation}: {error}"
@@ -323,10 +328,13 @@ async fn initialized_ledgers_never_replace_missing_economic_snapshots_with_empty
         }
         for _ in 0..2 {
             let mut node = BurstNode::new(config.clone()).await.unwrap();
-            let error = tokio::time::timeout(std::time::Duration::from_secs(10), node.start_with_services(burst_daemon::start_public_services))
-                .await
-                .unwrap()
-                .unwrap_err();
+            let error = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                node.start_with_services(burst_daemon::start_public_services),
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
             assert!(
                 error.to_string().contains("missing persisted"),
                 "{key}: {error}"
@@ -377,7 +385,9 @@ async fn populated_legacy_governance_migrates_on_start_and_survives_second_resta
         let shutdown = node.shutdown.clone();
         let store = node.store.clone();
         let worker = tokio::spawn(async move {
-            node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+            node.start_with_services(burst_daemon::start_public_services)
+                .await
+                .unwrap();
             node.stop().await.unwrap();
         });
         let client = NodeClient::new(format!("http://127.0.0.1:{port}")).unwrap();
@@ -406,7 +416,11 @@ async fn populated_legacy_governance_migrates_on_start_and_survives_second_resta
             assert!(batch.uses_governance_records().unwrap());
             assert_eq!(
                 batch.get_meta("schema_version").unwrap(),
-                Some(burst_store_lmdb::CURRENT_SCHEMA_VERSION.to_le_bytes().to_vec())
+                Some(
+                    burst_store_lmdb::CURRENT_SCHEMA_VERSION
+                        .to_le_bytes()
+                        .to_vec()
+                )
             );
             assert!(batch
                 .undo_value_ref(UndoTable::BrnMeta, b"governance_engine")

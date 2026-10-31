@@ -102,12 +102,8 @@ fn selection_signer_fences_payment_votes_and_cannot_reseal_a_new_epoch_on_restar
     .unwrap();
     let key = burst_crypto::keypair_from_seed(&[0; 32]);
     let mut generator = VoteGenerator::new(address(0), key.private.0);
-    assert_eq!(
-        generate_vote(&store, &mut generator, tail, true)
-            .unwrap()
-            .sequence,
-        1
-    );
+    let original = generate_vote(&store, &mut generator, tail, true).unwrap();
+    assert_eq!(original.sequence, 1);
     let clock = Some(SigningClock {
         now: CUTOFF + 5,
         error_bound: 0,
@@ -126,12 +122,9 @@ fn selection_signer_fences_payment_votes_and_cannot_reseal_a_new_epoch_on_restar
             .unwrap()
             .is_none()
     );
-    assert_eq!(
-        generate_vote(&store, &mut generator, tail, true)
-            .unwrap()
-            .sequence,
-        2
-    );
+    let retransmitted = generate_vote(&store, &mut generator, tail, true).unwrap();
+    assert_eq!(retransmitted.to_bytes(), original.to_bytes());
+    assert_eq!(generator.sequence(), original.sequence);
     let proposal = checkpoint_agreement::apply(
         &store,
         &anchor,

@@ -4,30 +4,42 @@ use proptest::prelude::*;
 
 #[test]
 fn shared_pause_snapshots_preserve_sequence_bytes_and_exact_deltas() {
-    let rows: Vec<_> = (0..1024).map(|i| (Timestamp::new(i * 2), Timestamp::new(i * 2 + 1))).collect();
+    let rows: Vec<_> = (0..1024)
+        .map(|i| (Timestamp::new(i * 2), Timestamp::new(i * 2 + 1)))
+        .collect();
     let before: PauseHistory = rows.clone().into();
     let mut after = before.clone();
     assert!(before.rows.ptr_eq(&after.rows));
-    assert_eq!(bincode::serialize(&before).unwrap(), bincode::serialize(&rows).unwrap());
+    assert_eq!(
+        bincode::serialize(&before).unwrap(),
+        bincode::serialize(&rows).unwrap()
+    );
     let mut changes = Vec::new();
-    after.visit_changes(&before, |i, old, new| {
-        changes.push((i, old.copied(), new.copied()));
-        Ok::<_, ()>(())
-    }).unwrap();
+    after
+        .visit_changes(&before, |i, old, new| {
+            changes.push((i, old.copied(), new.copied()));
+            Ok::<_, ()>(())
+        })
+        .unwrap();
     assert!(changes.is_empty());
     let added = (Timestamp::new(3000), Timestamp::new(4000));
     after.push(added);
-    after.visit_changes(&before, |i, old, new| {
-        changes.push((i, old.copied(), new.copied()));
-        Ok::<_, ()>(())
-    }).unwrap();
+    after
+        .visit_changes(&before, |i, old, new| {
+            changes.push((i, old.copied(), new.copied()));
+            Ok::<_, ()>(())
+        })
+        .unwrap();
     assert_eq!(changes, vec![(1024, None, Some(added))]);
     assert_eq!(before, rows);
     let mut visited = 0;
-    assert_eq!(PauseHistory::default().visit_changes(&after, |_, _, _| {
-        visited += 1;
+    assert_eq!(
+        PauseHistory::default().visit_changes(&after, |_, _, _| {
+            visited += 1;
+            Err("stop")
+        }),
         Err("stop")
-    }), Err("stop"));
+    );
     assert_eq!(visited, 1);
     after.clear();
     assert!(after.is_empty());
@@ -36,19 +48,24 @@ fn shared_pause_snapshots_preserve_sequence_bytes_and_exact_deltas() {
     wallet.paused_intervals = before;
     let mut changed = wallet.clone();
     changed.total_burned = 1;
-    assert!(wallet.paused_intervals.rows.ptr_eq(&changed.paused_intervals.rows));
+    assert!(wallet
+        .paused_intervals
+        .rows
+        .ptr_eq(&changed.paused_intervals.rows));
     let mut keys = Vec::new();
     crate::wallet_storage::visit_delta(Some(&wallet), Some(&changed), |key, _, _| {
         keys.push(key.to_vec());
         Ok(())
-    }).unwrap();
+    })
+    .unwrap();
     assert_eq!(keys, vec![crate::wallet_storage::HEADER]);
     changed.paused_intervals.push(added);
     keys.clear();
     crate::wallet_storage::visit_delta(Some(&wallet), Some(&changed), |key, _, _| {
         keys.push(key.to_vec());
         Ok(())
-    }).unwrap();
+    })
+    .unwrap();
     assert_eq!(keys.len(), 2);
     assert_eq!(keys[1], [&[1][..], &1024u64.to_be_bytes()].concat());
 }

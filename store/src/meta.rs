@@ -47,10 +47,13 @@ pub fn closed_payment_epoch_key(epoch: &BlockHash) -> String {
 pub fn read_open_payment_epoch(
     mut read: impl FnMut(&str) -> Result<Option<Vec<u8>>, StoreError>,
 ) -> Result<BlockHash, StoreError> {
-    let bytes = read(PAYMENT_EPOCH_KEY)?.ok_or_else(|| StoreError::Corruption("payment epoch is not initialized".into()))?;
+    let bytes = read(PAYMENT_EPOCH_KEY)?
+        .ok_or_else(|| StoreError::Corruption("payment epoch is not initialized".into()))?;
     let epoch = decode_payment_epoch(&bytes)?;
     if read(&closed_payment_epoch_key(&epoch))?.is_some() {
-        return Err(StoreError::Corruption("installed payment epoch is already closed".into()));
+        return Err(StoreError::Corruption(
+            "installed payment epoch is already closed".into(),
+        ));
     }
     Ok(epoch)
 }

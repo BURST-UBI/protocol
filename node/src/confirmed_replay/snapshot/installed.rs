@@ -8,7 +8,7 @@ use burst_types::{NetworkId, ProtocolParams};
 
 mod caches;
 mod current;
-pub(crate) use current::{recover_current_tip_with_cache, recover_current_tip_until_shutdown};
+pub(crate) use current::{recover_current_tip_until_shutdown, recover_current_tip_with_cache};
 mod changes;
 mod economics;
 mod projection_cache;
@@ -19,7 +19,7 @@ mod metadata;
 pub(crate) use metadata::recover_metadata_until_shutdown;
 pub(crate) use metadata::OwnedRetirement;
 #[cfg(test)]
-pub(crate) use metadata::{SignerRecord, PaymentPromise, BodyOrigin};
+pub(crate) use metadata::{BodyOrigin, PaymentPromise, SignerRecord};
 mod order;
 mod pages;
 #[cfg(test)]
@@ -32,20 +32,20 @@ mod selection_history;
 pub use selection_history::SelectionHistory;
 pub(crate) use selection_history::SelectionRefresh;
 mod retained;
-pub(crate) use retained::{BodyObservations, BodyObservationPages};
+pub(crate) use retained::{BodyObservationPages, BodyObservations};
 mod runtime;
 pub use changes::ReplayedEconomicChange;
-pub use metadata::{
-    recover_metadata_from_peers, PreparedCompactInstallation, RecoveredIndexProjection,
-    RecoveredInstalledMetadata, RecoveredUndoProjection,
-    RecoveredTrstReferences,
-};
 pub(crate) use metadata::{
-    recover_checkpoint_authority, recover_retirement_catalogue, recover_metadata_retaining_progress, recover_metadata_with_durable_inputs, CompactPreparation,
+    recover_checkpoint_authority, recover_metadata_retaining_progress,
+    recover_metadata_with_durable_inputs, recover_retirement_catalogue, CompactPreparation,
     StartupRecovery,
 };
+pub use metadata::{
+    recover_metadata_from_peers, PreparedCompactInstallation, RecoveredIndexProjection,
+    RecoveredInstalledMetadata, RecoveredTrstReferences, RecoveredUndoProjection,
+};
 pub use recovery::RecoveredSnapshot;
-pub(crate) use recovery::{ReplayCache, CandidateDiscovery};
+pub(crate) use recovery::{CandidateDiscovery, ReplayCache};
 pub use runtime::RecoveredRuntime;
 
 pub(crate) const BASE_KEY: &str = "checkpoint_snapshot/v1/base";
@@ -63,15 +63,21 @@ pub(super) fn persist(
     #[cfg(test)]
     let report = |stage: &str| {
         if std::env::var_os("BURST_SNAPSHOT_INSTALL_STAGE_LOG").is_some() {
-            eprintln!("snapshot-persist stage={stage} elapsed_ms={}", started.elapsed().as_millis());
+            eprintln!(
+                "snapshot-persist stage={stage} elapsed_ms={}",
+                started.elapsed().as_millis()
+            );
         }
     };
     #[cfg(test)]
     report("prepare-body");
     let body = snapshot
         .state
-        .prepare_snapshot_format_in(snapshot.anchor(), batch.storage_directory(),
-            snapshot.certificate().manifest.state_format)
+        .prepare_snapshot_format_in(
+            snapshot.anchor(),
+            batch.storage_directory(),
+            snapshot.certificate().manifest.state_format,
+        )
         .map_err(invalid)?;
     #[cfg(test)]
     report("open-writer");
@@ -85,7 +91,11 @@ pub(super) fn persist(
         &snapshot.beacons,
         &mut writer,
     )
-    .map_err(|error| writer.take_storage_error().unwrap_or_else(|| invalid(error)))?;
+    .map_err(|error| {
+        writer
+            .take_storage_error()
+            .unwrap_or_else(|| invalid(error))
+    })?;
     #[cfg(test)]
     report("finish-writer");
     writer.finish()
@@ -144,9 +154,12 @@ pub(super) fn read_base_at_until(
         return Ok(None);
     };
     let snapshot = AuthenticatedSnapshot::read_seekable_validated_in_until(
-        genesis, &mut input, directory,
+        genesis,
+        &mut input,
+        directory,
         &|stage| check(stage).map_err(|error| super::ReplayError::Invalid(error.to_string())),
-    ).map_err(invalid)?;
+    )
+    .map_err(invalid)?;
     let commitment = input.commitment()?;
     Ok(Some((snapshot, commitment)))
 }

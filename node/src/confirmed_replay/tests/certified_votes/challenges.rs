@@ -549,12 +549,7 @@ async fn challenge_beacon_worker_skips_the_completed_lifecycle_and_recovers_afte
     batch
         .put_brn_meta(BootstrapPhase::KEY, &BootstrapPhase::Complete.encoding())
         .unwrap();
-    batch
-        .put_meta(
-            crate::endorsement_commit::SNAPSHOT_KEY,
-            &live.snapshot().encode().unwrap(),
-        )
-        .unwrap();
+    batch.publish_recovered_verification(&live).unwrap();
     batch.commit().unwrap();
     let store = Arc::new(store);
     let service = super::super::snapshot_history::installed_recovery::WitnessService::start(
@@ -564,13 +559,8 @@ async fn challenge_beacon_worker_skips_the_completed_lifecycle_and_recovers_afte
     )
     .await;
     for restart in [false, true] {
-        let bytes = store
-            .meta_store()
-            .get_meta(crate::endorsement_commit::SNAPSHOT_KEY)
-            .unwrap();
-        let live = Arc::new(tokio::sync::Mutex::new(VerificationOrchestrator::restore(
-            OrchestratorSnapshot::decode(&bytes).unwrap(),
-        )));
+        let restored = crate::verification_storage::load(&store.tx_begin_write().unwrap()).unwrap();
+        let live = Arc::new(tokio::sync::Mutex::new(restored));
         let shutdown = Arc::new(crate::shutdown::ShutdownController::new());
         let worker = tokio::spawn(crate::checkpoint_beacon::run(
             Arc::clone(&store),

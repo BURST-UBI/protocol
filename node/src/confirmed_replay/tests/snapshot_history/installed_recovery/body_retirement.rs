@@ -36,37 +36,61 @@ async fn physical_prefix_retirement_preserves_roots_and_recovers_after_reopen() 
         assert!(!local.block_store().exists(&election).unwrap());
         let promise_key = format!(
             "consensus_final/v2/{epoch}/{}/{}/{election}",
-            address(0), promised.account
+            address(0),
+            promised.account
         );
-        local.meta_store().put_meta(&promise_key, promised.hash.as_bytes()).unwrap();
-        local.meta_store().put_meta(
-            &format!("consensus_time/v1/{epoch}/{}", address(0)),
-            &expected.anchor().cutoff().to_be_bytes(),
-        ).unwrap();
-        local.meta_store().put_meta(
-            &format!("consensus_sequence/v1/{}", address(0)),
-            &1u64.to_be_bytes(),
-        ).unwrap();
+        local
+            .meta_store()
+            .put_meta(&promise_key, promised.hash.as_bytes())
+            .unwrap();
+        local
+            .meta_store()
+            .put_meta(
+                &format!("consensus_time/v1/{epoch}/{}", address(0)),
+                &expected.anchor().cutoff().to_be_bytes(),
+            )
+            .unwrap();
+        local
+            .meta_store()
+            .put_meta(
+                &format!("consensus_sequence/v1/{}", address(0)),
+                &1u64.to_be_bytes(),
+            )
+            .unwrap();
         let closed_epoch = crate::checkpoint_replay::ReplayedCheckpoint::genesis_anchor(
-            NetworkId::Dev, &fixture.params,
-        ).unwrap().hash();
+            NetworkId::Dev,
+            &fixture.params,
+        )
+        .unwrap()
+        .hash();
         assert_ne!(closed_epoch, epoch);
         let excluded = BlockHash::new([77; 32]);
         assert!(!local.block_store().exists(&excluded).unwrap());
         let closed_promise = format!(
             "consensus_final/v2/{closed_epoch}/{}/{}/{election}",
-            address(0), promised.account
+            address(0),
+            promised.account
         );
-        local.meta_store().put_meta(&closed_promise, excluded.as_bytes()).unwrap();
-        local.meta_store().put_meta(
-            &format!("consensus_time/v1/{closed_epoch}/{}", address(0)),
-            &0u64.to_be_bytes(),
-        ).unwrap();
+        local
+            .meta_store()
+            .put_meta(&closed_promise, excluded.as_bytes())
+            .unwrap();
+        local
+            .meta_store()
+            .put_meta(
+                &format!("consensus_time/v1/{closed_epoch}/{}", address(0)),
+                &0u64.to_be_bytes(),
+            )
+            .unwrap();
         let mut closed = epoch.as_bytes().to_vec();
         closed.extend_from_slice(closed_epoch.as_bytes());
-        local.meta_store().put_meta(
-            &burst_store::meta::closed_payment_epoch_key(&closed_epoch), &closed,
-        ).unwrap();
+        local
+            .meta_store()
+            .put_meta(
+                &burst_store::meta::closed_payment_epoch_key(&closed_epoch),
+                &closed,
+            )
+            .unwrap();
         normalize_retention_fixture(&local, &fixture.params);
         let local = Arc::new(local);
         let mut before = local
@@ -121,11 +145,19 @@ async fn physical_prefix_retirement_preserves_roots_and_recovers_after_reopen() 
                 assert!(writer.matches_clean_storage_cut(&reader.clean_storage_cut().unwrap()));
                 drop(writer);
                 (Some(reader), Some(changes))
-            } else { (None, None) };
+            } else {
+                (None, None)
+            };
             let prepared = match &captured {
-                Some(view) => checked.prepare_token_indexes_view(&local, view, Timestamp::new(expected.anchor().cutoff())),
-                None => checked.prepare_token_indexes_at(&local, Timestamp::new(expected.anchor().cutoff())),
-            }.unwrap();
+                Some(view) => checked.prepare_token_indexes_view(
+                    &local,
+                    view,
+                    Timestamp::new(expected.anchor().cutoff()),
+                ),
+                None => checked
+                    .prepare_token_indexes_at(&local, Timestamp::new(expected.anchor().cutoff())),
+            }
+            .unwrap();
             if mode == 0 {
                 let closed = prepared
                     .body_requirements(&local)
@@ -217,7 +249,10 @@ async fn physical_prefix_retirement_preserves_roots_and_recovers_after_reopen() 
             let closed = match &captured {
                 Some(view) => prepared.body_requirements_view(&local, view),
                 None => prepared.body_requirements(&local),
-            }.unwrap().close(Default::default()).unwrap();
+            }
+            .unwrap()
+            .close(Default::default())
+            .unwrap();
             closed
                 .visit_bodies(|hash| {
                     required.push(hash);
@@ -225,8 +260,14 @@ async fn physical_prefix_retirement_preserves_roots_and_recovers_after_reopen() 
                 })
                 .unwrap();
             assert!(required.contains(&promised.hash));
-            assert!(!required.contains(&excluded), "closed-epoch promise is retained as a journal, not a live body root");
-            assert!(!required.contains(&election), "election identity is not a body dependency");
+            assert!(
+                !required.contains(&excluded),
+                "closed-epoch promise is retained as a journal, not a live body root"
+            );
+            assert!(
+                !required.contains(&election),
+                "election identity is not a body dependency"
+            );
             let batch = closed
                 .prepare_retirement(
                     burst_types::Timestamp::new(expected.anchor().cutoff()),
@@ -267,13 +308,25 @@ async fn physical_prefix_retirement_preserves_roots_and_recovers_after_reopen() 
                     assert_eq!(sibling.hashes(), selected);
                     // A validated soft reservation changes only the durable
                     // sequence, not this complete body's dependency closure.
-                    let sequence = local.meta_store().reserve_consensus_vote_at(
-                        &epoch, &address(0), &promised.account, &election,
-                        &promised.hash, false, 0, Some(expected.anchor().cutoff()),
-                    ).unwrap();
+                    let sequence = local
+                        .meta_store()
+                        .reserve_consensus_vote_at(
+                            &epoch,
+                            &address(0),
+                            &promised.account,
+                            &election,
+                            &promised.hash,
+                            false,
+                            0,
+                            Some(expected.anchor().cutoff()),
+                        )
+                        .unwrap();
                     assert_eq!(sequence, 2);
                     let key = format!("consensus_sequence/v1/{}", address(0));
-                    let row = before.iter_mut().find(|(name, _)| name == key.as_bytes()).unwrap();
+                    let row = before
+                        .iter_mut()
+                        .find(|(name, _)| name == key.as_bytes())
+                        .unwrap();
                     assert_eq!(row.1, 1u64.to_be_bytes());
                     row.1 = sequence.to_be_bytes().to_vec();
                     // Model an independent additive publication that must not be
@@ -304,7 +357,13 @@ async fn physical_prefix_retirement_preserves_roots_and_recovers_after_reopen() 
                 }
                 3 | 4 | 5 => {
                     if mode != 5 {
-                        assert!(closed.own_retirement(Timestamp::new(expected.anchor().cutoff()), None, || true).is_err());
+                        assert!(closed
+                            .own_retirement(
+                                Timestamp::new(expected.anchor().cutoff()),
+                                None,
+                                || true
+                            )
+                            .is_err());
                     }
                     let promised_sequence = std::cell::Cell::new(None);
                     let promise = || {
@@ -313,24 +372,55 @@ async fn physical_prefix_retirement_preserves_roots_and_recovers_after_reopen() 
                             let row = rows.iter().find(|row| row.hash == protected).unwrap();
                             let block: StateBlock = bincode::deserialize(&row.bytes).unwrap();
                             let root = crate::ledger_updater::election_root(&block);
-                            promised_sequence.set(Some(local.meta_store().reserve_consensus_vote_at(
-                                &epoch, &address(0), &block.account, &root, &protected,
-                                true, 0, Some(expected.anchor().cutoff()),
-                            ).unwrap()));
+                            promised_sequence.set(Some(
+                                local
+                                    .meta_store()
+                                    .reserve_consensus_vote_at(
+                                        &epoch,
+                                        &address(0),
+                                        &block.account,
+                                        &root,
+                                        &protected,
+                                        true,
+                                        0,
+                                        Some(expected.anchor().cutoff()),
+                                    )
+                                    .unwrap(),
+                            ));
                         }
                     };
                     let mut owned = if mode == 5 {
                         // The promise precedes classification; transferring the original
                         // watch must retain it even though captured roots cannot see it.
                         promise();
-                        assert!(closed.own_retirement(Timestamp::new(expected.anchor().cutoff()), None, || false).is_err());
-                        closed.own_captured_retirement(Timestamp::new(expected.anchor().cutoff()), None,
-                            || false, changes.take().unwrap()).unwrap()
+                        assert!(closed
+                            .own_retirement(
+                                Timestamp::new(expected.anchor().cutoff()),
+                                None,
+                                || false
+                            )
+                            .is_err());
+                        closed
+                            .own_captured_retirement(
+                                Timestamp::new(expected.anchor().cutoff()),
+                                None,
+                                || false,
+                                changes.take().unwrap(),
+                            )
+                            .unwrap()
                     } else {
-                        closed.own_retirement(Timestamp::new(expected.anchor().cutoff()), None, || {
-                            if mode == 4 { promise(); }
-                            false
-                        }).unwrap()
+                        closed
+                            .own_retirement(
+                                Timestamp::new(expected.anchor().cutoff()),
+                                None,
+                                || {
+                                    if mode == 4 {
+                                        promise();
+                                    }
+                                    false
+                                },
+                            )
+                            .unwrap()
                     };
 
                     drop(batch);
@@ -340,7 +430,10 @@ async fn physical_prefix_retirement_preserves_roots_and_recovers_after_reopen() 
                     // The catalogue survives its complete source proof and reader.
                     local.tx_begin_read().unwrap();
                     if mode >= 4 {
-                        assert!(!owned.is_current(&local).unwrap(), "classification-time promise must be reconciled");
+                        assert!(
+                            !owned.is_current(&local).unwrap(),
+                            "classification-time promise must be reconciled"
+                        );
                         owned.reconcile(&local).unwrap();
                     }
                     assert!(owned.is_current(&local).unwrap());
@@ -353,12 +446,21 @@ async fn physical_prefix_retirement_preserves_roots_and_recovers_after_reopen() 
                         let row = rows.iter().find(|row| row.hash == protected).unwrap();
                         let block: StateBlock = bincode::deserialize(&row.bytes).unwrap();
                         let root = crate::ledger_updater::election_root(&block);
-                        let sequence = promised_sequence.get().expect("promise committed during classification");
+                        let sequence = promised_sequence
+                            .get()
+                            .expect("promise committed during classification");
                         assert_eq!(sequence, 2);
                         let sequence_key = format!("consensus_sequence/v1/{}", address(0));
-                        before.iter_mut().find(|(key, _)| key == sequence_key.as_bytes()).unwrap().1
-                            = sequence.to_be_bytes().to_vec();
-                        let key = format!("consensus_final/v2/{epoch}/{}/{}/{root}", address(0), block.account);
+                        before
+                            .iter_mut()
+                            .find(|(key, _)| key == sequence_key.as_bytes())
+                            .unwrap()
+                            .1 = sequence.to_be_bytes().to_vec();
+                        let key = format!(
+                            "consensus_final/v2/{epoch}/{}/{}/{root}",
+                            address(0),
+                            block.account
+                        );
                         assert!(!before.iter().any(|(name, _)| name == key.as_bytes()));
                         before.push((key.into_bytes(), protected.as_bytes().to_vec()));
                         before.sort_unstable_by(|a, b| a.0.cmp(&b.0));
@@ -368,18 +470,40 @@ async fn physical_prefix_retirement_preserves_roots_and_recovers_after_reopen() 
                     while deleted.len() < if mode >= 4 { 1 } else { 2 } {
                         let page = owned.prepare_page(&local, 1, 64 << 20, 1).unwrap();
                         assert!(page.progress().examined <= 1);
-                        assert!(!page.progress().complete || !page.hashes().is_empty(), "catalogue exhausted before expected deletion");
+                        assert!(
+                            !page.progress().complete || !page.hashes().is_empty(),
+                            "catalogue exhausted before expected deletion"
+                        );
                         deleted.extend_from_slice(page.hashes());
                         page.commit_counted(&local, &counts).unwrap();
-                        assert!(owned.is_current(&local).unwrap(), "own deletion preserves the remaining checked catalogue");
+                        assert!(
+                            owned.is_current(&local).unwrap(),
+                            "own deletion preserves the remaining checked catalogue"
+                        );
                     }
-                    assert_eq!(deleted, if mode >= 4 { selected[1..].to_vec() } else { selected.clone() });
+                    assert_eq!(
+                        deleted,
+                        if mode >= 4 {
+                            selected[1..].to_vec()
+                        } else {
+                            selected.clone()
+                        }
+                    );
                     let page = owned.prepare_page(&local, 1, 64 << 20, 1).unwrap();
-                    local.meta_store().put_meta("owned_retirement_gap", &[1]).unwrap();
-                    local.meta_store().delete_meta("owned_retirement_gap").unwrap();
+                    local
+                        .meta_store()
+                        .put_meta("owned_retirement_gap", &[1])
+                        .unwrap();
+                    local
+                        .meta_store()
+                        .delete_meta("owned_retirement_gap")
+                        .unwrap();
                     assert!(page.commit_counted(&local, &counts).is_err());
                     assert!(!owned.is_current(&local).unwrap());
-                    assert_eq!(counts.block_count(), count_before - if mode >= 4 { 1 } else { 2 });
+                    assert_eq!(
+                        counts.block_count(),
+                        count_before - if mode >= 4 { 1 } else { 2 }
+                    );
                 }
                 _ => unreachable!(),
             }
@@ -387,7 +511,14 @@ async fn physical_prefix_retirement_preserves_roots_and_recovers_after_reopen() 
         // Every plan/read view has been dropped before opening another reader.
         assert_eq!(
             local.block_store().block_count().unwrap(),
-            count_before - if mode >= 4 { 1 } else if mode >= 2 { 2 } else { 0 }
+            count_before
+                - if mode >= 4 {
+                    1
+                } else if mode >= 2 {
+                    2
+                } else {
+                    0
+                }
         );
         assert_eq!(
             counts.block_count(),
@@ -481,8 +612,14 @@ async fn physical_prefix_retirement_preserves_roots_and_recovers_after_reopen() 
         assert_eq!(bincode::serialize(proofs[0].block()).unwrap(), row.bytes);
         if mode >= 4 {
             assert!(local.block_store().exists(&selected[0]).unwrap());
-            let protected = recovered.prepare_token_indexes_at(&local, Timestamp::new(expected.anchor().cutoff())).unwrap();
-            let requirements = protected.body_requirements(&local).unwrap().close(Default::default()).unwrap();
+            let protected = recovered
+                .prepare_token_indexes_at(&local, Timestamp::new(expected.anchor().cutoff()))
+                .unwrap();
+            let requirements = protected
+                .body_requirements(&local)
+                .unwrap()
+                .close(Default::default())
+                .unwrap();
             assert!(requirements.has_body(selected[0]).unwrap());
         }
 
@@ -539,19 +676,29 @@ pub(super) async fn crash_child(directory: &std::path::Path, owned: bool, probe:
         .unwrap();
     let save_selection = |hashes: &[BlockHash]| {
         assert_eq!(hashes.len(), 2);
-        std::fs::write(directory.join("retirement-selected.json"), serde_json::to_vec(hashes).unwrap()).unwrap();
+        std::fs::write(
+            directory.join("retirement-selected.json"),
+            serde_json::to_vec(hashes).unwrap(),
+        )
+        .unwrap();
     };
     if owned {
-        let mut catalogue = closed.own_retirement(Timestamp::new(cutoff), None, || false).unwrap();
+        let mut catalogue = closed
+            .own_retirement(Timestamp::new(cutoff), None, || false)
+            .unwrap();
         drop(closed);
         drop(prepared);
         let (blocks, accounts, pending) = local.tx_begin_write().unwrap().ledger_counts().unwrap();
         let counts = crate::ledger_cache::LedgerCache::new(blocks, accounts, pending);
-        let page = catalogue.prepare_page(&local, 2, 64 << 20, 131_072).unwrap();
+        let page = catalogue
+            .prepare_page(&local, 2, 64 << 20, 131_072)
+            .unwrap();
         save_selection(page.hashes());
         page.commit_with_probe(&local, &counts, probe).unwrap();
     } else {
-        let plan = closed.prepare_retirement(Timestamp::new(cutoff), 2, 64 << 20).unwrap();
+        let plan = closed
+            .prepare_retirement(Timestamp::new(cutoff), 2, 64 << 20)
+            .unwrap();
         save_selection(plan.hashes());
         plan.commit_with_probe(probe).unwrap();
     }

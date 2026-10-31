@@ -103,6 +103,11 @@ network_filters=(
   '::transfer::wire::'
 )
 slow_filters=(
+  'confirmed_replay::tests::electorate::'
+  '::signed_electorate_grows_across_snapshot_epochs_and_reopens'
+  '::electorate_resume_preserves_source_and_rejects_uncheckpointed_tail'
+  '::accepted_electorate_recovery_projects_state_before_strict_resume'
+  '::stored_suffix_recovery_authenticates_before_acceptance_and_reaches_final_target'
   'confirmed_replay::tests::snapshot_history::installed_recovery::publication_crash::'
   'confirmed_replay::tests::certified_votes::challenges::deadline::challenge_deadline_and_pending_expiry_preserve_fraud_and_inactivity_accounting'
 )

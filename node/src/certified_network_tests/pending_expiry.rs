@@ -170,7 +170,9 @@ async fn desktop_expired_merge_preserves_reputation_across_node_restart() {
         workers.push((
             node.shutdown.clone(),
             tokio::spawn(async move {
-                node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+                node.start_with_services(burst_daemon::start_public_services)
+                    .await
+                    .unwrap();
                 node.stop().await.unwrap();
             }),
         ));
@@ -259,7 +261,9 @@ async fn desktop_expired_merge_preserves_reputation_across_node_restart() {
         workers.push((
             node.shutdown.clone(),
             tokio::spawn(async move {
-                node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+                node.start_with_services(burst_daemon::start_public_services)
+                    .await
+                    .unwrap();
                 node.stop().await.unwrap();
             }),
         ));
@@ -339,7 +343,9 @@ async fn pending_journey(accept: bool) {
         workers.push((
             node.shutdown.clone(),
             tokio::spawn(async move {
-                node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+                node.start_with_services(burst_daemon::start_public_services)
+                    .await
+                    .unwrap();
                 node.stop().await.unwrap();
             }),
         ));
@@ -405,7 +411,8 @@ async fn pending_journey(accept: bool) {
         if accept {
             observed_clock.store(time(14).as_secs(), Ordering::SeqCst);
             submit(&clients, &late_receive).await;
-            let epoch = wait_for_receipt(&observed_stores, &sender, &receiver, late_receive.hash).await;
+            let epoch =
+                wait_for_receipt(&observed_stores, &sender, &receiver, late_receive.hash).await;
             assert_eq!(epoch, burn.payment_epoch);
             assert_pending_ownership(&clients, &sender, &receiver, 0, 0, BRN_UNIT).await;
             let duplicate_claim = signed_block(
@@ -480,7 +487,9 @@ async fn pending_journey(accept: bool) {
         workers.push((
             node.shutdown.clone(),
             tokio::spawn(async move {
-                node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+                node.start_with_services(burst_daemon::start_public_services)
+                    .await
+                    .unwrap();
                 node.stop().await.unwrap();
             }),
         ));

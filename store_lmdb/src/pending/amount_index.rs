@@ -73,7 +73,10 @@ pub(super) fn page(
     upper.extend_from_slice(&(!threshold).to_be_bytes());
     upper.extend_from_slice(&[0xff; 32]);
     if after.is_some_and(|(amount, _)| amount < threshold) {
-        return Ok(PendingPage { entries: Vec::new(), has_more: false });
+        return Ok(PendingPage {
+            entries: Vec::new(),
+            has_more: false,
+        });
     }
     let seek = after.map(|(amount, hash)| {
         let mut key = lower.clone();
@@ -83,7 +86,8 @@ pub(super) fn page(
     });
     let txn = store.env.read_txn().map_err(LmdbError::from)?;
     let bounds = (
-        seek.as_deref().map_or(Bound::Included(lower.as_slice()), Bound::Excluded),
+        seek.as_deref()
+            .map_or(Bound::Included(lower.as_slice()), Bound::Excluded),
         Bound::Included(upper.as_slice()),
     );
     let mut entries = Vec::new();

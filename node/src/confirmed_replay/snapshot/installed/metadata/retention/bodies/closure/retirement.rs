@@ -35,8 +35,13 @@ impl<'proof, 'db> ClosedBodyRequirements<'proof, 'db> {
         max_bodies: usize,
         max_bytes: u64,
     ) -> Result<BodyRetirement<'_, 'proof, 'db>, StoreError> {
-        self.prepare_retirement_page(before, max_bodies, max_bytes, None,
-            BodyClosureLimits::default().bodies as usize)
+        self.prepare_retirement_page(
+            before,
+            max_bodies,
+            max_bytes,
+            None,
+            BodyClosureLimits::default().bodies as usize,
+        )
     }
 
     /// Bound candidate examination separately from deletion. Seeking a cursor
@@ -55,25 +60,42 @@ impl<'proof, 'db> ClosedBodyRequirements<'proof, 'db> {
         max_examined: usize,
     ) -> Result<BodyRetirement<'_, 'proof, 'db>, StoreError> {
         let hard = BodyClosureLimits::default();
-        if max_bodies == 0 || max_bodies as u64 > hard.bodies || max_bytes == 0 || max_bytes > hard.bytes
-            || max_examined == 0 || max_examined as u64 > hard.bodies {
+        if max_bodies == 0
+            || max_bodies as u64 > hard.bodies
+            || max_bytes == 0
+            || max_bytes > hard.bytes
+            || max_examined == 0
+            || max_examined as u64 > hard.bodies
+        {
             return Err(invalid("invalid physical retirement budget"));
         }
         let cut = &self.required.cut;
         let mut hashes = Vec::new();
         let mut bytes = 0u64;
         let mut progress = RetirementProgress {
-            examined: 0, resume_after: after, complete: false, blocked_body_bytes: None,
+            examined: 0,
+            resume_after: after,
+            complete: false,
+            blocked_body_bytes: None,
         };
-        let mut rows = cut.metadata.inventory.observed_hashes_after(after)?.peekable();
-        while rows.peek().is_some() && progress.examined < max_examined && hashes.len() < max_bodies {
+        let mut rows = cut
+            .metadata
+            .inventory
+            .observed_hashes_after(after)?
+            .peekable();
+        while rows.peek().is_some() && progress.examined < max_examined && hashes.len() < max_bodies
+        {
             let (hash, length) = rows.next().unwrap()?;
             progress.examined += 1;
             if !self.has_body(hash)? {
-                let body = cut.metadata.resolve_body(cut.store, cut.reader.view(), &hash)?
+                let body = cut
+                    .metadata
+                    .resolve_body(cut.store, cut.reader.view(), &hash)?
                     .ok_or_else(|| invalid("retirement candidate is unresolved"))?;
                 if body.origin() == BodyOrigin::SnapshotPrefix && body.block().timestamp <= before {
-                    let next = bytes.checked_add(length as u64).ok_or_else(|| invalid("retirement byte overflow"))?;
+                    let next = bytes
+                        .checked_add(length as u64)
+                        .ok_or_else(|| invalid("retirement byte overflow"))?;
                     if next > max_bytes {
                         progress.blocked_body_bytes = Some(length as u64);
                         break;
@@ -84,31 +106,47 @@ impl<'proof, 'db> ClosedBodyRequirements<'proof, 'db> {
             }
             progress.resume_after = Some(hash);
         }
-        if rows.peek().is_some_and(Result::is_err) { return Err(rows.next().unwrap().unwrap_err()); }
+        if rows.peek().is_some_and(Result::is_err) {
+            return Err(rows.next().unwrap().unwrap_err());
+        }
         progress.complete = progress.blocked_body_bytes.is_none() && rows.peek().is_none();
         drop(rows);
-        Ok(BodyRetirement { closed: self, hashes, bytes, progress })
+        Ok(BodyRetirement {
+            closed: self,
+            hashes,
+            bytes,
+            progress,
+        })
     }
 }
 
 #[cfg(test)]
 impl BodyRetirement<'_, '_, '_> {
     #[cfg(test)]
-    pub(crate) fn progress(&self) -> RetirementProgress { self.progress }
+    pub(crate) fn progress(&self) -> RetirementProgress {
+        self.progress
+    }
 
     #[cfg(test)]
-    pub(crate) fn hashes(&self) -> &[BlockHash] { &self.hashes }
+    pub(crate) fn hashes(&self) -> &[BlockHash] {
+        &self.hashes
+    }
 
     /// The coordinator holds its publication exclusion through this synchronous
     /// call. Failed/empty commits do not change counts; successful deletion and
     /// the additive cache update cannot be separated by async cancellation.
     #[cfg(test)]
-    pub(crate) fn commit_counted(self, counts: &crate::ledger_cache::LedgerCache) -> Result<(usize, u64), StoreError> {
+    pub(crate) fn commit_counted(
+        self,
+        counts: &crate::ledger_cache::LedgerCache,
+    ) -> Result<(usize, u64), StoreError> {
         if counts.block_count() < self.hashes.len() as u64 {
             return Err(invalid("physical body count is behind retirement batch"));
         }
         let result = self.commit()?;
-        if result.0 != 0 { counts.retire_blocks(result.0 as u64); }
+        if result.0 != 0 {
+            counts.retire_blocks(result.0 as u64);
+        }
         Ok(result)
     }
 
@@ -122,7 +160,10 @@ impl BodyRetirement<'_, '_, '_> {
     }
 
     #[cfg(test)]
-    pub(crate) fn commit_with_probe(self, probe: impl Fn(&str)) -> Result<(usize, u64), StoreError> {
+    pub(crate) fn commit_with_probe(
+        self,
+        probe: impl Fn(&str),
+    ) -> Result<(usize, u64), StoreError> {
         self.commit_inner(probe)
     }
 
@@ -130,11 +171,15 @@ impl BodyRetirement<'_, '_, '_> {
     fn commit_inner(self, probe: impl Fn(&str)) -> Result<(usize, u64), StoreError> {
         let cut = &self.closed.required.cut;
         if !cfg!(test) {
-            return Err(invalid("physical body retirement requires coordinator and semantic qualification"));
+            return Err(invalid(
+                "physical body retirement requires coordinator and semantic qualification",
+            ));
         }
         let mut writer = cut.store.tx_begin_write()?;
         self.closed.check_retention_dependencies(&writer)?;
-        if self.hashes.is_empty() { return Ok((0, 0)); }
+        if self.hashes.is_empty() {
+            return Ok((0, 0));
+        }
         for hash in &self.hashes {
             writer.delete_block(hash)?;
             probe("deleted");

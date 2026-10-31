@@ -1,6 +1,6 @@
 //! Enumerate stored records without treating a numeric height bound as a key scan.
-use crate::checkpoint_store::record_storage;
 use super::*;
+use crate::checkpoint_store::record_storage;
 use std::collections::BTreeMap;
 
 pub(super) fn read(
@@ -10,9 +10,13 @@ pub(super) fn read(
     tip: u64,
 ) -> Result<BTreeMap<u64, Vec<u8>>, StoreError> {
     read_map(store, txn, prefix, tip, |key, bytes, budget| {
-        let record = record_storage::decode_stored(key, bytes,
+        let record = record_storage::decode_stored(
+            key,
+            bytes,
             |name| store.meta_store().get_meta_txn(txn, name),
-            |hash| store.read_view(txn)?.checkpoint_head_node(hash), budget)?;
+            |hash| store.read_view(txn)?.checkpoint_head_node(hash),
+            budget,
+        )?;
         let size = record.len();
         Ok((record.into_owned(), size))
     })
@@ -25,10 +29,17 @@ pub(super) fn fingerprints(
     tip: u64,
 ) -> Result<BTreeMap<u64, burst_types::BlockHash>, StoreError> {
     read_map(store, txn, prefix, tip, |key, bytes, budget| {
-        let commitment = record_storage::inspect_stored(key, bytes,
+        let commitment = record_storage::inspect_stored(
+            key,
+            bytes,
             |name| store.meta_store().get_meta_txn(txn, name),
-            |hash| store.read_view(txn)?.checkpoint_head_node(hash), budget)?;
-        Ok((burst_types::BlockHash::new(commitment.hash), commitment.size))
+            |hash| store.read_view(txn)?.checkpoint_head_node(hash),
+            budget,
+        )?;
+        Ok((
+            burst_types::BlockHash::new(commitment.hash),
+            commitment.size,
+        ))
     })
 }
 
@@ -48,7 +59,8 @@ fn read_map<T>(
         MAX_CHECKPOINTS as usize + 1,
         MAX_CHAIN_BYTES,
         |key, bytes| {
-            logical_bytes = logical_bytes.checked_add(key.len())
+            logical_bytes = logical_bytes
+                .checked_add(key.len())
                 .filter(|size| *size <= MAX_CHAIN_BYTES)
                 .ok_or_else(|| invalid("checkpoint inventory exceeds logical byte limit"))?;
             let suffix = key
@@ -69,7 +81,8 @@ fn read_map<T>(
                 logical_bytes += size;
                 records.insert(height, record);
             } else {
-                logical_bytes = logical_bytes.checked_add(bytes.len())
+                logical_bytes = logical_bytes
+                    .checked_add(bytes.len())
                     .filter(|size| *size <= MAX_CHAIN_BYTES)
                     .ok_or_else(|| invalid("checkpoint inventory exceeds logical byte limit"))?;
             }

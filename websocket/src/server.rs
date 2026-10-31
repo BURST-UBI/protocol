@@ -94,14 +94,21 @@ async fn ws_handler(
     State(sessions): State<Arc<Sessions>>,
 ) -> impl IntoResponse {
     let Ok(permit) = sessions.slots.clone().try_acquire_owned() else {
-        return (axum::http::StatusCode::SERVICE_UNAVAILABLE, "WebSocket capacity reached").into_response();
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "WebSocket capacity reached",
+        )
+            .into_response();
     };
     let active = sessions.active.subscribe();
-    ws.max_message_size(64 * 1024).max_frame_size(64 * 1024).on_upgrade(move |socket| async move {
-        let _permit = permit;
-        let _active = active;
-        handle_socket(socket, sessions.events.clone(), sessions.stopping.clone()).await;
-    }).into_response()
+    ws.max_message_size(64 * 1024)
+        .max_frame_size(64 * 1024)
+        .on_upgrade(move |socket| async move {
+            let _permit = permit;
+            let _active = active;
+            handle_socket(socket, sessions.events.clone(), sessions.stopping.clone()).await;
+        })
+        .into_response()
 }
 
 async fn handle_socket(
@@ -322,34 +329,58 @@ mod tests {
         drop(initial);
         let slots = Arc::new(tokio::sync::Semaphore::new(1));
         let sessions = Arc::new(Sessions {
-            events: Arc::new(WsState::new(8)), stopping: stopping.clone(), active,
+            events: Arc::new(WsState::new(8)),
+            stopping: stopping.clone(),
+            active,
             slots: slots.clone(),
         });
-        let app = Router::new().route("/ws", get(ws_handler)).with_state(sessions);
+        let app = Router::new()
+            .route("/ws", get(ws_handler))
+            .with_state(sessions);
         let worker = tokio::spawn(async move {
             let mut stopping = stopping;
-            axum::serve(listener, app).with_graceful_shutdown(async move {
-                let _ = stopping.wait_for(|value| *value).await;
-            }).await.unwrap();
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = stopping.wait_for(|value| *value).await;
+                })
+                .await
+                .unwrap();
         });
         let (mut first, _) = connect_async(&url).await.unwrap();
         let rejected = connect_async(&url).await.unwrap_err();
         match rejected {
-            tokio_tungstenite::tungstenite::Error::Http(response) => assert_eq!(response.status().as_u16(), 503),
+            tokio_tungstenite::tungstenite::Error::Http(response) => {
+                assert_eq!(response.status().as_u16(), 503)
+            }
             error => panic!("unexpected admission failure: {error}"),
         }
         first.close(None).await.unwrap();
         drop(first);
         tokio::time::timeout(Duration::from_secs(3), async {
-            while slots.available_permits() == 0 { tokio::task::yield_now().await; }
-        }).await.unwrap();
+            while slots.available_permits() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         let (mut second, _) = connect_async(&url).await.unwrap();
-        second.send(ClientFrame::Text("x".repeat(64 * 1024 + 1).into())).await.unwrap();
-        let reply = tokio::time::timeout(Duration::from_secs(3), second.next()).await.unwrap();
-        assert!(matches!(reply, None | Some(Err(_)) | Some(Ok(ClientFrame::Close(_)))));
+        second
+            .send(ClientFrame::Text("x".repeat(64 * 1024 + 1).into()))
+            .await
+            .unwrap();
+        let reply = tokio::time::timeout(Duration::from_secs(3), second.next())
+            .await
+            .unwrap();
+        assert!(matches!(
+            reply,
+            None | Some(Err(_)) | Some(Ok(ClientFrame::Close(_)))
+        ));
         drop(second);
         stop.send_replace(true);
-        tokio::time::timeout(Duration::from_secs(3), worker).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(3), worker)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[test]

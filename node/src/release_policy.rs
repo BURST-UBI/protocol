@@ -12,7 +12,8 @@ pub(crate) const fn governance_content(network: NetworkId) -> bool {
 }
 
 pub(crate) const fn delegation(network: NetworkId) -> bool {
-    burst_governance::signing_delegation::operation::LEDGER_DELEGATION_ENABLED || experimental(network)
+    burst_governance::signing_delegation::operation::LEDGER_DELEGATION_ENABLED
+        || experimental(network)
 }
 
 pub(crate) const fn appeals(network: NetworkId) -> bool {

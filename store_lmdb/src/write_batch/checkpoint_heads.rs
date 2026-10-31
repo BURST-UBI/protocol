@@ -4,24 +4,42 @@ use crate::LmdbError;
 use burst_store::StoreError;
 
 impl LmdbWriteTransaction<'_> {
-    fn mutate_heads<T>(&mut self, apply: impl FnOnce(&mut Self) -> Result<T, StoreError>)
-        -> Result<T, StoreError> {
+    fn mutate_heads<T>(
+        &mut self,
+        apply: impl FnOnce(&mut Self) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
         let result = (|| {
             if self.failed || self.undo.is_some() || self.block_group.is_some() {
-                return Err(invalid("historical head ownership requires a healthy non-undo writer"));
+                return Err(invalid(
+                    "historical head ownership requires a healthy non-undo writer",
+                ));
             }
             apply(self)
         })();
-        if result.is_err() { self.failed = true; }
+        if result.is_err() {
+            self.failed = true;
+        }
         result
     }
 
-    fn write_head_row(&mut self, kind: u8, hash: &NodeHash, value: Option<&[u8]>) -> Result<(), StoreError> {
-        self.dirty = true; self.changed_value = true; self.invalidate_body_changes();
+    fn write_head_row(
+        &mut self,
+        kind: u8,
+        hash: &NodeHash,
+        value: Option<&[u8]>,
+    ) -> Result<(), StoreError> {
+        self.dirty = true;
+        self.changed_value = true;
+        self.invalidate_body_changes();
         let db = self.env.checkpoint_heads_db;
         match value {
-            Some(bytes) => db.put(&mut self.txn, &key(kind, hash), bytes).map_err(LmdbError::from)?,
-            None => { db.delete(&mut self.txn, &key(kind, hash)).map_err(LmdbError::from)?; }
+            Some(bytes) => db
+                .put(&mut self.txn, &key(kind, hash), bytes)
+                .map_err(LmdbError::from)?,
+            None => {
+                db.delete(&mut self.txn, &key(kind, hash))
+                    .map_err(LmdbError::from)?;
+            }
         }
         Ok(())
     }
@@ -33,14 +51,28 @@ impl LmdbWriteTransaction<'_> {
     }
 
     // Only callers holding a node checked in this writer may use this path.
-    fn change_checked_head_references(&mut self, hash: &NodeHash, count: u64,
-        node: &HeadNode, retain: bool) -> Result<(), StoreError> {
-        let next = if retain { count.checked_add(1) } else { count.checked_sub(1) }
-            .ok_or_else(|| invalid("historical head reference count overflow or underflow"))?;
-        let mut row = next.to_be_bytes().to_vec(); row.extend_from_slice(&node.encode()?);
+    fn change_checked_head_references(
+        &mut self,
+        hash: &NodeHash,
+        count: u64,
+        node: &HeadNode,
+        retain: bool,
+    ) -> Result<(), StoreError> {
+        let next = if retain {
+            count.checked_add(1)
+        } else {
+            count.checked_sub(1)
+        }
+        .ok_or_else(|| invalid("historical head reference count overflow or underflow"))?;
+        let mut row = next.to_be_bytes().to_vec();
+        row.extend_from_slice(&node.encode()?);
         self.write_head_row(0, hash, Some(&row))?;
-        if count == 0 { self.write_head_row(1, hash, None)?; }
-        if next == 0 { self.write_head_row(1, hash, Some(&[]))?; }
+        if count == 0 {
+            self.write_head_row(1, hash, None)?;
+        }
+        if next == 0 {
+            self.write_head_row(1, hash, Some(&[]))?;
+        }
         Ok(())
     }
 
@@ -84,21 +116,35 @@ impl LmdbWriteTransaction<'_> {
 
     /// Atomically replace one migration's bounded forest pins. Callers persist
     /// their continuation in this same transaction. Empty roots abandon the job.
-    pub fn replace_checkpoint_head_staging(&mut self, id: &NodeHash, roots: &[NodeHash])
-        -> Result<(), StoreError> {
+    pub fn replace_checkpoint_head_staging(
+        &mut self,
+        id: &NodeHash,
+        roots: &[NodeHash],
+    ) -> Result<(), StoreError> {
         self.mutate_heads(|this| {
             let bytes = crate::checkpoint_heads::encode_staging(roots)?;
             let previous = crate::checkpoint_heads::read_staging(
-                this.env.meta_db, this.env.checkpoint_heads_db, &this.txn, id)?;
+                this.env.meta_db,
+                this.env.checkpoint_heads_db,
+                &this.txn,
+                id,
+            )?;
             let old: std::collections::BTreeSet<_> = previous.iter().collect();
             let new: std::collections::BTreeSet<_> = roots.iter().collect();
             // Pin the next forest before releasing the old one; shared roots
             // keep their existing staging owner without reference-count churn.
-            for root in new.difference(&old) { this.change_head_references(root, true)?; }
-            for root in old.difference(&new) { this.change_head_references(root, false)?; }
+            for root in new.difference(&old) {
+                this.change_head_references(root, true)?;
+            }
+            for root in old.difference(&new) {
+                this.change_head_references(root, false)?;
+            }
             let key = crate::checkpoint_heads::staging_key(id);
-            if roots.is_empty() { this.delete_meta(&key)?; }
-            else { this.put_meta(&key, &bytes)?; }
+            if roots.is_empty() {
+                this.delete_meta(&key)?;
+            } else {
+                this.put_meta(&key, &bytes)?;
+            }
             Ok(())
         })
     }
@@ -110,15 +156,24 @@ impl LmdbWriteTransaction<'_> {
     /// Reclaim at most `max_nodes` (1–4096); each node releases at most two children.
     /// Newly unowned children may be reclaimed in this call if budget remains;
     /// otherwise they stay queued across commits. Deletion never recurses.
-    pub fn reclaim_checkpoint_heads(&mut self, max_nodes: usize) -> Result<ReclaimedHeads, StoreError> {
+    pub fn reclaim_checkpoint_heads(
+        &mut self,
+        max_nodes: usize,
+    ) -> Result<ReclaimedHeads, StoreError> {
         self.mutate_heads(|this| {
-            if max_nodes == 0 || max_nodes > 4096 { return Err(invalid("invalid historical head cleanup budget")); }
+            if max_nodes == 0 || max_nodes > 4096 {
+                return Err(invalid("invalid historical head cleanup budget"));
+            }
             let mut nodes = 0;
             while nodes < max_nodes {
-                let Some(hash) = this.next_unowned_head()? else { break; };
+                let Some(hash) = this.next_unowned_head()? else {
+                    break;
+                };
                 let (count, node) = read(this.env.checkpoint_heads_db, &this.txn, &hash)?
                     .ok_or_else(|| invalid("queued historical head is missing"))?;
-                if count != 0 { return Err(invalid("owned historical head is queued for deletion")); }
+                if count != 0 {
+                    return Err(invalid("owned historical head is queued for deletion"));
+                }
                 this.write_head_row(1, &hash, None)?;
                 this.write_head_row(0, &hash, None)?;
                 if let HeadNode::Branch { left, right, .. } = node {
@@ -127,7 +182,10 @@ impl LmdbWriteTransaction<'_> {
                 }
                 nodes += 1;
             }
-            Ok(ReclaimedHeads { nodes, complete: this.next_unowned_head()?.is_none() })
+            Ok(ReclaimedHeads {
+                nodes,
+                complete: this.next_unowned_head()?.is_none(),
+            })
         })
     }
 }

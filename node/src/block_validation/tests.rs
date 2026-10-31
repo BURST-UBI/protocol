@@ -58,7 +58,8 @@ fn authentication_cannot_be_reused_for_modified_contents_or_signatures() {
         changed.signature = signature;
         assert_eq!(changed.hash, original.hash);
         rejected(
-            processor.validate_candidate_with_authentication(&rules.authenticate(changed), &frontier),
+            processor
+                .validate_candidate_with_authentication(&rules.authenticate(changed), &frontier),
             "signature",
         );
     }
@@ -333,11 +334,17 @@ async fn identical_payload_is_coalesced_through_worker_and_admission_then_retrya
     let wait = std::sync::Mutex::new(wait);
     validation.before_authenticate = Some(Arc::new(move || {
         started.send(()).unwrap();
-        wait.lock().unwrap().recv_timeout(Duration::from_secs(2)).unwrap();
+        wait.lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
     }));
     queue.push(candidate.clone()).await;
     validation.refill_now();
-    tokio::time::timeout(Duration::from_secs(2), observed.recv()).await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(2), observed.recv())
+        .await
+        .unwrap()
+        .unwrap();
     queue.push(candidate.clone()).await;
     validation.refill_now();
     assert_eq!(validation.pending.len(), 1);
@@ -348,7 +355,10 @@ async fn identical_payload_is_coalesced_through_worker_and_admission_then_retrya
     validation.before_authenticate = None;
     queue.push(candidate.clone()).await;
     validation.refill_now();
-    assert!(validation.pending.is_empty(), "admission still owns the payload");
+    assert!(
+        validation.pending.is_empty(),
+        "admission still owns the payload"
+    );
     drop(admitted);
     assert!(validation.in_flight.lock().unwrap().is_empty());
     queue.push(candidate).await;
@@ -361,56 +371,71 @@ async fn identical_payload_is_coalesced_through_worker_and_admission_then_retrya
 #[tokio::test]
 async fn unchecked_payload_coalesces_until_dependency_release_expiry_or_epoch_reset() {
     for source_gap in [false, true] {
-    for release in ["dependency", "expiry", "epoch"] {
-        let queue = Arc::new(BlockPriorityQueue::new(4));
-        let mut processor = processor();
-        let mut validation = BlockValidationQueue::with_workers(
-            queue.clone(), processor.authentication_rules(), 1);
-        let parent = BlockHash::new([99; 32]);
-        let mut dependent = block(2);
-        if source_gap {
-            dependent.link = parent;
-        } else {
-            dependent.block_type = BlockType::Send;
-            dependent.previous = parent;
-        }
-        resign(&mut dependent);
-        queue.push(dependent.clone()).await;
-        let candidate = validation.next().await.unwrap();
-        assert_eq!(processor.validate_candidate_with_authentication(&candidate, &DagFrontier::new()),
-            if source_gap { ProcessResult::GapSource } else { ProcessResult::Gap });
-        drop(candidate);
-        assert_eq!(processor.unchecked_count(), 1);
-        assert_eq!(validation.in_flight.lock().unwrap().len(), 1);
-        queue.push(dependent.clone()).await;
-        validation.refill_now();
-        assert!(validation.pending.is_empty(), "unchecked owns the identical payload");
-        let mut invalid = dependent.clone();
-        invalid.signature = Signature([0; 64]);
-        queue.push(invalid).await;
-        let variant = validation.next().await.unwrap();
-        assert!(variant.result().is_err(), "different payload still authenticates independently");
-        drop(variant);
-        assert_eq!(validation.in_flight.lock().unwrap().len(), 1);
-        if release == "epoch" {
-            processor.install_payment_epoch(BlockHash::new([1; 32]), 0);
+        for release in ["dependency", "expiry", "epoch"] {
+            let queue = Arc::new(BlockPriorityQueue::new(4));
+            let mut processor = processor();
+            let mut validation = BlockValidationQueue::with_workers(
+                queue.clone(),
+                processor.authentication_rules(),
+                1,
+            );
+            let parent = BlockHash::new([99; 32]);
+            let mut dependent = block(2);
+            if source_gap {
+                dependent.link = parent;
+            } else {
+                dependent.block_type = BlockType::Send;
+                dependent.previous = parent;
+            }
+            resign(&mut dependent);
             queue.push(dependent.clone()).await;
-        } else if release == "expiry" {
-            assert_eq!(processor.cleanup_unchecked(0, u64::MAX), 1);
+            let candidate = validation.next().await.unwrap();
+            assert_eq!(
+                processor.validate_candidate_with_authentication(&candidate, &DagFrontier::new()),
+                if source_gap {
+                    ProcessResult::GapSource
+                } else {
+                    ProcessResult::Gap
+                }
+            );
+            drop(candidate);
+            assert_eq!(processor.unchecked_count(), 1);
+            assert_eq!(validation.in_flight.lock().unwrap().len(), 1);
             queue.push(dependent.clone()).await;
-        } else {
-            let mut released = processor.release_retained(&parent);
-            assert_eq!(released.len(), 1);
-            assert!(queue.push_retained(released.pop().unwrap()).await);
+            validation.refill_now();
+            assert!(
+                validation.pending.is_empty(),
+                "unchecked owns the identical payload"
+            );
+            let mut invalid = dependent.clone();
+            invalid.signature = Signature([0; 64]);
+            queue.push(invalid).await;
+            let variant = validation.next().await.unwrap();
+            assert!(
+                variant.result().is_err(),
+                "different payload still authenticates independently"
+            );
+            drop(variant);
+            assert_eq!(validation.in_flight.lock().unwrap().len(), 1);
+            if release == "epoch" {
+                processor.install_payment_epoch(BlockHash::new([1; 32]), 0);
+                queue.push(dependent.clone()).await;
+            } else if release == "expiry" {
+                assert_eq!(processor.cleanup_unchecked(0, u64::MAX), 1);
+                queue.push(dependent.clone()).await;
+            } else {
+                let mut released = processor.release_retained(&parent);
+                assert_eq!(released.len(), 1);
+                assert!(queue.push_retained(released.pop().unwrap()).await);
+            }
+            assert_eq!(processor.unchecked_count(), 0);
+            assert!(validation.in_flight.lock().unwrap().is_empty());
+            let retry = validation.next().await.unwrap();
+            assert!(retry.result().is_ok());
+            assert_eq!(retry.block().hash, dependent.hash);
+            drop(retry);
+            assert!(validation.in_flight.lock().unwrap().is_empty());
         }
-        assert_eq!(processor.unchecked_count(), 0);
-        assert!(validation.in_flight.lock().unwrap().is_empty());
-        let retry = validation.next().await.unwrap();
-        assert!(retry.result().is_ok());
-        assert_eq!(retry.block().hash, dependent.hash);
-        drop(retry);
-        assert!(validation.in_flight.lock().unwrap().is_empty());
-    }
     }
 }
 
@@ -474,11 +499,16 @@ async fn opportunistic_refill_skips_duplicates_with_a_bounded_scan() {
         let stored = Arc::new(burst_nullables::NullStore::new());
         for _ in 0..duplicate_count {
             let duplicate = ordered.pop().await;
-            stored.put_block(&duplicate.hash, &bincode::serialize(&duplicate).unwrap()).unwrap();
+            stored
+                .put_block(&duplicate.hash, &bincode::serialize(&duplicate).unwrap())
+                .unwrap();
         }
         let fresh = ordered.pop().await;
         let mut validation = BlockValidationQueue::with_workers(
-            queue.clone(), processor().authentication_rules(), 1);
+            queue.clone(),
+            processor().authentication_rules(),
+            1,
+        );
         validation.ready_limit = PREPARATION_WINDOW;
         validation.stored = Some(stored);
         let starts = Arc::new(AtomicU64::new(0));
@@ -488,15 +518,24 @@ async fn opportunistic_refill_skips_duplicates_with_a_bounded_scan() {
         }));
         validation.refill_now();
         if duplicate_count == PREPARATION_WINDOW {
-            assert!(validation.pending.is_empty(), "scan must stop at its examination bound");
+            assert!(
+                validation.pending.is_empty(),
+                "scan must stop at its examination bound"
+            );
             assert_eq!(queue.len().await, 1);
             assert_eq!(starts.load(Ordering::SeqCst), 0);
             validation.refill_now();
         }
-        assert_eq!(validation.pending.len(), 1, "duplicate must not consume a worker slot");
+        assert_eq!(
+            validation.pending.len(),
+            1,
+            "duplicate must not consume a worker slot"
+        );
         assert!(queue.is_empty().await);
         let authenticated = tokio::time::timeout(Duration::from_secs(2), validation.next())
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(authenticated.block().hash, fresh.hash);
         assert!(authenticated.result().is_ok());
         assert_eq!(starts.load(Ordering::SeqCst), 1);
@@ -535,7 +574,6 @@ async fn authentication_throughput() {
     }
 }
 
-
 #[tokio::test]
 async fn one_worker_refills_during_admission_and_ready_delivery_preserves_order() {
     let queue = Arc::new(BlockPriorityQueue::new(3));
@@ -545,23 +583,32 @@ async fn one_worker_refills_during_admission_and_ready_delivery_preserves_order(
         expected.push(candidate.clone()).await;
         queue.push(candidate).await;
     }
-    let mut validation = BlockValidationQueue::with_workers(
-        queue.clone(), processor().authentication_rules(), 1);
+    let mut validation =
+        BlockValidationQueue::with_workers(queue.clone(), processor().authentication_rules(), 1);
     let (started, mut observed) = tokio::sync::mpsc::unbounded_channel();
-    validation.before_authenticate = Some(Arc::new(move || { started.send(()).unwrap(); }));
+    validation.before_authenticate = Some(Arc::new(move || {
+        started.send(()).unwrap();
+    }));
     let first = validation.next().await.unwrap();
     assert_eq!(first.block().hash, expected.pop().await.hash);
     assert_eq!(validation.pending.len(), 1);
     for _ in 0..2 {
-        tokio::time::timeout(Duration::from_secs(2), observed.recv()).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(2), observed.recv())
+            .await
+            .unwrap()
+            .unwrap();
     }
     // No second next() call is needed to start the next authentication job.
     let second = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if let Some(result) = validation.try_next_ready() { break result.unwrap(); }
+            if let Some(result) = validation.try_next_ready() {
+                break result.unwrap();
+            }
             tokio::task::yield_now().await;
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     assert_eq!(second.block().hash, expected.pop().await.hash);
     assert_eq!(validation.pending.len(), 1);
     let third = validation.next().await.unwrap();
@@ -573,8 +620,8 @@ async fn one_worker_refills_during_admission_and_ready_delivery_preserves_order(
 #[tokio::test]
 async fn ready_delivery_never_skips_an_unfinished_fifo_head() {
     let queue = Arc::new(BlockPriorityQueue::new(2));
-    let mut validation = BlockValidationQueue::with_workers(
-        queue, processor().authentication_rules(), 2);
+    let mut validation =
+        BlockValidationQueue::with_workers(queue, processor().authentication_rules(), 2);
     let rules = processor().authentication_rules();
     let first_rules = rules.clone();
     let first = block(1);
@@ -586,15 +633,24 @@ async fn ready_delivery_never_skips_an_unfinished_fifo_head() {
         released.await.unwrap();
         first_rules.authenticate(first)
     }));
-    validation.pending.push_back(tokio::spawn(async move { rules.authenticate(second) }));
+    validation
+        .pending
+        .push_back(tokio::spawn(async move { rules.authenticate(second) }));
     tokio::time::timeout(Duration::from_secs(2), async {
-        while !validation.pending[1].is_finished() { tokio::task::yield_now().await; }
-    }).await.unwrap();
+        while !validation.pending[1].is_finished() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     assert!(validation.try_next_ready().is_none());
     assert_eq!(validation.pending.len(), 2);
     release.send(()).unwrap();
     assert_eq!(validation.next().await.unwrap().block().hash, first_hash);
-    assert_eq!(validation.try_next_ready().unwrap().unwrap().block().hash, second_hash);
+    assert_eq!(
+        validation.try_next_ready().unwrap().unwrap().block().hash,
+        second_hash
+    );
 }
 
 #[tokio::test]
@@ -606,8 +662,8 @@ async fn preparation_window_batches_existing_work_without_more_workers_or_reorde
         assert!(expected.push(candidate.clone()).await);
         assert!(queue.push(candidate).await);
     }
-    let mut validation = BlockValidationQueue::with_workers(
-        queue.clone(), processor().authentication_rules(), 1);
+    let mut validation =
+        BlockValidationQueue::with_workers(queue.clone(), processor().authentication_rules(), 1);
     validation.ready_limit = PREPARATION_WINDOW;
     let first = validation.next().await.unwrap();
     assert_eq!(first.block().hash, expected.pop().await.hash);
@@ -620,7 +676,10 @@ async fn preparation_window_batches_existing_work_without_more_workers_or_reorde
         assert!(validation.pending.len() <= 1);
     }
     for _ in PREPARATION_WINDOW..35 {
-        assert_eq!(validation.next().await.unwrap().block().hash, expected.pop().await.hash);
+        assert_eq!(
+            validation.next().await.unwrap().block().hash,
+            expected.pop().await.hash
+        );
     }
     assert!(validation.ready.is_empty());
     assert!(validation.pending.is_empty());
@@ -628,8 +687,15 @@ async fn preparation_window_batches_existing_work_without_more_workers_or_reorde
     // A single arrival must return without waiting for the remaining window.
     let lone = block(100);
     assert!(queue.push(lone.clone()).await);
-    assert_eq!(tokio::time::timeout(Duration::from_secs(2), validation.next())
-        .await.unwrap().unwrap().block().hash, lone.hash);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), validation.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .block()
+            .hash,
+        lone.hash
+    );
 }
 
 #[tokio::test]
@@ -641,8 +707,8 @@ async fn cancelled_preparation_window_retains_completed_prefix_and_fixed_budget(
         assert!(expected.push(candidate.clone()).await);
         assert!(queue.push(candidate).await);
     }
-    let mut validation = BlockValidationQueue::with_workers(
-        queue.clone(), processor().authentication_rules(), 1);
+    let mut validation =
+        BlockValidationQueue::with_workers(queue.clone(), processor().authentication_rules(), 1);
     validation.ready_limit = PREPARATION_WINDOW;
     let entered = Arc::new(AtomicU64::new(0));
     let worker_entered = entered.clone();
@@ -653,8 +719,10 @@ async fn cancelled_preparation_window_retains_completed_prefix_and_fixed_budget(
         if worker_entered.fetch_add(1, Ordering::SeqCst) == 1 {
             started.send(()).unwrap();
             let guard = worker_gate.0.lock().unwrap();
-            let (released, _) = worker_gate.1.wait_timeout_while(
-                guard, Duration::from_secs(5), |released| !*released).unwrap();
+            let (released, _) = worker_gate
+                .1
+                .wait_timeout_while(guard, Duration::from_secs(5), |released| !*released)
+                .unwrap();
             assert!(*released, "test did not release second worker");
         }
     }));
@@ -687,23 +755,36 @@ async fn cancelled_preparation_window_retains_completed_prefix_and_fixed_budget(
     let hashes = [first, second, third, fourth].map(|item| item.block().hash);
     let unique: std::collections::HashSet<_> = hashes.into_iter().collect();
     assert_eq!(unique.len(), 4);
-    for _ in 0..4 { assert!(unique.contains(&expected.pop().await.hash)); }
+    for _ in 0..4 {
+        assert!(unique.contains(&expected.pop().await.hash));
+    }
 }
 
 #[tokio::test]
 async fn preparation_window_keeps_worker_failure_after_completed_prefix() {
     let queue = Arc::new(BlockPriorityQueue::new(3));
-    for i in 0..3 { assert!(queue.push(block(i)).await); }
-    let mut validation = BlockValidationQueue::with_workers(
-        queue, processor().authentication_rules(), 1);
+    for i in 0..3 {
+        assert!(queue.push(block(i)).await);
+    }
+    let mut validation =
+        BlockValidationQueue::with_workers(queue, processor().authentication_rules(), 1);
     validation.ready_limit = PREPARATION_WINDOW;
     let calls = Arc::new(AtomicU64::new(0));
     let worker_calls = calls.clone();
     validation.before_authenticate = Some(Arc::new(move || {
-        assert_ne!(worker_calls.fetch_add(1, Ordering::SeqCst), 1, "injected worker failure");
+        assert_ne!(
+            worker_calls.fetch_add(1, Ordering::SeqCst),
+            1,
+            "injected worker failure"
+        );
     }));
     assert!(validation.next().await.unwrap().result().is_ok());
-    assert!(validation.try_next_ready().unwrap().err().unwrap().is_panic());
+    assert!(validation
+        .try_next_ready()
+        .unwrap()
+        .err()
+        .unwrap()
+        .is_panic());
     assert!(validation.next().await.unwrap().result().is_ok());
     assert_eq!(calls.load(Ordering::SeqCst), 3);
 }
@@ -713,25 +794,36 @@ async fn cold_preparation_never_waits_for_writer_with_matching_or_stale_head() {
     use burst_store::account::{AccountInfo, AccountStore};
     for matches_head in [false, true] {
         let directory = tempfile::tempdir().unwrap();
-        let store = Arc::new(burst_store_lmdb::LmdbStore::open(directory.path(), 32, 16 << 20).unwrap());
+        let store =
+            Arc::new(burst_store_lmdb::LmdbStore::open(directory.path(), 32, 16 << 20).unwrap());
         let mut candidate = block(0);
         candidate.block_type = BlockType::ChangeRepresentative;
         candidate.previous = BlockHash::new([7; 32]);
         resign(&mut candidate);
         let mut account = AccountInfo::unopened(candidate.account.clone());
         account.block_count = 1;
-        account.head = if matches_head { candidate.previous } else { BlockHash::new([8; 32]) };
+        account.head = if matches_head {
+            candidate.previous
+        } else {
+            BlockHash::new([8; 32])
+        };
         store.account_store().put_account(&account).unwrap();
         let queue = Arc::new(BlockPriorityQueue::new(1));
         queue.push(candidate.clone()).await;
-        let mut validation = BlockValidationQueue::with_workers(
-            queue, processor().authentication_rules(), 1);
+        let mut validation =
+            BlockValidationQueue::with_workers(queue, processor().authentication_rules(), 1);
         validation.set_preparation(store.clone(), ProtocolParams::default());
-        assert!(processor().authentication_rules().authenticate(candidate).result().is_ok());
+        assert!(processor()
+            .authentication_rules()
+            .authenticate(candidate)
+            .result()
+            .is_ok());
         let writer = store.tx_begin_write().unwrap();
         let result = tokio::time::timeout(Duration::from_secs(2), validation.next()).await;
         drop(writer); // Unblock a broken implementation before reporting failure.
-        let authenticated = result.expect("cold preparation waited for the writer").unwrap();
+        let authenticated = result
+            .expect("cold preparation waited for the writer")
+            .unwrap();
         assert!(authenticated.result().is_ok());
         assert!(authenticated.preparation_fault.is_none());
         assert!(authenticated.prepared.is_none());

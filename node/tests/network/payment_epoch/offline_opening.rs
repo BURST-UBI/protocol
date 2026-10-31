@@ -1,6 +1,6 @@
 use super::*;
 use burst_wallet_core::{
-    offline::{load_payment, payment_was_submitted, save_payment},
+    offline::{load_payment, payment_may_have_been_submitted, save_payment},
     signed_client::parse_hash,
 };
 
@@ -17,7 +17,9 @@ async fn saved_openings_resolve_exact_or_competing_confirmation_after_restart() 
         node.initialize_genesis().unwrap();
         let shutdown = node.shutdown.clone();
         let task = tokio::spawn(async move {
-            node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+            node.start_with_services(burst_daemon::start_public_services)
+                .await
+                .unwrap();
             node.stop().await.unwrap();
         });
         let result = tokio::time::timeout(Duration::from_secs(60), async {
@@ -80,7 +82,7 @@ async fn saved_openings_resolve_exact_or_competing_confirmation_after_restart() 
                         .await
                         .unwrap();
                     assert_eq!(
-                        payment_was_submitted(&path, &draft.hash).unwrap(),
+                        payment_may_have_been_submitted(&path, &draft.hash).unwrap(),
                         !competing
                     );
                     assert_eq!(std::fs::read(&path).unwrap(), bytes);
@@ -108,7 +110,7 @@ async fn saved_openings_resolve_exact_or_competing_confirmation_after_restart() 
                     assert_eq!(info["confirmed_open"], opening.to_string());
                     assert_eq!(draft.hash == *opening, !competing);
                     assert_eq!(
-                        payment_was_submitted(path, &draft.hash).unwrap(),
+                        payment_may_have_been_submitted(path, &draft.hash).unwrap(),
                         !competing
                     );
                     if *competing {

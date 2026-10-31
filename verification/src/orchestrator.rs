@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 mod borrowed_snapshot;
-pub use borrowed_snapshot::{Snapshot as SnapshotView, SnapshotMap, ordered_prior_votes};
+pub use borrowed_snapshot::{ordered_prior_votes, Snapshot as SnapshotView, SnapshotMap};
 mod activity;
 pub use activity::ActivitySnapshot;
 mod appeal;
@@ -851,7 +851,10 @@ impl VerificationOrchestrator {
         };
 
         state.votes.push(VerifierVote {
-            verifier: voter.clone(), vote, stake_amount: stake, timestamp: now,
+            verifier: voter.clone(),
+            vote,
+            stake_amount: stake,
+            timestamp: now,
         });
         self.neither_tracker.configure(
             params.neither_penalty_threshold_bps,
@@ -1239,7 +1242,9 @@ impl VerificationOrchestrator {
         verified_wallet_count: u64,
         bootstrap_threshold: u64,
     ) -> Result<(), VerificationError> {
-        if verified_wallet_count >= bootstrap_threshold.min(u64::from(crate::bootstrap::MAX_BOOTSTRAP_HUMANS)) {
+        if verified_wallet_count
+            >= bootstrap_threshold.min(u64::from(crate::bootstrap::MAX_BOOTSTRAP_HUMANS))
+        {
             return Err(VerificationError::BootstrapPhaseEnded);
         }
 
@@ -1300,7 +1305,9 @@ impl VerificationOrchestrator {
         bootstrap_threshold: u64,
         now: Timestamp,
     ) -> Result<(), VerificationError> {
-        if verified_wallet_count >= bootstrap_threshold.min(u64::from(crate::bootstrap::MAX_BOOTSTRAP_HUMANS)) {
+        if verified_wallet_count
+            >= bootstrap_threshold.min(u64::from(crate::bootstrap::MAX_BOOTSTRAP_HUMANS))
+        {
             return Err(VerificationError::BootstrapPhaseEnded);
         }
 
@@ -2085,19 +2092,21 @@ mod tests {
         let target = test_addr("target");
         let challenger = test_addr("challenger");
         let mut verification = VerificationOrchestrator::new();
-        verification.genesis_verify_at(&target, &test_addr("creator"), 1, 50, Timestamp::new(0))
+        verification
+            .genesis_verify_at(&target, &test_addr("creator"), 1, 50, Timestamp::new(0))
             .unwrap();
         verification.drain_events();
         let context = BlockHash::new([17; 32]);
-        verification.initiate_signed_challenge_at(
-            &target,
-            &challenger,
-            true,
-            500,
-            (crate::ChallengeReason::Fraud, Timestamp::new(100), context),
-            &params,
-        )
-        .unwrap();
+        verification
+            .initiate_signed_challenge_at(
+                &target,
+                &challenger,
+                true,
+                500,
+                (crate::ChallengeReason::Fraud, Timestamp::new(100), context),
+                &params,
+            )
+            .unwrap();
         let mut old = b"BURST-VERIFICATION\x04".to_vec();
         old.extend(
             bincode::serialize(&(
@@ -2141,20 +2150,27 @@ mod tests {
         let second = test_addr("second");
         for amount in [0, 1, params.endorsement_burn_amount - 1] {
             assert!(matches!(
-                verification.process_endorsement_at(&target, &first, amount, &params, Timestamp::new(10)),
+                verification.process_endorsement_at(
+                    &target,
+                    &first,
+                    amount,
+                    &params,
+                    Timestamp::new(10)
+                ),
                 Err(VerificationError::InsufficientEndorsementBurn { .. })
             ));
             assert!(verification.get_state(&target).is_none());
             assert!(verification.drain_events().is_empty());
         }
-        verification.process_endorsement_at(
-            &target,
-            &first,
-            params.endorsement_burn_amount,
-            &params,
-            Timestamp::new(10),
-        )
-        .unwrap();
+        verification
+            .process_endorsement_at(
+                &target,
+                &first,
+                params.endorsement_burn_amount,
+                &params,
+                Timestamp::new(10),
+            )
+            .unwrap();
         params.endorsement_burn_amount += 1;
         assert!(verification
             .process_endorsement_at(
@@ -2165,15 +2181,19 @@ mod tests {
                 Timestamp::new(11)
             )
             .is_err());
-        assert_eq!(verification.get_state(&target).unwrap().endorsements.len(), 1);
-        verification.process_endorsement_at(
-            &target,
-            &second,
-            params.endorsement_burn_amount + 1,
-            &params,
-            Timestamp::new(11),
-        )
-        .unwrap();
+        assert_eq!(
+            verification.get_state(&target).unwrap().endorsements.len(),
+            1
+        );
+        verification
+            .process_endorsement_at(
+                &target,
+                &second,
+                params.endorsement_burn_amount + 1,
+                &params,
+                Timestamp::new(11),
+            )
+            .unwrap();
         assert_eq!(
             verification.get_state(&target).unwrap().endorsements.len(),
             2,
@@ -2191,14 +2211,15 @@ mod tests {
         let selected = verification
             .select_verifiers_at(&target, &pool, &[1; 32], &params, Timestamp::new(100))
             .unwrap();
-        verification.process_vote_at(
-            &target,
-            &selected[0],
-            Vote::Neither,
-            &params,
-            Timestamp::new(123),
-        )
-        .unwrap();
+        verification
+            .process_vote_at(
+                &target,
+                &selected[0],
+                Vote::Neither,
+                &params,
+                Timestamp::new(123),
+            )
+            .unwrap();
         assert_eq!(
             verification.get_state(&target).unwrap().votes[0].timestamp,
             Timestamp::new(123)
@@ -2208,29 +2229,36 @@ mod tests {
             123 + params.neither_penalty_cooldown_secs
         );
         let challenged = test_addr("other");
-        verification.genesis_verify_at(
-            &challenged,
-            &test_addr("creator"),
-            1,
-            50,
-            Timestamp::new(10),
-        )
-        .unwrap();
-        verification.initiate_challenge_at(
-            &challenged,
-            &test_addr("challenger"),
-            true,
-            500,
-            (crate::ChallengeReason::Fraud, Timestamp::new(200)),
-            &params,
-        )
-        .unwrap();
+        verification
+            .genesis_verify_at(
+                &challenged,
+                &test_addr("creator"),
+                1,
+                50,
+                Timestamp::new(10),
+            )
+            .unwrap();
+        verification
+            .initiate_challenge_at(
+                &challenged,
+                &test_addr("challenger"),
+                true,
+                500,
+                (crate::ChallengeReason::Fraud, Timestamp::new(200)),
+                &params,
+            )
+            .unwrap();
         assert_eq!(
             verification.snapshot().active_challenges[&challenged].initiated_at,
             Timestamp::new(200)
         );
-        assert!(verification.resolve_challenge(&challenged, &params).is_err());
-        assert!(verification.snapshot().active_challenges.contains_key(&challenged));
+        assert!(verification
+            .resolve_challenge(&challenged, &params)
+            .is_err());
+        assert!(verification
+            .snapshot()
+            .active_challenges
+            .contains_key(&challenged));
     }
 
     #[test]
@@ -2239,17 +2267,19 @@ mod tests {
         params.verification_threshold_bps = 9000;
         let target = test_addr("target");
         let mut verification = VerificationOrchestrator::new();
-        verification.genesis_verify_at(&target, &test_addr("creator"), 1, 50, Timestamp::new(0))
+        verification
+            .genesis_verify_at(&target, &test_addr("creator"), 1, 50, Timestamp::new(0))
             .unwrap();
-        verification.initiate_challenge_at(
-            &target,
-            &test_addr("challenger"),
-            true,
-            500,
-            (crate::ChallengeReason::Fraud, Timestamp::new(100)),
-            &params,
-        )
-        .unwrap();
+        verification
+            .initiate_challenge_at(
+                &target,
+                &test_addr("challenger"),
+                true,
+                500,
+                (crate::ChallengeReason::Fraud, Timestamp::new(100)),
+                &params,
+            )
+            .unwrap();
         let pool = [test_addr("v1"), test_addr("v2"), test_addr("v3")];
         let selected = verification
             .select_verifiers_at(&target, &pool, &[1; 32], &params, Timestamp::new(101))
@@ -2260,7 +2290,8 @@ mod tests {
             } else {
                 Vote::Illegitimate
             };
-            verification.process_vote_at(&target, voter, vote, &params, Timestamp::new(102))
+            verification
+                .process_vote_at(&target, voter, vote, &params, Timestamp::new(102))
                 .unwrap();
         }
         assert!(verification.resolve_challenge(&target, &params).is_err());
@@ -2281,17 +2312,19 @@ mod tests {
             .select_verifiers_at(&target, &pool, &[2; 32], &params, Timestamp::new(103))
             .unwrap();
         for voter in &selected {
-            verification.process_vote_at(
-                &target,
-                voter,
-                Vote::Legitimate,
-                &params,
-                Timestamp::new(104),
-            )
-            .unwrap();
+            verification
+                .process_vote_at(
+                    &target,
+                    voter,
+                    Vote::Legitimate,
+                    &params,
+                    Timestamp::new(104),
+                )
+                .unwrap();
         }
-        let Some(VerificationEvent::ChallengeResolved { outcome, .. }) =
-            verification.try_resolve_challenge(&target, &params).unwrap()
+        let Some(VerificationEvent::ChallengeResolved { outcome, .. }) = verification
+            .try_resolve_challenge(&target, &params)
+            .unwrap()
         else {
             panic!("missing resolution")
         };
@@ -2326,7 +2359,8 @@ mod tests {
             .select_verifiers(&target, &pool, &[1; 32], &params)
             .unwrap();
         for voter in &selected {
-            verification.process_vote(&target, voter, Vote::Illegitimate, &params)
+            verification
+                .process_vote(&target, voter, Vote::Illegitimate, &params)
                 .unwrap();
         }
         let mut old = b"BURST-VERIFICATION\x02".to_vec();
@@ -2359,14 +2393,19 @@ mod tests {
         let selected = verification
             .select_verifiers(&target, &pool, &[1; 32], &params)
             .unwrap();
-        verification.neither_tracker
+        verification
+            .neither_tracker
             .record_vote(&selected[0], Vote::Neither);
-        verification.process_vote(&target, &selected[0], Vote::Legitimate, &params)
+        verification
+            .process_vote(&target, &selected[0], Vote::Legitimate, &params)
             .unwrap();
         let bytes = verification.snapshot().encode().unwrap();
         let restored =
             VerificationOrchestrator::restore(OrchestratorSnapshot::decode(&bytes).unwrap());
-        assert_eq!(restored.neither_tracker.retained_assignments(&selected[0]), 2);
+        assert_eq!(
+            restored.neither_tracker.retained_assignments(&selected[0]),
+            2
+        );
         assert_eq!(restored.neither_tracker.neither_count(&selected[0]), 1);
         assert_eq!(
             *restored.get_state(&target).unwrap().selected_verifiers,
@@ -2392,7 +2431,8 @@ mod tests {
         let target = test_addr("target");
         let mut verification = VerificationOrchestrator::new();
         verify_wallet(&mut verification, &target, &params);
-        verification.penalized_verifiers
+        verification
+            .penalized_verifiers
             .insert(test_addr("penalized"), u64::MAX);
         // Bincode encodes a tuple and a struct with these three fields identically.
         let bytes = bincode::serialize(&(
@@ -2417,14 +2457,16 @@ mod tests {
         let params = test_params();
         let target = test_addr("target");
         let pool: Vec<_> = (1..=3).map(|i| test_addr(&format!("v{i}"))).collect();
-        verification.process_endorsement(&target, &test_addr("e1"), 1000, &params)
+        verification
+            .process_endorsement(&target, &test_addr("e1"), 1000, &params)
             .unwrap();
         assert!(matches!(
             verification.select_verifiers(&target, &pool, &[0; 32], &params),
             Err(VerificationError::ThresholdNotMet { .. })
         ));
         for endorser in ["e2", "e3"] {
-            verification.process_endorsement(&target, &test_addr(endorser), 1000, &params)
+            verification
+                .process_endorsement(&target, &test_addr(endorser), 1000, &params)
                 .unwrap();
         }
         let mut contaminated = vec![
@@ -2514,7 +2556,9 @@ mod tests {
     ) {
         let endorsers: Vec<WalletAddress> = (1..=3).map(|i| test_addr(&format!("e{i}"))).collect();
         for e in &endorsers {
-            verification.process_endorsement(wallet, e, 1000, params).unwrap();
+            verification
+                .process_endorsement(wallet, e, 1000, params)
+                .unwrap();
         }
     }
 
@@ -2533,11 +2577,11 @@ mod tests {
             .unwrap();
 
         for v in &selected {
-            verification.process_vote(wallet, v, Vote::Legitimate, params)
+            verification
+                .process_vote(wallet, v, Vote::Legitimate, params)
                 .unwrap();
         }
     }
-
 
     #[test]
     // Local engine flow; no certified selection, signatures or ledger settlement.
@@ -2632,9 +2676,11 @@ mod tests {
         let params = test_params();
         let wallet = test_addr("target");
 
-        verification.process_endorsement(&wallet, &test_addr("e1"), 1000, &params)
+        verification
+            .process_endorsement(&wallet, &test_addr("e1"), 1000, &params)
             .unwrap();
-        verification.process_endorsement(&wallet, &test_addr("e2"), 1000, &params)
+        verification
+            .process_endorsement(&wallet, &test_addr("e2"), 1000, &params)
             .unwrap();
 
         let events = verification.drain_events();
@@ -2667,14 +2713,14 @@ mod tests {
         endorse_wallet(&mut verification, &wallet, &params);
 
         let verifiers: Vec<WalletAddress> = (1..=5).map(|i| test_addr(&format!("v{i}"))).collect();
-        verification.select_verifiers(&wallet, &verifiers, &[0u8; 32], &params)
+        verification
+            .select_verifiers(&wallet, &verifiers, &[0u8; 32], &params)
             .unwrap();
 
         let outsider = test_addr("outsider");
         let result = verification.process_vote(&wallet, &outsider, Vote::Legitimate, &params);
         assert!(result.is_err());
     }
-
 
     #[test]
     fn challenge_fraud_confirmed() {
@@ -2686,15 +2732,16 @@ mod tests {
         verification.drain_events();
 
         let challenger = test_addr("challenger");
-        verification.initiate_challenge(
-            &wallet,
-            &challenger,
-            true,
-            500,
-            crate::challenge::ChallengeReason::Fraud,
-            &params,
-        )
-        .unwrap();
+        verification
+            .initiate_challenge(
+                &wallet,
+                &challenger,
+                true,
+                500,
+                crate::challenge::ChallengeReason::Fraud,
+                &params,
+            )
+            .unwrap();
 
         let state = verification.get_state(&wallet).unwrap();
         assert_eq!(state.phase, VerificationPhase::Challenged);
@@ -2743,15 +2790,16 @@ mod tests {
         verification.drain_events();
 
         let challenger = test_addr("challenger");
-        verification.initiate_challenge(
-            &wallet,
-            &challenger,
-            true,
-            500,
-            crate::challenge::ChallengeReason::Fraud,
-            &params,
-        )
-        .unwrap();
+        verification
+            .initiate_challenge(
+                &wallet,
+                &challenger,
+                true,
+                500,
+                crate::challenge::ChallengeReason::Fraud,
+                &params,
+            )
+            .unwrap();
 
         let verifiers: Vec<WalletAddress> =
             (10..=15).map(|i| test_addr(&format!("rv{i}"))).collect();
@@ -2761,7 +2809,8 @@ mod tests {
 
         // All vote Legitimate → challenge rejected
         for v in &selected {
-            verification.process_vote(&wallet, v, Vote::Legitimate, &params)
+            verification
+                .process_vote(&wallet, v, Vote::Legitimate, &params)
                 .unwrap();
         }
 
@@ -2826,17 +2875,25 @@ mod tests {
             .unwrap();
 
         // Give verifier some Legitimate history so one Neither doesn't trigger penalty
-        verification.neither_tracker
+        verification
+            .neither_tracker
             .record_vote(&selected[0], Vote::Legitimate);
-        verification.neither_tracker
+        verification
+            .neither_tracker
             .record_vote(&selected[0], Vote::Legitimate);
 
         // Third vote is Neither — 1/3 = 3333 bps < 5000 threshold, no penalty
-        verification.process_vote(&wallet, &selected[0], Vote::Neither, &params)
+        verification
+            .process_vote(&wallet, &selected[0], Vote::Neither, &params)
             .unwrap();
 
         assert_eq!(verification.neither_tracker.neither_count(&selected[0]), 1);
-        assert_eq!(verification.neither_tracker.retained_assignments(&selected[0]), 3);
+        assert_eq!(
+            verification
+                .neither_tracker
+                .retained_assignments(&selected[0]),
+            3
+        );
     }
 
     #[test]
@@ -2853,7 +2910,6 @@ mod tests {
         let events = verification.drain_events();
         assert!(events.is_empty());
     }
-
 
     #[test]
     fn genesis_creator_can_endorse_during_bootstrap() {
@@ -2950,7 +3006,6 @@ mod tests {
         ));
     }
 
-
     #[test]
     fn revote_verifiers_do_not_overlap_with_previous_round() {
         let mut verification = VerificationOrchestrator::new();
@@ -2971,7 +3026,8 @@ mod tests {
 
         // Force a revote
         for v in &round1 {
-            verification.process_vote(&wallet, v, Vote::Illegitimate, &params)
+            verification
+                .process_vote(&wallet, v, Vote::Illegitimate, &params)
                 .unwrap();
         }
 
@@ -3006,7 +3062,8 @@ mod tests {
             .unwrap();
 
         for v in &round1 {
-            verification.process_vote(&wallet, v, Vote::Illegitimate, &params)
+            verification
+                .process_vote(&wallet, v, Vote::Illegitimate, &params)
                 .unwrap();
         }
 
@@ -3015,7 +3072,8 @@ mod tests {
             .unwrap();
 
         for v in &round2 {
-            verification.process_vote(&wallet, v, Vote::Illegitimate, &params)
+            verification
+                .process_vote(&wallet, v, Vote::Illegitimate, &params)
                 .unwrap();
         }
 
@@ -3036,7 +3094,6 @@ mod tests {
         let state = verification.get_state(&wallet).unwrap();
         assert_eq!(state.excluded_verifiers.len(), 4); // 2 from each of 2 rounds
     }
-
 
     #[test]
     fn challenge_fails_if_challenger_not_verified() {
@@ -3061,7 +3118,6 @@ mod tests {
             VerificationError::ChallengerNotVerified(_)
         ));
     }
-
 
     #[test]
     fn penalized_verifier_excluded_from_selection() {
@@ -3125,7 +3181,8 @@ mod tests {
             .unwrap();
 
         // Pre-load one verifier with 100% Neither history so next Neither triggers penalty
-        verification.neither_tracker
+        verification
+            .neither_tracker
             .record_vote(&selected[0], Vote::Neither);
 
         // The ratio stays at 100%; recording the vote applies the penalty.
@@ -3151,7 +3208,6 @@ mod tests {
 
         assert!(verification.penalized_count() > 0);
     }
-
 
     #[test]
     fn verification_complete_records_endorser_burns() {
@@ -3205,27 +3261,34 @@ mod tests {
         let challenger = test_addr("challenger");
 
         verify_wallet(&mut verification, &target, &params);
-        verification.initiate_challenge(
-            &target,
-            &challenger,
-            true,
-            1000,
-            crate::challenge::ChallengeReason::Fraud,
-            &params,
-        )
-        .unwrap();
+        verification
+            .initiate_challenge(
+                &target,
+                &challenger,
+                true,
+                1000,
+                crate::challenge::ChallengeReason::Fraud,
+                &params,
+            )
+            .unwrap();
         let verifiers: Vec<WalletAddress> = (0..params.num_verifiers)
             .map(|i| test_addr(&format!("cv{i}")))
             .collect();
         let rand = [7u8; 32];
-        verification.select_verifiers(&target, &verifiers, &rand, &params)
+        verification
+            .select_verifiers(&target, &verifiers, &rand, &params)
             .unwrap();
         verification.drain_events();
 
-        let selected = verification.get_state(&target).unwrap().selected_verifiers.clone();
+        let selected = verification
+            .get_state(&target)
+            .unwrap()
+            .selected_verifiers
+            .clone();
 
         // Not all votes in — must NOT resolve.
-        verification.process_vote(&target, &selected[0], Vote::Illegitimate, &params)
+        verification
+            .process_vote(&target, &selected[0], Vote::Illegitimate, &params)
             .unwrap();
         assert!(verification
             .try_resolve_challenge(&target, &params)
@@ -3234,10 +3297,13 @@ mod tests {
 
         // A complete panel can now be resolved by the separate resolution call.
         for v in selected.iter().skip(1) {
-            verification.process_vote(&target, v, Vote::Illegitimate, &params)
+            verification
+                .process_vote(&target, v, Vote::Illegitimate, &params)
                 .unwrap();
         }
-        let resolved = verification.try_resolve_challenge(&target, &params).unwrap();
+        let resolved = verification
+            .try_resolve_challenge(&target, &params)
+            .unwrap();
         assert!(resolved.is_some());
         // Unanimous Illegitimate → fraud confirmed → WalletUnverified queued.
         let events = verification.drain_events();
@@ -3259,27 +3325,34 @@ mod tests {
         let challenger = test_addr("hunter");
 
         verify_wallet(&mut verification, &target, &params);
-        verification.initiate_challenge(
-            &target,
-            &challenger,
-            true,
-            1000,
-            crate::challenge::ChallengeReason::Inactivity,
-            &params,
-        )
-        .unwrap();
+        verification
+            .initiate_challenge(
+                &target,
+                &challenger,
+                true,
+                1000,
+                crate::challenge::ChallengeReason::Inactivity,
+                &params,
+            )
+            .unwrap();
         let verifiers: Vec<WalletAddress> = (0..params.num_verifiers)
             .map(|i| test_addr(&format!("iv{i}")))
             .collect();
-        verification.select_verifiers(&target, &verifiers, &[9u8; 32], &params)
+        verification
+            .select_verifiers(&target, &verifiers, &[9u8; 32], &params)
             .unwrap();
         verification.drain_events();
-        let selected = verification.get_state(&target).unwrap().selected_verifiers.clone();
+        let selected = verification
+            .get_state(&target)
+            .unwrap()
+            .selected_verifiers
+            .clone();
 
         // An upheld inactivity vote queues deactivation. This component test
         // checks events and phase, not the node's BRN/TRST settlement.
         for v in &selected {
-            verification.process_vote(&target, v, Vote::Illegitimate, &params)
+            verification
+                .process_vote(&target, v, Vote::Illegitimate, &params)
                 .unwrap();
         }
         assert!(verification
@@ -3304,35 +3377,73 @@ mod tests {
 
 #[cfg(test)]
 mod governed_threshold_regression {
-#[test]
-fn verification_component_round_uses_governed_threshold() {
-    use super::*;
-    let make_address = |seed: u8| WalletAddress::new(format!("brst_regression_{seed}"));
-    let params = ProtocolParams {
-        endorsement_threshold: 2, num_verifiers: 3,
-        verification_threshold_bps: 9000, max_revotes: 0,
-        ..ProtocolParams::burst_defaults()
-    };
-    for legitimate_votes in [2, 3] {
-        let mut orchestrator = VerificationOrchestrator::new();
-        let target = make_address(180);
-        let pool: Vec<_> = (190..193).map(make_address).collect();
-        orchestrator.process_endorsement(&target, &make_address(181), params.endorsement_burn_amount, &params).unwrap();
-        assert!(orchestrator.select_verifiers(&target, &pool, &[1; 32], &params).is_err());
-        orchestrator.process_endorsement(&target, &make_address(182), params.endorsement_burn_amount, &params).unwrap();
-        let selected = orchestrator.select_verifiers(&target, &pool, &[1; 32], &params).unwrap();
-        assert_eq!(selected.len(), 3);
-        let mut outcome = None;
-        for (index, verifier) in selected.iter().enumerate() {
-            outcome = orchestrator.process_vote(&target, verifier,
-                if index < legitimate_votes { Vote::Legitimate } else { Vote::Illegitimate }, &params).unwrap();
-            if index < 2 { assert!(outcome.is_none()); }
-        }
-        let Some(VerificationEvent::VerificationComplete { result, .. }) = outcome else {
-            panic!("expected a completed verification round");
+    #[test]
+    fn verification_component_round_uses_governed_threshold() {
+        use super::*;
+        let make_address = |seed: u8| WalletAddress::new(format!("brst_regression_{seed}"));
+        let params = ProtocolParams {
+            endorsement_threshold: 2,
+            num_verifiers: 3,
+            verification_threshold_bps: 9000,
+            max_revotes: 0,
+            ..ProtocolParams::burst_defaults()
         };
-        assert_eq!(result, if legitimate_votes == 3 { VerificationResult::Verified } else { VerificationResult::Failed });
+        for legitimate_votes in [2, 3] {
+            let mut orchestrator = VerificationOrchestrator::new();
+            let target = make_address(180);
+            let pool: Vec<_> = (190..193).map(make_address).collect();
+            orchestrator
+                .process_endorsement(
+                    &target,
+                    &make_address(181),
+                    params.endorsement_burn_amount,
+                    &params,
+                )
+                .unwrap();
+            assert!(orchestrator
+                .select_verifiers(&target, &pool, &[1; 32], &params)
+                .is_err());
+            orchestrator
+                .process_endorsement(
+                    &target,
+                    &make_address(182),
+                    params.endorsement_burn_amount,
+                    &params,
+                )
+                .unwrap();
+            let selected = orchestrator
+                .select_verifiers(&target, &pool, &[1; 32], &params)
+                .unwrap();
+            assert_eq!(selected.len(), 3);
+            let mut outcome = None;
+            for (index, verifier) in selected.iter().enumerate() {
+                outcome = orchestrator
+                    .process_vote(
+                        &target,
+                        verifier,
+                        if index < legitimate_votes {
+                            Vote::Legitimate
+                        } else {
+                            Vote::Illegitimate
+                        },
+                        &params,
+                    )
+                    .unwrap();
+                if index < 2 {
+                    assert!(outcome.is_none());
+                }
+            }
+            let Some(VerificationEvent::VerificationComplete { result, .. }) = outcome else {
+                panic!("expected a completed verification round");
+            };
+            assert_eq!(
+                result,
+                if legitimate_votes == 3 {
+                    VerificationResult::Verified
+                } else {
+                    VerificationResult::Failed
+                }
+            );
+        }
     }
-}
-
 }

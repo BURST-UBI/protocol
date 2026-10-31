@@ -9,15 +9,15 @@
 //! verification outcomes and apply any corresponding TRST payment.
 
 pub mod engine;
-pub mod pauses;
 pub mod error;
-pub mod releases;
+pub mod pauses;
 pub mod rate_storage;
-pub mod wallet_storage;
+pub mod releases;
 pub mod retention;
 pub mod stake;
 pub mod state;
 pub mod wallet_states;
+pub mod wallet_storage;
 
 pub use engine::BrnEngine;
 pub use error::BrnError;

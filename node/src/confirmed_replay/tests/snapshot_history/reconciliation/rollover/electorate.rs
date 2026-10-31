@@ -4,7 +4,10 @@ use std::{
     time::Instant,
 };
 
+mod prepare;
 mod resume;
+
+pub(in crate::confirmed_replay::tests) use prepare::prepared;
 
 #[test]
 fn signed_electorate_grows_across_snapshot_epochs_and_reopens() {
@@ -39,13 +42,21 @@ fn signed_incremental_electorate_resource_probe() {
         assert_eq!(mode, "1");
         assert!(std::env::var_os("BURST_ELECTORATE_FINISH_ACCEPTED").is_none());
         assert!(params.is_none(), "suffix recovery uses saved parameters");
-        resume::finish_suffix(baseline.as_deref().expect("set recovery baseline"), humans, until);
+        resume::finish_suffix(
+            baseline.as_deref().expect("set recovery baseline"),
+            humans,
+            until,
+        );
         return;
     }
     match std::env::var("BURST_ELECTORATE_FINISH_ACCEPTED").as_deref() {
         Ok("1") => {
             assert!(params.is_none(), "accepted recovery uses saved parameters");
-            resume::finish_accepted(baseline.as_deref().expect("set recovery baseline"), humans, until);
+            resume::finish_accepted(
+                baseline.as_deref().expect("set recovery baseline"),
+                humans,
+                until,
+            );
         }
         Err(std::env::VarError::NotPresent) => {
             grow(humans, batch_size, until, baseline.as_deref(), true, params);
@@ -57,11 +68,16 @@ fn signed_incremental_electorate_resource_probe() {
 fn configured_map_size() -> usize {
     let mut config = crate::NodeConfig::default();
     match std::env::var("BURST_ELECTORATE_MAP_BYTES") {
-        Ok(value) => config.database_map_size_bytes = value.parse().expect("invalid BURST_ELECTORATE_MAP_BYTES"),
-        Err(std::env::VarError::NotPresent) => {},
+        Ok(value) => {
+            config.database_map_size_bytes =
+                value.parse().expect("invalid BURST_ELECTORATE_MAP_BYTES")
+        }
+        Err(std::env::VarError::NotPresent) => {}
         Err(error) => panic!("invalid BURST_ELECTORATE_MAP_BYTES: {error}"),
     }
-    config.database_map_size().expect("invalid configured electorate map size")
+    config
+        .database_map_size()
+        .expect("invalid configured electorate map size")
 }
 
 fn grow(
@@ -104,17 +120,11 @@ fn grow(
             );
             (directory, store, fixture, population, epoch, now - 1)
         } else {
-            let mut fixture = Fixture::new();
-            if let Some(params) = fresh_params {
-                fixture.params = params;
-            }
-            fixture.params.bootstrap_exit_threshold = humans;
-            fixture.blocks[0] = crate::genesis_state::block(NetworkId::Dev, &fixture.params);
-            let cutoff = fixture.extend_electorate(1..3, fixture.blocks[0].hash, |index| {
-                address((index % 3) as u8)
-            });
-            let (directory, store, _) = fixture.store_with_map_size(map_size);
-            let epoch = fixture.blocks[0].hash;
+            let (directory, store, fixture, epoch, cutoff) = prepared(
+                humans,
+                fresh_params.unwrap_or_else(|| Fixture::new().params),
+                map_size,
+            );
             (directory, store, fixture, 3, epoch, cutoff)
         };
     let path = directory.path().to_path_buf();
@@ -124,25 +134,15 @@ fn grow(
     } else {
         Some(directory)
     };
-    if baseline.is_none() {
-        let first =
-            PreparedRoster::prepare_next(&store, NetworkId::Dev, &fixture.params, initial_cutoff)
-                .unwrap()
-                .unwrap();
-        epoch = first.manifest().checkpoint.hash();
-        chain::accept_manifest(
-            &store,
-            NetworkId::Dev,
-            &fixture.params,
-            certified_votes::certify(&first.manifest().checkpoint, &[0]),
-            &ReplayManifest::Roster(first.manifest().clone()),
-        )
-        .unwrap();
-        install(&fixture, &store, epoch, &[0, 1, 2]);
-        report("initial-snapshot", 3, &store);
-    } else {
-        report("authenticated-resume", population, &store);
-    }
+    report(
+        if baseline.is_none() {
+            "prepared-committees"
+        } else {
+            "authenticated-resume"
+        },
+        population,
+        &store,
+    );
     resume::save(
         &path,
         &store,
@@ -150,29 +150,35 @@ fn grow(
         epoch,
         population,
         initial_cutoff + 1,
+        humans,
     );
     while population < until {
-        let base = installed::load_base(&store, NetworkId::Dev, &fixture.params)
+        let recovered = installed::load_base(&store, NetworkId::Dev, &fixture.params)
             .unwrap()
             .unwrap()
-            .into_continuation();
+            .recover_stored_successors(&store, |base, plan, _| {
+                crate::checkpoint_sync::witness::read_plan(&store, base, plan)
+            })
+            .unwrap();
+        let base = &recovered.continuation;
         let end = (population + batch_size).min(until);
         let first_block = fixture.blocks.len();
-        let cutoff =
-            fixture.extend_electorate(population..end, epoch, |index| address((index % 3) as u8));
-        // Endorse/Open use serial admission in the node. A single writer for
+        let cutoff = fixture.extend_electorate(&store, population..end, epoch, |index| {
+            address((index % 3) as u8)
+        });
+        // VerificationVote/Open use serial admission in the node. A single writer for
         // the whole electorate suffix also pins pages retired by the last
         // installation until thousands of unrelated blocks have been stored.
         for block in &fixture.blocks[first_block..] {
             cemented::append(&store, block, true);
         }
         report("signed-suffix", end, &store);
-        let tail = cemented::finish(&base, &store, &store);
+        let tail = cemented::finish(base, &store, &store);
         let candidate = base
             .prepare_next_cemented_candidate(
                 &store,
                 &tail,
-                &[],
+                &recovered.selections,
                 SigningClock {
                     now: cutoff + 1,
                     error_bound: 0,
@@ -208,6 +214,7 @@ fn grow(
             epoch,
             end,
             reopened.anchor().cutoff() + 1,
+            humans,
         );
         report("verified-reopen", end, &store);
         population = end;

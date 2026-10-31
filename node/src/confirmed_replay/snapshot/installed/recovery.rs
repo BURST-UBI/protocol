@@ -1,5 +1,5 @@
-use super::*;
 use super::metadata::RecoveryControl;
+use super::*;
 use crate::confirmed_replay::snapshot::SelectionSource;
 use crate::{
     checkpoint_agreement::ReplayManifest,
@@ -230,7 +230,8 @@ impl AuthenticatedSnapshot {
         registry: Arc<RwLock<crate::connection_registry::ConnectionRegistry>>,
         target: Option<BlockHash>,
     ) -> Result<RecoveredSnapshot, StoreError> {
-        self.recover_from_peers_until(store, registry, target, RecoveryControl::default()).await?
+        self.recover_from_peers_until(store, registry, target, RecoveryControl::default())
+            .await?
             .ok_or_else(|| invalid("uncancelled tip recovery stopped"))
     }
 
@@ -241,7 +242,9 @@ impl AuthenticatedSnapshot {
         target: Option<BlockHash>,
         control: RecoveryControl,
     ) -> Result<Option<RecoveredSnapshot>, StoreError> {
-        if control.checkpoint("tip-recovery:before-plan") { return Ok(None); }
+        if control.checkpoint("tip-recovery:before-plan") {
+            return Ok(None);
+        }
         let source = Arc::clone(&store);
         let (recovered, records) =
             tokio::task::spawn_blocking(move || self.begin_recovery(&source, target))
@@ -334,8 +337,16 @@ impl RecoveredSnapshot {
         registry: Arc<RwLock<crate::connection_registry::ConnectionRegistry>>,
         target: Option<BlockHash>,
     ) -> Result<Self, StoreError> {
-        Self::recover_genesis_from_peers_until(store, network, params, registry, target, RecoveryControl::default()).await?
-            .ok_or_else(|| invalid("uncancelled tip recovery stopped"))
+        Self::recover_genesis_from_peers_until(
+            store,
+            network,
+            params,
+            registry,
+            target,
+            RecoveryControl::default(),
+        )
+        .await?
+        .ok_or_else(|| invalid("uncancelled tip recovery stopped"))
     }
 
     pub(super) async fn recover_genesis_from_peers_until(
@@ -346,7 +357,9 @@ impl RecoveredSnapshot {
         target: Option<BlockHash>,
         control: RecoveryControl,
     ) -> Result<Option<Self>, StoreError> {
-        if control.checkpoint("tip-recovery:before-plan") { return Ok(None); }
+        if control.checkpoint("tip-recovery:before-plan") {
+            return Ok(None);
+        }
         let source = store.clone();
         let (recovered, records) = tokio::task::spawn_blocking(move || {
             let mut recovered = Self::genesis(&source, network, &params)?;
@@ -382,7 +395,8 @@ impl RecoveredSnapshot {
         registry: Arc<RwLock<crate::connection_registry::ConnectionRegistry>>,
         target: Option<BlockHash>,
     ) -> Result<Self, StoreError> {
-        self.advance_target_from_peers_until(store, registry, target, RecoveryControl::default()).await?
+        self.advance_target_from_peers_until(store, registry, target, RecoveryControl::default())
+            .await?
             .ok_or_else(|| invalid("uncancelled tip recovery stopped"))
     }
 
@@ -393,7 +407,9 @@ impl RecoveredSnapshot {
         target: Option<BlockHash>,
         control: RecoveryControl,
     ) -> Result<Option<Self>, StoreError> {
-        if control.checkpoint("tip-recovery:before-plan") { return Ok(None); }
+        if control.checkpoint("tip-recovery:before-plan") {
+            return Ok(None);
+        }
         let source = store.clone();
         let (recovered, records) =
             tokio::task::spawn_blocking(move || self.begin_advance(&source, target))
@@ -463,9 +479,13 @@ impl RecoveredSnapshot {
         // Startup, cached recovery and tip refresh nest this replay loop. Keep
         // its suspension state out of each caller's async frame.
         Box::pin(async move {
-            if control.checkpoint("tip-recovery:planned") { return Ok(None); }
+            if control.checkpoint("tip-recovery:planned") {
+                return Ok(None);
+            }
             for record in records.into_cursor()? {
-                if control.checkpoint("tip-recovery:record") { return Ok(None); }
+                if control.checkpoint("tip-recovery:record") {
+                    return Ok(None);
+                }
                 let record = record?;
                 let source = store.clone();
                 let (state, record, plan) = tokio::task::spawn_blocking(move || {
@@ -475,19 +495,29 @@ impl RecoveredSnapshot {
                 })
                 .await
                 .map_err(invalid)??;
-                if control.checkpoint("tip-recovery:record-planned") { return Ok(None); }
-                let retained = control.peer_wait(crate::checkpoint_sync::witness::fetch_plan(
-                    &registry,
-                    &state.continuation,
-                    &plan,
-                )).await?;
-                let Some(retained) = retained else { return Ok(None); };
-                if control.checkpoint("tip-recovery:before-apply") { return Ok(None); }
+                if control.checkpoint("tip-recovery:record-planned") {
+                    return Ok(None);
+                }
+                let retained = control
+                    .peer_wait(crate::checkpoint_sync::witness::fetch_plan(
+                        &registry,
+                        &state.continuation,
+                        &plan,
+                    ))
+                    .await?;
+                let Some(retained) = retained else {
+                    return Ok(None);
+                };
+                if control.checkpoint("tip-recovery:before-apply") {
+                    return Ok(None);
+                }
                 self = tokio::task::spawn_blocking(move || state.apply(record, plan, retained))
                     .await
                     .map_err(invalid)??;
             }
-            if control.checkpoint("tip-recovery:records-complete") { return Ok(None); }
+            if control.checkpoint("tip-recovery:records-complete") {
+                return Ok(None);
+            }
             Ok(Some(self))
         })
     }
@@ -602,9 +632,14 @@ impl RecoveredSnapshot {
         registry: Arc<RwLock<crate::connection_registry::ConnectionRegistry>>,
         clock: crate::checkpoint_replay::SigningClock,
     ) -> Result<Option<crate::checkpoint_agreement::CompactReplayCandidate>, StoreError> {
-        match self.discover_cemented_candidate_attempt(store, registry, clock, |_, _| Ok(())).await? {
+        match self
+            .discover_cemented_candidate_attempt(store, registry, clock, |_, _| Ok(()))
+            .await?
+        {
             CandidateDiscovery::Ready(candidate) => Ok(candidate),
-            CandidateDiscovery::Advanced => Err(StoreError::StaleRead("confirmed cut advanced during compact discovery".into())),
+            CandidateDiscovery::Advanced => Err(StoreError::StaleRead(
+                "confirmed cut advanced during compact discovery".into(),
+            )),
         }
     }
 
@@ -613,7 +648,9 @@ impl RecoveredSnapshot {
         store: Arc<LmdbStore>,
         registry: Arc<RwLock<crate::connection_registry::ConnectionRegistry>>,
         clock: crate::checkpoint_replay::SigningClock,
-        before_validation: impl FnOnce(&LmdbStore, &CheckpointAnchor) -> Result<(), StoreError> + Send + 'static,
+        before_validation: impl FnOnce(&LmdbStore, &CheckpointAnchor) -> Result<(), StoreError>
+            + Send
+            + 'static,
     ) -> Result<CandidateDiscovery, StoreError> {
         let source = Arc::clone(&store);
         let (base, plan) = tokio::task::spawn_blocking(move || {
@@ -658,12 +695,18 @@ impl RecoveredSnapshot {
             #[cfg(test)]
             let _timing = DiscoveryTiming::new("validation", store.clone());
             base.verify_records_unchanged(&batch)?;
-            match base.continuation.verify_discovery_metadata_in(&batch, &cemented) {
+            match base
+                .continuation
+                .verify_discovery_metadata_in(&batch, &cemented)
+            {
                 Err(StoreError::StaleRead(_)) => return Ok(CandidateDiscovery::Advanced),
                 result => result?,
             }
             if let Some(candidate) = &candidate {
-                match candidate.input().check_signing_parent(&batch, base.continuation.anchor()) {
+                match candidate
+                    .input()
+                    .check_signing_parent(&batch, base.continuation.anchor())
+                {
                     Err(StoreError::StaleRead(_)) => return Ok(CandidateDiscovery::Advanced),
                     result => result?,
                 }
@@ -679,49 +722,78 @@ impl RecoveredSnapshot {
     /// not yet cemented. Capture confirmed and applied tails together, and check
     /// local metadata against the confirmed tail before returning a candidate.
     pub(crate) async fn discover_promised_candidate_from_peers(
-        self: Arc<Self>, store: Arc<LmdbStore>,
+        self: Arc<Self>,
+        store: Arc<LmdbStore>,
         registry: Arc<RwLock<crate::connection_registry::ConnectionRegistry>>,
         clock: crate::checkpoint_replay::SigningClock,
         representative: burst_types::WalletAddress,
     ) -> Result<CandidateDiscovery, StoreError> {
         let source = store.clone();
-        let (base, confirmed_plan, applied_plan, authenticated) = tokio::task::spawn_blocking(move || {
-            let (confirmed, applied, proofs) = self.continuation.plan_installed_tails(&source).map_err(invalid)?;
-            Ok::<_, StoreError>((self, confirmed, applied, proofs))
-        }).await.map_err(invalid)??;
+        let (base, confirmed_plan, applied_plan, authenticated) =
+            tokio::task::spawn_blocking(move || {
+                let (confirmed, applied, proofs) = self
+                    .continuation
+                    .plan_installed_tails(&source)
+                    .map_err(invalid)?;
+                Ok::<_, StoreError>((self, confirmed, applied, proofs))
+            })
+            .await
+            .map_err(invalid)??;
         let retained = crate::checkpoint_sync::witness::fetch_plan_reusing(
-            &registry, &base.continuation, confirmed_plan.witness_plan(), &authenticated,
-        ).await?;
+            &registry,
+            &base.continuation,
+            confirmed_plan.witness_plan(),
+            &authenticated,
+        )
+        .await?;
         let applied_retained = if confirmed_plan.witness_plan().witness_hashes()
-            == applied_plan.witness_plan().witness_hashes() {
+            == applied_plan.witness_plan().witness_hashes()
+        {
             retained.clone()
         } else {
             crate::checkpoint_sync::witness::fetch_plan_reusing(
-                &registry, &base.continuation, applied_plan.witness_plan(), retained.clone(),
-            ).await?
+                &registry,
+                &base.continuation,
+                applied_plan.witness_plan(),
+                retained.clone(),
+            )
+            .await?
         };
         tokio::task::spawn_blocking(move || {
             let confirmed = confirmed_plan.finish(retained).map_err(invalid)?;
             let applied = applied_plan.finish(applied_retained).map_err(invalid)?;
-            let candidate = base.continuation.prepare_next_replayed_candidate(
-                &store, applied.tail(), &base.selections, clock,
-            ).map_err(invalid)?;
+            let candidate = base
+                .continuation
+                .prepare_next_replayed_candidate(&store, applied.tail(), &base.selections, clock)
+                .map_err(invalid)?;
             let batch = store.tx_begin_write()?;
             base.verify_records_unchanged(&batch)?;
-            match base.continuation.verify_discovery_metadata_in(&batch, &confirmed) {
+            match base
+                .continuation
+                .verify_discovery_metadata_in(&batch, &confirmed)
+            {
                 Err(StoreError::StaleRead(_)) => return Ok(CandidateDiscovery::Advanced),
                 result => result?,
             }
             applied.verify_unchanged(&batch)?;
             if let Some(candidate) = &candidate {
-                candidate.input().check_signing_parent(&batch, base.continuation.anchor())?;
-                if !candidate.input().covers_local_promises(&batch, &representative)? {
-                    return Err(StoreError::Backend("replayed cut cannot yet cover local final promises".into()));
+                candidate
+                    .input()
+                    .check_signing_parent(&batch, base.continuation.anchor())?;
+                if !candidate
+                    .input()
+                    .covers_local_promises(&batch, &representative)?
+                {
+                    return Err(StoreError::Backend(
+                        "replayed cut cannot yet cover local final promises".into(),
+                    ));
                 }
             }
             tracing::debug!("replayed applied extension for checkpoint final promises");
             Ok(CandidateDiscovery::Ready(candidate))
-        }).await.map_err(invalid)?
+        })
+        .await
+        .map_err(invalid)?
     }
 
     /// Derive a confirmed cut from the installed compact ledger, then replay
@@ -1053,7 +1125,9 @@ impl RecoveredSnapshot {
             .transpose()
     }
 
-    pub(super) fn into_journal_history(self) -> (super::SelectionHistory, compact::RecordObservations) {
+    pub(super) fn into_journal_history(
+        self,
+    ) -> (super::SelectionHistory, compact::RecordObservations) {
         (self.selections, self.observations)
     }
 
@@ -1148,8 +1222,9 @@ impl RecoveredSnapshot {
         accepted: Option<&Self>,
     ) -> Result<(Self, super::super::continuation::CompactCutCoverage, bool), StoreError> {
         let cut = self.continuation.cut_coverage(&tail).map_err(invalid)?;
-        if let Some(accepted) = accepted.filter(|accepted|
-            accepted.continuation.anchor().hash() == record.certificate.checkpoint.hash()) {
+        if let Some(accepted) = accepted.filter(|accepted| {
+            accepted.continuation.anchor().hash() == record.certificate.checkpoint.hash()
+        }) {
             // Journal recovery already executed this exact certified successor.
             // Its observations include beacon bytes; neither a later accepted tip
             // nor changed records can replace this immediate installation input.

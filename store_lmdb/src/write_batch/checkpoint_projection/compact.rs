@@ -444,7 +444,10 @@ impl LmdbWriteTransaction<'_> {
         })
     }
 
-    fn reconcile_compact_account_rows(&mut self, accounts: &AccountTargets<'_>) -> Result<(), StoreError> {
+    fn reconcile_compact_account_rows(
+        &mut self,
+        accounts: &AccountTargets<'_>,
+    ) -> Result<(), StoreError> {
         // Rebuild the verified-account index and invalidate derived caches.
         // Later account writes skip byte-identical primary values.
         self.invalidate_body_changes();
@@ -454,27 +457,43 @@ impl LmdbWriteTransaction<'_> {
         cache.clear_counter_accounts(UndoTable::Accounts);
         self.dirty = true;
         crate::verified_index::rebuild(
-            &mut self.txn, self.env.accounts_db, self.env.verified_accounts_db,
-        ).map_err(LmdbError::from)?;
+            &mut self.txn,
+            self.env.accounts_db,
+            self.env.verified_accounts_db,
+        )
+        .map_err(LmdbError::from)?;
         for table in [UndoTable::Accounts, UndoTable::Frontiers] {
             let db = table.database(self.env);
             let mut cursor: Option<Vec<u8>> = None;
             loop {
-                let bounds = (cursor.as_deref().map_or(Bound::Unbounded, Bound::Excluded),
-                    Bound::<&[u8]>::Unbounded);
-                let rows = db.range(&self.txn, &bounds).map_err(LmdbError::from)?
-                    .take(256).map(|row| {
+                let bounds = (
+                    cursor.as_deref().map_or(Bound::Unbounded, Bound::Excluded),
+                    Bound::<&[u8]>::Unbounded,
+                );
+                let rows = db
+                    .range(&self.txn, &bounds)
+                    .map_err(LmdbError::from)?
+                    .take(256)
+                    .map(|row| {
                         let (key, _) = row.map_err(LmdbError::from)?;
-                        let keep = std::str::from_utf8(key).ok()
+                        let keep = std::str::from_utf8(key)
+                            .ok()
                             .filter(|address| address.starts_with(WalletAddress::PREFIX))
                             .and_then(|address| accounts.get(&WalletAddress::new(address)))
-                            .is_some_and(|account| table == UndoTable::Accounts || account.block_count > 0);
+                            .is_some_and(|account| {
+                                table == UndoTable::Accounts || account.block_count > 0
+                            });
                         Ok((key.to_vec(), keep))
-                    }).collect::<Result<Vec<_>, StoreError>>()?;
-                if rows.is_empty() { break; }
+                    })
+                    .collect::<Result<Vec<_>, StoreError>>()?;
+                if rows.is_empty() {
+                    break;
+                }
                 cursor = rows.last().map(|(key, _)| key.clone());
                 for (key, keep) in rows {
-                    if !keep { self.delete_raw(table, &key)?; }
+                    if !keep {
+                        self.delete_raw(table, &key)?;
+                    }
                 }
             }
         }

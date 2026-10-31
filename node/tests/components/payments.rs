@@ -245,8 +245,14 @@ fn economics_burn_reports_amount_on_success() {
     );
 
     let previous_brn_spent: u128 = 50;
-    let result =
-        burst_node::process_block_economics(&burn, &mut brn, &mut trst, now, 86400 * 365, previous_brn_spent);
+    let result = burst_node::process_block_economics(
+        &burn,
+        &mut brn,
+        &mut trst,
+        now,
+        86400 * 365,
+        previous_brn_spent,
+    );
 
     match &result {
         burst_node::EconomicResult::BurnAndMint {

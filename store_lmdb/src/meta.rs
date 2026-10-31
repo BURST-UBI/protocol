@@ -30,13 +30,13 @@ pub use consensus_batch::ConsensusVoteReservation;
 pub struct LmdbMetaStore {
     pub(crate) deferred_votes: std::sync::Arc<vote_admission::DeferredVotes>,
     pub(crate) body_changes: std::sync::Arc<crate::retention::changes::Observers>,
-    pub(crate) sequence_commits: std::sync::Arc<std::sync::Mutex<crate::retention::SequenceCommits>>,
-    pub(crate) governance_cache: std::sync::Arc<std::sync::Mutex<Option<(
-        usize, burst_governance::GovernanceEngine,
-    )>>>,
-    pub(crate) auxiliary_cache: std::sync::Arc<std::sync::Mutex<Option<(
-        usize, crate::write_batch::auxiliary_cache::AuxiliaryCache,
-    )>>>,
+    pub(crate) sequence_commits:
+        std::sync::Arc<std::sync::Mutex<crate::retention::SequenceCommits>>,
+    pub(crate) governance_cache:
+        std::sync::Arc<std::sync::Mutex<Option<(usize, burst_governance::GovernanceEngine)>>>,
+    pub(crate) auxiliary_cache: std::sync::Arc<
+        std::sync::Mutex<Option<(usize, crate::write_batch::auxiliary_cache::AuxiliaryCache)>>,
+    >,
     pub(crate) env: SharedEnv,
     pub(crate) meta_db: Database<Bytes, Bytes>,
     pub(crate) graph_position_db: Database<Bytes, Bytes>,
@@ -54,8 +54,11 @@ struct CheckedVoteReservation {
 }
 
 impl LmdbMetaStore {
-    pub fn checkpoint_head_node_txn(&self, txn: &crate::LmdbReadTransaction<'_>, hash: &[u8; 32])
-        -> Result<Option<crate::checkpoint_heads::HeadNode>, StoreError> {
+    pub fn checkpoint_head_node_txn(
+        &self,
+        txn: &crate::LmdbReadTransaction<'_>,
+        hash: &[u8; 32],
+    ) -> Result<Option<crate::checkpoint_heads::HeadNode>, StoreError> {
         crate::checkpoint_heads::read(self.checkpoint_heads_db, &txn.txn, hash)
             .map(|row| row.map(|(_, node)| node))
     }
@@ -72,24 +75,51 @@ impl LmdbMetaStore {
         mut visit: impl FnMut(&str, &[u8]) -> Result<(), StoreError>,
     ) -> Result<MetadataPage, StoreError> {
         use std::ops::Bound;
-        if prefix.is_empty() || max_rows == 0 || max_rows > 101 || max_bytes == 0
-            || cursor.is_some_and(|key| !key.starts_with(prefix)) {
+        if prefix.is_empty()
+            || max_rows == 0
+            || max_rows > 101
+            || max_bytes == 0
+            || cursor.is_some_and(|key| !key.starts_with(prefix))
+        {
             return Err(StoreError::Serialization("invalid metadata page".into()));
         }
-        let lower = cursor.map_or(Bound::Included(prefix.as_bytes()), |key| Bound::Excluded(key.as_bytes()));
-        let mut rows = self.meta_db.range(&txn.txn, &(lower, Bound::<&[u8]>::Unbounded)).map_err(LmdbError::from)?;
-        let mut page = MetadataPage { rows: 0, bytes: 0, last_key: None, done: false };
+        let lower = cursor.map_or(Bound::Included(prefix.as_bytes()), |key| {
+            Bound::Excluded(key.as_bytes())
+        });
+        let mut rows = self
+            .meta_db
+            .range(&txn.txn, &(lower, Bound::<&[u8]>::Unbounded))
+            .map_err(LmdbError::from)?;
+        let mut page = MetadataPage {
+            rows: 0,
+            bytes: 0,
+            last_key: None,
+            done: false,
+        };
         while page.rows < max_rows {
-            let Some(row) = rows.next() else { page.done = true; break; };
+            let Some(row) = rows.next() else {
+                page.done = true;
+                break;
+            };
             let (key, bytes) = row.map_err(LmdbError::from)?;
-            if !key.starts_with(prefix.as_bytes()) { page.done = true; break; }
-            let size = key.len().checked_add(bytes.len())
+            if !key.starts_with(prefix.as_bytes()) {
+                page.done = true;
+                break;
+            }
+            let size = key
+                .len()
+                .checked_add(bytes.len())
                 .ok_or_else(|| StoreError::Corruption("metadata row size overflow".into()))?;
             if size > max_bytes {
-                return Err(StoreError::Corruption("metadata row exceeds byte limit".into()));
+                return Err(StoreError::Corruption(
+                    "metadata row exceeds byte limit".into(),
+                ));
             }
-            if size > max_bytes - page.bytes { break; }
-            let key = std::str::from_utf8(key).map_err(|error| StoreError::Corruption(error.to_string()))?;
+            if size > max_bytes - page.bytes {
+                break;
+            }
+            let key = std::str::from_utf8(key)
+                .map_err(|error| StoreError::Corruption(error.to_string()))?;
             visit(key, bytes)?;
             page.rows += 1;
             page.bytes += size;
@@ -100,8 +130,12 @@ impl LmdbMetaStore {
 
     /// Only for vote reservations, which always change the sequence and never
     /// mutate governance records or inputs of auxiliary engines/expiry selectors.
-    fn commit_vote_reservation(&self, txn: heed::RwTxn<'_>, sequence_only: bool,
-        observed: Option<crate::retention::changes::Pending>) -> Result<(), StoreError> {
+    fn commit_vote_reservation(
+        &self,
+        txn: heed::RwTxn<'_>,
+        sequence_only: bool,
+        observed: Option<crate::retention::changes::Pending>,
+    ) -> Result<(), StoreError> {
         // The exclusive writer pins this generation. Keep publication locked
         // through commit so a later writer cannot publish before this update.
         let base = self.env.info().last_txn_id;
@@ -111,11 +145,24 @@ impl LmdbMetaStore {
         // write monotonically increasing consensus_sequence values and no roots.
         let committed_generation = txn.id();
         let mut sequences = if sequence_only {
-            Some(self.sequence_commits.lock().map_err(|error| StoreError::Backend(error.to_string()))?)
-        } else { None };
-        let commit = || txn.commit().map_err(LmdbError::from).map_err(StoreError::from);
-        if let Some(observed) = observed { observed.commit(base, committed_generation, commit)?; }
-        else { commit()?; }
+            Some(
+                self.sequence_commits
+                    .lock()
+                    .map_err(|error| StoreError::Backend(error.to_string()))?,
+            )
+        } else {
+            None
+        };
+        let commit = || {
+            txn.commit()
+                .map_err(LmdbError::from)
+                .map_err(StoreError::from)
+        };
+        if let Some(observed) = observed {
+            observed.commit(base, committed_generation, commit)?;
+        } else {
+            commit()?;
+        }
         if let Some(sequences) = sequences.as_mut() {
             sequences.record(base, committed_generation);
         }
@@ -225,7 +272,8 @@ impl LmdbMetaStore {
         txn: &crate::LmdbReadTransaction<'_>,
         block: &BlockHash,
     ) -> Result<Option<crate::block_undo::BlockUndo>, StoreError> {
-        self.meta_db.get(&txn.txn, &crate::block_undo::key(block))
+        self.meta_db
+            .get(&txn.txn, &crate::block_undo::key(block))
             .map_err(LmdbError::from)?
             .map(|bytes| crate::block_undo::BlockUndo::decode(block, bytes))
             .transpose()
@@ -233,10 +281,15 @@ impl LmdbMetaStore {
 
     /// Presence at the pinned cut without copying a potentially large value.
     pub fn contains_meta_txn(
-        &self, txn: &crate::LmdbReadTransaction<'_>, key: &str,
+        &self,
+        txn: &crate::LmdbReadTransaction<'_>,
+        key: &str,
     ) -> Result<bool, StoreError> {
-        self.meta_db.get(&txn.txn, key.as_bytes()).map(|value| value.is_some())
-            .map_err(LmdbError::from).map_err(Into::into)
+        self.meta_db
+            .get(&txn.txn, key.as_bytes())
+            .map(|value| value.is_some())
+            .map_err(LmdbError::from)
+            .map_err(Into::into)
     }
 
     pub fn get_meta_txn(
@@ -249,13 +302,22 @@ impl LmdbMetaStore {
 
     /// Reject oversized pinned values before allocating an owned copy.
     pub fn get_meta_txn_bounded(
-        &self, txn: &crate::LmdbReadTransaction<'_>, key: &str, max_bytes: usize,
+        &self,
+        txn: &crate::LmdbReadTransaction<'_>,
+        key: &str,
+        max_bytes: usize,
     ) -> Result<Option<Vec<u8>>, StoreError> {
-        let Some(bytes) = self.meta_db.get(&txn.txn, key.as_bytes()).map_err(LmdbError::from)? else {
+        let Some(bytes) = self
+            .meta_db
+            .get(&txn.txn, key.as_bytes())
+            .map_err(LmdbError::from)?
+        else {
             return Ok(None);
         };
         if bytes.len() > max_bytes {
-            return Err(StoreError::Corruption("metadata exceeds pinned read byte budget".into()));
+            return Err(StoreError::Corruption(
+                "metadata exceeds pinned read byte budget".into(),
+            ));
         }
         Ok(Some(bytes.to_vec()))
     }
@@ -374,8 +436,18 @@ impl LmdbMetaStore {
         timestamp: Option<u64>,
         governance_limit: Option<u64>,
     ) -> Result<u64, StoreError> {
-        self.consensus_vote_reservation(payment_epoch, representative, account, previous,
-            hash, is_final, sequence_floor, timestamp, governance_limit, None)
+        self.consensus_vote_reservation(
+            payment_epoch,
+            representative,
+            account,
+            previous,
+            hash,
+            is_final,
+            sequence_floor,
+            timestamp,
+            governance_limit,
+            None,
+        )
     }
 
     /// Revalidate an already signed final response without reserving a new sequence.
@@ -393,8 +465,19 @@ impl LmdbMetaStore {
         sequence: u64,
         timestamp: u64,
     ) -> Result<(), StoreError> {
-        self.consensus_vote_reservation(payment_epoch, representative, account, previous,
-            hash, true, 0, Some(timestamp), None, Some(sequence)).map(|_| ())
+        self.consensus_vote_reservation(
+            payment_epoch,
+            representative,
+            account,
+            previous,
+            hash,
+            true,
+            0,
+            Some(timestamp),
+            None,
+            Some(sequence),
+        )
+        .map(|_| ())
     }
 
     /// Recheck current guards for an in-memory, already signed soft response.
@@ -402,11 +485,29 @@ impl LmdbMetaStore {
     /// Storage checks that the sequence was allocated, but does not store the
     /// corresponding soft-vote hash or verify a signature.
     #[allow(clippy::too_many_arguments)]
-    pub fn validate_reserved_soft_vote(&self, payment_epoch: &BlockHash,
-        representative: &WalletAddress, account: &WalletAddress, previous: &BlockHash,
-        hash: &BlockHash, sequence: u64, timestamp: u64) -> Result<(), StoreError> {
-        self.consensus_vote_reservation(payment_epoch, representative, account, previous,
-            hash, false, 0, Some(timestamp), None, Some(sequence)).map(|_| ())
+    pub fn validate_reserved_soft_vote(
+        &self,
+        payment_epoch: &BlockHash,
+        representative: &WalletAddress,
+        account: &WalletAddress,
+        previous: &BlockHash,
+        hash: &BlockHash,
+        sequence: u64,
+        timestamp: u64,
+    ) -> Result<(), StoreError> {
+        self.consensus_vote_reservation(
+            payment_epoch,
+            representative,
+            account,
+            previous,
+            hash,
+            false,
+            0,
+            Some(timestamp),
+            None,
+            Some(sequence),
+        )
+        .map(|_| ())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -425,15 +526,38 @@ impl LmdbMetaStore {
     ) -> Result<u64, StoreError> {
         if reuse_sequence.is_some() {
             let txn = self.env.read_txn().map_err(LmdbError::from)?;
-            return self.check_consensus_vote_reservation(&txn, payment_epoch,
-                representative, account, previous, hash, is_final, sequence_floor,
-                timestamp, governance_limit, reuse_sequence).map(|checked| checked.sequence);
+            return self
+                .check_consensus_vote_reservation(
+                    &txn,
+                    payment_epoch,
+                    representative,
+                    account,
+                    previous,
+                    hash,
+                    is_final,
+                    sequence_floor,
+                    timestamp,
+                    governance_limit,
+                    reuse_sequence,
+                )
+                .map(|checked| checked.sequence);
         }
         let mut txn = self.env.write_txn().map_err(LmdbError::from)?;
         let mut observed = self.body_changes.begin();
-        let sequence = self.stage_consensus_vote_reservation(&mut txn, payment_epoch,
-            representative, account, previous, hash, is_final, sequence_floor,
-            timestamp, governance_limit, reuse_sequence, &mut observed)?;
+        let sequence = self.stage_consensus_vote_reservation(
+            &mut txn,
+            payment_epoch,
+            representative,
+            account,
+            previous,
+            hash,
+            is_final,
+            sequence_floor,
+            timestamp,
+            governance_limit,
+            reuse_sequence,
+            &mut observed,
+        )?;
         if reuse_sequence.is_none() {
             self.commit_vote_reservation(txn, !is_final, observed)?;
             self.env.sync_after_commit().map_err(LmdbError::from)?;
@@ -457,30 +581,65 @@ impl LmdbMetaStore {
         reuse_sequence: Option<u64>,
         observed: &mut Option<crate::retention::changes::Pending>,
     ) -> Result<u64, StoreError> {
-        let CheckedVoteReservation { sequence, sequence_key, final_key, time_key,
-            limit_key, previous_time, next_limit } = self.check_consensus_vote_reservation(
-                txn, payment_epoch, representative, account, previous, hash,
-                is_final, sequence_floor, timestamp, governance_limit, reuse_sequence)?;
-        if reuse_sequence.is_some() { return Ok(sequence); }
+        let CheckedVoteReservation {
+            sequence,
+            sequence_key,
+            final_key,
+            time_key,
+            limit_key,
+            previous_time,
+            next_limit,
+        } = self.check_consensus_vote_reservation(
+            txn,
+            payment_epoch,
+            representative,
+            account,
+            previous,
+            hash,
+            is_final,
+            sequence_floor,
+            timestamp,
+            governance_limit,
+            reuse_sequence,
+        )?;
+        if reuse_sequence.is_some() {
+            return Ok(sequence);
+        }
         self.meta_db
             .put(txn, sequence_key.as_bytes(), &sequence.to_be_bytes())
             .map_err(LmdbError::from)?;
         if is_final {
             self.put_observed_vote_value(txn, final_key.as_bytes(), hash.as_bytes(), observed)?;
             if let Some(at) = timestamp {
-                self.put_observed_vote_value(txn, time_key.as_bytes(),
-                    &previous_time.map_or(at, |previous| previous.max(at)).to_be_bytes(), observed)?;
+                self.put_observed_vote_value(
+                    txn,
+                    time_key.as_bytes(),
+                    &previous_time
+                        .map_or(at, |previous| previous.max(at))
+                        .to_be_bytes(),
+                    observed,
+                )?;
             }
             if let Some(limit) = next_limit {
-                self.put_observed_vote_value(txn, limit_key.as_bytes(), &limit.to_be_bytes(), observed)?;
+                self.put_observed_vote_value(
+                    txn,
+                    limit_key.as_bytes(),
+                    &limit.to_be_bytes(),
+                    observed,
+                )?;
             }
         }
         Ok(sequence)
     }
     // Sequence increments are the existing typed root-free case. Final choice,
     // timestamp and governance limit writes remain explicit observed mutations.
-    fn put_observed_vote_value(&self, txn: &mut heed::RwTxn<'_>, key: &[u8], value: &[u8],
-        observed: &mut Option<crate::retention::changes::Pending>) -> Result<(), StoreError> {
+    fn put_observed_vote_value(
+        &self,
+        txn: &mut heed::RwTxn<'_>,
+        key: &[u8],
+        value: &[u8],
+        observed: &mut Option<crate::retention::changes::Pending>,
+    ) -> Result<(), StoreError> {
         if let Some(observed) = observed.as_mut() {
             let before = self.meta_db.get(txn, key).map_err(LmdbError::from)?;
             observed.record(crate::block_undo::UndoTable::Meta, key, before, Some(value));
@@ -490,10 +649,18 @@ impl LmdbMetaStore {
     }
     #[allow(clippy::too_many_arguments)]
     fn check_consensus_vote_reservation(
-        &self, txn: &heed::RoTxn<'_>, payment_epoch: &BlockHash,
-        representative: &WalletAddress, account: &WalletAddress, previous: &BlockHash,
-        hash: &BlockHash, is_final: bool, sequence_floor: u64,
-        timestamp: Option<u64>, governance_limit: Option<u64>, reuse_sequence: Option<u64>,
+        &self,
+        txn: &heed::RoTxn<'_>,
+        payment_epoch: &BlockHash,
+        representative: &WalletAddress,
+        account: &WalletAddress,
+        previous: &BlockHash,
+        hash: &BlockHash,
+        is_final: bool,
+        sequence_floor: u64,
+        timestamp: Option<u64>,
+        governance_limit: Option<u64>,
+        reuse_sequence: Option<u64>,
     ) -> Result<CheckedVoteReservation, StoreError> {
         let sequence_key = format!("consensus_sequence/v1/{representative}");
         let final_key = crate::write_batch::vote_fence::final_key(
@@ -669,7 +836,10 @@ impl LmdbMetaStore {
                 "ordinary votes are sealed pending certified payment-epoch installation".into(),
             ));
         }
-        let final_choice = self.meta_db.get(txn, final_key.as_bytes()).map_err(LmdbError::from)?;
+        let final_choice = self
+            .meta_db
+            .get(txn, final_key.as_bytes())
+            .map_err(LmdbError::from)?;
         if let Some(choice) = final_choice {
             if choice.len() != 32 {
                 return Err(StoreError::Corruption("invalid durable final vote".into()));
@@ -682,7 +852,9 @@ impl LmdbMetaStore {
         }
         if reuse_sequence.is_none()
             && !is_final
-            && self.deferred_votes.contains(payment_epoch, representative)?
+            && self
+                .deferred_votes
+                .contains(payment_epoch, representative)?
         {
             return Err(StoreError::Backend(
                 "new soft votes deferred during checkpoint preparation".into(),
@@ -701,25 +873,39 @@ impl LmdbMetaStore {
             None => 0,
         };
         if let Some(sequence) = reuse_sequence {
-            if sequence == 0 || sequence > previous_sequence
-                || (is_final && (self.meta_db.get(txn, final_key.as_bytes()).map_err(LmdbError::from)?
-                    != Some(hash.as_bytes().as_slice())
-                    || timestamp.is_none_or(|at| previous_time.is_none_or(|reserved| at > reserved))))
+            if sequence == 0
+                || sequence > previous_sequence
+                || (is_final
+                    && (self
+                        .meta_db
+                        .get(txn, final_key.as_bytes())
+                        .map_err(LmdbError::from)?
+                        != Some(hash.as_bytes().as_slice())
+                        || timestamp
+                            .is_none_or(|at| previous_time.is_none_or(|reserved| at > reserved))))
             {
-                return Err(StoreError::Corruption("cached vote has no durable reservation".into()));
+                return Err(StoreError::Corruption(
+                    "cached vote has no durable reservation".into(),
+                ));
             }
-
         }
         let sequence = match reuse_sequence {
             Some(sequence) => sequence,
-            None => previous_sequence.max(sequence_floor).checked_add(1)
+            None => previous_sequence
+                .max(sequence_floor)
+                .checked_add(1)
                 .ok_or_else(|| StoreError::Backend("consensus vote sequence exhausted".into()))?,
         };
-        Ok(CheckedVoteReservation { sequence, sequence_key, final_key, time_key,
-            limit_key, previous_time, next_limit })
-
+        Ok(CheckedVoteReservation {
+            sequence,
+            sequence_key,
+            final_key,
+            time_key,
+            limit_key,
+            previous_time,
+            next_limit,
+        })
     }
-
 }
 
 impl MetaStore for LmdbMetaStore {
@@ -809,40 +995,80 @@ mod tests {
             let epoch = BlockHash::new([1; 32]);
             let hash = BlockHash::new([2; 32]);
             let rep = WalletAddress::new("brst_cached_read");
-            meta.put_meta(burst_store::meta::PAYMENT_EPOCH_KEY, epoch.as_bytes()).unwrap();
-            meta.reserve_consensus_vote_at(&epoch, &rep, &rep, &BlockHash::ZERO,
-                &hash, is_final, 0, Some(100)).unwrap();
-            let check = || if is_final {
-                meta.validate_reserved_final_vote(&epoch, &rep, &rep, &BlockHash::ZERO,
-                    &hash, 1, 100)
-            } else {
-                meta.validate_reserved_soft_vote(&epoch, &rep, &rep, &BlockHash::ZERO,
-                    &hash, 1, 100)
+            meta.put_meta(burst_store::meta::PAYMENT_EPOCH_KEY, epoch.as_bytes())
+                .unwrap();
+            meta.reserve_consensus_vote_at(
+                &epoch,
+                &rep,
+                &rep,
+                &BlockHash::ZERO,
+                &hash,
+                is_final,
+                0,
+                Some(100),
+            )
+            .unwrap();
+            let check = || {
+                if is_final {
+                    meta.validate_reserved_final_vote(
+                        &epoch,
+                        &rep,
+                        &rep,
+                        &BlockHash::ZERO,
+                        &hash,
+                        1,
+                        100,
+                    )
+                } else {
+                    meta.validate_reserved_soft_vote(
+                        &epoch,
+                        &rep,
+                        &rep,
+                        &BlockHash::ZERO,
+                        &hash,
+                        1,
+                        100,
+                    )
+                }
             };
             let generation = env.env().info().last_txn_id;
             let mut writer = env.env().write_txn().unwrap();
             let fence = crate::write_batch::vote_fence::fence_key(&epoch, &rep);
-            meta.meta_db.put(&mut writer, fence.as_bytes(), &[7; 32]).unwrap();
+            meta.meta_db
+                .put(&mut writer, fence.as_bytes(), &[7; 32])
+                .unwrap();
             std::thread::scope(|scope| {
                 let (sender, receiver) = std::sync::mpsc::channel();
                 let check = &check;
-                let worker = scope.spawn(move || { sender.send(check()).unwrap(); });
+                let worker = scope.spawn(move || {
+                    sender.send(check()).unwrap();
+                });
                 let result = receiver.recv_timeout(std::time::Duration::from_secs(2));
                 assert_eq!(env.env().info().last_txn_id, generation);
                 // Release the writer before joining even if a regression timed out.
                 writer.commit().unwrap();
                 worker.join().unwrap();
-                result.expect("cached validation waited for the writer").unwrap();
+                result
+                    .expect("cached validation waited for the writer")
+                    .unwrap();
             });
-            assert!(check().is_err(), "committed fence must invalidate cached response");
-            assert_eq!(meta.get_meta("consensus_sequence/v1/brst_cached_read").unwrap(),
-                1u64.to_be_bytes());
+            assert!(
+                check().is_err(),
+                "committed fence must invalidate cached response"
+            );
+            assert_eq!(
+                meta.get_meta("consensus_sequence/v1/brst_cached_read")
+                    .unwrap(),
+                1u64.to_be_bytes()
+            );
         }
     }
 
     #[test]
     fn reused_soft_response_checks_current_fences_without_writing() {
-        use burst_store::meta::{encode_payment_vote_limit, PAYMENT_VOTE_LIMIT_KEY, PAYMENT_EPOCH_KEY};
+        use burst_store::meta::{
+            encode_payment_vote_limit, PAYMENT_EPOCH_KEY, PAYMENT_VOTE_LIMIT_KEY,
+        };
         let dir = tempfile::tempdir().unwrap();
         let env = LmdbEnvironment::open(dir.path(), 32, 16 << 20).unwrap();
         let meta = env.meta_store();
@@ -850,15 +1076,31 @@ mod tests {
         let hash = BlockHash::new([2; 32]);
         let rep = WalletAddress::new("brst_soft_reuse");
         meta.put_meta(PAYMENT_EPOCH_KEY, epoch.as_bytes()).unwrap();
-        let check = || meta.validate_reserved_soft_vote(&epoch, &rep, &rep,
-            &BlockHash::ZERO, &hash, 1, 100);
+        let check = || {
+            meta.validate_reserved_soft_vote(&epoch, &rep, &rep, &BlockHash::ZERO, &hash, 1, 100)
+        };
         assert!(check().is_err());
-        meta.reserve_consensus_vote_at(&epoch, &rep, &rep, &BlockHash::ZERO,
-            &hash, false, 0, Some(100)).unwrap();
+        meta.reserve_consensus_vote_at(
+            &epoch,
+            &rep,
+            &rep,
+            &BlockHash::ZERO,
+            &hash,
+            false,
+            0,
+            Some(100),
+        )
+        .unwrap();
         let generation = env.env().info().last_txn_id;
-        for _ in 0..10 { check().unwrap(); }
+        for _ in 0..10 {
+            check().unwrap();
+        }
         assert_eq!(env.env().info().last_txn_id, generation);
-        meta.put_meta(PAYMENT_VOTE_LIMIT_KEY, &encode_payment_vote_limit(epoch, Some(99))).unwrap();
+        meta.put_meta(
+            PAYMENT_VOTE_LIMIT_KEY,
+            &encode_payment_vote_limit(epoch, Some(99)),
+        )
+        .unwrap();
         assert!(check().is_err());
         meta.delete_meta(PAYMENT_VOTE_LIMIT_KEY).unwrap();
         meta.put_meta(PAYMENT_EPOCH_KEY, &[3; 32]).unwrap();
@@ -868,15 +1110,26 @@ mod tests {
         meta.put_meta(&fence, &[9; 32]).unwrap();
         assert!(check().is_err());
         meta.delete_meta(&fence).unwrap();
-        meta.reserve_consensus_vote_at(&epoch, &rep, &rep, &BlockHash::ZERO,
-            &BlockHash::new([4; 32]), true, 0, Some(100)).unwrap();
+        meta.reserve_consensus_vote_at(
+            &epoch,
+            &rep,
+            &rep,
+            &BlockHash::ZERO,
+            &BlockHash::new([4; 32]),
+            true,
+            0,
+            Some(100),
+        )
+        .unwrap();
         assert!(check().is_err());
     }
 
     #[test]
     fn reused_final_response_rechecks_authority_without_writing() {
-        use burst_store::meta::{encode_payment_vote_limit, PAYMENT_VOTE_LIMIT_KEY,
-            GOVERNANCE_COUNTING_LIMIT_KEY, PAYMENT_EPOCH_KEY};
+        use burst_store::meta::{
+            encode_payment_vote_limit, GOVERNANCE_COUNTING_LIMIT_KEY, PAYMENT_EPOCH_KEY,
+            PAYMENT_VOTE_LIMIT_KEY,
+        };
         let dir = tempfile::tempdir().unwrap();
         let env = LmdbEnvironment::open(dir.path(), 32, 16 << 20).unwrap();
         let meta = env.meta_store();
@@ -884,22 +1137,50 @@ mod tests {
         let hash = BlockHash::new([2; 32]);
         let rep = WalletAddress::new("brst_reuse");
         meta.put_meta(PAYMENT_EPOCH_KEY, epoch.as_bytes()).unwrap();
-        let check = |sequence, candidate| meta.validate_reserved_final_vote(
-            &epoch, &rep, &rep, &BlockHash::ZERO, &candidate, sequence, 100);
+        let check = |sequence, candidate| {
+            meta.validate_reserved_final_vote(
+                &epoch,
+                &rep,
+                &rep,
+                &BlockHash::ZERO,
+                &candidate,
+                sequence,
+                100,
+            )
+        };
         assert!(check(1, hash).is_err());
-        assert_eq!(meta.reserve_consensus_vote_at(&epoch, &rep, &rep,
-            &BlockHash::ZERO, &hash, true, 0, Some(100)).unwrap(), 1);
+        assert_eq!(
+            meta.reserve_consensus_vote_at(
+                &epoch,
+                &rep,
+                &rep,
+                &BlockHash::ZERO,
+                &hash,
+                true,
+                0,
+                Some(100)
+            )
+            .unwrap(),
+            1
+        );
         let generation = env.env().info().last_txn_id;
-        for _ in 0..10 { check(1, hash).unwrap(); }
+        for _ in 0..10 {
+            check(1, hash).unwrap();
+        }
         assert_eq!(env.env().info().last_txn_id, generation);
-        assert_eq!(meta.get_meta("consensus_sequence/v1/brst_reuse").unwrap(), 1u64.to_be_bytes());
+        assert_eq!(
+            meta.get_meta("consensus_sequence/v1/brst_reuse").unwrap(),
+            1u64.to_be_bytes()
+        );
         assert!(check(0, hash).is_err());
         assert!(check(2, hash).is_err());
         assert!(check(1, BlockHash::new([3; 32])).is_err());
         for key in [PAYMENT_VOTE_LIMIT_KEY, GOVERNANCE_COUNTING_LIMIT_KEY] {
-            meta.put_meta(key, &encode_payment_vote_limit(epoch, Some(99))).unwrap();
+            meta.put_meta(key, &encode_payment_vote_limit(epoch, Some(99)))
+                .unwrap();
             assert!(check(1, hash).is_err());
-            meta.put_meta(key, &encode_payment_vote_limit(epoch, Some(100))).unwrap();
+            meta.put_meta(key, &encode_payment_vote_limit(epoch, Some(100)))
+                .unwrap();
             check(1, hash).unwrap();
             meta.delete_meta(key).unwrap();
         }
@@ -916,7 +1197,12 @@ mod tests {
         meta.put_meta(PAYMENT_EPOCH_KEY, epoch.as_bytes()).unwrap();
         check(1, hash).unwrap();
         meta.delete_meta(&crate::write_batch::vote_fence::final_key(
-            &epoch, &rep, &rep, &BlockHash::ZERO)).unwrap();
+            &epoch,
+            &rep,
+            &rep,
+            &BlockHash::ZERO,
+        ))
+        .unwrap();
         assert!(check(1, hash).is_err());
     }
 
@@ -926,27 +1212,58 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let env = LmdbEnvironment::open(dir.path(), 32, 16 << 20).unwrap();
         let meta = env.meta_store();
-        meta.put_meta(burst_store::meta::PAYMENT_EPOCH_KEY, &[1; 32]).unwrap();
+        meta.put_meta(burst_store::meta::PAYMENT_EPOCH_KEY, &[1; 32])
+            .unwrap();
         let base = env.env().info().last_txn_id;
         *env.auxiliary_cache.lock().unwrap() = Some((base, AuxiliaryCache::default()));
-        *env.governance_cache.lock().unwrap() = Some((base, burst_governance::GovernanceEngine::new()));
+        *env.governance_cache.lock().unwrap() =
+            Some((base, burst_governance::GovernanceEngine::new()));
         let representative = WalletAddress::new("brst_cache_generation");
-        let reserve = |epoch| meta.reserve_consensus_vote(&BlockHash::new([epoch; 32]),
-            &representative, &representative, &BlockHash::ZERO,
-            &BlockHash::new([2; 32]), false, 0);
+        let reserve = |epoch| {
+            meta.reserve_consensus_vote(
+                &BlockHash::new([epoch; 32]),
+                &representative,
+                &representative,
+                &BlockHash::ZERO,
+                &BlockHash::new([2; 32]),
+                false,
+                0,
+            )
+        };
         assert!(reserve(9).is_err());
-        assert_eq!(env.auxiliary_cache.lock().unwrap().as_ref().unwrap().0, base);
-        assert_eq!(env.governance_cache.lock().unwrap().as_ref().unwrap().0, base);
+        assert_eq!(
+            env.auxiliary_cache.lock().unwrap().as_ref().unwrap().0,
+            base
+        );
+        assert_eq!(
+            env.governance_cache.lock().unwrap().as_ref().unwrap().0,
+            base
+        );
         reserve(1).unwrap();
-        assert_eq!(env.auxiliary_cache.lock().unwrap().as_ref().unwrap().0, base + 1);
-        assert_eq!(env.governance_cache.lock().unwrap().as_ref().unwrap().0, base + 1);
+        assert_eq!(
+            env.auxiliary_cache.lock().unwrap().as_ref().unwrap().0,
+            base + 1
+        );
+        assert_eq!(
+            env.governance_cache.lock().unwrap().as_ref().unwrap().0,
+            base + 1
+        );
         // Another environment handle has a distinct cache. Its unknown write
         // must leave this handle cold even after a subsequent known vote write.
         let other = LmdbEnvironment::open(dir.path(), 32, 16 << 20).unwrap();
-        other.meta_store().put_meta("unknown-input", b"changed").unwrap();
+        other
+            .meta_store()
+            .put_meta("unknown-input", b"changed")
+            .unwrap();
         reserve(1).unwrap();
-        assert_eq!(env.auxiliary_cache.lock().unwrap().as_ref().unwrap().0, base + 1);
-        assert_eq!(env.governance_cache.lock().unwrap().as_ref().unwrap().0, base + 1);
+        assert_eq!(
+            env.auxiliary_cache.lock().unwrap().as_ref().unwrap().0,
+            base + 1
+        );
+        assert_eq!(
+            env.governance_cache.lock().unwrap().as_ref().unwrap().0,
+            base + 1
+        );
         assert!(env.env().info().last_txn_id > base + 1);
     }
 
@@ -959,15 +1276,31 @@ mod tests {
         meta.put_meta("empty", b"").unwrap();
         let old = store.tx_begin_read().unwrap();
         assert_eq!(meta.get_meta_txn_bounded(&old, "missing", 0).unwrap(), None);
-        assert_eq!(meta.get_meta_txn_bounded(&old, "empty", 0).unwrap(), Some(Vec::new()));
+        assert_eq!(
+            meta.get_meta_txn_bounded(&old, "empty", 0).unwrap(),
+            Some(Vec::new())
+        );
         assert!(meta.get_meta_txn_bounded(&old, "body", 3).is_err());
-        assert_eq!(meta.get_meta_txn_bounded(&old, "body", 4).unwrap(), Some(b"1234".to_vec()));
+        assert_eq!(
+            meta.get_meta_txn_bounded(&old, "body", 4).unwrap(),
+            Some(b"1234".to_vec())
+        );
         meta.put_meta("body", &vec![7; 1 << 20]).unwrap();
-        assert_eq!(meta.get_meta_txn_bounded(&old, "body", 4).unwrap(), Some(b"1234".to_vec()));
+        assert_eq!(
+            meta.get_meta_txn_bounded(&old, "body", 4).unwrap(),
+            Some(b"1234".to_vec())
+        );
         drop(old);
         let current = store.tx_begin_read().unwrap();
-        assert!(meta.get_meta_txn_bounded(&current, "body", 4).unwrap_err().to_string().contains("pinned read byte budget"));
-        assert_eq!(meta.get_meta_txn(&current, "body").unwrap().unwrap().len(), 1 << 20);
+        assert!(meta
+            .get_meta_txn_bounded(&current, "body", 4)
+            .unwrap_err()
+            .to_string()
+            .contains("pinned read byte budget"));
+        assert_eq!(
+            meta.get_meta_txn(&current, "body").unwrap().unwrap().len(),
+            1 << 20
+        );
     }
 
     #[test]
@@ -1024,26 +1357,54 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::LmdbStore::open(dir.path(), 32, 16 << 20).unwrap();
         let meta = store.meta_store();
-        for key in ["a/1", "a/2", "a/3", "b/1"] { meta.put_meta(key, b"1234").unwrap(); }
+        for key in ["a/1", "a/2", "a/3", "b/1"] {
+            meta.put_meta(key, b"1234").unwrap();
+        }
         let txn = store.tx_begin_read().unwrap();
         let mut keys = Vec::new();
-        let first = meta.visit_prefix_page_txn(&txn, "a/", None, 100, 13, |k, _| { keys.push(k.to_owned()); Ok(()) }).unwrap();
+        let first = meta
+            .visit_prefix_page_txn(&txn, "a/", None, 100, 13, |k, _| {
+                keys.push(k.to_owned());
+                Ok(())
+            })
+            .unwrap();
         assert_eq!((first.rows, first.bytes, first.done), (1, 7, false));
         meta.delete_meta("a/2").unwrap();
         meta.put_meta("a/4", b"new").unwrap();
-        let second = meta.visit_prefix_page_txn(&txn, "a/", first.last_key.as_deref(), 2, 14, |k, _| { keys.push(k.to_owned()); Ok(()) }).unwrap();
+        let second = meta
+            .visit_prefix_page_txn(&txn, "a/", first.last_key.as_deref(), 2, 14, |k, _| {
+                keys.push(k.to_owned());
+                Ok(())
+            })
+            .unwrap();
         assert_eq!((second.rows, second.bytes, second.done), (2, 14, false));
-        let last = meta.visit_prefix_page_txn(&txn, "a/", second.last_key.as_deref(), 2, 14, |_, _| panic!("end")).unwrap();
+        let last = meta
+            .visit_prefix_page_txn(&txn, "a/", second.last_key.as_deref(), 2, 14, |_, _| {
+                panic!("end")
+            })
+            .unwrap();
         assert_eq!((last.rows, last.bytes, last.done), (0, 0, true));
         assert_eq!(keys, ["a/1", "a/2", "a/3"]);
-        for (prefix, cursor, rows, bytes) in [("", None, 1, 7), ("a/", Some("b/1"), 1, 7),
-            ("a/", None, 0, 7), ("a/", None, 102, 7), ("a/", None, 1, 0), ("a/", None, 1, 6)] {
-            assert!(meta.visit_prefix_page_txn(&txn, prefix, cursor, rows, bytes, |_, _| panic!("invalid budget")).is_err());
+        for (prefix, cursor, rows, bytes) in [
+            ("", None, 1, 7),
+            ("a/", Some("b/1"), 1, 7),
+            ("a/", None, 0, 7),
+            ("a/", None, 102, 7),
+            ("a/", None, 1, 0),
+            ("a/", None, 1, 6),
+        ] {
+            assert!(meta
+                .visit_prefix_page_txn(&txn, prefix, cursor, rows, bytes, |_, _| panic!(
+                    "invalid budget"
+                ))
+                .is_err());
         }
         let mut calls = 0;
-        assert!(matches!(meta.visit_prefix_page_txn(&txn, "a/", None, 3, 30, |_, _| {
+        assert!(
+            matches!(meta.visit_prefix_page_txn(&txn, "a/", None, 3, 30, |_, _| {
             calls += 1; Err(StoreError::Backend("stop".into()))
-        }), Err(StoreError::Backend(reason)) if reason == "stop"));
+        }), Err(StoreError::Backend(reason)) if reason == "stop")
+        );
         assert_eq!(calls, 1);
     }
 

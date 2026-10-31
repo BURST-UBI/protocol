@@ -68,7 +68,14 @@ mod tests {
         assert_eq!(advance(0, &changes).unwrap(), 1);
         let verified_a = encode(&a);
         a.state = WalletState::Challenged;
-        changes.record(UndoTable::Accounts, a.address.as_str().as_bytes().to_vec(), verified_a, encode(&a)).unwrap();
+        changes
+            .record(
+                UndoTable::Accounts,
+                a.address.as_str().as_bytes().to_vec(),
+                verified_a,
+                encode(&a),
+            )
+            .unwrap();
         assert_eq!(advance(0, &changes).unwrap(), 1);
         assert!(advance(u64::MAX, &changes).is_err());
         let mut swap = crate::confirmed_replay::mutations::Mutations::default();

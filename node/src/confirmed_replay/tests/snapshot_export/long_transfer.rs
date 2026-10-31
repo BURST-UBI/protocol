@@ -300,10 +300,16 @@ fn transfer(account_count: u32, measure: bool) {
         reopened.force_sync().unwrap();
         drop(reopened);
         let metadata = (1u8, &fixture.params, epoch, account_count, 1_595_434_051u64);
-        std::fs::write(local_directory.path().join("resource-probe.bin"),
-            bincode::serialize(&metadata).unwrap()).unwrap();
+        std::fs::write(
+            local_directory.path().join("resource-probe.bin"),
+            bincode::serialize(&metadata).unwrap(),
+        )
+        .unwrap();
         let retained = local_directory.keep();
-        eprintln!("SNAPSHOT_NODE_BASELINE path={} accounts={account_count} epoch={epoch}", retained.display());
+        eprintln!(
+            "SNAPSHOT_NODE_BASELINE path={} accounts={account_count} epoch={epoch}",
+            retained.display()
+        );
     }
 }
 
@@ -314,57 +320,91 @@ async fn snapshot_retained_full_node_startup_resource_probe() {
         .with_env_filter("burst_node::node=debug,burst_node::confirmed_replay::snapshot::installed=debug,burst_node::confirmed_replay::events=debug,burst_node::checkpoint_sync::witness=debug")
         .with_ansi(false).with_test_writer().try_init()
         .expect("isolated startup diagnostic subscriber");
-    use std::sync::{Arc, atomic::AtomicU64};
+    use std::sync::{atomic::AtomicU64, Arc};
     let reopen = std::env::var_os("BURST_SNAPSHOT_REOPEN_LEDGER");
     if let Some(path) = &reopen {
-        assert!(!std::path::Path::new(path).join(crate::confirmed_replay::scratch_file::PERSISTENT_INPUTS_DIRECTORY).exists());
+        assert!(!std::path::Path::new(path)
+            .join(crate::confirmed_replay::scratch_file::PERSISTENT_INPUTS_DIRECTORY)
+            .exists());
     }
-    let (working, params, epoch, accounts, now) = retained_probe_copy_from(reopen.as_deref().map(std::path::Path::new), 100_000);
+    let (working, params, epoch, accounts, now) =
+        retained_probe_copy_from(reopen.as_deref().map(std::path::Path::new), 100_000);
     let working = working.keep();
     eprintln!("SNAPSHOT_NODE_WORKING path={}", working.display());
     let started = Instant::now();
     let report = |stage: &str| {
         let status = std::fs::read_to_string("/proc/self/status").unwrap();
-        let fields: Vec<_> = status.lines().filter(|line|
-            line.starts_with("VmRSS:") || line.starts_with("VmHWM:")).collect();
-        eprintln!("SNAPSHOT_NODE_RESOURCE accounts={accounts} stage={stage} elapsed_ms={} {}",
-            started.elapsed().as_millis(), fields.join(" "));
+        let fields: Vec<_> = status
+            .lines()
+            .filter(|line| line.starts_with("VmRSS:") || line.starts_with("VmHWM:"))
+            .collect();
+        eprintln!(
+            "SNAPSHOT_NODE_RESOURCE accounts={accounts} stage={stage} elapsed_ms={} {}",
+            started.elapsed().as_millis(),
+            fields.join(" ")
+        );
     };
     report("before-node");
-    let rpc_port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let rpc_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
     let mut node = crate::BurstNode::new(crate::NodeConfig {
-        data_dir: working, network: NetworkId::Dev, params, port: 0, rpc_port,
-        rpc_bind: "127.0.0.1".into(), enable_upnp: false, enable_peer_reachout: false,
-        enable_representative: false, enable_faucet: false, bootstrap_peers: vec![],
+        data_dir: working,
+        network: NetworkId::Dev,
+        params,
+        port: 0,
+        rpc_port,
+        rpc_bind: "127.0.0.1".into(),
+        enable_upnp: false,
+        enable_peer_reachout: false,
+        enable_representative: false,
+        enable_faucet: false,
+        bootstrap_peers: vec![],
         recovery_scratch_bytes: Some(64 << 20),
-        nts_sources: vec![], drand_relays: vec!["http://127.0.0.1:1".into()],
+        nts_sources: vec![],
+        drand_relays: vec!["http://127.0.0.1:1".into()],
         ..crate::NodeConfig::default()
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     node.block_processor.lock().await.test_time = Some(Arc::new(AtomicU64::new(now)));
     node.verification_fixture_clock = Some(Arc::new(|| None));
     report("constructed");
     let stop = node.shutdown.clone();
     let task = tokio::spawn(async move {
-        let result = node.start_with_services(burst_daemon::start_public_services).await;
+        let result = node
+            .start_with_services(burst_daemon::start_public_services)
+            .await;
         (node, result)
     });
-    let client = burst_wallet_core::NodeClient::new(format!("http://127.0.0.1:{rpc_port}")).unwrap();
+    let client =
+        burst_wallet_core::NodeClient::new(format!("http://127.0.0.1:{rpc_port}")).unwrap();
     let ready = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
-            if task.is_finished() { return Err("node exited before readiness"); }
+            if task.is_finished() {
+                return Err("node exited before readiness");
+            }
             if let Ok(telemetry) = client.rpc_call("telemetry", serde_json::json!({})).await {
                 assert!(telemetry["account_count"].as_u64().unwrap() >= accounts as u64);
                 return Ok(());
             }
             tokio::time::sleep(Duration::from_millis(30)).await;
         }
-    }).await;
+    })
+    .await;
     report("readiness-finished");
     eprintln!("SNAPSHOT_NODE_READINESS {ready:?}");
     stop.shutdown();
-    let (node, result) = tokio::time::timeout(Duration::from_secs(15), task).await.unwrap().unwrap();
+    let (node, result) = tokio::time::timeout(Duration::from_secs(15), task)
+        .await
+        .unwrap()
+        .unwrap();
     eprintln!("SNAPSHOT_NODE_OUTCOME readiness={ready:?} shutdown={result:?}");
-    ready.expect("retained full node readiness timed out").unwrap();
+    ready
+        .expect("retained full node readiness timed out")
+        .unwrap();
     result.unwrap();
     assert_eq!(node.store.meta_store().payment_epoch().unwrap(), epoch);
     assert!(node.store.account_store().account_count().unwrap() >= accounts as u64);
@@ -398,46 +438,74 @@ fn snapshot_retained_daemon_parameter_preflight() {
     let pinned = crate::network_identity::genesis_params(&store, NetworkId::Dev, &params).unwrap();
     assert_eq!(pinned.params_hash(), params.params_hash());
     let daemon_view = crate::network_identity::genesis_params(
-        &store, NetworkId::Dev, &ProtocolParams::devnet_defaults()).unwrap();
+        &store,
+        NetworkId::Dev,
+        &ProtocolParams::devnet_defaults(),
+    )
+    .unwrap();
     assert_eq!(daemon_view.params_hash(), params.params_hash());
-    assert_eq!(store.account_store().account_count().unwrap(), before_accounts);
+    assert_eq!(
+        store.account_store().account_count().unwrap(),
+        before_accounts
+    );
     assert_eq!(store.block_store().block_count().unwrap(), before_blocks);
     assert_eq!(store.meta_store().payment_epoch().unwrap(), epoch);
-    assert_eq!(store.block_store().get_block(&genesis.hash).unwrap(), genesis_bytes);
+    assert_eq!(
+        store.block_store().get_block(&genesis.hash).unwrap(),
+        genesis_bytes
+    );
     store.force_sync().unwrap();
     drop(store);
-    std::fs::write(working.path().join("resource-probe.bin"),
-        bincode::serialize(&(1u8, &params, epoch, accounts, now)).unwrap()).unwrap();
+    std::fs::write(
+        working.path().join("resource-probe.bin"),
+        bincode::serialize(&(1u8, &params, epoch, accounts, now)).unwrap(),
+    )
+    .unwrap();
     let prepared = working.keep();
-    eprintln!("DAEMON_PARAMETER_PREFLIGHT {}", serde_json::json!({
-        "path": prepared, "accounts": accounts, "epoch": epoch,
-        "genesis": genesis.hash, "params_hash": params.params_hash(),
-        "fixture_clock": now,
-        "database_map_size_bytes": map_size as u64,
-        "scope": "parameter identity only; no node startup, clock compatibility or readiness qualification",
-    }));
+    eprintln!(
+        "DAEMON_PARAMETER_PREFLIGHT {}",
+        serde_json::json!({
+            "path": prepared, "accounts": accounts, "epoch": epoch,
+            "genesis": genesis.hash, "params_hash": params.params_hash(),
+            "fixture_clock": now,
+            "database_map_size_bytes": map_size as u64,
+            "scope": "parameter identity only; no node startup, clock compatibility or readiness qualification",
+        })
+    );
 }
 
 #[test]
 #[ignore = "capped-host legacy verification migration diagnosis; not startup acceptance"]
 fn snapshot_retained_verification_migration_resource_probe() {
     let (working, _, epoch, accounts, _) = retained_probe_copy_from(None, 100_000);
-    let store = LmdbStore::open(working.path(), crate::node::MAX_DBS,
-        crate::node::DEFAULT_MAP_SIZE).unwrap();
-    let legacy = store.meta_store().get_meta("verification_orchestrator").unwrap();
-    let expected = burst_verification::OrchestratorSnapshot::decode(&legacy).unwrap()
-        .encode().unwrap();
+    let store = LmdbStore::open(
+        working.path(),
+        crate::node::MAX_DBS,
+        crate::node::DEFAULT_MAP_SIZE,
+    )
+    .unwrap();
+    let legacy = store
+        .meta_store()
+        .get_meta("verification_orchestrator")
+        .unwrap();
+    let expected = burst_verification::OrchestratorSnapshot::decode(&legacy)
+        .unwrap()
+        .encode()
+        .unwrap();
     let counts = store.tx_begin_write().unwrap().ledger_counts().unwrap();
     let started = Instant::now();
     let mut previous = started;
     let mut report = |stage: &str| {
         let now = Instant::now();
-        eprintln!("VERIFICATION_MIGRATION_RESOURCE {}", serde_json::json!({
-            "stage": stage, "accounts": accounts,
-            "stage_ms": now.duration_since(previous).as_secs_f64() * 1000.0,
-            "elapsed_ms": now.duration_since(started).as_secs_f64() * 1000.0,
-            "scope": "validation-profile legacy migration only; not readiness qualification",
-        }));
+        eprintln!(
+            "VERIFICATION_MIGRATION_RESOURCE {}",
+            serde_json::json!({
+                "stage": stage, "accounts": accounts,
+                "stage_ms": now.duration_since(previous).as_secs_f64() * 1000.0,
+                "elapsed_ms": now.duration_since(started).as_secs_f64() * 1000.0,
+                "scope": "validation-profile legacy migration only; not readiness qualification",
+            })
+        );
         previous = now;
     };
     let mut batch = store.tx_begin_write().unwrap();
@@ -452,15 +520,30 @@ fn snapshot_retained_verification_migration_resource_probe() {
     store.force_sync().unwrap();
     report("sync");
     assert_eq!(restored.snapshot().encode().unwrap(), expected);
-    assert_eq!(store.tx_begin_write().unwrap().ledger_counts().unwrap(), counts);
+    assert_eq!(
+        store.tx_begin_write().unwrap().ledger_counts().unwrap(),
+        counts
+    );
     assert_eq!(store.meta_store().payment_epoch().unwrap(), epoch);
     assert!(!crate::verification_storage::migrate(&store).unwrap());
     drop(store);
-    let reopened = LmdbStore::open(working.path(), crate::node::MAX_DBS,
-        crate::node::DEFAULT_MAP_SIZE).unwrap();
+    let reopened = LmdbStore::open(
+        working.path(),
+        crate::node::MAX_DBS,
+        crate::node::DEFAULT_MAP_SIZE,
+    )
+    .unwrap();
     let batch = reopened.tx_begin_write().unwrap();
     assert!(batch.uses_normalized_verification_records().unwrap());
-    assert_eq!(batch.read_verification_records().unwrap().snapshot().encode().unwrap(), expected);
+    assert_eq!(
+        batch
+            .read_verification_records()
+            .unwrap()
+            .snapshot()
+            .encode()
+            .unwrap(),
+        expected
+    );
     assert_eq!(batch.ledger_counts().unwrap(), counts);
     eprintln!("VERIFICATION_MIGRATION_PRESERVED accounts={accounts} epoch={epoch}");
 }
@@ -474,9 +557,14 @@ fn retained_probe_map_size(default: usize) -> usize {
     config.database_map_size().unwrap()
 }
 
-fn retained_probe_copy_from(source: Option<&std::path::Path>, max_accounts: u32) -> (tempfile::TempDir, ProtocolParams, BlockHash, u32, u64) {
-    let baseline = std::path::PathBuf::from(std::env::var_os("BURST_SNAPSHOT_NODE_BASELINE")
-        .expect("set retained authenticated baseline"));
+fn retained_probe_copy_from(
+    source: Option<&std::path::Path>,
+    max_accounts: u32,
+) -> (tempfile::TempDir, ProtocolParams, BlockHash, u32, u64) {
+    let baseline = std::path::PathBuf::from(
+        std::env::var_os("BURST_SNAPSHOT_NODE_BASELINE")
+            .expect("set retained authenticated baseline"),
+    );
     let (version, params, epoch, accounts, now): (u8, ProtocolParams, BlockHash, u32, u64) =
         bincode::deserialize(&std::fs::read(baseline.join("resource-probe.bin")).unwrap()).unwrap();
     assert_eq!(version, 1);
@@ -491,7 +579,10 @@ fn retained_probe_copy_from(source: Option<&std::path::Path>, max_accounts: u32)
         std::fs::create_dir(working.path().join(input_name)).unwrap();
         std::fs::copy(input, working.path().join(input_name).join("data.mdb")).unwrap();
         // Retained recovery inputs must count toward the copied fixture's budget.
-        assert!(crate::confirmed_replay::scratch_file::ScratchLimit::acquire(working.path(), 1).is_err());
+        assert!(
+            crate::confirmed_replay::scratch_file::ScratchLimit::acquire(working.path(), 1)
+                .is_err()
+        );
     }
     (working, params, epoch, accounts, now)
 }
@@ -506,55 +597,93 @@ fn snapshot_retained_history_preparation_resource_probe() {
     let mut report = |stage: &str| {
         let now = Instant::now();
         let status = std::fs::read_to_string("/proc/self/status").unwrap();
-        let memory: Vec<_> = status.lines().filter(|line|
-            line.starts_with("VmRSS:") || line.starts_with("VmHWM:")).collect();
-        eprintln!("HISTORY_PREPARATION {}", serde_json::json!({
-            "accounts":accounts,"stage":stage,
-            "stage_ms":now.duration_since(previous).as_secs_f64()*1000.0,
-            "elapsed_ms":now.duration_since(started).as_secs_f64()*1000.0,
-            "memory":memory,
-            "scope":"retained signed-open fixture; validation profile; preparation only"
-        }));
+        let memory: Vec<_> = status
+            .lines()
+            .filter(|line| line.starts_with("VmRSS:") || line.starts_with("VmHWM:"))
+            .collect();
+        eprintln!(
+            "HISTORY_PREPARATION {}",
+            serde_json::json!({
+                "accounts":accounts,"stage":stage,
+                "stage_ms":now.duration_since(previous).as_secs_f64()*1000.0,
+                "elapsed_ms":now.duration_since(started).as_secs_f64()*1000.0,
+                "memory":memory,
+                "scope":"retained signed-open fixture; validation profile; preparation only"
+            })
+        );
         previous = now;
     };
     use crate::historical_lookup::preparation::{Cache, Prepared, Request};
     use std::sync::Arc;
-    let request = Request::Batch(vec![crate::genesis_state::block(NetworkId::Dev, &params).hash]);
+    let request = Request::Batch(vec![
+        crate::genesis_state::block(NetworkId::Dev, &params).hash,
+    ]);
     let mut cache = Cache::default();
     report("before-cold-preparation");
-    let cold = cache.prepare(&store, NetworkId::Dev, &params, request.clone()).unwrap();
-    let Prepared::Batch(Some((roots, committed))) = cold.as_ref() else { panic!("missing prepared base") };
+    let cold = cache
+        .prepare(&store, NetworkId::Dev, &params, request.clone())
+        .unwrap();
+    let Prepared::Batch(Some((roots, committed))) = cold.as_ref() else {
+        panic!("missing prepared base")
+    };
     assert!(roots.len() >= accounts as usize);
     assert_eq!(committed.len(), 1);
     assert_eq!(committed[0].context().epoch, epoch);
     report("cold-prepared");
-    let warm = cache.prepare(&store, NetworkId::Dev, &params, request.clone()).unwrap();
+    let warm = cache
+        .prepare(&store, NetworkId::Dev, &params, request.clone())
+        .unwrap();
     assert!(Arc::ptr_eq(&cold, &warm));
     report("warm-prepared");
     let mut batch = store.tx_begin_write().unwrap();
-    batch.put_meta("history-cache-probe-unrelated", b"tracked").unwrap();
+    batch
+        .put_meta("history-cache-probe-unrelated", b"tracked")
+        .unwrap();
     batch.commit().unwrap();
-    assert!(Arc::ptr_eq(&cold, &cache.prepare(&store, NetworkId::Dev, &params, request.clone()).unwrap()));
+    assert!(Arc::ptr_eq(
+        &cold,
+        &cache
+            .prepare(&store, NetworkId::Dev, &params, request.clone())
+            .unwrap()
+    ));
     report("warm-after-unrelated-commit");
     // Change a page without changing its descriptor: descriptor-only caches fail this check.
-    let descriptor = store.meta_store().get_meta(crate::confirmed_replay::snapshot::installed::BASE_KEY).unwrap();
+    let descriptor = store
+        .meta_store()
+        .get_meta(crate::confirmed_replay::snapshot::installed::BASE_KEY)
+        .unwrap();
     let page_key = "checkpoint_snapshot/pages/v1/00000000";
     let page = store.meta_store().get_meta(page_key).unwrap();
-    assert!(!page.is_empty(), "retained fixture must use paged snapshot storage");
+    assert!(
+        !page.is_empty(),
+        "retained fixture must use paged snapshot storage"
+    );
     let mut corrupt = page.clone();
     corrupt[0] ^= 1;
     let mut batch = store.tx_begin_write().unwrap();
     batch.put_meta(page_key, &corrupt).unwrap();
     batch.commit().unwrap();
-    assert_eq!(store.meta_store().get_meta(crate::confirmed_replay::snapshot::installed::BASE_KEY).unwrap(), descriptor);
-    assert!(cache.prepare(&store, NetworkId::Dev, &params, request.clone()).is_err());
+    assert_eq!(
+        store
+            .meta_store()
+            .get_meta(crate::confirmed_replay::snapshot::installed::BASE_KEY)
+            .unwrap(),
+        descriptor
+    );
+    assert!(cache
+        .prepare(&store, NetworkId::Dev, &params, request.clone())
+        .is_err());
     report("changed-page-rejected");
     let mut batch = store.tx_begin_write().unwrap();
     batch.put_meta(page_key, &page).unwrap();
     batch.commit().unwrap();
-    let restored = cache.prepare(&store, NetworkId::Dev, &params, request).unwrap();
+    let restored = cache
+        .prepare(&store, NetworkId::Dev, &params, request)
+        .unwrap();
     assert!(!Arc::ptr_eq(&cold, &restored));
-    let Prepared::Batch(Some((restored_roots, restored_committed))) = restored.as_ref() else { panic!("missing restored base") };
+    let Prepared::Batch(Some((restored_roots, restored_committed))) = restored.as_ref() else {
+        panic!("missing restored base")
+    };
     assert_eq!(restored_roots.len(), roots.len());
     assert_eq!(restored_committed[0].next(), committed[0].next());
     report("restored-page-reauthenticated");
@@ -562,21 +691,27 @@ fn snapshot_retained_history_preparation_resource_probe() {
     report("preparations-dropped");
 }
 
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[ignore = "capped-host signed retained closure probe; reuses immutable account baseline"]
 async fn snapshot_retained_body_closure_resource_probe() {
     use crate::confirmed_replay::{scratch_file::ScratchLimit, snapshot::installed};
     use std::sync::Arc;
     let verified_humans = std::env::var("BURST_SNAPSHOT_CLOSURE_VERIFIED_HUMANS")
-        .map(|value| value.parse::<u32>().expect("verified human count")).ok();
+        .map(|value| value.parse::<u32>().expect("verified human count"))
+        .ok();
     let preflight_only = match std::env::var("BURST_SNAPSHOT_CLOSURE_PREFLIGHT_ONLY").as_deref() {
-        Ok("1") => { assert!(verified_humans.is_some()); true }
+        Ok("1") => {
+            assert!(verified_humans.is_some());
+            true
+        }
         Err(std::env::VarError::NotPresent) => false,
         other => panic!("invalid closure preflight mode: {other:?}"),
     };
     let migration_only = match std::env::var("BURST_SNAPSHOT_CLOSURE_MIGRATION_ONLY").as_deref() {
-        Ok("1") => { assert!(verified_humans.is_some() && !preflight_only); true }
+        Ok("1") => {
+            assert!(verified_humans.is_some() && !preflight_only);
+            true
+        }
         Err(std::env::VarError::NotPresent) => false,
         other => panic!("invalid closure migration mode: {other:?}"),
     };
@@ -585,15 +720,23 @@ async fn snapshot_retained_body_closure_resource_probe() {
             assert!((4000..=100_000).contains(&expected));
             let copied = retained_probe_copy_from(None, expected);
             assert_eq!(copied.3, expected);
-            assert_eq!(copied.1, crate::verification_test_support::governance_fixture_params(
-                copied.1.bootstrap_exit_threshold));
+            assert_eq!(
+                copied.1,
+                crate::verification_test_support::governance_fixture_params(
+                    copied.1.bootstrap_exit_threshold
+                )
+            );
             copied
         }
         None => retained_probe_copy(),
     };
     let working = working.keep();
     eprintln!("CLOSURE_WORKING path={}", working.display());
-    let ledger_map_bytes = if verified_humans.is_some() { crate::node::DEFAULT_MAP_SIZE } else { 128 << 20 };
+    let ledger_map_bytes = if verified_humans.is_some() {
+        crate::node::DEFAULT_MAP_SIZE
+    } else {
+        128 << 20
+    };
     let store = Arc::new(LmdbStore::open(&working, 64, ledger_map_bytes).unwrap());
     if let Some(expected) = verified_humans {
         // Certified migration is a separate stage. The closure/preflight paths
@@ -609,10 +752,15 @@ async fn snapshot_retained_body_closure_resource_probe() {
         let governance = writer.uses_governance_records().unwrap();
         eprintln!("CLOSURE_PREFLIGHT verified_humans={expected} blocks={blocks} live_accounts={live_accounts} pending={pending} map_bytes={ledger_map_bytes} fixture_rewritten=false stable={stable} graph={graph} rates={rates} wallets={wallets} verification={verification} governance={governance}");
         if migration_only {
-            assert!(!stable, "migration fixture is already stable; reuse its migration evidence");
+            assert!(
+                !stable,
+                "migration fixture is already stable; reuse its migration evidence"
+            );
         } else {
-            assert!(stable && graph && rates && wallets && verification && governance,
-                "closure requires normalized storage");
+            assert!(
+                stable && graph && rates && wallets && verification && governance,
+                "closure requires normalized storage"
+            );
         }
         drop(writer);
         assert_eq!(store.meta_store().payment_epoch().unwrap(), epoch);
@@ -634,9 +782,14 @@ async fn snapshot_retained_body_closure_resource_probe() {
             *height += 1;
             let bytes = bincode::serialize(block).unwrap();
             match writer.get_block(&block.hash) {
-                Ok(current) => assert_eq!(current, bytes, "baseline ancestry differs from original fixture"),
+                Ok(current) => assert_eq!(
+                    current, bytes,
+                    "baseline ancestry differs from original fixture"
+                ),
                 Err(burst_store::StoreError::NotFound(_)) => {
-                    writer.put_block_with_account(&block.hash, &bytes, &block.account, *height).unwrap();
+                    writer
+                        .put_block_with_account(&block.hash, &bytes, &block.account, *height)
+                        .unwrap();
                     added += 1;
                 }
                 Err(error) => panic!("ancestry preflight: {error}"),
@@ -651,12 +804,20 @@ async fn snapshot_retained_body_closure_resource_probe() {
     }
     let ledger_counts_before = store.tx_begin_write().unwrap().ledger_counts().unwrap();
     let map_bytes = 16 << 20;
-    let limit = ScratchLimit::acquire_reserved(&working, 64 << 20,
-        crate::confirmed_replay::snapshot::history::DurableHistoryInputs::reservation(map_bytes).unwrap()).unwrap();
+    let limit = ScratchLimit::acquire_reserved(
+        &working,
+        64 << 20,
+        crate::confirmed_replay::snapshot::history::DurableHistoryInputs::reservation(map_bytes)
+            .unwrap(),
+    )
+    .unwrap();
     let started = Instant::now();
     let report = |stage: &str| {
         let status = std::fs::read_to_string("/proc/self/status").unwrap();
-        let fields: Vec<_> = status.lines().filter(|line| line.starts_with("VmRSS:") || line.starts_with("VmHWM:")).collect();
+        let fields: Vec<_> = status
+            .lines()
+            .filter(|line| line.starts_with("VmRSS:") || line.starts_with("VmHWM:"))
+            .collect();
         eprintln!("SIGNED_CLOSURE accounts={accounts} stage={stage} elapsed_ms={} scratch_bytes={} scratch_capacity={} {}",
             started.elapsed().as_millis(), limit.used_temporary_bytes().unwrap(), limit.temporary_capacity(), fields.join(" "));
         if std::env::var_os("BURST_SCRATCH_ALLOCATION_DIAGNOSTIC").is_some() {
@@ -666,14 +827,26 @@ async fn snapshot_retained_body_closure_resource_probe() {
         }
     };
     report("before-recovery");
-    let registry = Arc::new(tokio::sync::RwLock::new(crate::connection_registry::ConnectionRegistry::new()));
+    let registry = Arc::new(tokio::sync::RwLock::new(
+        crate::connection_registry::ConnectionRegistry::new(),
+    ));
     registry.write().await.recovery_probe = Some(|stage| {
         let status = std::fs::read_to_string("/proc/self/status").unwrap();
-        let rss = status.lines().find(|line| line.starts_with("VmRSS:")).unwrap();
+        let rss = status
+            .lines()
+            .find(|line| line.starts_with("VmRSS:"))
+            .unwrap();
         eprintln!("SIGNED_RECOVERY stage={stage} {rss}");
     });
-    let recovered = installed::recover_metadata_with_durable_inputs(store.clone(), NetworkId::Dev,
-        params, registry.clone(), Arc::new(crate::shutdown::ShutdownController::new()), Some((limit.clone(), map_bytes))).await;
+    let recovered = installed::recover_metadata_with_durable_inputs(
+        store.clone(),
+        NetworkId::Dev,
+        params,
+        registry.clone(),
+        Arc::new(crate::shutdown::ShutdownController::new()),
+        Some((limit.clone(), map_bytes)),
+    )
+    .await;
     report("recovery-returned");
     let checked = match recovered.unwrap() {
         installed::StartupRecovery::Ready(Some(checked)) => checked,
@@ -682,18 +855,33 @@ async fn snapshot_retained_body_closure_resource_probe() {
     assert_eq!(checked.recovered().continuation.anchor().hash(), epoch);
     assert!(checked.recovered().continuation.state().accounts.len() >= accounts as usize);
     if let Some(expected) = verified_humans {
-        assert_eq!(checked.recovered().continuation.anchor().roster().total_humans(), u64::from(expected));
-        assert_eq!(checked.recovered().continuation.state().accounts.len(), expected as usize);
+        assert_eq!(
+            checked
+                .recovered()
+                .continuation
+                .anchor()
+                .roster()
+                .total_humans(),
+            u64::from(expected)
+        );
+        assert_eq!(
+            checked.recovered().continuation.state().accounts.len(),
+            expected as usize
+        );
     }
     let cutoff = checked.recovered().continuation.anchor().cutoff();
     if migration_only {
-        let projected = checked.project_token_indexes_with_stable_holdings(&store, Timestamp::new(cutoff));
+        let projected =
+            checked.project_token_indexes_with_stable_holdings(&store, Timestamp::new(cutoff));
         report("migration-projected");
         let staged = projected.unwrap().stage_undo();
         report("migration-staged");
         let staged = staged.unwrap();
         assert_eq!(staged.runtime().anchor.hash(), epoch);
-        assert_eq!(staged.runtime().anchor.roster().total_humans(), u64::from(accounts));
+        assert_eq!(
+            staged.runtime().anchor.roster().total_humans(),
+            u64::from(accounts)
+        );
         staged.commit_for_test().unwrap();
         store.force_sync().unwrap();
         report("migration-committed");
@@ -708,8 +896,13 @@ async fn snapshot_retained_body_closure_resource_probe() {
             assert!(writer.uses_governance_records().unwrap());
         }
         assert_eq!(store.meta_store().payment_epoch().unwrap(), epoch);
-        let baseline = std::path::PathBuf::from(std::env::var_os("BURST_SNAPSHOT_NODE_BASELINE").unwrap());
-        std::fs::copy(baseline.join("resource-probe.bin"), working.join("resource-probe.bin")).unwrap();
+        let baseline =
+            std::path::PathBuf::from(std::env::var_os("BURST_SNAPSHOT_NODE_BASELINE").unwrap());
+        std::fs::copy(
+            baseline.join("resource-probe.bin"),
+            working.join("resource-probe.bin"),
+        )
+        .unwrap();
         drop(registry);
         drop(store);
         report("migration-owners-dropped");
@@ -725,7 +918,12 @@ async fn snapshot_retained_body_closure_resource_probe() {
     report("roots-returned");
     let required = required.unwrap();
     let mut root_count = 0u64;
-    required.visit_roots(|_| { root_count += 1; Ok(()) }).unwrap();
+    required
+        .visit_roots(|_| {
+            root_count += 1;
+            Ok(())
+        })
+        .unwrap();
     assert!(root_count >= accounts as u64);
     eprintln!("SIGNED_CLOSURE root_count={root_count}");
     report("roots-enumerated");
@@ -733,26 +931,37 @@ async fn snapshot_retained_body_closure_resource_probe() {
     report("closure-returned");
     let closed = closed.unwrap();
     assert!(closed.work().bodies >= root_count);
-    eprintln!("SIGNED_CLOSURE bodies={} bytes={} edges={}", closed.work().bodies, closed.work().bytes, closed.work().edges);
+    eprintln!(
+        "SIGNED_CLOSURE bodies={} bytes={} edges={}",
+        closed.work().bodies,
+        closed.work().bytes,
+        closed.work().edges
+    );
     let catalogue = closed.own_retirement(Timestamp::new(0), None, || false);
     report("catalogue-returned");
     let mut catalogue = catalogue.unwrap();
     drop(closed);
     drop(projection);
     report("detached-catalogue");
-    let (blocks, accounts_before, pending) = store.tx_begin_write().unwrap().ledger_counts().unwrap();
+    let (blocks, accounts_before, pending) =
+        store.tx_begin_write().unwrap().ledger_counts().unwrap();
     let counters = crate::ledger_cache::LedgerCache::new(blocks, accounts_before, pending);
     let before = store.block_store().block_count().unwrap();
     let mut examined = 0usize;
     loop {
         let page = catalogue.prepare_page(&store, 256, 4 << 20, 4096).unwrap();
-        assert!(page.hashes().is_empty(), "age-ineligible fixture must not delete bodies");
+        assert!(
+            page.hashes().is_empty(),
+            "age-ineligible fixture must not delete bodies"
+        );
         let progress = page.progress();
         assert!(progress.examined > 0 && progress.examined <= 4096);
         assert!(progress.blocked_body_bytes.is_none());
         examined += progress.examined;
         assert_eq!(page.commit_counted(&store, &counters).unwrap(), (0, 0));
-        if progress.complete { break; }
+        if progress.complete {
+            break;
+        }
     }
     assert_eq!(examined as u64, before);
     assert_eq!(store.block_store().block_count().unwrap(), before);
@@ -762,28 +971,42 @@ async fn snapshot_retained_body_closure_resource_probe() {
     drop(registry);
     report("owners-dropped");
     assert_eq!(limit.used_temporary_bytes().unwrap(), 0);
-    eprintln!("CLOSURE_SCOPE accounts={accounts} full_node_readiness=false physical_deletion=false");
+    eprintln!(
+        "CLOSURE_SCOPE accounts={accounts} full_node_readiness=false physical_deletion=false"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[ignore = "capped-host cold reopen of the retained signed closure ledger; authentication only"]
 async fn snapshot_retained_reopen_recovery_resource_probe() {
     use crate::confirmed_replay::{scratch_file::ScratchLimit, snapshot::installed};
-    use std::sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}};
-    let source = std::path::PathBuf::from(std::env::var_os("BURST_SNAPSHOT_REOPEN_LEDGER")
-        .expect("set completed signed closure ledger"));
-    let baseline = std::path::PathBuf::from(std::env::var_os("BURST_SNAPSHOT_NODE_BASELINE")
-        .expect("set immutable signed fixture metadata"));
+    use std::sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    };
+    let source = std::path::PathBuf::from(
+        std::env::var_os("BURST_SNAPSHOT_REOPEN_LEDGER")
+            .expect("set completed signed closure ledger"),
+    );
+    let baseline = std::path::PathBuf::from(
+        std::env::var_os("BURST_SNAPSHOT_NODE_BASELINE")
+            .expect("set immutable signed fixture metadata"),
+    );
     let (version, params, epoch, accounts, _): (u8, ProtocolParams, BlockHash, u32, u64) =
         bincode::deserialize(&std::fs::read(baseline.join("resource-probe.bin")).unwrap()).unwrap();
     assert_eq!(version, 1);
     let verified_humans = std::env::var("BURST_SNAPSHOT_REOPEN_VERIFIED_HUMANS")
-        .map(|value| value.parse::<u32>().expect("verified human count")).ok();
+        .map(|value| value.parse::<u32>().expect("verified human count"))
+        .ok();
     let ledger_map_bytes = if let Some(expected) = verified_humans {
         assert!((4000..=100_000).contains(&expected));
         assert_eq!(accounts, expected);
-        assert_eq!(params, crate::verification_test_support::governance_fixture_params(
-            params.bootstrap_exit_threshold));
+        assert_eq!(
+            params,
+            crate::verification_test_support::governance_fixture_params(
+                params.bootstrap_exit_threshold
+            )
+        );
         retained_probe_map_size(crate::node::DEFAULT_MAP_SIZE)
     } else {
         assert_eq!(accounts, 32000);
@@ -791,7 +1014,9 @@ async fn snapshot_retained_reopen_recovery_resource_probe() {
     };
     let _ = tracing_subscriber::fmt()
         .with_env_filter("burst_node::confirmed_replay::snapshot::installed=debug")
-        .with_ansi(false).with_test_writer().try_init();
+        .with_ansi(false)
+        .with_test_writer()
+        .try_init();
     // The completed fixture used only local witnesses. Never silently discard
     // persistent inputs if a later fixture adds them: that needs a separate scope.
     let retain_inputs = match std::env::var("BURST_SNAPSHOT_REOPEN_RETAIN_INPUTS").as_deref() {
@@ -811,14 +1036,24 @@ async fn snapshot_retained_reopen_recovery_resource_probe() {
         // A new process must account for the retained map before any recovery.
         assert!(ScratchLimit::acquire(&working, 1).is_err());
     }
-    eprintln!("REOPEN_WORKING path={} retain_inputs={retain_inputs}", working.display());
+    eprintln!(
+        "REOPEN_WORKING path={} retain_inputs={retain_inputs}",
+        working.display()
+    );
     let store = Arc::new(LmdbStore::open(&working, 32, ledger_map_bytes).unwrap());
     let before = store.tx_begin_write().unwrap().ledger_counts().unwrap();
     assert_eq!(store.meta_store().payment_epoch().unwrap(), epoch);
     let map_bytes = 16 << 20;
-    let limit = ScratchLimit::acquire_reserved(&working, 64 << 20,
-        crate::confirmed_replay::snapshot::history::DurableHistoryInputs::reservation(map_bytes).unwrap()).unwrap();
-    let registry = Arc::new(tokio::sync::RwLock::new(crate::connection_registry::ConnectionRegistry::new()));
+    let limit = ScratchLimit::acquire_reserved(
+        &working,
+        64 << 20,
+        crate::confirmed_replay::snapshot::history::DurableHistoryInputs::reservation(map_bytes)
+            .unwrap(),
+    )
+    .unwrap();
+    let registry = Arc::new(tokio::sync::RwLock::new(
+        crate::connection_registry::ConnectionRegistry::new(),
+    ));
     static STAGES: Mutex<Option<(Instant, Instant, String)>> = Mutex::new(None);
     static CACHED_PAGES: AtomicU64 = AtomicU64::new(0);
     static PHYSICAL_PAGES: AtomicU64 = AtomicU64::new(0);
@@ -827,52 +1062,101 @@ async fn snapshot_retained_reopen_recovery_resource_probe() {
     PHYSICAL_PAGES.store(0, Ordering::SeqCst);
     registry.write().await.recovery_probe = Some(|stage| {
         match stage {
-            "private-recovery:inventory-cached-page" => { CACHED_PAGES.fetch_add(1, Ordering::SeqCst); return; }
-            "private-recovery:inventory-physical-page" => { PHYSICAL_PAGES.fetch_add(1, Ordering::SeqCst); return; }
+            "private-recovery:inventory-cached-page" => {
+                CACHED_PAGES.fetch_add(1, Ordering::SeqCst);
+                return;
+            }
+            "private-recovery:inventory-physical-page" => {
+                PHYSICAL_PAGES.fetch_add(1, Ordering::SeqCst);
+                return;
+            }
             _ => {}
         }
         let now = Instant::now();
         let mut previous = STAGES.lock().unwrap();
         match previous.as_ref() {
             Some((start, last, old)) if old.as_str() != stage => {
-                eprintln!("REOPEN_STAGE event={stage} previous={old} since_previous_ms={} elapsed_ms={}",
-                    now.duration_since(*last).as_millis(), now.duration_since(*start).as_millis());
+                eprintln!(
+                    "REOPEN_STAGE event={stage} previous={old} since_previous_ms={} elapsed_ms={}",
+                    now.duration_since(*last).as_millis(),
+                    now.duration_since(*start).as_millis()
+                );
                 *previous = Some((*start, now, stage.to_owned()));
             }
-            None => { eprintln!("REOPEN_STAGE event={stage} elapsed_ms=0"); *previous = Some((now, now, stage.to_owned())); }
+            None => {
+                eprintln!("REOPEN_STAGE event={stage} elapsed_ms=0");
+                *previous = Some((now, now, stage.to_owned()));
+            }
             _ => {}
         }
     });
     let started = Instant::now();
-    let checked = match installed::recover_metadata_with_durable_inputs(store.clone(), NetworkId::Dev,
-        params, registry.clone(), Arc::new(crate::shutdown::ShutdownController::new()), Some((limit.clone(), map_bytes))).await.unwrap() {
+    let checked = match installed::recover_metadata_with_durable_inputs(
+        store.clone(),
+        NetworkId::Dev,
+        params,
+        registry.clone(),
+        Arc::new(crate::shutdown::ShutdownController::new()),
+        Some((limit.clone(), map_bytes)),
+    )
+    .await
+    .unwrap()
+    {
         installed::StartupRecovery::Ready(Some(checked)) => checked,
         _ => panic!("cold reopen did not authenticate retained metadata"),
     };
     assert_eq!(checked.recovered().continuation.anchor().hash(), epoch);
     assert!(checked.recovered().continuation.state().accounts.len() >= accounts as usize);
     if let Some(expected) = verified_humans {
-        assert_eq!(checked.recovered().continuation.anchor().roster().total_humans(), u64::from(expected));
-        assert_eq!(checked.recovered().continuation.state().accounts.len(), expected as usize);
+        assert_eq!(
+            checked
+                .recovered()
+                .continuation
+                .anchor()
+                .roster()
+                .total_humans(),
+            u64::from(expected)
+        );
+        assert_eq!(
+            checked.recovered().continuation.state().accounts.len(),
+            expected as usize
+        );
         eprintln!("REOPEN_SCOPE verified_humans={expected} authentication_only=true full_node_readiness=false");
     }
-    checked.verify_unchanged(&store.tx_begin_write().unwrap()).unwrap();
-    assert_eq!(store.tx_begin_write().unwrap().ledger_counts().unwrap(), before);
+    checked
+        .verify_unchanged(&store.tx_begin_write().unwrap())
+        .unwrap();
+    assert_eq!(
+        store.tx_begin_write().unwrap().ledger_counts().unwrap(),
+        before
+    );
     let cached = CACHED_PAGES.load(Ordering::SeqCst);
     let physical = PHYSICAL_PAGES.load(Ordering::SeqCst);
     if retain_inputs {
         assert!(cached >= u64::from(accounts).div_ceil(100));
-        assert_eq!(physical, 0, "retained inventory was discarded or only partially reused");
+        assert_eq!(
+            physical, 0,
+            "retained inventory was discarded or only partially reused"
+        );
     } else {
         assert_eq!(cached, 0);
         assert!(physical >= u64::from(accounts).div_ceil(100));
     }
     eprintln!("REOPEN_INVENTORY cached_pages={cached} physical_pages={physical}");
     let status = std::fs::read_to_string("/proc/self/status").unwrap();
-    let memory: Vec<_> = status.lines().filter(|line| line.starts_with("VmRSS:") || line.starts_with("VmHWM:")).collect();
-    eprintln!("REOPEN_AUTHENTICATED accounts={accounts} elapsed_ms={} scratch_bytes={} {}",
-        started.elapsed().as_millis(), limit.used_temporary_bytes().unwrap(), memory.join(" "));
-    drop(checked); drop(registry); drop(store);
+    let memory: Vec<_> = status
+        .lines()
+        .filter(|line| line.starts_with("VmRSS:") || line.starts_with("VmHWM:"))
+        .collect();
+    eprintln!(
+        "REOPEN_AUTHENTICATED accounts={accounts} elapsed_ms={} scratch_bytes={} {}",
+        started.elapsed().as_millis(),
+        limit.used_temporary_bytes().unwrap(),
+        memory.join(" ")
+    );
+    drop(checked);
+    drop(registry);
+    drop(store);
     assert_eq!(limit.used_temporary_bytes().unwrap(), 0);
     eprintln!("REOPEN_OWNERS_DROPPED scratch_bytes=0");
 }

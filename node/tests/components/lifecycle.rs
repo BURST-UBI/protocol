@@ -115,7 +115,9 @@ fn component_lifecycle_accounting_simulation() {
         2100,
     );
     let pending = pending_store.get_pending(&bob, &burn_hash).unwrap();
-    assert!(burst_node::BlockProcessor::validate_open_block(&bob_open, Some(pending.amount)).is_ok());
+    assert!(
+        burst_node::BlockProcessor::validate_open_block(&bob_open, Some(pending.amount)).is_ok()
+    );
     let bob_token = burst_node::block_economics::create_received_token(&bob_open, &pending, 10_000);
     trst.receive_token(bob_token, Timestamp::new(2100));
     pending_store.delete_pending(&bob, &burn_hash).unwrap();
@@ -197,7 +199,8 @@ fn component_lifecycle_accounting_simulation() {
 
     // Verify sybil in the orchestrator (endorse + vote) so it can be challenged.
     for i in 0..3 {
-        verification.process_endorsement(&sybil, &make_address(210 + i), 1000, &params)
+        verification
+            .process_endorsement(&sybil, &make_address(210 + i), 1000, &params)
             .unwrap();
     }
     let verifier_candidates: Vec<_> = (0u8..3).map(|i| make_address(214 + i)).collect();
@@ -205,7 +208,8 @@ fn component_lifecycle_accounting_simulation() {
         .select_verifiers(&sybil, &verifier_candidates, &[1u8; 32], &params)
         .unwrap();
     for v in &selected_verifiers {
-        verification.process_vote(&sybil, v, burst_verification::Vote::Legitimate, &params)
+        verification
+            .process_vote(&sybil, v, burst_verification::Vote::Legitimate, &params)
             .unwrap();
     }
     verification.drain_events();
@@ -238,15 +242,16 @@ fn component_lifecycle_accounting_simulation() {
         }
     ));
     assert_eq!(brn.get_wallet(&carol).unwrap().total_staked, 1000);
-    verification.initiate_challenge(
-        &sybil,
-        &carol,
-        true,
-        1000,
-        burst_verification::ChallengeReason::Fraud,
-        &params,
-    )
-    .unwrap();
+    verification
+        .initiate_challenge(
+            &sybil,
+            &carol,
+            true,
+            1000,
+            burst_verification::ChallengeReason::Fraud,
+            &params,
+        )
+        .unwrap();
 
     // Assign the fixture panel directly; its last vote emits the component outcome.
     let challenge_verifiers: Vec<_> = (0u8..3).map(|i| make_address(220 + i)).collect();
@@ -261,7 +266,8 @@ fn component_lifecycle_accounting_simulation() {
         .select_verifiers(&sybil, &challenge_verifiers, &[2u8; 32], &params)
         .unwrap();
     for (i, v) in selected_verifiers.iter().enumerate() {
-        verification.process_vote(&sybil, v, burst_verification::Vote::Illegitimate, &params)
+        verification
+            .process_vote(&sybil, v, burst_verification::Vote::Illegitimate, &params)
             .unwrap();
         if i + 1 < selected_verifiers.len() {
             assert!(verification
@@ -296,7 +302,9 @@ fn component_lifecycle_accounting_simulation() {
         );
         // Challenger stake returned in full.
         let challenger_wallet = brn.get_wallet_mut(&carol).unwrap();
-        challenger_wallet.total_staked = challenger_wallet.total_staked.saturating_sub(outcome.challenger_stake);
+        challenger_wallet.total_staked = challenger_wallet
+            .total_staked
+            .saturating_sub(outcome.challenger_stake);
         // Panel: unanimous → no dissenters → stakes unlocked, no TRST minted.
         lifecycle_simulation::resolve_verifier_outcomes(
             &mut brn,
@@ -336,7 +344,8 @@ fn component_lifecycle_accounting_simulation() {
             TxHash::ZERO,
             3200,
         );
-        let reward_token = burst_node::block_economics::create_received_token(&reward_block, &pending, 10_000);
+        let reward_token =
+            burst_node::block_economics::create_received_token(&reward_block, &pending, 10_000);
         trst.receive_token(reward_token, Timestamp::new(3200));
         pending_store.delete_pending(&carol, &reward_hash).unwrap();
     } else {
@@ -378,7 +387,9 @@ fn component_lifecycle_accounting_simulation() {
         .sum();
     assert_eq!(total_tracked, 1002);
 
-    let restored = trst.restore_by_originator(&sybil, Timestamp::new(3400)).unwrap();
+    let restored = trst
+        .restore_by_originator(&sybil, Timestamp::new(3400))
+        .unwrap();
     assert_eq!(restored.len(), 2); // bob's 250 chunk + carol's 150 chunk
     assert_eq!(
         trst.transferable_balance(&bob, Timestamp::new(3400)),
@@ -401,7 +412,8 @@ fn component_lifecycle_accounting_simulation() {
         Some(2)
     );
     // Governance extends the expiry period — expired TRST becomes money again.
-    trst.set_expiry_period(1_000_000, Timestamp::new(12_500)).unwrap();
+    trst.set_expiry_period(1_000_000, Timestamp::new(12_500))
+        .unwrap();
     assert_eq!(
         trst.transferable_balance(&bob, Timestamp::new(12_500)),
         Some(500)

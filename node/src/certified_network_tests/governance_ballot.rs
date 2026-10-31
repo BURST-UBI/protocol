@@ -13,7 +13,12 @@ async fn confirmed(clients: &[NodeClient], hash: &str) {
     }
 }
 
-async fn transact(clients: &[NodeClient], signing: &tokio::sync::Mutex<()>, signer: &KeyPair, tx: Transaction) -> String {
+async fn transact(
+    clients: &[NodeClient],
+    signing: &tokio::sync::Mutex<()>,
+    signer: &KeyPair,
+    tx: Transaction,
+) -> String {
     let _signing = signing.lock().await;
     let submitted = clients[0]
         .submit_signed(signer, &tx, TxHash::ZERO)
@@ -231,8 +236,12 @@ async fn governance_journey(check_catchup: bool, mixed: bool) {
             )
             .await;
         }
-        let traffic = mixed.then(|| mixed::Traffic::start(&initial, traffic_params, signing.clone()));
-        if let Some(traffic) = &traffic { traffic.progress(0).await; traffic.phase(1); }
+        let traffic =
+            mixed.then(|| mixed::Traffic::start(&initial, traffic_params, signing.clone()));
+        if let Some(traffic) = &traffic {
+            traffic.progress(0).await;
+            traffic.phase(1);
+        }
         let proposal_guard = signing.lock().await;
         let proposal = initial[0]
             .propose_content_signed(
@@ -271,7 +280,10 @@ async fn governance_journey(check_catchup: bool, mixed: bool) {
                 "opening the voting window is a projection, not a ledger write"
             );
         }
-        if let Some(traffic) = &traffic { traffic.progress(1).await; traffic.phase(2); }
+        if let Some(traffic) = &traffic {
+            traffic.progress(1).await;
+            traffic.phase(2);
+        }
         for (index, vote) in [(0, GovernanceVote::Yea), (2, GovernanceVote::Nay)] {
             transact(
                 &initial,
@@ -284,9 +296,14 @@ async fn governance_journey(check_catchup: bool, mixed: bool) {
             )
             .await;
         }
-        if let Some(traffic) = &traffic { traffic.progress(2).await; }
+        if let Some(traffic) = &traffic {
+            traffic.progress(2).await;
+        }
         check(&initial, &proposal.hash).await;
-        if let Some(traffic) = traffic { traffic.phase(3); traffic.finish().await; }
+        if let Some(traffic) = traffic {
+            traffic.phase(3);
+            traffic.finish().await;
+        }
         // Revocation remains available, but cannot rewrite this closed ballot.
         transact(
             &initial,

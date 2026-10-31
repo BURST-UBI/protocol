@@ -2,10 +2,10 @@
 //! Scheduling weights count blocks, not bytes or processing time. This queue
 //! computes work scores but leaves authentication and ledger admission to workers.
 
+use burst_network::{admission::peer_bucket, fair_queue::FairQueue};
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::net::IpAddr;
-use burst_network::{admission::peer_bucket, fair_queue::FairQueue};
 
 use tokio::sync::{Mutex, Notify};
 
@@ -77,7 +77,11 @@ pub fn work_difficulty(work_root: &BlockHash, nonce: u64) -> u64 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum Origin { Local, Recovery, Peer(IpAddr) }
+enum Origin {
+    Local,
+    Recovery,
+    Peer(IpAddr),
+}
 
 #[derive(Default)]
 struct ReadyQueue {
@@ -88,17 +92,24 @@ impl ReadyQueue {
     fn push(&mut self, origin: Origin, item: PrioritizedBlock) {
         let network = matches!(origin, Origin::Peer(_));
         self.network_len += usize::from(network);
-        self.scheduler.push(origin, item, if network { 1 } else { 4 });
+        self.scheduler
+            .push(origin, item, if network { 1 } else { 4 });
     }
     fn pop(&mut self) -> Option<PrioritizedBlock> {
         let (origin, item) = self.scheduler.pop()?;
         self.network_len -= usize::from(matches!(origin, Origin::Peer(_)));
         Some(item)
     }
-    fn len(&self) -> usize { self.scheduler.len() }
+    fn len(&self) -> usize {
+        self.scheduler.len()
+    }
     #[cfg(test)]
-    fn peek(&self) -> Option<&PrioritizedBlock> { self.scheduler.peek().map(|(_, item)| item) }
-    fn is_empty(&self) -> bool { self.scheduler.is_empty() }
+    fn peek(&self) -> Option<&PrioritizedBlock> {
+        self.scheduler.peek().map(|(_, item)| item)
+    }
+    fn is_empty(&self) -> bool {
+        self.scheduler.is_empty()
+    }
 }
 
 /// Local submissions and retained recovery have separate scheduling origins.
@@ -145,16 +156,26 @@ impl BlockPriorityQueue {
     }
 
     pub async fn push_from_peer(&self, block: StateBlock, address: IpAddr) -> bool {
-        self.admit(RetainedBlock { block, slot: None }, Origin::Peer(peer_bucket(address))).await.is_ok()
+        self.admit(
+            RetainedBlock { block, slot: None },
+            Origin::Peer(peer_bucket(address)),
+        )
+        .await
+        .is_ok()
     }
 
     pub async fn push_retained(&self, retained: RetainedBlock) -> bool {
-        let origin = if retained.slot.is_some() { Origin::Recovery } else { Origin::Local };
+        let origin = if retained.slot.is_some() {
+            Origin::Recovery
+        } else {
+            Origin::Local
+        };
         self.admit(retained, origin).await.is_ok()
     }
 
     pub async fn push_with_reason(&self, block: StateBlock) -> Result<(), QueueAdmissionError> {
-        self.admit(RetainedBlock { block, slot: None }, Origin::Local).await
+        self.admit(RetainedBlock { block, slot: None }, Origin::Local)
+            .await
     }
 
     fn entry(&self, retained: RetainedBlock) -> Result<PrioritizedBlock, QueueAdmissionError> {
@@ -163,27 +184,48 @@ impl BlockPriorityQueue {
         // Deduplicate the complete payload, so an invalid same-hash variant
         // cannot hide a later valid signature or work value.
         let payload_hash = burst_crypto::blake2b_256(
-            &bincode::serialize(&block).map_err(|_| QueueAdmissionError::Encoding)?);
-        Ok(PrioritizedBlock { block, slot: retained.slot, difficulty, sequence: 0,
-            enqueued_at: self.stage_log.then(std::time::Instant::now), payload_hash })
+            &bincode::serialize(&block).map_err(|_| QueueAdmissionError::Encoding)?,
+        );
+        Ok(PrioritizedBlock {
+            block,
+            slot: retained.slot,
+            difficulty,
+            sequence: 0,
+            enqueued_at: self.stage_log.then(std::time::Instant::now),
+            payload_hash,
+        })
     }
 
     fn insert(
-        &self, state: &mut QueueState,
-        mut entry: PrioritizedBlock, origin: Origin,
+        &self,
+        state: &mut QueueState,
+        mut entry: PrioritizedBlock,
+        origin: Origin,
     ) -> Result<(), QueueAdmissionError> {
-        let QueueState { ready, sequence, pending_payloads } = state;
-        if pending_payloads.contains(&entry.payload_hash) { return Ok(()); }
+        let QueueState {
+            ready,
+            sequence,
+            pending_payloads,
+        } = state;
+        if pending_payloads.contains(&entry.payload_hash) {
+            return Ok(());
+        }
         if entry.slot.is_none() {
-            if ready.len() >= self.capacity { return Err(QueueAdmissionError::Capacity); }
+            if ready.len() >= self.capacity {
+                return Err(QueueAdmissionError::Capacity);
+            }
             if matches!(origin, Origin::Peer(_)) {
                 // Leave a quarter of ingress available to local submissions;
                 // already-retained recovery carries its own global capacity.
-                let reserve = (self.capacity / 4).max(1).min(self.capacity.saturating_sub(1));
+                let reserve = (self.capacity / 4)
+                    .max(1)
+                    .min(self.capacity.saturating_sub(1));
                 let per_origin = (self.capacity / 4).clamp(1, 256);
                 if ready.network_len >= self.capacity - reserve
                     || ready.scheduler.len_for(&origin) >= per_origin
-                { return Err(QueueAdmissionError::Capacity); }
+                {
+                    return Err(QueueAdmissionError::Capacity);
+                }
             }
             if let Some(budget) = &self.retention {
                 entry.slot = Some(budget.acquire().ok_or(QueueAdmissionError::Retention)?);
@@ -196,7 +238,11 @@ impl BlockPriorityQueue {
         Ok(())
     }
 
-    async fn admit(&self, retained: RetainedBlock, origin: Origin) -> Result<(), QueueAdmissionError> {
+    async fn admit(
+        &self,
+        retained: RetainedBlock,
+        origin: Origin,
+    ) -> Result<(), QueueAdmissionError> {
         let entry = self.entry(retained)?;
         let mut guard = self.state.lock().await;
         self.insert(&mut guard, entry, origin)?;
@@ -205,7 +251,9 @@ impl BlockPriorityQueue {
         Ok(())
     }
 
-    pub fn try_push(&self, block: StateBlock) -> bool { self.try_push_with_reason(block).is_ok() }
+    pub fn try_push(&self, block: StateBlock) -> bool {
+        self.try_push_with_reason(block).is_ok()
+    }
 
     /// Compute priority/payload digest before trying the mutex; never wait for it.
     /// A contention or capacity error consumes and drops the supplied block.
@@ -214,13 +262,24 @@ impl BlockPriorityQueue {
     }
 
     pub fn try_push_retained(&self, retained: RetainedBlock) -> bool {
-        let origin = if retained.slot.is_some() { Origin::Recovery } else { Origin::Local };
+        let origin = if retained.slot.is_some() {
+            Origin::Recovery
+        } else {
+            Origin::Local
+        };
         self.try_admit(retained, origin).is_ok()
     }
 
-    fn try_admit(&self, retained: RetainedBlock, origin: Origin) -> Result<(), QueueAdmissionError> {
+    fn try_admit(
+        &self,
+        retained: RetainedBlock,
+        origin: Origin,
+    ) -> Result<(), QueueAdmissionError> {
         let entry = self.entry(retained)?;
-        let mut guard = self.state.try_lock().map_err(|_| QueueAdmissionError::Contended)?;
+        let mut guard = self
+            .state
+            .try_lock()
+            .map_err(|_| QueueAdmissionError::Contended)?;
         self.insert(&mut guard, entry, origin)?;
         drop(guard);
         self.notify.notify_one();
@@ -228,7 +287,9 @@ impl BlockPriorityQueue {
     }
 
     /// Wait for a block and drop its retention permit when returning the bare block.
-    pub async fn pop(&self) -> StateBlock { self.pop_retained().await.block }
+    pub async fn pop(&self) -> StateBlock {
+        self.pop_retained().await.block
+    }
 
     /// Wait until an entry is available and transfer its retention permit.
     /// There is no close signal or built-in timeout.
@@ -238,7 +299,9 @@ impl BlockPriorityQueue {
             let notified = self.notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if let Some(entry) = self.try_pop_retained().await { return entry; }
+            if let Some(entry) = self.try_pop_retained().await {
+                return entry;
+            }
             notified.await;
         }
     }
@@ -269,7 +332,10 @@ impl BlockPriorityQueue {
                 priority = entry.difficulty, sequence = entry.sequence, remaining,
                 elapsed_us = enqueued.elapsed().as_micros(), "ingress queue residence");
         }
-        RetainedBlock { block: entry.block, slot: entry.slot }
+        RetainedBlock {
+            block: entry.block,
+            slot: entry.slot,
+        }
     }
 
     /// Current number of blocks in the queue.
@@ -370,30 +436,77 @@ mod tests {
         let budget = BlockRetention::new(32);
         let queue = BlockPriorityQueue::with_retention(8, budget.clone());
         for (ip, first) in [("192.0.2.1", 10), ("192.0.2.2", 20), ("192.0.2.3", 30)] {
-            for nonce in first..first+2 { assert!(queue.push_from_peer(make_block_with_work(nonce), ip.parse().unwrap()).await); }
+            for nonce in first..first + 2 {
+                assert!(
+                    queue
+                        .push_from_peer(make_block_with_work(nonce), ip.parse().unwrap())
+                        .await
+                );
+            }
         }
-        assert!(!queue.push_from_peer(make_block_with_work(99), "192.0.2.4".parse().unwrap()).await);
+        assert!(
+            !queue
+                .push_from_peer(make_block_with_work(99), "192.0.2.4".parse().unwrap())
+                .await
+        );
         assert!(queue.push(make_block_with_work(40)).await);
         assert!(queue.push(make_block_with_work(41)).await);
-        assert!(queue.push_retained(RetainedBlock { block: make_block_with_work(50), slot: budget.acquire() }).await);
+        assert!(
+            queue
+                .push_retained(RetainedBlock {
+                    block: make_block_with_work(50),
+                    slot: budget.acquire()
+                })
+                .await
+        );
         let mut served = Vec::new();
-        for _ in 0..6 { served.push(queue.pop().await.work); }
+        for _ in 0..6 {
+            served.push(queue.pop().await.work);
+        }
         assert!(served.contains(&40) && served.contains(&41) && served.contains(&50));
-        for first in [10, 20, 30] { assert!(served.iter().any(|work| *work == first || *work == first + 1)); }
+        for first in [10, 20, 30] {
+            assert!(served
+                .iter()
+                .any(|work| *work == first || *work == first + 1));
+        }
     }
 
     #[tokio::test]
     async fn address_aliases_share_queue_quota_and_retries_do_not_duplicate() {
         let queue = BlockPriorityQueue::new(8);
         let first = make_block_with_work(1);
-        assert!(queue.push_from_peer(first.clone(), "192.0.2.1".parse().unwrap()).await);
-        assert!(queue.push_from_peer(first, "::ffff:192.0.2.1".parse().unwrap()).await);
-        assert!(queue.push_from_peer(make_block_with_work(2), "::ffff:192.0.2.1".parse().unwrap()).await);
-        assert!(!queue.push_from_peer(make_block_with_work(3), "192.0.2.1".parse().unwrap()).await);
-        assert!(queue.push_from_peer(make_block_with_work(4), "198.51.100.1".parse().unwrap()).await);
+        assert!(
+            queue
+                .push_from_peer(first.clone(), "192.0.2.1".parse().unwrap())
+                .await
+        );
+        assert!(
+            queue
+                .push_from_peer(first, "::ffff:192.0.2.1".parse().unwrap())
+                .await
+        );
+        assert!(
+            queue
+                .push_from_peer(make_block_with_work(2), "::ffff:192.0.2.1".parse().unwrap())
+                .await
+        );
+        assert!(
+            !queue
+                .push_from_peer(make_block_with_work(3), "192.0.2.1".parse().unwrap())
+                .await
+        );
+        assert!(
+            queue
+                .push_from_peer(make_block_with_work(4), "198.51.100.1".parse().unwrap())
+                .await
+        );
         queue.pop().await;
         assert_eq!(queue.pop().await.work, 4);
-        assert!(queue.push_from_peer(make_block_with_work(5), "192.0.2.1".parse().unwrap()).await);
+        assert!(
+            queue
+                .push_from_peer(make_block_with_work(5), "192.0.2.1".parse().unwrap())
+                .await
+        );
     }
 
     #[test]
@@ -433,16 +546,25 @@ mod tests {
         let queue = BlockPriorityQueue::with_retention(1, budget.clone());
         let block = make_block_with_work(1);
         let guard = queue.state.lock().await;
-        assert_eq!(queue.try_push_with_reason(block.clone()), Err(QueueAdmissionError::Contended));
+        assert_eq!(
+            queue.try_push_with_reason(block.clone()),
+            Err(QueueAdmissionError::Contended)
+        );
         assert!(guard.ready.is_empty());
         let first = budget.acquire().unwrap();
         let second = budget.acquire().unwrap();
         drop(guard);
-        assert_eq!(queue.try_push_with_reason(block.clone()), Err(QueueAdmissionError::Retention));
+        assert_eq!(
+            queue.try_push_with_reason(block.clone()),
+            Err(QueueAdmissionError::Retention)
+        );
         assert!(queue.is_empty().await);
         drop(first);
         assert_eq!(queue.try_push_with_reason(block.clone()), Ok(()));
-        assert_eq!(queue.try_push_with_reason(make_block_with_work(2)), Err(QueueAdmissionError::Capacity));
+        assert_eq!(
+            queue.try_push_with_reason(make_block_with_work(2)),
+            Err(QueueAdmissionError::Capacity)
+        );
         assert_eq!(queue.len().await, 1);
         assert!(budget.acquire().is_none());
         let popped = queue.try_pop_retained().await.unwrap();
@@ -673,10 +795,19 @@ mod tests {
         let queue = BlockPriorityQueue::with_retention(4, budget.clone());
         let original = make_block_with_work(11);
         assert!(queue.push(original.clone()).await);
-        for _ in 0..10 { assert!(queue.try_push(original.clone())); }
+        for _ in 0..10 {
+            assert!(queue.try_push(original.clone()));
+        }
         assert_eq!(queue.len().await, 1);
         let spare = budget.acquire().unwrap();
-        assert!(queue.push_retained(RetainedBlock { block: original.clone(), slot: Some(spare) }).await);
+        assert!(
+            queue
+                .push_retained(RetainedBlock {
+                    block: original.clone(),
+                    slot: Some(spare)
+                })
+                .await
+        );
         let mut signature = original.clone();
         signature.signature.0[0] ^= 1;
         let mut work = original.clone();
@@ -688,23 +819,40 @@ mod tests {
             assert!(queue.push(candidate.clone()).await);
         }
         assert!(budget.acquire().is_none());
-        assert!(queue.push(original.clone()).await, "identical queued payload needs no new slot");
+        assert!(
+            queue.push(original.clone()).await,
+            "identical queued payload needs no new slot"
+        );
         assert_eq!(queue.len().await, 4);
         let mut delivered = Vec::new();
         delivered.push(queue.pop().await);
         delivered.push(queue.try_pop().await.unwrap());
-        while let Some(candidate) = queue.try_pop_retained_now() { delivered.push(candidate.block); }
+        while let Some(candidate) = queue.try_pop_retained_now() {
+            delivered.push(candidate.block);
+        }
         assert_eq!(delivered.len(), 4);
         for candidate in [&original, &signature, &work, &content] {
-            assert!(delivered.iter().any(|block| bincode::serialize(block).unwrap() == bincode::serialize(candidate).unwrap()));
+            assert!(delivered
+                .iter()
+                .any(|block| bincode::serialize(block).unwrap()
+                    == bincode::serialize(candidate).unwrap()));
         }
         assert!(queue.state.lock().await.pending_payloads.is_empty());
-        assert!(queue.push(signature).await, "bad signature can arrive first");
-        assert!(queue.push(original.clone()).await, "dequeue permits identical dependency retry");
-        assert_eq!(queue.len().await, 2, "bad same-hash signature cannot hide the original");
+        assert!(
+            queue.push(signature).await,
+            "bad signature can arrive first"
+        );
+        assert!(
+            queue.push(original.clone()).await,
+            "dequeue permits identical dependency retry"
+        );
+        assert_eq!(
+            queue.len().await,
+            2,
+            "bad same-hash signature cannot hide the original"
+        );
         drop(queue.pop().await);
         drop(queue.pop().await);
         assert!(budget.acquire().is_some());
     }
-
 }

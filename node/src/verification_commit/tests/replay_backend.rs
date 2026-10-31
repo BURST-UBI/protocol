@@ -320,8 +320,7 @@ fn replayed_candidate_and_lmdb_share_stake_and_reward_transitions() {
         )
         .unwrap();
         let updated =
-            crate::ledger_updater::account_after_block(block, account, previous.brn_spent)
-                .unwrap();
+            crate::ledger_updater::account_after_block(block, account, previous.brn_spent).unwrap();
         accounts.insert(block.account.clone(), updated);
         apply(
             &mut ReplayedLedger {
@@ -399,9 +398,14 @@ fn ordinary_verification_replay_retires_creator_authority_before_a_later_revocat
     let mut metadata = HashMap::new();
     let applied = HashMap::<BlockHash, &StateBlock>::new();
     let mut replay = ReplayedLedger {
-        bootstrap: &mut phase, bootstrap_threshold: 1000,
-        mutations: None, accounts: &mut accounts, pending: &mut pending,
-        metadata: &mut metadata, applied: &applied, current: &block,
+        bootstrap: &mut phase,
+        bootstrap_threshold: 1000,
+        mutations: None,
+        accounts: &mut accounts,
+        pending: &mut pending,
+        metadata: &mut metadata,
+        applied: &applied,
+        current: &block,
     };
     let mut fiftieth = burst_store::account::AccountInfo::unopened(address(49));
     replay.put_account(&fiftieth).unwrap();

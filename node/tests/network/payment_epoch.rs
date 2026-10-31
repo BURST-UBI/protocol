@@ -12,8 +12,6 @@ use std::time::Duration;
 #[path = "payment_epoch/offline_opening.rs"]
 mod offline_opening;
 
-
-
 fn config(path: &std::path::Path) -> NodeConfig {
     let mut config = NodeConfig {
         network: NetworkId::Dev,
@@ -52,7 +50,9 @@ async fn wallet_epoch_survives_restart_and_wrong_context_cannot_enter_the_ledger
         voter.lock().await.set_representative(false);
         let shutdown = node.shutdown.clone();
         let task = tokio::spawn(async move {
-            node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+            node.start_with_services(burst_daemon::start_public_services)
+                .await
+                .unwrap();
             node.stop().await.unwrap();
         });
         let result = tokio::time::timeout(Duration::from_secs(40), async {

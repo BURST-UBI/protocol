@@ -129,7 +129,9 @@ impl PeerAdmission {
 }
 
 impl ConnectionPermit {
-    pub fn bucket(&self) -> IpAddr { self.ip }
+    pub fn bucket(&self) -> IpAddr {
+        self.ip
+    }
 
     /// Match the address bucket and direction, not the exact host or node key.
     pub fn matches(&self, ip: IpAddr, outbound: bool) -> bool {

@@ -195,54 +195,84 @@ mod tests {
     fn compare_stable_adapter(before: &TrstEngine, after: &TrstEngine) {
         use super::holding_rows;
         let mut portfolios = before.wallets.clone();
-        after.visit_portfolio_changes(before, |holder, old, new| {
-            let mut entries: BTreeMap<_, _> = holding_rows::delta(holder, None, old)?
-                .into_iter().map(|(_, row)| row.unwrap().storage_entry())
-                .collect::<Result<_, _>>()?;
-            for (old, new) in holding_rows::delta(holder, old, new)? {
-                let old = old.map(|row| row.storage_entry()).transpose()?;
-                let new = new.map(|row| row.storage_entry()).transpose()?;
-                let key = new.as_ref().or(old.as_ref()).unwrap().0.clone();
-                if let (Some(old), Some(new)) = (&old, &new) { assert_eq!(old.0, new.0); }
-                assert_eq!(entries.get(&key), old.as_ref().map(|(_, value)| value));
-                if let Some((key, value)) = new { entries.insert(key, value); }
-                else { entries.remove(&key); }
-            }
-            if new.is_some() {
-                let key = holding_rows::portfolio_keys(holder).0;
-                let header = holding_rows::Row::from_storage_entry(&key, &entries.remove(&key).unwrap())?;
-                let restored = holding_rows::restore(holder, header, entries.iter().map(|(key, value)|
-                    holding_rows::Row::from_storage_entry(key, value)), after.expiry_secs)?;
-                assert_eq!(Some(&restored), new);
-                portfolios.insert(holder.clone(), Shared::from(restored));
-            } else {
-                assert!(entries.is_empty());
-                portfolios.remove(holder);
-            }
-            Ok::<_, String>(())
-        }).unwrap();
+        after
+            .visit_portfolio_changes(before, |holder, old, new| {
+                let mut entries: BTreeMap<_, _> = holding_rows::delta(holder, None, old)?
+                    .into_iter()
+                    .map(|(_, row)| row.unwrap().storage_entry())
+                    .collect::<Result<_, _>>()?;
+                for (old, new) in holding_rows::delta(holder, old, new)? {
+                    let old = old.map(|row| row.storage_entry()).transpose()?;
+                    let new = new.map(|row| row.storage_entry()).transpose()?;
+                    let key = new.as_ref().or(old.as_ref()).unwrap().0.clone();
+                    if let (Some(old), Some(new)) = (&old, &new) {
+                        assert_eq!(old.0, new.0);
+                    }
+                    assert_eq!(entries.get(&key), old.as_ref().map(|(_, value)| value));
+                    if let Some((key, value)) = new {
+                        entries.insert(key, value);
+                    } else {
+                        entries.remove(&key);
+                    }
+                }
+                if new.is_some() {
+                    let key = holding_rows::portfolio_keys(holder).0;
+                    let header = holding_rows::Row::from_storage_entry(
+                        &key,
+                        &entries.remove(&key).unwrap(),
+                    )?;
+                    let restored = holding_rows::restore(
+                        holder,
+                        header,
+                        entries
+                            .iter()
+                            .map(|(key, value)| holding_rows::Row::from_storage_entry(key, value)),
+                        after.expiry_secs,
+                    )?;
+                    assert_eq!(Some(&restored), new);
+                    portfolios.insert(holder.clone(), Shared::from(restored));
+                } else {
+                    assert!(entries.is_empty());
+                    portfolios.remove(holder);
+                }
+                Ok::<_, String>(())
+            })
+            .unwrap();
         assert_eq!(portfolios, after.wallets);
 
         let metadata = |engine: &TrstEngine| {
-            rows(engine).into_iter().filter(|(key, _)| {
-                !key.starts_with(&format!("{}0/", WalletRecord::STORAGE_PREFIX))
-                    && !key.starts_with(&format!("{}1/", WalletRecord::STORAGE_PREFIX))
-            }).collect::<BTreeMap<_, _>>()
+            rows(engine)
+                .into_iter()
+                .filter(|(key, _)| {
+                    !key.starts_with(&format!("{}0/", WalletRecord::STORAGE_PREFIX))
+                        && !key.starts_with(&format!("{}1/", WalletRecord::STORAGE_PREFIX))
+                })
+                .collect::<BTreeMap<_, _>>()
         };
         let mut actual = metadata(before);
-        after.visit_wallet_metadata_delta(before, |old, new| {
-            for row in old.iter().chain(&new) {
-                assert!(!matches!(row, WalletRecord::Portfolio { .. } | WalletRecord::Holding { .. }));
-            }
-            let old = old.map(|row| row.storage_entry()).transpose()?;
-            let new = new.map(|row| row.storage_entry()).transpose()?;
-            let key = new.as_ref().or(old.as_ref()).unwrap().0.clone();
-            if let (Some(old), Some(new)) = (&old, &new) { assert_eq!(old.0, new.0); }
-            assert_eq!(actual.get(&key), old.as_ref().map(|(_, value)| value));
-            if let Some((key, value)) = new { actual.insert(key, value); }
-            else { actual.remove(&key); }
-            Ok::<_, String>(())
-        }).unwrap();
+        after
+            .visit_wallet_metadata_delta(before, |old, new| {
+                for row in old.iter().chain(&new) {
+                    assert!(!matches!(
+                        row,
+                        WalletRecord::Portfolio { .. } | WalletRecord::Holding { .. }
+                    ));
+                }
+                let old = old.map(|row| row.storage_entry()).transpose()?;
+                let new = new.map(|row| row.storage_entry()).transpose()?;
+                let key = new.as_ref().or(old.as_ref()).unwrap().0.clone();
+                if let (Some(old), Some(new)) = (&old, &new) {
+                    assert_eq!(old.0, new.0);
+                }
+                assert_eq!(actual.get(&key), old.as_ref().map(|(_, value)| value));
+                if let Some((key, value)) = new {
+                    actual.insert(key, value);
+                } else {
+                    actual.remove(&key);
+                }
+                Ok::<_, String>(())
+            })
+            .unwrap();
         assert_eq!(actual, metadata(after));
     }
 
@@ -348,17 +378,32 @@ mod tests {
     fn creator_history_extension_emits_only_the_new_origin() {
         let owner = WalletAddress::new("brst_history_owner");
         let mut before = TrstEngine::new();
-        let origins: SharedSet<_> = (0u64..10_000).map(|n| {
-            let mut bytes = [0u8; 32];
-            bytes[..8].copy_from_slice(&n.to_be_bytes());
-            TxHash::new(bytes)
-        }).collect();
+        let origins: SharedSet<_> = (0u64..10_000)
+            .map(|n| {
+                let mut bytes = [0u8; 32];
+                bytes[..8].copy_from_slice(&n.to_be_bytes());
+                TxHash::new(bytes)
+            })
+            .collect();
         before.wallet_origins.insert(owner.clone(), origins);
         let mut after = before.clone();
         let added = TxHash::new([255; 32]);
-        after.mint(added, WalletAddress::new("brst_receiver"), 1, owner.clone(), Timestamp::new(1)).unwrap();
+        after
+            .mint(
+                added,
+                WalletAddress::new("brst_receiver"),
+                1,
+                owner.clone(),
+                Timestamp::new(1),
+            )
+            .unwrap();
         assert!(!before.wallet_origins[&owner].contains(&added));
-        assert_eq!(after.wallet_origins[&owner].changed_keys(&before.wallet_origins[&owner]).count(), 1);
+        assert_eq!(
+            after.wallet_origins[&owner]
+                .changed_keys(&before.wallet_origins[&owner])
+                .count(),
+            1
+        );
         assert_eq!(compare(&before, &after), 1);
         let restored = TrstEngine::load_wallets(&after.save_wallets(), after.expiry_secs).unwrap();
         assert_eq!(restored.save_wallets(), after.save_wallets());
@@ -371,11 +416,13 @@ mod tests {
         let owner = WalletAddress::new("brst_history_owner");
         for population in [100u64, 1_000, 10_000, 100_000] {
             let mut before = TrstEngine::new();
-            let origins: SharedSet<_> = (0..population).map(|n| {
-                let mut bytes = [0u8; 32];
-                bytes[..8].copy_from_slice(&n.to_be_bytes());
-                TxHash::new(bytes)
-            }).collect();
+            let origins: SharedSet<_> = (0..population)
+                .map(|n| {
+                    let mut bytes = [0u8; 32];
+                    bytes[..8].copy_from_slice(&n.to_be_bytes());
+                    TxHash::new(bytes)
+                })
+                .collect();
             before.wallet_origins.insert(owner.clone(), origins);
             for replace in [false, true] {
                 for sample in 0..5 {
@@ -383,22 +430,42 @@ mod tests {
                     let start = Instant::now();
                     let mut after = before.clone();
                     if replace {
-                        after.wallet_origins.get_mut(&owner).unwrap().remove(&TxHash::ZERO);
+                        after
+                            .wallet_origins
+                            .get_mut(&owner)
+                            .unwrap()
+                            .remove(&TxHash::ZERO);
                     }
-                    after.mint(added, WalletAddress::new("brst_receiver"), 1, owner.clone(), Timestamp::new(1)).unwrap();
+                    after
+                        .mint(
+                            added,
+                            WalletAddress::new("brst_receiver"),
+                            1,
+                            owner.clone(),
+                            Timestamp::new(1),
+                        )
+                        .unwrap();
                     let mutation_ns = start.elapsed().as_nanos();
                     let mut changes = Vec::new();
                     let start = Instant::now();
-                    after.visit_wallet_record_delta(&before, |old, new| {
-                        changes.push((old, new));
-                        Ok::<_, ()>(())
-                    }).unwrap();
+                    after
+                        .visit_wallet_record_delta(&before, |old, new| {
+                            changes.push((old, new));
+                            Ok::<_, ()>(())
+                        })
+                        .unwrap();
                     let delta_ns = start.elapsed().as_nanos();
                     assert_eq!(changes.len(), if replace { 2 } else { 1 });
                     assert!(!before.wallet_origins[&owner].contains(&added));
                     assert!(before.wallet_origins[&owner].contains(&TxHash::ZERO));
-                    let encoded_bytes: usize = changes.iter().flat_map(|(a,b)| a.iter().chain(b.iter()))
-                        .map(|record| { let (key, value) = record.storage_entry().unwrap(); key.len() + value.len() }).sum();
+                    let encoded_bytes: usize = changes
+                        .iter()
+                        .flat_map(|(a, b)| a.iter().chain(b.iter()))
+                        .map(|record| {
+                            let (key, value) = record.storage_entry().unwrap();
+                            key.len() + value.len()
+                        })
+                        .sum();
                     println!("creator_history_scale population={population} replace={replace} sample={sample} mutation_ns={mutation_ns} delta_ns={delta_ns} changed_records={} encoded_bytes={encoded_bytes}", changes.len());
                 }
             }
@@ -412,7 +479,9 @@ mod tests {
         let first = WalletAddress::new("brst_first");
         let second = WalletAddress::new("brst_second");
         after.wallets.insert(first.clone(), Shared::default());
-        after.wallet_origins.insert(first.clone(), SharedSet::default());
+        after
+            .wallet_origins
+            .insert(first.clone(), SharedSet::default());
         assert_eq!(compare(&before, &after), 2);
         let before = after.clone();
         after
@@ -446,17 +515,22 @@ mod tests {
         fn holding_changes(before: &TrstEngine, after: &TrstEngine) -> (usize, usize) {
             let mut count = 0;
             let mut bytes = 0;
-            after.visit_wallet_record_delta(before, |old, new| {
-                if old.as_ref().or(new.as_ref()).is_some_and(
-                    |row| matches!(row, WalletRecord::Holding { .. })) {
-                    count += 1;
-                    for row in old.iter().chain(new.iter()) {
-                        let (key, value) = row.storage_entry().unwrap();
-                        bytes += key.len() + value.len();
+            after
+                .visit_wallet_record_delta(before, |old, new| {
+                    if old
+                        .as_ref()
+                        .or(new.as_ref())
+                        .is_some_and(|row| matches!(row, WalletRecord::Holding { .. }))
+                    {
+                        count += 1;
+                        for row in old.iter().chain(new.iter()) {
+                            let (key, value) = row.storage_entry().unwrap();
+                            bytes += key.len() + value.len();
+                        }
                     }
-                }
-                Ok::<_, ()>(())
-            }).unwrap();
+                    Ok::<_, ()>(())
+                })
+                .unwrap();
             // Check reconstruction as well as the number of positional rows changed.
             compare(before, after);
             (count, bytes)
@@ -465,8 +539,15 @@ mod tests {
         for population in [32u64, 256, 1024] {
             let mut state = TrstEngine::with_expiry(u64::MAX);
             for n in 1..=population {
-                let token = state.mint(id(n), holder.clone(), 1, holder.clone(),
-                    Timestamp::new(100 + n)).unwrap();
+                let token = state
+                    .mint(
+                        id(n),
+                        holder.clone(),
+                        1,
+                        holder.clone(),
+                        Timestamp::new(100 + n),
+                    )
+                    .unwrap();
                 state.track_token(token);
             }
             for (operation, timestamp, expected) in [
@@ -477,11 +558,21 @@ mod tests {
             ] {
                 let before = state.clone();
                 let mut after = before.clone();
-                let token = after.mint(id(population + 1), holder.clone(), 1,
-                    holder.clone(), Timestamp::new(timestamp)).unwrap();
+                let token = after
+                    .mint(
+                        id(population + 1),
+                        holder.clone(),
+                        1,
+                        holder.clone(),
+                        Timestamp::new(timestamp),
+                    )
+                    .unwrap();
                 after.track_token(token);
                 let (rows, encoded_bytes) = holding_changes(&before, &after);
-                assert_eq!(rows as u64, expected, "{operation}, population {population}");
+                assert_eq!(
+                    rows as u64, expected,
+                    "{operation}, population {population}"
+                );
                 println!("holding_row_cost population={population} operation={operation} rows={rows} old_plus_new_encoded_bytes={encoded_bytes}");
             }
             let before = state.clone();
@@ -535,7 +626,9 @@ mod tests {
         compare(&before, &state);
         assert_eq!(state.wallets[&holder].cached_transferable, 40);
         let before = state.clone();
-        state.restore_by_originator(&owners[0], Timestamp::new(160)).unwrap();
+        state
+            .restore_by_originator(&owners[0], Timestamp::new(160))
+            .unwrap();
         compare(&before, &state);
         assert_eq!(state.wallets[&holder].cached_transferable, 100);
     }

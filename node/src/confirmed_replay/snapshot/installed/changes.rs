@@ -31,7 +31,9 @@ pub struct ReplayedEconomicChange {
 
 pub(super) struct Rows {
     values: rows::ProjectionRows,
-    publication_accounts: Option<std::collections::HashMap<burst_types::WalletAddress, burst_store::account::AccountInfo>>,
+    publication_accounts: Option<
+        std::collections::HashMap<burst_types::WalletAddress, burst_store::account::AccountInfo>,
+    >,
     publication_account_rows: usize,
     publication_lifecycle: Option<std::collections::HashMap<String, Vec<u8>>>,
     bytes: usize,
@@ -158,7 +160,8 @@ impl Rows {
         if let Some(accounts) = &self.publication_accounts {
             for account in accounts.values() {
                 let mut account = account.clone();
-                account.confirmation_height = batch.get_account(&account.address)?.confirmation_height;
+                account.confirmation_height =
+                    batch.get_account(&account.address)?.confirmation_height;
                 batch.put_account_info(&account, false)?;
             }
         }
@@ -263,7 +266,9 @@ impl Rows {
             ));
         }
         self.charge_row(key.len(), value.len())?;
-        self.values.insert(table, key, value).map_err(replay_error)?;
+        self.values
+            .insert(table, key, value)
+            .map_err(replay_error)?;
         Ok(())
     }
 
@@ -271,10 +276,16 @@ impl Rows {
         self.charge_bytes(key_bytes, value_bytes)?;
         let publication = self.publication_lifecycle.is_some();
         if self.publication_account_rows > 2 * MAX_ROWS || self.wallets.len() > MAX_ROWS {
-            return Err(crate::confirmed_replay::invalid("excessive publication accounts or wallets"));
+            return Err(crate::confirmed_replay::invalid(
+                "excessive publication accounts or wallets",
+            ));
         }
         let wallet_rows = if self.complete_wallets {
-            if publication { usize::from(!self.wallets.is_empty()) } else { self.wallets.len() }
+            if publication {
+                usize::from(!self.wallets.is_empty())
+            } else {
+                self.wallets.len()
+            }
         } else {
             0
         };
@@ -283,7 +294,9 @@ impl Rows {
             .len()
             .checked_add(if publication {
                 usize::from(self.publication_account_rows > 0)
-            } else { self.publication_account_rows })
+            } else {
+                self.publication_account_rows
+            })
             .and_then(|count| count.checked_add(usize::from(self.publication_lifecycle.is_some())))
             .and_then(|count| count.checked_add(wallet_rows))
             .and_then(|count| count.checked_add(usize::from(self.governance_projection.is_some())))
@@ -302,11 +315,16 @@ impl Rows {
     fn byte_budget(&self) -> usize {
         // Publication keeps the replay maps and allows a larger byte total than
         // an undo projection. This accounting does not bound CPU time or RAM.
-        if self.publication_lifecycle.is_some() { MAX_WORK_BYTES } else { MAX_BYTES }
+        if self.publication_lifecycle.is_some() {
+            MAX_WORK_BYTES
+        } else {
+            MAX_BYTES
+        }
     }
 
     fn charge_bytes(&mut self, key_bytes: usize, value_bytes: usize) -> Result<(), ReplayError> {
-        let size = key_bytes.checked_add(value_bytes)
+        let size = key_bytes
+            .checked_add(value_bytes)
             .filter(|size| *size <= MAX_BYTES)
             .ok_or_else(|| crate::confirmed_replay::invalid("replay row exceeds byte budget"))?;
         let limit = self.byte_budget();
@@ -321,7 +339,11 @@ impl Rows {
     ) -> Result<(), ReplayError> {
         let size = bincode::serialized_size(value).map_err(replay_error)?;
         if size > MAX_BYTES.saturating_sub(key.len()) as u64
-            || size > self.byte_budget().saturating_sub(self.bytes.saturating_add(key.len())) as u64 {
+            || size
+                > self
+                    .byte_budget()
+                    .saturating_sub(self.bytes.saturating_add(key.len())) as u64
+        {
             return Err(crate::confirmed_replay::invalid(
                 "replay row exceeds byte budget",
             ));
@@ -379,15 +401,28 @@ impl Rows {
     }
 
     fn capture_publication(
-        mut state: ConfirmedReplay, cache_at: Timestamp, directory: &std::path::Path,
-        rate_records: bool, wallet_records: bool,
+        mut state: ConfirmedReplay,
+        cache_at: Timestamp,
+        directory: &std::path::Path,
+        rate_records: bool,
+        wallet_records: bool,
     ) -> Result<Self, ReplayError> {
-        let mut rows = Self::capture_projection_inner(&state, cache_at, directory, true,
-            rate_records, wallet_records, None, true)?;
+        let mut rows = Self::capture_projection_inner(
+            &state,
+            cache_at,
+            directory,
+            true,
+            rate_records,
+            wallet_records,
+            None,
+            true,
+        )?;
         let mut accounts = std::mem::take(&mut state.accounts);
         for (address, account) in &mut accounts {
             if address != &account.address {
-                return Err(crate::confirmed_replay::invalid("publication account key differs from address"));
+                return Err(crate::confirmed_replay::invalid(
+                    "publication account key differs from address",
+                ));
             }
             *account = expiry::normalized_account(account, &rows.trst, cache_at)?;
         }
@@ -412,7 +447,9 @@ impl Rows {
         rows.values = rows::ProjectionRows::bulk(directory).map_err(replay_error)?;
         if typed_publication {
             if state.accounts.len() > MAX_ROWS || state.brn.wallets.len() > MAX_ROWS {
-                return Err(crate::confirmed_replay::invalid("excessive publication accounts or wallets"));
+                return Err(crate::confirmed_replay::invalid(
+                    "excessive publication accounts or wallets",
+                ));
             }
             // capture_publication moves the lifecycle map into these rows.
             // Count its key/value bytes without building a second scratch index.
@@ -446,8 +483,9 @@ impl Rows {
         {
             if typed_publication {
                 let account = expiry.account(account)?;
-                let bytes = usize::try_from(bincode::serialized_size(&account).map_err(replay_error)?)
-                    .map_err(replay_error)?;
+                let bytes =
+                    usize::try_from(bincode::serialized_size(&account).map_err(replay_error)?)
+                        .map_err(replay_error)?;
                 rows.charge_row(address.as_str().len(), bytes)?;
                 rows.publication_account_rows += 1;
                 if account.block_count > 0 {
@@ -455,9 +493,17 @@ impl Rows {
                     rows.publication_account_rows += 1;
                 }
             } else {
-                rows.encoded(UndoTable::Accounts, address.as_str().as_bytes(), &expiry.account(account)?)?;
+                rows.encoded(
+                    UndoTable::Accounts,
+                    address.as_str().as_bytes(),
+                    &expiry.account(account)?,
+                )?;
                 if account.block_count > 0 {
-                    rows.put(UndoTable::Frontiers, address.as_str().as_bytes(), account.head.as_bytes().to_vec())?;
+                    rows.put(
+                        UndoTable::Frontiers,
+                        address.as_str().as_bytes(),
+                        account.head.as_bytes().to_vec(),
+                    )?;
                 }
             }
         }
@@ -502,8 +548,10 @@ impl Rows {
                 recorded::visit_wallet_delta(address, None, Some(wallet), |change| {
                     // Publication streams child records from retained roots.
                     // Count their encoded keys and values without indexing each proof.
-                    rows.charge_bytes(change.key.len(),
-                        change.after.as_ref().expect("new wallet row").len())
+                    rows.charge_bytes(
+                        change.key.len(),
+                        change.after.as_ref().expect("new wallet row").len(),
+                    )
                 })?;
             } else {
                 rows.encoded(UndoTable::BrnWallets, address.as_str().as_bytes(), wallet)?;
@@ -610,7 +658,9 @@ pub(super) fn derive(
     source_keyed_governance: bool,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Option<DerivedChanges>, StoreError> {
-    if cancelled() { return Ok(None); }
+    if cancelled() {
+        return Ok(None);
+    }
     if cache_at.as_secs() < recovered.continuation.anchor().cutoff() {
         return Err(invalid(
             "recovery cache clock precedes the authenticated cutoff",
@@ -645,7 +695,9 @@ pub(super) fn derive(
             &mut |before, block, state| {
                 if cancelled() {
                     interrupted = true;
-                    return Err(crate::confirmed_replay::invalid("rollback derivation cancelled"));
+                    return Err(crate::confirmed_replay::invalid(
+                        "rollback derivation cancelled",
+                    ));
                 }
                 if block.is_none() {
                     verified = Some(verified_count::full(state));
@@ -717,7 +769,12 @@ pub(super) fn derive(
                 let oracle_current = {
                     let oracle_started = std::time::Instant::now();
                     let rows = Rows::capture_projection_records(
-                        state, cache_at, directory, true, rate_records, wallet_records,
+                        state,
+                        cache_at,
+                        directory,
+                        true,
+                        rate_records,
+                        wallet_records,
                     )?;
                     oracle_time += oracle_started.elapsed();
                     rows
@@ -999,26 +1056,38 @@ pub(super) fn derive(
             },
         )
     };
-    if interrupted { return Ok(None); }
+    if interrupted {
+        return Ok(None);
+    }
     let mut state = state.map_err(invalid)?;
-    if cancelled() { return Ok(None); }
+    if cancelled() {
+        return Ok(None);
+    }
     #[cfg(test)]
     let publication_started = std::time::Instant::now();
     if !provisional.is_empty() {
         super::publication::materialize(
-            economics.state.verification.snapshot(), &mut state, &recovered.selections, directory,
+            economics.state.verification.snapshot(),
+            &mut state,
+            &recovered.selections,
+            directory,
         )?;
     }
-    if cancelled() { return Ok(None); }
+    if cancelled() {
+        return Ok(None);
+    }
     let projection_started = std::time::Instant::now();
-    let mut rows = Rows::capture_publication(state, cache_at, directory, rate_records, wallet_records)
-        .map_err(invalid)?;
+    let mut rows =
+        Rows::capture_publication(state, cache_at, directory, rate_records, wallet_records)
+            .map_err(invalid)?;
     tracing::debug!(
         elapsed_ms = projection_started.elapsed().as_millis(),
         rows = rows.values.len(),
         "recovery publication captured projection rows"
     );
-    if cancelled() { return Ok(None); }
+    if cancelled() {
+        return Ok(None);
+    }
     rows.stable_holdings = stable_holdings;
     rows.source_stable_holdings = source_stable_holdings;
     rows.source_rate_records = source_rate_records;
@@ -1109,7 +1178,12 @@ mod tests {
                 batch.commit().unwrap();
             }
             let mut rows = Rows::new(directory.path()).unwrap();
-            rows.put(UndoTable::Meta, b"verified_count", 0u64.to_be_bytes().to_vec()).unwrap();
+            rows.put(
+                UndoTable::Meta,
+                b"verified_count",
+                0u64.to_be_bytes().to_vec(),
+            )
+            .unwrap();
             rows.governance_projection = Some(engine.clone());
             rows.source_keyed_governance = Some(false);
             rows.keyed_governance = true;
@@ -1117,20 +1191,38 @@ mod tests {
                 let mut batch = store.tx_begin_write().unwrap();
                 rows.stage_caches(&mut batch).unwrap();
                 assert!(batch.uses_governance_records().unwrap());
-                assert!(batch.undo_value_ref(UndoTable::BrnMeta, b"governance_engine").unwrap().is_none());
-                assert_eq!(bincode::serialize(&crate::governance_storage::load(&batch).unwrap().unwrap()).unwrap(), expected);
-                if commit { batch.commit().unwrap(); } else {
+                assert!(batch
+                    .undo_value_ref(UndoTable::BrnMeta, b"governance_engine")
+                    .unwrap()
+                    .is_none());
+                assert_eq!(
+                    bincode::serialize(&crate::governance_storage::load(&batch).unwrap().unwrap())
+                        .unwrap(),
+                    expected
+                );
+                if commit {
+                    batch.commit().unwrap();
+                } else {
                     drop(batch);
                     let batch = store.tx_begin_write().unwrap();
                     assert!(!batch.uses_governance_records().unwrap());
-                    assert_eq!(batch.undo_value(UndoTable::BrnMeta, b"governance_engine").unwrap(), legacy_present.then(|| expected.clone()));
+                    assert_eq!(
+                        batch
+                            .undo_value(UndoTable::BrnMeta, b"governance_engine")
+                            .unwrap(),
+                        legacy_present.then(|| expected.clone())
+                    );
                 }
             }
             drop(store);
             let reopened = LmdbStore::open(directory.path(), 32, 16 << 20).unwrap();
             let batch = reopened.tx_begin_write().unwrap();
             assert!(batch.uses_governance_records().unwrap());
-            assert_eq!(bincode::serialize(&crate::governance_storage::load(&batch).unwrap().unwrap()).unwrap(), expected);
+            assert_eq!(
+                bincode::serialize(&crate::governance_storage::load(&batch).unwrap().unwrap())
+                    .unwrap(),
+                expected
+            );
         }
     }
 
@@ -1332,7 +1424,11 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let store = LmdbStore::open(directory.path(), 64, 32 << 20).unwrap();
         let mut state = crate::confirmed_replay::snapshot::SnapshotContinuation::from_genesis(
-            burst_types::NetworkId::Dev, &burst_types::ProtocolParams::default()).unwrap().into_state();
+            burst_types::NetworkId::Dev,
+            &burst_types::ProtocolParams::default(),
+        )
+        .unwrap()
+        .into_state();
         let prototype = state.accounts.values().next().unwrap().clone();
         for n in 1..=1024u64 {
             let mut account = prototype.clone();
@@ -1344,7 +1440,8 @@ mod tests {
         }
         for n in 0..1024 {
             state.lifecycle_metadata.insert(
-                format!("verification_identity_source/v1/brst_projection_{n}"), vec![n as u8; 32],
+                format!("verification_identity_source/v1/brst_projection_{n}"),
+                vec![n as u8; 32],
             );
         }
         let expected_metadata = state.lifecycle_metadata.clone();
@@ -1362,31 +1459,62 @@ mod tests {
         let expected_bytes = legacy.bytes;
         let mut batch = store.tx_begin_write().unwrap();
         legacy.stage_caches(&mut batch).unwrap();
-        let expected: Vec<_> = state.accounts.keys().map(|address| {
-            (address.clone(), batch.get_account(address).unwrap())
-        }).collect();
+        let expected: Vec<_> = state
+            .accounts
+            .keys()
+            .map(|address| (address.clone(), batch.get_account(address).unwrap()))
+            .collect();
         drop(batch);
         drop(legacy);
         let address = expected[0].0.clone();
-        let allocation = state.accounts.get(&address).unwrap() as *const burst_store::account::AccountInfo;
-        let limit = crate::confirmed_replay::scratch_file::ScratchLimit::acquire(directory.path(), 128 << 10).unwrap();
+        let allocation =
+            state.accounts.get(&address).unwrap() as *const burst_store::account::AccountInfo;
+        let limit = crate::confirmed_replay::scratch_file::ScratchLimit::acquire(
+            directory.path(),
+            128 << 10,
+        )
+        .unwrap();
         let rows = Rows::capture_publication(state, at, directory.path(), false, false).unwrap();
-        assert_eq!(rows.bytes, expected_bytes, "typed publication must keep all logical byte charges");
+        assert_eq!(
+            rows.bytes, expected_bytes,
+            "typed publication must keep all logical byte charges"
+        );
         assert_eq!(rows.publication_account_rows, 2 * expected.len());
-        assert_eq!(rows.publication_lifecycle.as_ref().unwrap(), &expected_metadata);
-        assert_eq!(rows.publication_lifecycle.as_ref().unwrap()[&metadata_key].as_ptr(), metadata_allocation,
-            "publication must transfer metadata values, not clone them");
-        assert_eq!(rows.publication_accounts.as_ref().unwrap().get(&address).unwrap() as *const _, allocation,
-            "publication must transfer the replay map, not clone it");
-        rows.values.visit(|table, key, _| {
-            assert!(!matches!(table, UndoTable::Accounts | UndoTable::Frontiers));
-            assert!(!(table == UndoTable::Meta && key.starts_with(b"verification_identity_source/")));
-            Ok(())
-        }).unwrap();
+        assert_eq!(
+            rows.publication_lifecycle.as_ref().unwrap(),
+            &expected_metadata
+        );
+        assert_eq!(
+            rows.publication_lifecycle.as_ref().unwrap()[&metadata_key].as_ptr(),
+            metadata_allocation,
+            "publication must transfer metadata values, not clone them"
+        );
+        assert_eq!(
+            rows.publication_accounts
+                .as_ref()
+                .unwrap()
+                .get(&address)
+                .unwrap() as *const _,
+            allocation,
+            "publication must transfer the replay map, not clone it"
+        );
+        rows.values
+            .visit(|table, key, _| {
+                assert!(!matches!(table, UndoTable::Accounts | UndoTable::Frontiers));
+                assert!(
+                    !(table == UndoTable::Meta
+                        && key.starts_with(b"verification_identity_source/"))
+                );
+                Ok(())
+            })
+            .unwrap();
         for commit in [false, true] {
             let mut batch = store.tx_begin_write().unwrap();
             for key in expected_metadata.keys() {
-                assert!(batch.get_meta(key).unwrap().is_none(), "aborted metadata must not leak");
+                assert!(
+                    batch.get_meta(key).unwrap().is_none(),
+                    "aborted metadata must not leak"
+                );
             }
             rows.stage_caches(&mut batch).unwrap();
             for (key, value) in &expected_metadata {
@@ -1396,7 +1524,9 @@ mod tests {
                 assert_eq!(&batch.get_account(address).unwrap(), account);
                 assert_eq!(account.confirmation_height, 0);
             }
-            if commit { batch.commit().unwrap(); }
+            if commit {
+                batch.commit().unwrap();
+            }
         }
         drop(rows);
         assert_eq!(limit.used_temporary_bytes().unwrap(), 0);
@@ -1404,7 +1534,11 @@ mod tests {
         rejected.publication_account_rows = 2 * MAX_ROWS + 1;
         assert!(rejected.put(UndoTable::Meta, b"overflow", vec![1]).is_err());
         let mut batch = store.tx_begin_write().unwrap();
-        assert!(rejected.stage_caches(&mut batch).unwrap_err().to_string().contains("incomplete typed account"));
+        assert!(rejected
+            .stage_caches(&mut batch)
+            .unwrap_err()
+            .to_string()
+            .contains("incomplete typed account"));
     }
 
     #[test]
@@ -1412,23 +1546,38 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let store = LmdbStore::open(directory.path(), 64, crate::node::DEFAULT_MAP_SIZE).unwrap();
         let mut state = crate::confirmed_replay::snapshot::SnapshotContinuation::from_genesis(
-            burst_types::NetworkId::Dev, &burst_types::ProtocolParams::default()).unwrap().into_state();
+            burst_types::NetworkId::Dev,
+            &burst_types::ProtocolParams::default(),
+        )
+        .unwrap()
+        .into_state();
         let prototype = state.accounts.values().next().unwrap().clone();
         for n in 1..100_000u64 {
             let mut account = prototype.clone();
             account.address = burst_types::WalletAddress::new(format!("brst_{n:060}"));
-            state.brn.wallets.insert(account.address.clone(), burst_brn::BrnWalletState::new(state.cutoff));
+            state.brn.wallets.insert(
+                account.address.clone(),
+                burst_brn::BrnWalletState::new(state.cutoff),
+            );
             let address = account.address.clone();
             state.accounts.insert(account.address.clone(), account);
-            for prefix in ["verification_identity_source", "verification_identity_binding", "verification_identity_bound"] {
-                state.lifecycle_metadata.insert(format!("{prefix}/v1/{address}"), vec![1; 32]);
+            for prefix in [
+                "verification_identity_source",
+                "verification_identity_binding",
+                "verification_identity_bound",
+            ] {
+                state
+                    .lifecycle_metadata
+                    .insert(format!("{prefix}/v1/{address}"), vec![1; 32]);
             }
         }
         let at = state.cutoff;
         let count = state.projected_lifecycle_metadata().count();
         assert!(2 * state.accounts.len() + count > MAX_ROWS);
-        assert!(Rows::capture(&state, at, directory.path(), false).is_err(),
-            "full delta capture retains its aggregate row limit");
+        assert!(
+            Rows::capture(&state, at, directory.path(), false).is_err(),
+            "full delta capture retains its aggregate row limit"
+        );
         let mut batch = store.tx_begin_write().unwrap();
         for account in state.accounts.values() {
             let mut account = account.clone();
@@ -1436,25 +1585,52 @@ mod tests {
             batch.put_account_info(&account, false).unwrap();
         }
         batch.begin_brn_wallet_records_projection().unwrap();
-        batch.put_brn_meta(b"next_stake_id", &state.brn.next_stake_id().to_be_bytes()).unwrap();
-        batch.put_brn_meta(b"rate_history", &bincode::serialize(&state.brn.rate_history).unwrap()).unwrap();
+        batch
+            .put_brn_meta(b"next_stake_id", &state.brn.next_stake_id().to_be_bytes())
+            .unwrap();
+        batch
+            .put_brn_meta(
+                b"rate_history",
+                &bincode::serialize(&state.brn.rate_history).unwrap(),
+            )
+            .unwrap();
         batch.commit().unwrap();
-        let limit = crate::confirmed_replay::scratch_file::ScratchLimit::acquire(directory.path(), 128 << 10).unwrap();
+        let limit = crate::confirmed_replay::scratch_file::ScratchLimit::acquire(
+            directory.path(),
+            128 << 10,
+        )
+        .unwrap();
         let rows = Rows::capture_publication(state, at, directory.path(), false, true).unwrap();
         assert_eq!(rows.publication_lifecycle.as_ref().unwrap().len(), count);
         assert_eq!(rows.publication_accounts.as_ref().unwrap().len(), 100_000);
         assert_eq!(rows.wallets.len(), 100_000);
-        assert!(rows.bytes > MAX_BYTES, "exercise streamed publication beyond one undo image");
+        assert!(
+            rows.bytes > MAX_BYTES,
+            "exercise streamed publication beyond one undo image"
+        );
         assert!(rows.bytes < MAX_WORK_BYTES);
-        assert!(rows.values.len() < 32, "lifecycle rows must not enter the scratch index");
+        assert!(
+            rows.values.len() < 32,
+            "lifecycle rows must not enter the scratch index"
+        );
         for commit in [false, true] {
             let mut batch = store.tx_begin_write().unwrap();
-            assert!(batch.read_brn_engine(MAX_ROWS, MAX_BYTES).unwrap().wallets.is_empty());
+            assert!(batch
+                .read_brn_engine(MAX_ROWS, MAX_BYTES)
+                .unwrap()
+                .wallets
+                .is_empty());
             for key in rows.publication_lifecycle.as_ref().unwrap().keys() {
-                assert!(batch.get_meta(key).unwrap().is_none(), "aborted metadata must not leak");
+                assert!(
+                    batch.get_meta(key).unwrap().is_none(),
+                    "aborted metadata must not leak"
+                );
             }
             rows.stage_caches(&mut batch).unwrap();
-            assert_eq!(batch.read_brn_engine(MAX_ROWS, MAX_BYTES).unwrap().wallets, rows.wallets);
+            assert_eq!(
+                batch.read_brn_engine(MAX_ROWS, MAX_BYTES).unwrap().wallets,
+                rows.wallets
+            );
             for (key, value) in rows.publication_lifecycle.as_ref().unwrap() {
                 assert_eq!(batch.get_meta(key).unwrap().as_ref(), Some(value));
             }
@@ -1463,10 +1639,15 @@ mod tests {
                 expected.confirmation_height = 0;
                 assert_eq!(batch.get_account(&account.address).unwrap(), expected);
             }
-            if commit { batch.commit().unwrap(); }
+            if commit {
+                batch.commit().unwrap();
+            }
         }
         let batch = store.tx_begin_write().unwrap();
-        assert_eq!(batch.read_brn_engine(MAX_ROWS, MAX_BYTES).unwrap().wallets, rows.wallets);
+        assert_eq!(
+            batch.read_brn_engine(MAX_ROWS, MAX_BYTES).unwrap().wallets,
+            rows.wallets
+        );
         assert_eq!(batch.account_entries().unwrap().count(), 100_000);
         for (key, value) in rows.publication_lifecycle.as_ref().unwrap() {
             assert_eq!(batch.get_meta(key).unwrap().as_ref(), Some(value));

@@ -11,12 +11,19 @@ pub(crate) struct BasisCutLookup<'a> {
 
 #[cfg(test)]
 impl BasisCutLookup<'_> {
-    pub(crate) fn cut(&mut self, origin: &TxHash, basis: TrstBasis, amount: u128, tainted: u128) -> u128 {
+    pub(crate) fn cut(
+        &mut self,
+        origin: &TxHash,
+        basis: TrstBasis,
+        amount: u128,
+        tainted: u128,
+    ) -> u128 {
         let graph = self.graph;
         let revoked = self.revoked;
         let answers = &mut self.answers;
-        graph.basis_cut_using(origin, basis, amount, &revoked, tainted,
-            |revision| graph.revoked_at_cached(revision, &revoked, answers))
+        graph.basis_cut_using(origin, basis, amount, &revoked, tainted, |revision| {
+            graph.revoked_at_cached(revision, &revoked, answers)
+        })
     }
 }
 
@@ -27,7 +34,9 @@ impl MergerGraph {
     /// Requires an already validated, acyclic revision chain: missing records
     /// panic, and this lookup does not check that the basis belongs to a merge.
     pub(crate) fn basis_excludes_all(
-        &self, basis: TrstBasis, origins: impl IntoIterator<Item = TxHash>,
+        &self,
+        basis: TrstBasis,
+        origins: impl IntoIterator<Item = TxHash>,
     ) -> bool {
         let mut origins = origins.into_iter();
         match basis {
@@ -38,7 +47,9 @@ impl MergerGraph {
                 while !unresolved.is_empty() && revision != TxHash::ZERO {
                     #[cfg(test)]
                     super::REVISION_VISITS.with(|probe| {
-                        if let Some(count) = probe.get() { probe.set(Some(count + 1)); }
+                        if let Some(count) = probe.get() {
+                            probe.set(Some(count + 1));
+                        }
                     });
                     let state = &self.revisions[&revision];
                     if unresolved.remove(&state.origin) && !state.revoked {
@@ -52,16 +63,26 @@ impl MergerGraph {
     }
 
     pub(crate) fn basis_cut_cached(
-        &self, origin: &TxHash, basis: TrstBasis, amount: u128,
-        revoked: &TxHash, tainted: u128, answers: &mut HashMap<TxHash, bool>,
+        &self,
+        origin: &TxHash,
+        basis: TrstBasis,
+        amount: u128,
+        revoked: &TxHash,
+        tainted: u128,
+        answers: &mut HashMap<TxHash, bool>,
     ) -> u128 {
-        self.basis_cut_using(origin, basis, amount, revoked, tainted,
-            |revision| self.revoked_at_cached(revision, revoked, answers))
+        self.basis_cut_using(origin, basis, amount, revoked, tainted, |revision| {
+            self.revoked_at_cached(revision, revoked, answers)
+        })
     }
 
     #[cfg(test)]
     pub(crate) fn basis_cut_lookup(&self, revoked: TxHash) -> BasisCutLookup<'_> {
-        BasisCutLookup { graph: self, revoked, answers: HashMap::new() }
+        BasisCutLookup {
+            graph: self,
+            revoked,
+            answers: HashMap::new(),
+        }
     }
 }
 
@@ -101,7 +122,9 @@ impl MergerGraph {
             }
             #[cfg(test)]
             super::REVISION_VISITS.with(|probe| {
-                if let Some(count) = probe.get() { probe.set(Some(count + 1)); }
+                if let Some(count) = probe.get() {
+                    probe.set(Some(count + 1));
+                }
             });
             path.push(revision);
             let state = &self.revisions[&revision];
@@ -196,8 +219,11 @@ mod tests {
         let mut previous = TxHash::ZERO;
         for n in 0..1024 {
             let state = RevocationRevision {
-                merge_tx: hash(2000), previous, origin: hash(n % 256 + 1),
-                revoked: n >= 768, remaining: 100,
+                merge_tx: hash(2000),
+                previous,
+                origin: hash(n % 256 + 1),
+                revoked: n >= 768,
+                remaining: 100,
             };
             previous = state.hash();
             graph.revisions.insert(previous, state);
@@ -208,17 +234,34 @@ mod tests {
         assert!(graph.basis_excludes_all(basis, origins.iter().copied()));
         let visits = super::super::REVISION_VISITS.with(|probe| probe.replace(None).unwrap());
         assert_eq!(visits, 256, "stop when every origin has its latest answer");
-        for basis in [basis, TrstBasis::Remainder(TxHash::ZERO),
-            TrstBasis::Entire, TrstBasis::Single(hash(1))] {
-            for queries in [vec![], origins.clone(), vec![hash(1), hash(1)],
-                vec![hash(4000)], vec![hash(1), hash(4000)]] {
-                assert_eq!(graph.basis_excludes_all(basis, queries.iter().copied()),
-                    queries.iter().all(|origin| graph.basis_excludes(basis, origin)));
+        for basis in [
+            basis,
+            TrstBasis::Remainder(TxHash::ZERO),
+            TrstBasis::Entire,
+            TrstBasis::Single(hash(1)),
+        ] {
+            for queries in [
+                vec![],
+                origins.clone(),
+                vec![hash(1), hash(1)],
+                vec![hash(4000)],
+                vec![hash(1), hash(4000)],
+            ] {
+                assert_eq!(
+                    graph.basis_excludes_all(basis, queries.iter().copied()),
+                    queries
+                        .iter()
+                        .all(|origin| graph.basis_excludes(basis, origin))
+                );
             }
         }
         // A newer restoration takes precedence over all older revocations.
         let state = RevocationRevision {
-            merge_tx: hash(2000), previous, origin: hash(1), revoked: false, remaining: 100,
+            merge_tx: hash(2000),
+            previous,
+            origin: hash(1),
+            revoked: false,
+            remaining: 100,
         };
         previous = state.hash();
         graph.revisions.insert(previous, state);
@@ -235,11 +278,25 @@ mod tests {
         let merge = TxHash::new([9; 32]);
         let mut graph = MergerGraph::new();
         graph.record_merge(MergeNode {
-            merge_tx: merge, total_amount: 100,
-            source_origins: vec![MergeSource { origin: first, amount: 40 }, MergeSource { origin: second, amount: 60 }],
+            merge_tx: merge,
+            total_amount: 100,
+            source_origins: vec![
+                MergeSource {
+                    origin: first,
+                    amount: 40,
+                },
+                MergeSource {
+                    origin: second,
+                    amount: 60,
+                },
+            ],
             revoked_contribs: HashMap::new(),
         });
-        let mut bases = vec![TrstBasis::Entire, TrstBasis::Single(first), TrstBasis::Single(second)];
+        let mut bases = vec![
+            TrstBasis::Entire,
+            TrstBasis::Single(first),
+            TrstBasis::Single(second),
+        ];
         for _ in 0..64 {
             graph.apply_revocation(first);
             bases.push(graph.current_basis(&merge));
@@ -253,8 +310,10 @@ mod tests {
             for basis in bases.iter().rev().chain(bases.iter()) {
                 for amount in [0, 1, 7, 100, u128::MAX] {
                     for tainted in [0, 1, 40, 60, 100] {
-                        assert_eq!(lookup.cut(&merge, *basis, amount, tainted),
-                            graph.basis_cut(&merge, *basis, amount, &revoked, tainted));
+                        assert_eq!(
+                            lookup.cut(&merge, *basis, amount, tainted),
+                            graph.basis_cut(&merge, *basis, amount, &revoked, tainted)
+                        );
                     }
                 }
                 // Appending generated remainders cannot change the lookup's prior cut.
@@ -276,10 +335,17 @@ mod tests {
         for history in [100usize, 1_000, 10_000] {
             let mut graph = MergerGraph::new();
             graph.record_merge(MergeNode {
-                merge_tx: merge, total_amount: 100,
+                merge_tx: merge,
+                total_amount: 100,
                 source_origins: vec![
-                    MergeSource { origin: first, amount: 40 },
-                    MergeSource { origin: target, amount: 60 },
+                    MergeSource {
+                        origin: first,
+                        amount: 40,
+                    },
+                    MergeSource {
+                        origin: target,
+                        amount: 60,
+                    },
                 ],
                 revoked_contribs: HashMap::new(),
             });
@@ -294,15 +360,17 @@ mod tests {
             for queries in [1usize, 100, 1_000] {
                 for sample in 0..3 {
                     let start = Instant::now();
-                    let direct: u128 = (0..queries).map(|_| {
-                        std::hint::black_box(&graph).basis_cut(&merge, basis, 10, &target, 60)
-                    }).sum();
+                    let direct: u128 = (0..queries)
+                        .map(|_| {
+                            std::hint::black_box(&graph).basis_cut(&merge, basis, 10, &target, 60)
+                        })
+                        .sum();
                     let direct_ns = start.elapsed().as_nanos();
                     let mut lookup = graph.basis_cut_lookup(target);
                     let start = Instant::now();
-                    let cached: u128 = (0..queries).map(|_| {
-                        lookup.cut(&merge, basis, 10, 60)
-                    }).sum();
+                    let cached: u128 = (0..queries)
+                        .map(|_| lookup.cut(&merge, basis, 10, 60))
+                        .sum();
                     let cached_ns = start.elapsed().as_nanos();
                     assert_eq!(direct, 6 * queries as u128);
                     assert_eq!(cached, direct);
@@ -312,5 +380,4 @@ mod tests {
             }
         }
     }
-
 }

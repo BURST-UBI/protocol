@@ -1,8 +1,8 @@
 use super::origin_history::MAX_ROWS;
 use crate::error::RpcError;
 use burst_trst::{MergerGraph, WalletPortfolio};
-use burst_utils::{Shared, SharedMap};
 use burst_types::{TxHash, WalletAddress};
+use burst_utils::{Shared, SharedMap};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 const MAX_HOLDING_WORK: usize = 131_072;

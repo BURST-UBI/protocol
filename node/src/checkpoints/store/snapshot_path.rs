@@ -1,5 +1,5 @@
-use crate::checkpoint_store::record_storage;
 use super::*;
+use crate::checkpoint_store::record_storage;
 use burst_store_lmdb::LmdbWriteTransaction;
 
 /// Compare already accepted local certificates with a separately authenticated
@@ -51,8 +51,13 @@ fn reconcile_records(
             return Err(invalid("invalid local checkpoint height"));
         }
         present.insert(height);
-        let bytes = record_storage::decode_stored(key, bytes, |name| batch.get_meta(name),
-            |hash| batch.read_view().checkpoint_head_node(hash), MAX_CHAIN_BYTES - used)?;
+        let bytes = record_storage::decode_stored(
+            key,
+            bytes,
+            |name| batch.get_meta(name),
+            |hash| batch.read_view().checkpoint_head_node(hash),
+            MAX_CHAIN_BYTES - used,
+        )?;
         used = used
             .checked_add(bytes.len())
             .filter(|size| *size <= MAX_CHAIN_BYTES)
@@ -148,7 +153,8 @@ pub(crate) fn stage_snapshot_head(
     if anchor.height() == 0 {
         return Err(invalid("invalid snapshot checkpoint height"));
     }
-    record_storage::put(batch,
+    record_storage::put(
+        batch,
         &format!("{}/head", prefix(&anchor)),
         &anchor.height().to_be_bytes(),
     )?;
@@ -181,11 +187,21 @@ impl SnapshotRecords {
         if self.epoch != snapshot.anchor().hash() {
             return Err(invalid("record retirement belongs to another snapshot"));
         }
-        let required = self.records.iter().filter_map(|record| record.selection).collect();
-        let mut selections = snapshot.recover_selections_for(&required).map_err(invalid)?;
+        let required = self
+            .records
+            .iter()
+            .filter_map(|record| record.selection)
+            .collect();
+        let mut selections = snapshot
+            .recover_selections_for(&required)
+            .map_err(invalid)?;
         for StagedRecord {
-            key, digest, archived: already_archived, ..
-        } in self.records {
+            key,
+            digest,
+            archived: already_archived,
+            ..
+        } in self.records
+        {
             let bytes = record_storage::get_batch(&batch, &key)?
                 .ok_or_else(|| invalid("checkpoint record missing before retirement"))?;
             if burst_crypto::blake2b_256(&bytes) != *digest.as_bytes() {
@@ -223,11 +239,9 @@ impl SnapshotRecords {
                 _ => None,
             };
             if let Some((epoch, beacon)) = proof {
-                let selection = selections
-                    .get_mut(&epoch)
-                    .ok_or_else(|| {
-                        invalid("retired beacon has no authenticated selection receipt")
-                    })?;
+                let selection = selections.get_mut(&epoch).ok_or_else(|| {
+                    invalid("retired beacon has no authenticated selection receipt")
+                })?;
                 selection.attach_compact_beacon(beacon.clone())?;
                 super::archive_selection::persist_beacon(batch, selection, &beacon)?;
             }

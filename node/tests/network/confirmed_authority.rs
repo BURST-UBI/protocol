@@ -1,5 +1,7 @@
 //! Independent representatives cannot replace an offline human with a smaller quorum.
 use burst_node::{BurstNode, NodeConfig};
+#[path = "../support/admin_rpc.rs"]
+mod admin_rpc;
 use burst_types::{BlockHash, NetworkId, Timestamp, TxHash};
 use burst_wallet_core::{
     transaction_builder::{build_burn_tx, build_state_block, sign_state_block},
@@ -7,8 +9,6 @@ use burst_wallet_core::{
 };
 use serde_json::json;
 use std::time::Duration;
-
-
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn offline_representative_stalls_finality_until_its_real_vote_returns() {
@@ -81,7 +81,9 @@ async fn pending_chain_recovers(recovery: Recovery) {
         nodes.push((
             shutdown,
             tokio::spawn(async move {
-                node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+                node.start_with_services(admin_rpc::start_services)
+                    .await
+                    .unwrap();
                 node.stop().await.unwrap();
             }),
         ));
@@ -100,8 +102,7 @@ async fn pending_chain_recovers(recovery: Recovery) {
             }
         }
         for address in &addresses[1..] {
-            let reply = clients[0]
-                .rpc_call("genesis_endorse", json!({"account":address.as_str()}))
+            let reply = admin_rpc::endorse(&clients[0], address.as_str())
                 .await
                 .unwrap();
             let hash = reply["block_hash"].as_str().unwrap();
@@ -183,7 +184,9 @@ async fn pending_chain_recovers(recovery: Recovery) {
                 nodes.push((
                     shutdown,
                     tokio::spawn(async move {
-                        node.start_with_services(burst_daemon::start_public_services).await.unwrap();
+                        node.start_with_services(admin_rpc::start_services)
+                            .await
+                            .unwrap();
                         node.stop().await.unwrap();
                     }),
                 ));

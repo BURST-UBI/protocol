@@ -108,9 +108,13 @@ pub(super) fn settle_review(
     // No receipt or pending transition reads account counters. Publish each
     // affected holder's final cut once, after all reward-origin changes.
     for holder in affected_holders {
-        let mut account = batch.get_account(&holder).map_err(|error| error.to_string())?;
+        let mut account = batch
+            .get_account(&holder)
+            .map_err(|error| error.to_string())?;
         update_token_counters(&mut account, trst, context.timestamp)?;
-        batch.put_account(&account).map_err(|error| error.to_string())?;
+        batch
+            .put_account(&account)
+            .map_err(|error| error.to_string())?;
     }
     restore_pending(batch, trst)?;
     if new_legitimate != appeal.previously_legitimate {

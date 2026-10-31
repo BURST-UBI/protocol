@@ -111,14 +111,26 @@ pub struct PendingSourceTotals {
 }
 
 impl PendingSourceTotals {
-    pub fn include(&mut self, source: &WalletAddress, pending: &PendingInfo) -> Result<(), StoreError> {
-        if pending.return_credit { return Ok(()); }
-        if &pending.source != source {
-            return Err(StoreError::Corruption("pending transfer belongs to another sender".into()));
+    pub fn include(
+        &mut self,
+        source: &WalletAddress,
+        pending: &PendingInfo,
+    ) -> Result<(), StoreError> {
+        if pending.return_credit {
+            return Ok(());
         }
-        let amount = self.amount.checked_add(pending.amount)
+        if &pending.source != source {
+            return Err(StoreError::Corruption(
+                "pending transfer belongs to another sender".into(),
+            ));
+        }
+        let amount = self
+            .amount
+            .checked_add(pending.amount)
             .ok_or_else(|| StoreError::Corruption("pending amount overflow".into()))?;
-        let count = self.count.checked_add(1)
+        let count = self
+            .count
+            .checked_add(1)
             .ok_or_else(|| StoreError::Corruption("pending count overflow".into()))?;
         self.amount = amount;
         self.count = count;
@@ -132,14 +144,20 @@ pub trait PendingSourceSnapshot {
     /// this method to stream entries from a pinned read transaction.
     fn totals(self: Box<Self>, source: &WalletAddress) -> Result<PendingSourceTotals, StoreError> {
         let mut totals = PendingSourceTotals::default();
-        for (_, _, pending) in self.into_entries()? { totals.include(source, &pending)?; }
+        for (_, _, pending) in self.into_entries()? {
+            totals.include(source, &pending)?;
+        }
         Ok(totals)
     }
-    fn into_entries(self: Box<Self>) -> Result<Vec<(WalletAddress, TxHash, PendingInfo)>, StoreError>;
+    fn into_entries(
+        self: Box<Self>,
+    ) -> Result<Vec<(WalletAddress, TxHash, PendingInfo)>, StoreError>;
 }
 
 impl PendingSourceSnapshot for Vec<(WalletAddress, TxHash, PendingInfo)> {
-    fn into_entries(self: Box<Self>) -> Result<Vec<(WalletAddress, TxHash, PendingInfo)>, StoreError> {
+    fn into_entries(
+        self: Box<Self>,
+    ) -> Result<Vec<(WalletAddress, TxHash, PendingInfo)>, StoreError> {
         Ok(*self)
     }
 }
@@ -211,17 +229,28 @@ pub trait PendingStore {
     /// ascending. The default loads and sorts the full account backlog. Separate
     /// calls do not share a snapshot, so changes can affect later pages.
     fn get_pending_page_after(
-        &self, destination: &WalletAddress, threshold: u128,
-        after: Option<(u128, TxHash)>, count: u32,
+        &self,
+        destination: &WalletAddress,
+        threshold: u128,
+        after: Option<(u128, TxHash)>,
+        count: u32,
     ) -> Result<PendingPage, StoreError> {
         let mut all = self.get_pending_for_account_with_hashes(destination)?;
         all.sort_by_key(|(hash, info)| (std::cmp::Reverse(info.amount), *hash));
-        let mut entries: Vec<_> = all.into_iter().filter(|(hash, info)| {
-            info.amount >= threshold && after.is_none_or(|(amount, prior)|
-                info.amount < amount || (info.amount == amount && *hash > prior))
-        }).take(count as usize + 1).collect();
+        let mut entries: Vec<_> = all
+            .into_iter()
+            .filter(|(hash, info)| {
+                info.amount >= threshold
+                    && after.is_none_or(|(amount, prior)| {
+                        info.amount < amount || (info.amount == amount && *hash > prior)
+                    })
+            })
+            .take(count as usize + 1)
+            .collect();
         let has_more = entries.len() > count as usize;
-        if has_more { entries.pop(); }
+        if has_more {
+            entries.pop();
+        }
         Ok(PendingPage { entries, has_more })
     }
 
@@ -235,7 +264,8 @@ pub trait PendingStore {
     /// Pin outgoing data now; callers may enumerate after releasing their
     /// publication guard. Backends without snapshots materialize under the guard.
     fn capture_pending_from_account(
-        &self, source: &WalletAddress,
+        &self,
+        source: &WalletAddress,
     ) -> Result<Box<dyn PendingSourceSnapshot + '_>, StoreError> {
         Ok(Box::new(self.get_pending_from_account(source)?))
     }
@@ -262,24 +292,55 @@ mod retention_tests {
         let h = |n| TxHash::new([n; 32]);
         for return_credit in [false, true] {
             let pending = PendingInfo {
-                source: WalletAddress::new("brst_source"), amount: 10, timestamp: Timestamp::new(1), return_credit,
+                source: WalletAddress::new("brst_source"),
+                amount: 10,
+                timestamp: Timestamp::new(1),
+                return_credit,
                 provenance: vec![PendingProvenance {
-                    basis: TrstBasis::Remainder(h(3)), amount: 10, origin: h(2),
-                    origin_wallet: WalletAddress::new("brst_origin"), origin_timestamp: Timestamp::new(1),
+                    basis: TrstBasis::Remainder(h(3)),
+                    amount: 10,
+                    origin: h(2),
+                    origin_wallet: WalletAddress::new("brst_origin"),
+                    origin_timestamp: Timestamp::new(1),
                     effective_origin_timestamp: Timestamp::new(1),
-                    revoked_amounts: [([4; 32], TrstRevocationChunk { amount: 2, restored: false }),
-                        ([5; 32], TrstRevocationChunk { amount: 3, restored: true })].into(),
+                    revoked_amounts: [
+                        (
+                            [4; 32],
+                            TrstRevocationChunk {
+                                amount: 2,
+                                restored: false,
+                            },
+                        ),
+                        (
+                            [5; 32],
+                            TrstRevocationChunk {
+                                amount: 3,
+                                restored: true,
+                            },
+                        ),
+                    ]
+                    .into(),
                 }],
             };
             validate_pending_provenance(&pending).unwrap();
             let source = BlockHash::new([1; 32]);
             let destination = WalletAddress::new("brst_destination");
-            let expected = [Block(source), Account(&destination), Account(&pending.source),
-                Account(&pending.provenance[0].origin_wallet), Graph(h(2)), Revision(h(3)), Graph(h(4)), Graph(h(5))];
+            let expected = [
+                Block(source),
+                Account(&destination),
+                Account(&pending.source),
+                Account(&pending.provenance[0].origin_wallet),
+                Graph(h(2)),
+                Revision(h(3)),
+                Graph(h(4)),
+                Graph(h(5)),
+            ];
             for limit in 0..=expected.len() {
                 let mut seen = Vec::new();
                 let result = pending.visit_retention_references(&destination, source, |r| {
-                    if seen.len() == limit { return ControlFlow::Break("budget"); }
+                    if seen.len() == limit {
+                        return ControlFlow::Break("budget");
+                    }
                     seen.push(r);
                     ControlFlow::Continue(())
                 });

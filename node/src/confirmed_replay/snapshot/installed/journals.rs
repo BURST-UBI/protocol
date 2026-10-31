@@ -41,11 +41,16 @@ fn observe(batch: &LmdbWriteTransaction<'_>) -> Result<BlockHash, StoreError> {
 }
 
 #[cfg(test)]
-fn observe_view(batch: &burst_store_lmdb::read_view::LedgerReadView<'_>) -> Result<BlockHash, StoreError> {
+fn observe_view(
+    batch: &burst_store_lmdb::read_view::LedgerReadView<'_>,
+) -> Result<BlockHash, StoreError> {
     observe_view_with_poll(batch, &|_| Ok(()))
 }
 
-fn observe_view_with_poll(batch: &burst_store_lmdb::read_view::LedgerReadView<'_>, poll: &dyn Fn(&'static str) -> Result<(), StoreError>) -> Result<BlockHash, StoreError> {
+fn observe_view_with_poll(
+    batch: &burst_store_lmdb::read_view::LedgerReadView<'_>,
+    poll: &dyn Fn(&'static str) -> Result<(), StoreError>,
+) -> Result<BlockHash, StoreError> {
     let mut digest = Blake2b::<U32>::new();
     digest.update(b"BURST/recovery-journals/v1");
     for prefix in PREFIXES {
@@ -101,17 +106,29 @@ impl JournalGuard {
             });
         poll("journal:capture-start")?;
         let fingerprint = observe_view_with_poll(batch, poll)?;
-        validate_view_with_poll(batch, || anchors.iter(), installed.continuation.anchor(), poll)?;
+        validate_view_with_poll(
+            batch,
+            || anchors.iter(),
+            installed.continuation.anchor(),
+            poll,
+        )?;
         let history = match accepted {
-            Some(accepted) if installed.continuation.anchor().height().checked_add(1)
-                == Some(accepted.continuation.anchor().height()) =>
-                JournalHistory::Accepted(Box::new(accepted)),
+            Some(accepted)
+                if installed.continuation.anchor().height().checked_add(1)
+                    == Some(accepted.continuation.anchor().height()) =>
+            {
+                JournalHistory::Accepted(Box::new(accepted))
+            }
             Some(accepted) => {
                 let (selections, observations) = accepted.into_journal_history();
-                JournalHistory::Records { selections, observations: Some(observations) }
+                JournalHistory::Records {
+                    selections,
+                    observations: Some(observations),
+                }
             }
             None => JournalHistory::Records {
-                selections: installed.selections.fork(batch.storage_directory())?, observations: None,
+                selections: installed.selections.fork(batch.storage_directory())?,
+                observations: None,
             },
         };
         let sequences = sequences::SequenceGuard::capture_view_with_poll(batch, poll)?;
@@ -165,11 +182,16 @@ impl JournalGuard {
                 poll("metadata:accepted-records")?;
                 accepted.verify_records_view_with_poll(batch, poll)?;
             }
-            JournalHistory::Records { observations: Some(records), .. } => {
+            JournalHistory::Records {
+                observations: Some(records),
+                ..
+            } => {
                 poll("metadata:accepted-records")?;
                 records.verify_view_with_poll(batch, poll)?;
             }
-            JournalHistory::Records { observations: None, .. } => (),
+            JournalHistory::Records {
+                observations: None, ..
+            } => (),
         }
         Ok(())
     }
@@ -183,11 +205,16 @@ fn payment_epoch_namespace(batch: &LmdbWriteTransaction<'_>) -> Result<bool, Sto
 }
 
 #[cfg(test)]
-fn payment_epoch_namespace_view(batch: &burst_store_lmdb::read_view::LedgerReadView<'_>) -> Result<bool, StoreError> {
+fn payment_epoch_namespace_view(
+    batch: &burst_store_lmdb::read_view::LedgerReadView<'_>,
+) -> Result<bool, StoreError> {
     payment_epoch_namespace_view_with_poll(batch, &|_| Ok(()))
 }
 
-fn payment_epoch_namespace_view_with_poll(batch: &burst_store_lmdb::read_view::LedgerReadView<'_>, poll: &dyn Fn(&'static str) -> Result<(), StoreError>) -> Result<bool, StoreError> {
+fn payment_epoch_namespace_view_with_poll(
+    batch: &burst_store_lmdb::read_view::LedgerReadView<'_>,
+    poll: &dyn Fn(&'static str) -> Result<(), StoreError>,
+) -> Result<bool, StoreError> {
     let mut has_closed = false;
     for row in batch.checkpoint_metadata_entries(b"payment_epoch/")? {
         let (key, _) = row?;
@@ -245,7 +272,11 @@ where
     batch.verify_checkpoint_undo_encoding_with_poll(poll)?;
     poll("journal:undo-encoded")?;
     records::validate_view_with_poll(batch, authority(), installed, poll)?;
-    crate::checkpoint_agreement::reconcile_recovery_journals_view_with_poll(batch, authority(), poll)?;
+    crate::checkpoint_agreement::reconcile_recovery_journals_view_with_poll(
+        batch,
+        authority(),
+        poll,
+    )?;
     let mut anchors = authority().into_iter();
     let genesis = anchors
         .next()
@@ -304,7 +335,8 @@ where
             checked.transpose()
         });
     if has_closed {
-        let mut index = epoch_index::EpochIndex::build_with_poll(batch.storage_directory(), epochs, poll)?;
+        let mut index =
+            epoch_index::EpochIndex::build_with_poll(batch.storage_directory(), epochs, poll)?;
         for row in batch.checkpoint_metadata_entries(b"payment_epoch/v1/closed/")? {
             let (key, value) = row?;
             poll("journal:closed-epoch")?;
@@ -352,8 +384,12 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let store = LmdbStore::open(directory.path(), 32, 16 << 20).unwrap();
         let anchor = crate::checkpoint_replay::ReplayedCheckpoint::genesis_anchor(
-            burst_types::NetworkId::Dev, &burst_types::ProtocolParams::default()).unwrap();
-        let signer = burst_crypto::derive_address(&burst_crypto::keypair_from_seed(&[23; 32]).public);
+            burst_types::NetworkId::Dev,
+            &burst_types::ProtocolParams::default(),
+        )
+        .unwrap();
+        let signer =
+            burst_crypto::derive_address(&burst_crypto::keypair_from_seed(&[23; 32]).public);
         let sequence = format!("consensus_sequence/v1/{signer}");
         let mut writer = store.tx_begin_write().unwrap();
         writer.put_meta(&sequence, &12u64.to_be_bytes()).unwrap();
@@ -363,9 +399,13 @@ mod tests {
         let guard = sequences::SequenceGuard::capture_view(&view).unwrap();
         let fingerprint = observe_view(&view).unwrap();
         validate_view(&view, || [Ok(anchor.clone())], &anchor).unwrap();
-        for key in ["block_undo/v2/unknown", "checkpoint_round/v2/unknown",
-            "payment_epoch/v1/closed/unknown", "consensus_final/v2/unknown",
-            "snapshot_attestation/v2/unknown"] {
+        for key in [
+            "block_undo/v2/unknown",
+            "checkpoint_round/v2/unknown",
+            "payment_epoch/v1/closed/unknown",
+            "consensus_final/v2/unknown",
+            "snapshot_attestation/v2/unknown",
+        ] {
             let mut writer = store.tx_begin_write().unwrap();
             writer.put_meta(key, b"malformed").unwrap();
             writer.commit().unwrap();
@@ -393,19 +433,23 @@ mod tests {
     #[test]
     fn journal_observation_pins_all_local_governance_revision_versions() {
         let dir = tempfile::tempdir().unwrap();
-        let store = LmdbStore::open(dir.path(),32,16 << 20).unwrap();
+        let store = LmdbStore::open(dir.path(), 32, 16 << 20).unwrap();
         let mut batch = store.tx_begin_write().unwrap();
         let initial = observe(&batch).unwrap();
         for version in ["v1", "v2"] {
-            let key = format!("governance_revision/{version}/{}", BlockHash::new([8;32]));
-            batch.put_meta(&key,&1u128.to_be_bytes()).unwrap();
-            let first = observe(&batch).unwrap(); assert_ne!(first,initial);
-            batch.put_meta(&key,&2u128.to_be_bytes()).unwrap();
-            assert_ne!(observe(&batch).unwrap(),first);
-            batch.delete_meta(&key).unwrap(); assert_eq!(observe(&batch).unwrap(),initial);
+            let key = format!("governance_revision/{version}/{}", BlockHash::new([8; 32]));
+            batch.put_meta(&key, &1u128.to_be_bytes()).unwrap();
+            let first = observe(&batch).unwrap();
+            assert_ne!(first, initial);
+            batch.put_meta(&key, &2u128.to_be_bytes()).unwrap();
+            assert_ne!(observe(&batch).unwrap(), first);
+            batch.delete_meta(&key).unwrap();
+            assert_eq!(observe(&batch).unwrap(), initial);
         }
-        batch.put_meta("governance_revision-other",b"unrelated").unwrap();
-        assert_eq!(observe(&batch).unwrap(),initial);
+        batch
+            .put_meta("governance_revision-other", b"unrelated")
+            .unwrap();
+        assert_eq!(observe(&batch).unwrap(), initial);
     }
 
     #[test]
@@ -413,32 +457,46 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let store = LmdbStore::open(directory.path(), 32, 16 << 20).unwrap();
         let anchor = crate::checkpoint_replay::ReplayedCheckpoint::genesis_anchor(
-            burst_types::NetworkId::Dev, &burst_types::ProtocolParams::default(),
-        ).unwrap();
+            burst_types::NetworkId::Dev,
+            &burst_types::ProtocolParams::default(),
+        )
+        .unwrap();
         let mut batch = store.tx_begin_write().unwrap();
         let initial = observe(&batch).unwrap();
-        for key in ["payment_epoch/v2", "payment_epoch/v2/closed/test",
-            "payment_epoch/v1/unknown", "payment_epoch/v1/closed", "payment_epoch/"] {
+        for key in [
+            "payment_epoch/v2",
+            "payment_epoch/v2/closed/test",
+            "payment_epoch/v1/unknown",
+            "payment_epoch/v1/closed",
+            "payment_epoch/",
+        ] {
             batch.put_meta(key, b"unknown").unwrap();
             let before = batch.checkpoint_metadata(b"").unwrap();
             assert_ne!(observe(&batch).unwrap(), initial, "{key}");
-            assert!(validate(&batch, || std::iter::once(Ok(anchor.clone())), &anchor).is_err(), "{key}");
+            assert!(
+                validate(&batch, || std::iter::once(Ok(anchor.clone())), &anchor).is_err(),
+                "{key}"
+            );
             assert_eq!(batch.checkpoint_metadata(b"").unwrap(), before);
             batch.delete_meta(key).unwrap();
             validate(&batch, || std::iter::once(Ok(anchor.clone())), &anchor).unwrap();
             assert_eq!(observe(&batch).unwrap(), initial);
         }
-        for key in [burst_store::meta::PAYMENT_EPOCH_KEY,
+        for key in [
+            burst_store::meta::PAYMENT_EPOCH_KEY,
             crate::confirmed_replay::installation::CUTOFF_KEY,
             burst_store::meta::PAYMENT_VOTE_LIMIT_KEY,
-            burst_store::meta::GOVERNANCE_COUNTING_LIMIT_KEY] {
+            burst_store::meta::GOVERNANCE_COUNTING_LIMIT_KEY,
+        ] {
             // This helper classifies namespaces only; economic checks validate values.
             batch.put_meta(key, b"observed").unwrap();
             assert!(!payment_epoch_namespace(&batch).unwrap());
             assert_ne!(observe(&batch).unwrap(), initial);
             batch.delete_meta(key).unwrap();
         }
-        batch.put_meta("payment_epoch/v1/closed/test", b"malformed closure").unwrap();
+        batch
+            .put_meta("payment_epoch/v1/closed/test", b"malformed closure")
+            .unwrap();
         assert!(payment_epoch_namespace(&batch).unwrap());
         assert!(validate(&batch, || std::iter::once(Ok(anchor.clone())), &anchor).is_err());
         batch.delete_meta("payment_epoch/v1/closed/test").unwrap();

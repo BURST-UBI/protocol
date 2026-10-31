@@ -87,7 +87,9 @@ fn owner_identity(
     genesis: BlockHash,
     owner: &WalletAddress,
 ) -> Result<Vec<u8>, String> {
-    if genesis.is_zero() { return Err("invalid delegation identity".into()); }
+    if genesis.is_zero() {
+        return Err("invalid delegation identity".into());
+    }
     let key = burst_crypto::decode_address(owner.as_str()).ok_or("invalid delegation owner")?;
     let mut bytes = vec![match network {
         NetworkId::Live => 0,

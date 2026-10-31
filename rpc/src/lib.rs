@@ -12,9 +12,9 @@
 
 pub mod contracts;
 pub mod error;
+pub mod governance_snapshot;
 #[cfg(feature = "server")]
 pub mod handlers;
-pub mod governance_snapshot;
 mod merger_stats;
 mod read_executor;
 pub use read_executor::ReadExecutor;
@@ -22,13 +22,13 @@ mod governance_projection_cache;
 pub use governance_projection_cache::GovernanceProjectionCache;
 pub mod pagination;
 pub use merger_stats::MergerStatsCache;
-pub mod state;
 #[cfg(feature = "server")]
 pub mod server;
+pub mod state;
 
-pub use state::{BlockProcessorCallback, LedgerCacheView, ProcessResult, RateLimiter, RpcState};
 #[cfg(feature = "server")]
 pub use server::RpcServer;
+pub use state::{BlockProcessorCallback, LedgerCacheView, ProcessResult, RateLimiter, RpcState};
 #[cfg(feature = "server")]
 mod security;
 

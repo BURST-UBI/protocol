@@ -47,26 +47,24 @@ const RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(5);
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(120);
 
-pub use burst_messages::checkpoint_transport::{Context, Packet, Body};
+pub use burst_messages::checkpoint_transport::{Body, Context, Packet};
 
-    pub fn context_from_anchor(anchor: &CheckpointAnchor) -> Result<Context, StoreError> {
-        Ok(Context {
-            network: anchor.network(),
-            genesis: anchor.genesis_hash(),
-            parent: anchor.hash(),
-            height: anchor
-                .height()
-                .checked_add(1)
-                .ok_or_else(|| invalid("checkpoint height exhausted"))?,
-        })
-    }
+pub fn context_from_anchor(anchor: &CheckpointAnchor) -> Result<Context, StoreError> {
+    Ok(Context {
+        network: anchor.network(),
+        genesis: anchor.genesis_hash(),
+        parent: anchor.hash(),
+        height: anchor
+            .height()
+            .checked_add(1)
+            .ok_or_else(|| invalid("checkpoint height exhausted"))?,
+    })
+}
 trait ContextMatches {
     fn matches_checkpoint(&self, checkpoint: &Checkpoint) -> bool;
     fn matches(&self, message: &Message) -> bool;
 }
 impl ContextMatches for Context {
-
-
     fn matches_checkpoint(&self, checkpoint: &Checkpoint) -> bool {
         self.network == checkpoint.network
             && self.genesis == checkpoint.genesis
@@ -196,7 +194,11 @@ impl Transport {
                 .len();
         }
         self.published_bytes += bytes.len();
-        self.published.push_back(Published { digest, bytes, announced: false });
+        self.published.push_back(Published {
+            digest,
+            bytes,
+            announced: false,
+        });
         Ok(digest)
     }
 
@@ -344,7 +346,10 @@ impl Transport {
             // New approved votes should not wait for a complete rebroadcast
             // cycle of older messages. Keep the same bounded cache and one-offer
             // poll; duplicates do not regain first-announcement priority.
-            let index = self.published.iter().position(|entry| !entry.announced)
+            let index = self
+                .published
+                .iter()
+                .position(|entry| !entry.announced)
                 .unwrap_or_else(|| {
                     let index = self.announce_cursor % self.published.len();
                     self.announce_cursor = (index + 1) % self.published.len();
@@ -372,7 +377,8 @@ impl Transport {
             }
         }
         self.offers.retain(|offer| {
-            now.saturating_duration_since(offer.offered_at) < TRANSFER_TIMEOUT && peers.contains(&offer.peer)
+            now.saturating_duration_since(offer.offered_at) < TRANSFER_TIMEOUT
+                && peers.contains(&offer.peer)
         });
         if self.download.as_ref().is_some_and(|download| {
             now.saturating_duration_since(download.last_progress_at) >= IDLE_TIMEOUT
@@ -393,11 +399,9 @@ impl Transport {
                 });
                 sends.extend(self.request(now));
             }
-        } else if self
-            .download
-            .as_ref()
-            .is_some_and(|download| now.saturating_duration_since(download.last_request_at) >= RETRY_INTERVAL)
-        {
+        } else if self.download.as_ref().is_some_and(|download| {
+            now.saturating_duration_since(download.last_request_at) >= RETRY_INTERVAL
+        }) {
             sends.extend(self.request(now));
         }
         sends
@@ -495,7 +499,9 @@ mod tests {
 
     #[test]
     fn new_vote_precedes_rebroadcast_without_duplicate_priority_or_starvation() {
-        let (context, Message::Vote(mut vote)) = fixture() else { unreachable!() };
+        let (context, Message::Vote(mut vote)) = fixture() else {
+            unreachable!()
+        };
         let now = Instant::now();
         let mut sender = Transport::new(context, now);
         let peers = ["receiver".into()];
@@ -512,13 +518,21 @@ mod tests {
         }
         let offered = |sends: Vec<Send>| {
             assert_eq!(sends.len(), 1);
-            let Body::Offer { digest, .. } = sends[0].packet.body else { panic!("offer") };
+            let Body::Offer { digest, .. } = sends[0].packet.body else {
+                panic!("offer")
+            };
             digest
         };
         for second in 0..3 {
-            assert_eq!(offered(sender.poll(&peers, now + RETRY_INTERVAL * second)), digests[second as usize]);
+            assert_eq!(
+                offered(sender.poll(&peers, now + RETRY_INTERVAL * second)),
+                digests[second as usize]
+            );
         }
-        assert_eq!(offered(sender.poll(&peers, now + RETRY_INTERVAL * 3)), digests[0]);
+        assert_eq!(
+            offered(sender.poll(&peers, now + RETRY_INTERVAL * 3)),
+            digests[0]
+        );
         vote.ballot.round = 3;
         vote.signer.signature = burst_crypto::sign_message(
             &vote.ballot.signing_payload(),
@@ -527,10 +541,14 @@ mod tests {
         let fresh = sender.publish(&Message::Vote(vote)).unwrap();
         sender.publish(&messages[0]).unwrap();
         // Offer the fresh vote at the next slot, ahead of cached rebroadcasts.
-        assert_eq!(offered(sender.poll(&peers, now + RETRY_INTERVAL * 4)), fresh);
+        assert_eq!(
+            offered(sender.poll(&peers, now + RETRY_INTERVAL * 4)),
+            fresh
+        );
         assert!(sender.poll(&peers, now + RETRY_INTERVAL * 4).is_empty());
-        let replayed: Vec<_> = (5..9).map(|second|
-            offered(sender.poll(&peers, now + RETRY_INTERVAL * second))).collect();
+        let replayed: Vec<_> = (5..9)
+            .map(|second| offered(sender.poll(&peers, now + RETRY_INTERVAL * second)))
+            .collect();
         for digest in digests.iter().chain(std::iter::once(&fresh)) {
             assert_eq!(replayed.iter().filter(|value| *value == digest).count(), 1);
         }
@@ -545,7 +563,9 @@ mod tests {
         let peers = ["receiver".into()];
         assert_eq!(sender.poll(&peers, now).len(), 1);
         for tick in 1..4 {
-            assert!(sender.poll(&peers, now + MIN_ANNOUNCE_INTERVAL * tick).is_empty());
+            assert!(sender
+                .poll(&peers, now + MIN_ANNOUNCE_INTERVAL * tick)
+                .is_empty());
         }
         assert_eq!(sender.poll(&peers, now + RETRY_INTERVAL).len(), 1);
     }
@@ -575,7 +595,9 @@ mod tests {
             .unwrap();
         assert!(lost.is_some());
         assert!(receiver.poll(&["sender".into()], now).is_empty());
-        assert!(receiver.poll(&["sender".into()], now + MIN_ANNOUNCE_INTERVAL).is_empty());
+        assert!(receiver
+            .poll(&["sender".into()], now + MIN_ANNOUNCE_INTERVAL)
+            .is_empty());
         let mut request = receiver
             .poll(&["sender".into()], now + RETRY_INTERVAL)
             .pop()
@@ -647,11 +669,15 @@ mod tests {
                 data: vec![0; CHUNK],
             },
         };
-        assert!(receiver.handle("stalled", delayed, now + IDLE_TIMEOUT).is_err());
+        assert!(receiver
+            .handle("stalled", delayed, now + IDLE_TIMEOUT)
+            .is_err());
         assert_eq!(receiver.download.as_ref().unwrap().offer.peer, "ready");
         // A timeout is not a ban: a recovered peer can offer data again at the
         // back of the queue, without interrupting the active responsive peer.
-        receiver.handle("stalled", offer(1), now + IDLE_TIMEOUT).unwrap();
+        receiver
+            .handle("stalled", offer(1), now + IDLE_TIMEOUT)
+            .unwrap();
         assert_eq!(receiver.offers.len(), 1);
         for index in 1..=100 {
             receiver

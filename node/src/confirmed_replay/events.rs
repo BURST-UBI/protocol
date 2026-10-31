@@ -539,9 +539,12 @@ impl ConfirmedReplay {
             self.selection_checkpoints.stage(directory)?;
             self.selection_receipts.stage(directory)?;
         }
-        let mut applied =
-            super::blocks::AppliedHistory::from_certified_input(blocks, retained_blocks, input.directory)
-                .map_err(|error| invalid(error.to_string()))?;
+        let mut applied = super::blocks::AppliedHistory::from_certified_input(
+            blocks,
+            retained_blocks,
+            input.directory,
+        )
+        .map_err(|error| invalid(error.to_string()))?;
         tracing::debug!(
             elapsed_ms = stage.elapsed().as_millis(),
             certified = retained_blocks.len(),
@@ -568,7 +571,12 @@ impl ConfirmedReplay {
                     .map_err(|error| invalid(error.to_string()))?;
                 if block.block_type != BlockType::Endorse
                     || block.account != genesis
-                    || verified >= u64::from(params.bootstrap_exit_threshold.min(burst_verification::bootstrap::MAX_BOOTSTRAP_HUMANS))
+                    || verified
+                        >= u64::from(
+                            params
+                                .bootstrap_exit_threshold
+                                .min(burst_verification::bootstrap::MAX_BOOTSTRAP_HUMANS),
+                        )
                 {
                     continue;
                 }
@@ -713,7 +721,10 @@ impl ConfirmedReplay {
                 .push(dependency);
         }
         let ordered = crate::confirmed_history::causal_hash_order_after(
-            known.iter().copied().filter(|hash| !retained_blocks.contains(hash)),
+            known
+                .iter()
+                .copied()
+                .filter(|hash| !retained_blocks.contains(hash)),
             retained_blocks,
             |hash| {
                 let block = blocks.get(hash)?;

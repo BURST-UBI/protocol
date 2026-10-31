@@ -33,9 +33,18 @@ pub struct BodyRetirementConfig {
 
 impl Default for BodyRetirementConfig {
     fn default() -> Self {
-        Self { enabled: false, retain_seconds: 30 * 86400, interval_secs: 3600,
-            max_scratch_bytes: None, max_capture_secs: 120, max_capture_growth_bytes: 64 << 20,
-            min_capture_headroom_bytes: 4 << 20, max_examined: 4096, max_bodies: 256, max_bytes: 4 << 20 }
+        Self {
+            enabled: false,
+            retain_seconds: 30 * 86400,
+            interval_secs: 3600,
+            max_scratch_bytes: None,
+            max_capture_secs: 120,
+            max_capture_growth_bytes: 64 << 20,
+            min_capture_headroom_bytes: 4 << 20,
+            max_examined: 4096,
+            max_bodies: 256,
+            max_bytes: 4 << 20,
+        }
     }
 }
 
@@ -50,17 +59,28 @@ impl BodyRetirementConfig {
 
     pub(crate) fn validate(&self) -> Result<(), String> {
         if self.enabled && self.max_scratch_bytes.is_none_or(|bytes| bytes < 4 << 20) {
-            return Err("physical body retirement requires an explicit scratch byte budget of at least4MiB".into());
+            return Err(
+                "physical body retirement requires an explicit scratch byte budget of at least4MiB"
+                    .into(),
+            );
         }
-        if self.max_capture_secs == 0 || self.max_capture_secs > 120
-            || self.max_capture_growth_bytes == 0 || self.max_capture_growth_bytes > 64 << 20
-            || self.min_capture_headroom_bytes < 4 << 20 {
+        if self.max_capture_secs == 0
+            || self.max_capture_secs > 120
+            || self.max_capture_growth_bytes == 0
+            || self.max_capture_growth_bytes > 64 << 20
+            || self.min_capture_headroom_bytes < 4 << 20
+        {
             return Err("invalid retirement capture lifetime/growth/headroom budget".into());
         }
-        if self.interval_secs == 0 || self.interval_secs > 31_536_000
-            || self.max_examined == 0 || self.max_examined > 131_072
-            || self.max_bodies == 0 || self.max_bodies > 131_072
-            || self.max_bytes == 0 || self.max_bytes > 64 << 20 {
+        if self.interval_secs == 0
+            || self.interval_secs > 31_536_000
+            || self.max_examined == 0
+            || self.max_examined > 131_072
+            || self.max_bodies == 0
+            || self.max_bodies > 131_072
+            || self.max_bytes == 0
+            || self.max_bytes > 64 << 20
+        {
             return Err("invalid physical body retirement budget".into());
         }
         Ok(())
@@ -101,7 +121,6 @@ pub struct NodeConfig {
     /// Shared outbound budget; bulk traffic leaves capacity for control messages.
     #[serde(default)]
     pub bandwidth_limits: burst_network::bandwidth::BandwidthLimits,
-
 
     /// Port to listen on for P2P connections.
     #[serde(default = "default_p2p_port")]
@@ -284,10 +303,17 @@ impl NodeConfig {
 
     pub(crate) fn recovery_scratch_budget(&self) -> Result<Option<u64>, String> {
         self.body_retirement.validate()?;
-        if self.recovery_scratch_bytes.is_some_and(|bytes| bytes < 4 << 20) {
+        if self
+            .recovery_scratch_bytes
+            .is_some_and(|bytes| bytes < 4 << 20)
+        {
             return Err("recovery scratch budget must be at least4MiB".into());
         }
-        let retirement = self.body_retirement.enabled.then_some(self.body_retirement.max_scratch_bytes).flatten();
+        let retirement = self
+            .body_retirement
+            .enabled
+            .then_some(self.body_retirement.max_scratch_bytes)
+            .flatten();
         if let (Some(recovery), Some(retirement)) = (self.recovery_scratch_bytes, retirement) {
             if recovery != retirement {
                 return Err("recovery and retirement scratch budgets must match".into());
@@ -295,7 +321,6 @@ impl NodeConfig {
         }
         Ok(self.recovery_scratch_bytes.or(retirement))
     }
-
 
     pub(crate) fn representative_key(&self) -> Result<Option<burst_types::KeyPair>, NodeError> {
         use std::io::Read;
@@ -345,7 +370,9 @@ impl NodeConfig {
         config.database_map_size().map_err(NodeError::Config)?;
         config.effective_peer_limits()?;
         config.validate_drand_relays()?;
-        config.recovery_scratch_budget().map_err(NodeError::Config)?;
+        config
+            .recovery_scratch_budget()
+            .map_err(NodeError::Config)?;
         config
             .snapshot_transfer
             .validate()
@@ -353,7 +380,9 @@ impl NodeConfig {
         Ok(config)
     }
 
-    pub(crate) fn effective_peer_limits(&self) -> Result<burst_network::admission::PeerLimits, NodeError> {
+    pub(crate) fn effective_peer_limits(
+        &self,
+    ) -> Result<burst_network::admission::PeerLimits, NodeError> {
         let limits = self.peer_limits.clone().unwrap_or_else(|| {
             if self.network == burst_types::NetworkId::Live {
                 burst_network::admission::PeerLimits::default()
@@ -361,8 +390,12 @@ impl NodeConfig {
                 burst_network::admission::PeerLimits::for_test_network(self.max_peers)
             }
         });
-        limits.validate().map_err(|error| NodeError::Config(error.into()))?;
-        self.bandwidth_limits.validate().map_err(|error| NodeError::Config(error.into()))?;
+        limits
+            .validate()
+            .map_err(|error| NodeError::Config(error.into()))?;
+        self.bandwidth_limits
+            .validate()
+            .map_err(|error| NodeError::Config(error.into()))?;
         Ok(limits)
     }
 
@@ -427,38 +460,80 @@ mod tests {
         config.network = NetworkId::Live;
         assert_eq!(config.effective_peer_limits().unwrap().per_ip, 4);
         config.network = NetworkId::Dev;
-        assert_eq!(config.effective_peer_limits().unwrap().per_ip, config.max_peers);
-        config.peer_limits = Some(burst_network::admission::PeerLimits { per_ip: 12, per_subnet: 24, outbound_reserved: 4 });
+        assert_eq!(
+            config.effective_peer_limits().unwrap().per_ip,
+            config.max_peers
+        );
+        config.peer_limits = Some(burst_network::admission::PeerLimits {
+            per_ip: 12,
+            per_subnet: 24,
+            outbound_reserved: 4,
+        });
         let decoded = NodeConfig::from_toml_str(&config.to_toml_string()).unwrap();
         assert_eq!(decoded.effective_peer_limits().unwrap().per_ip, 12);
         assert!(NodeConfig::from_toml_str("[peer_limits]\nper_ip = 0\n").is_err());
-        assert!(NodeConfig::from_toml_str("[bandwidth_limits]\ntotal_bytes_per_second = 65540\nbulk_bytes_per_second = 65540\n").is_err());
+        assert!(NodeConfig::from_toml_str(
+            "[bandwidth_limits]\ntotal_bytes_per_second = 65540\nbulk_bytes_per_second = 65540\n"
+        )
+        .is_err());
     }
 
     #[test]
     fn database_map_configuration_defaults_roundtrips_and_rejects_invalid_sizes() {
-        assert_eq!(NodeConfig::from_toml_str("").unwrap().database_map_size().unwrap(), 1 << 30);
-        let bytes = if usize::BITS >= 64 { 4u64 << 30 } else { 1536u64 << 20 };
-        let config = NodeConfig::from_toml_str(&format!("database_map_size_bytes = {bytes}\n")).unwrap();
+        assert_eq!(
+            NodeConfig::from_toml_str("")
+                .unwrap()
+                .database_map_size()
+                .unwrap(),
+            1 << 30
+        );
+        let bytes = if usize::BITS >= 64 {
+            4u64 << 30
+        } else {
+            1536u64 << 20
+        };
+        let config =
+            NodeConfig::from_toml_str(&format!("database_map_size_bytes = {bytes}\n")).unwrap();
         assert_eq!(config.database_map_size().unwrap() as u64, bytes);
-        assert_eq!(NodeConfig::from_toml_str(&config.to_toml_string()).unwrap().database_map_size_bytes, bytes);
+        assert_eq!(
+            NodeConfig::from_toml_str(&config.to_toml_string())
+                .unwrap()
+                .database_map_size_bytes,
+            bytes
+        );
         for bytes in [0, (1 << 20) - 1, (1 << 30) + 1, u64::MAX] {
-            let config = NodeConfig { database_map_size_bytes: bytes, ..NodeConfig::default() };
+            let config = NodeConfig {
+                database_map_size_bytes: bytes,
+                ..NodeConfig::default()
+            };
             assert!(config.database_map_size().is_err());
-            assert!(NodeConfig::from_toml_str(&format!("database_map_size_bytes = {bytes}\n")).is_err());
+            assert!(
+                NodeConfig::from_toml_str(&format!("database_map_size_bytes = {bytes}\n")).is_err()
+            );
         }
     }
 
     #[test]
     fn recovery_budget_is_optional_and_agrees_with_enabled_retirement() {
-        assert_eq!(NodeConfig::default().recovery_scratch_budget().unwrap(), None);
+        assert_eq!(
+            NodeConfig::default().recovery_scratch_budget().unwrap(),
+            None
+        );
         for bytes in [0, (4 << 20) - 1] {
-            assert!(NodeConfig::from_toml_str(&format!("recovery_scratch_bytes = {bytes}\n")).is_err());
+            assert!(
+                NodeConfig::from_toml_str(&format!("recovery_scratch_bytes = {bytes}\n")).is_err()
+            );
         }
         let mut config = NodeConfig::from_toml_str("recovery_scratch_bytes = 67108864\n").unwrap();
         assert_eq!(config.recovery_scratch_budget().unwrap(), Some(64 << 20));
         assert!(!config.body_retirement.enabled);
-        assert_eq!(NodeConfig::from_toml_str(&config.to_toml_string()).unwrap().recovery_scratch_budget().unwrap(), Some(64 << 20));
+        assert_eq!(
+            NodeConfig::from_toml_str(&config.to_toml_string())
+                .unwrap()
+                .recovery_scratch_budget()
+                .unwrap(),
+            Some(64 << 20)
+        );
         config.body_retirement.enabled = true;
         config.body_retirement.max_scratch_bytes = Some(32 << 20);
         assert!(config.recovery_scratch_budget().is_err());
@@ -472,26 +547,56 @@ mod tests {
 
     #[test]
     fn physical_retirement_policy_is_opt_in_and_budgeted() {
-        assert!(!NodeConfig::from_toml_str("").unwrap().body_retirement.enabled);
+        assert!(
+            !NodeConfig::from_toml_str("")
+                .unwrap()
+                .body_retirement
+                .enabled
+        );
         let parsed = NodeConfig::from_toml_str("[body_retirement]\nenabled = true\nmax_scratch_bytes = 67108864\nretain_seconds = 0\nmax_examined = 1\n").unwrap();
         assert!(parsed.body_retirement.enabled);
         assert_eq!(parsed.body_retirement.max_scratch_bytes, Some(64 << 20));
-        for suffix in ["", "max_scratch_bytes = 0\n", "max_scratch_bytes = 4194303\n"] {
-            assert!(NodeConfig::from_toml_str(&format!("[body_retirement]\nenabled = true\n{suffix}")).is_err());
+        for suffix in [
+            "",
+            "max_scratch_bytes = 0\n",
+            "max_scratch_bytes = 4194303\n",
+        ] {
+            assert!(NodeConfig::from_toml_str(&format!(
+                "[body_retirement]\nenabled = true\n{suffix}"
+            ))
+            .is_err());
         }
         assert_eq!(parsed.body_retirement.max_capture_secs, 120);
         assert_eq!(parsed.body_retirement.max_capture_growth_bytes, 64 << 20);
         assert_eq!(parsed.body_retirement.min_capture_headroom_bytes, 4 << 20);
-        assert_eq!(NodeConfig::from_toml_str(&parsed.to_toml_string()).unwrap().body_retirement.max_capture_secs, 120);
+        assert_eq!(
+            NodeConfig::from_toml_str(&parsed.to_toml_string())
+                .unwrap()
+                .body_retirement
+                .max_capture_secs,
+            120
+        );
         assert_eq!(parsed.body_retirement.max_examined, 1);
         assert_eq!(parsed.body_retirement.retain_seconds, 0);
-        for (field, value) in [("max_capture_secs", 0), ("max_capture_secs", 121),
-            ("max_capture_growth_bytes", 0), ("max_capture_growth_bytes", (64 << 20) + 1),
-            ("min_capture_headroom_bytes", (4 << 20) - 1), ("interval_secs", 0), ("interval_secs", 31_536_001),
-            ("max_examined", 0), ("max_examined", 131_073),
-            ("max_bodies", 0), ("max_bodies", 131_073),
-            ("max_bytes", 0), ("max_bytes", (64 << 20) + 1)] {
-            assert!(NodeConfig::from_toml_str(&format!("[body_retirement]\n{field} = {value}\n")).is_err());
+        for (field, value) in [
+            ("max_capture_secs", 0),
+            ("max_capture_secs", 121),
+            ("max_capture_growth_bytes", 0),
+            ("max_capture_growth_bytes", (64 << 20) + 1),
+            ("min_capture_headroom_bytes", (4 << 20) - 1),
+            ("interval_secs", 0),
+            ("interval_secs", 31_536_001),
+            ("max_examined", 0),
+            ("max_examined", 131_073),
+            ("max_bodies", 0),
+            ("max_bodies", 131_073),
+            ("max_bytes", 0),
+            ("max_bytes", (64 << 20) + 1),
+        ] {
+            assert!(
+                NodeConfig::from_toml_str(&format!("[body_retirement]\n{field} = {value}\n"))
+                    .is_err()
+            );
         }
         assert!(NodeConfig::from_toml_str("[body_retirement]\nmax_body = 1\n").is_err());
     }

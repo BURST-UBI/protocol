@@ -3,7 +3,10 @@
 //! then outcome-keyed stake releases. Whole-wallet serialization uses a separate
 //! format. Callers select the format and commit related rows atomically.
 
-use crate::{BrnError, BrnWalletState, releases::{PendingReleases, StakeRelease}};
+use crate::{
+    releases::{PendingReleases, StakeRelease},
+    BrnError, BrnWalletState,
+};
 use bincode::Options;
 use burst_types::{BlockHash, Timestamp};
 use serde::{Deserialize, Serialize};
@@ -27,10 +30,18 @@ pub fn row_prefix(address: &burst_types::WalletAddress) -> Result<Vec<u8>, BrnEr
 /// validate UTF-8, the wallet address or the row suffix.
 pub fn split_row_key(key: &[u8]) -> Result<(&[u8], &[u8]), BrnError> {
     let key = key.strip_prefix(ROW_PREFIX).ok_or_else(invalid)?;
-    let len = u32::from_be_bytes(key.get(..4).ok_or_else(invalid)?.try_into().map_err(|_| invalid())?) as usize;
+    let len = u32::from_be_bytes(
+        key.get(..4)
+            .ok_or_else(invalid)?
+            .try_into()
+            .map_err(|_| invalid())?,
+    ) as usize;
     let rest = &key[4..];
     let address = rest.get(..len).ok_or_else(invalid)?;
-    let suffix = rest.get(len..).filter(|suffix| !suffix.is_empty()).ok_or_else(invalid)?;
+    let suffix = rest
+        .get(len..)
+        .filter(|suffix| !suffix.is_empty())
+        .ok_or_else(invalid)?;
     Ok((address, suffix))
 }
 const PAUSE: u8 = 1;
@@ -51,10 +62,14 @@ pub fn visit_retention_references(
     match key.first().copied() {
         Some(0) if key == HEADER => {
             let header: Header = decode_value(value)?;
-            if header.version != 1 { return Err(invalid()); }
+            if header.version != 1 {
+                return Err(invalid());
+            }
             visit(Account(owner))?;
             visit(Boundary(header.verified_at))?;
-            if let Some(at) = header.accrual_stopped_at { visit(Boundary(at))?; }
+            if let Some(at) = header.accrual_stopped_at {
+                visit(Boundary(at))?;
+            }
         }
         Some(PAUSE) if key.len() == 9 => {
             let (start, end): (Timestamp, Timestamp) = decode_value(value)?;
@@ -68,7 +83,9 @@ pub fn visit_retention_references(
             visit(Account(owner))?;
             visit(Outcome(outcome))?;
             visit(Boundary(release.completed_at))?;
-            for source in release.sources { visit(Block(source))?; }
+            for source in release.sources {
+                visit(Block(source))?;
+            }
         }
         _ => return Err(invalid()),
     }
@@ -102,13 +119,18 @@ impl From<&BrnWalletState> for Header {
     }
 }
 
-fn invalid() -> BrnError { BrnError::Other("invalid persisted BRN wallet records".into()) }
+fn invalid() -> BrnError {
+    BrnError::Other("invalid persisted BRN wallet records".into())
+}
 fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, BrnError> {
     bincode::serialize(value).map_err(|error| BrnError::Other(error.to_string()))
 }
 fn decode_value<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, BrnError> {
-    bincode::DefaultOptions::new().with_fixint_encoding().reject_trailing_bytes()
-        .with_limit(bytes.len() as u64).deserialize(bytes)
+    bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .reject_trailing_bytes()
+        .with_limit(bytes.len() as u64)
+        .deserialize(bytes)
         .map_err(|error| BrnError::Other(error.to_string()))
 }
 fn pause_key(index: usize) -> Vec<u8> {
@@ -133,19 +155,31 @@ pub fn visit_delta(
     let old = before.map(Header::from);
     let new = after.map(Header::from);
     if old != new {
-        emit(HEADER, old.as_ref().map(encode).transpose()?, new.as_ref().map(encode).transpose()?)?;
+        emit(
+            HEADER,
+            old.as_ref().map(encode).transpose()?,
+            new.as_ref().map(encode).transpose()?,
+        )?;
     }
     let empty = crate::pauses::PauseHistory::default();
     let old = before.map_or(&empty, |state| &state.paused_intervals);
     let new = after.map_or(&empty, |state| &state.paused_intervals);
     new.visit_changes(old, |index, old, new| {
-        emit(&pause_key(index), old.map(encode).transpose()?, new.map(encode).transpose()?)
+        emit(
+            &pause_key(index),
+            old.map(encode).transpose()?,
+            new.map(encode).transpose()?,
+        )
     })?;
     let empty = PendingReleases::default();
     let old = before.map_or(&empty, |state| &state.pending_releases);
     let new = after.map_or(&empty, |state| &state.pending_releases);
     new.visit_changes(old, |hash, old, new| {
-        emit(&release_key(hash), old.map(encode).transpose()?, new.map(encode).transpose()?)
+        emit(
+            &release_key(hash),
+            old.map(encode).transpose()?,
+            new.map(encode).transpose()?,
+        )
     })
 }
 
@@ -159,9 +193,9 @@ pub fn contains_row(state: &BrnWalletState, key: &[u8]) -> bool {
             let index = u64::from_be_bytes(key[1..].try_into().unwrap());
             usize::try_from(index).is_ok_and(|index| index < state.paused_intervals.len())
         }
-        Some(RELEASE) if key.len() == 33 => {
-            state.pending_releases.contains_key(&BlockHash::new(key[1..].try_into().unwrap()))
-        }
+        Some(RELEASE) if key.len() == 33 => state
+            .pending_releases
+            .contains_key(&BlockHash::new(key[1..].try_into().unwrap())),
         _ => false,
     }
 }
@@ -175,10 +209,16 @@ pub fn decode<K: AsRef<[u8]>, V: AsRef<[u8]>>(
     rows: impl IntoIterator<Item = Result<(K, V), BrnError>>,
 ) -> Result<Option<BrnWalletState>, BrnError> {
     let mut rows = rows.into_iter();
-    let Some((key, value)) = rows.next().transpose()? else { return Ok(None) };
-    if key.as_ref() != HEADER { return Err(invalid()); }
+    let Some((key, value)) = rows.next().transpose()? else {
+        return Ok(None);
+    };
+    if key.as_ref() != HEADER {
+        return Err(invalid());
+    }
     let header: Header = decode_value(value.as_ref())?;
-    if header.version != 1 { return Err(invalid()); }
+    if header.version != 1 {
+        return Err(invalid());
+    }
     let mut state = BrnWalletState::new(header.verified_at);
     state.total_burned = header.total_burned;
     state.total_staked = header.total_staked;
@@ -193,13 +233,20 @@ pub fn decode<K: AsRef<[u8]>, V: AsRef<[u8]>>(
         match key.first().copied() {
             Some(PAUSE) if key.len() == 9 && last_release.is_none() => {
                 let index = u64::from_be_bytes(key[1..].try_into().map_err(|_| invalid())?);
-                if index != state.paused_intervals.len() as u64 || index >= header.pauses { return Err(invalid()); }
+                if index != state.paused_intervals.len() as u64 || index >= header.pauses {
+                    return Err(invalid());
+                }
                 state.paused_intervals.push(decode_value(value)?);
             }
-            Some(RELEASE) if key.len() == 33 && state.paused_intervals.len() as u64 == header.pauses => {
+            Some(RELEASE)
+                if key.len() == 33 && state.paused_intervals.len() as u64 == header.pauses =>
+            {
                 let hash = BlockHash::new(key[1..].try_into().map_err(|_| invalid())?);
                 if last_release.is_some_and(|last| last >= hash)
-                    || releases.len() as u64 >= header.releases { return Err(invalid()); }
+                    || releases.len() as u64 >= header.releases
+                {
+                    return Err(invalid());
+                }
                 let release: StakeRelease = decode_value(value)?;
                 releases.insert(hash, release);
                 last_release = Some(hash);
@@ -208,7 +255,10 @@ pub fn decode<K: AsRef<[u8]>, V: AsRef<[u8]>>(
         }
     }
     if state.paused_intervals.len() as u64 != header.pauses
-        || releases.len() as u64 != header.releases { return Err(invalid()); }
+        || releases.len() as u64 != header.releases
+    {
+        return Err(invalid());
+    }
     state.pending_releases = releases.into();
     Ok(Some(state))
 }

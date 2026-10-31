@@ -76,16 +76,24 @@ impl PriorityScheduler {
     }
 
     pub fn new(max_queue: usize) -> Self {
-        Self { queue: BTreeMap::new(), priorities: BTreeMap::new(), max_queue }
+        Self {
+            queue: BTreeMap::new(),
+            priorities: BTreeMap::new(),
+            max_queue,
+        }
     }
 
     /// Duplicate candidate hashes retain their original account and priority. At capacity,
     /// only a strictly higher balance can replace the lowest-priority entry.
     pub fn push(&mut self, root: BlockHash, account: WalletAddress, balance: u128) {
-        if self.max_queue == 0 || self.priorities.contains_key(&root) { return; }
+        if self.max_queue == 0 || self.priorities.contains_key(&root) {
+            return;
+        }
         if self.queue.len() == self.max_queue {
             let (&(lowest, hash), _) = self.queue.first_key_value().expect("full queue");
-            if balance <= lowest { return; }
+            if balance <= lowest {
+                return;
+            }
             self.remove(&hash);
         }
         self.queue.insert((balance, root), account);
@@ -98,9 +106,13 @@ impl PriorityScheduler {
         Some((root, account))
     }
 
-    pub fn len(&self) -> usize { self.queue.len() }
+    pub fn len(&self) -> usize {
+        self.queue.len()
+    }
 
-    pub fn is_empty(&self) -> bool { self.queue.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -287,5 +299,4 @@ mod tests {
         assert_eq!(sched.pop(), Some((make_hash(1), make_addr("again"))));
         assert!(sched.priorities.is_empty());
     }
-
 }

@@ -10,8 +10,8 @@ use burst_store_lmdb::LmdbWriteTransaction;
 use burst_types::{BlockHash, NetworkId, ProtocolParams};
 use std::collections::HashSet;
 
-pub(in crate::confirmed_replay::snapshot) mod promises;
 mod projection;
+pub(in crate::confirmed_replay::snapshot) mod promises;
 mod rows;
 pub use projection::{PreparedSnapshotState, ProjectedSnapshot};
 
@@ -190,7 +190,8 @@ impl AuthenticatedSnapshot {
         {
             return Err(invalid("snapshot belongs to a different local network"));
         }
-        let authority = crate::payment_authority::storage::read_at(|key| transaction.get_meta(key))?;
+        let authority =
+            crate::payment_authority::storage::read_at(|key| transaction.get_meta(key))?;
         let cutoff = transaction.get_meta(CUTOFF_KEY)?;
         let installed_cutoff = if local.height() == 0 {
             genesis.timestamp.as_secs()

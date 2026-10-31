@@ -1,5 +1,5 @@
-use crate::confirmed_replay::scratch_file::ScratchFile as File;
 use super::*;
+use crate::confirmed_replay::scratch_file::ScratchFile as File;
 use std::{
     cell::RefCell,
     io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
@@ -109,7 +109,12 @@ impl EpochIndex {
         Ok(index)
     }
 
-    fn merge(self, directory: &Path, width: u64, poll: &dyn Fn(&'static str) -> Result<(), StoreError>) -> Result<Self, StoreError> {
+    fn merge(
+        self,
+        directory: &Path,
+        width: u64,
+        poll: &dyn Fn(&'static str) -> Result<(), StoreError>,
+    ) -> Result<Self, StoreError> {
         let source = RefCell::new(self.file);
         let mut writer = BufWriter::new(File::new_in(directory).map_err(invalid)?);
         let mut digest = Blake2b::<U32>::new();
@@ -181,11 +186,18 @@ impl EpochIndex {
         self.verify_with_poll(&|_| Ok(()))
     }
 
-    pub(super) fn verify_with_poll(&mut self, poll: &dyn Fn(&'static str) -> Result<(), StoreError>) -> Result<(), StoreError> {
+    pub(super) fn verify_with_poll(
+        &mut self,
+        poll: &dyn Fn(&'static str) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
         self.scan(true, poll)
     }
 
-    fn scan(&mut self, sorted: bool, poll: &dyn Fn(&'static str) -> Result<(), StoreError>) -> Result<(), StoreError> {
+    fn scan(
+        &mut self,
+        sorted: bool,
+        poll: &dyn Fn(&'static str) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
         if self.file.metadata().map_err(invalid)?.len() != self.rows * ROW_BYTES {
             return Err(invalid("epoch index length changed"));
         }
@@ -251,22 +263,41 @@ mod tests {
             [Ok((hash(0), 0)), Err(invalid("missing authority"))]
         )
         .is_err());
-        for target in ["journal:epoch-input", "journal:epoch-merge", "journal:epoch-scan"] {
+        for target in [
+            "journal:epoch-input",
+            "journal:epoch-merge",
+            "journal:epoch-scan",
+        ] {
             let cancelled_dir = tempfile::tempdir().unwrap();
-            let limit = crate::confirmed_replay::scratch_file::ScratchLimit::acquire(cancelled_dir.path(), 2 << 20).unwrap();
+            let limit = crate::confirmed_replay::scratch_file::ScratchLimit::acquire(
+                cancelled_dir.path(),
+                2 << 20,
+            )
+            .unwrap();
             let polls = std::cell::Cell::new(0);
-            let result = EpochIndex::build_with_poll(cancelled_dir.path(),
-                (0..(RUN_ROWS as u64 + 1)).map(|height| Ok((hash(height), height))), &|stage| {
+            let result = EpochIndex::build_with_poll(
+                cancelled_dir.path(),
+                (0..(RUN_ROWS as u64 + 1)).map(|height| Ok((hash(height), height))),
+                &|stage| {
                     if stage == target {
                         polls.set(polls.get() + 1);
-                        if polls.get() == 3 { return Err(StoreError::Backend("epoch checkpoint sentinel".into())); }
+                        if polls.get() == 3 {
+                            return Err(StoreError::Backend("epoch checkpoint sentinel".into()));
+                        }
                     }
                     Ok(())
-                });
-            assert!(matches!(result, Err(ref error) if error.to_string().contains("epoch checkpoint sentinel")));
+                },
+            );
+            assert!(
+                matches!(result, Err(ref error) if error.to_string().contains("epoch checkpoint sentinel"))
+            );
             assert_eq!(polls.get(), 3, "checkpoint not reached: {target}");
             drop(result);
-            assert_eq!(limit.used_temporary_bytes().unwrap(), 0, "scratch leaked: {target}");
+            assert_eq!(
+                limit.used_temporary_bytes().unwrap(),
+                0,
+                "scratch leaked: {target}"
+            );
         }
         let mut empty = EpochIndex::build(directory.path(), std::iter::empty()).unwrap();
         assert_eq!(empty.height(hash(0)).unwrap(), None);

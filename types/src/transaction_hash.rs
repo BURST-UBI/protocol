@@ -54,7 +54,9 @@ impl fmt::Display for ParseHashError {
 impl std::error::Error for ParseHashError {}
 
 fn parse_bytes(value: &str) -> Result<[u8; 32], ParseHashError> {
-    if value.len() != 64 { return Err(ParseHashError); }
+    if value.len() != 64 {
+        return Err(ParseHashError);
+    }
     fn digit(byte: u8) -> Result<u8, ParseHashError> {
         match byte {
             b'0'..=b'9' => Ok(byte - b'0'),
@@ -64,7 +66,7 @@ fn parse_bytes(value: &str) -> Result<[u8; 32], ParseHashError> {
         }
     }
     let mut bytes = [0; 32];
-    for (out, pair) in bytes.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
+    for (out, pair) in bytes.iter_mut().zip(value.as_bytes().as_chunks::<2>().0) {
         *out = digit(pair[0])? * 16 + digit(pair[1])?;
     }
     Ok(bytes)
@@ -91,8 +93,18 @@ mod parsing_tests {
     fn exact_hex_grammar_for_both_hash_types() {
         let upper = "AB".repeat(32);
         assert_eq!(upper.parse::<TxHash>().unwrap().as_bytes(), &[0xab; 32]);
-        assert_eq!(upper.parse::<crate::BlockHash>().unwrap().as_bytes(), &[0xab; 32]);
-        for bad in ["0".repeat(63), "0".repeat(65), "gg".repeat(32), "é".repeat(32), format!(" {}", "0".repeat(63)), format!("0x{}", "0".repeat(62))] {
+        assert_eq!(
+            upper.parse::<crate::BlockHash>().unwrap().as_bytes(),
+            &[0xab; 32]
+        );
+        for bad in [
+            "0".repeat(63),
+            "0".repeat(65),
+            "gg".repeat(32),
+            "é".repeat(32),
+            format!(" {}", "0".repeat(63)),
+            format!("0x{}", "0".repeat(62)),
+        ] {
             assert!(bad.parse::<TxHash>().is_err());
             assert!(bad.parse::<crate::BlockHash>().is_err());
         }

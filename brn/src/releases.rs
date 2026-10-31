@@ -181,11 +181,15 @@ fn select_release_sources<'a>(
 ) -> Vec<BlockHash> {
     let mut selected = BTreeSet::new();
     while selected.len() < limit {
-        let Some(release) = releases.next() else { break };
+        let Some(release) = releases.next() else {
+            break;
+        };
         let remaining = limit - selected.len();
         // Preserve whole-proof greedy selection. Once this proof exceeds the
         // remaining space, its unseen sources cannot make it fit again.
-        let extra = release.sources.iter()
+        let extra = release
+            .sources
+            .iter()
             .filter(|hash| !selected.contains(*hash))
             .take(remaining.saturating_add(1))
             .count();

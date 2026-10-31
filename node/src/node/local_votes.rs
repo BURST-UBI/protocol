@@ -20,10 +20,16 @@ mod tests {
         use burst_store::{account::AccountStore, block::BlockStore, meta::MetaStore};
         let directory = tempfile::tempdir().unwrap();
         let mut config = NodeConfig {
-            data_dir: directory.path().to_path_buf(), network: burst_types::NetworkId::Dev,
+            data_dir: directory.path().to_path_buf(),
+            network: burst_types::NetworkId::Dev,
             params: burst_ledger::genesis::initial_params(&burst_types::NetworkId::Dev),
-            port: 0, enable_rpc: false, enable_upnp: false, enable_representative: true,
-            bootstrap_peers: Vec::new(), nts_sources: Vec::new(), ..NodeConfig::default()
+            port: 0,
+            enable_rpc: false,
+            enable_upnp: false,
+            enable_representative: true,
+            bootstrap_peers: Vec::new(),
+            nts_sources: Vec::new(),
+            ..NodeConfig::default()
         };
         config.params.min_work_difficulty = 0;
         let mut node = BurstNode::new(config).await.unwrap();
@@ -38,7 +44,8 @@ mod tests {
         let shutdown = node.shutdown.clone();
         let creator = crate::genesis_key::genesis_address(burst_types::NetworkId::Dev);
         let genesis = store.account_store().get_account(&creator).unwrap().head;
-        let mut block: StateBlock = bincode::deserialize(&store.block_store().get_block(&genesis).unwrap()).unwrap();
+        let mut block: StateBlock =
+            bincode::deserialize(&store.block_store().get_block(&genesis).unwrap()).unwrap();
         let keys = burst_crypto::keypair_from_seed(&[17; 32]);
         block.account = burst_crypto::derive_address(&keys.public);
         block.representative = creator;
@@ -49,23 +56,34 @@ mod tests {
         let payload = bincode::serialize(&block).unwrap();
         results.track(&payload);
         let task = tokio::spawn(async move {
-            let started = node.start_with_services(burst_daemon::start_public_services).await;
+            let started = node
+                .start_with_services(burst_daemon::start_public_services)
+                .await;
             (node, started)
         });
         let outcome = tokio::time::timeout(Duration::from_secs(20), async {
             assert!(queue.push(block.clone()).await);
-            assert_eq!(tokio::time::timeout(Duration::from_secs(10), results.wait(&payload)).await.unwrap(),
-                Some(burst_rpc::ProcessResult::Accepted));
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(10), results.wait(&payload))
+                    .await
+                    .unwrap(),
+                Some(burst_rpc::ProcessResult::Accepted)
+            );
             let capture_store = store.clone();
             let (ready, received) = std::sync::mpsc::channel();
             let (release, released) = std::sync::mpsc::channel();
             let owner = std::thread::spawn(move || {
                 let reader = capture_store.tx_begin_read().unwrap();
                 for n in 0..8 {
-                    capture_store.meta_store().put_meta("test/vote-pressure", &vec![n; 128 << 10]).unwrap();
+                    capture_store
+                        .meta_store()
+                        .put_meta("test/vote-pressure", &vec![n; 128 << 10])
+                        .unwrap();
                 }
                 let mut writer = capture_store.tx_begin_write().unwrap();
-                let limit = writer.limit_file_extent(capture_store.env().real_disk_size().unwrap() as usize).unwrap();
+                let limit = writer
+                    .limit_file_extent(capture_store.env().real_disk_size().unwrap() as usize)
+                    .unwrap();
                 drop(writer);
                 ready.send(limit.watch()).unwrap();
                 released.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -75,26 +93,60 @@ mod tests {
             let watch = received.recv_timeout(Duration::from_secs(2)).unwrap();
             drop(guard);
             tokio::time::timeout(Duration::from_secs(2), async {
-                while !watch.was_exceeded() { tokio::task::yield_now().await; }
-            }).await.unwrap();
+                while !watch.was_exceeded() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
             // Span the ordinary one-second repair interval while capacity is held.
             tokio::time::sleep(Duration::from_millis(1100)).await;
             assert_eq!(signer.lock().await.sequence(), initial_sequence);
-            assert_eq!(store.account_store().get_account(&block.account).unwrap().confirmation_height, 0);
+            assert_eq!(
+                store
+                    .account_store()
+                    .get_account(&block.account)
+                    .unwrap()
+                    .confirmation_height,
+                0
+            );
             assert!(!watch.wait_released(Duration::ZERO));
             release.send(()).unwrap();
             owner.join().unwrap();
             tokio::time::timeout(Duration::from_secs(10), async {
                 loop {
-                    if store.account_store().get_account(&block.account).unwrap().confirmation_height == 1 { break; }
+                    if store
+                        .account_store()
+                        .get_account(&block.account)
+                        .unwrap()
+                        .confirmation_height
+                        == 1
+                    {
+                        break;
+                    }
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
-            }).await.expect("ordinary vote repair and confirmation handoff must recover without resubmission");
+            })
+            .await
+            .expect(
+                "ordinary vote repair and confirmation handoff must recover without resubmission",
+            );
             assert!(signer.lock().await.sequence() > initial_sequence);
-            assert_eq!(store.account_store().get_account(&block.account).unwrap().head, block.hash);
-        }).await;
+            assert_eq!(
+                store
+                    .account_store()
+                    .get_account(&block.account)
+                    .unwrap()
+                    .head,
+                block.hash
+            );
+        })
+        .await;
         shutdown.shutdown();
-        let (mut node, started) = tokio::time::timeout(Duration::from_secs(10), task).await.unwrap().unwrap();
+        let (mut node, started) = tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .unwrap()
+            .unwrap();
         started.unwrap();
         node.stop().await.unwrap();
         outcome.expect("vote pressure recovery timed out");
@@ -109,7 +161,9 @@ mod tests {
             params: burst_ledger::genesis::initial_params(&burst_types::NetworkId::Dev),
             enable_representative: true,
             ..NodeConfig::default()
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         node.initialize_genesis().unwrap();
         let genesis = crate::genesis_state::block(node.config.network, &node.initial_params);
         let signer = node.vote_generator.clone().lock_owned().await;
@@ -119,7 +173,9 @@ mod tests {
             while queue.capacity() != CAPACITY {
                 tokio::task::yield_now().await;
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         for _ in 0..CAPACITY {
             enqueue(&queue, genesis.hash);
         }
@@ -131,8 +187,11 @@ mod tests {
         assert_eq!(signer.sequence(), 0);
         node.shutdown.shutdown();
         crate::shutdown::drain_tasks(
-            std::mem::take(&mut node.task_handles), Duration::from_secs(1),
-        ).await.unwrap();
+            std::mem::take(&mut node.task_handles),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
         assert!(queue.is_closed());
         assert_eq!(signer.sequence(), 0);
         drop(signer);

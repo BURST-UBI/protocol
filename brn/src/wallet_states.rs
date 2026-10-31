@@ -305,7 +305,9 @@ impl WalletStates {
 
     /// Clear an enabled recording without enabling a disabled recorder.
     pub fn reset_recorded_transition(&mut self) {
-        if self.recording.is_some() { self.recording = Some(Recording::default()); }
+        if self.recording.is_some() {
+            self.recording = Some(Recording::default());
+        }
     }
 
     // Capture each address once. A capture failure is retained for visit_recorded;

@@ -19,18 +19,34 @@ pub struct DelegationView<'a> {
     reverse_delegations: &'a PersistentMap<WalletAddress, PersistentSet<WalletAddress>>,
     scoped_delegations: &'a PersistentMap<(WalletAddress, DelegationScope), WalletAddress>,
     max_depth: usize,
-    key_ballots: &'a PersistentMap<WalletAddress, Option<burst_transactions::governance::GovernanceVote>>,
+    key_ballots:
+        &'a PersistentMap<WalletAddress, Option<burst_transactions::governance::GovernanceVote>>,
 }
 impl DelegationEngine {
     pub fn snapshot_view(&self) -> DelegationView<'_> {
-        DelegationView { delegations: &self.delegations, reverse_delegations: &self.reverse_delegations,
-            scoped_delegations: &self.scoped_delegations, max_depth: self.max_depth, key_ballots: &self.key_ballots }
+        DelegationView {
+            delegations: &self.delegations,
+            reverse_delegations: &self.reverse_delegations,
+            scoped_delegations: &self.scoped_delegations,
+            max_depth: self.max_depth,
+            key_ballots: &self.key_ballots,
+        }
     }
 }
 impl DelegationView<'_> {
-    pub fn delegations(&self) -> &impl SnapshotMap { self.delegations }
-    pub fn reverse(&self) -> &impl SnapshotMap<Value: WalletSet> { self.reverse_delegations }
-    pub fn scoped(&self) -> &impl SnapshotMap { self.scoped_delegations }
-    pub fn max_depth(&self) -> usize { self.max_depth }
-    pub fn ballots(&self) -> &impl SnapshotMap { self.key_ballots }
+    pub fn delegations(&self) -> &impl SnapshotMap {
+        self.delegations
+    }
+    pub fn reverse(&self) -> &impl SnapshotMap<Value: WalletSet> {
+        self.reverse_delegations
+    }
+    pub fn scoped(&self) -> &impl SnapshotMap {
+        self.scoped_delegations
+    }
+    pub fn max_depth(&self) -> usize {
+        self.max_depth
+    }
+    pub fn ballots(&self) -> &impl SnapshotMap {
+        self.key_ballots
+    }
 }

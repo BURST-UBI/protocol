@@ -13,7 +13,10 @@ impl RevisionWaiters {
         if change.table != UndoTable::Meta || !change.key.starts_with(b"governance_revision/v1/") {
             return false;
         }
-        self.waiting.entry((change.key.clone(), change.after.clone())).or_default().insert(hash);
+        self.waiting
+            .entry((change.key.clone(), change.after.clone()))
+            .or_default()
+            .insert(hash);
         true
     }
 
@@ -21,7 +24,10 @@ impl RevisionWaiters {
         if change.table != UndoTable::Meta || !change.key.starts_with(b"governance_revision/v1/") {
             return;
         }
-        if let Some(waiting) = self.waiting.remove(&(change.key.clone(), change.before.clone())) {
+        if let Some(waiting) = self
+            .waiting
+            .remove(&(change.key.clone(), change.before.clone()))
+        {
             ready.extend(waiting);
         }
     }
@@ -32,10 +38,16 @@ mod tests {
     use super::*;
 
     fn guard(proposal: u8, before: Option<u128>, after: Option<u128>) -> UndoChange {
-        UndoChange { table: UndoTable::Meta,
-            key: format!("governance_revision/v1/{}", burst_types::TxHash::new([proposal; 32])).into_bytes(),
+        UndoChange {
+            table: UndoTable::Meta,
+            key: format!(
+                "governance_revision/v1/{}",
+                burst_types::TxHash::new([proposal; 32])
+            )
+            .into_bytes(),
             before: before.map(|v| v.to_be_bytes().to_vec()),
-            after: after.map(|v| v.to_be_bytes().to_vec()) }
+            after: after.map(|v| v.to_be_bytes().to_vec()),
+        }
     }
 
     #[test]
@@ -46,7 +58,11 @@ mod tests {
         assert!(waiters.park(first, &guard(1, None, Some(7))));
         assert!(waiters.park(second, &guard(1, Some(1), None)));
         let mut ready = BTreeSet::new();
-        for change in [guard(2, Some(7), Some(8)), guard(1, Some(8), Some(9)), guard(1, Some(0), Some(1))] {
+        for change in [
+            guard(2, Some(7), Some(8)),
+            guard(1, Some(8), Some(9)),
+            guard(1, Some(0), Some(1)),
+        ] {
             waiters.wake(&change, &mut ready);
             assert!(ready.is_empty());
         }
@@ -58,10 +74,17 @@ mod tests {
         waiters.wake(&guard(1, None, Some(1)), &mut ready);
         assert_eq!(ready, BTreeSet::from([second]));
         assert!(waiters.waiting.is_empty());
-        for (table, key) in [(UndoTable::BrnMeta, b"governance_engine".to_vec()),
+        for (table, key) in [
+            (UndoTable::BrnMeta, b"governance_engine".to_vec()),
             (UndoTable::Meta, b"governance_revision/v2/unknown".to_vec()),
-            (UndoTable::Accounts, guard(1, None, None).key)] {
-            let change = UndoChange { table, key, before: None, after: Some(vec![1]) };
+            (UndoTable::Accounts, guard(1, None, None).key),
+        ] {
+            let change = UndoChange {
+                table,
+                key,
+                before: None,
+                after: Some(vec![1]),
+            };
             assert!(!waiters.park(first, &change));
         }
     }
@@ -69,10 +92,13 @@ mod tests {
     #[test]
     fn reverse_hash_revision_chain_has_linear_candidate_attempts() {
         for count in [16u128, 1024] {
-            let rows: BTreeMap<_, _> = (1..=count).map(|value| {
-                let mut hash = [0; 32]; hash[16..].copy_from_slice(&value.to_be_bytes());
-                (BlockHash::new(hash), guard(1, Some(value-1), Some(value)))
-            }).collect();
+            let rows: BTreeMap<_, _> = (1..=count)
+                .map(|value| {
+                    let mut hash = [0; 32];
+                    hash[16..].copy_from_slice(&value.to_be_bytes());
+                    (BlockHash::new(hash), guard(1, Some(value - 1), Some(value)))
+                })
+                .collect();
             let mut ready: BTreeSet<_> = rows.keys().copied().collect();
             let mut waiting = RevisionWaiters::default();
             let mut current = count;
@@ -85,15 +111,20 @@ mod tests {
                     attempts += 1;
                     let row = &rows[hash];
                     if row.after.as_deref() == Some(current.to_be_bytes().as_slice()) {
-                        selected = Some(*hash); break;
+                        selected = Some(*hash);
+                        break;
                     }
-                    assert!(waiting.park(*hash, row)); deferred.push(*hash);
+                    assert!(waiting.park(*hash, row));
+                    deferred.push(*hash);
                 }
-                for hash in deferred { ready.remove(&hash); }
+                for hash in deferred {
+                    ready.remove(&hash);
+                }
                 let hash = selected.expect("valid chain must make progress");
                 ready.remove(&hash);
                 waiting.wake(&rows[&hash], &mut ready);
-                removed.push(hash); current -= 1;
+                removed.push(hash);
+                current -= 1;
             }
             assert_eq!(removed, rows.keys().rev().copied().collect::<Vec<_>>());
             assert_eq!(attempts, 2 * count - 1);

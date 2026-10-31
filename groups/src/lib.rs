@@ -11,8 +11,8 @@ pub mod trust_graph;
 pub mod types;
 
 pub use client::GroupClient;
-pub use evaluation::GroupEvaluation;
 pub use error::GroupError;
+pub use evaluation::GroupEvaluation;
 pub use registry::GroupRegistry;
 pub use trust_graph::MembershipPath;
 pub use types::{GroupInfo, MemberStatus};

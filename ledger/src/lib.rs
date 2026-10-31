@@ -27,6 +27,6 @@ pub use genesis::{legacy_genesis_fixture, legacy_genesis_fixture_hash, GenesisCo
 pub use legacy::ledger::{Ledger, LedgerSummary};
 #[doc(hidden)]
 #[deprecated(note = "Candidate selection only; use authenticated retirement in the node")]
-pub use legacy::pruning::{PruningCandidates, CandidateCounts, PruningConfig};
+pub use legacy::pruning::{CandidateCounts, PruningCandidates, PruningConfig};
 pub use snapshot::{AccountSnapshot, LedgerSnapshot};
 pub use state_block::{BlockType, StateBlock, CURRENT_BLOCK_VERSION};

@@ -52,17 +52,29 @@ mod tests {
 
     #[test]
     fn map_capacity_is_typed_without_classifying_other_failures_as_retryable() {
-        for native in [heed::MdbError::MapFull, heed::MdbError::TxnFull,
-            heed::MdbError::ReadersFull, heed::MdbError::Corrupted, heed::MdbError::GrowthLimit] {
+        for native in [
+            heed::MdbError::MapFull,
+            heed::MdbError::TxnFull,
+            heed::MdbError::ReadersFull,
+            heed::MdbError::Corrupted,
+            heed::MdbError::GrowthLimit,
+        ] {
             let message = heed::Error::Mdb(native).to_string();
             let lmdb = LmdbError::from(heed::Error::Mdb(native));
             assert_eq!(lmdb.to_string(), format!("LMDB error: {message}"));
             let store = burst_store::StoreError::from(lmdb);
-            assert_eq!(store.to_string(), format!("storage backend error: {message}"));
-            assert_eq!(matches!(store, burst_store::StoreError::GrowthLimit(_)),
-                native == heed::MdbError::GrowthLimit);
-            assert_eq!(matches!(store, burst_store::StoreError::MapFull(_)),
-                native == heed::MdbError::MapFull);
+            assert_eq!(
+                store.to_string(),
+                format!("storage backend error: {message}")
+            );
+            assert_eq!(
+                matches!(store, burst_store::StoreError::GrowthLimit(_)),
+                native == heed::MdbError::GrowthLimit
+            );
+            assert_eq!(
+                matches!(store, burst_store::StoreError::MapFull(_)),
+                native == heed::MdbError::MapFull
+            );
         }
         let io = std::io::Error::from(std::io::ErrorKind::WriteZero);
         let error = burst_store::StoreError::from(LmdbError::from(heed::Error::Io(io)));

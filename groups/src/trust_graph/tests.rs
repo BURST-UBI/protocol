@@ -265,12 +265,35 @@ async fn overlapping_roots_share_requests_only_within_one_evaluation() {
     let (a, b) = futures_util::future::join(
         evaluation.verify_member_through_groups(&graph.registry, "root", "brst_origin", 1),
         evaluation.verify_member_through_groups(&graph.registry, "other", "brst_origin", 1),
-    ).await;
+    )
+    .await;
     assert!(a.unwrap().is_some());
     assert!(b.unwrap().is_some());
-    assert_eq!(graph.requests.lock().unwrap().iter().filter(|p| p.as_str() == "/leaf/verify/brst_origin").count(), 1);
+    assert_eq!(
+        graph
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| p.as_str() == "/leaf/verify/brst_origin")
+            .count(),
+        1
+    );
     drop(evaluation);
     graph.group("leaf", false, &[]);
-    assert!(client.verify_member_through_groups(&graph.registry, "root", "brst_origin", 1).await.unwrap().is_none());
-    assert_eq!(graph.requests.lock().unwrap().iter().filter(|p| p.as_str() == "/leaf/verify/brst_origin").count(), 2);
+    assert!(client
+        .verify_member_through_groups(&graph.registry, "root", "brst_origin", 1)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        graph
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| p.as_str() == "/leaf/verify/brst_origin")
+            .count(),
+        2
+    );
 }

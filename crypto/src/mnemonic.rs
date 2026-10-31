@@ -32,9 +32,13 @@ pub fn keypair_from_mnemonic(phrase: &str) -> Result<KeyPair, MnemonicError> {
     let mnemonic = Mnemonic::parse_normalized(phrase)
         .map_err(|e| MnemonicError::InvalidMnemonic(e.to_string()))?;
     let entropy = Zeroizing::new(mnemonic.to_entropy());
-    let seed: &[u8; 32] = entropy.as_slice().try_into()
+    let seed: &[u8; 32] = entropy
+        .as_slice()
+        .try_into()
         .map_err(|_| MnemonicError::InvalidEntropyLength)?;
-    Ok(crate::keypair_from_private(crate::derive_account_key(seed, 0)))
+    Ok(crate::keypair_from_private(crate::derive_account_key(
+        seed, 0,
+    )))
 }
 
 /// Whether the phrase has a valid BIP39 checksum and a 32-byte wallet seed.
@@ -104,8 +108,17 @@ mod tests {
         let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
         let keypair = keypair_from_mnemonic(phrase).unwrap();
         // Independent hashlib.blake2b(bytes(32) + bytes(4), digest_size=32).
-        assert_eq!(keypair.private.0, [159, 14, 68, 76, 105, 247, 122, 73, 189, 11, 232, 157, 185, 44, 56, 254, 113, 62, 9, 99, 22, 92, 202, 18, 250, 245, 113, 45, 118, 87, 18, 15]);
-        assert_eq!(keypair.public.0, crate::public_from_private(&keypair.private).0);
+        assert_eq!(
+            keypair.private.0,
+            [
+                159, 14, 68, 76, 105, 247, 122, 73, 189, 11, 232, 157, 185, 44, 56, 254, 113, 62,
+                9, 99, 22, 92, 202, 18, 250, 245, 113, 45, 118, 87, 18, 15
+            ]
+        );
+        assert_eq!(
+            keypair.public.0,
+            crate::public_from_private(&keypair.private).0
+        );
     }
 
     #[test]
@@ -113,7 +126,10 @@ mod tests {
         for bytes in [16, 20, 24, 28] {
             let phrase = Mnemonic::from_entropy(&vec![0; bytes]).unwrap().to_string();
             assert!(!validate_mnemonic(&phrase));
-            assert!(matches!(keypair_from_mnemonic(&phrase), Err(MnemonicError::InvalidEntropyLength)));
+            assert!(matches!(
+                keypair_from_mnemonic(&phrase),
+                Err(MnemonicError::InvalidEntropyLength)
+            ));
         }
     }
 }

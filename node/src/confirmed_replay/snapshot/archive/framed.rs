@@ -72,33 +72,52 @@ pub(super) fn write<A: AuthoritySource + ?Sized>(
 }
 
 pub(super) fn compact_size<A: AuthoritySource + ?Sized>(
-    base: &CheckpointAnchor, authority: &A, certificate: &SnapshotCertificate, beacons: &[(burst_types::BlockHash, burst_vrf::RandomOutput)],
+    base: &CheckpointAnchor,
+    authority: &A,
+    certificate: &SnapshotCertificate,
+    beacons: &[(burst_types::BlockHash, burst_vrf::RandomOutput)],
 ) -> Result<u64, ReplayError> {
-    let mut length = 16u64.checked_add(frame_size(&(certificate, beacons))?)
+    let mut length = 16u64
+        .checked_add(frame_size(&(certificate, beacons))?)
         .ok_or_else(|| invalid("snapshot header length overflow"))?;
     let mut count = 0usize;
     for entry in authority.entries(base) {
         let bytes = frame_size(&entry?)?;
-        length = length.checked_add(8).and_then(|n| n.checked_add(bytes))
+        length = length
+            .checked_add(8)
+            .and_then(|n| n.checked_add(bytes))
             .ok_or_else(|| invalid("snapshot authority frame exceeds limits"))?;
-        count = count.checked_add(1).ok_or_else(|| invalid("snapshot authority count overflow"))?;
+        count = count
+            .checked_add(1)
+            .ok_or_else(|| invalid("snapshot authority count overflow"))?;
     }
-    if count != authority.count()? { return Err(invalid("snapshot authority source length changed")); }
+    if count != authority.count()? {
+        return Err(invalid("snapshot authority source length changed"));
+    }
     Ok(length)
 }
 
 pub(super) fn write_compact<A: AuthoritySource + ?Sized>(
-    base: &CheckpointAnchor, authority: &A, certificate: &SnapshotCertificate,
-    beacons: &[(burst_types::BlockHash, burst_vrf::RandomOutput)], writer: &mut impl Write,
+    base: &CheckpointAnchor,
+    authority: &A,
+    certificate: &SnapshotCertificate,
+    beacons: &[(burst_types::BlockHash, burst_vrf::RandomOutput)],
+    writer: &mut impl Write,
 ) -> Result<(), ReplayError> {
     let expected = authority.count()?;
-    writer.write_all(&(expected as u64).to_be_bytes()).map_err(invalid)?;
+    writer
+        .write_all(&(expected as u64).to_be_bytes())
+        .map_err(invalid)?;
     let mut count = 0usize;
     for entry in authority.entries(base) {
         write_frame(&entry?, writer)?;
-        count = count.checked_add(1).ok_or_else(|| invalid("snapshot authority count overflow"))?;
+        count = count
+            .checked_add(1)
+            .ok_or_else(|| invalid("snapshot authority count overflow"))?;
     }
-    if count != expected { return Err(invalid("snapshot authority source length changed")); }
+    if count != expected {
+        return Err(invalid("snapshot authority source length changed"));
+    }
     write_frame(&(certificate, beacons), writer)
 }
 
@@ -135,13 +154,19 @@ pub(super) fn read(
 }
 
 pub(super) fn read_compact(
-    base: &CheckpointAnchor, reader: &mut impl Read, length: u64, directory: &std::path::Path,
+    base: &CheckpointAnchor,
+    reader: &mut impl Read,
+    length: u64,
+    directory: &std::path::Path,
 ) -> Result<(Authority, SnapshotCertificate, Beacons), ReplayError> {
     read_format(base, reader, length, directory, true)
 }
 
 fn read_format(
-    base: &CheckpointAnchor, reader: &mut impl Read, length: u64, directory: &std::path::Path,
+    base: &CheckpointAnchor,
+    reader: &mut impl Read,
+    length: u64,
+    directory: &std::path::Path,
     compact: bool,
 ) -> Result<(Authority, SnapshotCertificate, Beacons), ReplayError> {
     if length == 0 {

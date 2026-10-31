@@ -183,7 +183,9 @@ fn compact_economic_projection_matches_full_installation_without_a_prefix() {
         .unwrap()
     };
     assert_eq!(decode_governance(txn), decode_governance(&full));
-    let expected_electorate: Vec<_> = full.account_entries().unwrap()
+    let expected_electorate: Vec<_> = full
+        .account_entries()
+        .unwrap()
         .map(Result::unwrap)
         .filter(|account| account.state.is_verified())
         .map(|account| account.address)

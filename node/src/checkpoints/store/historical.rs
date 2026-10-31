@@ -152,11 +152,12 @@ impl CertifiedCheckpoint {
             return snapshot_transfer::encode(bytes).map(Some);
         }
         let transaction = store.tx_begin_read()?;
-        let compact = record_storage::get_txn(&store.meta_store(),
-                &transaction,
-                crate::confirmed_replay::snapshot::installed::BASE_KEY,
-            )?
-            .is_some();
+        let compact = record_storage::get_txn(
+            &store.meta_store(),
+            &transaction,
+            crate::confirmed_replay::snapshot::installed::BASE_KEY,
+        )?
+        .is_some();
         drop(transaction);
         if compact {
             return snapshot_transfer::encode(bytes).map(Some);

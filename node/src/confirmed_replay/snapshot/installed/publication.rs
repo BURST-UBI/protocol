@@ -43,8 +43,11 @@ pub(in crate::confirmed_replay) fn materialize(
         }
     }
     if !super::super::canonical::equivalent_verification(
-        actual.snapshot_view(), expected.snapshot_view(), directory,
-    ).map_err(invalid)?
+        actual.snapshot_view(),
+        expected.snapshot_view(),
+        directory,
+    )
+    .map_err(invalid)?
     {
         return Err(invalid(
             "published verification state differs from certified replay",

@@ -4,6 +4,9 @@ use burst_store_lmdb::LmdbStore;
 use burst_wallet_core::NodeClient;
 use std::{sync::Arc, time::Duration};
 
+#[path = "admin_rpc.rs"]
+pub mod admin_rpc;
+
 pub struct RunningNode {
     pub client: NodeClient,
     pub store: Arc<LmdbStore>,
@@ -12,15 +15,30 @@ pub struct RunningNode {
 }
 
 impl RunningNode {
+    #[allow(dead_code)] // Shared by integration targets with different fixture entry points.
     pub async fn launch(config: NodeConfig) -> Self {
+        Self::launch_with_services(config, burst_daemon::start_public_services).await
+    }
+
+    #[allow(dead_code)]
+    pub async fn launch_with_admin(config: NodeConfig) -> Self {
+        Self::launch_with_services(config, admin_rpc::start_services).await
+    }
+
+    async fn launch_with_services(
+        config: NodeConfig,
+        services: fn(
+            burst_node::services::RpcEndpoint,
+            burst_node::services::WebSocketEndpoint,
+            Arc<ShutdownController>,
+        ) -> burst_node::services::ServiceTasks,
+    ) -> Self {
         let client = NodeClient::new(format!("http://127.0.0.1:{}", config.rpc_port)).unwrap();
         let mut node = BurstNode::new(config).await.unwrap();
         let store = node.store.clone();
         let shutdown = node.shutdown.clone();
         let task = tokio::spawn(async move {
-            let started = node
-                .start_with_services(burst_daemon::start_public_services)
-                .await;
+            let started = node.start_with_services(services).await;
             // Failed startup can leave workers to drain; preserve both errors.
             let stopped = node.stop().await;
             lifecycle_result(
@@ -75,9 +93,20 @@ fn lifecycle_result(
 mod tests {
     use super::*;
 
-    fn fixture() -> (tempfile::TempDir, RunningNode, tokio::sync::oneshot::Receiver<()>) {
+    fn fixture() -> (
+        tempfile::TempDir,
+        RunningNode,
+        tokio::sync::oneshot::Receiver<()>,
+    ) {
         let directory = tempfile::tempdir().unwrap();
-        let store = Arc::new(LmdbStore::open(directory.path(), burst_store_lmdb::REQUIRED_DATABASES, 8 << 20).unwrap());
+        let store = Arc::new(
+            LmdbStore::open(
+                directory.path(),
+                burst_store_lmdb::REQUIRED_DATABASES,
+                8 << 20,
+            )
+            .unwrap(),
+        );
         let shutdown = Arc::new(ShutdownController::new());
         let mut stopped = shutdown.subscribe();
         let (finished, completion) = tokio::sync::oneshot::channel();
@@ -86,8 +115,12 @@ mod tests {
             finished.send(()).unwrap();
             Ok(())
         });
-        let node = RunningNode { client: NodeClient::new("http://127.0.0.1:1").unwrap(),
-            store, shutdown, task: Some(task) };
+        let node = RunningNode {
+            client: NodeClient::new("http://127.0.0.1:1").unwrap(),
+            store,
+            shutdown,
+            task: Some(task),
+        };
         (directory, node, completion)
     }
 
@@ -97,7 +130,10 @@ mod tests {
         let shutdown = node.shutdown.clone();
         drop(node);
         assert!(shutdown.is_requested());
-        tokio::time::timeout(Duration::from_secs(2), completion).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(2), completion)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
@@ -123,10 +159,11 @@ mod tests {
         };
         let mut node = RunningNode::launch(config).await;
         let result = tokio::time::timeout(Duration::from_secs(20), node.task.take().unwrap())
-            .await.expect("failed startup did not drain").expect("node task panicked");
+            .await
+            .expect("failed startup did not drain")
+            .expect("node task panicked");
         assert!(node.shutdown.is_requested());
         let error = result.expect_err("occupied RPC listener must fail startup");
         assert!(error.contains("RPC server"), "{error}");
     }
-
 }

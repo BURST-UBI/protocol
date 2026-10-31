@@ -1,7 +1,7 @@
 use crate::{ChallengeOutcomeEvent, VerificationError, VerifierOutcome};
 use burst_types::{BlockHash, WalletAddress};
-use serde::{Deserialize, Serialize};
 use imbl::OrdMap;
+use serde::{Deserialize, Serialize};
 
 /// Binds votes and challenges to attempt hashes for economic settlement.
 /// These maps record caller-supplied contexts; they do not verify signatures.
@@ -21,17 +21,29 @@ fn ordered_votes<S: serde::Serializer>(
     struct Voters<'a>(&'a OrdMap<WalletAddress, BlockHash>);
     impl Serialize for Voters<'_> {
         fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-            serializer.collect_map(self.0.iter().map(|(wallet, context)| (wallet.as_str(), context)))
+            serializer.collect_map(
+                self.0
+                    .iter()
+                    .map(|(wallet, context)| (wallet.as_str(), context)),
+            )
         }
     }
-    serializer.collect_map(votes.iter().map(|(target, voters)| (target.as_str(), Voters(voters))))
+    serializer.collect_map(
+        votes
+            .iter()
+            .map(|(target, voters)| (target.as_str(), Voters(voters))),
+    )
 }
 
 fn ordered_challenges<S: serde::Serializer>(
     challenges: &crate::tracked_map::TrackedMap<WalletAddress, BlockHash>,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
-    serializer.collect_map(challenges.iter().map(|(wallet, hash)| (wallet.as_str(), hash)))
+    serializer.collect_map(
+        challenges
+            .iter()
+            .map(|(wallet, hash)| (wallet.as_str(), hash)),
+    )
 }
 
 fn rewind_map<V: Clone + PartialEq>(
@@ -168,18 +180,40 @@ mod tests {
             let mut contexts = super::AttemptContexts::default();
             for index in (0..count).rev() {
                 let target = burst_types::WalletAddress::new(format!("brst_context_{index}"));
-                let voters = (0..index % 8).rev().map(|voter| (
-                    burst_types::WalletAddress::new(format!("brst_voter_{voter}")),
-                    burst_types::BlockHash::new([(voter + 1) as u8; 32]),
-                )).collect();
+                let voters = (0..index % 8)
+                    .rev()
+                    .map(|voter| {
+                        (
+                            burst_types::WalletAddress::new(format!("brst_voter_{voter}")),
+                            burst_types::BlockHash::new([(voter + 1) as u8; 32]),
+                        )
+                    })
+                    .collect();
                 contexts.votes.insert(target.clone(), voters);
-                if index % 2 == 0 { contexts.challenges.insert(target, burst_types::BlockHash::new([9; 32])); }
+                if index % 2 == 0 {
+                    contexts
+                        .challenges
+                        .insert(target, burst_types::BlockHash::new([9; 32]));
+                }
             }
-            let votes: BTreeMap<_, _> = contexts.votes.iter().map(|(target, voters)| (
-                target.as_str(), voters.iter().map(|(wallet, context)| (wallet.as_str(), context))
-                    .collect::<BTreeMap<_, _>>(),
-            )).collect();
-            let challenges: BTreeMap<_, _> = contexts.challenges.iter().map(|(wallet, hash)| (wallet.as_str(), hash)).collect();
+            let votes: BTreeMap<_, _> = contexts
+                .votes
+                .iter()
+                .map(|(target, voters)| {
+                    (
+                        target.as_str(),
+                        voters
+                            .iter()
+                            .map(|(wallet, context)| (wallet.as_str(), context))
+                            .collect::<BTreeMap<_, _>>(),
+                    )
+                })
+                .collect();
+            let challenges: BTreeMap<_, _> = contexts
+                .challenges
+                .iter()
+                .map(|(wallet, hash)| (wallet.as_str(), hash))
+                .collect();
             let legacy = bincode::serialize(&(votes, challenges)).unwrap();
             let actual = bincode::serialize(&contexts).unwrap();
             assert_eq!(actual, legacy);
@@ -222,16 +256,35 @@ mod tests {
         // The former HashMap-backed two-field representation must decode these
         // exact bytes; ordered wire maps remain independent of runtime storage.
         type Legacy = (
-            std::collections::HashMap<WalletAddress, std::collections::HashMap<WalletAddress, BlockHash>>,
+            std::collections::HashMap<
+                WalletAddress,
+                std::collections::HashMap<WalletAddress, BlockHash>,
+            >,
             std::collections::HashMap<WalletAddress, BlockHash>,
         );
         let legacy: Legacy = bincode::deserialize(&bytes).unwrap();
-        let ordered_votes: std::collections::BTreeMap<_, _> = legacy.0.iter().map(|(target, voters)|
-            (target.as_str(), voters.iter().map(|(voter, hash)| (voter.as_str(), hash))
-                .collect::<std::collections::BTreeMap<_, _>>())).collect();
-        let ordered_challenges: std::collections::BTreeMap<_, _> = legacy.1.iter()
-            .map(|(target, hash)| (target.as_str(), hash)).collect();
-        assert_eq!(bytes, bincode::serialize(&(ordered_votes, ordered_challenges)).unwrap());
+        let ordered_votes: std::collections::BTreeMap<_, _> = legacy
+            .0
+            .iter()
+            .map(|(target, voters)| {
+                (
+                    target.as_str(),
+                    voters
+                        .iter()
+                        .map(|(voter, hash)| (voter.as_str(), hash))
+                        .collect::<std::collections::BTreeMap<_, _>>(),
+                )
+            })
+            .collect();
+        let ordered_challenges: std::collections::BTreeMap<_, _> = legacy
+            .1
+            .iter()
+            .map(|(target, hash)| (target.as_str(), hash))
+            .collect();
+        assert_eq!(
+            bytes,
+            bincode::serialize(&(ordered_votes, ordered_challenges)).unwrap()
+        );
         assert_eq!(bytes, bincode::serialize(&second).unwrap());
         for _ in 0..8 {
             let restored: AttemptContexts = bincode::deserialize(&bytes).unwrap();

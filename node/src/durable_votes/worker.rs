@@ -23,8 +23,9 @@ async fn run<T: Send + 'static>(
                 elapsed_us = started.elapsed().as_micros(), "vote worker finished");
         }
         result
-    }).await
-        .map_err(|error| StoreError::Backend(format!("durable vote worker failed: {error}")))
+    })
+    .await
+    .map_err(|error| StoreError::Backend(format!("durable vote worker failed: {error}")))
 }
 
 #[cfg(test)]
@@ -34,7 +35,10 @@ pub(crate) async fn generate(
     hash: BlockHash,
     is_final: bool,
 ) -> Result<GeneratedVote, VoteGenerationError> {
-    run(store, generator, move |store, generator| generate_vote(store, generator, hash, is_final)).await?
+    run(store, generator, move |store, generator| {
+        generate_vote(store, generator, hash, is_final)
+    })
+    .await?
 }
 
 pub(crate) async fn respond(
@@ -42,7 +46,10 @@ pub(crate) async fn respond(
     generator: OwnedMutexGuard<VoteGenerator>,
     hash: BlockHash,
 ) -> Result<Option<GeneratedVote>, StoreError> {
-    run(store, generator, move |store, generator| respond_vote(store, generator, hash)).await?
+    run(store, generator, move |store, generator| {
+        respond_vote(store, generator, hash)
+    })
+    .await?
 }
 
 pub(crate) async fn responses(
@@ -50,7 +57,10 @@ pub(crate) async fn responses(
     generator: OwnedMutexGuard<VoteGenerator>,
     hashes: Vec<BlockHash>,
 ) -> Result<Vec<Result<Option<GeneratedVote>, StoreError>>, StoreError> {
-    run(store, generator, move |store, generator| respond_votes(store, generator, &hashes)).await
+    run(store, generator, move |store, generator| {
+        respond_votes(store, generator, &hashes)
+    })
+    .await
 }
 
 pub(crate) async fn finals(
@@ -58,7 +68,10 @@ pub(crate) async fn finals(
     generator: OwnedMutexGuard<VoteGenerator>,
     hashes: Vec<BlockHash>,
 ) -> Result<Vec<Result<GeneratedVote, VoteGenerationError>>, StoreError> {
-    run(store, generator, move |store, generator| generate_final_votes(store, generator, &hashes)).await
+    run(store, generator, move |store, generator| {
+        generate_final_votes(store, generator, &hashes)
+    })
+    .await
 }
 
 #[cfg(test)]
@@ -73,7 +86,9 @@ mod tests {
         let store = Arc::new(LmdbStore::open(dir.path(), 32, 16 << 20).unwrap());
         let key = burst_crypto::keypair_from_seed(&[7; 32]);
         let signer = Arc::new(Mutex::new(VoteGenerator::new(
-            burst_crypto::derive_address(&key.public), key.private.0)));
+            burst_crypto::derive_address(&key.public),
+            key.private.0,
+        )));
         let (entered, started) = oneshot::channel();
         let (release, released) = std::sync::mpsc::channel();
         let guard = signer.clone().lock_owned().await;
@@ -85,7 +100,10 @@ mod tests {
             generator.advance_sequence_to(7);
         }));
         started.await.unwrap();
-        assert!(!first.is_finished(), "blocking operation ran on the async runtime");
+        assert!(
+            !first.is_finished(),
+            "blocking operation ran on the async runtime"
+        );
         first.abort();
         assert!(first.await.unwrap_err().is_cancelled());
         assert!(signer.try_lock().is_err());
@@ -96,11 +114,19 @@ mod tests {
             run(store, guard, move |_, generator| {
                 entered.send(()).unwrap();
                 generator.sequence()
-            }).await
+            })
+            .await
         });
-        assert!(tokio::time::timeout(Duration::from_millis(25), &mut started).await.is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut started)
+                .await
+                .is_err()
+        );
         release.send(()).unwrap();
-        tokio::time::timeout(Duration::from_secs(2), started).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(2), started)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(second.await.unwrap().unwrap(), 7);
         assert!(signer.try_lock().is_ok());
     }
@@ -111,9 +137,17 @@ mod tests {
         let store = Arc::new(LmdbStore::open(dir.path(), 32, 16 << 20).unwrap());
         let key = burst_crypto::keypair_from_seed(&[7; 32]);
         let signer = Arc::new(Mutex::new(VoteGenerator::new(
-            burst_crypto::derive_address(&key.public), key.private.0)));
-        let result = run::<()>(store, signer.clone().lock_owned().await, |_, _| panic!("worker fault")).await;
-        assert!(result.unwrap_err().to_string().contains("durable vote worker failed"));
+            burst_crypto::derive_address(&key.public),
+            key.private.0,
+        )));
+        let result = run::<()>(store, signer.clone().lock_owned().await, |_, _| {
+            panic!("worker fault")
+        })
+        .await;
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("durable vote worker failed"));
         assert_eq!(signer.try_lock().unwrap().sequence(), 0);
     }
 }

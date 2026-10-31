@@ -476,43 +476,91 @@ fn projection_reuse_windows_match_fresh_projection_at_phase_boundaries() {
     variants.push(cooldown.clone());
     cooldown.activation_at = Some(Timestamp::new(130));
     variants.push(cooldown);
-    for phase in [GovernancePhase::Rejected, GovernancePhase::Withdrawn,
-        GovernancePhase::Activation, GovernancePhase::Activated, GovernancePhase::Promotion,
-        GovernancePhase::Conflicted] {
+    for phase in [
+        GovernancePhase::Rejected,
+        GovernancePhase::Withdrawn,
+        GovernancePhase::Activation,
+        GovernancePhase::Activated,
+        GovernancePhase::Promotion,
+        GovernancePhase::Conflicted,
+    ] {
         let mut terminal = original.clone();
         terminal.phase = phase;
         variants.push(terminal);
     }
-    let proposal_end = engine.timing(original, &params).unwrap()
-        .proposal_end(original.created_at).unwrap().as_secs();
-    let times = [0, 99, 100, 109, 110, 111, 112, 113, 116, 117, 118, 129, 130,
-        proposal_end.saturating_sub(1), proposal_end, proposal_end.saturating_add(12), u64::MAX];
+    let proposal_end = engine
+        .timing(original, &params)
+        .unwrap()
+        .proposal_end(original.created_at)
+        .unwrap()
+        .as_secs();
+    let times = [
+        0,
+        99,
+        100,
+        109,
+        110,
+        111,
+        112,
+        113,
+        116,
+        117,
+        118,
+        129,
+        130,
+        proposal_end.saturating_sub(1),
+        proposal_end,
+        proposal_end.saturating_add(12),
+        u64::MAX,
+    ];
     for input in variants {
         for electorate in [&verified[..], &[][..]] {
             for seconds in times {
                 let now = Timestamp::new(seconds);
-                let projected = engine.project_proposal_at(&input, now, &params, &delegation, electorate);
+                let projected =
+                    engine.project_proposal_at(&input, now, &params, &delegation, electorate);
                 let until = engine.projection_valid_until(&projected, now, &params);
                 for later in times.into_iter().filter(|later| *later >= seconds) {
                     if until.is_none_or(|end| later < end.as_secs()) {
-                        assert_eq!(projected, engine.project_proposal_at(&input,
-                            Timestamp::new(later), &params, &delegation, electorate),
-                            "invalid reuse window at {seconds} -> {later} for {:?}", input.phase);
+                        assert_eq!(
+                            projected,
+                            engine.project_proposal_at(
+                                &input,
+                                Timestamp::new(later),
+                                &params,
+                                &delegation,
+                                electorate
+                            ),
+                            "invalid reuse window at {seconds} -> {later} for {:?}",
+                            input.phase
+                        );
                     }
                 }
             }
         }
     }
-    assert_eq!(engine.projection_valid_until(original, Timestamp::new(110), &params), Some(Timestamp::new(112)));
+    assert_eq!(
+        engine.projection_valid_until(original, Timestamp::new(110), &params),
+        Some(Timestamp::new(112))
+    );
     let mut invalid = original.clone();
     invalid.exploration_started_at = None;
-    assert_eq!(engine.projection_valid_until(&invalid, Timestamp::new(110), &params), Some(Timestamp::new(110)));
+    assert_eq!(
+        engine.projection_valid_until(&invalid, Timestamp::new(110), &params),
+        Some(Timestamp::new(110))
+    );
     invalid.exploration_started_at = Some(Timestamp::new(u64::MAX));
-    assert_eq!(engine.projection_valid_until(&invalid, Timestamp::new(110), &params), Some(Timestamp::new(110)));
+    assert_eq!(
+        engine.projection_valid_until(&invalid, Timestamp::new(110), &params),
+        Some(Timestamp::new(110))
+    );
     let mut overflow = original.clone();
     overflow.phase = GovernancePhase::Cooldown;
     overflow.cooldown_started_at = Some(Timestamp::new(u64::MAX - 1));
-    assert_eq!(engine.projection_valid_until(&overflow, Timestamp::new(110), &params), Some(Timestamp::new(u64::MAX)));
+    assert_eq!(
+        engine.projection_valid_until(&overflow, Timestamp::new(110), &params),
+        Some(Timestamp::new(u64::MAX))
+    );
 }
 
 #[test]
@@ -520,49 +568,90 @@ fn shared_electorate_preserves_canonical_receipts_and_lazy_validation() {
     let (engine, delegation, params, id, verified) = fixture();
     let electorate = BallotElectorate::new(verified.clone());
     assert!(electorate.commitment.get().is_none());
-    assert!(engine.prepare_ballot_with_electorate(&id, BlockHash::ZERO,
-        Timestamp::new(112), &params, &delegation, &electorate).is_err());
-    assert!(electorate.commitment.get().is_none(), "invalid history must precede electorate work");
+    assert!(engine
+        .prepare_ballot_with_electorate(
+            &id,
+            BlockHash::ZERO,
+            Timestamp::new(112),
+            &params,
+            &delegation,
+            &electorate
+        )
+        .is_err());
+    assert!(
+        electorate.commitment.get().is_none(),
+        "invalid history must precede electorate work"
+    );
     let expected = prepare(&engine, &delegation, &params, id, &verified);
     // Construct the expected encoding directly from the count and sorted keys.
-    let mut keys: Vec<_> = verified.iter().map(|a| burst_crypto::decode_address(a.as_str()).unwrap()).collect();
+    let mut keys: Vec<_> = verified
+        .iter()
+        .map(|a| burst_crypto::decode_address(a.as_str()).unwrap())
+        .collect();
     keys.sort();
     let mut bytes = b"BURST/governance-electorate/v1\0".to_vec();
     bytes.extend_from_slice(&(verified.len() as u32).to_be_bytes());
-    for key in keys { bytes.extend_from_slice(&key); }
+    for key in keys {
+        bytes.extend_from_slice(&key);
+    }
     for _ in 0..4 {
-        let ballot = engine.prepare_ballot_with_electorate(&id, BlockHash::new([9; 32]),
-            Timestamp::new(112), &params, &delegation, &electorate).unwrap();
-        assert_eq!(ballot.receipt.electorate, BlockHash::new(burst_crypto::blake2b_256(&bytes)));
+        let ballot = engine
+            .prepare_ballot_with_electorate(
+                &id,
+                BlockHash::new([9; 32]),
+                Timestamp::new(112),
+                &params,
+                &delegation,
+                &electorate,
+            )
+            .unwrap();
+        assert_eq!(
+            ballot.receipt.electorate,
+            BlockHash::new(burst_crypto::blake2b_256(&bytes))
+        );
         assert_eq!(ballot.commitment().unwrap(), expected.commitment().unwrap());
         assert_eq!(ballot.next_proposal(), expected.next_proposal());
         assert!(electorate.commitment.get().is_some());
     }
     let mut reordered = verified.clone();
     reordered.reverse();
-    assert_eq!(BallotElectorate::new(reordered).commitment().unwrap(), electorate.commitment().unwrap());
-    for invalid in [vec![wallet(1), wallet(1)], vec![WalletAddress::new("brst_invalid")]] {
+    assert_eq!(
+        BallotElectorate::new(reordered).commitment().unwrap(),
+        electorate.commitment().unwrap()
+    );
+    for invalid in [
+        vec![wallet(1), wallet(1)],
+        vec![WalletAddress::new("brst_invalid")],
+    ] {
         let invalid = BallotElectorate::new(invalid);
         assert!(invalid.commitment.get().is_none());
         assert!(invalid.commitment().is_err());
         assert!(invalid.commitment().is_err());
     }
     let smaller = BallotElectorate::new(verified[..verified.len() - 1].to_vec());
-    assert_ne!(smaller.commitment().unwrap(), electorate.commitment().unwrap());
+    assert_ne!(
+        smaller.commitment().unwrap(),
+        electorate.commitment().unwrap()
+    );
 }
 
 #[test]
 #[ignore = "explicit capped-host governance scaling diagnostic"]
 fn electorate_commitment_scaling() {
     use std::time::Instant;
-    let n: usize = std::env::var("BURST_GOV_PROBE_POPULATION").unwrap().parse().unwrap();
+    let n: usize = std::env::var("BURST_GOV_PROBE_POPULATION")
+        .unwrap()
+        .parse()
+        .unwrap();
     assert!((10..=100_000).contains(&n));
     let start = Instant::now();
-    let voters: Vec<_> = (0..n).map(|i| {
-        let mut key = [0u8; 32];
-        key[..8].copy_from_slice(&(i as u64).to_be_bytes());
-        burst_crypto::derive_address(&burst_types::PublicKey(key))
-    }).collect();
+    let voters: Vec<_> = (0..n)
+        .map(|i| {
+            let mut key = [0u8; 32];
+            key[..8].copy_from_slice(&(i as u64).to_be_bytes());
+            burst_crypto::derive_address(&burst_types::PublicKey(key))
+        })
+        .collect();
     let setup_ms = start.elapsed().as_secs_f64() * 1000.0;
     for sample in 0..5 {
         let electorate = BallotElectorate::new(voters.as_slice());
@@ -571,15 +660,24 @@ fn electorate_commitment_scaling() {
         let cold_ms = start.elapsed().as_secs_f64() * 1000.0;
         let start = Instant::now();
         for _ in 0..1000 {
-            assert_eq!(std::hint::black_box(electorate.commitment().unwrap()), expected);
+            assert_eq!(
+                std::hint::black_box(electorate.commitment().unwrap()),
+                expected
+            );
         }
         let warm_per_call_ns = start.elapsed().as_nanos() as f64 / 1000.0;
         assert_eq!(expected.0 as usize, n);
         let status = std::fs::read_to_string("/proc/self/status").unwrap();
-        let memory: Vec<_> = status.lines().filter(|line| line.starts_with("VmRSS:") || line.starts_with("VmHWM:")).collect();
-        println!("gov_scale {}", serde_json::json!({"kind":"electorate", "population":n,
+        let memory: Vec<_> = status
+            .lines()
+            .filter(|line| line.starts_with("VmRSS:") || line.starts_with("VmHWM:"))
+            .collect();
+        println!(
+            "gov_scale {}",
+            serde_json::json!({"kind":"electorate", "population":n,
             "sample":sample,"setup_ms":setup_ms,"cold_ms":cold_ms,
-            "warm_per_call_ns":warm_per_call_ns,"memory":memory}));
+            "warm_per_call_ns":warm_per_call_ns,"memory":memory})
+        );
     }
 }
 

@@ -1,8 +1,10 @@
+use super::helpers::{
+    brn_state_from_account, checked_brn_balance, parse_tx_hash, to_value, validate_account_format,
+};
 use super::{account_not_found, deserialize_block};
-use super::helpers::{validate_account_format, parse_tx_hash, to_value, brn_state_from_account, checked_brn_balance};
 use crate::{error::RpcError, pagination, state::RpcState};
-use burst_types::{Timestamp, WalletAddress};
 use burst_store::StoreError;
+use burst_types::{Timestamp, WalletAddress};
 
 pub async fn handle_account_info(
     params: serde_json::Value,

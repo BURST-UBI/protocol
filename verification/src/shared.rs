@@ -66,7 +66,9 @@ where
 impl<T: Clone + IntoIterator> IntoIterator for Shared<T> {
     type Item = T::Item;
     type IntoIter = T::IntoIter;
-    fn into_iter(self) -> Self::IntoIter { self.into_inner().into_iter() }
+    fn into_iter(self) -> Self::IntoIter {
+        self.into_inner().into_iter()
+    }
 }
 impl<A, T: FromIterator<A>> FromIterator<A> for Shared<T> {
     fn from_iter<I: IntoIterator<Item = A>>(iter: I) -> Self {

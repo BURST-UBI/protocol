@@ -74,12 +74,26 @@ pub(crate) async fn authenticate_with_cache(
 /// worker. Dropping the future does not wait for cleanup; cancelled work grants
 /// no authority.
 pub(super) async fn authenticate_until_shutdown(
-    store: Arc<LmdbStore>, network: NetworkId, params: ProtocolParams,
-    registry: Arc<RwLock<ConnectionRegistry>>, cached: Option<installed::ReplayCache>,
+    store: Arc<LmdbStore>,
+    network: NetworkId,
+    params: ProtocolParams,
+    registry: Arc<RwLock<ConnectionRegistry>>,
+    cached: Option<installed::ReplayCache>,
     shutdown: Arc<ShutdownController>,
 ) -> Result<Option<Checked>, StoreError> {
     let recovery = installed::recover_current_tip_until_shutdown(
-        store.clone(), network, params.clone(), registry, cached, shutdown,
-    ).await?;
-    Ok(recovery.map(|recovery| Checked { store, network, params, recovery: Some(recovery) }))
+        store.clone(),
+        network,
+        params.clone(),
+        registry,
+        cached,
+        shutdown,
+    )
+    .await?;
+    Ok(recovery.map(|recovery| Checked {
+        store,
+        network,
+        params,
+        recovery: Some(recovery),
+    }))
 }

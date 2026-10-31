@@ -7,13 +7,13 @@ use bincode::Options;
 use burst_consti::ConstiEngine;
 use burst_governance::DelegationEngine;
 mod brn;
-mod trst;
-mod expiry_counters;
-mod pending_expiry;
-mod pending_provenance;
 mod confirmations;
 mod confirmed_authority;
 mod confirmed_governance;
+mod expiry_counters;
+mod pending_expiry;
+mod pending_provenance;
+mod trst;
 
 #[derive(Clone, Default)]
 pub(crate) struct AuxiliaryCache {
@@ -37,7 +37,10 @@ pub(crate) struct AuxiliaryCache {
 
 impl AuxiliaryCache {
     pub(super) fn clear_electorate(&mut self, table: UndoTable) {
-        if table == UndoTable::Accounts { self.electorate = None; self.projection_identity = None; }
+        if table == UndoTable::Accounts {
+            self.electorate = None;
+            self.projection_identity = None;
+        }
     }
 
     pub(super) fn invalidate_projection(&mut self) {
@@ -48,10 +51,15 @@ impl AuxiliaryCache {
         if key.starts_with(b"checkpoint_snapshot/") {
             self.snapshot_base_identity = None;
         }
-        if key.starts_with(b"confirmed_governance/") { self.confirmed_governance = None; }
-        if key.starts_with(b"confirmed_authority/") { self.confirmed_authority = None; }
+        if key.starts_with(b"confirmed_governance/") {
+            self.confirmed_governance = None;
+        }
+        if key.starts_with(b"confirmed_authority/") {
+            self.confirmed_authority = None;
+        }
         if key == burst_store::meta::CERTIFIED_PAYMENT_AUTHORITY_KEY.as_bytes()
-            || key.starts_with(burst_store::meta::CERTIFIED_PAYMENT_AUTHORITY_PAGE_PREFIX.as_bytes())
+            || key
+                .starts_with(burst_store::meta::CERTIFIED_PAYMENT_AUTHORITY_PAGE_PREFIX.as_bytes())
             || key.starts_with(b"payment_epoch/")
             || key.starts_with(b"confirmed_governance/")
         {
@@ -105,10 +113,18 @@ impl LmdbEnvironment {
     /// environment and pinned generation. A miss never restores state, repairs
     /// caches or queues for the LMDB writer; authoritative admission does that.
     pub fn cached_payment_engines(
-        &self, view: &LmdbReadTransaction<'_>, expiry_secs: u64, max_rows: usize, max_bytes: usize,
+        &self,
+        view: &LmdbReadTransaction<'_>,
+        expiry_secs: u64,
+        max_rows: usize,
+        max_bytes: usize,
     ) -> Result<Option<(burst_brn::BrnEngine, burst_trst::TrstEngine)>, StoreError> {
-        if !view.belongs_to(self) { return Ok(None); }
-        let Some(generation) = view.generation else { return Ok(None); };
+        if !view.belongs_to(self) {
+            return Ok(None);
+        }
+        let Some(generation) = view.generation else {
+            return Ok(None);
+        };
         // Vote reservations retain this mutex through their durable commit.
         // Speculation must not queue behind that writer indirectly either.
         let slot = match self.auxiliary_cache.try_lock() {
@@ -118,33 +134,55 @@ impl LmdbEnvironment {
                 return Err(StoreError::Backend("payment cache lock poisoned".into()));
             }
         };
-        let Some((_, cache)) = slot.as_ref().filter(|(id, _)| *id == generation) else { return Ok(None); };
-        let (Some(brn), Some(trst)) = (&cache.brn, &cache.trst) else { return Ok(None); };
+        let Some((_, cache)) = slot.as_ref().filter(|(id, _)| *id == generation) else {
+            return Ok(None);
+        };
+        let (Some(brn), Some(trst)) = (&cache.brn, &cache.trst) else {
+            return Ok(None);
+        };
         // The complete cached TRST reader checked mixed/unknown rows at this cut.
         // Retain preparation's normalized-graph eligibility without a cold scan.
-        if self.meta_db.get(&view.txn, b"trst_graph_format").map_err(LmdbError::from)? != Some(&[1][..]) {
+        if self
+            .meta_db
+            .get(&view.txn, b"trst_graph_format")
+            .map_err(LmdbError::from)?
+            != Some(&[1][..])
+        {
             return Ok(None);
         }
-        let Some(brn) = brn.clean_snapshot(max_rows, max_bytes)? else { return Ok(None); };
-        let Some(trst) = trst.clean_snapshot(expiry_secs) else { return Ok(None); };
+        let Some(brn) = brn.clean_snapshot(max_rows, max_bytes)? else {
+            return Ok(None);
+        };
+        let Some(trst) = trst.clean_snapshot(expiry_secs) else {
+            return Ok(None);
+        };
         Ok(Some((brn, trst)))
     }
 
     /// Local reuse token for display-tally inputs. The view must belong to this
     /// environment. Managed unrelated commits carry the token forward; an
     /// unknown generation or exhausted identity space returns None.
-    pub fn read_governance_projection_identity(&self, view: &LmdbReadTransaction<'_>) -> Option<usize> {
+    pub fn read_governance_projection_identity(
+        &self,
+        view: &LmdbReadTransaction<'_>,
+    ) -> Option<usize> {
         let generation = view.generation?;
         let mut slot = self.auxiliary_cache.lock().unwrap();
-        if slot.as_ref().is_some_and(|(id, _)| *id > generation) { return None; }
+        if slot.as_ref().is_some_and(|(id, _)| *id > generation) {
+            return None;
+        }
         if slot.as_ref().is_none_or(|(id, _)| *id != generation) {
             *slot = Some((generation, AuxiliaryCache::default()));
         }
         let cache = &mut slot.as_mut().unwrap().1;
         if cache.projection_identity.is_none() {
-            cache.projection_identity = NEXT_PROJECTION_ID.try_update(
-                std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed,
-                |id| id.checked_add(1)).ok();
+            cache.projection_identity = NEXT_PROJECTION_ID
+                .try_update(
+                    std::sync::atomic::Ordering::Relaxed,
+                    std::sync::atomic::Ordering::Relaxed,
+                    |id| id.checked_add(1),
+                )
+                .ok();
         }
         cache.projection_identity
     }
@@ -156,15 +194,21 @@ impl LmdbEnvironment {
     pub fn read_payment_authority_identity(&self, view: &LmdbReadTransaction<'_>) -> Option<usize> {
         let generation = view.generation?;
         let mut slot = self.auxiliary_cache.lock().unwrap();
-        if slot.as_ref().is_some_and(|(id, _)| *id > generation) { return None; }
+        if slot.as_ref().is_some_and(|(id, _)| *id > generation) {
+            return None;
+        }
         if slot.as_ref().is_none_or(|(id, _)| *id != generation) {
             *slot = Some((generation, AuxiliaryCache::default()));
         }
         let cache = &mut slot.as_mut().unwrap().1;
         if cache.payment_authority_identity.is_none() {
-            cache.payment_authority_identity = NEXT_PROJECTION_ID.try_update(
-                std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed,
-                |id| id.checked_add(1)).ok();
+            cache.payment_authority_identity = NEXT_PROJECTION_ID
+                .try_update(
+                    std::sync::atomic::Ordering::Relaxed,
+                    std::sync::atomic::Ordering::Relaxed,
+                    |id| id.checked_add(1),
+                )
+                .ok();
         }
         cache.payment_authority_identity
     }
@@ -173,18 +217,26 @@ impl LmdbEnvironment {
     /// descriptor and pages. It is not authentication. Unknown/foreign views,
     /// lock contention and exhausted identity space cannot establish reuse.
     pub fn read_snapshot_base_identity(&self, view: &LmdbReadTransaction<'_>) -> Option<usize> {
-        if !view.belongs_to(self) { return None; }
+        if !view.belongs_to(self) {
+            return None;
+        }
         let generation = view.generation?;
         let mut slot = self.auxiliary_cache.try_lock().ok()?;
-        if slot.as_ref().is_some_and(|(id, _)| *id > generation) { return None; }
+        if slot.as_ref().is_some_and(|(id, _)| *id > generation) {
+            return None;
+        }
         if slot.as_ref().is_none_or(|(id, _)| *id != generation) {
             *slot = Some((generation, AuxiliaryCache::default()));
         }
         let cache = &mut slot.as_mut().unwrap().1;
         if cache.snapshot_base_identity.is_none() {
-            cache.snapshot_base_identity = NEXT_PROJECTION_ID.try_update(
-                std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed,
-                |id| id.checked_add(1)).ok();
+            cache.snapshot_base_identity = NEXT_PROJECTION_ID
+                .try_update(
+                    std::sync::atomic::Ordering::Relaxed,
+                    std::sync::atomic::Ordering::Relaxed,
+                    |id| id.checked_add(1),
+                )
+                .ok();
         }
         cache.snapshot_base_identity
     }
@@ -192,72 +244,109 @@ impl LmdbEnvironment {
     /// One retained electorate per environment, bounded to 8 MiB of address
     /// payload plus inline element storage. Larger sets still work uncached.
     pub fn read_verified_snapshot(
-        &self, view: &LmdbReadTransaction<'_>,
+        &self,
+        view: &LmdbReadTransaction<'_>,
     ) -> Result<std::sync::Arc<[WalletAddress]>, StoreError> {
         self.read_verified_snapshot_with_limit(view, 8 << 20)
     }
 
     fn read_verified_snapshot_with_limit(
-        &self, view: &LmdbReadTransaction<'_>, retain_limit: usize,
+        &self,
+        view: &LmdbReadTransaction<'_>,
+        retain_limit: usize,
     ) -> Result<std::sync::Arc<[WalletAddress]>, StoreError> {
         if let Some(generation) = view.generation {
             let cache = self.auxiliary_cache.lock().unwrap();
             if let Some((_, cache)) = cache.as_ref().filter(|(id, _)| *id == generation) {
-                if let Some(addresses) = &cache.electorate { return Ok(addresses.clone()); }
+                if let Some(addresses) = &cache.electorate {
+                    return Ok(addresses.clone());
+                }
             }
         }
         let addresses: std::sync::Arc<[WalletAddress]> =
             crate::verified_index::addresses(&view.txn, self.verified_accounts_db)?.into();
         let retained = addresses.iter().try_fold(0usize, |used, address| {
             used.checked_add(std::mem::size_of::<WalletAddress>())?
-                .checked_add(address.as_str().len()).filter(|size| *size <= retain_limit)
+                .checked_add(address.as_str().len())
+                .filter(|size| *size <= retain_limit)
         });
         if retained.is_some() {
-            self.publish_read_auxiliary(view.generation, |cache| cache.electorate = Some(addresses.clone()));
+            self.publish_read_auxiliary(view.generation, |cache| {
+                cache.electorate = Some(addresses.clone())
+            });
         }
         Ok(addresses)
     }
 
     /// Return an immutable delegation image for this pinned database view.
     pub fn read_delegation_snapshot(
-        &self, view: &LmdbReadTransaction<'_>,
+        &self,
+        view: &LmdbReadTransaction<'_>,
     ) -> Result<Option<DelegationEngine>, StoreError> {
         if let Some(generation) = view.generation {
             let cache = self.auxiliary_cache.lock().unwrap();
             if let Some((_, cache)) = cache.as_ref().filter(|(id, _)| *id == generation) {
-                if let Some(engine) = &cache.delegation { return Ok(Some(engine.clone())); }
+                if let Some(engine) = &cache.delegation {
+                    return Ok(Some(engine.clone()));
+                }
             }
         }
-        let Some(bytes) = self.meta_db.get(&view.txn, DelegationEngine::meta_key().as_bytes())
-            .map_err(LmdbError::from)? else { return Ok(None) };
+        let Some(bytes) = self
+            .meta_db
+            .get(&view.txn, DelegationEngine::meta_key().as_bytes())
+            .map_err(LmdbError::from)?
+        else {
+            return Ok(None);
+        };
         let engine = DelegationEngine::load_state(bytes)
             .map_err(|error| StoreError::Corruption(error.to_string()))?;
-        self.publish_read_auxiliary(view.generation, |cache| cache.delegation = Some(engine.clone()));
+        self.publish_read_auxiliary(view.generation, |cache| {
+            cache.delegation = Some(engine.clone())
+        });
         Ok(Some(engine))
     }
 
     pub fn read_constitution_snapshot(
-        &self, view: &LmdbReadTransaction<'_>,
+        &self,
+        view: &LmdbReadTransaction<'_>,
     ) -> Result<Option<ConstiEngine>, StoreError> {
         if let Some(generation) = view.generation {
             let cache = self.auxiliary_cache.lock().unwrap();
             if let Some((_, cache)) = cache.as_ref().filter(|(id, _)| *id == generation) {
-                if let Some(engine) = &cache.constitution { return Ok(Some(engine.clone())); }
+                if let Some(engine) = &cache.constitution {
+                    return Ok(Some(engine.clone()));
+                }
             }
         }
-        let Some(bytes) = self.meta_db.get(&view.txn, b"consti_engine")
-            .map_err(LmdbError::from)? else { return Ok(None) };
-        let engine: ConstiEngine = bincode::DefaultOptions::new().with_fixint_encoding()
-            .with_limit(bytes.len() as u64).reject_trailing_bytes().deserialize(bytes)
+        let Some(bytes) = self
+            .meta_db
+            .get(&view.txn, b"consti_engine")
+            .map_err(LmdbError::from)?
+        else {
+            return Ok(None);
+        };
+        let engine: ConstiEngine = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .with_limit(bytes.len() as u64)
+            .reject_trailing_bytes()
+            .deserialize(bytes)
             .map_err(|error| StoreError::Corruption(error.to_string()))?;
-        self.publish_read_auxiliary(view.generation, |cache| cache.constitution = Some(engine.clone()));
+        self.publish_read_auxiliary(view.generation, |cache| {
+            cache.constitution = Some(engine.clone())
+        });
         Ok(Some(engine))
     }
 
-    fn publish_read_auxiliary(&self, generation: Option<usize>, publish: impl FnOnce(&mut AuxiliaryCache)) {
+    fn publish_read_auxiliary(
+        &self,
+        generation: Option<usize>,
+        publish: impl FnOnce(&mut AuxiliaryCache),
+    ) {
         let Some(generation) = generation else { return };
         let mut slot = self.auxiliary_cache.lock().unwrap();
-        if slot.as_ref().is_some_and(|(id, _)| *id > generation) { return; }
+        if slot.as_ref().is_some_and(|(id, _)| *id > generation) {
+            return;
+        }
         if slot.as_ref().is_none_or(|(id, _)| *id != generation) {
             *slot = Some((generation, AuxiliaryCache::default()));
         }
@@ -309,9 +398,13 @@ mod tests;
 #[cfg(test)]
 fn probe_rss_kib() -> u64 {
     let status = std::fs::read_to_string("/proc/self/status").expect("Linux scaling host");
-    status.lines().find_map(|line| line.strip_prefix("VmRSS:"))
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmRSS:"))
         .and_then(|value| value.split_whitespace().next())
-        .unwrap().parse().unwrap()
+        .unwrap()
+        .parse()
+        .unwrap()
 }
 
 #[cfg(test)]
@@ -322,9 +415,26 @@ pub(super) fn reserve_test_votes(store: &crate::LmdbStore) {
     let previous = BlockHash::ZERO;
     let choice = BlockHash::new([2; 32]);
     for final_vote in [false, true] {
-        meta.reserve_consensus_vote(&epoch, &representative, &representative,
-            &previous, &choice, final_vote, 0).unwrap();
+        meta.reserve_consensus_vote(
+            &epoch,
+            &representative,
+            &representative,
+            &previous,
+            &choice,
+            final_vote,
+            0,
+        )
+        .unwrap();
     }
-    assert!(meta.reserve_consensus_vote(&epoch, &representative, &representative,
-        &previous, &BlockHash::new([3; 32]), true, 0).is_err());
+    assert!(meta
+        .reserve_consensus_vote(
+            &epoch,
+            &representative,
+            &representative,
+            &previous,
+            &BlockHash::new([3; 32]),
+            true,
+            0
+        )
+        .is_err());
 }

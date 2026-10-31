@@ -56,11 +56,19 @@ pub(crate) fn respond_vote(
         }
         if let Some(vote) = generator.cached_soft_response(&block.account, block.previous, hash) {
             if block.hash != hash || block.compute_hash() != hash {
-                return Err(StoreError::Corruption("vote candidate hash mismatch".into()));
+                return Err(StoreError::Corruption(
+                    "vote candidate hash mismatch".into(),
+                ));
             }
-            store.meta_store().validate_reserved_soft_vote(&block.payment_epoch,
-                &generator.representative, &block.account, &block.previous, &hash,
-                vote.sequence, block.timestamp.as_secs())?;
+            store.meta_store().validate_reserved_soft_vote(
+                &block.payment_epoch,
+                &generator.representative,
+                &block.account,
+                &block.previous,
+                &hash,
+                vote.sequence,
+                block.timestamp.as_secs(),
+            )?;
             return Ok(Some(vote.clone()));
         }
     }
@@ -86,12 +94,21 @@ pub(crate) fn generate_vote(
     is_final: bool,
 ) -> Result<GeneratedVote, VoteGenerationError> {
     let block = vote_candidate(store, hash)?;
-    let governance_limit = if is_final { final_vote_limit(store, &block)? } else { None };
+    let governance_limit = if is_final {
+        final_vote_limit(store, &block)?
+    } else {
+        None
+    };
     if is_final && governance_limit.is_none() {
         if let Some(vote) = generator.cached_final_response(&hash) {
             store.meta_store().validate_reserved_final_vote(
-                &block.payment_epoch, &generator.representative, &block.account,
-                &block.previous, &hash, vote.sequence, block.timestamp.as_secs(),
+                &block.payment_epoch,
+                &generator.representative,
+                &block.account,
+                &block.previous,
+                &hash,
+                vote.sequence,
+                block.timestamp.as_secs(),
             )?;
             let vote = vote.clone();
             generator.remember_response_choice(block.account, block.previous, &vote);
@@ -143,7 +160,10 @@ fn vote_candidate(store: &LmdbStore, hash: BlockHash) -> Result<StateBlock, Vote
     Ok(block)
 }
 
-fn final_vote_limit(store: &LmdbStore, block: &StateBlock) -> Result<Option<u64>, VoteGenerationError> {
+fn final_vote_limit(
+    store: &LmdbStore,
+    block: &StateBlock,
+) -> Result<Option<u64>, VoteGenerationError> {
     if needs_governance_readiness(block) {
         let batch = store.tx_begin_write()?;
         final_vote_limit_in(&batch, block)
@@ -160,16 +180,22 @@ fn final_vote_limit_in(
 ) -> Result<Option<u64>, VoteGenerationError> {
     check_final_dependencies(batch, block)?;
     if needs_governance_readiness(block) {
-        Ok(crate::confirmed_governance::ConfirmedGovernance::load(batch)?
-            .map(|schedule| schedule.promise_limit(batch, block)).transpose()?.flatten())
+        Ok(
+            crate::confirmed_governance::ConfirmedGovernance::load(batch)?
+                .map(|schedule| schedule.promise_limit(batch, block))
+                .transpose()?
+                .flatten(),
+        )
     } else {
         Ok(None)
     }
 }
 
 fn needs_governance_readiness(block: &StateBlock) -> bool {
-    matches!(block.block_type,
-        burst_ledger::BlockType::GovernanceProposal | burst_ledger::BlockType::GovernanceEndorse)
+    matches!(
+        block.block_type,
+        burst_ledger::BlockType::GovernanceProposal | burst_ledger::BlockType::GovernanceEndorse
+    )
 }
 
 fn check_final_dependencies(
@@ -235,7 +261,8 @@ mod tests {
         let sign = |voter: usize, checkpoint: &Checkpoint| CheckpointSignature {
             representative: addresses[voter].clone(),
             signature: sign_message(
-                &burst_consensus::checkpoint_round::Ballot::precommit(checkpoint, 0).signing_payload(),
+                &burst_consensus::checkpoint_round::Ballot::precommit(checkpoint, 0)
+                    .signing_payload(),
                 &keys[voter].private,
             ),
         };
@@ -265,7 +292,9 @@ mod tests {
                 )
                 .unwrap();
             if voter == 3 {
-                conflicting_certificate.signatures.push(sign(voter, checkpoint));
+                conflicting_certificate
+                    .signatures
+                    .push(sign(voter, checkpoint));
             } else {
                 first_certificate.signatures.push(sign(voter, checkpoint));
             }
@@ -385,26 +414,43 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!soft.is_final);
-        let repeated_soft = respond_vote(&store, &mut generator, block.hash).unwrap().unwrap();
+        let repeated_soft = respond_vote(&store, &mut generator, block.hash)
+            .unwrap()
+            .unwrap();
         assert_eq!(repeated_soft.signature, soft.signature);
         assert_eq!(repeated_soft.sequence, soft.sequence);
         assert_eq!(generator.sequence(), soft.sequence);
         let competing = candidate(2);
-        store.meta_store().put_fork_candidate(&competing.hash,
-            &bincode::serialize(&competing).unwrap()).unwrap();
+        store
+            .meta_store()
+            .put_fork_candidate(&competing.hash, &bincode::serialize(&competing).unwrap())
+            .unwrap();
         let fork_soft = generate_vote(&store, &mut generator, competing.hash, false).unwrap();
-        let canonical_again = respond_vote(&store, &mut generator, block.hash).unwrap().unwrap();
+        let canonical_again = respond_vote(&store, &mut generator, block.hash)
+            .unwrap()
+            .unwrap();
         assert!(canonical_again.sequence > fork_soft.sequence);
         assert_ne!(canonical_again.signature, soft.signature);
-        let canonical_repeat = respond_vote(&store, &mut generator, block.hash).unwrap().unwrap();
+        let canonical_repeat = respond_vote(&store, &mut generator, block.hash)
+            .unwrap()
+            .unwrap();
         assert_eq!(canonical_repeat.signature, canonical_again.signature);
         let promised = generate_vote(&store, &mut generator, block.hash, true).unwrap();
-        let before_cementation = respond_vote(&store, &mut generator, block.hash).unwrap().unwrap();
+        let before_cementation = respond_vote(&store, &mut generator, block.hash)
+            .unwrap()
+            .unwrap();
         assert!(before_cementation.is_final);
         assert_eq!(before_cementation.signature, promised.signature);
         assert_eq!(before_cementation.sequence, promised.sequence);
         assert_eq!(generator.sequence(), promised.sequence);
-        assert_eq!(store.account_store().get_account(&block.account).unwrap().confirmation_height, 1);
+        assert_eq!(
+            store
+                .account_store()
+                .get_account(&block.account)
+                .unwrap()
+                .confirmation_height,
+            1
+        );
         account.confirmation_height = 2;
         store.account_store().put_account(&account).unwrap();
         let final_vote = respond_vote(&store, &mut generator, block.hash)
@@ -413,7 +459,9 @@ mod tests {
         assert!(final_vote.is_final);
         assert!(final_vote.sequence > soft.sequence);
         let reserved_sequence = generator.sequence();
-        let repeated = respond_vote(&store, &mut generator, block.hash).unwrap().unwrap();
+        let repeated = respond_vote(&store, &mut generator, block.hash)
+            .unwrap()
+            .unwrap();
         assert_eq!(repeated.sequence, final_vote.sequence);
         assert_eq!(repeated.timestamp, final_vote.timestamp);
         assert_eq!(repeated.signature, final_vote.signature);
@@ -429,13 +477,28 @@ mod tests {
             &final_vote.signature,
             &keys.public
         ));
-        use burst_store::meta::{MetaStore, encode_payment_vote_limit, GOVERNANCE_COUNTING_LIMIT_KEY};
-        store.meta_store().put_meta(GOVERNANCE_COUNTING_LIMIT_KEY,
-            &encode_payment_vote_limit(block.payment_epoch, Some(block.timestamp.as_secs() - 1))).unwrap();
+        use burst_store::meta::{
+            encode_payment_vote_limit, MetaStore, GOVERNANCE_COUNTING_LIMIT_KEY,
+        };
+        store
+            .meta_store()
+            .put_meta(
+                GOVERNANCE_COUNTING_LIMIT_KEY,
+                &encode_payment_vote_limit(
+                    block.payment_epoch,
+                    Some(block.timestamp.as_secs() - 1),
+                ),
+            )
+            .unwrap();
         assert!(respond_vote(&store, &mut generator, block.hash).is_err());
         assert_eq!(generator.sequence(), reserved_sequence);
-        store.meta_store().delete_meta(GOVERNANCE_COUNTING_LIMIT_KEY).unwrap();
-        let restored = respond_vote(&store, &mut generator, block.hash).unwrap().unwrap();
+        store
+            .meta_store()
+            .delete_meta(GOVERNANCE_COUNTING_LIMIT_KEY)
+            .unwrap();
+        let restored = respond_vote(&store, &mut generator, block.hash)
+            .unwrap()
+            .unwrap();
         assert_eq!(restored.signature, final_vote.signature);
         let fork = candidate(2);
         store
@@ -486,15 +549,19 @@ mod tests {
             .put_fork_candidate(&fork.hash, &bincode::serialize(&fork).unwrap())
             .unwrap();
         let mut generator = VoteGenerator::new(WalletAddress::new("brst_rep"), [7; 32]);
-        assert!(matches!(generate_vote(&store, &mut generator, fork.hash, true),
-            Err(VoteGenerationError::DependenciesPending(dependencies)) if dependencies == vec![opening.hash]));
+        assert!(
+            matches!(generate_vote(&store, &mut generator, fork.hash, true),
+            Err(VoteGenerationError::DependenciesPending(dependencies)) if dependencies == vec![opening.hash])
+        );
         assert_eq!(generator.sequence(), 0);
         store
             .meta_store()
             .enqueue_confirmation(&opening.hash)
             .unwrap();
-        assert!(matches!(generate_vote(&store, &mut generator, fork.hash, true),
-            Err(VoteGenerationError::DependenciesPending(dependencies)) if dependencies == vec![opening.hash]));
+        assert!(
+            matches!(generate_vote(&store, &mut generator, fork.hash, true),
+            Err(VoteGenerationError::DependenciesPending(dependencies)) if dependencies == vec![opening.hash])
+        );
         assert_eq!(generator.sequence(), 0);
         let soft = generate_vote(&store, &mut generator, fork.hash, false).unwrap();
         assert_eq!(soft.sequence, 1);

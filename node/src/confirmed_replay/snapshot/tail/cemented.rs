@@ -266,42 +266,60 @@ impl IndexedTail<true> {
     ) -> Result<(), StoreError> {
         let invalid = |message: &str| StoreError::Corruption(message.into());
         if batch.payment_epoch()? != self.tail.context().epoch {
-            return Err(invalid("cemented suffix belongs to another installed epoch"));
+            return Err(invalid(
+                "cemented suffix belongs to another installed epoch",
+            ));
         }
         self.verify_rows(batch, &|_| Ok(()))?;
-        let mut expected: std::collections::HashMap<_, _> = self.tail.heads().iter()
-            .map(|head| (&head.account, (head.height, head.hash))).collect();
+        let mut expected: std::collections::HashMap<_, _> = self
+            .tail
+            .heads()
+            .iter()
+            .map(|head| (&head.account, (head.height, head.hash)))
+            .collect();
         for account in batch.account_entries()? {
             let account = account?;
             if account.confirmation_height > account.block_count
                 || account.head.is_zero() != (account.block_count == 0)
                 || (account.block_count > 0
-                    && (batch.block_at_height(&account.address, account.block_count)? != Some(account.head)
-                        || batch.block_height(&account.address, &account.head)? != account.block_count))
+                    && (batch.block_at_height(&account.address, account.block_count)?
+                        != Some(account.head)
+                        || batch.block_height(&account.address, &account.head)?
+                            != account.block_count))
             {
                 return Err(invalid("invalid account boundary during compact discovery"));
             }
             let captured = expected.remove(&account.address);
             if account.confirmation_height == 0 {
                 if captured.is_some() {
-                    return Err(invalid("confirmed account changed during compact discovery"));
+                    return Err(invalid(
+                        "confirmed account changed during compact discovery",
+                    ));
                 }
                 continue;
             }
-            let Some(hash) = batch.block_at_height(&account.address, account.confirmation_height)? else {
+            let Some(hash) =
+                batch.block_at_height(&account.address, account.confirmation_height)?
+            else {
                 return Err(invalid("confirmed head missing during compact discovery"));
             };
             if captured.is_none_or(|(height, _)| account.confirmation_height > height) {
-                return Err(StoreError::StaleRead("confirmed cut advanced during compact discovery".into()));
+                return Err(StoreError::StaleRead(
+                    "confirmed cut advanced during compact discovery".into(),
+                ));
             }
             if captured != Some((account.confirmation_height, hash))
                 || batch.block_height(&account.address, &hash)? != account.confirmation_height
             {
-                return Err(invalid("confirmed account changed during compact discovery"));
+                return Err(invalid(
+                    "confirmed account changed during compact discovery",
+                ));
             }
         }
         if !expected.is_empty() {
-            return Err(invalid("confirmed account missing during compact discovery"));
+            return Err(invalid(
+                "confirmed account missing during compact discovery",
+            ));
         }
         Ok(())
     }

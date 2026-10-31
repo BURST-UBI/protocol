@@ -183,7 +183,13 @@ impl AccountStore for LmdbAccountStore {
         }
         let bytes = bincode::serialize(&info).map_err(LmdbError::from)?;
 
-        crate::verified_index::update(&mut wtxn, self.accounts_db, self.verified_accounts_db, info.address.as_str().as_bytes(), Some(&bytes))?;
+        crate::verified_index::update(
+            &mut wtxn,
+            self.accounts_db,
+            self.verified_accounts_db,
+            info.address.as_str().as_bytes(),
+            Some(&bytes),
+        )?;
 
         self.accounts_db
             .put(&mut wtxn, info.address.as_str().as_bytes(), &bytes)
@@ -278,14 +284,26 @@ impl AccountStore for LmdbAccountStore {
 
     fn all_verified_accounts(&self) -> Result<Vec<AccountInfo>, StoreError> {
         let txn = self.env.read_txn().map_err(LmdbError::from)?;
-        crate::verified_index::addresses(&txn, self.verified_accounts_db)?.into_iter().map(|address| {
-            let key = address.as_str().as_bytes();
-            let bytes = self.accounts_db.get(&txn, key).map_err(LmdbError::from)?
-                .ok_or_else(|| StoreError::Corruption("verified index references missing account".into()))?;
-            let account = decode_account_entry(key, bytes)?;
-            if !account.state.is_verified() { return Err(StoreError::Corruption("verified index references ineligible account".into())); }
-            Ok(account)
-        }).collect()
+        crate::verified_index::addresses(&txn, self.verified_accounts_db)?
+            .into_iter()
+            .map(|address| {
+                let key = address.as_str().as_bytes();
+                let bytes = self
+                    .accounts_db
+                    .get(&txn, key)
+                    .map_err(LmdbError::from)?
+                    .ok_or_else(|| {
+                        StoreError::Corruption("verified index references missing account".into())
+                    })?;
+                let account = decode_account_entry(key, bytes)?;
+                if !account.state.is_verified() {
+                    return Err(StoreError::Corruption(
+                        "verified index references ineligible account".into(),
+                    ));
+                }
+                Ok(account)
+            })
+            .collect()
     }
 
     fn all_verified_addresses(&self) -> Result<Vec<WalletAddress>, StoreError> {
@@ -344,32 +362,45 @@ mod tests {
         accounts.put_account(&eligible).unwrap();
         let outsider = AccountInfo::unopened(WalletAddress::new("brst_unverified"));
         accounts.put_account(&outsider).unwrap();
-        assert_eq!(accounts.all_verified_addresses().unwrap(), vec![eligible.address.clone()]);
+        assert_eq!(
+            accounts.all_verified_addresses().unwrap(),
+            vec![eligible.address.clone()]
+        );
         eligible.state = WalletState::Revoked;
         {
             let mut batch = store.tx_begin_write().unwrap();
             batch.put_account_info(&eligible, false).unwrap();
             assert!(batch.verified_accounts().unwrap().is_empty());
         }
-        assert_eq!(accounts.all_verified_addresses().unwrap(), vec![eligible.address.clone()]);
+        assert_eq!(
+            accounts.all_verified_addresses().unwrap(),
+            vec![eligible.address.clone()]
+        );
         let mut batch = store.tx_begin_write().unwrap();
         batch.put_account_info(&eligible, false).unwrap();
         batch.commit().unwrap();
         assert!(accounts.all_verified_addresses().unwrap().is_empty());
         eligible.state = WalletState::Challenged;
         accounts.put_account(&eligible).unwrap();
-        assert_eq!(accounts.all_verified_addresses().unwrap(), vec![eligible.address.clone()]);
+        assert_eq!(
+            accounts.all_verified_addresses().unwrap(),
+            vec![eligible.address.clone()]
+        );
         assert_eq!(accounts.all_verified_accounts().unwrap().len(), 1);
         drop(accounts);
         drop(store);
         let store = crate::LmdbStore::open(dir.path(), 32, 16 << 20).unwrap();
-        assert_eq!(store.tx_begin_write().unwrap().verified_accounts().unwrap(), vec![eligible.address]);
+        assert_eq!(
+            store.tx_begin_write().unwrap().verified_accounts().unwrap(),
+            vec![eligible.address]
+        );
     }
 
     #[test]
     fn electorate_migration_rebuilds_multiple_batches_and_is_atomic_on_corruption() {
         let dir = tempfile::tempdir().unwrap();
-        let store = crate::LmdbStore::open(dir.path(), crate::REQUIRED_DATABASES, 16 << 20).unwrap();
+        let store =
+            crate::LmdbStore::open(dir.path(), crate::REQUIRED_DATABASES, 16 << 20).unwrap();
         let accounts = store.account_store();
         let mut expected = Vec::new();
         for i in 0..600 {
@@ -389,36 +420,59 @@ mod tests {
         {
             let mut txn = accounts.env.write_txn().unwrap();
             accounts.verified_accounts_db.clear(&mut txn).unwrap();
-            accounts.accounts_db.put(&mut txn, original.address.as_str().as_bytes(), b"bad").unwrap();
+            accounts
+                .accounts_db
+                .put(&mut txn, original.address.as_str().as_bytes(), b"bad")
+                .unwrap();
             txn.commit().unwrap();
         }
-        store.meta_store().put_meta("schema_version", &6u32.to_le_bytes()).unwrap();
+        store
+            .meta_store()
+            .put_meta("schema_version", &6u32.to_le_bytes())
+            .unwrap();
         assert!(crate::LmdbStore::open(dir.path(), crate::REQUIRED_DATABASES, 16 << 20).is_err());
         assert_eq!(store.meta_store().get_schema_version().unwrap(), 6);
         assert!(accounts.all_verified_addresses().unwrap().is_empty());
         {
             let mut txn = accounts.env.write_txn().unwrap();
-            accounts.accounts_db.delete(&mut txn, original.address.as_str().as_bytes()).unwrap();
+            accounts
+                .accounts_db
+                .delete(&mut txn, original.address.as_str().as_bytes())
+                .unwrap();
             txn.commit().unwrap();
         }
         drop(accounts);
         drop(store);
-        let store = crate::LmdbStore::open(dir.path(), crate::REQUIRED_DATABASES, 16 << 20).unwrap();
-        assert_eq!(store.meta_store().get_schema_version().unwrap(), crate::CURRENT_SCHEMA_VERSION);
-        assert_eq!(store.account_store().all_verified_addresses().unwrap(), expected);
-        assert_eq!(store.tx_begin_write().unwrap().verified_accounts().unwrap(), expected);
+        let store =
+            crate::LmdbStore::open(dir.path(), crate::REQUIRED_DATABASES, 16 << 20).unwrap();
+        assert_eq!(
+            store.meta_store().get_schema_version().unwrap(),
+            crate::CURRENT_SCHEMA_VERSION
+        );
+        assert_eq!(
+            store.account_store().all_verified_addresses().unwrap(),
+            expected
+        );
+        assert_eq!(
+            store.tx_begin_write().unwrap().verified_accounts().unwrap(),
+            expected
+        );
     }
 
     #[test]
     fn electorate_index_rejects_bad_markers_and_membership_disagreement() {
         let dir = tempfile::tempdir().unwrap();
-        let store = crate::LmdbStore::open(dir.path(), crate::REQUIRED_DATABASES, 16 << 20).unwrap();
+        let store =
+            crate::LmdbStore::open(dir.path(), crate::REQUIRED_DATABASES, 16 << 20).unwrap();
         let accounts = store.account_store();
         let row = account();
         accounts.put_account(&row).unwrap();
         {
             let mut txn = accounts.env.write_txn().unwrap();
-            accounts.verified_accounts_db.put(&mut txn, row.address.as_str().as_bytes(), &[2]).unwrap();
+            accounts
+                .verified_accounts_db
+                .put(&mut txn, row.address.as_str().as_bytes(), &[2])
+                .unwrap();
             txn.commit().unwrap();
         }
         assert!(accounts.all_verified_addresses().is_err());
@@ -484,9 +538,7 @@ mod tests {
             accounts.put_account(&value).unwrap();
         }
         let snapshot = store.tx_begin_read().unwrap();
-        let first = accounts
-            .accounts_page_txn(&snapshot, None, 1)
-            .unwrap();
+        let first = accounts.accounts_page_txn(&snapshot, None, 1).unwrap();
         assert_eq!(first[0].address.as_str(), "brst_a");
         let mut inserted = account();
         inserted.address = WalletAddress::new("brst_ab");
@@ -520,10 +572,7 @@ mod tests {
             .is_empty());
         drop(snapshot);
         assert_eq!(
-            accounts
-                .accounts_page(Some(&first[0].address), 1)
-                .unwrap()[0]
-                .address,
+            accounts.accounts_page(Some(&first[0].address), 1).unwrap()[0].address,
             inserted.address
         );
     }
@@ -538,11 +587,7 @@ mod tests {
         store.account_store().put_account(&account).unwrap();
         assert_eq!(store.account_store().verified_account_count().unwrap(), 1);
         assert_eq!(
-            store
-                .account_store()
-                .all_verified_accounts()
-                .unwrap()
-                .len(),
+            store.account_store().all_verified_accounts().unwrap().len(),
             1
         );
         account.state = WalletState::Revoked;
