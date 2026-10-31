@@ -43,7 +43,7 @@ module.exports = {
     };
   }],
   themeConfig: {
-    colorMode: {respectPrefersColorScheme: true},
+    colorMode: {defaultMode: 'light', respectPrefersColorScheme: false},
     navbar: {
       title: 'BURST',
       items: [

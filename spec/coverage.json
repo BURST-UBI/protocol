@@ -5,7 +5,7 @@
       "sha256": "aad2d398d7ffe13b52c0fa8ba4df38e8e823895c875af57595a04213e81ac1fa"
     },
     "docs/README.md": {
-      "sha256": "7f679d537df07991ea9f478b1af16651bd636392bda8cb3abd7db263edb0890e"
+      "sha256": "40d064eb689211c7fc763fb78f1c9d29ca10e27674aa9a317f200a3f138e976d"
     },
     "docs/SUMMARY.md": {
       "sha256": "d620e16c9d376ad1d1d52e459e2fda8229131ee4253a622d768c265ae5ecbcc4"
@@ -35,7 +35,7 @@
       "sha256": "a004fe3177d51161b5c7b376c02749209d25b5f1c361c4a4767adacc209369d6"
     },
     "docs/introduction/QUICK_TOUR.md": {
-      "sha256": "510fbdc67d3e8cbe32dfc902e1a1b5d11979cf6dddb51f1bf9050e7c783f3edb"
+      "sha256": "54695549b52b28468ec3b5211f9de29d64e4ef54810bb7ff3f2f122aad1a3606"
     },
     "docs/introduction/WHITEPAPER.md": {
       "sha256": "f6c94f1840b2848d9b6f40018c2d722edca5e7056226297535ec598f802737ce"
@@ -3005,7 +3005,7 @@
       "source": "docs/README.md",
       "line": 1,
       "title": "BURST",
-      "sha256": "fa0466162c72ea75af246aa512f97591d532dd1ed5327699b18426a4e75394d0",
+      "sha256": "42eadc5dee1e99209d6ddc012b19630bde048661f6f367f95ab8bbcd4ed17870",
       "status": "unverified",
       "evidence": [],
       "note": "Current documentation section. Indexing does not establish implementation or release qualification."
@@ -3016,7 +3016,7 @@
       "evidence": [],
       "id": "DOC-README-002",
       "source": "docs/README.md",
-      "line": 8,
+      "line": 10,
       "title": "Start here",
       "sha256": "45f5f360baa043c2d7377812e0135283cb615cb6df9b683707247534d0f540c3"
     },
@@ -3026,7 +3026,7 @@
       "evidence": [],
       "id": "DOC-README-003",
       "source": "docs/README.md",
-      "line": 14,
+      "line": 16,
       "title": "Choose a path",
       "sha256": "63f15db80bf823b523be6573bc4faf08422d662650c09b337cd4b78268cf727b"
     },
@@ -3665,7 +3665,7 @@
       "source": "docs/introduction/QUICK_TOUR.md",
       "line": 6,
       "title": "Two kinds of balance",
-      "sha256": "3e9f8531d75429e02e395a6ea7010d0af8414d4135cf88930f168d3e6dfed141",
+      "sha256": "dd22b9c8a98cf18fabb1518100effb3e0d8f8d9de115ad4cf71c86ca46fcd681",
       "status": "unverified",
       "evidence": [],
       "note": "Current documentation section. Indexing does not establish implementation or release qualification."
@@ -3673,7 +3673,7 @@
     {
       "id": "DOC-introduction/QUICK_TOUR-003",
       "source": "docs/introduction/QUICK_TOUR.md",
-      "line": 16,
+      "line": 18,
       "title": "Currency with a history",
       "sha256": "7fa976abb5d0df6e0de1520e510ebe289e248521385d5e77fb54121c0d0cf573",
       "status": "unverified",
@@ -3683,7 +3683,7 @@
     {
       "id": "DOC-introduction/QUICK_TOUR-004",
       "source": "docs/introduction/QUICK_TOUR.md",
-      "line": 31,
+      "line": 33,
       "title": "People make the judgments",
       "sha256": "96e80e7fd592526aff001d37a8105fd4c74222bc42861ad6f68e976f14dfda6a",
       "status": "unverified",

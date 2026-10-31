@@ -5,6 +5,8 @@ being a person, rather than owning money already?
 
 ## Two kinds of balance
 
+![Burning BRN creates TRST for a recipient to accept.](../assets/conversion.png)
+
 A verified person accrues **BRN** while eligible. It is a personal allowance:
 you cannot transfer it directly to someone else.
 

@@ -5,6 +5,8 @@ TRST. Verified people accrue BRN while eligible. Burning BRN for a payment creat
 TRST for a recipient; that TRST can then change hands until it expires or is
 revoked.
 
+![Burning BRN creates TRST for a recipient to accept.](assets/conversion.png)
+
 ## Start here
 
 Read the [two-minute introduction](introduction/QUICK_TOUR.md) for the basic flow, then
