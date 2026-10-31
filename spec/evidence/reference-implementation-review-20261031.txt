@@ -6762,7 +6762,7 @@ fixture retains its isolated logs and data in `/tmp/burst-native-wallet-Y8DTPW`.
 Reproduce it from `wallet/` with the current wallet binary and Vite on port 1430:
 
 ```sh
-TAURI_DRIVER=/home/nitesh/.cargo/bin/tauri-driver \
+TAURI_DRIVER=/home/developer/.cargo/bin/tauri-driver \
 BURST_DAEMON=../protocol/target/debug/burst-daemon \
 node tests/native-session.mjs --group-graph-only
 ```

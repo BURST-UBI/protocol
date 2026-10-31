@@ -2762,7 +2762,7 @@ insufficient.486/diagnosis.json and sync-summary.json preserve measured scope.
 486terminal/MainPID0/Resultexit-code; runtime receiptFAIL/auditdiagnose; saved
 terminal log hashes verified. Failed fixture copied, hashes compared/fsynced on
 persistent target486/failed-fixture (manifest retained). Temporary8GiBP20disk
-burst-startup-20261028 unmounted/detached/deleted; Azure absence verified. No owned
+[temporary-startup-disk] unmounted/detached/deleted; Azure absence verified. No owned
 job or temporary disk remains. Preserve failure; no unchanged retry or deadline rise.
 
 485retained100kcapacity PASS637.28s remains valid: signed growth, authenticated
@@ -3096,7 +3096,7 @@ No sustained-service, release-binary, Pi, power-loss or minimum-IOPS claim.
 Temporary disk cleanup COMPLETE: attempt468/fixture/data.mdb copied back to original
 target, SHA2560ed7f37cae41c9fc3f5c4e4b58fbac48ea1463b137361ecafd4eba2f40e65887,
 102,006,784B, hashverified and fsynced. Unmounted/rmdir /mnt/burst-migration-io;
-Azure detached/deleted burst-migration-io-20261028 and list verifiedabsent. Existing
+Azure detached/deleted [temporary-migration-disk] and list verifiedabsent. Existing
 disk/VM/caps/shutdown schedule unchanged.467disk-cleanup.json records resource
 cleanup. No diagnostic disk cost continues and no owned validation job active.
 
@@ -3124,8 +3124,8 @@ supports a disk-specific limit, not a CPU/whole-VM IOPS limit. Saved raw definit
 metrics, summaries and artifact hashes in467; no benchmark repetition needed.
 
 Using user's explicit Azure authorization, created temporary8GiB Premium_LRS disk
-burst-migration-io-20261028 in BURST-VALIDATION-20261010-RG, P20 (API2300IOPS/150MBps),
-attached to burst-validation-1 LUN1 cachingNone. Existing LUN0disk untouched.
+[temporary-migration-disk] in [validation-resource-group], P20 (API2300IOPS/150MBps),
+attached to [validation-host-1] LUN1 cachingNone. Existing LUN0disk untouched.
 Verified new blank8GiB /dev/disk/azure/scsi1/lun1→/dev/sdc, then capped setup formatted
 ext4 with lazy inode/journal initialization disabled and mounted /mnt/burst-migration-io.
 Setup unit burst-migration-disk-setup-20261028 terminalinactive/MainPID0/success.
@@ -12996,7 +12996,7 @@ Invocationdaa1d7654fb045bcb96ec6063dbfe0b0. Collected and verified1063source
 hashes, four terminal stages and438component scopes:437reusable passes and the
 preserved8195readiness failure.180unit-fixture failure stays historical; its
 corrected assertion now passes. No build/test/collection remains active.
-Temporary rule BurstComplexityValidation180 removed after collection.
+Temporary rule [temporary-ssh-rule] removed after collection.
 Archive: `7c18e47ddf125baac392aac3e3a812db108fe1a6f1745a1f723209dc4287753b`.
 Validation executable: `86d1bc1ea7dc8b9ce758b5624e2e378ec43098e371cf9b563f5f472acf7aafed`.
 Audit: `76807d79ae0a3855d04ca97ef58f6b427f477737811537000b2e26a8031c6f40`.
@@ -13053,8 +13053,8 @@ to advance pending/confirmed heights monotonically; preserve every selection
 assertion and reuse completed passes. Collection complete and verified; historical failure preserved.
 Invocation24eff6510a91490794d7d05193e0fbfb. Evidence:
 `target/validation-evidence/signed-retained-closure-20261024/attempt180`.
-Temporary SSH rule BurstComplexityValidation180 permits85.76.4.223/32 to
-VM1 10.87.1.4/32 port22 only; remove after collection. Next after preparation:
+Temporary SSH rule [temporary-ssh-rule] permits[temporary-ssh-allowlist-ip]/32 to
+VM1 [validation-private-ip-1]/32 port22 only; remove after collection. Next after preparation:
 reuse its retained directory for the actual8195query resume; do not regenerate it.
 R1–R6/CX01–CX15 remain open; full goal active.
 
@@ -13271,7 +13271,7 @@ c931106ded994caba447a146c9a59f5d, PID113233 at launch (last confirmed job state)
 SSH observations subsequently timed out; Azure VM-agent read-only inspection now
 confirms terminal MainPID0/inactive/success and exact startup test PASS4.636s.
 Scoped source/evidence review PASS. No VM/job restart or compiler was launched.
-VM is running at unchanged132.164.251.154 with ssh service active. Evidence collection completed through VM agent; archive downloaded/hash-verified
+VM is running at unchanged[validation-public-ip] with ssh service active. Evidence collection completed through VM agent; archive downloaded/hash-verified
 using a temporary source-/destination-specific SSH rule, now deleted. Existing
 rules unchanged.175/access-recovery.json records the access diagnosis; no reboot.
 1062source hashes,2terminal stages and434scoped receipts verified. Archive SHA256:

@@ -10,8 +10,13 @@ This directory holds design decisions and the records used to qualify changes.
 | [Decision resolutions](DECISION_RESOLUTIONS.md) | Recorded resolutions of conflicting requirements |
 | `design/` | Detailed implementation contracts |
 | `reviews/` | Dated audits, fixes and their validation limits |
-| `evidence/` | Preserved original reports, run history and documentation baseline |
+| `evidence/` | Reports, run history and documentation baseline with infrastructure identifiers redacted |
 | `coverage.json` | Requirement inventory consumed by CI and release checks |
+
+Public records redact deployment addresses, cloud resource names and personal
+filesystem prefixes. Test outcomes, limitations and artifact hashes are retained.
+Original reports are archived privately; these public copies are not byte-identical
+receipts. Earlier Git commits still contain the original identifiers.
 
 ## Design notes
 

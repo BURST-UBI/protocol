@@ -18,7 +18,7 @@ The frozen product binaries were not changed or rebuilt during this review.
 | Retirement gate | Exact archived source defaults body retirement off and rejects enablement in production. The gate stays closed. |
 | Dependency notices | Twelve target graphs resolved; collection covers 692 selected Rust and frontend dependencies, including nested vendor notices and patched heed/LMDB. Five packages use clearly identified declared-license notices; no copyright owner/year was invented. |
 | Installer notices and sources | Pinned NSIS 3.11 and WiX 3.14.1 archive checksums verified; their notices and nsis-tauri-utils 0.5.3 terms included. Eight MPL package source archives match frozen lockfile checksums. Frozen daemon sources include patched-library source, licenses and change records. |
-| Sidecar delivery | `/home/nitesh/Downloads/Burst-release-notices-20261029.zip`, SHA256 `c6d045d51878a42782f3158c9a4caaadb8e7ffc3502747f958d680172e647d02`. All 14 indexed files and ZIP integrity verified. Original signed apps, DMGs and installers remain unchanged. |
+| Sidecar delivery | `/home/developer/Downloads/Burst-release-notices-20261029.zip`, SHA256 `c6d045d51878a42782f3158c9a4caaadb8e7ffc3502747f958d680172e647d02`. All 14 indexed files and ZIP integrity verified. Original signed apps, DMGs and installers remain unchanged. |
 | Operator documentation | `docs/release/DOWNLOADS.md` records supported-environment limits, backup scope, uncertain-action recovery and upgrade cautions. |
 
 ## Evidence limits and gates retained

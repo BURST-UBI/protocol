@@ -29,7 +29,7 @@ end-to-end release qualification. No test assertions were removed or weakened.
 | VM1 final-audit-20261031/artifact-preservation.json | Exact test executable preserved as node-tests with SHA256 | Reuse matching executable; do not rebuild to rerun unchanged questions |
 
 Evidence is archived at
-`/home/nitesh/.local/state/burst/audits/final-fixes-20261031`.
+`/home/developer/.local/state/burst/audits/final-fixes-20261031`.
 The Azure evidence archive was hash-verified locally against
 `9ed9b7e398cd1a5146d9a0f281b1f5d9b6829b2c1cfbb1799fa7e5f6cc74a624`.
 Remote evidence/source backups and preserved executable remain at

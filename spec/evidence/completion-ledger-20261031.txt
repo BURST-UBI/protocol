@@ -2859,7 +2859,7 @@ insufficient.486/diagnosis.json and sync-summary.json preserve measured scope.
 486terminal/MainPID0/Resultexit-code; runtime receiptFAIL/auditdiagnose; saved
 terminal log hashes verified. Failed fixture copied, hashes compared/fsynced on
 persistent target486/failed-fixture (manifest retained). Temporary8GiBP20disk
-burst-startup-20261028 unmounted/detached/deleted; Azure absence verified. No owned
+[temporary-startup-disk] unmounted/detached/deleted; Azure absence verified. No owned
 job or temporary disk remains. Preserve failure; no unchanged retry or deadline rise.
 
 485retained100kcapacity PASS637.28s remains valid: signed growth, authenticated
@@ -3193,7 +3193,7 @@ No sustained-service, release-binary, Pi, power-loss or minimum-IOPS claim.
 Temporary disk cleanup COMPLETE: attempt468/fixture/data.mdb copied back to original
 target, SHA2560ed7f37cae41c9fc3f5c4e4b58fbac48ea1463b137361ecafd4eba2f40e65887,
 102,006,784B, hashverified and fsynced. Unmounted/rmdir /mnt/burst-migration-io;
-Azure detached/deleted burst-migration-io-20261028 and list verifiedabsent. Existing
+Azure detached/deleted [temporary-migration-disk] and list verifiedabsent. Existing
 disk/VM/caps/shutdown schedule unchanged.467disk-cleanup.json records resource
 cleanup. No diagnostic disk cost continues and no owned validation job active.
 
@@ -3221,8 +3221,8 @@ supports a disk-specific limit, not a CPU/whole-VM IOPS limit. Saved raw definit
 metrics, summaries and artifact hashes in467; no benchmark repetition needed.
 
 Using user's explicit Azure authorization, created temporary8GiB Premium_LRS disk
-burst-migration-io-20261028 in BURST-VALIDATION-20261010-RG, P20 (API2300IOPS/150MBps),
-attached to burst-validation-1 LUN1 cachingNone. Existing LUN0disk untouched.
+[temporary-migration-disk] in [validation-resource-group], P20 (API2300IOPS/150MBps),
+attached to [validation-host-1] LUN1 cachingNone. Existing LUN0disk untouched.
 Verified new blank8GiB /dev/disk/azure/scsi1/lun1→/dev/sdc, then capped setup formatted
 ext4 with lazy inode/journal initialization disabled and mounted /mnt/burst-migration-io.
 Setup unit burst-migration-disk-setup-20261028 terminalinactive/MainPID0/success.
@@ -13093,7 +13093,7 @@ Invocationdaa1d7654fb045bcb96ec6063dbfe0b0. Collected and verified1063source
 hashes, four terminal stages and438component scopes:437reusable passes and the
 preserved8195readiness failure.180unit-fixture failure stays historical; its
 corrected assertion now passes. No build/test/collection remains active.
-Temporary rule BurstComplexityValidation180 removed after collection.
+Temporary rule [temporary-ssh-rule] removed after collection.
 Archive: `7c18e47ddf125baac392aac3e3a812db108fe1a6f1745a1f723209dc4287753b`.
 Validation executable: `86d1bc1ea7dc8b9ce758b5624e2e378ec43098e371cf9b563f5f472acf7aafed`.
 Audit: `76807d79ae0a3855d04ca97ef58f6b427f477737811537000b2e26a8031c6f40`.
@@ -13150,8 +13150,8 @@ to advance pending/confirmed heights monotonically; preserve every selection
 assertion and reuse completed passes. Collection complete and verified; historical failure preserved.
 Invocation24eff6510a91490794d7d05193e0fbfb. Evidence:
 `target/validation-evidence/signed-retained-closure-20261024/attempt180`.
-Temporary SSH rule BurstComplexityValidation180 permits85.76.4.223/32 to
-VM1 10.87.1.4/32 port22 only; remove after collection. Next after preparation:
+Temporary SSH rule [temporary-ssh-rule] permits[temporary-ssh-allowlist-ip]/32 to
+VM1 [validation-private-ip-1]/32 port22 only; remove after collection. Next after preparation:
 reuse its retained directory for the actual8195query resume; do not regenerate it.
 R1–R6/CX01–CX15 remain open; full goal active.
 
@@ -13368,7 +13368,7 @@ c931106ded994caba447a146c9a59f5d, PID113233 at launch (last confirmed job state)
 SSH observations subsequently timed out; Azure VM-agent read-only inspection now
 confirms terminal MainPID0/inactive/success and exact startup test PASS4.636s.
 Scoped source/evidence review PASS. No VM/job restart or compiler was launched.
-VM is running at unchanged132.164.251.154 with ssh service active. Evidence collection completed through VM agent; archive downloaded/hash-verified
+VM is running at unchanged[validation-public-ip] with ssh service active. Evidence collection completed through VM agent; archive downloaded/hash-verified
 using a temporary source-/destination-specific SSH rule, now deleted. Existing
 rules unchanged.175/access-recovery.json records the access diagnosis; no reboot.
 1062source hashes,2terminal stages and434scoped receipts verified. Archive SHA256:
@@ -15967,7 +15967,7 @@ Latest node build parent091. No other compiler/scenario active.
 094observation interruption: two SSH connect timeouts. Azure control plane then
 reported VM deallocated. Activity log records deallocate started2026-10-25T02:00:46Z,
 correlationa5cb6710-3abc-4fe9-94f5-12af75d29598; enabled daily ComputeVmShutdownTask
-is0200UTC. Started only burst-validation-1 to recover evidence; daily shutdown and
+is0200UTC. Started only [validation-host-1] to recover evidence; daily shutdown and
 all resource caps unchanged. No scenario/build retry authorized by the observation
 failure alone. Inspect saved build result/start/receipt and authoritative processes
 after boot; do not treat094as pass. Local azure-deallocation.json preserves activity.
@@ -25647,10 +25647,10 @@ the wrong filesystem and do not establish available target capacity.
 Diagnosis checkpoint after two unsuccessful attempts: first was an unsupported
 aggregate fixture (test-only correction applied); second is compiler output
 capacity, not a protocol/test assertion failure. Read-only mount/LUN inspection
-confirmed Azure data disk burst-validation-1-build-cache-20261021, StandardSSD_LRS,
+confirmed Azure data disk [validation-build-disk], StandardSSD_LRS,
 64GiB, LUN0=/dev/sda. growpart and resize2fs are installed; partition starts at
 sector2048, GPT identity10C7DAF2-1EE5-436A-9BAB-17439E641166. Incremental snapshot
-burst-validation-build-pre-expand-20261023 succeeded, then disk update128GiB
+[validation-disk-snapshot] succeeded, then disk update128GiB
 succeeded. Verified LUN0/device, reviewed growpart dry run (start sector2048
 unchanged), grew partition and ext4 online without changing target path or
 artifacts. Target df now reports67,635,159,040 bytes free. CPU/memory/runtime caps
@@ -29068,7 +29068,7 @@ and no dependent compatibility policy/code change is authorized by elapsed time.
 Independent work can continue on R1–R6.
 
 Qualification infrastructure inventory (read-only Azure CLI,2026-10-23): existing
-burst-validation-1/2/3 are Standard_B2s_v2 in northeurope. No VM provisioned,
+[validation-host-1]/2/3 are Standard_B2s_v2 in northeurope. No VM provisioned,
 restarted or resized; no user daemon touched. Decisions2.1–2.4 explicitly require
 subsecond confirmation,100+TPS, under1GB/node and Pi4-class4GB/ARM hardware.
 These are not satisfied by the shared1CPU/four-peer validation fixture. The three
@@ -35075,8 +35075,8 @@ fix. Review existing logs/source first and retain a failed fixture before anothe
 Read-only host review confirms the fixture still uses StandardSSD OS storage. Azure CPU
 credit samples during the prior load were604.54/605.33/605.57, not exhausted; later/future
 zero placeholders are not used as evidence. Current /tmp is root ext4. A separate64GiB
-Premium_LRS disk burst-validation-1-payment-load-ssd-20261021 was created with owner tag
-codex-payment-load-20261021, attached to burst-validation-1 at LUN1/cache=None, and guarded
+Premium_LRS disk [validation-load-disk] was created with owner tag
+codex-payment-load-20261021, attached to [validation-host-1] at LUN1/cache=None, and guarded
 against existing filesystems/signatures/partitions/mounts before formatting. Azure size
 query casing initially returned null and the guard stopped before formatting; corrected
 metadata and device checks passed. No existing disk or source/target path changed.
@@ -40634,7 +40634,7 @@ Host/local archive `inline-prefix-evidence-20261021.tar.gz` verified SHA-256:
 ## Current validation-host capacity migration: complete, no daemon restart
 
 VM1 root disk was down to ~591MiB free. Attached new 64GiB StandardSSD_LRS disk
-`burst-validation-1-build-cache-20261021`, LUN0, in the existing validation resource
+`[validation-build-disk]`, LUN0, in the existing validation resource
 group. Azure inventory and `/dev/disk/azure/scsi1/lun0` identified new `/dev/sdb`;
 it had no filesystem, partitions, mounts or wipefs signatures before formatting.
 New GPT ext4 partition UUID `b8a86b94-b525-469d-8da3-55da9fb60ff2` is mounted at
@@ -40744,9 +40744,9 @@ Historical pre-migration capacity review (resolved by migration above):
 591MiB available disk, 7241MiB available memory; `/dev/sda` is
 64GiB with the root filesystem on sda1, and no separate data volume exists. Stable
 target uses 12GiB. Azure read-only inventory confirms this SSH host is
-`burst-validation-1`, public IP 132.164.251.154, resource group
-`BURST-VALIDATION-20261010-RG`, with attached StandardSSD_LRS OS disk
-`burst-validation-1_OsDisk_1_c57ce94783274b0f8b18b5041f47c8a0`.
+`[validation-host-1]`, public IP [validation-public-ip], resource group
+`[validation-resource-group]`, with attached StandardSSD_LRS OS disk
+`[validation-os-disk]`.
 The subsequent migration above adds a data disk while preserving target paths
 and artifacts; it resolves this capacity constraint without an OS-disk expansion. OS-disk expansion must follow the official Azure procedure, including
 its deallocation requirements; do not stop unrelated services as an incidental step.
@@ -46786,7 +46786,7 @@ validation environment without waiting for it. Host-specific deployment, DNS,
 mail delivery and public launch remain separate; Azure is not the release host.
 
 At the owner's request, a byte-identical creator seed backup was made under
-`/home/nitesh/burst-creator-backup-20261019/`, outside the repository. The directory
+`/home/developer/burst-creator-backup-20261019/`, outside the repository. The directory
 is mode 0700 and the file 0600, owned by the user. `cmp --silent` passed; no seed
 contents were displayed or uploaded. This resolves the requested local copy,
 not independent disaster recovery. Both copies are on the same machine.
@@ -49403,7 +49403,7 @@ are complete; separate-device integration is recorded above, while final
 packaged-wallet qualification remains open.
 SSH diagnosis found the desktop public IP had changed. The existing owned
 `BurstNativeReceiveTemporary` TCP/22 rule was narrowed to the current
-`91.156.229.88/32`; the separate developer rule was unchanged. Pinned host-key SSH
+`[developer-allowlist-ip]/32`; the separate developer rule was unchanged. Pinned host-key SSH
 works again. Keep this temporary rule scoped and restore/close temporary access
 when host work ends. No new VM, public application port or address range was added.
 
@@ -49701,7 +49701,7 @@ identity, funding gates, authority rejection and same-ledger restart checks.
 The installed GUI binaries match the final Debian payloads byte-for-byte; no
 reinstall or UI journey was repeated. This qualifies the current Azure LAN
 integration, not NAT, empty-observer or uncertain-action recovery.
-VM2 is `10.87.1.6`; VM1 remains `10.87.1.4`. No VM was created. Cleanup is
+VM2 is `[validation-private-ip-2]`; VM1 remains `[validation-private-ip-1]`. No VM was created. Cleanup is
 confirmed: VM2 reports `VM deallocated`; the temporary source has MainPID 0 and
 its P2P/RPC/transfer ports 28076/28077/28090 are closed. Its unit reports failed
 because the source script exits on deliberate termination; the peer acceptance
@@ -49747,7 +49747,7 @@ fingerprint `befb6b44cacb2701f76ef551daa7ef5fa7fe2c53c57853b97066b5c4933de2cd`.
 `deploy/public-testnet-identity.json` records only the public key
 `948acade65c53fcc5e0d2d001fb1b01edc40b9ea102f1a9ae84d53c92551fd7e`.
 The new seed is outside the repository at
-`/home/nitesh/.local/share/burst/private-testnet-20261019/creator.seed`, owned by
+`/home/developer/.local/share/burst/private-testnet-20261019/creator.seed`, owned by
 the user with file mode 0600 and parent mode 0700. Node crypto independently
 derived the same public key and verified the helper's reported genesis-hash
 signature without printing the secret. The final daemon now matches the reported

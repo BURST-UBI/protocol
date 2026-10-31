@@ -93,3 +93,15 @@ No credential was printed or tested against a live service during this review.
 
 See [the mainnet bootstrap review](../../docs/node/NETWORK_LAUNCH.md) for the
 launch procedure and outstanding timestamp/funding decisions.
+
+## Infrastructure redaction follow-up, 2026-10-31
+
+Current public records now redact the identified validation-host addresses, SSH
+allowlist address, cloud resource names and personal filesystem prefixes. Original
+files and their hashes are retained in a private local archive. Results and release
+qualification limits are unchanged. Cloud provider and hardware descriptions remain
+where they explain the validation environment.
+
+A targeted history search confirmed that the identifiers also occur in earlier
+commits. This cleanup does not remove those objects, hosted caches or existing
+clones. No history rewrite or infrastructure change was performed.

@@ -90,7 +90,7 @@ not presented as a newly hash-matching run. The new regression has its own passi
 receipt. No unchanged suite was rerun to manufacture matching status.
 
 Evidence is also archived outside git at
-`/home/nitesh/.local/state/burst/audits/simplicity-20261030`.
+`/home/developer/.local/state/burst/audits/simplicity-20261030`.
 Receipts retain their original absolute /tmp input/log paths; the archive preserves
 the original bytes, not a rewritten or newly qualified receipt.
 

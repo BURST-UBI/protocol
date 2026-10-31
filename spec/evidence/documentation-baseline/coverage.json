@@ -455,7 +455,7 @@
           "path": "spec/evidence/reference-implementation-review-20261031.txt",
           "claim": "The real desktop wallet checks original creators behind merged payments, applies selected any/all rules and outage fallback, permits manual acceptance, cancels read-only queries on lock and reaches a payment behind an all-held first page.",
           "result": "pass",
-          "command": "cd ../wallet && TAURI_DRIVER=/home/nitesh/.cargo/bin/tauri-driver node tests/native-session.mjs"
+          "command": "cd ../wallet && TAURI_DRIVER=/home/developer/.cargo/bin/tauri-driver node tests/native-session.mjs"
         }
       ],
       "note": "Iteration 57 records consumer group configuration and seven passing native flow groups, including real-node group-aware acceptance. Iteration 137 adds bounded, opt-in transitive trust with live queries, receiver-pinned endpoints and direct-root selection in wallet settings; see W-043. Weighted origin analysis and directory publication/discovery remain incomplete. Node-reported origins are not independent proofs."
@@ -727,7 +727,7 @@
         {
           "path": "node/src/certified_network_tests/native_delegation.rs",
           "claim": "The real Tauri/WebKit wallet reviews and publishes an exact BRN rate, burns a reviewed endorsement and casts direct/scoped-secondary votes. Three independent human representatives certify activation. All-node restart and a fresh observer retain the exact rate and tally. Stale revisions, wrong-wallet requests, overflow, inactive fields and locked signing fail. Controlled setup/counting clocks and debug desktop, not partition or all-parameter evidence. Requires the built debug wallet, Vite on 1430, tauri-driver, WebKitWebDriver and Xvfb.",
-          "command": "TAURI_DRIVER=/home/nitesh/.cargo/bin/tauri-driver CARGO_BUILD_JOBS=1 cargo test -p burst-node --lib certified_network_tests::native_delegation::desktop_parameter_authoring_and_votes_activate_and_recover -- --exact --ignored --nocapture --test-threads=1",
+          "command": "TAURI_DRIVER=/home/developer/.cargo/bin/tauri-driver CARGO_BUILD_JOBS=1 cargo test -p burst-node --lib certified_network_tests::native_delegation::desktop_parameter_authoring_and_votes_activate_and_recover -- --exact --ignored --nocapture --test-threads=1",
           "result": "pass"
         }
       ],
@@ -854,7 +854,7 @@
         {
           "path": "node/src/certified_network_tests/native_delegation.rs",
           "claim": "Real Tauri/WebKit controls register parameter and proposal grants, discover encrypted grants, submit two secondary ballots, and revoke one grant before counting. Stale generations, changed genesis, wrong wallet, revoked grants and locked signers are rejected. Three independent human nodes certify two supporting votes rather than three, activate the proposal, restart, and recover the same result and indexes on a fresh observer. Public fixture keys, controlled setup/counting clocks and wall-time desktop signing; not partition or production packaging evidence.",
-          "command": "TAURI_DRIVER=/home/nitesh/.cargo/bin/tauri-driver CARGO_BUILD_JOBS=1 nice -n 15 taskset -c 0,1 cargo test -p burst-node --lib certified_network_tests::native_delegation::desktop_scoped_signing_counts_and_recovers_on_certified_nodes -- --exact --ignored --nocapture --test-threads=1",
+          "command": "TAURI_DRIVER=/home/developer/.cargo/bin/tauri-driver CARGO_BUILD_JOBS=1 nice -n 15 taskset -c 0,1 cargo test -p burst-node --lib certified_network_tests::native_delegation::desktop_scoped_signing_counts_and_recovers_on_certified_nodes -- --exact --ignored --nocapture --test-threads=1",
           "result": "pass"
         }
       ],
@@ -3667,7 +3667,7 @@
         {
           "path": "node/src/certified_network_tests/native_delegation.rs",
           "claim": "The real native wallet reviews and withdraws its own supported proposal without refunding endorsement burns. Cancellation changes no head; stale revision, wrong-wallet, repeated, post-Proposal-phase and locked signing attempts fail. Three independent human representatives still activate the next proposal; all-node restart and fresh-observer catch-up preserve the withdrawn record. Requires the built debug wallet, Vite on 1430, tauri-driver, WebKitWebDriver and Xvfb. Controlled clocks, not partition evidence.",
-          "command": "TAURI_DRIVER=/home/nitesh/.cargo/bin/tauri-driver CARGO_BUILD_JOBS=1 cargo test -p burst-node --lib certified_network_tests::native_delegation::desktop_parameter_authoring_and_votes_activate_and_recover -- --exact --ignored --nocapture --test-threads=1",
+          "command": "TAURI_DRIVER=/home/developer/.cargo/bin/tauri-driver CARGO_BUILD_JOBS=1 cargo test -p burst-node --lib certified_network_tests::native_delegation::desktop_parameter_authoring_and_votes_activate_and_recover -- --exact --ignored --nocapture --test-threads=1",
           "result": "pass"
         },
         {
@@ -3836,7 +3836,7 @@
         {
           "path": "node/src/certified_network_tests/native_delegation.rs",
           "claim": "Real Tauri/WebKit controls publish an ordered UTF-8 add/replace/repeal diff, review and burn an endorsement, register a proposal grant and cast direct/secondary ballots. Stale revisions, wrong-wallet requests, oversized text and locked signing fail; cancellation leaves the account head unchanged. Three independent human representatives certify two supporting votes and activate the exact document. All-node restart and fresh-observer catch-up retain it. Controlled setup/counting clocks and debug desktop; not partition or packaged-release evidence. Requires the built debug wallet, Vite on 1430, tauri-driver, WebKitWebDriver and Xvfb.",
-          "command": "TAURI_DRIVER=/home/nitesh/.cargo/bin/tauri-driver CARGO_BUILD_JOBS=1 cargo test -p burst-node --lib certified_network_tests::native_delegation::desktop_constitution_authoring_and_votes_activate_and_recover -- --exact --ignored --nocapture --test-threads=1",
+          "command": "TAURI_DRIVER=/home/developer/.cargo/bin/tauri-driver CARGO_BUILD_JOBS=1 cargo test -p burst-node --lib certified_network_tests::native_delegation::desktop_constitution_authoring_and_votes_activate_and_recover -- --exact --ignored --nocapture --test-threads=1",
           "result": "pass"
         }
       ],
@@ -5143,7 +5143,7 @@
         {
           "path": "wallet_core/tests/browser.cjs",
           "claim": "Compiled WASM runs in Chromium and a Web Worker. The contract test exercises fresh keys, signatures, clock, work, signed RPC submission/confirmation, group queries, redirect rejection, cookie omission, response bounds and cancellation. The payment signature is independently verified in Node.js. Requires the browser_check adapter built and bound as documented in wallet_core/BROWSER.md; the RPC fixture is not a live ledger.",
-          "command": "PLAYWRIGHT_MODULE=/tmp/burst-scoped-ui.WIyarw/node_modules/playwright CHROMIUM_PATH=/home/nitesh/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome node --test wallet_core/tests/browser.cjs",
+          "command": "PLAYWRIGHT_MODULE=/tmp/burst-scoped-ui.WIyarw/node_modules/playwright CHROMIUM_PATH=/home/developer/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome node --test wallet_core/tests/browser.cjs",
           "result": "pass"
         }
       ],
