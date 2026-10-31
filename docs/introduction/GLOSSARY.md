@@ -7,7 +7,7 @@
 | Wallet | Software that manages keys, signs operations and reads account state from a node. |
 | Node | Software that validates blocks, stores the ledger and communicates with other nodes. Running more nodes does not give an account more votes. |
 | Representative | An account that votes to confirm blocks. Each verified account can delegate one unit of voting weight to a representative. |
-| Verifier | A participant selected to judge an account's verification request or a challenge against it. This is separate from confirming transactions. |
+| Verifier | An eligible volunteer drawn randomly to help judge an account's verification request or a challenge. The group chosen is called a panel; its selection can be checked by other nodes. Verifiers do not confirm payments. |
 | Governance delegate | An account or key authorized to cast governance votes for another account within a defined scope. |
 | BRN | A personal spending allowance earned while an account is eligible. It cannot be transferred. Burns spend it; locked stakes and unacknowledged stake returns reduce what is available. |
 | TRST holding | An amount of transferable currency owned by an account, with a recorded origin and age. Holdings can differ in expiry and exposure to revocation. |

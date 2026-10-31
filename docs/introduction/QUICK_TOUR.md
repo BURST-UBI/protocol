@@ -40,8 +40,15 @@ an allowance of their own, and people can also earn from one another.
 ## One income for each person
 
 Making another wallet must not be enough to claim another income. People joining
-BURST get endorsements from existing participants, then a selected panel judges
-their application. Decisions can be challenged later.
+BURST first get endorsements from existing participants. A small group of
+verifiers then checks the application. This group is chosen by a random draw
+from people who have volunteered and meet the verification requirements.
+
+The applicant cannot pick who judges them. The network fixes the eligible list
+before the random result is known, and every node can check the draw using the
+same public result. This makes the selection fairer by preventing hand-picking
+or changing the list to suit the result. The people chosen still have to judge
+honestly, and their decisions can be challenged later.
 
 The history of a payment matters too. If an account was verified under a false
 identity, a successful fraud challenge can invalidate the TRST it created, even

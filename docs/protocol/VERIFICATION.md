@@ -1,7 +1,12 @@
 # Account verification
 
 Verification determines which accounts qualify for BRN accrual and human-based
-voting rights. It records endorsements, selected-panel votes and agreed outcomes.
+voting rights. In ordinary enrollment, a small group of verifiers, called a
+panel, is drawn randomly from eligible volunteers to assess the application.
+The applicant cannot choose its members. Nodes can independently check the draw
+from the agreed candidate list and public random result.
+
+The protocol records endorsements, the panel's votes and the agreed outcome.
 It does not cryptographically prove that a person is unique or that their evidence
 is truthful.
 
@@ -32,10 +37,10 @@ not mean it was selected or meets all selection requirements.
 ```mermaid
 flowchart TD
     accTitle: Ordinary verification
-    accDescr: Endorsers burn BRN. The network agrees the request and eligible pool, uses an agreed beacon round to select and activate a panel, then certifies and applies the outcome of its assessment and votes.
+    accDescr: Endorsers burn BRN. The network agrees the request and eligible pool, uses a future public random result to draw and activate a panel of verifiers, then certifies and applies the outcome of its assessment and votes.
     A[Endorsements burn BRN] --> B[Agree request and eligible pool]
-    B --> C[Use the agreed beacon round]
-    C --> D[Select and activate the panel]
+    B --> C[Wait for the agreed public random result]
+    C --> D[Draw verifiers randomly and activate the panel]
     D --> E[Evidence assessment and votes]
     E --> F[Certify and apply the outcome]
 ```
@@ -52,7 +57,11 @@ is not enough. Panel selection also applies its request-specific exclusions.
 The request commits to the eligible pool before its designated drand beacon is
 available. After verifying the checkpoint certificate and that exact beacon
 round, nodes rank pool members by a hash of the beacon value and wallet address.
-The lowest-ranked members form the panel. Later eligibility changes do not
+The lowest-ranked members form the panel. This gives each account in the frozen
+pool a random rank, without weighting it by wealth. Freezing the list first
+prevents it from being adjusted to favor particular people after seeing the
+result. Requiring the specified future round prevents a node from choosing
+among random results until it finds a panel it likes. Later eligibility changes do not
 rewrite the frozen pool. A certificate relies on its signers checking the pool
 and signing deadline; the signatures alone cannot prove when they were made.
 
