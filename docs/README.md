@@ -1,10 +1,12 @@
 # BURST
 
-BURST is built around a simple idea: every person should have access to an income,
-and people should be able to earn money by doing things others value.
+BURST is a parameterized, decentralized and democratic monetary protocol.
+Its participants choose how quickly personal income grows and how long
+transferable currency lasts.
 
-It separates personal income, **BRN**, from transferable money, **TRST**. The
-community votes on how quickly BRN grows and how long people can keep spending TRST.
+Universal income is one configuration. The community can change the income rate,
+including setting it to zero, and choose a limited or effectively unlimited
+currency lifetime. These choices use the same underlying payment system.
 
 Start with the [introduction](introduction/QUICK_TOUR.md), then read the
 [whitepaper](introduction/WHITEPAPER.md). It follows a payment from its creation

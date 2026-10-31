@@ -135,7 +135,7 @@
 .paper__mark i:last-child::after {background: var(--flow-trst);}
 .paper .markdown {counter-reset: chapter;}
 .paper .markdown h1 {font-family: var(--paper-display); font-size: clamp(3rem, 5vw, 4.5rem); font-weight: 400; line-height: 1.06; letter-spacing: -.055em;}
-.paper--whitepaper .markdown h1 {font-size: clamp(5rem, 9vw, 8rem); margin-bottom: 1.5rem;}
+.paper--whitepaper .markdown h1 {font-size: clamp(3rem, 5vw, 4.5rem); margin-bottom: 1.5rem;}
 .paper .markdown > h1 + p {font-size: clamp(1.18rem, 1.6vw, 1.4rem); color: var(--ifm-font-color-base); line-height: 1.6; max-width: 48ch;}
 .paper .markdown h2 {font-family: var(--paper-display); font-size: clamp(1.9rem, 3vw, 2.5rem); font-weight: 400; line-height: 1.16; letter-spacing: -.035em; padding-top: 0; margin: 3.5rem 0 1.5rem; border: 0; max-width: 24ch;}
 .paper--whitepaper .markdown h2::before {counter-increment: chapter; content: counter(chapter, decimal-leading-zero); display: block; font-family: var(--ifm-font-family-base); font-size: .72rem; font-weight: 600; letter-spacing: .12em; color: var(--paper-accent); margin-bottom: .8rem;}

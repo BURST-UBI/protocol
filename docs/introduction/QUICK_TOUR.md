@@ -1,10 +1,17 @@
 # What is BURST?
 
-BURST is an attempt to give everyone a starting point in an economy: a personal
-income they can use, while still being able to earn money by helping others.
-The people taking part choose the monetary rules together.
+BURST lets people choose the monetary rules they live with. How much personal
+income should each person receive? Should money keep circulating forever, or
+have a lifetime? Participants decide these settings together.
 
-Here is how the idea works, through one payment.
+That is what *parameterized* means here. The personal income rate and currency
+lifetime are settings, rather than permanent choices made by the developer.
+The income rate can be positive or zero; the lifetime can be limited or
+effectively unlimited. The same payment system supports these combinations.
+
+The current defaults give verified people ongoing income and give transferable
+currency an effectively unlimited lifetime. Here is how a payment works under
+those settings.
 
 ## An income of your own
 
@@ -51,7 +58,8 @@ The current defaults give TRST an effectively unlimited lifetime. If the communi
 chooses a limit, passing money to someone else does not restart its age.
 Unused BRN still has no expiry date.
 
-The [whitepaper](WHITEPAPER.md) follows the payment further: how it divides,
+The [whitepaper](WHITEPAPER.md) develops the parameterized design and follows
+the payment further: how it divides,
 combines with other payments, and keeps its history. It also explains verification
 and voting. Some of these features are currently restricted to experimental
 networks; the [implementation status](WHITEPAPER.md#implementation-status)

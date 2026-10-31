@@ -1,12 +1,16 @@
-# BURST
+# BURST: The General Form of Money
 
-BURST is a decentralized, democratic monetary protocol. People receive a personal
-income over time, spend it to create transferable currency, and vote on the rules
-that govern both.
+A parameterized, decentralized and democratic monetary protocol.
 
-The name brings together **BRN**, from *burn*, and **TRST**, from *trust*. They have
-different jobs. Understanding that distinction is the starting point for everything
-else in BURST.
+Who should receive new money, and how long should that money last? BURST makes
+these choices part of the protocol, so its participants can decide them together.
+Its two central economic parameters are the personal income rate and the lifetime
+of transferable currency.
+
+Universal income is one configuration of that design. Participants can change
+the rate, including setting it to zero, and choose whether currency has a limited
+or effectively unlimited lifetime. The broader idea is to make these monetary
+rules a choice for the people using them.
 
 ## Why BURST?
 
@@ -14,15 +18,61 @@ Access to money shapes what people can do with their lives. Someone with savings
 can take time to learn, care for a relative or try an idea. Someone without them
 may have to turn down the same opportunity.
 
-BURST starts from the idea that everyone should have access to an income, and
-that people should still be able to earn money by doing things others value.
-Its monetary rules give those two purposes separate forms: BRN for personal
-income, TRST for payments that can continue circulating.
+That concern motivates BURST. An income available to everyone could give more
+people room to choose, while payments let people earn by doing things others
+value. But adopting the protocol should not mean accepting one economic policy
+forever. The community should be able to change its mind.
 
-The people using the system choose its income rate and currency lifetime. These
-are parameters of the protocol, so the community can change them through voting.
-Universal income is the starting configuration, rather than a rule that the
-software's creator can change on everyone's behalf.
+BURST separates personal income, **BRN**, from transferable currency, **TRST**.
+Their names come from *burn* and *trust*. This separation lets the community
+change how quickly personal income grows and how long money circulates after
+that income is spent.
+
+## Parameterized money
+
+A parameter is a setting the protocol can change without replacing its underlying
+mechanism. Here, the two central economic settings are:
+
+- **r**, the BRN income rate: how much personal income an eligible account gains
+  per unit of time.
+- **e**, the TRST lifetime: how long currency created from that income remains
+  spendable.
+
+| Income rate (r) | TRST lifetime (e) | What the configuration does |
+| --- | --- | --- |
+| Zero | Effectively unlimited | Stops new personal income; existing valid TRST can continue circulating without age-based expiry. |
+| Positive | Effectively unlimited | Gives eligible people ongoing income, while TRST has no practical age limit. |
+| Positive | Finite | Combines ongoing income with a limit on how long each amount of TRST can circulate. |
+| Zero | Finite | Stops new personal income while existing TRST remains subject to expiry. |
+
+These choices use the same BRN/TRST mechanism. A community can change the
+settings through governance rather than adopt a different currency design for
+each combination. The source defaults are approximately one BRN per eligible
+hour and an effectively unlimited TRST lifetime.
+
+Changing a setting does not erase the past. A zero rate stops BRN from growing,
+but people can still spend previously earned allowances to create TRST. It also
+does not supply a fresh network with money: a zero-rate launch needs an explicit
+plan for starting balances and the BRN required by protocol actions.
+
+The title, *The General Form of Money*, describes this ambition to make monetary
+rules configurable. Two settings do not, by themselves, reproduce every economic
+system. Ownership, lending, prices and access to real goods involve choices
+beyond these parameters. Likewise, zero income and unlimited lifetime do not
+make BURST identical to fiat money; its verification and payment rules remain.
+
+## A choice for the people using it
+
+The community can choose ongoing income, change its rate, or turn it off. It can
+choose a currency lifetime and revise that choice later. These decisions belong
+to verified participants under the governance rules, rather than remaining a
+permanent privilege of the software's creator.
+
+That is the distinction between the protocol and its starting policy. The
+examples below use a positive income rate to explain how BRN becomes TRST, how
+payments move, and why their history matters. The
+[implementation status](#implementation-status) distinguishes the design from
+features currently enabled on Live networks.
 
 ## BRN: your personal income
 
