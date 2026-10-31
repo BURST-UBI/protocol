@@ -1,13 +1,23 @@
 # Keys and signing
 
-A wallet holds signing keys and constructs account operations. The node checks
-those operations against the ledger. A restored key controls the same identity;
-its balances and eligibility still come from network state.
+Your wallet keeps the key that authorizes actions on your account. When you pay
+someone, it signs the action locally and sends it to a node for checking. The
+node can verify the signature without receiving your private key.
+
+This division explains recovery: restoring the key gives you control of the
+same account, but it does not recreate the account's history on your computer.
+The wallet reads balances and verification status from the network and must
+also resolve any previously signed payment whose outcome is still uncertain.
 
 ## Recovery phrase and local password
 
-The mnemonic creation path generates a 24-word BIP39 phrase from 256 bits of
-random entropy. Those bytes are the wallet seed. BURST derives account zero with
+The recovery phrase lets you recreate your account's signing key. The local
+password has a different job: it protects the saved key file on this device.
+Someone with the phrase does not need that password, which is why the phrase
+needs its own private backup.
+
+For developers, the phrase uses BIP39: 24 words generated from 256 random bits.
+Those bytes are the wallet seed. BURST derives account zero with
 BLAKE2b-256(seed || four-byte big-endian index), matching Nano’s account-key
 construction. It retains BURST signature and address formats. Importing the phrase
 into another wallet is not guaranteed to produce the same address.

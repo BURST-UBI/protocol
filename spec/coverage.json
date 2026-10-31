@@ -5,7 +5,7 @@
       "sha256": "aad2d398d7ffe13b52c0fa8ba4df38e8e823895c875af57595a04213e81ac1fa"
     },
     "docs/README.md": {
-      "sha256": "7481d090d3b4cb995a705add2a776d63e04119ccd76e90e7552a7b6e75115b14"
+      "sha256": "b0e49f75fc8e0d6ea51daf8b0a8fc14cc7c81a886eac8fd144946d12392a6e31"
     },
     "docs/SUMMARY.md": {
       "sha256": "990d6904cac10eeb591423b76c92b6829f794cd6825d1b08374c6853f9e5f9a5"
@@ -26,28 +26,28 @@
       "sha256": "52ae987391042b02d5f56c50bf979f60012ba7492252270a530f0909b5a67350"
     },
     "docs/development/RPC.md": {
-      "sha256": "295ac999dd77882f482a1ad85afe772184e1807dce22d8feb4e20662b0e1d66f"
+      "sha256": "80b8da78cd96329bd0cc2f9ed12c9cd97fa937b0c96e84b1b3cbcc1fb71fd13b"
     },
     "docs/development/WEBSOCKET.md": {
       "sha256": "b306755bb324ad4b8428b124f5b9b542263f24dd2b08044b856ac7bdc4f93573"
     },
     "docs/introduction/ECONOMICS.md": {
-      "sha256": "ca1ac5e1314f51e37028d9786f983c4c361eb0c230bf432b167aea733e7e3511"
+      "sha256": "568027242ac1c57483e4f03e6a2e4ee6ce6a2666376e363126c4edd9c29bf863"
     },
     "docs/introduction/GLOSSARY.md": {
-      "sha256": "56ebdf3567e0689ba333f4177847ff61205892d6d2b55ca58a42a751366cf860"
+      "sha256": "c17cde3d3874fab4244d23766b375d54538338acbda2fb26b829c12ea50783a8"
     },
     "docs/introduction/LIMITATIONS.md": {
-      "sha256": "19ba31f243145db0143775695d4cbdd35f13b5c5c8594370dc159747c0b26c31"
+      "sha256": "4dc3bd44ce267c83dd2cc93f9ceaa7e78a5a0e43420d287a9f966211a3324b1d"
     },
     "docs/introduction/QUICK_TOUR.md": {
-      "sha256": "bcc953fe226e22ba4acd149f9890f1ac6d5ffbabd18c5dbc71809137b0d1d069"
+      "sha256": "649d52b135716c51a060cec02e9066785a1df5f735870b0b22889767a2bff32b"
     },
     "docs/introduction/WHITEPAPER.md": {
       "sha256": "3a27365585f5e88f6b76aba8c698958e8a03d48b847e331d8a2f76f0c043ee1f"
     },
     "docs/node/GROUP_SERVICES.md": {
-      "sha256": "f080dd7de4dba96cc11710a80d810b878e2b45b9f1bf58452f5aca843b0f2624"
+      "sha256": "3b4f90fdfda208cf113387de28599eec939050454109ea6bae19102e1553a607"
     },
     "docs/node/INSTALLATION.md": {
       "sha256": "215e0997070d1b7d939dd225523d6f96f7aca44cf911ebef60e5eb9c56d0b333"
@@ -56,7 +56,7 @@
       "sha256": "f82e67a408643891b44d3158b772c3cd47292c8ffa2d6e3b98bfcd1842b7ad43"
     },
     "docs/node/NODES.md": {
-      "sha256": "d20427c935619f7071b23e0c0f01204c61f20564afd966b58ae27a8a42773f7f"
+      "sha256": "ef0a684ec30a59bd22c73462d811e0e7390776b7e80f3019ee1c0f15740f53db"
     },
     "docs/node/SERVICES.md": {
       "sha256": "3d4f27800023ecffa91b42a2eaac0c404b54d30f0c717e092e789a758ecb6ea3"
@@ -65,40 +65,40 @@
       "sha256": "af90d4b0910a7a4cf1c72b5d259818695f4cbd7181efb0164e0fb59e38fa9ca7"
     },
     "docs/protocol/BOOTSTRAP.md": {
-      "sha256": "d04d7fb7f9e07337decfaa972dc5727c1f1c85108f6d4e1f3d2c9a95a8cc031e"
+      "sha256": "bf78343092ce20bc75a2660cfd46831fe393753dd6380023e6ccce27fd846e60"
     },
     "docs/protocol/CHECKPOINTS.md": {
-      "sha256": "bd5699760c25016311fbb2286acb05731847ad6cf589f576ae9a58e9d5572f6a"
+      "sha256": "210709a5a43a1a4e1618641c51450b858effd2cbcbbc2df42f682a87e3e4c665"
     },
     "docs/protocol/CONSENSUS.md": {
-      "sha256": "07798fe3dff4915a122d9bd0c35cc328753cb66fdaee6442574c942baada9eaa"
+      "sha256": "ead2cfdd42cdd0f7b14e33041c8393d7b645fde837d0d9d3e19c6e765d6d0088"
     },
     "docs/protocol/GOVERNANCE.md": {
-      "sha256": "2a936c06f77e1411a37f71e2a9731082d395c45d7282bd6545a6c1dec61aad86"
+      "sha256": "f471e8d44254a55201366cbbec934bfc6aa7572cef4f7a836ce6fe29bc72ad42"
     },
     "docs/protocol/PARAMETERS.md": {
-      "sha256": "42e697508982c4495836f5137b8ae7ae77ede6c840e49ced5d26d52899dfa398"
+      "sha256": "23a0925cf8977bbf803ea424788c96389249d7e68d4e2fbc5914d4f0e69f7874"
     },
     "docs/protocol/VERIFICATION.md": {
-      "sha256": "9baf551e676d0e795441f438869d46adb8ff8f6a1a0a73dc14262e0da6e66988"
+      "sha256": "e806817fcde34e60b4dab2929aa6a63d811a29b28a05457c0d36181975e7b0aa"
     },
     "docs/release/CODE_SIGNING.md": {
       "sha256": "a740303b685d1936f849feb8e3d0c399a7460f6719a01776b66f23923e908e54"
     },
     "docs/release/DOWNLOADS.md": {
-      "sha256": "2db0a02933088f049921d24cf686b1356a4ee64f680e77f0ae72c06ad79a62ec"
+      "sha256": "06e6f32c708a44f52f0c24e5554b37e95d9ea047e07637c48f112bff437a126e"
     },
     "docs/release/PRIVACY.md": {
       "sha256": "b5468f90a22fbf480793f2c30a6d50c32b40fa17cc800923837c8ae5ec8da8fe"
     },
     "docs/wallet/PAYMENTS.md": {
-      "sha256": "3d502044cf657f850bd3306a357c4a58802a48fc5edfbc1a2d576f977881401b"
+      "sha256": "669e88c892b01a3f0f1e1a3a731bad2e9e6243d6fc85642387d2c2afebcbfe05"
     },
     "docs/wallet/TRUST.md": {
-      "sha256": "d6a53c46a5a085ff0178057662c891504e0f2c4af5a0bf5f5188bd81ca09b554"
+      "sha256": "b0d98c78e24d25db05bf9c021614a74c124208480c63784a66d874c939dccd4e"
     },
     "docs/wallet/WALLETS.md": {
-      "sha256": "b37d17c2d2d28ee737ccf171b870bc2e24844d30d84f676bdeb163e3f4bfbaf1"
+      "sha256": "c30d74396cb2c059aec690789342d6a43f1a2ab8e55f0b3b50bbfd9decd5f3a8"
     }
   },
   "requirements": [
@@ -3017,15 +3017,15 @@
       "source": "docs/README.md",
       "line": 1,
       "title": "BURST",
-      "sha256": "9007cd45738b9e5c13f664ab039c013c15ae8a978383af920b85cd26963ff667",
+      "sha256": "87ca4b9caec5e80663abc4172f9d8a37c181349fb3c04cacbd138843f66dc672",
       "status": "unverified",
-      "note": "Restored parameterized framing; documentation review does not qualify runtime behavior.",
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
       "evidence": []
     },
     {
       "id": "DOC-README-002",
       "source": "docs/README.md",
-      "line": 16,
+      "line": 21,
       "title": "Build with BURST",
       "sha256": "3cec8d3899c76eaecbf02a5e775a6bda5f6708d714ecea8c4723a27a133c9c95",
       "status": "unverified",
@@ -3567,15 +3567,15 @@
       "source": "docs/development/RPC.md",
       "line": 1,
       "title": "RPC",
-      "sha256": "0408e110c2ee493948b890db3ce10ec523ba4e121fc35fc01cad34e16a243540",
+      "sha256": "ab544d350be975fca66a3c20c319b0d9194b15430c6d5ff727906e2cfa590f04",
       "status": "unverified",
-      "note": "Documentation revised against source for developer workflows. This index entry is not runtime validation or release sign-off.",
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
       "evidence": []
     },
     {
       "id": "DOC-development/RPC-002",
       "source": "docs/development/RPC.md",
-      "line": 7,
+      "line": 9,
       "title": "Make a request",
       "sha256": "f1735537a6ab07af0abed675cce0a7ebad93e25d96cd02d00f268492077c37a5",
       "status": "unverified",
@@ -3585,7 +3585,7 @@
     {
       "id": "DOC-development/RPC-003",
       "source": "docs/development/RPC.md",
-      "line": 35,
+      "line": 37,
       "title": "Read account state",
       "sha256": "6feadcbf0dc6b113db17dccb1383b7daa891b0ed05ae4e18f0ad7c9ac7cdf668",
       "status": "unverified",
@@ -3595,7 +3595,7 @@
     {
       "id": "DOC-development/RPC-004",
       "source": "docs/development/RPC.md",
-      "line": 57,
+      "line": 59,
       "title": "Page through results",
       "sha256": "14caf3b42c8ca2a751ca412723a650f81538e955c457c31dd400314001644349",
       "status": "unverified",
@@ -3605,7 +3605,7 @@
     {
       "id": "DOC-development/RPC-005",
       "source": "docs/development/RPC.md",
-      "line": 79,
+      "line": 81,
       "title": "Submit a signed block",
       "sha256": "08b00f04a94e163e5975c5a780bd175b0601a247c5e1c02729bb81117d66c399",
       "status": "unverified",
@@ -3615,7 +3615,7 @@
     {
       "id": "DOC-development/RPC-006",
       "source": "docs/development/RPC.md",
-      "line": 118,
+      "line": 120,
       "title": "Work and protocol state",
       "sha256": "c10d354f1df2a9150b6f8fab89180f5dfb6c36f64d6016f4cf9977ceee71099b",
       "status": "unverified",
@@ -3625,7 +3625,7 @@
     {
       "id": "DOC-development/RPC-007",
       "source": "docs/development/RPC.md",
-      "line": 138,
+      "line": 140,
       "title": "Governance, verification and provenance",
       "sha256": "d79905752530fd84329d6c349a7ba91d70168339f9df316616efd0ce41ba37a3",
       "status": "unverified",
@@ -3635,7 +3635,7 @@
     {
       "id": "DOC-development/RPC-008",
       "source": "docs/development/RPC.md",
-      "line": 155,
+      "line": 157,
       "title": "Compatibility and test actions",
       "sha256": "5fdda502416627502fe2932d400599fcba7f8c36a378ada20ca060fe0a53141a",
       "status": "unverified",
@@ -3645,7 +3645,7 @@
     {
       "id": "DOC-development/RPC-009",
       "source": "docs/development/RPC.md",
-      "line": 177,
+      "line": 179,
       "title": "Batches and limits",
       "sha256": "88a17bb5eecd34ee40284764dd2da4a62aca9d6a19276d895184fffb1d34a2a3",
       "status": "unverified",
@@ -3697,55 +3697,55 @@
       "source": "docs/introduction/ECONOMICS.md",
       "line": 1,
       "title": "Balances and units",
-      "sha256": "c04352316c1559e92eab5eac00cad9b6d0d8b08754cef2381e542a6e416f31c0",
+      "sha256": "98171e0eeb96415c333d6d13e645899363e49223b9b71063b44ed074bb1e77da",
       "status": "unverified",
-      "note": "Documentation revised against source for developer workflows. This index entry is not runtime validation or release sign-off.",
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
       "evidence": []
     },
     {
       "id": "DOC-introduction/ECONOMICS-002",
       "source": "docs/introduction/ECONOMICS.md",
-      "line": 32,
+      "line": 30,
       "title": "BRN balance",
-      "sha256": "5cb7b0c78a8de6ed42cd17da359ff325461ba64a1663f3405f8fdd8f6c7c917e",
+      "sha256": "723643d2f23287b9c41b95ad8c931f2e7893f690c24a32841d25a465330d25e2",
       "status": "unverified",
-      "evidence": [],
-      "note": "Current documentation section. Indexing does not establish implementation or release qualification."
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
+      "evidence": []
     },
     {
       "id": "DOC-introduction/ECONOMICS-003",
       "source": "docs/introduction/ECONOMICS.md",
-      "line": 57,
+      "line": 60,
       "title": "TRST holdings",
-      "sha256": "eb97a200d39f60b6cdf7c93a11a93937cce5530dd47dd64d369657448fefa1a0",
+      "sha256": "4b9cc17be2eee33f6dcf37c82a6b7f2d133a255c1652b4e702d1fc59becd0909",
       "status": "unverified",
-      "evidence": [],
-      "note": "Current documentation section. Indexing does not establish implementation or release qualification."
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
+      "evidence": []
     },
     {
       "id": "DOC-introduction/ECONOMICS-004",
       "source": "docs/introduction/ECONOMICS.md",
-      "line": 82,
-      "title": "Revocation follows provenance",
-      "sha256": "9ceb87a1d9ba631992baf041b404fc1e680bb899f7fd7d6d2c5c93d6e77f7e27",
+      "line": 91,
+      "title": "How fraud affects later payments {#revocation-follows-provenance}",
+      "sha256": "26e9ef76369d7ca87837bf0ed0ed77acbf9d7d9cf5e780ec64c5a8327f6bc7d5",
       "status": "unverified",
-      "evidence": [],
-      "note": "Diagram removed; documentation only, no new validation evidence."
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
+      "evidence": []
     },
     {
       "id": "DOC-introduction/ECONOMICS-005",
       "source": "docs/introduction/ECONOMICS.md",
-      "line": 93,
+      "line": 106,
       "title": "Merging a clean remainder",
-      "sha256": "d8e4a704f4af8f078f17df58f08e9ed4f8f06fea4499a131bbaf5b8c4c680dfa",
+      "sha256": "33143699103d0a95e78eab45e90d7e8becaf724e872e65d217d37d1664c76486",
       "status": "unverified",
-      "evidence": [],
-      "note": "Documentation paths updated; no new qualification."
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
+      "evidence": []
     },
     {
       "id": "DOC-introduction/ECONOMICS-006",
       "source": "docs/introduction/ECONOMICS.md",
-      "line": 128,
+      "line": 145,
       "title": "Expiry and reference value",
       "sha256": "5eb9c62f48ea2017580043939b689f9f0f48f24533060988fad2a4bd398b60c7",
       "status": "unverified",
@@ -3755,7 +3755,17 @@
     {
       "id": "DOC-introduction/ECONOMICS-007",
       "source": "docs/introduction/ECONOMICS.md",
-      "line": 148,
+      "line": 165,
+      "title": "Units for wallet developers",
+      "sha256": "60a94e073f6591fede23b0b21e0389345923994d67a40ca275eb71a2aec699db",
+      "status": "unverified",
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
+      "evidence": []
+    },
+    {
+      "id": "DOC-introduction/ECONOMICS-008",
+      "source": "docs/introduction/ECONOMICS.md",
+      "line": 181,
       "title": "What the parameters mean",
       "sha256": "1caddda115bcca1944a458cf229522dcf616e8afe245d5602d41f69e85634c5d",
       "status": "unverified",
@@ -3767,9 +3777,39 @@
       "source": "docs/introduction/GLOSSARY.md",
       "line": 1,
       "title": "Glossary",
-      "sha256": "56ebdf3567e0689ba333f4177847ff61205892d6d2b55ca58a42a751366cf860",
+      "sha256": "3484ebd6fecc0fc20770eaec761e550e2cf8a581267d72a7599faaee6d644faa",
       "status": "unverified",
-      "note": "Reader glossary simplified to main concepts; no runtime qualification inferred.",
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
+      "evidence": []
+    },
+    {
+      "id": "DOC-introduction/GLOSSARY-002",
+      "source": "docs/introduction/GLOSSARY.md",
+      "line": 6,
+      "title": "Money",
+      "sha256": "45165064e2fb6934880cf5f13a80a3d1857af7ecddbeef56f1fec7f436be55d9",
+      "status": "unverified",
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
+      "evidence": []
+    },
+    {
+      "id": "DOC-introduction/GLOSSARY-003",
+      "source": "docs/introduction/GLOSSARY.md",
+      "line": 20,
+      "title": "Accounts and people",
+      "sha256": "df46925b8989d92ce1a9545f1f08a926c24265e96f7f2d9dac28725c8b9ac1fc",
+      "status": "unverified",
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
+      "evidence": []
+    },
+    {
+      "id": "DOC-introduction/GLOSSARY-004",
+      "source": "docs/introduction/GLOSSARY.md",
+      "line": 34,
+      "title": "Changing the rules",
+      "sha256": "a083fed3bad3ca67226db1d99f75ca710c8efd193152873785725ee5fc845883",
+      "status": "unverified",
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
       "evidence": []
     },
     {
@@ -3777,15 +3817,15 @@
       "source": "docs/introduction/LIMITATIONS.md",
       "line": 1,
       "title": "Limits and assumptions",
-      "sha256": "f2f56673697cdd5b500e3183e1215cb0ae6d029a3c8b927939925711c9f47a6d",
+      "sha256": "474ac8e11f3684775f1a8fb4562c1fe196fa4c40d5e129074e2c784542f099e6",
       "status": "unverified",
-      "note": "Documentation revised against source for developer workflows. This index entry is not runtime validation or release sign-off.",
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
       "evidence": []
     },
     {
       "id": "DOC-introduction/LIMITATIONS-002",
       "source": "docs/introduction/LIMITATIONS.md",
-      "line": 3,
+      "line": 7,
       "title": "Feature availability",
       "sha256": "e54f4ad0a341a60090de5b262cc70474b78d4c45162d71d3f4e44f54ab3541c3",
       "status": "unverified",
@@ -3795,11 +3835,11 @@
     {
       "id": "DOC-introduction/LIMITATIONS-003",
       "source": "docs/introduction/LIMITATIONS.md",
-      "line": 26,
+      "line": 30,
       "title": "Protocol assumptions",
-      "sha256": "dfcd2649d09c40d4288026e697e64248750939c6216c0eed2acb7402de0c2a93",
+      "sha256": "9c90425374535f27bb2816c42699f7a017bc2d8e944cf66825c31fa6a9d740d8",
       "status": "unverified",
-      "note": "Documentation revised against source for developer workflows. This index entry is not runtime validation or release sign-off.",
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
       "evidence": []
     },
     {
@@ -3807,49 +3847,69 @@
       "source": "docs/introduction/QUICK_TOUR.md",
       "line": 1,
       "title": "What is BURST?",
-      "sha256": "39c3652b1b634d60d77d39fce5a6f5f83c32dd87a4e7ef6f0d03e2ee682d595b",
+      "sha256": "6173bbf68fd148d35910ff1864ad1c66489216e7ca18b23737f3afff3559fbe3",
       "status": "unverified",
-      "note": "Restored parameterized framing; documentation review does not qualify runtime behavior.",
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
       "evidence": []
     },
     {
       "id": "DOC-introduction/QUICK_TOUR-002",
       "source": "docs/introduction/QUICK_TOUR.md",
-      "line": 16,
+      "line": 24,
       "title": "An income of your own",
-      "sha256": "5fb686aa0b24639c92cfaa095aea322bd96577ecf189e8b7c5b681df88d76cdc",
+      "sha256": "1e64593ac78351bab601dc4b8c3e93b41e1bacc4f00dae4a85802de1f5684484",
       "status": "unverified",
-      "note": "Narrative explanation of the design; no runtime qualification inferred.",
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
       "evidence": []
     },
     {
       "id": "DOC-introduction/QUICK_TOUR-003",
       "source": "docs/introduction/QUICK_TOUR.md",
-      "line": 25,
+      "line": 40,
       "title": "Something worth paying for",
-      "sha256": "16997564930baeb5ea534791e39b4dfa5764b4c830238bbf53f7b3b2227e9752",
+      "sha256": "9c8eb4346cc877987c7af50d274b4c561e916b2400b21c62885aad124ce29da2",
       "status": "unverified",
-      "note": "Narrative explanation of the design; no runtime qualification inferred.",
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
       "evidence": []
     },
     {
       "id": "DOC-introduction/QUICK_TOUR-004",
       "source": "docs/introduction/QUICK_TOUR.md",
-      "line": 40,
-      "title": "One income for each person",
-      "sha256": "fde4acce3951733eae002b31154c04fd08c6c99229df8e991d4f8aa24264bcf1",
+      "line": 60,
+      "title": "Why would someone accept TRST?",
+      "sha256": "b1f622b36501ecaf9b07b95039724eff9554af808548a9a521d6dd40d4e75e56",
       "status": "unverified",
-      "note": "Clarifies random panel selection and its fairness mechanism; no runtime qualification inferred.",
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
       "evidence": []
     },
     {
       "id": "DOC-introduction/QUICK_TOUR-005",
       "source": "docs/introduction/QUICK_TOUR.md",
-      "line": 58,
-      "title": "Rules people choose together",
-      "sha256": "06c015197bd4378d191dcf0d5e23cdc851e2e5ea77c73ea4403cf12feed303ff",
+      "line": 78,
+      "title": "One income for each person",
+      "sha256": "e7d47fe691d487cfcc33fc24db7b3ec7fe890773b541a79dfcadd51543d225f9",
       "status": "unverified",
-      "note": "Restored parameterized framing; documentation review does not qualify runtime behavior.",
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
+      "evidence": []
+    },
+    {
+      "id": "DOC-introduction/QUICK_TOUR-006",
+      "source": "docs/introduction/QUICK_TOUR.md",
+      "line": 106,
+      "title": "Who checks the payments?",
+      "sha256": "243aea80ae84c3bf6b23089d43316ab09442ba0f4dd42062fb7bd9c5071ac8e1",
+      "status": "unverified",
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
+      "evidence": []
+    },
+    {
+      "id": "DOC-introduction/QUICK_TOUR-007",
+      "source": "docs/introduction/QUICK_TOUR.md",
+      "line": 121,
+      "title": "Rules people choose together",
+      "sha256": "c9128b72307295894c0d0b8f4ec435123e4cdeaef8440984ca22c874fba47508",
+      "status": "unverified",
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
       "evidence": []
     },
     {
@@ -4077,15 +4137,15 @@
       "source": "docs/node/GROUP_SERVICES.md",
       "line": 1,
       "title": "Running a group service",
-      "sha256": "880f2a98881a13ff007cfc86e354ee006b4ec1a2b9de08a6a9a12ed699c002ef",
+      "sha256": "eff8492b524517a63bd225c63b059d4a02c77de0e819dc1560eb56719fc64b17",
       "status": "unverified",
-      "evidence": [],
-      "note": "Current documentation section. Indexing does not establish implementation or release qualification."
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
+      "evidence": []
     },
     {
       "id": "DOC-node/GROUP_SERVICES-002",
       "source": "docs/node/GROUP_SERVICES.md",
-      "line": 7,
+      "line": 13,
       "title": "Public directory format",
       "sha256": "9842d196151379c6e438f0d2dd514af67e023d1ff6bf18f59b517ebfd9e8fb5d",
       "status": "unverified",
@@ -4095,7 +4155,7 @@
     {
       "id": "DOC-node/GROUP_SERVICES-003",
       "source": "docs/node/GROUP_SERVICES.md",
-      "line": 36,
+      "line": 42,
       "title": "Publish a directory",
       "sha256": "81ffaed7fd404f5b4ddead6497c2a26c502863090c2cb5060366bed3a4c5cc5a",
       "status": "unverified",
@@ -4105,7 +4165,7 @@
     {
       "id": "DOC-node/GROUP_SERVICES-004",
       "source": "docs/node/GROUP_SERVICES.md",
-      "line": 59,
+      "line": 65,
       "title": "Membership API",
       "sha256": "5aa2754efd38fce76ad3cb8b8dfe6b49d9102326178342c8fdd571e4ff7dfd8a",
       "status": "unverified",
@@ -4115,7 +4175,7 @@
     {
       "id": "DOC-node/GROUP_SERVICES-005",
       "source": "docs/node/GROUP_SERVICES.md",
-      "line": 103,
+      "line": 109,
       "title": "Group-to-group trust",
       "sha256": "c662ce491ebdb107ead499539aa08270428d4f7474e8f53626959a80bf62a93e",
       "status": "unverified",
@@ -4125,7 +4185,7 @@
     {
       "id": "DOC-node/GROUP_SERVICES-006",
       "source": "docs/node/GROUP_SERVICES.md",
-      "line": 144,
+      "line": 150,
       "title": "Source and focused checks",
       "sha256": "e60138a1b47bf17bf2b69c15d407437231049ddd726423ab81694bb3143dcb44",
       "status": "unverified",
@@ -4277,15 +4337,15 @@
       "source": "docs/node/NODES.md",
       "line": 1,
       "title": "Node operation and recovery",
-      "sha256": "7af2c501872db2fcaac68a26cb8798a95f4302229d02a00c25c5a315b7c86902",
+      "sha256": "f53ec6f2901efd1baf6a283cedfaad42b3735f8aca48a3eab39bbd9d7e210576",
       "status": "unverified",
-      "note": "Documentation revised against source for developer workflows. This index entry is not runtime validation or release sign-off.",
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
       "evidence": []
     },
     {
       "id": "DOC-node/NODES-002",
       "source": "docs/node/NODES.md",
-      "line": 11,
+      "line": 16,
       "title": "Configuration",
       "sha256": "4c9d5f5d306c87b86e10ad46373ecefed8842865c97582ce26034b766443f226",
       "status": "unverified",
@@ -4295,7 +4355,7 @@
     {
       "id": "DOC-node/NODES-003",
       "source": "docs/node/NODES.md",
-      "line": 60,
+      "line": 65,
       "title": "Joining and synchronizing",
       "sha256": "25b7816385fd6eebed32275c4c54a4706993fc697adfd442e4faa8d26f669a21",
       "status": "unverified",
@@ -4305,7 +4365,7 @@
     {
       "id": "DOC-node/NODES-004",
       "source": "docs/node/NODES.md",
-      "line": 75,
+      "line": 80,
       "title": "Peer and database compatibility",
       "sha256": "574975a0f287b4cc30260bc193163f4dc3b4976b85650fe1d5b69bb6cbb41ec4",
       "status": "unverified",
@@ -4315,7 +4375,7 @@
     {
       "id": "DOC-node/NODES-005",
       "source": "docs/node/NODES.md",
-      "line": 87,
+      "line": 92,
       "title": "Reachability and services",
       "sha256": "ad0e6e61275030d16678f4e16ae85fea68a3d72f60bd9f3a6da09967ed5ac00a",
       "status": "unverified",
@@ -4325,7 +4385,7 @@
     {
       "id": "DOC-node/NODES-006",
       "source": "docs/node/NODES.md",
-      "line": 114,
+      "line": 119,
       "title": "Peer traffic and duplicate handling",
       "sha256": "434d1351fc1c3d1870d192d6f702e257eddba7937bddae2bd19ad50dd6d6fa03",
       "status": "unverified",
@@ -4335,7 +4395,7 @@
     {
       "id": "DOC-node/NODES-007",
       "source": "docs/node/NODES.md",
-      "line": 130,
+      "line": 135,
       "title": "Queued blocks",
       "sha256": "8787cdc1b64023946f7a52e927488430b8e6981f4b1cf0691be446167c0a361c",
       "status": "unverified",
@@ -4345,7 +4405,7 @@
     {
       "id": "DOC-node/NODES-008",
       "source": "docs/node/NODES.md",
-      "line": 143,
+      "line": 148,
       "title": "Storage capacity",
       "sha256": "5b2267396e7432506f07e6dd679a04d78e3e7a199cb165f8019d656605f2f2c8",
       "status": "unverified",
@@ -4355,7 +4415,7 @@
     {
       "id": "DOC-node/NODES-009",
       "source": "docs/node/NODES.md",
-      "line": 156,
+      "line": 161,
       "title": "Beacon relays",
       "sha256": "2d66bd06b6f567d4cfce78b7cce270a10ad520a2fa04e1a41300a7402174bbe1",
       "status": "unverified",
@@ -4365,7 +4425,7 @@
     {
       "id": "DOC-node/NODES-010",
       "source": "docs/node/NODES.md",
-      "line": 172,
+      "line": 177,
       "title": "Time and agreed transitions",
       "sha256": "0d0405627df08bbbd4af26a772d83b85eff220278f977d8bcecf8a18f535e4ab",
       "status": "unverified",
@@ -4375,7 +4435,7 @@
     {
       "id": "DOC-node/NODES-011",
       "source": "docs/node/NODES.md",
-      "line": 204,
+      "line": 209,
       "title": "What restart must preserve",
       "sha256": "26d4754f233a49967b8d9bb72ad5a5b8f29cabd9d9021990743cbef786ac72f1",
       "status": "unverified",
@@ -4385,7 +4445,7 @@
     {
       "id": "DOC-node/NODES-012",
       "source": "docs/node/NODES.md",
-      "line": 215,
+      "line": 220,
       "title": "Historical blocks from peers",
       "sha256": "3a86048108491dc7915714ad57116980640866c3c14998f96a36047b824c0436",
       "status": "unverified",
@@ -4395,7 +4455,7 @@
     {
       "id": "DOC-node/NODES-013",
       "source": "docs/node/NODES.md",
-      "line": 229,
+      "line": 234,
       "title": "Authenticated snapshots",
       "sha256": "02b590fa9c25bac2c07db3ec31f8f7ada9a5ed455c579687aa81967c23bb094b",
       "status": "unverified",
@@ -4405,7 +4465,7 @@
     {
       "id": "DOC-node/NODES-014",
       "source": "docs/node/NODES.md",
-      "line": 271,
+      "line": 276,
       "title": "Pruning and retirement",
       "sha256": "deadf66202275dd2dcdc3b95387d278c5b840b88cf44d5e73572a98665b16595",
       "status": "unverified",
@@ -4418,14 +4478,14 @@
       "evidence": [],
       "id": "DOC-node/NODES-015",
       "source": "docs/node/NODES.md",
-      "line": 282,
+      "line": 287,
       "title": "Backups",
       "sha256": "73e489de634860e9d9274f71dac944067412f31ad35b3a66cfccc5a04c41c7ac"
     },
     {
       "id": "DOC-node/NODES-016",
       "source": "docs/node/NODES.md",
-      "line": 298,
+      "line": 303,
       "title": "Implementation",
       "sha256": "e19f139a2b6c9178ef7943a620d03040cd16942609e0a630410e094c61914f37",
       "status": "unverified",
@@ -4435,7 +4495,7 @@
     {
       "id": "DOC-node/NODES-017",
       "source": "docs/node/NODES.md",
-      "line": 308,
+      "line": 313,
       "title": "Logging",
       "sha256": "891c72c94cee4a5caef03d09f04921f158746e2095c3ca503f0b5c57d9bbbedd",
       "status": "unverified",
@@ -4557,15 +4617,15 @@
       "source": "docs/protocol/BOOTSTRAP.md",
       "line": 1,
       "title": "Bootstrap permissions",
-      "sha256": "52d31591d6d16e30a08e2021bd8779254b6e797d32e7918eaa31b1e5c311624e",
+      "sha256": "918877e4487ee4516322d45ad1d842cc77cd5957902a61e192f2ae4381169a77",
       "status": "unverified",
-      "evidence": [],
-      "note": "Current documentation section. Indexing does not establish implementation or release qualification."
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
+      "evidence": []
     },
     {
       "id": "DOC-protocol/BOOTSTRAP-002",
       "source": "docs/protocol/BOOTSTRAP.md",
-      "line": 6,
+      "line": 13,
       "title": "When authority ends",
       "sha256": "3311bcc1fe2d9a77aa4751cb072c871a7f8007878b05e8f677cc7c03604c5125",
       "status": "unverified",
@@ -4575,7 +4635,7 @@
     {
       "id": "DOC-protocol/BOOTSTRAP-003",
       "source": "docs/protocol/BOOTSTRAP.md",
-      "line": 20,
+      "line": 27,
       "title": "Governance veto",
       "sha256": "110b48d12e53209718f7e6ccd4dd99816ecea7564e5c632e8dd59c2c04f839d6",
       "status": "unverified",
@@ -4588,14 +4648,14 @@
       "evidence": [],
       "id": "DOC-protocol/BOOTSTRAP-004",
       "source": "docs/protocol/BOOTSTRAP.md",
-      "line": 40,
+      "line": 47,
       "title": "Bootstrap verification",
       "sha256": "047d2edde458ad0bd429a1ebf11de0791a0d7de77818575fb8e3c135677091a4"
     },
     {
       "id": "DOC-protocol/BOOTSTRAP-005",
       "source": "docs/protocol/BOOTSTRAP.md",
-      "line": 51,
+      "line": 58,
       "title": "Key compromise",
       "sha256": "3c55d82f0b51839ae5ff184bb9f1a8c799cf0afde05d9ba2feaba31b8988c0cc",
       "status": "unverified",
@@ -4605,7 +4665,7 @@
     {
       "id": "DOC-protocol/BOOTSTRAP-006",
       "source": "docs/protocol/BOOTSTRAP.md",
-      "line": 63,
+      "line": 70,
       "title": "Availability",
       "sha256": "3ebe0059a3fa4c96d6933ad90f563ead678c5b0c3dfa72e60c1290d411c63461",
       "status": "unverified",
@@ -4617,15 +4677,15 @@
       "source": "docs/protocol/CHECKPOINTS.md",
       "line": 1,
       "title": "Checkpoints",
-      "sha256": "98bc8ef15001be12a3b90c965199fefcddbf5b7359bce66ab19245c97b735650",
+      "sha256": "2575d6c75f31c1c34234979ea17ecfb8f2d01a1b9b4277bd359cb284d4422f37",
       "status": "unverified",
-      "note": "Documentation revised against source for developer workflows. This index entry is not runtime validation or release sign-off.",
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
       "evidence": []
     },
     {
       "id": "DOC-protocol/CHECKPOINTS-002",
       "source": "docs/protocol/CHECKPOINTS.md",
-      "line": 21,
+      "line": 27,
       "title": "Authority and replay",
       "sha256": "2d97425df0b7d364fd91e41bef05ecc3a8b4d9d5b417f41922db0b492f2eb567",
       "status": "unverified",
@@ -4635,17 +4695,17 @@
     {
       "id": "DOC-protocol/CHECKPOINTS-003",
       "source": "docs/protocol/CHECKPOINTS.md",
-      "line": 53,
+      "line": 59,
       "title": "How a checkpoint round works",
-      "sha256": "3f9ca69d9f17cc196c2a31b1adcb8e3f8b289866beb64d590775d70647c4a078",
+      "sha256": "0f1e1a8ad10ba8abb46f0de40b93c91566cf63713b85160758975e5d868ae4d0",
       "status": "unverified",
-      "evidence": [],
-      "note": "Current documentation section. Indexing does not establish implementation or release qualification."
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
+      "evidence": []
     },
     {
       "id": "DOC-protocol/CHECKPOINTS-004",
       "source": "docs/protocol/CHECKPOINTS.md",
-      "line": 78,
+      "line": 90,
       "title": "Signing time and randomness",
       "sha256": "4328ecdc4d66d7faba1b4f609faccc0a9e6e48036188ef43ff47c6306c861aae",
       "status": "unverified",
@@ -4655,7 +4715,7 @@
     {
       "id": "DOC-protocol/CHECKPOINTS-005",
       "source": "docs/protocol/CHECKPOINTS.md",
-      "line": 116,
+      "line": 128,
       "title": "Durable signing and recovery",
       "sha256": "0ede67cbbb95d469e124bfd9b7c8f19e1721c63e55d496fbf8b811d40f5f48ad",
       "status": "unverified",
@@ -4665,7 +4725,7 @@
     {
       "id": "DOC-protocol/CHECKPOINTS-006",
       "source": "docs/protocol/CHECKPOINTS.md",
-      "line": 140,
+      "line": 152,
       "title": "Payment-epoch handoff",
       "sha256": "aea0261d096aa6577a79bca503ce2e237f55a7ef78004a3ceec670e7f3b2b8c0",
       "status": "unverified",
@@ -4675,7 +4735,7 @@
     {
       "id": "DOC-protocol/CHECKPOINTS-007",
       "source": "docs/protocol/CHECKPOINTS.md",
-      "line": 157,
+      "line": 169,
       "title": "Installation",
       "sha256": "60ef62d750cd8d312c502f4ba46320e9f6f7fc0afa594f02b98771509117f731",
       "status": "unverified",
@@ -4685,12 +4745,12 @@
     {
       "id": "DOC-protocol/CHECKPOINTS-008",
       "source": "docs/protocol/CHECKPOINTS.md",
-      "line": 182,
+      "line": 194,
       "title": "History transfer",
-      "sha256": "6db0428bdd90426b13cd4dba5cc48474781b31cceb961738a589dc1bfa3c5061",
+      "sha256": "84e2eb546392a0674171952aaf98a90d56d7ed9aefec9b9600817cc2ff6b3fe7",
       "status": "unverified",
-      "evidence": [],
-      "note": "Documentation paths updated; no new qualification."
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
+      "evidence": []
     },
     {
       "status": "unverified",
@@ -4698,14 +4758,14 @@
       "evidence": [],
       "id": "DOC-protocol/CHECKPOINTS-009",
       "source": "docs/protocol/CHECKPOINTS.md",
-      "line": 223,
+      "line": 237,
       "title": "Qualification requirements",
       "sha256": "8bd3eb1c56f8396d98bd772a504f05cc104f125247882f1f8a9542af06c2b88f"
     },
     {
       "id": "DOC-protocol/CHECKPOINTS-010",
       "source": "docs/protocol/CHECKPOINTS.md",
-      "line": 248,
+      "line": 262,
       "title": "Implementation",
       "sha256": "32744afe1d7efd28476314c3cbb5a703fb641fd9de07d7974344a45e3a78fb2b",
       "status": "unverified",
@@ -4717,25 +4777,25 @@
       "source": "docs/protocol/CONSENSUS.md",
       "line": 1,
       "title": "Consensus",
-      "sha256": "7e61f5738d86997e68287b19aeaa44486468f45a6f4f6fbd97b617b52c1cba4b",
+      "sha256": "f58e649ea00a233c1e3d66ede6155b32a3bae00603b20239ce1accc2ff13aed4",
       "status": "unverified",
-      "evidence": [],
-      "note": "Current documentation section. Indexing does not establish implementation or release qualification."
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
+      "evidence": []
     },
     {
       "id": "DOC-protocol/CONSENSUS-002",
       "source": "docs/protocol/CONSENSUS.md",
-      "line": 7,
+      "line": 15,
       "title": "Competing blocks",
-      "sha256": "1c0941cb9218010b7e44da94a83530ff4af7ac3c2fcdd0134d1dc8e85216cd09",
+      "sha256": "a5b131d2cf1071e5ee923a4d9390bf923046eb34327052d4c69e287b57d9909c",
       "status": "unverified",
-      "evidence": [],
-      "note": "Documentation paths updated; no new qualification."
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
+      "evidence": []
     },
     {
       "id": "DOC-protocol/CONSENSUS-003",
       "source": "docs/protocol/CONSENSUS.md",
-      "line": 27,
+      "line": 36,
       "title": "Representatives and delegation",
       "sha256": "d1b8e23d19945854cbe9d44e5d7033c5b697860f59e47f0335c12f32a2251aca",
       "status": "unverified",
@@ -4745,7 +4805,7 @@
     {
       "id": "DOC-protocol/CONSENSUS-004",
       "source": "docs/protocol/CONSENSUS.md",
-      "line": 40,
+      "line": 49,
       "title": "Election lifecycle",
       "sha256": "38bf6e99889b368e8b9aaf68c752612d9204f134d5720c274f1df05500e09fa7",
       "status": "unverified",
@@ -4755,7 +4815,7 @@
     {
       "id": "DOC-protocol/CONSENSUS-005",
       "source": "docs/protocol/CONSENSUS.md",
-      "line": 52,
+      "line": 61,
       "title": "Which candidates run first",
       "sha256": "e59077b96541d21e034ffab8a53327e9d80d5cc759ca1dcafbea762ae00a0838",
       "status": "unverified",
@@ -4765,7 +4825,7 @@
     {
       "id": "DOC-protocol/CONSENSUS-006",
       "source": "docs/protocol/CONSENSUS.md",
-      "line": 66,
+      "line": 75,
       "title": "Durable cementation",
       "sha256": "b335d70db5369cdda98b40141415c54cb2ecc6cec7d18a9c5d721dc9771064ea",
       "status": "unverified",
@@ -4775,7 +4835,7 @@
     {
       "id": "DOC-protocol/CONSENSUS-007",
       "source": "docs/protocol/CONSENSUS.md",
-      "line": 82,
+      "line": 91,
       "title": "Signed votes and conflicting signatures",
       "sha256": "f56051cbe079660effcd3254f16fc017f20e0afe971835cafa6dd8117b3b7326",
       "status": "unverified",
@@ -4785,7 +4845,7 @@
     {
       "id": "DOC-protocol/CONSENSUS-008",
       "source": "docs/protocol/CONSENSUS.md",
-      "line": 96,
+      "line": 105,
       "title": "Shared checkpoints",
       "sha256": "0bc86a38a4e55e32ff144915874fbd5a7f3c480a8e0cafabbefefa91879502e6",
       "status": "unverified",
@@ -4795,7 +4855,7 @@
     {
       "id": "DOC-protocol/CONSENSUS-009",
       "source": "docs/protocol/CONSENSUS.md",
-      "line": 113,
+      "line": 122,
       "title": "Verifier selection",
       "sha256": "cca1404c1f660675e1ea10b9d9c18ed267e80a47f8071c4fd5854a1e0bf9fec1",
       "status": "unverified",
@@ -4805,7 +4865,7 @@
     {
       "id": "DOC-protocol/CONSENSUS-010",
       "source": "docs/protocol/CONSENSUS.md",
-      "line": 140,
+      "line": 149,
       "title": "Experimental randomness helper",
       "sha256": "de18705e9b43e7f0428fea275cdbbbc7c8ab6dbbe84ec175bff1452248f25185",
       "status": "unverified",
@@ -4815,7 +4875,7 @@
     {
       "id": "DOC-protocol/CONSENSUS-011",
       "source": "docs/protocol/CONSENSUS.md",
-      "line": 148,
+      "line": 157,
       "title": "Availability",
       "sha256": "92f2cce7bb6328b1b4e4975648130c347f60b533ae761448859b3179ad78fc2e",
       "status": "unverified",
@@ -4825,7 +4885,7 @@
     {
       "id": "DOC-protocol/CONSENSUS-012",
       "source": "docs/protocol/CONSENSUS.md",
-      "line": 155,
+      "line": 164,
       "title": "Implementation",
       "sha256": "f3aa532814e3ece74d4b3b9b3bbfb4efa012fdc3b3cd0db4add9e70626e0ffe4",
       "status": "unverified",
@@ -4837,15 +4897,15 @@
       "source": "docs/protocol/GOVERNANCE.md",
       "line": 1,
       "title": "Governance",
-      "sha256": "14958535c23bcc3beec2fd83e32b13bed004d9dd27f488e8017cfb65ee4d0777",
+      "sha256": "4cd8c7c327feceefd8fc18efb642c7760e07f73f7a505f07a2a1077355e514b0",
       "status": "unverified",
-      "evidence": [],
-      "note": "Current documentation section. Indexing does not establish implementation or release qualification."
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
+      "evidence": []
     },
     {
       "id": "DOC-protocol/GOVERNANCE-002",
       "source": "docs/protocol/GOVERNANCE.md",
-      "line": 8,
+      "line": 18,
       "title": "Network availability",
       "sha256": "08112abb1e2dd953f358bbea378aeab9018896ec8ab4edc0c1cfb52c51b35941",
       "status": "unverified",
@@ -4855,37 +4915,37 @@
     {
       "id": "DOC-protocol/GOVERNANCE-003",
       "source": "docs/protocol/GOVERNANCE.md",
-      "line": 15,
+      "line": 25,
       "title": "Ordinary proposals",
-      "sha256": "a59ba79424824b9d270f56cc9a3d04d9ea881d28abc3f85f671bf1360e807d8d",
+      "sha256": "7a4bffc6df8d16f9ac7e0e2dbbbb3d720a4a8b3ebe81d32f32be5e8138a3b012",
       "status": "unverified",
-      "note": "Documentation revised against source for developer workflows. This index entry is not runtime validation or release sign-off.",
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
       "evidence": []
     },
     {
-      "status": "unverified",
-      "note": "Documentation consolidated; no new implementation or release qualification.",
-      "evidence": [],
       "id": "DOC-protocol/GOVERNANCE-004",
       "source": "docs/protocol/GOVERNANCE.md",
-      "line": 33,
+      "line": 45,
       "title": "Participation and approval",
-      "sha256": "17586f317ba382d82080dd176bf71850bfa69729ebaf66892686c99c104b4e3e"
+      "sha256": "2f7c6516f132f7e1d00b046bab2540e835cbe7cfba47d4efffa6ef8d2b393c4d",
+      "status": "unverified",
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
+      "evidence": []
     },
     {
       "id": "DOC-protocol/GOVERNANCE-005",
       "source": "docs/protocol/GOVERNANCE.md",
-      "line": 58,
+      "line": 73,
       "title": "Effects of a change",
-      "sha256": "c87f30c05a80818e21545e7068f254fe38ec57b2a46bbdf095d87bf2d936a837",
+      "sha256": "799c90c1fe23c387925f18d72c3917e40691515225635edd4103bb2705f9f0d2",
       "status": "unverified",
-      "evidence": [],
-      "note": "Documentation paths updated; no new qualification."
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
+      "evidence": []
     },
     {
       "id": "DOC-protocol/GOVERNANCE-006",
       "source": "docs/protocol/GOVERNANCE.md",
-      "line": 72,
+      "line": 92,
       "title": "Constitutional text and content",
       "sha256": "c39f74e8ee97738c01b3f9d009c0cb65d880af10055e0b55404f75179888d994",
       "status": "unverified",
@@ -4895,7 +4955,7 @@
     {
       "id": "DOC-protocol/GOVERNANCE-007",
       "source": "docs/protocol/GOVERNANCE.md",
-      "line": 99,
+      "line": 119,
       "title": "Emergency proposals",
       "sha256": "334ced7d08bd8dd36d7377c710a7e03cfdd50140e9cdecff774a9e0288ddad07",
       "status": "unverified",
@@ -4908,7 +4968,7 @@
       "evidence": [],
       "id": "DOC-protocol/GOVERNANCE-008",
       "source": "docs/protocol/GOVERNANCE.md",
-      "line": 110,
+      "line": 130,
       "title": "Governance delegation",
       "sha256": "03f77242b181a6c161bd4d440d31814bd7eead2f903e40a980ee22fec5e8e54c"
     },
@@ -4918,7 +4978,7 @@
       "evidence": [],
       "id": "DOC-protocol/GOVERNANCE-009",
       "source": "docs/protocol/GOVERNANCE.md",
-      "line": 151,
+      "line": 171,
       "title": "Implementation",
       "sha256": "5bb0468a3488665283d4674454cbde7361618f648fbe8b38faa1752f1e7a6b69"
     },
@@ -4927,15 +4987,15 @@
       "source": "docs/protocol/PARAMETERS.md",
       "line": 1,
       "title": "Protocol parameters",
-      "sha256": "6877042bc0216a9bbe25353d4021f71f73c27102655dd52047491a9bc773333d",
+      "sha256": "6c52c65cbcc6edb2785cb45ef8d6e72ad082bd17210a5c73f6c67fefe4ec9a7c",
       "status": "unverified",
-      "note": "Documentation revised against source for developer workflows. This index entry is not runtime validation or release sign-off.",
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
       "evidence": []
     },
     {
       "id": "DOC-protocol/PARAMETERS-002",
       "source": "docs/protocol/PARAMETERS.md",
-      "line": 24,
+      "line": 29,
       "title": "Accrual and expiry",
       "sha256": "e5613f9db6e0d3720938a40b5fc7068ba14376d14b76833b6d6b52bb2f2a2dc0",
       "status": "unverified",
@@ -4945,7 +5005,7 @@
     {
       "id": "DOC-protocol/PARAMETERS-003",
       "source": "docs/protocol/PARAMETERS.md",
-      "line": 44,
+      "line": 49,
       "title": "Verification and challenges",
       "sha256": "dd24a55616599550a8f87b731f6fac59324a53ad6f572f091a7c6e9ae375ce77",
       "status": "unverified",
@@ -4955,7 +5015,7 @@
     {
       "id": "DOC-protocol/PARAMETERS-004",
       "source": "docs/protocol/PARAMETERS.md",
-      "line": 74,
+      "line": 79,
       "title": "Governance",
       "sha256": "53bc8e620e75ea29298db832d53c1b13c0e07a1bd7dc27ada63796d8e6bb0baa",
       "status": "unverified",
@@ -4965,7 +5025,7 @@
     {
       "id": "DOC-protocol/PARAMETERS-005",
       "source": "docs/protocol/PARAMETERS.md",
-      "line": 99,
+      "line": 104,
       "title": "Inactive stored fields",
       "sha256": "32c81366f479881901ec1b664c067994fe96fcff3c715259385c2532cab128ea",
       "status": "unverified",
@@ -4975,7 +5035,7 @@
     {
       "id": "DOC-protocol/PARAMETERS-006",
       "source": "docs/protocol/PARAMETERS.md",
-      "line": 112,
+      "line": 117,
       "title": "Admission limits",
       "sha256": "3cd5e473be738e897f568015bc1e758531aad7c80b1d0b5ac5cba530c95fc69d",
       "status": "unverified",
@@ -4985,7 +5045,7 @@
     {
       "id": "DOC-protocol/PARAMETERS-007",
       "source": "docs/protocol/PARAMETERS.md",
-      "line": 124,
+      "line": 129,
       "title": "Test and Dev differences",
       "sha256": "b24704d2fe2a27fb05378d51b4282b8105e9804ff66a03463aa7abd0f92748ec",
       "status": "unverified",
@@ -4995,7 +5055,7 @@
     {
       "id": "DOC-protocol/PARAMETERS-008",
       "source": "docs/protocol/PARAMETERS.md",
-      "line": 133,
+      "line": 138,
       "title": "Source",
       "sha256": "a6141b656b7d92643ab61676948e5aea3f61ba217895b75eb4465f7a5d4bfa1b",
       "status": "unverified",
@@ -5007,15 +5067,15 @@
       "source": "docs/protocol/VERIFICATION.md",
       "line": 1,
       "title": "Account verification",
-      "sha256": "986dd8a7aa25d44986f4a93b5034e81568e9c83ebccc2784b6ba0c60386d243b",
+      "sha256": "0c70973350df43d9b65f92adcab4c6ac506fa322aa1edf032186864b0a97583c",
       "status": "unverified",
-      "note": "Clarifies random panel selection and its fairness mechanism; no runtime qualification inferred.",
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
       "evidence": []
     },
     {
       "id": "DOC-protocol/VERIFICATION-002",
       "source": "docs/protocol/VERIFICATION.md",
-      "line": 13,
+      "line": 19,
       "title": "Network availability",
       "sha256": "e4ee28c3fe9f3be6685011ae51fd06a137a094b1cdfd471fe72bca03377e59c5",
       "status": "unverified",
@@ -5025,35 +5085,25 @@
     {
       "id": "DOC-protocol/VERIFICATION-003",
       "source": "docs/protocol/VERIFICATION.md",
-      "line": 23,
-      "title": "Read an account's verification state",
-      "sha256": "a7f2ca5363aba57d602ec2ac733bfe2843070c4d11683ddba1973162c11ab8ed",
+      "line": 29,
+      "title": "Ordinary enrollment",
+      "sha256": "a7034d0099dc713c07b78a07fc15f745c49343313b99d6773cc2aa9ed0ff8b65",
       "status": "unverified",
-      "note": "Documentation revised against source for developer workflows. This index entry is not runtime validation or release sign-off.",
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
       "evidence": []
     },
     {
       "id": "DOC-protocol/VERIFICATION-004",
       "source": "docs/protocol/VERIFICATION.md",
-      "line": 35,
-      "title": "Ordinary enrollment",
-      "sha256": "b0788c82a505ea68efe0c0a08531fddb080f9ddeb2ff9b75495b0e29bef5e050",
+      "line": 71,
+      "title": "Votes and settlement",
+      "sha256": "c2c465e5109d14d849384513db44c2a0763e005082a91bd5054e3faaba75ed99",
       "status": "unverified",
-      "note": "Clarifies random panel selection and its fairness mechanism; no runtime qualification inferred.",
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
       "evidence": []
     },
     {
       "id": "DOC-protocol/VERIFICATION-005",
-      "source": "docs/protocol/VERIFICATION.md",
-      "line": 74,
-      "title": "Votes and settlement",
-      "sha256": "8db6e1498e957e457ea01a604b6fa3acf6fa3653585d5a51469f1ead73c55d88",
-      "status": "unverified",
-      "evidence": [],
-      "note": "Current documentation section. Indexing does not establish implementation or release qualification."
-    },
-    {
-      "id": "DOC-protocol/VERIFICATION-006",
       "source": "docs/protocol/VERIFICATION.md",
       "line": 111,
       "title": "Challenges",
@@ -5063,7 +5113,7 @@
       "note": "Current documentation section. Indexing does not establish implementation or release qualification."
     },
     {
-      "id": "DOC-protocol/VERIFICATION-007",
+      "id": "DOC-protocol/VERIFICATION-006",
       "source": "docs/protocol/VERIFICATION.md",
       "line": 126,
       "title": "Re-verification and appeals",
@@ -5073,7 +5123,7 @@
       "note": "Current documentation section. Indexing does not establish implementation or release qualification."
     },
     {
-      "id": "DOC-protocol/VERIFICATION-008",
+      "id": "DOC-protocol/VERIFICATION-007",
       "source": "docs/protocol/VERIFICATION.md",
       "line": 158,
       "title": "Evidence and privacy",
@@ -5083,19 +5133,19 @@
       "note": "Documentation paths updated; no new qualification."
     },
     {
-      "id": "DOC-protocol/VERIFICATION-009",
+      "id": "DOC-protocol/VERIFICATION-008",
       "source": "docs/protocol/VERIFICATION.md",
       "line": 169,
-      "title": "Implementation",
-      "sha256": "e6b7dae065cac31344fcdf0f3606e408c0a587422ef94e518ee9b6130454090a",
+      "title": "Read an account's verification state",
+      "sha256": "a7f2ca5363aba57d602ec2ac733bfe2843070c4d11683ddba1973162c11ab8ed",
       "status": "unverified",
-      "evidence": [],
-      "note": "Current documentation section. Indexing does not establish implementation or release qualification."
+      "note": "Documentation revised against source for developer workflows. This index entry is not runtime validation or release sign-off.",
+      "evidence": []
     },
     {
-      "id": "DOC-protocol/VERIFICATION-010",
+      "id": "DOC-protocol/VERIFICATION-009",
       "source": "docs/protocol/VERIFICATION.md",
-      "line": 179,
+      "line": 181,
       "title": "Endorsement limits and revocation",
       "sha256": "629c8dfcd113aa442ced255e29f1ce236eb75a4c942e8414ba725a9de459aed7",
       "status": "unverified",
@@ -5103,14 +5153,24 @@
       "note": "Current documentation section. Indexing does not establish implementation or release qualification."
     },
     {
-      "id": "DOC-protocol/VERIFICATION-011",
+      "id": "DOC-protocol/VERIFICATION-010",
       "source": "docs/protocol/VERIFICATION.md",
-      "line": 192,
+      "line": 194,
       "title": "Evidence and notifications",
       "sha256": "50f8531cb9bec1354a081a23488a917063665483f49a86673509c824cce84005",
       "status": "unverified",
       "evidence": [],
       "note": "Current documentation section. Indexing does not establish implementation or release qualification."
+    },
+    {
+      "id": "DOC-protocol/VERIFICATION-011",
+      "source": "docs/protocol/VERIFICATION.md",
+      "line": 205,
+      "title": "Implementation",
+      "sha256": "e6b7dae065cac31344fcdf0f3606e408c0a587422ef94e518ee9b6130454090a",
+      "status": "unverified",
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
+      "evidence": []
     },
     {
       "id": "DOC-release/CODE_SIGNING-001",
@@ -5183,14 +5243,14 @@
       "sha256": "817244cb2275ff52634e9d8658a5f5e66ed75355c52693a24d1e7bff00a1e602"
     },
     {
-      "status": "unverified",
-      "note": "Documentation consolidated; no new implementation or release qualification.",
-      "evidence": [],
       "id": "DOC-release/DOWNLOADS-004",
       "source": "docs/release/DOWNLOADS.md",
       "line": 49,
       "title": "Read qualification claims narrowly",
-      "sha256": "ad1970ab0ea4315604c8239471b039f6cb39bc989f49b0fbaa4bc486a7ffcc51"
+      "sha256": "a7058329fb9fdb827294aaa0b252e4edd17e79b7e85ea1ff4c08212b6db376f5",
+      "status": "unverified",
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
+      "evidence": []
     },
     {
       "status": "unverified",
@@ -5198,7 +5258,7 @@
       "evidence": [],
       "id": "DOC-release/DOWNLOADS-005",
       "source": "docs/release/DOWNLOADS.md",
-      "line": 68,
+      "line": 70,
       "title": "Before installation or upgrade",
       "sha256": "62f595a2e159def0e02126a62a12fba8356f06f98dec9a691ae241de8aabde84"
     },
@@ -5267,15 +5327,15 @@
       "source": "docs/wallet/PAYMENTS.md",
       "line": 1,
       "title": "Sending and receiving",
-      "sha256": "f7d496e397b7d71705bfdde3c31de2109161241c7d6ab39f8ea382b793f9e898",
+      "sha256": "eb1432ee9430a854496c349f95d16cda38bdd69ad99e928712c83a9a8b4e1f08",
       "status": "unverified",
-      "note": "Documentation revised against source for developer workflows. This index entry is not runtime validation or release sign-off.",
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
       "evidence": []
     },
     {
       "id": "DOC-wallet/PAYMENTS-002",
       "source": "docs/wallet/PAYMENTS.md",
-      "line": 25,
+      "line": 32,
       "title": "Integrate a payment",
       "sha256": "6b73d30a51b6da279b7905bc17b6e99c0e7f5830ba29ac293fda440705331a42",
       "status": "unverified",
@@ -5285,17 +5345,17 @@
     {
       "id": "DOC-wallet/PAYMENTS-003",
       "source": "docs/wallet/PAYMENTS.md",
-      "line": 42,
+      "line": 49,
       "title": "Acceptance, rejection and expiry",
-      "sha256": "c091a6fa491209d7e0c2705e7b9f7313c404ee129018b7bfb9eba8c51797a10c",
+      "sha256": "925f800e113853e48da0dfc1c2b1bac288ad1c4aafef3ddc5bd7f4d7541461e4",
       "status": "unverified",
-      "evidence": [],
-      "note": "Current documentation section. Indexing does not establish implementation or release qualification."
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
+      "evidence": []
     },
     {
       "id": "DOC-wallet/PAYMENTS-004",
       "source": "docs/wallet/PAYMENTS.md",
-      "line": 92,
+      "line": 98,
       "title": "Expiry timing",
       "sha256": "02600ae69b0fac1d4cc87070098c9d84a0cd8c04e2ef908f41fe316ae4cc0227",
       "status": "unverified",
@@ -5305,7 +5365,7 @@
     {
       "id": "DOC-wallet/PAYMENTS-005",
       "source": "docs/wallet/PAYMENTS.md",
-      "line": 108,
+      "line": 114,
       "title": "Wallet responsibilities",
       "sha256": "e2e9bbac04ba7204727d794b3e1e95b62b4446a6a80dd44a14c681732d38dcde",
       "status": "unverified",
@@ -5315,7 +5375,7 @@
     {
       "id": "DOC-wallet/PAYMENTS-006",
       "source": "docs/wallet/PAYMENTS.md",
-      "line": 123,
+      "line": 129,
       "title": "Implementation",
       "sha256": "6b1f32a81118bd65da88b96668e282a7add2eda33f29cfa0fc61d13f9f83dc4e",
       "status": "unverified",
@@ -5327,15 +5387,15 @@
       "source": "docs/wallet/TRUST.md",
       "line": 1,
       "title": "Payment acceptance policies",
-      "sha256": "93484ed75689e9ddffc3b5494a2c42d5e5923fde1a12e07d5e3726149af25680",
+      "sha256": "3898dfefd3d56abbbc28a07f1871260e6e2b89633ca29db80d61061ff19e4f02",
       "status": "unverified",
-      "note": "Documentation revised against source for developer workflows. This index entry is not runtime validation or release sign-off.",
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
       "evidence": []
     },
     {
       "id": "DOC-wallet/TRUST-002",
       "source": "docs/wallet/TRUST.md",
-      "line": 9,
+      "line": 14,
       "title": "Sender or creator?",
       "sha256": "df9859e8ca02e903b3311f17e89f7ffd77ce53bf20a98c8aa5cbbe4ef18e1cd8",
       "status": "unverified",
@@ -5345,7 +5405,7 @@
     {
       "id": "DOC-wallet/TRUST-003",
       "source": "docs/wallet/TRUST.md",
-      "line": 28,
+      "line": 33,
       "title": "Personal creator trust",
       "sha256": "592173ac7c4fcad3b781fba657efe4035c0855c1d78556b36edf8770a8daf86a",
       "status": "unverified",
@@ -5355,7 +5415,7 @@
     {
       "id": "DOC-wallet/TRUST-004",
       "source": "docs/wallet/TRUST.md",
-      "line": 45,
+      "line": 50,
       "title": "Group trust",
       "sha256": "3d0a813d39291bdfc5d22f8e831273b42b26698871dedd0a6bc1e6256c6a74e8",
       "status": "unverified",
@@ -5365,17 +5425,17 @@
     {
       "id": "DOC-wallet/TRUST-005",
       "source": "docs/wallet/TRUST.md",
-      "line": 79,
+      "line": 84,
       "title": "Decisions and unavailable services",
-      "sha256": "513d72c535391a9f1b053a3910da408b1a46112db7e29c75fe078953e85aba20",
+      "sha256": "99e9361dc70e87eab555ea0c4dfad5fba46dbd312a1373845c6e325e6ac97358",
       "status": "unverified",
-      "note": "Documentation revised against source for developer workflows. This index entry is not runtime validation or release sign-off.",
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
       "evidence": []
     },
     {
       "id": "DOC-wallet/TRUST-006",
       "source": "docs/wallet/TRUST.md",
-      "line": 105,
+      "line": 109,
       "title": "Implementation",
       "sha256": "990d12695590efed75d43c3718a432d721458d4876dbd2e33195e091a6f8dfe7",
       "status": "unverified",
@@ -5387,25 +5447,25 @@
       "source": "docs/wallet/WALLETS.md",
       "line": 1,
       "title": "Keys and signing",
-      "sha256": "2ff1c8c6e46b5bd69a2e3a588fd64fc2bda36ca48ac01055152759918810aaf6",
+      "sha256": "92a417ae6ee02fbdc1b74aa903148a482c983501b56b53b8e565ac887ff04d54",
       "status": "unverified",
-      "evidence": [],
-      "note": "Current documentation section. Indexing does not establish implementation or release qualification."
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
+      "evidence": []
     },
     {
       "id": "DOC-wallet/WALLETS-002",
       "source": "docs/wallet/WALLETS.md",
-      "line": 7,
+      "line": 12,
       "title": "Recovery phrase and local password",
-      "sha256": "6b67d6fda219b01988fdada65fc6ba604f9be0e046683fe6b92467eb2322b030",
+      "sha256": "7ae6b31e91ee59bcb03cfcdaec00d756719b664bc5fa4cddf8201582c0a884c6",
       "status": "unverified",
-      "note": "Documentation revised against source for developer workflows. This index entry is not runtime validation or release sign-off.",
+      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
       "evidence": []
     },
     {
       "id": "DOC-wallet/WALLETS-003",
       "source": "docs/wallet/WALLETS.md",
-      "line": 27,
+      "line": 37,
       "title": "What a phrase does not restore",
       "sha256": "a39960ed2b9bbad17fa70ebfa12a3b8dc183b8476eb55b8fd31716c4d6a2c72c",
       "status": "unverified",
@@ -5415,7 +5475,7 @@
     {
       "id": "DOC-wallet/WALLETS-004",
       "source": "docs/wallet/WALLETS.md",
-      "line": 40,
+      "line": 50,
       "title": "Desktop automation",
       "sha256": "e4ed677d5ffa7fb0f2ff76251019b0a40526ca7b46b6d60b49ed5c3a7c218390",
       "status": "unverified",
@@ -5425,7 +5485,7 @@
     {
       "id": "DOC-wallet/WALLETS-005",
       "source": "docs/wallet/WALLETS.md",
-      "line": 60,
+      "line": 70,
       "title": "Display conventions",
       "sha256": "a192172ebc70c20cf6c8ed5380711253597bd4dbf56111d781f4857e463c3e06",
       "status": "unverified",
@@ -5435,7 +5495,7 @@
     {
       "id": "DOC-wallet/WALLETS-006",
       "source": "docs/wallet/WALLETS.md",
-      "line": 75,
+      "line": 85,
       "title": "Balance displays and local estimates",
       "sha256": "42af1503bac7f619eb2e4331f66b5074c1a63b3c2a206d9a51fd59c69d6a4c3a",
       "status": "unverified",
@@ -5445,7 +5505,7 @@
     {
       "id": "DOC-wallet/WALLETS-007",
       "source": "docs/wallet/WALLETS.md",
-      "line": 94,
+      "line": 104,
       "title": "One account chain, multiple devices",
       "sha256": "6aae06811398667eede337e9b6f18ad9e4c89b4308eb877c609690c3ee77f25d",
       "status": "unverified",
@@ -5455,7 +5515,7 @@
     {
       "id": "DOC-wallet/WALLETS-008",
       "source": "docs/wallet/WALLETS.md",
-      "line": 106,
+      "line": 116,
       "title": "Building and signing operations",
       "sha256": "ea3037c7d7506f1a4bcfd240a4273d527537e06f9399acb92675956eb300bd7a",
       "status": "unverified",
@@ -5465,7 +5525,7 @@
     {
       "id": "DOC-wallet/WALLETS-009",
       "source": "docs/wallet/WALLETS.md",
-      "line": 133,
+      "line": 143,
       "title": "Offline actions",
       "sha256": "1ec132be25e3ee161d122e58f99fff57bdafd5dceda33d1cb609b4d141a8e1f2",
       "status": "unverified",
@@ -5475,7 +5535,7 @@
     {
       "id": "DOC-wallet/WALLETS-010",
       "source": "docs/wallet/WALLETS.md",
-      "line": 162,
+      "line": 172,
       "title": "A lost response is not a failed payment",
       "sha256": "da086567b62a410c6eed8997364717a8ca84e3595be416dc894dad8644973c55",
       "status": "unverified",
@@ -5485,7 +5545,7 @@
     {
       "id": "DOC-wallet/WALLETS-011",
       "source": "docs/wallet/WALLETS.md",
-      "line": 188,
+      "line": 198,
       "title": "Preparation can advance the account",
       "sha256": "d468ccd61c71550ac324468c557db0a4e46cc4da3668a4106c0b0dcdb70b41df",
       "status": "unverified",
@@ -5495,7 +5555,7 @@
     {
       "id": "DOC-wallet/WALLETS-012",
       "source": "docs/wallet/WALLETS.md",
-      "line": 198,
+      "line": 208,
       "title": "Completed receipts",
       "sha256": "44843330d4f2b0a3148b6ac14f4aa47c3753b71eda3eb34e4dafc53c8a52aad1",
       "status": "unverified",
@@ -5505,7 +5565,7 @@
     {
       "id": "DOC-wallet/WALLETS-013",
       "source": "docs/wallet/WALLETS.md",
-      "line": 210,
+      "line": 220,
       "title": "RPC integration",
       "sha256": "138df68aee782fa71f0809605c99dba475d599a51e40e1f98b3961ce824352e4",
       "status": "unverified",
@@ -5515,7 +5575,7 @@
     {
       "id": "DOC-wallet/WALLETS-014",
       "source": "docs/wallet/WALLETS.md",
-      "line": 222,
+      "line": 232,
       "title": "Payment acceptance policies",
       "sha256": "71edde305d5d9a8b785e835103736bead10cfbc3507572d0ab3cd9e892ffd0a1",
       "status": "unverified",
@@ -5528,14 +5588,14 @@
       "evidence": [],
       "id": "DOC-wallet/WALLETS-015",
       "source": "docs/wallet/WALLETS.md",
-      "line": 229,
+      "line": 239,
       "title": "Guardians and shared custody",
       "sha256": "7f254aff2c8b591cc0fc9902228ab8f7a28551225256f69ed81edb04ef080ccd"
     },
     {
       "id": "DOC-wallet/WALLETS-016",
       "source": "docs/wallet/WALLETS.md",
-      "line": 240,
+      "line": 250,
       "title": "Implementation",
       "sha256": "d3b03dd74505eec89b3b916c1b1e499e5973e88704718881cc19ba7b0e70b1e1",
       "status": "unverified",

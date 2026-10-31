@@ -1,14 +1,20 @@
 # Account verification
 
-Verification determines which accounts qualify for BRN accrual and human-based
-voting rights. In ordinary enrollment, a small group of verifiers, called a
-panel, is drawn randomly from eligible volunteers to assess the application.
+If creating another wallet gave someone another income and vote, one person
+could claim the share of many. Verification is BURST's attempt to establish one
+participating account per person. Passing it gives an account the right to gain
+BRN and take part in voting.
+
+In ordinary enrollment, a small group of verifiers, called a panel, is drawn randomly from eligible volunteers to assess the application.
 The applicant cannot choose its members. Nodes can independently check the draw
 from the agreed candidate list and public random result.
 
-The protocol records endorsements, the panel's votes and the agreed outcome.
-It does not cryptographically prove that a person is unique or that their evidence
-is truthful.
+Why involve people at all? A digital signature can establish that someone
+controls a key. It cannot establish that the key belongs to a unique person.
+Verifiers examine the evidence; the software records their votes and applies
+the agreed result. This makes the quality of those judgments part of the
+system's security. A random draw can prevent hand-picking without proving that
+any particular judgment is true.
 
 ## Network availability
 
@@ -19,18 +25,6 @@ make it an available production operation.
 
 The rules below describe those implemented paths. Bootstrap has separate
 [creator-authority rules](BOOTSTRAP.md).
-
-## Read an account's verification state
-
-```json
-{"action":"verification_status","account":"YOUR_ACCOUNT_ADDRESS"}
-```
-
-Send this to the node's [RPC listener](../development/RPC.md). The result includes
-`status`, `phase`, `verified_at`, endorsers, selected verifiers and votes.
-Check `selection_available` and `selection_unavailable_reason` before showing a
-user a panel workflow. `verifier_opted_in` means the account volunteered; it does
-not mean it was selected or meets all selection requirements.
 
 ## Ordinary enrollment
 
@@ -45,8 +39,11 @@ flowchart TD
     E --> F[Certify and apply the outcome]
 ```
 
-Endorsers permanently burn BRN. They do not receive a protocol reward when the
-applicant succeeds, and a failed application does not refund that burn.
+An endorsement puts some of an existing participant's own allowance behind an
+application. Endorsers permanently burn BRN; they do not receive a protocol
+reward when the applicant succeeds, and failure does not refund that burn.
+This gives endorsements a cost, but an endorsement is still support for an
+application, not proof that the applicant is a unique person.
 
 Selection uses agreed ledger state rather than whichever accounts a node happens
 to know. The replay eligibility check requires verified status, an on-chain
@@ -54,8 +51,8 @@ verifier opt-in, sufficient verified age, the minimum BRN balance and completed
 external TRST activity with a counterparty that is still verified. Opt-in alone
 is not enough. Panel selection also applies its request-specific exclusions.
 
-The request commits to the eligible pool before its designated drand beacon is
-available. After verifying the checkpoint certificate and that exact beacon
+The random result comes from drand, a public randomness service. The request
+fixes the eligible list and a future drand round before that result is available. After verifying the checkpoint certificate and that exact beacon
 round, nodes rank pool members by a hash of the beacon value and wallet address.
 The lowest-ranked members form the panel. This gives each account in the frozen
 pool a random rank, without weighting it by wealth. Freezing the list first
@@ -73,11 +70,14 @@ and durations are listed in [protocol parameters](PARAMETERS.md).
 
 ## Votes and settlement
 
-| Vote | Stake | Effect on acceptance |
-| --- | --- | --- |
-| Legitimate | Required | Supports acceptance. |
-| Illegitimate | Required | Does not support acceptance. |
-| Neither | None | Does not support acceptance; remains in the tally denominator. |
+A verifier votes **Legitimate** to support acceptance, **Illegitimate** to oppose
+it, or **Neither** when making neither judgment. Legitimate and Illegitimate
+require BRN to be locked as a stake. Neither requires no stake, but the verifier
+still counts as a panel member when the acceptance threshold is calculated.
+
+This matters when someone abstains. With seven members and a 90% acceptance
+threshold, six Legitimate votes and one Neither do not pass. Ignoring the
+abstention would turn uncertainty into apparent unanimity.
 
 Absent votes become Neither at the applicable deadline. Repeated Neither votes
 can trigger selection exclusion under a rolling assignment window. Neither is
@@ -166,15 +166,17 @@ Verification evidence may expose personal information. A public account address
 and its ledger history should not be mistaken for an anonymous identity. See
 [privacy and network behavior](../release/PRIVACY.md).
 
-## Implementation
+## Read an account's verification state
 
-- [Selection gate](https://github.com/BURST-UBI/protocol/blob/main/verification/src/lib.rs)
-- [Replay eligibility](https://github.com/BURST-UBI/protocol/blob/main/node/src/confirmed_replay.rs)
-- [Voting and timeout defaults](https://github.com/BURST-UBI/protocol/blob/main/verification/src/voting.rs)
-- [Stake and reward outcomes](https://github.com/BURST-UBI/protocol/blob/main/verification/src/outcomes.rs)
-- [Challenge transitions](https://github.com/BURST-UBI/protocol/blob/main/verification/src/orchestrator.rs)
-- [Verification and restoration commit](https://github.com/BURST-UBI/protocol/blob/main/node/src/verification_commit.rs)
-- [Appeal release policy](https://github.com/BURST-UBI/protocol/blob/main/node/src/release_policy.rs)
+```json
+{"action":"verification_status","account":"YOUR_ACCOUNT_ADDRESS"}
+```
+
+Send this to the node's [RPC listener](../development/RPC.md). The result includes
+`status`, `phase`, `verified_at`, endorsers, selected verifiers and votes.
+Check `selection_available` and `selection_unavailable_reason` before showing a
+user a panel workflow. `verifier_opted_in` means the account volunteered; it does
+not mean it was selected or meets all selection requirements.
 
 ## Endorsement limits and revocation
 
@@ -199,3 +201,13 @@ The WebSocket library exposes a verification topic, but the node does not
 currently publish challenge outcomes through its publisher. Clients must query
 current verification state rather than rely on a push notification. Generic
 WebSocket broadcasts can lose events when a subscriber falls behind.
+
+## Implementation
+
+- [Selection gate](https://github.com/BURST-UBI/protocol/blob/main/verification/src/lib.rs)
+- [Replay eligibility](https://github.com/BURST-UBI/protocol/blob/main/node/src/confirmed_replay.rs)
+- [Voting and timeout defaults](https://github.com/BURST-UBI/protocol/blob/main/verification/src/voting.rs)
+- [Stake and reward outcomes](https://github.com/BURST-UBI/protocol/blob/main/verification/src/outcomes.rs)
+- [Challenge transitions](https://github.com/BURST-UBI/protocol/blob/main/verification/src/orchestrator.rs)
+- [Verification and restoration commit](https://github.com/BURST-UBI/protocol/blob/main/node/src/verification_commit.rs)
+- [Appeal release policy](https://github.com/BURST-UBI/protocol/blob/main/node/src/release_policy.rs)

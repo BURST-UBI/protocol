@@ -8,10 +8,15 @@ Universal income is one configuration. The community can change the income rate,
 including setting it to zero, and choose a limited or effectively unlimited
 currency lifetime. These choices use the same underlying payment system.
 
-Start with the [introduction](introduction/QUICK_TOUR.md), then read the
-[whitepaper](introduction/WHITEPAPER.md). It follows a payment from its creation
-through transfers, splits and merges, and explains how verification and voting
-fit together.
+Start with the [introduction](introduction/QUICK_TOUR.md). It follows a payment,
+explains why the rules exist, and discusses what they cannot guarantee. Then read
+[balances and units](introduction/ECONOMICS.md) for the accounting,
+[verification](protocol/VERIFICATION.md) for how people join, and
+[governance](protocol/GOVERNANCE.md) for how the rules can change.
+
+The [whitepaper](introduction/WHITEPAPER.md) presents the broader monetary design.
+The [limits and assumptions page](introduction/LIMITATIONS.md) explains the risks and
+which features are available in current builds.
 
 ## Build with BURST
 

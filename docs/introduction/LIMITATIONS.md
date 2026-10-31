@@ -1,5 +1,9 @@
 # Limits and assumptions
 
+Understanding the rules also means understanding what they depend on. This page
+separates features not yet available on Live from risks that remain even when
+the software follows its rules.
+
 ## Feature availability
 
 The source includes features that are not enabled on Live. Check these before
@@ -28,17 +32,27 @@ gate; see [node storage](../node/NODES.md#pruning-and-retirement).
 Correct accounting does not by itself establish economic usefulness or honest
 human judgments. These risks remain relevant even when software follows its rules.
 
-| Risk | Consequence |
-| --- | --- |
-| False identities pass verification | Extra accounts can gain BRN and human-based voting weight. Endorsements and challenges do not prove perfect Sybil prevention. |
-| Honest accounts are wrongly revoked | Recipients can lose affected value. Restoration can correct accounting, but not the intervening harm; appeals are currently gated on Live. |
-| Representatives become concentrated | Equal account weights can still be delegated to a small number of operators. |
-| Required quorum becomes unavailable | Finalization can stop. Each partition cannot safely redefine authority around its reachable peers. |
-| A sufficiently powerful electorate colludes | Signatures establish who authorized an action, not that their decision is benevolent. |
-| Merchants refuse TRST | The ledger can function while the currency has little purchasing power. Acceptance is voluntary. |
-| Fraudulent value buys real goods | Revocation cannot retrieve the goods or insure the recipient. |
-| Public provenance is linked to people | Addresses and transfers can expose financial relationships. This is not a private-payment system. |
-| Recovery secrets are lost | The wallet cannot recreate an unknown signing key. Local guardian records are not a general social-recovery service. |
+Verification can be wrong in either direction. A false identity that passes can
+gain extra income and voting weight. A real person wrongly judged fraudulent can
+lose rights, and honest recipients can lose affected payments. Restoration can
+correct the accounting but cannot undo an intervening loss of goods or opportunity.
+Appeals are currently disabled on Live.
+
+Equal account weights do not guarantee widely distributed control. People can
+delegate them to a small number of representatives. If too much required weight
+goes offline, agreement can stop; each disconnected part of the network cannot
+safely redefine the voting group around the nodes it can reach. If enough voters
+collude, their signatures can authorize a harmful decision. Signatures establish
+who agreed, not whether the decision was good.
+
+A functioning ledger does not guarantee purchasing power. Merchants may refuse
+TRST, and a payment may buy goods before its fraudulent origin is discovered.
+Revocation cannot retrieve those goods or insure the recipient.
+
+The ledger is also public. Linking payment history to real people can reveal
+financial relationships. Losing the secrets that control an account presents a
+different risk: the wallet cannot recreate an unknown key. Its local guardian
+records do not provide a general social-recovery service.
 
 Tests and benchmarks can establish specific behavior under recorded conditions.
 They do not prove a safe fraudulent-account percentage, incentive equilibrium,

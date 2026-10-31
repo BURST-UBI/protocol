@@ -1,6 +1,11 @@
 # Protocol parameters
 
-The tables below describe `ProtocolParams::burst_defaults()`, the source defaults
+Parameters are the settings governance can change, such as the BRN income rate,
+TRST lifetime and number of verifiers. This page is a reference for their names,
+units and current code behavior. For why the two central economic settings
+exist, start with the [introduction](../introduction/QUICK_TOUR.md).
+
+The tables describe `ProtocolParams::burst_defaults()`, the source defaults
 for Live. They are not a report of any running network's current state. Governance
 can change values, and Test and Dev override some defaults.
 

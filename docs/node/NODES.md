@@ -1,9 +1,14 @@
 # Node operation and recovery
 
-A node validates and stores ledger state, exchanges protocol data with peers and
-serves RPC and WebSocket clients. Run a non-voting node to validate and serve
-ledger data; run a representative with a signing key to vote with the weight
-accounts delegate to it. Both need the state required to validate the protocol.
+A wallet asks a node what happened on the network. Running your own node lets
+you check and keep that record yourself, rather than depend on another operator
+for every answer. The node checks blocks, exchanges them with peers and exposes
+interfaces that wallets and dashboards can use.
+
+A non-voting node checks and serves the data. A representative node also signs
+votes using the weight people have delegated to its account. Running more nodes
+does not create more voting weight. Both kinds need the state required to check
+the protocol's rules.
 
 Start with [installation](INSTALLATION.md) for a background service, or
 [build and test](../development/DEVELOPING.md) for a local source build.

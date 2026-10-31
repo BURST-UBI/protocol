@@ -48,13 +48,15 @@ that its first-install download path works.
 
 ## Read qualification claims narrowly
 
-| Evidence | What it does not establish |
-| --- | --- |
-| Process-crash recovery | Physical storage behavior during power loss. |
-| One platform's installed journey | The same behavior on every platform. |
-| A measured workload | Unrestricted throughput, latency or low-memory capacity. |
-| Test-network operation | Readiness for a Live network with different inputs. |
-| A signed or notarized package | Correct protocol rules or complete safety review. |
+Check what a release was actually tested against. A successful installation on
+one platform does not establish the same result on another. A test-network run
+qualifies its recorded network and inputs, while a measured workload establishes
+only its tested throughput, latency and memory use.
+
+Recovery evidence also has a scope. Surviving a process crash does not establish
+how physical storage behaves during a power loss. A signed or notarized package
+identifies its publisher and protects the package bytes; it does not establish
+that the protocol rules are correct or that every safety review has passed.
 
 Physical body retirement remains gated in the current node. Do not enable it by
 bypassing that gate. Performance targets and unresolved safety requirements must

@@ -1,8 +1,14 @@
 # Running a group service
 
-Group membership is a wallet preference, not a node consensus rule. A group
-score or member count never supplies voting weight. The client checks the
-original BRN creators behind a payment, not just its immediate sender.
+A group service answers a question for wallets: is this person a member of a
+group the recipient trusts? A wallet can use that answer when deciding whether
+to accept a payment automatically. The group publishes its own membership
+judgment; it does not verify people on behalf of the whole network.
+
+The check concerns the people whose BRN originally created the payment, not just
+who sent it most recently. This follows from the risk of later fraud revocation.
+A group's score or member count gives it no extra voting weight. See
+[acceptance policies](../wallet/TRUST.md) before setting up the service below.
 
 ## Public directory format
 

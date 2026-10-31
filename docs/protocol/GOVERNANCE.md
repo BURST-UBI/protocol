@@ -1,9 +1,19 @@
 # Governance
 
-Verified accounts vote on changes to supported protocol settings, such as the
-BRN accrual rate and TRST expiry period. Votes cannot install new code; new
-behavior requires a software release. Constitutional text records community
-rules but cannot add behavior the software does not implement.
+An income rate is a choice about how much new personal income people receive.
+A currency lifetime is a choice about how long their payments remain spendable.
+Both affect people beyond whoever first wrote the software, so BURST gives
+verified participants a way to propose and vote on changes.
+
+This page follows a proposal from support to activation, then explains what a
+change does to existing balances. Choosing a representative to confirm payments
+does not automatically delegate your governance vote. Voting on monetary rules
+and agreeing which transactions happened are separate responsibilities.
+
+Governance can change supported settings. A vote cannot install new software,
+and constitutional text cannot create behavior the code does not implement.
+Nor does a successful vote establish that a policy is economically wise; it
+records that the proposal met the community's decision rules.
 
 ## Network availability
 
@@ -14,8 +24,10 @@ operations when their required certified path is unavailable.
 
 ## Ordinary proposals
 
-A verified proposer submits a change. Submission is distinct from endorsement:
-supporters burn the configured BRN amount to qualify the proposal for voting.
+Suppose participants want to raise the BRN income rate. A verified proposer
+submits the proposed setting. Other participants must support it before it goes
+to a vote, so submitting an idea and qualifying it for a ballot are separate
+steps. Supporters burn the configured BRN amount to endorse it.
 Those burns are not refunded when a proposal loses or is withdrawn. Only the
 proposer can withdraw, and only during the proposal phase.
 
@@ -34,7 +46,10 @@ not a second ballot.
 
 Eligible accounts vote yea, nay or abstain. Each contributes at most one effective
 ballot, with [delegation rules](GOVERNANCE.md#governance-delegation) applied where enabled.
-Two thresholds must pass:
+Two thresholds must pass. The participation threshold asks whether enough people
+took part; the approval threshold asks whether enough of those choosing a side
+supported the change. Without the first check, a tiny group could decide a rule
+for everyone simply because nobody else voted:
 
 ```text
 participation = (yea + nay + abstain) / eligible accounts
@@ -57,9 +72,14 @@ The permission ends permanently at the [bootstrap threshold](BOOTSTRAP.md).
 
 ## Effects of a change
 
-A BRN-rate change adds a rate-history interval rather than recalculating previous
-income. An expiry change reevaluates holdings against the new period and may
-expire or reactivate them, without overriding revocation. See
+If Alice earned BRN at one rate yesterday, a new rate today does not rewrite
+what she earned. The node keeps the old and new rates with the times they apply.
+
+Changing the TRST lifetime has a different effect. Money that is 100 days old
+would be expired under a 90-day lifetime but usable under a 120-day lifetime,
+unless invalid for another reason. Shortening the lifetime can also expire money
+someone already holds. This is a consequence voters need to consider; a
+successful vote does not protect every holder from loss. See
 [accounting](../introduction/ECONOMICS.md).
 
 The governed registry exposes supported values and storage widths. Not every

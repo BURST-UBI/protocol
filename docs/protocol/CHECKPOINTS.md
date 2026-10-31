@@ -1,9 +1,15 @@
 # Checkpoints
 
-A checkpoint records agreement on how far each account chain has advanced and
-the shared state calculated from those blocks. This boundary is called a
-**ledger cut**. It coordinates verifier selection, verification results,
-governance changes and the representatives allowed to vote.
+Account chains record what each account has done. Some rules affect everyone:
+for example, nodes must apply an approved income-rate change to the same agreed
+history. If each node chose its own boundary, they could calculate different
+balances from what was supposed to be one decision.
+
+A **checkpoint** records that shared boundary and the state calculated from it.
+It says how far each account chain has advanced; the technical name for that
+set of chain positions is a **ledger cut**. Checkpoints coordinate verifier
+selection, verification results, governance changes and the representatives
+allowed to vote.
 
 A node checks a checkpoint in three steps:
 
@@ -57,12 +63,18 @@ round number. A representative has one proposer slot per human delegated to it.
 The proposer suggests a checkpoint; it cannot approve that checkpoint alone
 unless its delegated weight reaches the required quorum.
 
-| Step | What happens |
-| --- | --- |
-| Propose | The designated representative proposes a fresh valid cut or reuses a prepared value with its proof. |
-| Prevote | Representatives check the proposal and their locks, then vote for its hash or for no value. |
-| Precommit | A quorum of prevotes for the same hash lets a representative lock that value and precommit it. |
-| Decide | A quorum of precommits for one hash in one round forms the checkpoint certificate. |
+1. The designated representative proposes a fresh valid boundary, or reuses a
+   prepared value together with the proof that justifies it.
+2. Representatives check the proposal and the commitments they have already
+   made. They **prevote** for its hash or for no value.
+3. When enough prevote weight supports the same hash, a representative can lock
+   that value and **precommit** it. The lock restricts what it can sign later.
+4. Enough precommits for one hash in one round form the **certificate**: the
+   signed evidence that the checkpoint was agreed.
+
+These stages keep a node from treating a proposal as a decision. They also carry
+commitments into later rounds, where forgetting an earlier promise could allow
+conflicting decisions.
 
 A proposal timeout can produce a prevote for no value. Prevote and precommit
 timeouts also require quorum evidence that representatives reached that phase;
@@ -181,13 +193,15 @@ See [verification and challenges](VERIFICATION.md) and
 
 ## History transfer
 
-History recovery separates three checks:
+Receiving a file intact is not enough to trust the history inside it. A transfer
+digest checks that the assembled bytes match what was advertised. A dishonest
+peer could still advertise a file containing false history.
 
-| Check | What it establishes |
-| --- | --- |
-| Transfer digest | The assembled bytes match the advertised digest. |
-| Authenticated history cursor | A block belongs to the account prefix committed by a trusted snapshot or checkpoint. |
-| Semantic replay | The history obeys the protocol and produces the claimed state. |
+The receiver therefore also checks that each block belongs to the account
+history committed by a trusted snapshot or checkpoint. Finally, it replays the
+history to check that the operations follow the rules and produce the claimed
+state. These checks answer different questions: did the bytes arrive intact,
+is this the agreed history, and are its effects valid?
 
 A peer's account hint only tells the receiver where to look. The receiver follows
 hashes from an independently authenticated account head before accepting the

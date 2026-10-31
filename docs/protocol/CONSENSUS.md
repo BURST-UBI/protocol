@@ -1,13 +1,22 @@
 # Consensus
 
-Each account has its own signed chain. A payment links the sender's operation to
-the recipient's receive, so independent account chains still have dependencies.
-Identity and governance transitions also change shared state.
+A signature proves that an account's key authorized an action. It does not stop
+the owner from signing two conflicting payments that spend the same money.
+Nodes need to agree which payment happened, or two recipients could each believe
+they had been paid. That agreement is called consensus.
+
+BURST gives each account its own chain of signed entries, called blocks.
+Representatives vote when entries compete. A receive also points back to the
+payment it accepts, so confirming one account's history can depend on another's.
+This page explains that agreement process and why enough voting weight must
+remain online for it to continue. The minimum voting weight needed for a decision
+is called its **quorum**.
 
 ## Competing blocks
 
-Two different successors of the same account position compete. They cannot both
-become that account's next confirmed state. Representatives vote on candidates;
+Suppose Alice signs two different blocks after the same last confirmed block.
+They compete for the same position in her account history. Both cannot become
+her next confirmed block, even if both carry her valid signature. Representatives vote on candidates;
 confirmation requires the applicable final-vote weight and durable handling of
 the block's dependencies.
 

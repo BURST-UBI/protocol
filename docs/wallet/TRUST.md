@@ -1,10 +1,15 @@
 # Payment acceptance policies
 
-A payment can satisfy the protocol while failing your wallet's acceptance policy.
-For example, you may want automatic receipt only for payments originating from
-people you know, or members of a community you trust. Other payments remain
-available for manual review; a policy decision does not change their ledger
-validity.
+A payment can follow every network rule and still carry a risk you do not want
+to accept automatically. If the person whose BRN created it is later found to
+have enrolled fraudulently, the affected value can become invalid, even after
+it reaches you. Knowing the sender is not necessarily enough.
+
+Wallet acceptance policies let you decide which payments to accept automatically
+and which to review yourself. You might trust particular creators, or rely on
+membership in a group you know. Those are your preferences; they do not change
+what the network considers a valid payment. They also cannot guarantee that a
+trusted person will never be found fraudulent.
 
 ## Sender or creator?
 
@@ -78,11 +83,10 @@ timeouts require review instead of silently accepting the payment.
 
 ### Decisions and unavailable services
 
-| Decision | Wallet behavior |
-| --- | --- |
-| Accept | The policy permits automatic acceptance; protocol validation still applies. |
-| Reject | The payment fails the configured trust policy. |
-| Warn | The wallet needs review or the explicitly configured fallback. |
+The policy returns **Accept** when it permits automatic acceptance, **Reject**
+when the payment fails a configured rule, or **Warn** when the wallet needs review
+or an explicitly configured fallback. These are policy results. Accept does not
+skip protocol validation, and Reject does not itself send the money back.
 
 The explicit protocol-only fallback applies when the group client reports service
 unavailability, including connection failures and HTTP server errors such as 503.

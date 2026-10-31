@@ -1,10 +1,17 @@
 # Sending and receiving
 
-A payment takes two signed operations: one from the sender and one from the
-recipient. The sender either burns BRN to create TRST or sends TRST they already
-hold. When the node applies the sender's block, the payment is **pending**: its
-TRST is reserved for the recipient, who has not yet received it. The stored pending entry is
-called a **pending receipt**.
+When Alice pays Bob, she authorizes the payment and Bob accepts it. BURST records
+those as two signed operations because each person controls their own account
+history. Alice can offer a payment; she cannot write an acceptance into Bob's
+account on his behalf. Bob's wallet can accept automatically under his rules
+or leave the payment for review.
+
+For an application developer, this means "sent" and "received" are different
+states to display and recover.
+
+The sender either burns BRN to create TRST or sends TRST they already hold. When the node applies the sender's block, the payment is **pending**: its
+TRST is reserved for the recipient, who has not yet received it. The stored
+pending entry is called a **pending receipt**.
 
 The recipient signs a receive operation to claim it. For a new account, that claim
 can also open its account chain. The node checks the receipt, amount, provenance
@@ -70,15 +77,14 @@ flowchart TD
     E -->|Sender receives| A["Credit acknowledged<br/>No second delivery"]
 ```
 
-The arrows describe accepted ledger transitions, not merely signed or submitted
-requests. Rejection and expiry return value through different paths:
+The diagrams show changes the node has accepted, not merely requests a wallet
+has signed or submitted. If Bob does nothing, the payment stays pending, subject
+to expiry and other protocol rules. He has not accepted it, and Alice cannot
+treat his silence as permission to spend it again.
 
-| Event | Result |
-| --- | --- |
-| Recipient accepts | A signed receive consumes the pending entry and delivers its holdings. |
-| Recipient rejects | A signed `RejectReceive` creates a new pending entry for the sender, keyed by the rejection block. The sender claims it explicitly. |
-| Recipient does nothing | The receipt remains pending, subject to expiry and other protocol rules. |
-| Pending TRST expires | The agreed expiry transition delivers it back to the sender and creates a return credit for acknowledgment. |
+When Bob rejects it with `RejectReceive`, the node creates a new pending payment
+for Alice, identified by Bob's rejection block. Alice must sign to claim that
+return. Expiry follows a different path, described below.
 
 Rejection does not delete the original send or reverse a BRN burn. It returns
 TRST through another pending receipt. Neither account's signed balance is silently

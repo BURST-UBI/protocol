@@ -16,6 +16,7 @@ module.exports = {
     docs: {
       path: '../docs',
       routeBasePath: '/',
+      rehypePlugins: [require('./src/plugins/currency-terms')],
       exclude: ['SUMMARY.md'],
       sidebarPath: require.resolve('./sidebars.js'),
       editUrl: 'https://github.com/BURST-UBI/protocol/edit/main/docs/',

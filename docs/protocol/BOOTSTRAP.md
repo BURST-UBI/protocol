@@ -1,7 +1,14 @@
 # Bootstrap permissions
 
-The creator has temporary bootstrap permissions. Once bootstrap ends, the creator
-keeps an ordinary account without special verification or governance authority.
+Ordinary enrollment relies on people who are already verified. A new network
+has too few of them to start that process. BURST therefore gives its creator
+temporary permissions to help enroll the first participants. This starting
+period is called bootstrap.
+
+It is a real exception to equal authority. The creator can also veto approved
+governance proposals during this period. The limit matters: once bootstrap ends,
+the creator keeps an ordinary account without special verification or governance
+authority, and a later fall in population cannot bring those powers back.
 
 ## When authority ends
 

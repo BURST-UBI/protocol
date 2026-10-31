@@ -1,6 +1,8 @@
 # RPC
 
-The node exposes an action-based HTTP API. Send JSON to `/` on the RPC listener,
+The RPC interface lets a wallet or another program ask a node for balances,
+inspect account history and submit signed actions. It uses HTTP requests with
+JSON bodies. Send JSON to `/` on the RPC listener,
 which defaults to `http://127.0.0.1:7077`. This is not JSON-RPC 2.0: requests use
 `action`, not `method`, and have no request ID.
 
