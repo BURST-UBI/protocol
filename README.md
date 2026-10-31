@@ -42,4 +42,4 @@ is indexed in [spec/README.md](spec/README.md).
 
 ## License
 
-[MIT](LICENSE). Copyright 2025 Nitesh Gautam.
+[MIT](LICENSE). Copyright 2024–2026 Nitesh Gautam.
