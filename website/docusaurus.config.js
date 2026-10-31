@@ -1,3 +1,5 @@
+const {themes} = require('prism-react-renderer');
+
 module.exports = {
   title: 'BURST',
   tagline: 'A currency built around people',
@@ -43,6 +45,20 @@ module.exports = {
     };
   }],
   themeConfig: {
+    prism: {
+      theme: {
+        ...themes.github,
+        styles: [...themes.github.styles, {
+          types: ['property', 'parameter', 'variable', 'attr-name'],
+          style: {color: '#176b78'},
+        }, {
+          types: ['function'],
+          style: {color: '#913954'},
+        }],
+      },
+      darkTheme: themes.dracula,
+      additionalLanguages: ['rust', 'toml', 'bash', 'json'],
+    },
     docs: {sidebar: {autoCollapseCategories: true}},
     colorMode: {defaultMode: 'light', respectPrefersColorScheme: false},
     navbar: {

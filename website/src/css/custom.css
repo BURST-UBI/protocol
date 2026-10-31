@@ -17,11 +17,12 @@
   --ifm-toc-border-color: #e6e4dc;
   --ifm-menu-color: #64645d;
   --ifm-menu-color-background-active: #f0ede4;
-  --reading-muted: #717168;
+  --reading-muted: #62645b;
+  --paper-display: 'Iowan Old Style', 'Palatino Linotype', 'Book Antiqua', Palatino, Georgia, serif;
   --reading-panel: #f1efe8;
   --flow-brn: #36784c;
   --flow-trst: #276494;
-  --flow-token: #e69b43;
+  --flow-token: #f68921;
 }
 [data-theme='dark'] {
   --ifm-color-primary: #f0b17e;
@@ -57,7 +58,7 @@
 .markdown > p, .markdown > ul, .markdown > ol {max-width: 65ch;}
 .markdown h1, .markdown h2, .markdown h3 {text-wrap: balance;}
 .markdown h1 {font-family: var(--ifm-font-family-base); font-size: clamp(2rem, 3vw, 2.6rem); font-weight: 650; line-height: 1.08; letter-spacing: -.045em; margin-bottom: 1.75rem;}
-.markdown h2 {margin-top: 3rem; padding-top: 1.25rem; border-top: 1px solid var(--ifm-toc-border-color); font-size: 1.55rem; letter-spacing: -.035em;}
+.markdown h2 {margin-top: 3rem; padding-top: 1.25rem; border-top: 1px solid var(--ifm-toc-border-color); font-size: 1.65rem; line-height: 1.3; letter-spacing: -.025em;}
 .markdown h3 {font-size: 1.15rem; letter-spacing: -.015em;}
 .markdown > h1 + p {font-size: 1.16rem; line-height: 1.75; color: var(--reading-muted);}
 .markdown a:not(.hash-link) {text-decoration-thickness: 1px; text-underline-offset: .2em;}
@@ -79,7 +80,7 @@
 .button {border-radius: 4px; font-weight: 500;}
 :focus-visible {outline: 2px solid var(--ifm-color-primary); outline-offset: 4px;}
 .markdown header + p {font-size: 1.12rem; color: var(--reading-muted);}
-.payment-flow {display: block; margin: 1.25rem 0 0; padding: 2.5rem 2rem 1rem; background: var(--reading-panel); border-radius: 6px;}
+.payment-flow {display: block; margin: 2rem 0; padding: 3rem 2rem 1rem; background: var(--reading-panel); border-block: 1px solid var(--ifm-toc-border-color);}
 .payment-flow__drawing {display: grid; grid-template-columns: 1fr .8fr 1fr; align-items: start; gap: 1rem;}
 .payment-flow__balance {display: flex; flex-direction: column; align-items: center; text-align: center;}
 .payment-flow__token {display: grid; place-items: center; width: 72px; height: 72px; background: var(--flow-token); border-radius: 12px; transform: rotate(45deg); margin: 14px 0 26px;}
@@ -123,4 +124,41 @@
   .payment-flow__drawing[data-playing='true'] .payment-flow__token,
   .payment-flow__drawing[data-playing='true'] .payment-flow__connection i {animation: flow-fade 180ms ease both;}
   .payment-flow button span {transition: none; transform: none !important;}
+}
+
+/* The paper borrows the serif lettering and colored tokens of the original illustrations. */
+.paper {--paper-accent: var(--ifm-color-primary);}
+.paper__masthead {display: flex; align-items: center; justify-content: space-between; min-height: 5rem; margin-bottom: .5rem; color: var(--reading-muted); font-size: .75rem; letter-spacing: .16em; text-transform: uppercase;}
+.paper__mark {display: flex; gap: 1.6rem; padding-right: 1rem;}
+.paper__mark i {display: block; width: 32px; height: 32px; border-radius: 6px; background: var(--flow-token); transform: rotate(45deg); position: relative;}
+.paper__mark i::after {content: ''; position: absolute; inset: 9px; border-radius: 50%; background: var(--flow-brn);}
+.paper__mark i:last-child::after {background: var(--flow-trst);}
+.paper .markdown {counter-reset: chapter;}
+.paper .markdown h1 {font-family: var(--paper-display); font-size: clamp(3rem, 5vw, 4.5rem); font-weight: 400; line-height: 1.06; letter-spacing: -.055em;}
+.paper--whitepaper .markdown h1 {font-size: clamp(5rem, 9vw, 8rem); margin-bottom: 1.5rem;}
+.paper .markdown > h1 + p {font-size: clamp(1.18rem, 1.6vw, 1.4rem); color: var(--ifm-font-color-base); line-height: 1.6; max-width: 48ch;}
+.paper .markdown h2 {font-family: var(--paper-display); font-size: clamp(1.9rem, 3vw, 2.5rem); font-weight: 400; line-height: 1.16; letter-spacing: -.035em; padding-top: 0; margin: 3.5rem 0 1.5rem; border: 0; max-width: 24ch;}
+.paper--whitepaper .markdown h2::before {counter-increment: chapter; content: counter(chapter, decimal-leading-zero); display: block; font-family: var(--ifm-font-family-base); font-size: .72rem; font-weight: 600; letter-spacing: .12em; color: var(--paper-accent); margin-bottom: .8rem;}
+.paper .markdown h3 {font-size: 1.2rem; margin-top: 2.25rem;}
+.paper .markdown #brn-your-personal-income {color: var(--flow-brn);}
+.paper .markdown #trst-money-you-can-pass-on {color: var(--flow-trst);}
+.paper .markdown blockquote {border: 0; border-left: 3px solid var(--flow-token); background: var(--reading-panel); margin: 2rem 0; padding: 1.4rem 1.6rem; color: var(--ifm-font-color-base); font-family: var(--paper-display); font-size: clamp(1.25rem, 2vw, 1.6rem); line-height: 1.4;}
+.paper .markdown blockquote p {margin: 0;}
+.paper .markdown > p:has(.paper-illustration), .paper .markdown > p:has(.payment-flow) {max-width: none;}
+.paper-illustration {display: block; margin: 2rem 0; border: 1px solid var(--ifm-toc-border-color); background: var(--reading-panel);}
+.paper-illustration > a {display: block; background: #fff;}
+.paper-illustration img {display: block; width: 100%; height: auto; aspect-ratio: 16 / 9; object-fit: contain;}
+.paper-illustration__caption {display: block; padding: 1rem 1.25rem; font-size: .85rem; line-height: 1.6; color: var(--reading-muted);}
+.payment-flow__balance--brn strong {color: var(--flow-brn);}
+.payment-flow__balance--trst strong {color: var(--flow-trst);}
+.payment-flow__balance strong {font-size: 2.6rem;}
+.payment-flow__balance > span:last-child, .payment-flow__connection, .payment-flow__caption {font-size: .82rem;}
+.markdown pre {font-size: .86rem; line-height: 1.7; border: 1px solid var(--ifm-toc-border-color); border-radius: 6px;}
+.markdown :not(pre) > code {color: var(--ifm-color-primary); background: var(--reading-panel); border: 1px solid var(--ifm-toc-border-color); padding: .12em .3em;}
+.markdown pre code {border: 0;}
+@media (max-width: 996px) {
+  .paper__masthead {min-height: 3.5rem;}
+  .paper .markdown h2 {margin-top: 2.75rem;}
+  .paper .markdown blockquote {padding: 1.15rem 1.25rem;}
+  .paper-illustration__caption {padding: .85rem 1rem;}
 }
