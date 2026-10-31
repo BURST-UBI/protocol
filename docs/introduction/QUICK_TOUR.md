@@ -1,50 +1,58 @@
 # What is BURST?
 
-BURST gives verified people a personal income and lets them use it to pay one
-another. Its name combines **BRN**, from *burn*, and **TRST**, from *trust*.
+BURST is an attempt to give everyone a starting point in an economy: a personal
+income they can use, while still being able to earn money by helping others.
+The people taking part choose the monetary rules together.
 
-## Start with a payment
+Here is how the idea works, through one payment.
 
-Imagine you have accumulated 50 BRN. You buy something from a shop for 50.
-Your wallet burns those 50 BRN, creating 50 TRST for the shop to receive.
+## An income of your own
+
+Once you are verified, your personal balance grows over time. It is called
+**BRN**, from *burn*. At the current default rate, you gain about one BRN per
+hour, just like everyone else's eligible account.
+
+You can save it until you need it. You do not need someone to send it to you,
+and unused BRN does not expire.
+
+## Something worth paying for
+
+Suppose Alice has saved 50 BRN. Bob has made something she wants, and they agree
+on a price of 50. Alice spends her BRN, which is burned, and Bob receives
+50 **TRST**, from *trust*. BRN and TRST together give BURST its name.
 
 ![Burning 50 BRN creates 50 TRST for a recipient.](../assets/conversion.png)
 
-The shop can spend its TRST with someone else. That person can spend it again.
-The same 50 TRST moves between people; each transfer does not create another 50.
+Bob can use that TRST to pay Carol. She can pass it on again. These later
+payments move the same money without creating more of it.
 
-Meanwhile, your BRN continues to accrue while you are eligible. At the current
-default rate, you gain approximately one BRN per hour, just like other verified
-people.
+Alice used her personal income. Bob earned money from his work. Both continue
+to gain BRN while eligible. That is why the two balances exist: everyone has
+an allowance of their own, and people can also earn from one another.
 
-## Why two kinds of balance?
+## One income for each person
 
-BRN is personal. You can save it, but spending it burns it. TRST is transferable:
-it is what someone receives when you pay them, and they can pass it on.
+Making another wallet must not be enough to claim another income. People joining
+BURST get endorsements from existing participants, then a selected panel judges
+their application. Decisions can be challenged later.
 
-The community can set a lifetime for TRST. If that lifetime is finite, TRST
-becomes unspendable when it reaches that age, even if it has changed hands.
-Unused BRN does not expire. The current defaults give TRST an effectively
-unlimited lifetime.
+The history of a payment matters too. If an account was verified under a false
+identity, a successful fraud challenge can invalidate the TRST it created, even
+after that money has changed hands. Honest recipients can be affected, which is
+why the quality of verification matters so much.
 
-## What keeps it fair?
+## Rules people choose together
 
-Verification aims to give each person one eligible account. Existing participants
-endorse applicants, and selected verifiers judge them. Challenges provide a way
-to review fraud or inactivity later.
+How quickly should BRN grow? Should TRST keep circulating forever, or have a
+limited lifetime? Verified participants vote on these choices. More money does
+not buy more voting weight.
 
-TRST keeps a record of its origin. If an account obtained verification
-fraudulently, revocation can follow the value it created through later transfers
-and merges. That can affect recipients too, which makes the quality of
-verification important.
+The current defaults give TRST an effectively unlimited lifetime. If the community
+chooses a limit, passing money to someone else does not restart its age.
+Unused BRN still has no expiry date.
 
-## Who chooses the rules?
-
-Verified accounts vote on supported settings, including the income rate and TRST
-lifetime. Money does not buy extra voting weight. Separate representatives vote
-to confirm transactions and help nodes agree on ledger state.
-
-Read the [whitepaper](WHITEPAPER.md) next. It develops these ideas with the original
-payment, splitting and merging examples. The
-[implementation status](WHITEPAPER.md#implementation-status) identifies features
-that are currently restricted to experimental networks.
+The [whitepaper](WHITEPAPER.md) follows the payment further: how it divides,
+combines with other payments, and keeps its history. It also explains verification
+and voting. Some of these features are currently restricted to experimental
+networks; the [implementation status](WHITEPAPER.md#implementation-status)
+sets out what is available today.

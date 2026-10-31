@@ -1,369 +1,409 @@
 # BURST
 
-BURST is a decentralized, democratic monetary protocol. People receive a personal
-income over time, spend it to create transferable currency, and vote on the rules
-that govern both.
+Money gives people room to choose. It can mean being able to learn something new,
+care for someone, or take a chance on an idea. We want that room to belong to
+more people.
 
-The name brings together **BRN**, from *burn*, and **TRST**, from *trust*. They have
-different jobs. Understanding that distinction is the starting point for everything
-else in BURST.
+BURST starts with two beliefs: everyone should have access to an income, and
+people should be able to earn money by doing things others value. The question
+is how to put both into the same system, with rules its participants can change
+together.
 
-> Everyone should have access to an income. People should also be able to earn
-> money by doing things others value.
+> An income gives you a starting point. What you do with it is yours to decide.
 
-## An income to start. A reason to contribute. {#why-burst}
+## What should money make possible? {#why-burst}
 
-Access to money shapes what people can do with their lives. Someone with savings
-can take time to learn, care for a relative or try an idea. Someone without them
-may have to turn down the same opportunity.
+Imagine two people with the same idea. One has enough savings to spend a few
+months trying it. The other needs every working hour to cover rent. Their
+ability is not the difference. Their freedom to use it is.
 
-BURST starts from the idea that everyone should have access to an income, and
-that people should still be able to earn money by doing things others value.
-Its monetary rules give those two purposes separate forms: BRN for personal
-income, TRST for payments that can continue circulating.
+An income available to everyone could give more people some breathing room.
+But an economy also needs people willing to make things and help one another.
+When someone does something you value, you should be able to pay them, and they
+should be able to use that payment elsewhere.
 
-The people using the system choose its income rate and currency lifetime. These
-are parameters of the protocol, so the community can change them through voting.
-Universal income is the starting configuration, rather than a rule that the
-software's creator can change on everyone's behalf.
+BURST gives these two purposes different forms. **BRN**, from *burn*, is your
+personal income. **TRST**, from *trust*, is what another person receives when
+you spend it. Together, they give BURST its name.
+
+That distinction may seem unusual at first. Follow a payment through the system
+and the reason for it becomes clearer.
 
 ## BRN: your personal income
 
-Once your account is verified, BRN accumulates at the same rate as it does for
-other eligible accounts. At the current default rate, that is approximately one
-BRN per hour. After 50 eligible hours, you would have about 50 BRN, assuming you
-had not spent or staked any.
+Once you are verified, your BRN grows over time at the same rate as everyone
+else's eligible account. At the current default rate, you gain about one BRN
+per hour. Leave it untouched for 50 eligible hours and you have about 50 BRN.
 
-BRN stays with you. You cannot send it to another account. When you use it for a
-payment, it is **burned**: the amount is deducted from your allowance and creates
-an equal amount of TRST for the recipient.
+You can save that allowance until you need it. It has no expiry date. Nobody
+needs to employ you or send you a payment for it to grow.
 
-Unused BRN has no expiry date. You can save the allowance for a later purchase.
-The wallet calculates it from your verified time, the income rates that applied
-and your spending. The network does not need to send every person an hourly
-payment. That matters as participation grows: another hour of income does not
-require another transaction from every person.
+BRN belongs to your account. When you spend it, that amount is used up, or
+**burned**. An equal amount of TRST is then created for the person you are paying.
+You cannot keep the BRN and spend it a second time.
 
-BRN also pays for certain protocol actions. Endorsements consume it permanently;
-stakes lock it while a verification or challenge is being decided. Those amounts
-are unavailable for ordinary spending. [Balances and units](ECONOMICS.md) explains
-the full calculation.
+There is no hourly payment sent to every wallet. Your wallet works out how much
+you have earned from your verified time and the income rates that applied, then
+accounts for what you have spent or locked as a stake. This lets income grow
+without filling the network with millions of routine payments.
+
+BRN also gives people something of their own to put behind certain decisions.
+Supporting a new person's application burns BRN. A stake locks BRN while a
+verification or challenge is decided. You cannot spend that locked amount in
+the meantime. [Balances and units](ECONOMICS.md) gives the full calculation.
 
 ## TRST: money you can pass on
 
-Suppose Alice has 50 BRN and buys something from Bob for 50. Alice burns her
-50 BRN, creating a payment of 50 TRST for Bob. Bob accepts that payment in his
-wallet.
+Alice has saved 50 BRN. Bob has made something she wants to buy, and they agree
+on a price of 50. Alice's wallet burns her 50 BRN and creates a payment of
+50 TRST. Bob accepts it in his wallet.
 
 ![Burning BRN creates an equal amount of TRST for a recipient.](../assets/conversion.png)
 
-Bob now holds 50 TRST. He can use it to pay Carol, who can use it to pay someone
-else. Those later payments move the same value; they do not require another burn
-and do not create more TRST.
+Alice used her personal income to buy something she wanted. Bob earned money
+by making it. He can now pay Carol with that TRST, and Carol can pay someone
+else. The same money keeps moving; those later payments do not create more of it.
 
-This is why BRN and TRST are separate. Everyone can accrue a personal allowance.
-Someone who receives payments can also accumulate and spend transferable money.
-The protocol records those payments, while people decide what goods or services
-they will exchange for them.
+Meanwhile, Alice's BRN keeps growing while she remains eligible. So does Bob's.
+Earning TRST does not take away his personal income.
 
-## Why a payment needs two signatures {#sending-and-receiving}
+This is the reason for having two balances. BRN gives each verified person an
+allowance of their own. TRST lets people earn from one another and carry that
+value into their next exchange. What a payment buys is still for the people
+making the exchange to decide.
 
-A payment has two sides. The sender signs an operation that creates a pending
-payment. The recipient signs an operation to receive it. Until that happens, the
-value is pending rather than available for the recipient to spend.
+## Accepting a payment {#sending-and-receiving}
 
-The sender can offer a payment, but cannot write a new block into someone else's
-account chain. Receiving is the recipient's signed decision to accept it. That
-also gives wallets a place to apply the owner's acceptance rules.
+There is one step in Alice and Bob's exchange that deserves a closer look.
+Alice signs the payment, but Bob also signs to receive it. Why both?
 
-There are two ways to pay:
+Each account keeps its own signed history. Alice can add a payment to hers;
+she cannot add an entry to Bob's on his behalf. Bob's signed receive accepts the
+payment into his account. Until then, it waits as a pending payment and he
+cannot spend it.
 
-| You spend | The recipient receives | New TRST created? |
-| --- | --- | --- |
-| 50 BRN | 50 TRST | Yes, from the burn. |
-| 50 TRST | 50 TRST | No, existing TRST changes hands. |
+This also gives Bob's wallet a place to apply his acceptance rules. It can accept
+a payment automatically when those rules allow it, or leave it for him to review.
 
-A recipient can reject a payment. That creates a return receipt for the sender
-to accept. It returns TRST; it does not recreate the BRN used in the original burn.
+| The payment | What changes |
+| --- | --- |
+| Alice pays 50 BRN | Her BRN is burned and 50 new TRST is created for Bob. |
+| Bob pays 50 TRST | Existing TRST moves to the next person. No new TRST is created. |
 
-Receiving TRST and becoming verified are separate. An unverified account can
-receive a payment, but must gain verified rights before ordinary spending.
-Applications must also distinguish submitting a signed payment from the network
-confirming it. The [payment guide](../wallet/PAYMENTS.md) covers those steps.
+Bob can reject Alice's payment. That creates a return for Alice to accept.
+She receives TRST back; the original burn is not undone.
 
-## Spend a little. Keep the rest. {#splitting-trst}
+An account can receive TRST before it is verified, but needs verification before
+ordinary spending. And signing a payment is only part of making it happen: the
+network must also confirm it. The [payment guide](../wallet/PAYMENTS.md) explains
+those steps for wallet developers.
 
-Bob does not have to spend his 50 TRST all at once. He can send 30 and keep 20.
-The recipient of the 30 can later divide it into payments of 10, 5 and 15.
+## Spending part of a payment {#splitting-trst}
 
-![A 50-TRST payment splits into 30 and 20; the 30 splits into 10, 5 and 15.](../assets/splitting.png "One payment, smaller portions. Splitting preserves both the total and the origin.")
+Bob does not have to spend all 50 TRST at once. If he pays Carol 30, he keeps 20.
+Carol can later divide her 30 into payments of 10, 5 and 15.
 
-The amounts still add up to 50. Each part keeps a record of where it came from,
-so the network can connect it to the original BRN burn. The numbers inside the
-shapes show successive steps in this example, not separate new currency issues.
+![A 50-TRST payment splits into 30 and 20; the 30 splits into 10, 5 and 15.](../assets/splitting.png "The payment gets divided, but the amounts still add up to 50. Each part remembers where it came from.")
 
-That history matters for two things: how old the TRST is, and what happens if
-its original creator is later found to have obtained verification fraudulently.
+Nothing new has been created. We have only divided the original amount into
+smaller pieces. The numbers inside the shapes show steps along the way.
+
+Each piece keeps a connection to Alice's original burn. Even after several
+payments, the network can still tell where that money began and how old it is.
+Those details matter for the next two questions: how long money should last,
+and what to do if someone received income under a false identity.
 
 ## Should money have a lifetime? {#expiry}
 
-A continuing personal income creates new spending power. A finite lifetime gives
-the community a way to limit how long previously issued TRST remains in
-circulation. It is an economic choice with a real cost: holders must consider
-how much time remains when they accept a payment.
+Personal income keeps adding new spending power. Should money created years ago
+also keep circulating forever? BURST leaves that choice to its participants.
+They can vote to give TRST a limited lifetime.
 
-The community can give TRST a finite lifetime. For example, with a 30-year
-lifetime, TRST becomes unspendable 30 years after its creation, whoever holds it
-then. Passing it to another account does not restart its age.
+Suppose they choose 30 years. The TRST Alice created would stop being spendable
+30 years after her burn, whoever holds it then. Sending it from Bob to Carol
+would not restart the clock. Otherwise, a quick payment between two accounts
+would be enough to avoid the rule.
 
-The current defaults use an effectively unlimited lifetime. The finite lifetimes
-in these examples illustrate a setting the community can choose.
+This has a cost for the person accepting a payment. They need to know how much
+time is left. A holding of 50 TRST remains 50 TRST until it expires; the number
+does not gradually shrink. People can still agree on a lower price for money
+that is closer to expiry.
 
-Expiry applies to TRST, not unused BRN. A person can keep their personal allowance
-until they need it; the currency created when they spend that allowance can have
-a limited period of circulation.
+Alice's unused BRN is different. It does not expire while she saves it. A limited
+TRST lifetime would apply to the money she creates when she finally spends.
 
-The amount does not gradually shrink. A holding of 50 TRST remains 50 TRST until
-expiry makes it unspendable. Wallets can show an age-based reference value, but
-people still choose the price at which they will accept it.
+The current defaults give TRST an effectively unlimited lifetime. The limited
+lifetimes in this paper are examples of a choice the community could make.
 
-An expired holding remains recorded. If the governed lifetime later increases,
-its age may fall within the new limit and it can become spendable again. Fraud
-revocation is a separate condition, explained below.
+Expired TRST stays in the records. If a later vote extends its lifetime enough,
+it can become spendable again. Expiry means that money has grown too old under
+the current rule; it does not mean its history was false.
 
-## Combine payments without erasing their past {#merging-trst}
+## Bringing payments together {#merging-trst}
 
-A wallet can receive many small holdings. Merging combines compatible holdings
-into one larger amount so they are easier to use together.
+Over time, Bob may collect many small payments. Keeping each one separate would
+make a wallet awkward to use. A **merge** brings compatible amounts together
+into one larger holding.
 
-The merged amount is the sum of its inputs. Its expiry is the earliest expiry
-among them. Otherwise, someone could keep old currency alive by repeatedly
-mixing it with newer currency.
+Suppose Bob now has three payments: 10, 15 and 25 TRST. Together they make 50.
+If they have 150, 145 and 140 days left, the combined amount has 140 days left.
+It takes the earliest expiry.
 
-> A merge combines value. It does not renew it.
+> Bringing money together must not make old money young again.
 
-![10 TRST with 150 days left, 15 with 145 days left, and 25 with 140 days left merge into 50 TRST with 140 days left.](../assets/merge_time.png "10 + 15 + 25 = 50 TRST. The earliest expiry, 140 days, becomes the expiry of the whole merge.")
+![10 TRST with 150 days left, 15 with 145 days left, and 25 with 140 days left merge into 50 TRST with 140 days left.](../assets/merge_time.png "10 + 15 + 25 becomes 50 TRST. The combined amount has 140 days left, the earliest expiry of the three.")
 
-Here, 10 + 15 + 25 becomes 50 TRST, with 140 days remaining. Grouping holdings with
-similar lifetimes avoids sacrificing much of the newer inputs' remaining time.
-The wallet can make that selection automatically.
+Without that rule, Bob could keep old TRST alive by mixing it with a small amount
+of newer TRST. The tradeoff is that some of the newer money's remaining time is
+lost. A wallet can reduce that loss by choosing amounts with similar expiry dates.
 
-Merging also keeps the history of the inputs. Nodes store a **merger graph**:
-each merge points to the holdings it consumed. Another merge can refer to that
-result without copying the whole history into every payment.
+The merge also remembers all three payments. Nodes keep links from the combined
+holding back to the amounts that made it. These links form the **merger graph**.
+A later merge can link to this one instead of copying its entire history again.
 
-The current operation accepts up to 256 inputs. Active and expired holdings cannot
-be mixed, and revoked value cannot be merged. Those rules keep consolidation
-from making unusable value spendable.
+A merge currently accepts up to 256 inputs. It cannot mix expired and unexpired
+holdings, or include value removed because of fraud. Combining money should make
+it easier to use, without making an invalid amount valid again.
 
-## What happens when an identity was false? {#revocation-and-restoration}
+## When an identity turns out to be false {#revocation-and-restoration}
 
-What if the creator of some TRST passed verification using a false identity?
-If simply losing verified status left all earlier issuance intact, a false
-identity could still leave its income circulating. BURST therefore connects
-issued value to its origin. Once a fraud challenge succeeds, the protocol revokes the value originating from
-that account. Its history lets nodes find the affected contributions even after
-they have been transferred, split or merged.
+Now suppose one of the people who created Bob's TRST had enrolled under a false
+identity. Stopping their future income would prevent more harm. But the money
+they had already created would still be moving through the network.
 
-Consider the same 50-TRST merge. If its 10-TRST input came from the fraudulent
-account, one fifth of the mixture is affected. A later 10-TRST portion contains
-2 affected TRST and 8 unaffected TRST. A 20-TRST portion contains 4 affected and
-16 unaffected.
+BURST keeps the connection to that original account so a successful fraud
+challenge can also invalidate its earlier TRST. This is called **revocation**.
+Sending the money elsewhere, splitting it, or merging it cannot erase that
+connection.
 
-![Revoking the 10-TRST contribution separates one fifth of each remaining portion from its unaffected value.](../assets/merge_split.png "The revoked input was one fifth of the merge. Each remaining portion loses that same fraction, not its entire value.")
+Return to Bob's merge of 10, 15 and 25. Suppose the 10 came from the false
+identity. It made up one fifth of the combined 50, so one fifth of each later
+piece is affected. A piece of 10 contains 2 invalid TRST and 8 valid TRST.
+A piece of 20 contains 4 invalid and 16 valid.
 
-The dark portions show the revoked value. The other contributions remain usable,
-subject to their age. The network records the separation so a later payment or
-merge uses the value the holder actually has left.
+![Revoking the 10-TRST contribution separates one fifth of each remaining portion from its unaffected value.](../assets/merge_split.png "The dark pieces show the invalid money. The other four fifths remain, subject to their expiry dates.")
 
-If the origin is restored after re-verification, its separated value can become
-valid again. It does not get inserted into a newer merge that consumed only the
-unaffected remainder. [This worked example](ECONOMICS.md#merging-a-clean-remainder)
-shows that case in detail.
+The other people's contributions are not thrown away. The network separates the
+invalid share, and later payments or merges use what the holder actually has left.
 
-Revocation can therefore affect an honest recipient. It cannot recover goods
-already delivered to a fraudulent payer. Knowing the origin of a payment helps
-people assess that risk; it does not remove it.
+A judgment can be wrong. If the original account is restored through
+re-verification, its separated value can become valid again. It does not get
+added to a newer merge that used only the valid remainder.
+[This worked example](ECONOMICS.md#merging-a-clean-remainder) follows that case.
+
+There is a difficult consequence here. Bob may have accepted the money honestly,
+yet still lose its invalid share. The protocol cannot give him back the goods he
+sold. Keeping a payment's history makes this rule possible; good verification
+is what people depend on to avoid being hurt by it.
 
 ## One person, one income {#humanity-verification}
 
-Equal income and equal voting weight depend on people being unable to enroll
-unlimited identities. BURST uses endorsements and selected verifier panels to
-make that judgment. Creating a new key is cheap; establishing another
-verified person must require more than creating another wallet.
+All of this rests on a person receiving one personal income. If making ten
+wallets were enough to receive ten incomes, the promise would fall apart.
+Creating a key is easy. Verifying a person has to mean more.
 
-An applicant receives endorsements from verified accounts. Endorsers burn BRN to
-support the application. Once the requirement is met, the network selects a panel
-from eligible people who have volunteered to verify others.
+An applicant first gets support from verified participants. Those people burn
+some of their own BRN to endorse the application. Once there is enough support,
+the network selects a panel from eligible volunteers to examine it.
 
-The panel examines evidence and votes **Legitimate**, **Illegitimate** or
-**Neither**. Substantive votes require a stake. Neither needs no stake and does
-not count toward acceptance. Missing votes become Neither at the deadline.
-The protocol defines how much support is needed, whether another panel is tried,
-and how stakes are returned or forfeited.
+The panel members vote **Legitimate**, **Illegitimate**, or **Neither**.
+The first two require a stake: BRN they lock behind their judgment. Neither
+requires no stake and does not count as support for acceptance. A missing vote
+becomes Neither when time runs out.
 
-For example, the default panel has seven members and requires 90% Legitimate
-votes. Six out of seven is only about 85.7%, so all seven must support acceptance
-in that case. These requirements are governable parameters.
+The rules set how much agreement is needed and what happens to the stakes.
+For example, the default panel has seven members and needs 90% Legitimate votes.
+Six out of seven is only about 85.7%, so all seven must support acceptance in
+that case. The community can vote to change these settings.
 
-Panel selection must be reproducible. Nodes agree on the eligible pool before
-using a designated future randomness result from drand. Every node then uses the
-same inputs to select the same panel. Using a future result means an applicant
-cannot simply choose a panel of friends; fixing the pool first prevents nodes
-from changing the candidate list after seeing the randomness.
+The applicant does not choose the panel. Nodes first agree on who is eligible,
+then use a specified future random result from drand to select the members.
+They all use the same result, so they all select the same panel. Fixing the list
+first prevents it from being changed after the result is known.
 
-People assess the evidence; software records and applies their votes. The
-protocol does not supply an automatic biometric or identity-document check.
-The [verification guide](../protocol/VERIFICATION.md) covers selection requirements,
-voting, stakes and deadlines.
+People still have to judge the evidence. The software records their votes and
+applies the rules; it does not automatically decide whether a face or identity
+document belongs to a unique person. The
+[verification guide](../protocol/VERIFICATION.md) explains the requirements.
 
-### Challenges and appeals
+### Correcting a decision {#challenges-and-appeals}
 
-Verification has no scheduled renewal date. Another eligible participant can
-challenge an account under the protocol's rules, putting up the required stake.
-Submitting a challenge starts a review; it does not immediately revoke the target.
+Verification does not need scheduled renewal. But it must be possible to
+question an account later. An eligible participant can put up a stake and
+challenge it. The challenge starts a review; an accusation alone does not
+remove someone's rights.
 
-A successful fraud challenge removes verified rights and revokes the account's
-TRST origins. An inactivity outcome deactivates the account without revoking
-its earlier TRST. Both stop new BRN accrual while the account is inactive.
+A finding of fraud removes verified rights and invalidates the TRST created
+from that account. A finding of inactivity stops the account's new income but
+leaves its earlier TRST intact. Both outcomes stop BRN from growing while the
+account is inactive.
 
-Re-verification can restore eligibility without awarding income for the inactive
-period. An appeal reviews an earlier challenge judgment. These processes can
-correct decisions, but still depend on the people judging them.
+Re-verification can restore the account's rights. It does not award income for
+the time it was inactive. An appeal provides a way to review an earlier challenge
+decision. These are ways to correct mistakes, though their quality still depends
+on the people making the judgments.
 
-### Optional trust policies
+### Choosing which payments to accept {#optional-trust-policies}
 
-A recipient can choose stricter automatic acceptance rules in their wallet.
-They may trust particular original creators, or require those creators to belong
-to selected groups. Groups provide membership services outside the protocol.
+Bob may want his wallet to accept payments automatically only when he trusts
+the people whose BRN created them. He can name those people directly or use
+membership in selected groups. Groups run their membership services outside
+the protocol.
 
-If Bob sends Alice's TRST to Carol, a creator policy checks Alice. A sender
-allow-list checks Bob. These answer different questions. Neither changes the
-network's rules; a payment held for review can still be received manually.
-See [acceptance policies](../wallet/TRUST.md).
+The distinction between a sender and an original creator matters here. When Bob
+passes Alice's TRST to Carol, a rule about its creator checks Alice. A rule about
+who sent it checks Bob. Carol may care about either, or both.
+
+These are personal wallet choices. They do not change the network's rules.
+A payment left for review can still be accepted manually. See
+[acceptance policies](../wallet/TRUST.md).
 
 ## How the network agrees {#agreement-between-nodes}
 
-A wallet holds the account's keys and signs its actions. Nodes check those actions
-and maintain the ledger. Each account has its own chain of blocks, and a receive
-connects its chain to the payment it claims.
+So far, we have followed the payment as people see it. Underneath, computers
+called **nodes** check the signatures and keep the shared records, or ledger.
+Each account has its own chain of signed entries, called blocks. Bob's receive
+links his account's history to Alice's payment.
 
-If two blocks try to follow the same predecessor, representatives vote on which
-one to confirm. Each verified account gives one equal unit of weight to its
-chosen representative. Holding more BRN or TRST adds no voting weight.
+But what if Alice signs two conflicting payments that both try to spend the
+same money? Representatives vote on which block to confirm. Each verified
+account gives one equal unit of weight to its chosen representative. Owning
+more money adds no weight.
 
-> The unit of voting weight is a verified person, not a unit of money.
+> Each verified person has the same weight in choosing representatives.
 
-Some decisions affect many accounts at once: a verification result, a change to
-the income rate, or the set of representatives. Nodes use **checkpoints** to agree
-on the account history and shared state at those boundaries. They check the
-representatives' signatures and calculate the resulting state from the agreed
-history.
+Some decisions need agreement across accounts. A change to the income rate,
+for example, has to mean the same thing to everyone. Nodes use **checkpoints**
+to agree on the recorded history and shared rules at those points. They check
+the representatives' signatures and work out the resulting state from that history.
 
-Representatives need enough voting weight online to make progress. Their saved
-signing history also matters: restarting a node must not let it sign a conflicting
-promise. [Consensus](../protocol/CONSENSUS.md) and
-[checkpoints](../protocol/CHECKPOINTS.md) explain these mechanisms.
+Enough representative voting weight must be online for the network to move
+forward. A representative also keeps a record of what it has signed, so a
+restart cannot let it make conflicting promises. The
+[consensus](../protocol/CONSENSUS.md) and [checkpoint](../protocol/CHECKPOINTS.md)
+guides explain the details.
 
-## Time and deadlines
+## Agreeing on time {#time-and-deadlines}
 
-Time determines BRN accrual and, where enabled, TRST expiry. It also sets the
-windows for voting and selection. Nodes use clock estimates for local checks and
-agreed checkpoints for shared deadline effects.
+An income that grows by the hour needs a shared way to account for time.
+Otherwise, a fast clock could claim extra income, or one node could close a
+vote while another thought it was still open.
 
-Representative checkpoint signing uses authenticated external time sources.
-Random panel selection uses a separately verified drand result. If the required
-time or randomness is unavailable, the affected work waits; the node cannot
-invent a replacement result. See [node time configuration](../node/NODES.md#time-and-agreed-transitions).
+Nodes use clock estimates for local checks. Shared deadline effects happen
+through agreed checkpoints. Representative signing of those checkpoints uses
+authenticated external time sources. Panel selection separately requires a
+verified random result from drand.
+
+If the required time or random result is unavailable, the affected work waits.
+A node cannot invent an answer so it can keep going. That dependence on outside
+services is a limit of the current design. See
+[node time configuration](../node/NODES.md#time-and-agreed-transitions).
 
 ## Who gets to change the rules? {#governance}
 
-The community chooses the income rate and currency lifetime through verified-account
-voting. The same process governs supported verification and governance settings.
-A representative chosen to confirm payments does not automatically receive your
-governance vote.
+The income rate affects everyone. So does the lifetime of money. BURST puts
+those choices in the hands of verified participants, through voting. The person
+who wrote the software does not get to keep choosing for everyone.
 
-An ordinary proposal gathers endorsements, enters voting, and must meet both
-participation and approval thresholds. Abstaining counts toward participation
-without supporting approval. An approved change waits through a cooldown before
-activation. The cooldown separates approving a rule from putting it into effect,
-giving participants time to see what will change. Emergency proposals use a shorter path with higher voting requirements.
+An ordinary proposal first gathers endorsements. It then goes to a vote, where
+enough people must take part and enough must support it. An abstention counts
+as taking part, but not as support.
 
-A rate change affects income from that point onward. Previously earned BRN keeps
-the rates that applied when it accrued. A lifetime change changes how old TRST
-may be while remaining spendable.
+An approved change waits through a cooldown before it takes effect. That gives
+people time to see what is coming. Emergency proposals have a shorter path,
+with higher voting requirements.
 
-The protocol also supports constitutional text and scoped voting delegation.
-Constitutional text records the community's rules; executable changes still
-require software that implements them. [Governance](../protocol/GOVERNANCE.md)
-and the [parameter reference](../protocol/PARAMETERS.md) describe the supported changes.
+If the income rate changes, the new rate applies from then on. Alice keeps the
+BRN she earned under earlier rates. If the TRST lifetime changes, the new limit
+affects how old money may be while remaining spendable.
 
-### The first participants
+The community can also govern supported verification settings, record
+constitutional text, and delegate votes within a chosen scope. Choosing a
+representative to confirm payments does not automatically give that person
+your governance vote.
 
-A new network begins without enough ordinary verifiers. During bootstrap, the
-creator can endorse people through a special verification path. These
-endorsements still consume BRN.
+A vote cannot install a software feature that has not been written. Some changes
+need a software upgrade as well. The [governance guide](../protocol/GOVERNANCE.md)
+and [parameter reference](../protocol/PARAMETERS.md) describe what can change.
 
-The creator can also veto an approved governance proposal before it activates.
-Otherwise, activation needs no separate creator approval. These special powers
-end permanently at the bootstrap threshold, capped at 50 verified accounts
-including the creator. A later fall in population does not bring them back.
+### How the first people join {#the-first-participants}
+
+There is a practical problem at the beginning: a new network has no established
+community of verifiers. During this starting period, the creator can endorse
+people through a special path. Those endorsements still burn BRN.
+
+The creator can also veto an approved governance proposal before it takes
+effect. Without a veto, it activates without needing separate creator approval.
+
+Those powers are temporary. They end permanently at the starting threshold,
+which is capped at 50 verified accounts including the creator. Even if the
+population later falls, the powers do not return. The point is to get a community
+started, then leave its members on equal terms.
 See [bootstrap permissions](../protocol/BOOTSTRAP.md).
 
-## Economic choices
+## What these choices can, and cannot, do {#economic-choices}
 
-The two central parameters make different choices possible. A positive income
-rate supplies personal spending allowances. A finite TRST lifetime limits how
-long issued currency circulates. An unlimited lifetime lets it remain
-transferable regardless of age. A zero income rate stops new accrual.
+A positive income rate gives people new BRN over time. A limited TRST lifetime
+sets a limit on how long the money they create can circulate. An unlimited
+lifetime lets it keep moving regardless of age. Setting the income rate to zero
+stops new BRN from growing.
 
-These settings affect issuance and circulation. Prices still depend on what
-people offer and accept. Unspent BRN also matters: people can turn accumulated
-allowances into new TRST later, so the current income rate alone does not determine
-how much TRST enters circulation today.
+These are rules people can choose together. They cannot tell us what a loaf of
+bread will cost. That depends on what people make, need, and agree to exchange.
+Saved BRN matters too: Alice can spend an allowance she built up long ago, so
+this month's income rate alone cannot tell us how much new TRST people will
+create this month.
 
-BURST makes these choices part of the community's monetary rules. Whether those
-rules produce a useful economy depends on participation, reliable verification,
-goods and services, and decisions made through governance.
+The ambition is to give more people the freedom to take part in an economy.
+Software can record the rules and enforce the accounting. A useful economy
+still has to be built by the people using it.
 
-## Wallets, nodes and history
+## Keeping your account and its history {#wallets-nodes-and-history}
 
-A recovery phrase restores an account's key. The wallet reads its balances and
-verification state from the network. Saved signed actions need separate recovery
-handling if their outcome is uncertain; a lost response does not mean a payment
-failed.
+Your wallet holds the key that signs for your account. A recovery phrase can
+restore that key, and the wallet can read your balances and verification state
+from the network.
 
-Nodes retain the state needed to check payments, including holdings, pending
-receipts and merge history. Expired value can still matter for restoration or a
-future lifetime change. An authenticated snapshot can help recover state, but
-keeping only the latest block of each account is insufficient.
+If a wallet loses its connection after sending a payment, it must check what
+happened before trying again. No response does not mean no payment. Saved signed
+actions need their own recovery handling.
 
-The ledger is public. Addresses do not contain people's names, but activity and
-external information can connect an address to a person. See
-[wallet recovery](../wallet/WALLETS.md), [node storage](../node/NODES.md) and
+Nodes also need more than each account's latest balance. Our examples show why:
+they must remember pending payments, merges, and the history behind them.
+Even expired money can matter if a later vote extends its lifetime. A verified
+snapshot can help a node recover that state; a list of balances alone cannot.
+
+These records are public. An address does not include your name, but payments
+and outside information may connect it to you. See
+[wallet recovery](../wallet/WALLETS.md), [node storage](../node/NODES.md), and
 [privacy](../release/PRIVACY.md).
 
 ## Cryptography and upgrades
 
-Accounts use Ed25519 signatures. Hashing and proof of work use Blake2b.
-Proof of work supplies an anti-spam computation cost; it does not mine currency
-or give the worker voting weight.
+Digital signatures let nodes check that an action was authorized by the
+account's key. BURST uses Ed25519 for those signatures and Blake2b for hashing
+and proof of work. Proof of work adds a computation cost to discourage
+spam; it does not create money or give someone extra voting weight.
 
-Changing these algorithms or introducing new executable rules requires a software
-upgrade. Parameter votes and epoch markers do not install code. The
-[cryptography reference](../development/CRYPTOGRAPHY.md) documents the formats.
+Changing those algorithms or adding new executable rules requires a software
+upgrade. A parameter vote or epoch marker does not install code on people's
+machines. The [cryptography reference](../development/CRYPTOGRAPHY.md) describes
+the formats developers need.
 
 ## Implementation status
 
-The current source enables certified verifier selection, governance and appeals
-only on experimental Dev/Test builds. They are not currently enabled on Live.
-Physical deletion of historical block bodies is also release-gated. The
-[availability table](LIMITATIONS.md#feature-availability) records these restrictions.
+The paper explains the design. Some parts are still restricted in the current
+software: certified verifier selection, governance, and appeals are enabled only
+on experimental Dev/Test builds, not Live. Physical deletion of historical block
+bodies also remains release-gated. The
+[availability table](LIMITATIONS.md#feature-availability) tracks those restrictions.
 
-The accounting can be checked in code and tests. Verification quality, resistance
-to collusion and the behavior of a real economy also need observation and
-independent review. The [limitations](LIMITATIONS.md) explain those assumptions.
+Tests can check the accounting and whether the software follows its rules.
+They cannot by themselves show how well people will verify one another, resist
+collusion, or build an economy. Those need real-world observation and independent
+review. The [limitations page](LIMITATIONS.md) describes what remains uncertain.
 
-For implementation work, start with [accounts and blocks](../protocol/BLOCKS.md),
-[RPC](../development/RPC.md), or [build and test](../development/DEVELOPING.md).
-The [architecture guide](../development/ARCHITECTURE.md) maps those mechanisms to code.
+To work on the implementation, start with
+[accounts and blocks](../protocol/BLOCKS.md), [RPC](../development/RPC.md), or
+[build and test](../development/DEVELOPING.md). The
+[architecture guide](../development/ARCHITECTURE.md) maps the design to the code.

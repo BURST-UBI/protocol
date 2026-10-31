@@ -4,7 +4,7 @@ BURST is built around a simple idea: every person should have access to an incom
 and people should be able to earn money by doing things others value.
 
 It separates personal income, **BRN**, from transferable money, **TRST**. The
-community votes on how quickly BRN accrues and how long TRST remains spendable.
+community votes on how quickly BRN grows and how long people can keep spending TRST.
 
 Start with the [introduction](introduction/QUICK_TOUR.md), then read the
 [whitepaper](introduction/WHITEPAPER.md). It follows a payment from its creation
