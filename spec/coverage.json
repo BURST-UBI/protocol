@@ -2,7 +2,7 @@
   "version": 1,
   "sources": {
     "IMPLEMENTATION_DECISIONS.md": {
-      "sha256": "aad2d398d7ffe13b52c0fa8ba4df38e8e823895c875af57595a04213e81ac1fa"
+      "sha256": "84e258f1d54304fbc20ee03e4154ac87e98d0c5092c769db36d7a2178022cadb"
     },
     "docs/README.md": {
       "sha256": "7f679d537df07991ea9f478b1af16651bd636392bda8cb3abd7db263edb0890e"
@@ -38,7 +38,7 @@
       "sha256": "510fbdc67d3e8cbe32dfc902e1a1b5d11979cf6dddb51f1bf9050e7c783f3edb"
     },
     "docs/introduction/WHITEPAPER.md": {
-      "sha256": "3ac42b16724bcdad11e6eb1090c966c267f3048765272dbe8d39d46f79f19488"
+      "sha256": "f52a0754bf011f0629197bce7cd2bc467a48697c96c07328d67c987a14ac27e9"
     },
     "docs/node/GROUP_SERVICES.md": {
       "sha256": "be29404af586234e8ad389039013d18acb38fa719f6c3f0f95865d23c6cdb34f"
@@ -68,7 +68,7 @@
       "sha256": "cd4d0f4a2a6958c4c224b8f9c7e3f7e9edbcbd1ffd5d0ee615949cb336376001"
     },
     "docs/protocol/PARAMETERS.md": {
-      "sha256": "8daf99fd1010566c2b670a1421f090dd3bd2b2101a412a30c62726fc8e8e0f4c"
+      "sha256": "f1c15db1f47abf56f8abb0fd608131a4abb3977391ce22d63751e532b06a9ed7"
     },
     "docs/protocol/VERIFICATION.md": {
       "sha256": "ac3f47ee71a0564dc8480f66775848e14a667c46f8457be77ff6329e4fb81378"
@@ -344,7 +344,7 @@
       "id": "D-5.7",
       "source": "IMPLEMENTATION_DECISIONS.md",
       "line": 118,
-      "title": "5.7 BRN rate change history \u2014 how many changes to store per wallet?",
+      "title": "5.7 BRN rate change history — how many changes to store per wallet?",
       "sha256": "6b6e39431aa036287aba525c4541e96acaa332cc7f627b9948a902f1a20f48c1",
       "status": "unverified",
       "evidence": [],
@@ -415,10 +415,10 @@
       "source": "IMPLEMENTATION_DECISIONS.md",
       "line": 148,
       "title": "6.2 Default TRST expiry period (launch default)",
-      "sha256": "c827e8688b95f96aae05645cae396b6c42c26837f21f147af3c96bdcf0a16bda",
+      "sha256": "4c5b4c2df4176a6ab8c6b011aca1267ac2f6804f7156a4ce4d26c0992e06a5a5",
       "status": "unverified",
       "evidence": [],
-      "note": "Source text changed. Earlier scope and evidence remain in spec/evidence/documentation-baseline/coverage.json; no sign-off transferred."
+      "note": "Launch expiry changed to 70 years; no release qualification implied."
     },
     {
       "id": "D-6.3",
@@ -584,7 +584,7 @@
       "id": "D-7.1",
       "source": "IMPLEMENTATION_DECISIONS.md",
       "line": 225,
-      "title": "7.1 Revocation scope \u2014 which TRST is revoked?",
+      "title": "7.1 Revocation scope — which TRST is revoked?",
       "sha256": "0748dd3a83569d5a969f7df97e3cd5cf2b947023ed01fc6715367e41bd479649",
       "status": "unverified",
       "evidence": [],
@@ -1274,7 +1274,7 @@
       "id": "D-15.7",
       "source": "IMPLEMENTATION_DECISIONS.md",
       "line": 751,
-      "title": "15.7 MVP verification evidence \u2014 what's the concrete first method?",
+      "title": "15.7 MVP verification evidence — what's the concrete first method?",
       "sha256": "ca7985079722941dbc31d47c0add390ddcd3a41bb6ac7222c36f20551a6b11cb",
       "status": "unverified",
       "evidence": [],
@@ -1484,7 +1484,7 @@
       "id": "D-17.4",
       "source": "IMPLEMENTATION_DECISIONS.md",
       "line": 941,
-      "title": "17.4 Challenge resolution verifiers \u2014 same pool or different?",
+      "title": "17.4 Challenge resolution verifiers — same pool or different?",
       "sha256": "45804098c65bdb6e9f51592cfe8f49bc7a198aa1a48c464f730c6c2634797a42",
       "status": "unverified",
       "evidence": [],
@@ -1804,7 +1804,7 @@
       "id": "D-22.1",
       "source": "IMPLEMENTATION_DECISIONS.md",
       "line": 1266,
-      "title": "22.1 Group registration \u2014 where does the directory live?",
+      "title": "22.1 Group registration — where does the directory live?",
       "sha256": "f7dab9872d45411af0cd4aef0e0d0dcd3647fa709fa99452ef85f6be50ff6858",
       "status": "unverified",
       "evidence": [],
@@ -2294,11 +2294,11 @@
       "id": "D-27.5",
       "source": "IMPLEMENTATION_DECISIONS.md",
       "line": 1808,
-      "title": "27.5 Testnet TRST/BRN \u2014 accelerated parameters?",
-      "sha256": "4126ff3355312429f4d7bc05a7c662c7e4ae7a920e66b15c1db401d733686e38",
+      "title": "27.5 Testnet TRST/BRN — accelerated parameters?",
+      "sha256": "ea0f5635539c1f53149bccbdd4d8401dfc3f682c6e35b3fda98eaa4e26bf2f06",
       "status": "unverified",
       "evidence": [],
-      "note": "Source text changed. Earlier scope and evidence remain in spec/evidence/documentation-baseline/coverage.json; no sign-off transferred."
+      "note": "Launch expiry changed to 70 years; no release qualification implied."
     },
     {
       "id": "D-28.1",
@@ -2554,7 +2554,7 @@
       "id": "D-32.2",
       "source": "IMPLEMENTATION_DECISIONS.md",
       "line": 2099,
-      "title": "32.2 Display units \u2014 should there be named sub-units?",
+      "title": "32.2 Display units — should there be named sub-units?",
       "sha256": "0c4a2820f9e7975619fed8068463aa3e9e143c9d7252cf6352d1500bdd62c8c1",
       "status": "unverified",
       "evidence": [],
@@ -2564,7 +2564,7 @@
       "id": "D-32.3",
       "source": "IMPLEMENTATION_DECISIONS.md",
       "line": 2106,
-      "title": "32.3 Negative balances \u2014 how to display \"you can't afford this\"",
+      "title": "32.3 Negative balances — how to display \"you can't afford this\"",
       "sha256": "2509a8b1b36b12ebff3987d5c576d6602b99938997106fc9aace792aadf237a9",
       "status": "unverified",
       "evidence": [],
@@ -2645,10 +2645,10 @@
       "source": "IMPLEMENTATION_DECISIONS.md",
       "line": 2177,
       "title": "33.3 What if TRST expiry is voted to infinity?",
-      "sha256": "5f8381d03da335827f2ede0ec549cb01d88ff269a3696ff41e39f36c3b31efe3",
+      "sha256": "3814a5e6f4f4c8819007dc34ca82aa423a1cf15969b2a4d281d05f178f31cbef",
       "status": "unverified",
       "evidence": [],
-      "note": "Source text changed. Earlier scope and evidence remain in spec/evidence/documentation-baseline/coverage.json; no sign-off transferred."
+      "note": "Launch expiry changed to 70 years; no release qualification implied."
     },
     {
       "id": "D-33.4",
@@ -3725,10 +3725,10 @@
       "source": "docs/introduction/WHITEPAPER.md",
       "line": 43,
       "title": "What the community controls",
-      "sha256": "3dcd91b95c32c7c7cb35b5886ea71a2c3928eda6ad6694eafe0b8f87ae925225",
+      "sha256": "2c079a4678fb885bb23e788f119ef51d272efe276a55f07bd13bf610ba15a3e1",
       "status": "unverified",
       "evidence": [],
-      "note": "Documentation paths updated; no new qualification."
+      "note": "Launch expiry changed to 70 years; no release qualification implied."
     },
     {
       "id": "DOC-introduction/WHITEPAPER-005",
@@ -4785,10 +4785,10 @@
       "source": "docs/protocol/PARAMETERS.md",
       "line": 13,
       "title": "Accrual and expiry",
-      "sha256": "e5613f9db6e0d3720938a40b5fc7068ba14376d14b76833b6d6b52bb2f2a2dc0",
+      "sha256": "5028d7db34fa69a8a7110daf00dff941e18134739333cacea4ad7a2dee922b16",
       "status": "unverified",
       "evidence": [],
-      "note": "Documentation paths updated; no new qualification."
+      "note": "Launch expiry changed to 70 years; no release qualification implied."
     },
     {
       "id": "DOC-protocol/PARAMETERS-003",

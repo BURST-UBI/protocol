@@ -62,8 +62,11 @@ the installed wallet. Existing payment proofs remain valid for their scope.
 
 The owner explicitly selected 1 BRN/hour initially, with governance able to set
 the rate to zero later. This confirms decisions 5.3 and 37.1 and supersedes the
-whitepaper roadmap's rate-zero launch wording. Initial TRST expiry remains infinite
-under decision 6.2. No premine or Live-network test faucet is authorized. Rate zero
+whitepaper roadmap's rate-zero launch wording. The initial unlimited TRST expiry
+choice was superseded by the owner's 2026-11-01 decision: the launch lifetime is
+70 years of 365 days (2,207,520,000 seconds), as recorded in decision 6.2. Governance
+can still choose a different duration. No premine or Live-network test faucet is
+authorized. Rate zero
 remains a required supported economic configuration, not the initial setting.
 
 The owner delegated these choices on 2026-10-10: "do it yourself you understand

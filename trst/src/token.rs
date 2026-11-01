@@ -165,6 +165,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn default_lifetime_expires_at_seventy_years_from_effective_origin() {
+        let expiry = burst_types::ProtocolParams::burst_defaults().trst_expiry_secs;
+        let origin = 1_800_000_000;
+        let token = TrstToken {
+            basis: Default::default(),
+            id: TxHash::ZERO,
+            amount: 100,
+            origin: TxHash::ZERO,
+            link: TxHash::ZERO,
+            holder: WalletAddress::new(format!("brst_{:0>75}", "holder")),
+            origin_timestamp: Timestamp::new(origin + 100),
+            effective_origin_timestamp: Timestamp::new(origin),
+            state: TrstState::Active,
+            origin_wallet: WalletAddress::new(format!("brst_{:0>75}", "origin")),
+            revoked_origin: None,
+        };
+        let deadline = Timestamp::new(origin + 2_207_520_000);
+        assert_eq!(token.earliest_expiry(expiry), deadline);
+        assert!(token.is_transferable(Timestamp::new(deadline.as_secs() - 1), expiry));
+        assert!(!token.is_transferable(deadline, expiry));
+        assert!(token.is_expired(Timestamp::new(deadline.as_secs() + 1), expiry));
+        assert_eq!(
+            token.current_value_bps(Timestamp::new(origin + expiry / 2), expiry),
+            5_000
+        );
+        assert_eq!(token.current_value_bps(deadline, expiry), 0);
+        assert_eq!(token.amount, 100);
+    }
+
+    #[test]
     fn linear_reference_preserves_large_raw_amounts() {
         let token = TrstToken {
             basis: Default::default(),

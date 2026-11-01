@@ -52,7 +52,7 @@ uses the oldest input's effective origin time, so merging cannot extend their
 lifetime.
 
 The default parameter set enables accrual at approximately one BRN per hour and
-uses `u64::MAX` for TRST lifetime, effectively disabling expiry. The code does not
+uses a 70-year TRST lifetime (70 periods of 365 days). The code does not
 launch with zero accrual. See [protocol parameters](../protocol/PARAMETERS.md) for exact raw
 values and enforcement.
 
