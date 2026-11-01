@@ -406,7 +406,7 @@ impl LmdbPendingSourceSnapshot<'_> {
                     StoreError::Corruption("pending sender index has no transfer".into())
                 })?;
             let pending: PendingInfo = bincode::deserialize(bytes).map_err(LmdbError::from)?;
-            if &pending.source != &self.source {
+            if pending.source != self.source {
                 return Err(StoreError::Corruption(
                     "pending sender index has wrong owner".into(),
                 ));

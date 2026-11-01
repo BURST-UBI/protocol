@@ -141,7 +141,7 @@ async fn project(
     let now = (state.display_now)();
     let needs_electorate = selected
         .iter()
-        .any(|proposal| governance.projection_requires_electorate(proposal, now, &params));
+        .any(|proposal| governance.projection_requires_electorate(proposal, now, params));
     let delegation = if needs_electorate {
         Some(state.delegation_engine.lock().await)
     } else {
@@ -158,7 +158,7 @@ async fn project(
         .iter()
         .map(|original| {
             let proposal =
-                governance.project_proposal_at(original, now, &params, delegation, &verified);
+                governance.project_proposal_at(original, now, params, delegation, &verified);
             let phase_projected = original.phase != proposal.phase;
             ProjectedProposal {
                 proposal,

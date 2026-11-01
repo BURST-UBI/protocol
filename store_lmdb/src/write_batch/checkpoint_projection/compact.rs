@@ -460,8 +460,7 @@ impl LmdbWriteTransaction<'_> {
             &mut self.txn,
             self.env.accounts_db,
             self.env.verified_accounts_db,
-        )
-        .map_err(LmdbError::from)?;
+        )?;
         for table in [UndoTable::Accounts, UndoTable::Frontiers] {
             let db = table.database(self.env);
             let mut cursor: Option<Vec<u8>> = None;

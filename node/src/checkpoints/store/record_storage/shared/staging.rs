@@ -84,7 +84,9 @@ impl State {
                     return Err(invalid("invalid head build frontier size"));
                 }
                 let branches = bytes[123..]
-                    .chunks_exact(34)
+                    .as_chunks::<34>()
+                    .0
+                    .iter()
                     .map(|entry| {
                         (
                             u16::from_be_bytes(entry[..2].try_into().unwrap()),

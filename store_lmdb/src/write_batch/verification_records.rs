@@ -496,7 +496,7 @@ impl LmdbWriteTransaction<'_> {
             }
             // Preflight every output before mutating this writer; a later LMDB
             // failure still poisons the transaction and cannot partially commit.
-            normalized::visit_state_rows(&engine, |key, bytes| {
+            normalized::visit_state_rows(engine, |key, bytes| {
                 charge(key.as_bytes(), &bytes, true).map_err(|e| e.to_string())
             })
             .map_err(invalid)?;
@@ -506,7 +506,7 @@ impl LmdbWriteTransaction<'_> {
                     .delete(&mut self.txn, &key)
                     .map_err(LmdbError::from)?;
             }
-            normalized::visit_state_rows(&engine, |key, bytes| {
+            normalized::visit_state_rows(engine, |key, bytes| {
                 self.env
                     .meta_db
                     .put(&mut self.txn, key.as_bytes(), &bytes)

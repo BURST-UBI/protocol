@@ -135,10 +135,10 @@ impl ClosureWalk {
                     let sources = RootRows::decode(value)?;
                     let hash = BlockHash::new(key);
                     if hash.is_zero() || sources == 0 || sources & !127 != 0 {
-                        return Err(invalid("invalid required body entry").into());
+                        return Err(invalid("invalid required body entry"));
                     }
                     if self.pending_body.replace(hash).is_some() {
-                        return Err(invalid("closure seed page emitted multiple bodies").into());
+                        return Err(invalid("closure seed page emitted multiple bodies"));
                     }
                     self.seed_seen += 1;
                     Ok(())

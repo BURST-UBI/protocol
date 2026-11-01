@@ -594,7 +594,7 @@ impl RetainedInventory {
             bytes = bytes
                 .checked_add(u64::try_from(length).map_err(invalid)?)
                 .ok_or_else(|| invalid("closure inventory bytes overflow"))?;
-            if count % 128 == 0 {
+            if count.is_multiple_of(128) {
                 tokio::task::yield_now().await;
             }
         }
@@ -957,7 +957,7 @@ impl AccountWalk {
                     "retained block index differs from authenticated position",
                 ));
             }
-            let bytes = row.read_bytes(&self.store, &view)?;
+            let bytes = row.read_bytes(&self.store, view)?;
             if self
                 .authenticated_head
                 .as_ref()
@@ -1011,7 +1011,7 @@ fn plan_view(
         ));
     }
     let account_store = store.account_store();
-    let mut accounts = AccountInventoryCapture::new(account_store.account_entries(&txn)?);
+    let mut accounts = AccountInventoryCapture::new(account_store.account_entries(txn)?);
     loop {
         let done = accounts.advance(128)?;
         if control.checkpoint("private-recovery:account-inventory-page") {
@@ -1050,7 +1050,7 @@ fn plan_view(
                 // Validate every emitted head before deduplication: contradictory
                 // receipt positions cannot be hidden by an already-seen hash.
                 if committed.get(row.hash.as_bytes())?.is_none() {
-                    let bytes = row.read_bytes(store, &txn)?;
+                    let bytes = row.read_bytes(store, txn)?;
                     cursor.accept(&[bytes])?;
                     committed.insert(*row.hash.as_bytes(), [0; 32])?;
                     if !committed.compact_until(directory, || {
@@ -1087,7 +1087,7 @@ fn plan_view(
     )?;
     let mut current: Option<(WalletAddress, u64, u64)> = None;
     let mut previous_height = 0;
-    let mut positions = block_store.retained_positions(&txn, inventory.limits.rows)?;
+    let mut positions = block_store.retained_positions(txn, inventory.limits.rows)?;
     let mut position_count = 0u64;
     loop {
         let mut visited = 0;
@@ -1115,7 +1115,7 @@ fn plan_view(
                     }
                 }
                 let height = account_store
-                    .get_account_txn(&txn, &row.account)?
+                    .get_account_txn(txn, &row.account)?
                     .block_count;
                 current = Some((row.account.clone(), height, hash_count));
             } else if row.height >= previous_height {

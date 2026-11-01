@@ -290,7 +290,7 @@ fn default_work_threads() -> usize {
 impl NodeConfig {
     pub(crate) fn database_map_size(&self) -> Result<usize, String> {
         let bytes = self.database_map_size_bytes;
-        if bytes < 1 << 20 || bytes % (1 << 20) != 0 {
+        if bytes < 1 << 20 || !bytes.is_multiple_of(1 << 20) {
             return Err("database_map_size_bytes must be a positive whole number of MiB".into());
         }
         let size = usize::try_from(bytes)

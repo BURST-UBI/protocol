@@ -1579,7 +1579,7 @@ impl BurstNode {
                                     let mut processor = block_processor.lock().await;
                                     let mut f = frontier.write().await;
                                     processor.set_params_hash(params.params_hash());
-                                    processor.publish_committed(&block, &mut f);
+                                    processor.publish_committed(block, &mut f);
                                 }
                                 publication_stage("frontier_published", block.hash);
                                 ledger_cache.inc_block_count();
@@ -1635,7 +1635,7 @@ impl BurstNode {
                                 if let Err(error) = crate::backlog_scan::register_candidate(
                                     &store,
                                     &mut *active_elections.write().await,
-                                    &block,
+                                    block,
                                     Timestamp::new(unix_now_secs()),
                                 ) {
                                     tracing::debug!(hash = %block.hash, %error, "election deferred to scheduler");
@@ -2414,9 +2414,9 @@ impl BurstNode {
                                         node_id: our_node_id.clone(),
                                         cookie: Some(cookie),
                                         cookie_signature: None,
-                                        params_hash: params_hash,
+                                        params_hash,
                                         network_id: network,
-                                        peering_port: peering_port,
+                                        peering_port,
                                         block_version: CURRENT_BLOCK_VERSION,
                                         wire_version: burst_types::PROTOCOL_VERSION,
                                     };

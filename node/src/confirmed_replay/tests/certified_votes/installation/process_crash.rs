@@ -80,7 +80,11 @@ fn assert_contents(actual: &Contents, expected: &Contents) {
     );
     for (name, entries) in expected {
         let observed = &actual[name];
-        assert_eq!(observed.len(), entries.len(), "table {name} length");
+        assert_eq!(
+            observed.iter().map(|(key, _)| key).collect::<Vec<_>>(),
+            entries.iter().map(|(key, _)| key).collect::<Vec<_>>(),
+            "table {name} keys"
+        );
         for ((key, value), (expected_key, expected_value)) in observed.iter().zip(entries) {
             assert_eq!(key, expected_key, "table {name} key");
             if name == "brn_meta" && key == b"governance_engine" {

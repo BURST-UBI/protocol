@@ -61,14 +61,9 @@ pub(super) async fn replace(
         )
         .await;
         for store in stores {
-            let snapshot = burst_verification::OrchestratorSnapshot::decode(
-                &store
-                    .meta_store()
-                    .get_meta(crate::endorsement_commit::SNAPSHOT_KEY)
-                    .unwrap(),
-            )
-            .unwrap();
-            let verification = burst_verification::VerificationOrchestrator::restore(snapshot);
+            let reader = store.tx_begin_read().unwrap();
+            let view = store.read_view(&reader).unwrap();
+            let verification = crate::verification_storage::load_view(&view).unwrap();
             assert_eq!(verification.get_state(&target).is_some(), endorsement_wins);
         }
         eprintln!("verification fork: replacement confirmed on every node");

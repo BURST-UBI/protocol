@@ -612,7 +612,7 @@ impl RestoredTrstState {
         }
         for (origin, owner) in &changes.origins {
             let old = candidate.owners.get(origin).cloned();
-            if old.as_ref().map(|owner| &**owner) == owner.as_ref() {
+            if old.as_deref() == owner.as_ref() {
                 continue;
             }
             if let Some(owner) = owner {

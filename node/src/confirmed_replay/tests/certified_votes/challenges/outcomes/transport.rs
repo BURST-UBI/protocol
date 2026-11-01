@@ -5,7 +5,6 @@ use crate::{
     checkpoint_replay::SigningClock,
     checkpoint_service::{self, Clock, Session},
     checkpoint_transport::Incoming,
-    connection_registry::ConnectionRegistry,
     shutdown::ShutdownController,
     wire_message::WireMessage,
 };
@@ -107,7 +106,11 @@ async fn outcome_workers(runtime: bool) {
     }
     let registries: Vec<_> = seeds
         .iter()
-        .map(|_| Arc::new(RwLock::new(ConnectionRegistry::new())))
+        .map(|_| {
+            Arc::new(RwLock::new(
+                crate::verification_test_support::loopback_registry(),
+            ))
+        })
         .collect();
     let stops: Vec<_> = seeds
         .iter()
@@ -150,10 +153,14 @@ async fn outcome_workers(runtime: bool) {
             .unwrap();
             for (owner, peer, stream) in [(left, right, outgoing), (right, left, incoming.0)] {
                 let (mut reader, writer) = stream.into_split();
-                registries[owner]
+                let connection = registries[owner]
                     .write()
                     .await
                     .insert(peer.to_string(), writer);
+                assert_ne!(
+                    connection, 0,
+                    "fixture peer {owner} -> {peer} was not admitted"
+                );
                 let sender = senders[owner].clone();
                 let registry = registries[owner].clone();
                 readers.spawn(async move {

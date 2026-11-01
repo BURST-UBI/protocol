@@ -361,7 +361,7 @@ pub(in crate::confirmed_replay::snapshot) fn plan_pair_view(
     txn: &burst_store_lmdb::LmdbReadTransaction<'_>,
 ) -> Result<(CementedTailPlan, AppliedTailPlan, Vec<HistoricalBlock>), ReplayError> {
     store.read_view(txn).map_err(invalid)?;
-    let captured = capture_indexed(&base, store, &txn, true, true)?;
+    let captured = capture_indexed(&base, store, txn, true, true)?;
     let confirmed = finish_indexed::<true>(
         Base {
             anchor: base.anchor,
@@ -369,7 +369,7 @@ pub(in crate::confirmed_replay::snapshot) fn plan_pair_view(
             state: base.state,
         },
         store,
-        &txn,
+        txn,
         captured.confirmed_heads,
         captured.rows.clone(),
         captured.accounts.clone(),
@@ -377,7 +377,7 @@ pub(in crate::confirmed_replay::snapshot) fn plan_pair_view(
     let applied = finish_indexed::<false>(
         base,
         store,
-        &txn,
+        txn,
         captured.applied_heads,
         captured.rows,
         captured.accounts,

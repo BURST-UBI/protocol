@@ -81,7 +81,7 @@ async fn saturated_ingress_recovers_dependency_and_persists_owner_chain() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn protocol_epoch_crosses_peer_transport_and_restarts_with_owner_successor() {
+async fn retired_creator_epoch_is_rejected_and_owner_chain_survives_restart() {
     let _permit = crate::verification_test_support::NETWORK_FIXTURE
         .acquire()
         .await
@@ -110,15 +110,30 @@ async fn protocol_epoch_crosses_peer_transport_and_restarts_with_owner_successor
     marker.release_sources.clear();
     marker.delegation_payload.clear();
     sign(0, &mut marker);
-    let response = submit(&source, &serde_json::to_string(&marker).unwrap()).await;
-    assert!(response.accepted, "creator marker rejected: {response:?}");
-    stored(&source, marker.hash).await;
-    stored(&target, marker.hash).await;
+    let payload = serde_json::to_string(&marker).unwrap();
+    tokio::time::timeout(Duration::from_secs(90), async {
+        loop {
+            let response = submit(&source, &payload).await;
+            for node in [&source, &target] {
+                assert!(!node.store.block_store().exists(&marker.hash).unwrap());
+            }
+            if !response.accepted {
+                assert_eq!(
+                    response.detail.as_deref(),
+                    Some("creator epoch authority has ended")
+                );
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("retired creator marker was not rejected");
     for node in [&source, &target] {
         let after = node.store.account_store().get_account(&owner).unwrap();
-        assert_eq!(after.epoch, marker.version);
-        assert_eq!(after.head, marker.hash);
-        assert_eq!(after.block_count, before.block_count + 1);
+        assert_eq!(after.epoch, before.epoch);
+        assert_eq!(after.head, before.head);
+        assert_eq!(after.block_count, before.block_count);
         assert_eq!(after.representative, before.representative);
         assert_eq!(after.state, before.state);
         assert_eq!(after.verified_at, before.verified_at);
@@ -130,7 +145,7 @@ async fn protocol_epoch_crosses_peer_transport_and_restarts_with_owner_successor
     let target = Running::start(prepared.target_config.clone(), prepared.now + 1).await;
     target.ready(prepared.epoch).await;
     let state = target.client.signing_state(&owner).await.unwrap();
-    assert_eq!(state.head, marker.hash);
+    assert_eq!(state.head, before.head);
     assert_eq!(state.signing_grant, marker.signing_grant);
     assert_eq!(
         target
@@ -139,12 +154,12 @@ async fn protocol_epoch_crosses_peer_transport_and_restarts_with_owner_successor
             .get_account(&owner)
             .unwrap()
             .epoch,
-        marker.version
+        before.epoch
     );
 
     let mut successor = marker.clone();
     successor.block_type = BlockType::ChangeRepresentative;
-    successor.previous = marker.hash;
+    successor.previous = before.head;
     successor.timestamp = Timestamp::new(prepared.now + 1);
     successor.representative = address(2);
     sign(1, &mut successor);
@@ -175,7 +190,7 @@ async fn protocol_epoch_crosses_peer_transport_and_restarts_with_owner_successor
             .get_account(&owner)
             .unwrap()
             .epoch,
-        marker.version
+        before.epoch
     );
     target.stop().await;
     source.stop().await;

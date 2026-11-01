@@ -54,11 +54,19 @@ impl Running {
         node.verification_fixture_clock = Some(Arc::new(|| None));
         if let Some(block) = prefill {
             let queue = node.block_queue();
-            for _ in 0..4096 {
-                assert!(queue.push(block.clone()).await);
+            assert!(queue.push(block.clone()).await);
+            // Identical payloads are deduplicated. Fill the remaining slots with
+            // distinct invalid signatures while retaining the real dependent block.
+            for nonce in 1u64..4096 {
+                let mut noise = block.clone();
+                noise.signature.0[..8].copy_from_slice(&nonce.to_le_bytes());
+                assert!(queue.push(noise).await);
             }
-            assert!(
-                !queue.push(block.clone()).await,
+            let mut overflow = block.clone();
+            overflow.signature.0[..8].copy_from_slice(&4096u64.to_le_bytes());
+            assert_eq!(
+                queue.push_with_reason(overflow).await,
+                Err(crate::priority_queue::QueueAdmissionError::Capacity),
                 "real ingress capacity must reject overflow"
             );
             assert_eq!(queue.len().await, 4096);

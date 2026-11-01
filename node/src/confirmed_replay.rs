@@ -2762,7 +2762,6 @@ mod tests {
             checkpoint_service::{self, Clock, Session},
             checkpoint_store::CertifiedCheckpoint,
             checkpoint_transport::Incoming,
-            connection_registry::ConnectionRegistry,
             shutdown::ShutdownController,
             wire_message::WireMessage,
         };
@@ -2788,7 +2787,11 @@ mod tests {
         let active: Vec<usize> = (0..9).map(|index| (leader + index) % 9).collect();
         let anchor = drivers[leader].as_ref().unwrap().anchor().clone();
         let registries: Vec<_> = (0..9)
-            .map(|_| Arc::new(RwLock::new(ConnectionRegistry::new())))
+            .map(|_| {
+                Arc::new(RwLock::new(
+                    crate::verification_test_support::loopback_registry(),
+                ))
+            })
             .collect();
         let stops: Vec<_> = (0..9)
             .map(|_| Arc::new(ShutdownController::new()))
@@ -2818,10 +2821,14 @@ mod tests {
                 .expect("checkpoint fixture TCP connection failed");
                 for (owner, peer, stream) in [(left, right, outgoing), (right, left, incoming.0)] {
                     let (mut reader, writer) = stream.into_split();
-                    registries[owner]
+                    let connection = registries[owner]
                         .write()
                         .await
                         .insert(peer.to_string(), writer);
+                    assert_ne!(
+                        connection, 0,
+                        "fixture peer {owner} -> {peer} was not admitted"
+                    );
                     let sender = senders[owner].clone();
                     readers.spawn(async move {
                         while let Ok(size) = reader.read_u32().await {

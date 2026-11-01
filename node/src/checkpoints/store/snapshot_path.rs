@@ -25,9 +25,9 @@ fn reconcile_records(
         return Err(invalid("snapshot authority must start at genesis"));
     }
     let prefix = format!("{}/", prefix(&genesis));
-    let tip = decode_tip(record_storage::get_batch(&batch, &format!("{prefix}head"))?.as_deref())?;
+    let tip = decode_tip(record_storage::get_batch(batch, &format!("{prefix}head"))?.as_deref())?;
     let base = crate::confirmed_replay::snapshot::installed::read_base_at(
-        |key| record_storage::get_batch(&batch, key),
+        |key| record_storage::get_batch(batch, key),
         &genesis,
         batch.storage_directory(),
     )?
@@ -95,7 +95,7 @@ fn reconcile_records(
             } else {
                 archived_record_key(&parent, height)
             };
-            let bytes = record_storage::get_batch(&batch, &key)?
+            let bytes = record_storage::get_batch(batch, &key)?
                 .ok_or_else(|| invalid("snapshot cannot discard a missing accepted successor"))?;
             let selection = verify_record(&bytes, &parent, &next)?;
             observe(&key, &bytes, !active, selection);
@@ -202,7 +202,7 @@ impl SnapshotRecords {
             ..
         } in self.records
         {
-            let bytes = record_storage::get_batch(&batch, &key)?
+            let bytes = record_storage::get_batch(batch, &key)?
                 .ok_or_else(|| invalid("checkpoint record missing before retirement"))?;
             if burst_crypto::blake2b_256(&bytes) != *digest.as_bytes() {
                 return Err(invalid("checkpoint record changed before retirement"));
@@ -247,7 +247,7 @@ impl SnapshotRecords {
             }
             let archived =
                 archived_record_key(snapshot.anchor(), record.certificate().checkpoint.height);
-            match record_storage::matches_batch(&batch, &archived, &bytes)? {
+            match record_storage::matches_batch(batch, &archived, &bytes)? {
                 Some(false) => {
                     return Err(invalid(
                         "retired checkpoint archive conflicts with local record",

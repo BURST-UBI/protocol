@@ -1252,14 +1252,9 @@ async fn governance_journey_from(
         );
         for (index, client) in clients.iter().enumerate() {
             if scenario == Scenario::VerificationFork {
-                let snapshot = burst_verification::OrchestratorSnapshot::decode(
-                    &stores[index]
-                        .meta_store()
-                        .get_meta(crate::endorsement_commit::SNAPSHOT_KEY)
-                        .unwrap(),
-                )
-                .unwrap();
-                let verification = burst_verification::VerificationOrchestrator::restore(snapshot);
+                let reader = stores[index].tx_begin_read().unwrap();
+                let view = stores[index].read_view(&reader).unwrap();
+                let verification = crate::verification_storage::load_view(&view).unwrap();
                 let target =
                     burst_crypto::derive_address(&burst_crypto::keypair_from_seed(&[9; 32]).public);
                 assert_eq!(

@@ -176,10 +176,7 @@ pub(crate) fn read_staging(
     if count == 0 || count > MAX_STAGING_ROOTS || bytes.len() != 10 + count * 32 {
         return Err(invalid("invalid historical head staging count"));
     }
-    let roots: Vec<NodeHash> = bytes[10..]
-        .chunks_exact(32)
-        .map(|b| b.try_into().unwrap())
-        .collect();
+    let roots: Vec<NodeHash> = bytes[10..].as_chunks::<32>().0.to_vec();
     if roots
         .iter()
         .collect::<std::collections::BTreeSet<_>>()

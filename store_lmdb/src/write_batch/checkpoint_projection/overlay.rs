@@ -10,7 +10,7 @@ impl LmdbWriteTransaction<'_> {
         &'a self,
         overlay: &'a BTreeMap<(UndoTable, Vec<u8>), Option<Vec<u8>>>,
         prefix: &'a [u8],
-    ) -> Result<impl Iterator<Item = Result<(&'a [u8], &'a [u8]), StoreError>> + 'a, StoreError>
+    ) -> Result<impl Iterator<Item = Result<BorrowedCheckpointRow<'a>, StoreError>> + 'a, StoreError>
     {
         let mut base = self.checkpoint_metadata_entries(prefix)?.peekable();
         let mut staged = overlay

@@ -231,14 +231,7 @@ fn encode_map<M: MapSource>(
     depth: usize,
     encode_value: impl Fn(&M::Value, &mut dyn Write, usize) -> Result<(), ReplayError>,
 ) -> Result<(), ReplayError> {
-    encode_map_with_keys(
-        map,
-        output,
-        directory,
-        depth,
-        |key, output, depth| encode_at_depth(key, output, depth),
-        encode_value,
-    )
+    encode_map_with_keys(map, output, directory, depth, encode_at_depth, encode_value)
 }
 
 pub(super) fn encode_map_with_keys<M: MapSource>(

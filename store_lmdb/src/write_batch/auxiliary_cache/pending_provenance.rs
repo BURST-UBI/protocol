@@ -163,7 +163,7 @@ fn remove(index: &mut Reverse, origins: &[TxHash], key: &Vec<u8>) {
     }
 }
 
-fn insert(index: &mut Reverse, origins: &[TxHash], key: &Vec<u8>) {
+fn insert(index: &mut Reverse, origins: &[TxHash], key: &[u8]) {
     for origin in origins.iter() {
         index.entry(*origin).or_default().insert(key.to_vec());
     }

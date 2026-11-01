@@ -427,7 +427,7 @@ impl crate::read_view::LedgerReadView<'_> {
             if self
                 .env
                 .frontiers_db
-                .get(&self.txn, account.address.as_str().as_bytes())
+                .get(self.txn, account.address.as_str().as_bytes())
                 .map_err(LmdbError::from)?
                 != Some(account.head.as_bytes().as_slice())
             {
@@ -437,7 +437,7 @@ impl crate::read_view::LedgerReadView<'_> {
         if self
             .env
             .frontiers_db
-            .len(&self.txn)
+            .len(self.txn)
             .map_err(LmdbError::from)?
             != expected_frontiers
         {
@@ -458,7 +458,7 @@ impl crate::read_view::LedgerReadView<'_> {
             if self
                 .env
                 .pending_amount_db
-                .get(&self.txn, &amount_index)
+                .get(self.txn, &amount_index)
                 .map_err(LmdbError::from)?
                 != Some(key)
             {
@@ -470,7 +470,7 @@ impl crate::read_view::LedgerReadView<'_> {
             if self
                 .env
                 .pending_sender_db
-                .get(&self.txn, &index)
+                .get(self.txn, &index)
                 .map_err(LmdbError::from)?
                 != Some(key)
             {
@@ -482,7 +482,7 @@ impl crate::read_view::LedgerReadView<'_> {
         if self
             .env
             .pending_amount_db
-            .len(&self.txn)
+            .len(self.txn)
             .map_err(LmdbError::from)?
             != count
         {
@@ -493,7 +493,7 @@ impl crate::read_view::LedgerReadView<'_> {
         if self
             .env
             .pending_sender_db
-            .len(&self.txn)
+            .len(self.txn)
             .map_err(LmdbError::from)?
             != count
         {

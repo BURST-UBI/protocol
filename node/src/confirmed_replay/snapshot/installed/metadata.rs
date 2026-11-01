@@ -691,6 +691,10 @@ pub fn recover_metadata_from_peers(
     ))
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Preserve recovery ownership; boxing is a separate allocation change."
+)]
 pub(crate) enum StartupRecovery {
     Ready(Option<RecoveredInstalledMetadata>),
     Cancelled,

@@ -1,11 +1,13 @@
 use super::*;
 
+type RevisionImage = (Vec<u8>, Option<Vec<u8>>);
+
 /// Local proposal guards have exact byte equality semantics. Keep a blocked
 /// journal out of the ready scan until its required after-image is restored.
 /// Aggregate reconciliation and causal readiness retain their existing rules.
 #[derive(Default)]
 pub(super) struct RevisionWaiters {
-    waiting: BTreeMap<(Vec<u8>, Option<Vec<u8>>), BTreeSet<BlockHash>>,
+    waiting: BTreeMap<RevisionImage, BTreeSet<BlockHash>>,
 }
 
 impl RevisionWaiters {

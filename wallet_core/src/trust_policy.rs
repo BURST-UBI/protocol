@@ -222,21 +222,26 @@ pub async fn evaluate_payment_group_graph(
             let mut warning = None;
             let mut used_protocol_fallback = false;
             let mut checked_originators = 0;
-            let mut results = stream::iter(creators.into_iter().map(|creator| {
-                let queries = &queries;
-                let rules = &rules;
-                async move {
-                    check_membership(
-                        rules.group_ids,
-                        rules.require_all,
-                        &WalletAddress::new(creator),
-                        queries,
-                        registry,
-                        rules.max_hops,
-                    )
-                    .await
-                }
-            }))
+            let mut results = stream::iter(
+                creators
+                    .into_iter()
+                    .map(|creator| {
+                        let queries = &queries;
+                        let rules = &rules;
+                        async move {
+                            check_membership(
+                                rules.group_ids,
+                                rules.require_all,
+                                &WalletAddress::new(creator),
+                                queries,
+                                registry,
+                                rules.max_hops,
+                            )
+                            .await
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            )
             .buffer_unordered(MAX_CONCURRENT_REQUESTS);
             while let Some(result) = results.next().await {
                 checked_originators += 1;
@@ -426,20 +431,30 @@ async fn check_membership(
                 offline_only = false;
             }
         }
-        let mut responses = stream::iter(endpoints.into_iter().map(|(id, endpoint)| async move {
-            let response = if max_hops == 0 {
-                queries
-                    .verify_member(endpoint, originator.as_str())
-                    .await
-                    .map(|member| member.valid)
-            } else {
-                queries
-                    .verify_member_through_groups(registry, id, originator.as_str(), max_hops)
-                    .await
-                    .map(|path| path.is_some())
-            };
-            (id.to_owned(), response)
-        }))
+        let mut responses = stream::iter(
+            endpoints
+                .into_iter()
+                .map(|(id, endpoint)| async move {
+                    let response = if max_hops == 0 {
+                        queries
+                            .verify_member(endpoint, originator.as_str())
+                            .await
+                            .map(|member| member.valid)
+                    } else {
+                        queries
+                            .verify_member_through_groups(
+                                registry,
+                                id,
+                                originator.as_str(),
+                                max_hops,
+                            )
+                            .await
+                            .map(|path| path.is_some())
+                    };
+                    (id.to_owned(), response)
+                })
+                .collect::<Vec<_>>(),
+        )
         .buffer_unordered(MAX_CONCURRENT_REQUESTS);
         let mut has_member = false;
         let mut has_nonmember = false;
@@ -524,6 +539,23 @@ mod tests {
     use super::*;
     use burst_groups::GroupInfo;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn payment_group_check_can_run_in_a_native_command() {
+        fn assert_send(_: impl Send) {}
+        let payment = payment();
+        let client = GroupClient::new().unwrap();
+        let registry = GroupRegistry::new();
+        assert_send(evaluate_payment_groups(
+            &payment,
+            &[],
+            false,
+            OfflineFallback::Review,
+            &client,
+            &registry,
+        ));
+    }
 
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn payment() -> crate::provenance::PaymentOrigins {

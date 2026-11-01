@@ -177,10 +177,53 @@ fn projection(store: &LmdbStore, expiry_secs: u64) -> Contents {
         .iter()
         .any(|name| key == name.as_bytes())
     });
-    // Startup may migrate aggregate storage to rows. Compare decoded wallets
-    // and provenance graphs alongside the selected raw tables and metadata above.
+    // Startup migrates aggregate economics, governance and verification to rows.
+    // Compare their decoded state while retaining unrelated metadata verbatim.
+    let brn = burst_brn::BrnEngine::load_from_store(&store.brn_store()).unwrap();
+    let mut wallets: Vec<_> = brn
+        .wallets
+        .iter()
+        .map(|(address, state)| {
+            (
+                address.as_str().as_bytes().to_vec(),
+                bincode::serialize(state).unwrap(),
+            )
+        })
+        .collect();
+    wallets.sort_by(|a, b| a.0.cmp(&b.0));
+    data.insert("brn_wallets".into(), wallets);
     let batch = store.tx_begin_write().unwrap();
+    let brn_meta = data.get_mut("brn_meta").unwrap();
+    brn_meta.retain(|(key, _)| {
+        key != b"rate_history"
+            && !key.starts_with(b"rate_history/")
+            && key != burst_brn::wallet_storage::FORMAT_KEY
+            && !key.starts_with(burst_brn::wallet_storage::ROW_PREFIX)
+            && key != b"governance_engine"
+    });
+    brn_meta.push((
+        b"rate_history".to_vec(),
+        bincode::serialize(&brn.rate_history).unwrap(),
+    ));
+    if let Some(governance) = crate::governance_storage::load(&batch).unwrap() {
+        brn_meta.push((
+            b"governance_engine".to_vec(),
+            bincode::serialize(&governance).unwrap(),
+        ));
+    }
+    brn_meta.sort_by(|a, b| a.0.cmp(&b.0));
     let meta = data.get_mut("meta").unwrap();
+    let verification_key = crate::endorsement_commit::SNAPSHOT_KEY.as_bytes();
+    meta.retain(|(key, _)| key != verification_key);
+    let verification = crate::verification_storage::load(&batch).unwrap();
+    meta.push((
+        verification_key.to_vec(),
+        logical_value(
+            "meta",
+            verification_key,
+            &verification.snapshot().encode().unwrap(),
+        ),
+    ));
     meta.push((
         TrstEngine::meta_key().as_bytes().to_vec(),
         crate::trst_storage::load(&batch, expiry_secs)

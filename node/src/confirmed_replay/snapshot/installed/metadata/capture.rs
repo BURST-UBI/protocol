@@ -12,6 +12,10 @@ fn log_stage(epoch: BlockHash, started: std::time::Instant, name: &str) {
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Recovery inputs remain explicit at this existing boundary."
+)]
 pub(crate) async fn recover_retirement_catalogue(
     store: Arc<LmdbStore>,
     network: NetworkId,
@@ -63,6 +67,10 @@ enum CapturePurpose {
     },
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Preserve recovery ownership; boxing is a separate allocation change."
+)]
 enum CaptureResult {
     Retirement(OwnedRetirement, BlockHash),
     Authority(ReplayCache),
@@ -100,6 +108,10 @@ pub(crate) async fn recover_checkpoint_authority(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Recovery inputs remain explicit at this existing boundary."
+)]
 async fn recover_bounded(
     store: Arc<LmdbStore>,
     network: NetworkId,
@@ -411,6 +423,10 @@ async fn recover_bounded(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Recovery inputs remain explicit at this existing boundary."
+)]
 async fn recover_captured(
     store: &Arc<LmdbStore>,
     reader: &LmdbReadTransaction<'_>,

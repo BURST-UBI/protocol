@@ -746,6 +746,10 @@ impl PreparedSnapshot<super::body::StagedBody> {
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Recovery inputs remain explicit at this existing boundary."
+)]
 fn write_prepared_archive<A: AuthoritySource + ?Sized>(
     manifest: &burst_consensus::snapshot::SnapshotManifest,
     (body, directory): (&mut impl super::body::ReadSeek, Option<&std::path::Path>),

@@ -400,7 +400,7 @@ impl crate::read_view::LedgerReadView<'_> {
             self.undo_value_ref(UndoTable::BrnMeta, burst_brn::rate_storage::HEADER)?,
             self.env
                 .brn_meta_db
-                .prefix_iter(&self.txn, burst_brn::rate_storage::ROW_PREFIX)
+                .prefix_iter(self.txn, burst_brn::rate_storage::ROW_PREFIX)
                 .map_err(LmdbError::from)?
                 .map(|row| row.map_err(|error| burst_brn::BrnError::Other(error.to_string()))),
         )
@@ -439,14 +439,14 @@ impl crate::read_view::LedgerReadView<'_> {
         if self
             .env
             .brn_wallets_db
-            .len(&self.txn)
+            .len(self.txn)
             .map_err(LmdbError::from)?
             > max_rows as u64
         {
             return Err(invalid("BRN snapshot exceeds restoration limit".into()));
         }
         let uses_wallet_records = crate::brn::records::validate_inventory(
-            &self.txn,
+            self.txn,
             self.env.brn_wallets_db,
             self.env.brn_meta_db,
             max_bytes,
@@ -457,7 +457,7 @@ impl crate::read_view::LedgerReadView<'_> {
             let (address, bytes) = row?;
             let state = if uses_wallet_records {
                 let (state, size) = crate::brn::records::decode_wallet(
-                    &self.txn,
+                    self.txn,
                     self.env.brn_meta_db,
                     &address,
                     Some(bytes),
@@ -544,7 +544,7 @@ impl crate::read_view::LedgerReadView<'_> {
         let mut actual = self
             .env
             .brn_meta_db
-            .prefix_iter(&self.txn, rate_storage::ROW_PREFIX)
+            .prefix_iter(self.txn, rate_storage::ROW_PREFIX)
             .map_err(LmdbError::from)?;
         for (expected_key, expected_value) in expected_rows {
             poll("storage:brn-rate")?;

@@ -10,6 +10,21 @@ use burst_types::{BlockHash, NetworkId, ProtocolParams, Timestamp, WalletAddress
 use burst_verification::VerificationOrchestrator;
 use burst_vrf::{DrandBeacon, DrandClient};
 
+/// Use the node's development-network admission limits for localhost peers.
+pub(crate) fn loopback_registry() -> crate::ConnectionRegistry {
+    let config = crate::NodeConfig {
+        network: NetworkId::Dev,
+        ..Default::default()
+    };
+    let mut registry = crate::ConnectionRegistry::new();
+    registry.configure_network_limits(
+        config.max_peers,
+        config.effective_peer_limits().unwrap(),
+        &config.bandwidth_limits,
+    );
+    registry
+}
+
 /// Stable indexed fixture keys, preserving the original repeated-byte seeds.
 pub fn indexed_seed(index: u32) -> [u8; 32] {
     if let Ok(index) = u8::try_from(index) {

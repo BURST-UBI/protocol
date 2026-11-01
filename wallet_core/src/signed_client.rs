@@ -630,7 +630,7 @@ impl NodeClient {
                 self.rpc_call("consti", json!({})).await?
             }
             OfflineAction::GovernanceVeto { proposal } => {
-                self.review_governance_veto(&account, *proposal).await?
+                self.review_governance_veto(account, *proposal).await?
             }
             OfflineAction::GovernanceVote { proposal, .. }
             | OfflineAction::GovernanceEndorse { proposal, .. }

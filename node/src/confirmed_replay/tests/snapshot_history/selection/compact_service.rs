@@ -440,10 +440,14 @@ pub(in crate::confirmed_replay::tests) async fn assert_service(
             .unwrap();
             for (owner, peer, stream) in [(left, right, outgoing), (right, left, incoming.0)] {
                 let (mut reader, writer) = stream.into_split();
-                registries[owner]
+                let connection = registries[owner]
                     .write()
                     .await
                     .insert(peer.to_string(), writer);
+                assert_ne!(
+                    connection, 0,
+                    "fixture peer {owner} -> {peer} was not admitted"
+                );
                 let sender = senders[owner].clone();
                 readers.spawn(async move {
                     while let Ok(size) = reader.read_u32().await {

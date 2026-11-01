@@ -62,10 +62,10 @@ pub(super) fn make_room(
         if count <= MAX_CHECKPOINTS && used <= MAX_CHAIN_BYTES {
             break;
         }
-        let record = record_storage::get_batch(&batch, &key)?
+        let record = record_storage::get_batch(batch, &key)?
             .ok_or_else(|| invalid("checkpoint disappeared during retirement"))?;
         let archived = archived_record_key(anchor, height);
-        match record_storage::matches_batch(&batch, &archived, &record)? {
+        match record_storage::matches_batch(batch, &archived, &record)? {
             Some(false) => {
                 return Err(invalid(
                     "retired checkpoint archive conflicts with local record",

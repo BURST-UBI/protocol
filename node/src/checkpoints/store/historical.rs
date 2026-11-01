@@ -19,7 +19,7 @@ pub(super) fn persist_history(
     for block in history.replay_blocks() {
         let key = format!("checkpoint_history/v1/{}", block.hash);
         let bytes = bincode::serialize(block).map_err(invalid)?;
-        match record_storage::get_batch(&batch, &key)? {
+        match record_storage::get_batch(batch, &key)? {
             Some(existing) if existing != bytes => {
                 return Err(invalid("certified history bytes changed"))
             }
@@ -29,7 +29,7 @@ pub(super) fn persist_history(
     }
     for witness in history.proposal_witnesses() {
         let key = crate::confirmed_history::proposal_archive_key(witness.block);
-        match record_storage::get_batch(&batch, &key)? {
+        match record_storage::get_batch(batch, &key)? {
             Some(existing) if existing != witness.bytes => {
                 return Err(invalid("certified proposal content changed"))
             }

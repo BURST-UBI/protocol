@@ -1,7 +1,13 @@
 //! Borrowed reads from one LMDB transaction, including a writer's pending changes.
-use crate::{write_batch::CleanStorageCut, LmdbEnvironment, LmdbError};
+use crate::{
+    write_batch::{checkpoint_projection::BorrowedCheckpointRow, CleanStorageCut},
+    LmdbEnvironment, LmdbError,
+};
 use burst_store::{account::AccountInfo, StoreError};
 use heed::RoTxn;
+
+type MetadataIter<'a> =
+    Box<dyn Iterator<Item = Result<BorrowedCheckpointRow<'a>, heed::Error>> + 'a>;
 
 /// Borrows its transaction and environment; exposes no mutation or commit API.
 /// A clean cut identifies storage only, never replay or deletion authority.
@@ -63,8 +69,7 @@ impl<'a> LedgerReadView<'a> {
             self.env.height_db,
             self.env.block_height_db,
             after,
-            max_rows,
-            max_bytes,
+            (max_rows, max_bytes),
             visit,
         )
     }
@@ -78,13 +83,11 @@ impl<'a> LedgerReadView<'a> {
     ) -> Result<(), StoreError> {
         let db = self.env.meta_db;
         let mut total = 0usize;
-        let iter: Box<dyn Iterator<Item = Result<(&[u8], &[u8]), heed::Error>> + '_> =
-            match (!prefix.is_empty()).then_some(prefix) {
-                Some(prefix) => {
-                    Box::new(db.prefix_iter(&self.txn, prefix).map_err(LmdbError::from)?)
-                }
-                None => Box::new(db.iter(&self.txn).map_err(LmdbError::from)?),
-            };
+        let iter: MetadataIter<'_> = if prefix.is_empty() {
+            Box::new(db.iter(self.txn).map_err(LmdbError::from)?)
+        } else {
+            Box::new(db.prefix_iter(self.txn, prefix).map_err(LmdbError::from)?)
+        };
         for (count, row) in iter.enumerate() {
             let (key, value) = row.map_err(LmdbError::from)?;
             total = total
@@ -157,7 +160,7 @@ impl<'a> LedgerReadView<'a> {
         let rows = self
             .env
             .brn_wallets_db
-            .iter(&self.txn)
+            .iter(self.txn)
             .map_err(LmdbError::from)?;
         Ok(rows.map(move |row| {
             let (key, bytes) = row.map_err(LmdbError::from)?;
@@ -219,7 +222,7 @@ impl<'a> LedgerReadView<'a> {
     pub fn checkpoint_metadata_entries(
         &self,
         prefix: &'a [u8],
-    ) -> Result<impl Iterator<Item = Result<(&'a [u8], &'a [u8]), StoreError>> + 'a, StoreError>
+    ) -> Result<impl Iterator<Item = Result<BorrowedCheckpointRow<'a>, StoreError>> + 'a, StoreError>
     {
         let rows = self
             .env
@@ -245,7 +248,7 @@ impl<'a> LedgerReadView<'a> {
     /// decodes each receipt and bounds the total scan.
     pub fn pending_entries(
         &self,
-    ) -> Result<impl Iterator<Item = Result<(&'a [u8], &'a [u8]), StoreError>> + 'a, StoreError>
+    ) -> Result<impl Iterator<Item = Result<BorrowedCheckpointRow<'a>, StoreError>> + 'a, StoreError>
     {
         let rows = self
             .env
@@ -272,6 +275,48 @@ impl<'a> LedgerReadView<'a> {
 mod tests {
     use super::*;
     use burst_types::{BlockHash, WalletAddress};
+
+    #[test]
+    fn metadata_visits_preserve_empty_prefix_and_callback_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        let env = LmdbEnvironment::open(directory.path(), 32, 32 << 20).unwrap();
+        let mut writer = env.tx_begin_write().unwrap();
+        writer.put_meta("a/one", b"1").unwrap();
+        writer.put_meta("b/two", b"2").unwrap();
+        writer.commit().unwrap();
+        let reader = env.tx_begin_read().unwrap();
+        let view = env.read_view(&reader).unwrap();
+        for prefix in [b"".as_slice(), b"a/", b"missing/"] {
+            let expected = env
+                .meta_db
+                .iter(&reader.txn)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .into_iter()
+                .filter(|(key, _)| key.starts_with(prefix));
+            let mut actual = Vec::new();
+            view.visit_checkpoint_metadata(prefix, |key, value| {
+                actual.push((key.to_vec(), value.to_vec()));
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(
+                actual,
+                expected
+                    .map(|(key, value)| (key.to_vec(), value.to_vec()))
+                    .collect::<Vec<_>>()
+            );
+        }
+        let mut calls = 0;
+        assert!(view
+            .visit_checkpoint_metadata(b"", |_, _| {
+                calls += 1;
+                Err(StoreError::Corruption("callback stopped".into()))
+            })
+            .is_err());
+        assert_eq!(calls, 1);
+    }
 
     #[test]
     fn pinned_view_keeps_rows_and_identity_while_writer_commits() {

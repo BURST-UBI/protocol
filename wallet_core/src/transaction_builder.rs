@@ -9,7 +9,6 @@ use burst_types::{BlockHash, Signature, Timestamp, TxHash, WalletAddress};
 use crate::error::WalletError;
 
 /// Encode a wallet address as a 32-byte public key for the `link` field.
-
 fn address_to_link(address: &WalletAddress) -> Result<BlockHash, WalletError> {
     burst_crypto::decode_address(address.as_str())
         .map(BlockHash::new)

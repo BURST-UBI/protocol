@@ -310,7 +310,7 @@ impl GovernanceEngine {
         changed(&before.timings, &self.timings, |proposal, a, b| {
             let record = |timing: &crate::GovernanceTiming| GovernanceRecord::Timing {
                 proposal: *proposal,
-                timing: timing.clone(),
+                timing: *timing,
             };
             visit(a.map(record), b.map(record))
         })?;

@@ -4,6 +4,10 @@ use burst_verification::{
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Preserve recovery ownership; boxing is a separate allocation change."
+)]
 pub(super) enum Verification<'a> {
     Borrowed(&'a VerificationOrchestrator),
     Owned(OrchestratorSnapshot),

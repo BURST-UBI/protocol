@@ -1360,7 +1360,7 @@ impl TrstEngine {
             link: most_recent_input,
             holder: holder.clone(),
             origin_timestamp: now,
-            effective_origin_timestamp: effective_origin_timestamp,
+            effective_origin_timestamp,
             state,
             // Constituent originators are found through the merger graph.
             origin_wallet: holder,
@@ -1780,12 +1780,12 @@ impl TrstEngine {
                 .apply_restoration_with_totals(&origin, &mut contribution_totals);
 
             let holders = self.revoked_holders.remove(&origin).unwrap_or_default();
-            for holder in holders.iter().cloned() {
+            for holder in &holders {
                 if let Some(root) = self
                     .wallets
-                    .get(&holder)
+                    .get(holder)
                     .and_then(|p| p.indexed())
-                    .filter(|root| root.matches_context(&holder, expiry_secs))
+                    .filter(|root| root.matches_context(holder, expiry_secs))
                 {
                     let restored_origins: HashSet<_> =
                         root.revoked_tokens(&origin).map(|t| t.origin).collect();
@@ -1804,7 +1804,7 @@ impl TrstEngine {
                     continue;
                 }
                 let mut restored_origins: HashSet<TxHash> = HashSet::new();
-                if let Some(portfolio) = self.wallets.get_mut(&holder) {
+                if let Some(portfolio) = self.wallets.get_mut(holder) {
                     let mut restored_active = 0u128;
                     for t in &mut portfolio.tokens {
                         if t.revoked_origin != Some(origin) {

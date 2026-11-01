@@ -41,7 +41,7 @@ pub fn visit_rollback_row(
         if suffix.len() != 64 {
             return Err(invalid("invalid local revision proposal length"));
         }
-        for (byte, pair) in hash.iter_mut().zip(suffix.chunks_exact(2)) {
+        for (byte, pair) in hash.iter_mut().zip(suffix.as_chunks::<2>().0.iter()) {
             *byte = u8::from_str_radix(std::str::from_utf8(pair).map_err(invalid)?, 16)
                 .map_err(invalid)?;
         }

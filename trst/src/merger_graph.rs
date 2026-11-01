@@ -499,14 +499,12 @@ impl MergerGraph {
         let merges = self
             .merge_nodes
             .changed_keys(&before.merge_nodes)
-            .into_iter()
             .filter(|id| self.merge_nodes.contains_key(id) != before.merge_nodes.contains_key(id))
             .copied()
             .collect();
         let revisions = self
             .revisions
             .changed_keys(&before.revisions)
-            .into_iter()
             .filter(|id| {
                 let domain = |graph: &Self| {
                     graph

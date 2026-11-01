@@ -1446,7 +1446,7 @@ pub async fn handle_verification_status(
             phase,
             verified_at,
             endorser_count,
-            endorsement_threshold: endorsement_threshold,
+            endorsement_threshold,
             endorsers,
             verifier_votes,
             challenge_active,

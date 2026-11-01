@@ -249,7 +249,7 @@ impl RecoveryInputs {
             || limits.bytes > MAX_BYTES
             || limits.map_bytes < 1 << 20
             || limits.map_bytes as u64 > MAX_BYTES
-            || limits.map_bytes % 4096 != 0
+            || !limits.map_bytes.is_multiple_of(4096)
             || limits.bytes > limits.map_bytes as u64
         {
             return Err(invalid("invalid durable recovery input limits"));
@@ -455,7 +455,7 @@ impl RecoveryInputs {
                 .ok_or_else(|| invalid("aggregate recovery stream bytes exceeded"))?;
         }
         let mut extra = 0u64;
-        for kind in [b'g', b'r'] {
+        for kind in *b"gr" {
             for row in manifest.prefix_iter(&txn, &[kind, b'/']).map_err(invalid)? {
                 let (key, value) = row.map_err(invalid)?;
                 if key.len() != 34 {

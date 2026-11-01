@@ -340,7 +340,7 @@ impl RecordObservation {
             {
                 if let Some(beacon) = selection.beacon() {
                     let expected = bincode::serialize(beacon).map_err(invalid)?;
-                    if record_storage::matches_batch(&batch, &self.key, expected.as_slice())?
+                    if record_storage::matches_batch(batch, &self.key, expected.as_slice())?
                         == Some(true)
                     {
                         self.value = ObservedValue::Record(Some(burst_types::BlockHash::new(
@@ -358,7 +358,7 @@ impl RecordObservation {
             if self.key == format!("{}/{height}", prefix(anchor))
                 || self.key == archived_record_key(anchor, height)
             {
-                if let Some(bytes) = record_storage::get_batch(&batch, &self.key)? {
+                if let Some(bytes) = record_storage::get_batch(batch, &self.key)? {
                     if let Ok(chain::ParsedRecord::Selection(mut record)) =
                         chain::decode_record(&bytes)
                     {
@@ -387,10 +387,10 @@ impl RecordObservation {
                 }
             }
             if self.key == format!("{}/{height}", prefix(anchor))
-                && record_storage::get_batch(&batch, &self.key)?.is_none()
+                && record_storage::get_batch(batch, &self.key)?.is_none()
             {
                 let archive = archived_record_key(anchor, height);
-                if let Some(bytes) = record_storage::get_batch(&batch, &archive)? {
+                if let Some(bytes) = record_storage::get_batch(batch, &archive)? {
                     if burst_types::BlockHash::new(burst_crypto::blake2b_256(&bytes)) == *expected {
                         let absence = Self::new(self.height, self.key.clone(), None);
                         self.key = archive;

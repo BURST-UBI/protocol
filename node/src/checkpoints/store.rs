@@ -663,17 +663,17 @@ impl CertifiedCheckpoint {
             prefix(&self.parent),
             self.record.certificate.checkpoint.height
         );
-        let bytes = match record_storage::get_batch(&batch, &key)? {
+        let bytes = match record_storage::get_batch(batch, &key)? {
             Some(bytes) => bytes,
             None => record_storage::get_batch(
-                &batch,
+                batch,
                 &archived_record_key(&self.parent, self.record.certificate.checkpoint.height),
             )?
             .ok_or_else(|| invalid("selection certificate is not persisted"))?,
         };
         let mut stored = decode(&bytes)?;
         if let Some(bytes) = record_storage::get_batch(
-            &batch,
+            batch,
             &archive_selection::beacon_key(self.record.certificate.checkpoint.hash()),
         )? {
             let beacon = archive_selection::decode_beacon(&bytes)?;
@@ -729,17 +729,17 @@ impl CertifiedCheckpoint {
     ) -> Result<Option<burst_types::BlockHash>, StoreError> {
         let prefix = prefix(&self.parent);
         let tip =
-            decode_tip(record_storage::get_batch(&batch, &format!("{prefix}/head"))?.as_deref())?;
+            decode_tip(record_storage::get_batch(batch, &format!("{prefix}/head"))?.as_deref())?;
         if tip < self.certificate().checkpoint.height {
             return Err(invalid("selection chain tip precedes its certificate"));
         }
-        if record_storage::get_batch(&batch, crate::confirmed_replay::installation::INSTALLED_KEY)?
+        if record_storage::get_batch(batch, crate::confirmed_replay::installation::INSTALLED_KEY)?
             .is_none()
         {
             return Ok(None);
         }
         let installed = crate::payment_authority::PaymentAuthority::read_at(|key| {
-            record_storage::get_batch(&batch, key)
+            record_storage::get_batch(batch, key)
         })?
         .ok_or_else(|| invalid("installed payment authority disappeared"))?;
         publication::parameter_hash(
@@ -748,11 +748,10 @@ impl CertifiedCheckpoint {
             tip,
             &installed,
             |height| {
-                let bytes = match record_storage::get_batch(&batch, &format!("{prefix}/{height}"))?
-                {
+                let bytes = match record_storage::get_batch(batch, &format!("{prefix}/{height}"))? {
                     Some(bytes) => bytes,
                     None => record_storage::get_batch(
-                        &batch,
+                        batch,
                         &archived_record_key(&self.parent, height),
                     )?
                     .ok_or_else(|| invalid("selection chain record is missing"))?,

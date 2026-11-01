@@ -158,9 +158,12 @@ async fn check_caches(node: &BurstNode) {
         .snapshot()
         .encode()
         .unwrap();
-    let persisted = store
-        .meta_store()
-        .get_meta(crate::endorsement_commit::SNAPSHOT_KEY)
+    let reader = store.tx_begin_read().unwrap();
+    let view = store.read_view(&reader).unwrap();
+    let persisted = crate::verification_storage::load_view(&view)
+        .unwrap()
+        .snapshot()
+        .encode()
         .unwrap();
     assert_eq!(
         logical_value(
@@ -174,14 +177,11 @@ async fn check_caches(node: &BurstNode) {
             &persisted
         )
     );
-    let governance: burst_governance::GovernanceEngine = bincode::deserialize(
-        &store
-            .brn_store()
-            .get_meta(b"governance_engine")
-            .unwrap()
-            .unwrap(),
-    )
-    .unwrap();
+    let governance = crate::governance_storage::load_view(&view)
+        .unwrap()
+        .unwrap();
+    drop(view);
+    drop(reader);
     assert_eq!(*node.governance.lock().await, governance);
     let constitution = bincode::serialize(&*node.consti_engine.lock().await).unwrap();
     let persisted = store.meta_store().get_meta("consti_engine").unwrap();

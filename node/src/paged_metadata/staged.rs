@@ -96,9 +96,9 @@ pub(crate) fn append(
         || expected.size > max
         || bytes.is_empty()
         || bytes.len() > PAGES_PER_BATCH * PAGE_BYTES
-        || offset % PAGE_BYTES != 0
+        || !offset.is_multiple_of(PAGE_BYTES)
         || end > expected.size
-        || (end != expected.size && bytes.len() % PAGE_BYTES != 0)
+        || (end != expected.size && !bytes.len().is_multiple_of(PAGE_BYTES))
     {
         return Err(invalid("invalid staged page batch"));
     }

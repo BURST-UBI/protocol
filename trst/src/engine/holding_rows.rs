@@ -109,7 +109,9 @@ impl Row {
             }
             encoded
                 .as_bytes()
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .zip(bytes)
                 .all(|(pair, byte)| {
                     pair[0] == DIGITS[(byte >> 4) as usize]
@@ -303,6 +305,8 @@ fn holding(holder: &WalletAddress, token: &TrstToken, next: Option<TxHash>) -> R
     }
 }
 
+pub type RowChange = (Option<Row>, Option<Row>);
+
 /// Collect changed rows from visit_delta. Output space is proportional to emitted
 /// rows. Compatible indexed portfolios diff retained roots; the vector fallback
 /// uses O(old + new holdings) time and temporary lookup space. Emission order
@@ -311,7 +315,7 @@ pub fn delta(
     holder: &WalletAddress,
     before: Option<&WalletPortfolio>,
     after: Option<&WalletPortfolio>,
-) -> Result<Vec<(Option<Row>, Option<Row>)>, String> {
+) -> Result<Vec<RowChange>, String> {
     let mut changes = Vec::new();
     visit_delta(
         holder,

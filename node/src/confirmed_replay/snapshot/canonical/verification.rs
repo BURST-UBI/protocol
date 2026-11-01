@@ -286,7 +286,7 @@ impl Verification<'_, '_> {
                     &PollingMap {
                         map: &states,
                         poll: self.1,
-                        measure_only: measure_only,
+                        measure_only,
                     },
                 ),
                 (
@@ -294,7 +294,7 @@ impl Verification<'_, '_> {
                     &PollingMap {
                         map: &challenges,
                         poll: self.1,
-                        measure_only: measure_only,
+                        measure_only,
                     },
                 ),
                 (
@@ -302,7 +302,7 @@ impl Verification<'_, '_> {
                     &PollingMap {
                         map: &penalties,
                         poll: self.1,
-                        measure_only: measure_only,
+                        measure_only,
                     },
                 ),
                 (
@@ -319,7 +319,7 @@ impl Verification<'_, '_> {
                     &PollingMap {
                         map: &selections,
                         poll: self.1,
-                        measure_only: measure_only,
+                        measure_only,
                     },
                 ),
                 (
@@ -335,7 +335,7 @@ impl Verification<'_, '_> {
                     &PollingMap {
                         map: &appeals,
                         poll: self.1,
-                        measure_only: measure_only,
+                        measure_only,
                     },
                 ),
             ],

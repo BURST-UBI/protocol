@@ -433,6 +433,10 @@ impl Rows {
         Ok(rows)
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Recovery inputs remain explicit at this existing boundary."
+    )]
     fn capture_projection_inner(
         state: &ConfirmedReplay,
         cache_at: Timestamp,
@@ -640,6 +644,10 @@ pub(super) struct DerivedChanges {
     pub rows: Rows,
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Recovery inputs remain explicit at this existing boundary."
+)]
 pub(super) fn derive(
     directory: &std::path::Path,
     recovered: &RecoveredSnapshot,

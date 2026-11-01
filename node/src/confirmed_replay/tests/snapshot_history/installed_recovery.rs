@@ -274,7 +274,9 @@ impl WitnessService {
         local: Arc<LmdbStore>,
         change: usize,
     ) -> Self {
-        let registry = Arc::new(RwLock::new(ConnectionRegistry::new()));
+        let registry = Arc::new(RwLock::new(
+            crate::verification_test_support::loopback_registry(),
+        ));
         let (sender, mut receiver) = mpsc::channel::<crate::checkpoint_sync::witness::Command>(1);
         registry.write().await.set_witness_requests(sender);
         let requests = Arc::new(AtomicUsize::new(0));

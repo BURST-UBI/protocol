@@ -68,10 +68,10 @@ fn roster_changes(
         }
         if next.peek().is_some_and(|row| row.human == old.human) {
             let row = next.next().expect("matching next roster row");
-            if row.representative != old.representative {
-                if !push(&row.human, Some(&row.representative))? {
-                    return Ok(None);
-                }
+            if row.representative != old.representative
+                && !push(&row.human, Some(&row.representative))?
+            {
+                return Ok(None);
             }
         } else {
             if !push(&old.human, None)? {

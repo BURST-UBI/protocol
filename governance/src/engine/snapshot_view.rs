@@ -5,6 +5,9 @@ pub trait SnapshotMap: Serialize {
     type Key: Serialize;
     type Value: Serialize;
     fn len(&self) -> usize;
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
     fn entries(&self) -> impl Iterator<Item = (&Self::Key, &Self::Value)>;
 }
 impl<K: Ord + Clone + Serialize, V: Clone + Serialize> SnapshotMap for OrdMap<K, V> {

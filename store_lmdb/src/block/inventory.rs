@@ -295,8 +295,7 @@ pub(crate) fn visit_window<'a>(
     heights: Database<Bytes, Bytes>,
     reverse: Database<Bytes, Bytes>,
     after: Option<BlockHash>,
-    max_rows: usize,
-    max_bytes: usize,
+    (max_rows, max_bytes): (usize, usize),
     mut visit: impl FnMut(IndexedBlock<'a>) -> Result<(), StoreError>,
 ) -> Result<IndexedBlockWindow, StoreError> {
     let invalid = |message: &str| StoreError::Corruption(message.into());
@@ -380,8 +379,7 @@ impl LmdbBlockStore {
             self.height_db,
             self.block_height_db,
             after,
-            max_rows,
-            max_bytes,
+            (max_rows, max_bytes),
             visit,
         )
     }

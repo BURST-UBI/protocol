@@ -25,6 +25,9 @@ pub trait SnapshotMap {
     type Key: Serialize;
     type Value: Serialize;
     fn len(&self) -> usize;
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
     fn get(&self, key: &Self::Key) -> Option<&Self::Value>;
     fn entries(&self) -> impl Iterator<Item = (&Self::Key, &Self::Value)>;
 }

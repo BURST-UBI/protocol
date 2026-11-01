@@ -862,16 +862,16 @@ impl<'a> LmdbWriteTransaction<'a> {
                 undo.record(table, key, before, value)?;
             }
             self.dirty = true;
-            if table == UndoTable::Accounts {
-                if crate::verified_index::update(
+            if table == UndoTable::Accounts
+                && crate::verified_index::update(
                     &mut self.txn,
                     self.env.accounts_db,
                     self.env.verified_accounts_db,
                     key,
                     value,
-                )? {
-                    self.auxiliary_cache.get_mut().clear_electorate(table);
-                }
+                )?
+            {
+                self.auxiliary_cache.get_mut().clear_electorate(table);
             }
             if table == UndoTable::Pending {
                 crate::pending::update_pending_indexes(
@@ -2410,7 +2410,7 @@ impl crate::read_view::LedgerReadView<'_> {
         key.extend_from_slice(&height.to_be_bytes());
         self.env
             .height_db
-            .get(&self.txn, &key)
+            .get(self.txn, &key)
             .map_err(LmdbError::from)?
             .map(|bytes| {
                 bytes
@@ -2424,7 +2424,7 @@ impl crate::read_view::LedgerReadView<'_> {
     pub fn get_block(&self, hash: &BlockHash) -> Result<Vec<u8>, StoreError> {
         self.env
             .blocks_db
-            .get(&self.txn, hash.as_bytes())
+            .get(self.txn, hash.as_bytes())
             .map_err(LmdbError::from)?
             .map(<[u8]>::to_vec)
             .ok_or_else(|| StoreError::NotFound(hash.to_string()))
@@ -2438,7 +2438,7 @@ impl crate::read_view::LedgerReadView<'_> {
         let key = self
             .env
             .block_height_db
-            .get(&self.txn, hash.as_bytes())
+            .get(self.txn, hash.as_bytes())
             .map_err(LmdbError::from)?
             .ok_or_else(|| StoreError::NotFound(hash.to_string()))?;
         let prefix = account.as_str().as_bytes();
@@ -2447,7 +2447,7 @@ impl crate::read_view::LedgerReadView<'_> {
             || self
                 .env
                 .height_db
-                .get(&self.txn, key)
+                .get(self.txn, key)
                 .map_err(LmdbError::from)?
                 != Some(hash.as_bytes().as_slice())
         {
@@ -2462,7 +2462,7 @@ impl crate::read_view::LedgerReadView<'_> {
         let bytes = self
             .env
             .accounts_db
-            .get(&self.txn, account.as_str().as_bytes())
+            .get(self.txn, account.as_str().as_bytes())
             .map_err(LmdbError::from)?
             .ok_or_else(|| StoreError::NotFound(account.to_string()))?;
         bincode::deserialize(bytes).map_err(|error| StoreError::Serialization(error.to_string()))
@@ -2477,7 +2477,7 @@ impl crate::read_view::LedgerReadView<'_> {
         let bytes = self
             .env
             .pending_db
-            .get(&self.txn, &key)
+            .get(self.txn, &key)
             .map_err(LmdbError::from)?
             .ok_or_else(|| StoreError::NotFound(source.to_string()))?;
         bincode::deserialize(bytes)
@@ -2488,7 +2488,7 @@ impl crate::read_view::LedgerReadView<'_> {
     pub fn block_undo(&self, block: &BlockHash) -> Result<Option<BlockUndo>, StoreError> {
         self.env
             .meta_db
-            .get(&self.txn, &crate::block_undo::key(block))
+            .get(self.txn, &crate::block_undo::key(block))
             .map_err(LmdbError::from)?
             .map(|bytes| BlockUndo::decode(block, bytes))
             .transpose()

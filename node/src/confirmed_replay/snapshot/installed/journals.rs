@@ -27,6 +27,10 @@ pub(super) struct JournalGuard {
     sequences: sequences::SequenceGuard,
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Preserve recovery ownership; boxing is a separate allocation change."
+)]
 enum JournalHistory {
     Records {
         selections: super::SelectionHistory,

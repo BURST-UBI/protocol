@@ -85,9 +85,9 @@ pub fn encode_pending_cursor(amount: u128, hash: &burst_types::TxHash) -> String
     base64_encode(&bytes)
 }
 
-pub fn decode_pending_cursor(
-    cursor: Option<&str>,
-) -> Result<(Option<(u128, burst_types::TxHash)>, u64), &'static str> {
+pub type PendingCursor = (Option<(u128, burst_types::TxHash)>, u64);
+
+pub fn decode_pending_cursor(cursor: Option<&str>) -> Result<PendingCursor, &'static str> {
     if let Some(bytes) = cursor.and_then(base64_decode) {
         if let Some(key) = bytes.strip_prefix(b"pending1:") {
             if key.len() != 48 {

@@ -1555,7 +1555,7 @@ impl VerificationOrchestrator {
             penalized_verifiers: self
                 .penalized_verifiers
                 .iter()
-                .map(|(key, value)| (key.clone(), value.clone()))
+                .map(|(key, value)| (key.clone(), *value))
                 .collect(),
             neither_tracker: self.neither_tracker.clone(),
         }

@@ -14,9 +14,33 @@ runtime acceptance. Nothing is published by this handoff.
 | [Release record](evidence/release-status-20261031.txt) | Frozen candidate and platform evidence | Match exact artifacts and requirements before reuse; newer source is not covered automatically. |
 | [Coverage index](README.md) | Current sections and unchanged historical requirements | Unsigned requirements remain unsigned. Inventory validity is not a test result. |
 
-No runtime validation was started for this documentation pass. Before starting or
-restarting validation, inspect the actual process/service state and latest terminal
-receipt; a historical statement that a job was active is not current process state.
+## November 1 CI repairs
+
+Native workspace Clippy and the wallet-core/groups/web-runtime WASM Clippy check
+pass. The twelve failing network tests now pass in focused runs: two ingress and
+creator-authority tests, eight agreement and fork-recovery tests, and two live
+publication crash-recovery tests. The intermediate ten-test run remains recorded
+as eight passes and two failures; the two failures passed after correcting the
+shared cache assertion's obsolete aggregate-state reads.
+
+The fixtures now use existing normalized-state readers, Dev peer limits for
+localhost meshes, distinct ingress payloads, and the existing post-bootstrap
+creator-authority rule. Production peer limits, consensus rules, deadlines and
+release gates are unchanged. A storage regression also checks empty and selected
+metadata prefixes and callback-error propagation against direct database reads.
+
+These are development checks, not a complete CI or package-acceptance pass.
+Process-kill recovery does not establish physical power-loss safety. Private
+receipts retain source identities, terminal results and earlier failed attempts.
+Before restarting validation, inspect those records and actual process state.
+
+The wallet's native command exposed a `Send` compilation failure in group trust
+evaluation. Collecting the bounded futures before buffering fixes it without
+changing trust decisions or the shared request limit. All 21 trust-policy tests
+pass, including a new native `Send` regression, and WASM Clippy passes again.
+Wallet and dashboard TypeScript and native test compilation pass. Their Node
+unit/driver checks pass 30 and 2 tests respectively. These app checks do not
+replace browser journeys, native signing journeys or platform package acceptance.
 
 The next release boundary remains private end-to-end qualification of an explicitly
 selected protocol, wallet and dashboard candidate. Follow [the validation workflow](VALIDATION_WORKFLOW.md),
