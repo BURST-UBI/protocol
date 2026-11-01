@@ -5,6 +5,12 @@ how quickly personal income grows, and how long money created from that income
 can be used. These are its economic *parameters*. People choose them through
 voting instead of leaving them permanently fixed by the developer.
 
+There is a temporary exception while the network gets started: the creator can
+help verify the first participants and veto approved rule changes. These powers
+end permanently when the network reaches 50 verified people, including the
+creator. After that, the creator participates under the same rules as everyone
+else.
+
 That describes the mechanism, but why build it? The motivation is to give people
 more room to take part in an economy. Someone with savings can afford to learn,
 care for a relative or try an idea. Someone without that cushion may not have
@@ -81,7 +87,7 @@ If Alice could create ten accounts and claim ten incomes, the equal-income rule
 would mean very little. That is why participation needs more than a new key.
 It also matters for voting: additional false identities could gain extra votes.
 
-People joining first get endorsements from verified participants. Endorsers
+Under ordinary enrollment, applicants get endorsements from verified participants. Endorsers
 burn some of their own BRN to support the application. A small group of
 verifiers then examines it, chosen by a random draw from volunteers who meet
 the verification requirements.
@@ -129,8 +135,26 @@ automatically give that representative your vote on these proposals.
 Voting gives people a say; it does not guarantee they will agree or choose well.
 A new income rate applies from then on, leaving previously earned BRN intact.
 A new currency lifetime can affect money people already hold. The
-[governance guide](../protocol/GOVERNANCE.md) explains those consequences and the
-creator's temporary powers while a network is starting.
+[governance guide](../protocol/GOVERNANCE.md) explains those consequences.
+
+## Getting started, then giving up control
+
+A new network does not yet have enough verified people to run its ordinary
+verification process. Bootstrap gives the creator temporary verification powers
+to help that first community form, and a veto over approved governance proposals
+while the community is still small. The veto can stop a change before it takes
+effect; it cannot let the creator pass a change alone. An approved proposal goes
+ahead unless the creator explicitly vetoes it within that window.
+
+**At 50 verified people, those special powers end permanently.** The creator
+counts as one of the 50. The protocol can end bootstrap earlier, but it cannot
+extend it beyond that cap. A later fall below 50 does not bring the powers back.
+This is enforced by the protocol, not left to the creator's promise to step aside.
+
+From then on, the creator has no special verification rights, governance veto or
+other creator-only protocol authority. Their account follows the same rules as
+anyone else's. The [bootstrap guide](../protocol/BOOTSTRAP.md) explains the exact
+permissions and how the network records their permanent end.
 
 The [whitepaper](WHITEPAPER.md) develops the broader argument. To see the
 accounting in detail, continue with [balances and units](ECONOMICS.md). Before
