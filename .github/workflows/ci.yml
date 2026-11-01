@@ -220,13 +220,25 @@ jobs:
   node-components:
     needs: [scope, node-test-build]
     if: needs.scope.outputs.runtime == 'true'
-    name: Node components (${{ matrix.group }})
+    name: Node components (${{ matrix.group }}, shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        group: [fast, slow]
+        include:
+          - group: fast
+            shard: 0
+            shards: 1
+          - group: slow
+            shard: 0
+            shards: 3
+          - group: slow
+            shard: 1
+            shards: 3
+          - group: slow
+            shard: 2
+            shards: 3
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -254,6 +266,8 @@ jobs:
           echo "BURST_ELECTORATE_PREPARED=$RUNNER_TEMP/burst-electorate" >> "$GITHUB_ENV"
       - run: bash tools/test-node.sh "${{ matrix.group }}"
         env:
+          BURST_TEST_SLOW_SHARD: ${{ matrix.shard }}
+          BURST_TEST_SLOW_SHARDS: ${{ matrix.shards }}
           BURST_NODE_TEST_BINARY: ${{ github.workspace }}/target/ci-node-tests/burst-node-tests
       - if: matrix.group == 'fast'
         run: cargo test -p burst-node --doc --locked
@@ -373,6 +387,9 @@ jobs:
           cargo test -p burst-node --locked --no-fail-fast --test "$INTEGRATION_TARGET" -- --test-threads=1 || status=1
           if [[ "$INTEGRATION_TARGET" == '*' || "$INTEGRATION_TARGET" == 'confirmed_replay_network' ]]; then
             cargo test -p burst-node --locked --features experimental-testnet --test confirmed_replay_network certified_selection_catches_up_after_payment_replay -- --exact --test-threads=1 || status=1
+          fi
+          if [[ "$INTEGRATION_TARGET" == '*' || "$INTEGRATION_TARGET" == 'governance_network' ]]; then
+            cargo test -p burst-node --locked --features experimental-testnet --test governance_network signed_governance_reaches_activation_and_replays_on_a_fresh_node -- --exact --test-threads=1 || status=1
           fi
           if [[ "$INTEGRATION_TARGET" == '*' || "$INTEGRATION_TARGET" == 'economic_snapshot_recovery' ]]; then
             cargo test -p burst-node --locked --features experimental-testnet --test economic_snapshot_recovery populated_legacy_governance_migrates_on_start_and_survives_second_restart -- --exact --test-threads=1 || status=1

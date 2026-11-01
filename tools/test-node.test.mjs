@@ -28,7 +28,7 @@ function run(args, overrides = {}, affinity, prebuilt = false) {
     chmodSync(cargo, 0o700);
     const env = { ...process.env };
     delete env.BURST_NODE_TEST_BINARY;
-    for (const key of ["BURST_TEST_CPUS", "CARGO_BUILD_JOBS", "TOKIO_WORKER_THREADS", "BURST_TEST_NETWORK_CONCURRENCY", "BURST_TEST_NETWORK_SHARD", "BURST_TEST_NETWORK_SHARDS"]) delete env[key];
+    for (const key of ["BURST_TEST_CPUS", "CARGO_BUILD_JOBS", "TOKIO_WORKER_THREADS", "BURST_TEST_NETWORK_CONCURRENCY", "BURST_TEST_NETWORK_SHARD", "BURST_TEST_NETWORK_SHARDS", "BURST_TEST_SLOW_SHARD", "BURST_TEST_SLOW_SHARDS"]) delete env[key];
     Object.assign(env, { PATH: `${dir}:${env.PATH}`, MOCK_CARGO_LOG: log, MOCK_TEST_NAMES: JSON.stringify(names) }, overrides);
     if (prebuilt) {
       const binary = join(dir, 'node-tests');
@@ -154,6 +154,32 @@ test("network shards cover the same catalog exactly once with exact names", () =
   assert.deepEqual(executions.sort(), whole.calls[0].selected.sort());
   assert.equal(new Set(executions).size, executions.length);
   const empty = run(["network"], { BURST_TEST_NETWORK_SHARDS: "9", BURST_TEST_NETWORK_SHARD: "8" });
+  assert.equal(empty.status, 0, empty.stderr);
+  assert.equal(empty.calls.length, 1);
+});
+
+test("slow shards cover the same catalog exactly once with exact names", () => {
+  const whole = run(["slow", "--list"]);
+  const executions = [];
+  for (let shard = 0; shard < 3; shard++) {
+    const env = { BURST_TEST_SLOW_SHARDS: "3", BURST_TEST_SLOW_SHARD: String(shard) };
+    const result = run(["slow"], env);
+    assert.equal(result.status, 0, result.stderr);
+    const listed = run(["slow", "--list"], env);
+    assert.equal(listed.status, 0, listed.stderr);
+    assert.equal(listed.calls.length, 1, "listing must never execute a test");
+    const selected = result.calls.slice(1).flatMap(call => {
+      assert(call.args.includes("--exact"));
+      assert(call.args.includes("--locked"));
+      assert.equal(call.selected.length, 1);
+      return call.selected;
+    });
+    assert.deepEqual(listed.stdout.trim().split("\n").filter(Boolean).map(line => line.replace(/: test$/, "")), selected);
+    executions.push(...selected);
+  }
+  assert.deepEqual(executions.sort(), whole.calls[0].selected.sort());
+  assert.equal(new Set(executions).size, executions.length);
+  const empty = run(["slow"], { BURST_TEST_SLOW_SHARDS: "9", BURST_TEST_SLOW_SHARD: "8" });
   assert.equal(empty.status, 0, empty.stderr);
   assert.equal(empty.calls.length, 1);
 });

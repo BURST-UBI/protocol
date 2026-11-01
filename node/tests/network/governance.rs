@@ -1,6 +1,6 @@
 //! Real signed governance over RPC/P2P. Short timelines are isolated to this fixture.
 use burst_governance::GovernableParam;
-use burst_node::{BurstNode, NodeConfig};
+use burst_node::NodeConfig;
 use burst_store::meta::MetaStore;
 use burst_transactions::{governance::GovernanceVote, Transaction};
 use burst_types::{NetworkId, Timestamp, TxHash};
@@ -10,27 +10,9 @@ use burst_wallet_core::{
 use serde_json::{json, Value};
 use std::time::Duration;
 
-async fn launch(
-    config: NodeConfig,
-) -> (
-    std::sync::Arc<burst_node::shutdown::ShutdownController>,
-    tokio::task::JoinHandle<()>,
-    std::sync::Arc<burst_store_lmdb::LmdbStore>,
-) {
-    let mut node = BurstNode::new(config).await.unwrap();
-    let shutdown = node.shutdown.clone();
-    let store = node.store.clone();
-    let task = tokio::spawn(async move {
-        node.start_with_services(burst_daemon::start_public_services)
-            .await
-            .unwrap();
-        tokio::time::timeout(Duration::from_secs(15), node.stop())
-            .await
-            .expect("node shutdown timed out")
-            .unwrap();
-    });
-    (shutdown, task, store)
-}
+#[path = "../support/running_node.rs"]
+mod running_node;
+use running_node::RunningNode;
 
 async fn wait_phase(clients: &[NodeClient], hash: &str, phase: &str) {
     let mut last = vec![String::new(); clients.len()];
@@ -71,21 +53,14 @@ async fn wait_phase(clients: &[NodeClient], hash: &str, phase: &str) {
     );
 }
 
-async fn wait_ready(
-    clients: &[NodeClient],
-    nodes: &[(
-        std::sync::Arc<burst_node::shutdown::ShutdownController>,
-        tokio::task::JoinHandle<()>,
-        std::sync::Arc<burst_store_lmdb::LmdbStore>,
-    )],
-) {
+async fn wait_ready(clients: &[NodeClient], nodes: &[RunningNode]) {
     let mut status = vec![String::new(); clients.len()];
     let ready = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let mut all_ready = true;
             for (i, client) in clients.iter().enumerate() {
                 assert!(
-                    !nodes[i].1.is_finished(),
+                    !nodes[i].is_finished(),
                     "node {i} exited before RPC readiness"
                 );
                 match client.rpc_call("peers", json!({})).await {
@@ -182,18 +157,44 @@ async fn signed_governance_reaches_activation_and_replays_on_a_fresh_node() {
         config.params.governance_proposal_endorsements = 1;
         config.params.governance_proposal_cost = 5;
         config.params.min_work_difficulty = 0;
-        let node = launch(config.clone()).await;
-        clients.push(NodeClient::new(format!("http://127.0.0.1:{}", config.rpc_port)).unwrap());
+        let node = RunningNode::launch(config.clone()).await;
+        clients.push(node.client.clone());
         configs.push(config);
         nodes.push(node);
     }
+    eprintln!("governance fixture: three nodes launched");
     wait_ready(&clients, &nodes).await;
+    eprintln!("governance fixture: peers ready");
     let keys = burst_crypto::keypair_from_seed(&[0; 32]);
     let address = burst_crypto::derive_address(&keys.public);
     let head = clients[0].signing_state(&address).await.unwrap().head;
-    let constitution = nodes[0].2.meta_store().get_meta("consti_engine").unwrap();
+    if !cfg!(feature = "experimental-testnet") {
+        let error = clients[0]
+            .propose_parameter_signed(&keys, GovernableParam::BrnRate, 999)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains(
+                "governance requires certified activation; unavailable behind the release gate"
+            ),
+            "{error}"
+        );
+        assert_eq!(clients[0].signing_state(&address).await.unwrap().head, head);
+        for node in &nodes {
+            node.shutdown.shutdown();
+        }
+        for node in nodes {
+            node.stop().await;
+        }
+        return;
+    }
+    let constitution = nodes[0]
+        .store
+        .meta_store()
+        .get_meta("consti_engine")
+        .unwrap();
     nodes[0]
-        .2
+        .store
         .meta_store()
         .delete_meta("consti_engine")
         .unwrap();
@@ -208,13 +209,18 @@ async fn signed_governance_reaches_activation_and_replays_on_a_fresh_node() {
         "{error}"
     );
     assert_eq!(clients[0].signing_state(&address).await.unwrap().head, head);
-    assert!(nodes[0].2.meta_store().get_meta("consti_engine").is_err());
+    assert!(nodes[0]
+        .store
+        .meta_store()
+        .get_meta("consti_engine")
+        .is_err());
     // Restore only the exact saved bytes; admission must not invent replacement state.
     nodes[0]
-        .2
+        .store
         .meta_store()
         .put_meta("consti_engine", &constitution)
         .unwrap();
+    eprintln!("governance fixture: missing-state rejection preserved account head");
     let id = change_rate(&clients, &keys, 123).await;
     eprintln!("all nodes activated the approved BRN rate");
     let expected: Value = clients[0]
@@ -237,7 +243,7 @@ async fn signed_governance_reaches_activation_and_replays_on_a_fresh_node() {
     config.rpc_port = available_port();
     config.bootstrap_peers = vec![format!("127.0.0.1:{first_port}")];
     let late_client = NodeClient::new(format!("http://127.0.0.1:{}", config.rpc_port)).unwrap();
-    let late = launch(config).await;
+    let late = RunningNode::launch(config).await;
     wait_phase(
         std::slice::from_ref(&late_client),
         &id.to_string(),
@@ -278,21 +284,14 @@ async fn signed_governance_reaches_activation_and_replays_on_a_fresh_node() {
             assert_eq!(info["phase"], "Activated");
         }
     }
-    late.0.shutdown();
-    tokio::time::timeout(Duration::from_secs(20), late.1)
-        .await
-        .expect("late-node start waiter did not stop")
-        .unwrap();
+    late.stop().await;
     for node in &nodes {
-        node.0.shutdown();
+        node.shutdown.shutdown();
     }
     for node in nodes {
-        tokio::time::timeout(Duration::from_secs(20), node.1)
-            .await
-            .expect("node start waiter did not stop")
-            .unwrap();
+        node.stop().await;
     }
-    let recovered = launch(configs[0].clone()).await;
+    let recovered = RunningNode::launch(configs[0].clone()).await;
     eprintln!("restarting the activated node from its persisted state");
     wait_phase(
         std::slice::from_ref(&clients[0]),
@@ -325,11 +324,7 @@ async fn signed_governance_reaches_activation_and_replays_on_a_fresh_node() {
             .unwrap();
         assert_eq!(info["phase"], "Activated");
     }
-    recovered.0.shutdown();
-    tokio::time::timeout(Duration::from_secs(20), recovered.1)
-        .await
-        .expect("recovered-node start waiter did not stop")
-        .unwrap();
+    recovered.stop().await;
 }
 
 #[path = "../support/ports.rs"]

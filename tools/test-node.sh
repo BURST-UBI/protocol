@@ -74,13 +74,17 @@ fi
 
 shard_index="${BURST_TEST_NETWORK_SHARD:-0}"
 shard_count="${BURST_TEST_NETWORK_SHARDS:-1}"
+if [[ "$mode" == slow ]]; then
+  shard_index="${BURST_TEST_SLOW_SHARD:-0}"
+  shard_count="${BURST_TEST_SLOW_SHARDS:-1}"
+fi
 if [[ ! "$shard_count" =~ ^[1-9][0-9]?$ || ! "$shard_index" =~ ^(0|[1-9][0-9]?)$ ]] \
     || (( shard_index >= shard_count )); then
-  echo 'Network shard must be a zero-based index below BURST_TEST_NETWORK_SHARDS (1–99)' >&2
+  echo 'Test shard must be a zero-based index below its configured shard count (1–99)' >&2
   exit 2
 fi
-if (( shard_count > 1 )) && [[ "$mode" != network ]]; then
-  echo 'Network sharding is only supported in network mode' >&2
+if (( shard_count > 1 )) && [[ "$mode" != network && "$mode" != slow ]]; then
+  echo 'Sharding is only supported in network or slow mode' >&2
   exit 2
 fi
 
@@ -140,15 +144,15 @@ fi
 if [[ "$mode" == fast || "$mode" == all ]]; then
   "${runner[@]}" "${node_tests[@]}" "${skip_expensive[@]}" --test-threads="$cpu_budget" "${listing[@]}"
 fi
-if [[ "$mode" == slow || "$mode" == all ]]; then
-  "${runner[@]}" "${node_tests[@]}" "${slow_filters[@]}" --test-threads=1 "${listing[@]}"
-fi
-if [[ "$mode" == network || "$mode" == all ]]; then
+run_group() {
+  local group="$1" threads="$2"
+  shift 2
+  local filters=("$@")
   if (( shard_count == 1 )); then
-    "${runner[@]}" "${node_tests[@]}" "${network_filters[@]}" \
-      --test-threads="$network_threads" "${listing[@]}"
+    "${runner[@]}" "${node_tests[@]}" "${filters[@]}" \
+      --test-threads="$threads" "${listing[@]}"
   else
-    inventory=$("${runner[@]}" "${node_tests[@]}" "${network_filters[@]}" --list)
+    inventory=$("${runner[@]}" "${node_tests[@]}" "${filters[@]}" --list)
     selected=()
     position=0
     while IFS= read -r name; do
@@ -157,8 +161,8 @@ if [[ "$mode" == network || "$mode" == all ]]; then
       if (( position % shard_count == shard_index )); then selected+=("$name"); fi
       position=$((position + 1))
     done < <(LC_ALL=C sort <<< "$inventory")
-    (( position > 0 )) || { echo 'No network tests were discovered' >&2; exit 1; }
-    echo "Network shard $shard_index/$shard_count: ${#selected[@]} of $position tests" >&2
+    (( position > 0 )) || { echo "No $group tests were discovered" >&2; exit 1; }
+    echo "$group shard $shard_index/$shard_count: ${#selected[@]} of $position tests" >&2
     failures=()
     for name in "${selected[@]}"; do
       if (( ${#listing[@]} )); then
@@ -170,8 +174,16 @@ if [[ "$mode" == network || "$mode" == all ]]; then
       fi
     done
     if (( ${#failures[@]} )); then
-      printf 'Failed network test: %s\n' "${failures[@]}" >&2
+      for name in "${failures[@]}"; do
+        printf 'Failed %s test: %s\n' "$group" "$name" >&2
+      done
       exit 1
     fi
   fi
+}
+if [[ "$mode" == slow || "$mode" == all ]]; then
+  run_group slow 1 "${slow_filters[@]}"
+fi
+if [[ "$mode" == network || "$mode" == all ]]; then
+  run_group network "$network_threads" "${network_filters[@]}"
 fi
