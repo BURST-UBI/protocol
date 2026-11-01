@@ -164,14 +164,11 @@ an incompatibility with the revision CI builds.
 
 ## Documentation changes
 
-Edit `docs/` and its `SUMMARY.md` navigation. Docusaurus in `website/` reads those
-files directly; Vercel builds the same commit. There is no separate website
-copy to update.
-
-```bash
-npm --prefix website ci
-npm --prefix website run build
-```
+Edit `docs/` and its `SUMMARY.md` navigation here. The website source and build
+instructions live in [BURST-UBI/whitepaper](https://github.com/BURST-UBI/whitepaper).
+It renders these files from the protocol commit recorded in its
+`protocol-source.json`; there is no second editable copy of the docs.
+Website dependencies and deployment configuration belong in that repository.
 
 The build checks internal links and generates local search. Keep code examples
 consistent with the RPC contracts in `rpc/messages/` and the public methods in

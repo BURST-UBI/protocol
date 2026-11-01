@@ -20,7 +20,7 @@
       "sha256": "14315ef75699e016dd7f3fef3220b58bf30524b6999f8f01236b40cbc77c13fd"
     },
     "docs/development/DEVELOPING.md": {
-      "sha256": "3d4dc5e2938288c7dd38cf3f25fd50bf9a429127b74f547e56a7a301e2545c6c"
+      "sha256": "c5f3894f0de2493b3192e59e06b95b688a9506c30c2bbdc49e6b255291eb479d"
     },
     "docs/development/PERFORMANCE.md": {
       "sha256": "52ae987391042b02d5f56c50bf979f60012ba7492252270a530f0909b5a67350"
@@ -3457,10 +3457,10 @@
       "source": "docs/development/DEVELOPING.md",
       "line": 165,
       "title": "Documentation changes",
-      "sha256": "973e424cf9b9069d17472905b6f75c9185c3c5767b163f78969b27d16db765f7",
+      "sha256": "6e18a4aee14f7fff4894d7aebf9ef4e4ad96e6dfa3cc4768dd8c383958d3c84b",
       "status": "unverified",
-      "note": "Documentation revised against source for developer workflows. This index entry is not runtime validation or release sign-off.",
-      "evidence": []
+      "evidence": [],
+      "note": "Website build instructions moved to the separate whitepaper repository; no protocol implementation sign-off implied."
     },
     {
       "id": "DOC-development/PERFORMANCE-001",
