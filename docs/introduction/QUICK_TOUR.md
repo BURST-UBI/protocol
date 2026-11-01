@@ -1,47 +1,27 @@
 # What is BURST?
 
-BURST is a monetary protocol whose participants can change two central rules:
-how quickly personal income grows, and how long money created from that income
-can be used. These are its economic *parameters*. People choose them through
-voting instead of leaving them permanently fixed by the developer.
+BURST is a monetary protocol whose participants choose how quickly personal
+income grows and how long money created from that income can be used. These
+are its economic *parameters*, decided through voting.
 
-There is a temporary exception while the network gets started: the creator can
-help verify the first participants and veto approved rule changes. These powers
-end permanently when the network reaches <!-- default:live.bootstrap_exit_threshold -->50<!-- /default --> verified people, including the
-creator. After that, the creator participates under the same rules as everyone
-else.
+Why build it? Someone with savings can afford to learn, care for a relative
+or try an idea. Someone without that cushion may not have the same choice.
+An income available to everyone could help, while payments would still let
+people earn by doing things others value.
 
-That describes the mechanism, but why build it? The motivation is to give people
-more room to take part in an economy. Someone with savings can afford to learn,
-care for a relative or try an idea. Someone without that cushion may not have
-the same choice. An income available to everyone could help, while payments
-would still let people earn by doing things others value.
-
-You do not have to believe that one particular income rate or currency lifetime
-is right to understand the design. BURST makes those choices explicit and lets
-the community revise them. A positive income rate gives people ongoing income;
-a zero rate stops new income. Currency can have a limited or effectively
-unlimited lifetime.
-
-The current defaults use ongoing income and a <!-- default:live.trst_expiry_secs:years -->70<!-- /default -->-year currency lifetime. Let's
-follow a payment under those settings, then look at the problems
-that this creates and how BURST tries to address them.
+The community can change the income rate, including setting it to zero.
+Here is how a payment works with income enabled.
 
 ## An income of your own
 
 Once your account is verified, your personal balance grows over time. It is
-called **BRN**, from *burn*. At the default rate, each account that qualifies
-for income gains about <!-- default:live.brn_rate:hourly_approx -->1<!-- /default --> BRN per hour. You can save it until you need it;
-unused BRN has no expiry date.
+called **BRN**, from *burn*. At the default rate, an eligible account gains
+about <!-- default:live.brn_rate:hourly_approx -->1<!-- /default --> BRN per hour. Unused BRN has no expiry date, so you can save
+it until you need it.
 
-Nobody has to send you an hourly payment. Your wallet calculates your income
-from how long your account qualified, which rates applied, and what you have
-already spent. The network can check the same calculation. This avoids making
-every hour of income a separate transaction for every person.
-
-Calling it income does not guarantee that it will cover someone's needs. BRN
-only becomes useful purchasing power when people are willing to accept payments
-for things others want.
+Your wallet calculates income from your eligible time, the rates that applied
+and what you have spent. Nodes check the same calculation, so nobody needs to
+send you an hourly payment.
 
 ## Something worth paying for
 
@@ -53,113 +33,76 @@ give BURST its name.
 ![Alice spends BRN to create a payment in TRST, which Bob signs to accept.](../assets/conversion.png)
 
 Bob can pay Carol with that TRST, and she can pass it on again. These later
-payments move the same money; they do not create another 50 TRST each time.
-Alice and Bob continue to gain their own BRN while they qualify for income.
-Earning TRST does not take away Bob's personal allowance.
+payments move the same money; they do not create more. Both Alice and Bob
+continue to gain BRN while they qualify for income.
 
-Why have two balances? They let the community treat unspent personal income
-and circulating money differently. Alice can keep her unused BRN. Once she
-spends it, the TRST has a creation date and a history, so the network can apply
-a currency lifetime or trace money created through a false identity. These are
-real differences in the rules, not two names for the same balance.
+Unlike saved BRN, circulating TRST has an origin and a history. These let the
+network apply an expiry date or trace money created through a false identity.
 
 ## Why would someone accept TRST?
 
-Bob accepts because he expects to be able to use the payment himself. The
-software cannot make that expectation true. It cannot supply the goods, choose
-Bob's price or force another shop to accept TRST. Those depend on the people
-participating in the economy.
+Bob accepts because he expects to be able to spend it himself. Its purchasing
+power depends on what people will offer for it; the software cannot guarantee
+that anyone will accept it.
 
-Expiry is another choice people may disagree about. A limited lifetime lets the
-community decide how long earlier payments can keep circulating while new
-income continues to grow. But it also gives the recipient a deadline for using
-the money. With the default <!-- default:live.trst_expiry_secs:years -->70<!-- /default -->-year lifetime, Alice's payment expires <!-- default:live.trst_expiry_secs:years -->70<!-- /default --> years after
-its creation, even if it had changed hands many times. Passing it on cannot
-restart the clock.
-
-The default lifetime is <!-- default:live.trst_expiry_secs:years -->70<!-- /default --> years, measured as <!-- default:live.trst_expiry_secs:years -->70<!-- /default --> periods of 365 days from the
-money's effective origin date. (Yes, we know leap years exist. For simplicity,
-a year here means 365 days.) The community can choose a different lifetime,
-including effectively unlimited, with consequences it must weigh. No setting
-promises stable prices or equal wealth.
+The default TRST lifetime is <!-- default:live.trst_expiry_secs:years -->70<!-- /default --> years from its effective origin date.
+Passing it on does not restart the clock. A year here means 365 days.
+(Yes, we know leap years exist.) A limited lifetime gives earlier money a
+deadline while new income keeps growing. The community can change that
+lifetime, including making it effectively unlimited, but no setting guarantees
+stable prices.
 
 ## One income for each person
 
-If Alice could create ten accounts and claim ten incomes, the equal-income rule
-would mean very little. That is why participation needs more than a new key.
-It also matters for voting: additional false identities could gain extra votes.
+Ten accounts must not mean ten incomes or ten votes. That is why people
+need to verify that they are unique.
 
-Under ordinary enrollment, applicants get endorsements from verified participants. Endorsers
-burn some of their own BRN to support the application. A small group of
-verifiers then examines it, chosen by a random draw from volunteers who meet
-the verification requirements.
+In ordinary enrollment, verified participants endorse an applicant by burning
+some of their own BRN. Verifiers then examine the application. They are chosen
+by a random draw from eligible volunteers, using a candidate list agreed before
+the random result is known. Everyone can check the draw; the applicant cannot
+hand-pick their judges.
 
-The applicant cannot pick their judges. The network agrees the candidate list
-before the random result is known, and nodes can check the draw using the same
-public result. This prevents hand-picking or changing the list to fit the
-result. It does not guarantee that the people chosen are honest or correct.
-
-Verification has to remain open to challenge. If a fraud challenge succeeds,
-the account loses its verified rights and the TRST created from its BRN can
-become invalid, even after changing hands. Otherwise, a false identity could
-leave its earlier income circulating after it was caught.
-
-That choice can hurt an honest recipient. Bob might already have delivered
-goods when some of his payment becomes invalid. The network cannot recover
-those goods for him. Random selection, stakes and appeals are attempts to
-improve the judgments; they do not remove this risk. The
-[verification guide](../protocol/VERIFICATION.md) explains the process and its
-current restrictions.
+A successful fraud challenge removes verified rights and can invalidate TRST
+created from that account's BRN, even after it changes hands. Otherwise,
+fraudulent income could keep circulating. An honest recipient can lose a
+payment for goods already delivered, so these judgments matter.
+[Account verification](../protocol/VERIFICATION.md) explains the stakes, appeals
+and current restrictions.
 
 ## Who checks the payments?
 
 Your wallet signs actions with your account's key. Computers called **nodes**
-check those signatures and whether the actions follow the rules. A signature
-proves that the key authorized a payment; it cannot make an overspend valid.
+check those signatures and reject actions that break the rules, such as
+overspending.
 
 If someone signs conflicting payments, **representatives** vote on which block
-to confirm. Each verified person can give one equal unit of voting weight to a
-representative. More money does not give that person more weight. This is a
-separate job from the verifiers who judge whether an applicant is a unique person.
-
-The distinction matters: selecting people fairly for identity checks and agreeing
-which payments happened solve different problems. The
-[consensus guide](../protocol/CONSENSUS.md) explains the latter.
+to confirm. Each verified person can assign one equal unit of voting weight to
+a representative; holding more money adds no weight. This is separate from
+verifiers judging whether an applicant is a unique person. See [consensus](../protocol/CONSENSUS.md).
 
 ## Rules people choose together
 
-The community can propose changes to the income rate, currency lifetime and other
-supported settings. Proposals need enough participation and support to pass.
-An ordinary approved change then waits before taking effect, so participants
-can see what is coming. Choosing a representative to confirm payments does not
-automatically give that representative your vote on these proposals.
+Participants vote on proposals to change the supported settings. An ordinary
+change needs enough participation and support, followed by a wait before it
+takes effect. Your payment representative does not automatically get your
+governance vote.
 
-Voting gives people a say; it does not guarantee they will agree or choose well.
-A new income rate applies from then on, leaving previously earned BRN intact.
-A new currency lifetime can affect money people already hold. The
-[governance guide](../protocol/GOVERNANCE.md) explains those consequences.
+A new income rate leaves previously earned BRN intact. A new currency lifetime
+can affect money people already hold. [Governance](../protocol/GOVERNANCE.md)
+explains how proposals work and what they can change.
 
 ## Getting started, then giving up control
 
-A new network does not yet have enough verified people to run its ordinary
-verification process. Bootstrap gives the creator temporary verification powers
-to help that first community form, and a veto over approved governance proposals
-while the community is still small. The veto can stop a change before it takes
-effect; it cannot let the creator pass a change alone. An approved proposal goes
-ahead unless the creator explicitly vetoes it within that window.
+A new network needs help forming its first verified community. During bootstrap,
+the creator can help verify participants and veto approved rule changes.
+Approved proposals proceed unless explicitly vetoed; the creator cannot pass
+a change alone. These powers end permanently at <!-- default:live.bootstrap_exit_threshold -->50<!-- /default --> verified people,
+including the creator, or sooner if bootstrap ends earlier.
+They cannot return if participation later falls. Afterward, the creator follows
+the same rules as everyone else. See [bootstrap permissions](../protocol/BOOTSTRAP.md).
 
-**At <!-- default:live.bootstrap_exit_threshold -->50<!-- /default --> verified people under the default settings, those special powers end permanently.** The creator
-counts toward that total. The protocol can end bootstrap earlier, but it cannot
-extend it beyond that cap. A later fall below the exit threshold does not bring the powers back.
-This is enforced by the protocol, not left to the creator's promise to step aside.
-
-From then on, the creator has no special verification rights, governance veto or
-other creator-only protocol authority. Their account follows the same rules as
-anyone else's. The [bootstrap guide](../protocol/BOOTSTRAP.md) explains the exact
-permissions and how the network records their permanent end.
-
-The [whitepaper](WHITEPAPER.md) develops the broader argument. To see the
-accounting in detail, continue with [balances and units](ECONOMICS.md). Before
-using or building on the software, read [limits and assumptions](LIMITATIONS.md):
-some of the mechanisms described here are currently enabled only on experimental
-networks, and their economic and social assumptions remain open to scrutiny.
+Read [balances and units](ECONOMICS.md) for the accounting, or the
+[whitepaper](WHITEPAPER.md) for the broader argument. Check
+[limits and assumptions](LIMITATIONS.md) before using BURST; some mechanisms
+are currently enabled only on experimental networks.

@@ -41,7 +41,7 @@
       "sha256": "d067f148ee5db9e0814f9e4f33f59dc1f57d053de0726bc4fa7f63b72531b6fa"
     },
     "docs/introduction/QUICK_TOUR.md": {
-      "sha256": "ba0a7ca3dc79fadefc97d6cbc26b5990ea47799ec0ca0da9a23218a3736ce71b"
+      "sha256": "1de8b0f26183cf258d8af80f64f4149dfa6c3fd91a77f565bc16f01443c7f6fb"
     },
     "docs/introduction/WHITEPAPER.md": {
       "sha256": "2e2b3d4d5802eb3c3efa840f6df4b9db006df149b9861b92faed3b076b002168"
@@ -3847,80 +3847,80 @@
       "source": "docs/introduction/QUICK_TOUR.md",
       "line": 1,
       "title": "What is BURST?",
-      "sha256": "c59fe681a14899bb00ba4a5638bce3a9a4d1f6ab059aee1de83c03d5e96a9cff",
+      "sha256": "284437a473629bcc623636e78e26037515915648bb9d32cfd5dfe67e20c4676e",
       "status": "unverified",
       "evidence": [],
-      "note": "Default values now marked for generation from the Rust parameter registry; no new runtime sign-off."
+      "note": "Introduction shortened to remove repeated explanations; no implementation sign-off implied."
     },
     {
       "id": "DOC-introduction/QUICK_TOUR-002",
       "source": "docs/introduction/QUICK_TOUR.md",
-      "line": 30,
+      "line": 15,
       "title": "An income of your own",
-      "sha256": "c72aabc46ac8fc44856a0349598e5f1cdddcbf3a35c3242946a101467ef11ce0",
+      "sha256": "0b61dfcfc9fc7be9993d490b566ecdad2a92d4104f8980a392b58e0748a82cd5",
       "status": "unverified",
       "evidence": [],
-      "note": "Default values now marked for generation from the Rust parameter registry; no new runtime sign-off."
+      "note": "Introduction shortened to remove repeated explanations; no implementation sign-off implied."
     },
     {
       "id": "DOC-introduction/QUICK_TOUR-003",
       "source": "docs/introduction/QUICK_TOUR.md",
-      "line": 46,
+      "line": 26,
       "title": "Something worth paying for",
-      "sha256": "9c8eb4346cc877987c7af50d274b4c561e916b2400b21c62885aad124ce29da2",
+      "sha256": "5662dbc645cc7a2610724de0ac6fa334154675ec4438141be2fdc86db35e1a09",
       "status": "unverified",
-      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
-      "evidence": []
+      "evidence": [],
+      "note": "Introduction shortened to remove repeated explanations; no implementation sign-off implied."
     },
     {
       "id": "DOC-introduction/QUICK_TOUR-004",
       "source": "docs/introduction/QUICK_TOUR.md",
-      "line": 66,
+      "line": 42,
       "title": "Why would someone accept TRST?",
-      "sha256": "fd47aa255a4173896dd349c64dc1f78369eba03be5f973a990068f1c173fac24",
+      "sha256": "e29dc1bbb0e7e16edebe6b0256f20c17980570a71d79ef019431f6d39a756a16",
       "status": "unverified",
       "evidence": [],
-      "note": "Default values now marked for generation from the Rust parameter registry; no new runtime sign-off."
+      "note": "Introduction shortened to remove repeated explanations; no implementation sign-off implied."
     },
     {
       "id": "DOC-introduction/QUICK_TOUR-005",
       "source": "docs/introduction/QUICK_TOUR.md",
-      "line": 86,
+      "line": 55,
       "title": "One income for each person",
-      "sha256": "26f76330fc1f87a4849675348e6af788a3656b8bc4ca5d4eeee2185ac660ac91",
+      "sha256": "e1d787c4d49479fda37663a13b9a616d1ffa0a85657e846f91a1699d894f5305",
       "status": "unverified",
       "evidence": [],
-      "note": "Introduction explains bootstrap purpose and permanent creator-authority exit; reviewed against bootstrap phase and veto admission code. No new runtime qualification."
+      "note": "Introduction shortened to remove repeated explanations; no implementation sign-off implied."
     },
     {
       "id": "DOC-introduction/QUICK_TOUR-006",
       "source": "docs/introduction/QUICK_TOUR.md",
-      "line": 114,
+      "line": 73,
       "title": "Who checks the payments?",
-      "sha256": "243aea80ae84c3bf6b23089d43316ab09442ba0f4dd42062fb7bd9c5071ac8e1",
+      "sha256": "2e8c2f526009ae45a0abd78da45a6333b38563275930afec2e978c65ed4d3574",
       "status": "unverified",
-      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
-      "evidence": []
+      "evidence": [],
+      "note": "Introduction shortened to remove repeated explanations; no implementation sign-off implied."
     },
     {
       "id": "DOC-introduction/QUICK_TOUR-007",
       "source": "docs/introduction/QUICK_TOUR.md",
-      "line": 129,
+      "line": 84,
       "title": "Rules people choose together",
-      "sha256": "2ee977f0957be65cb7638ba2f8806a57e6db5e1e4e4ae16918f7a85487413b36",
+      "sha256": "3a62b172481f5a761ae92f8877e44d14cb03c7b07621a822804e3015c128f334",
       "status": "unverified",
       "evidence": [],
-      "note": "Introduction explains bootstrap purpose and permanent creator-authority exit; reviewed against bootstrap phase and veto admission code. No new runtime qualification."
+      "note": "Introduction shortened to remove repeated explanations; no implementation sign-off implied."
     },
     {
       "id": "DOC-introduction/QUICK_TOUR-008",
       "source": "docs/introduction/QUICK_TOUR.md",
-      "line": 142,
+      "line": 95,
       "title": "Getting started, then giving up control",
-      "sha256": "4e4a1b07ba27f6a15d212c7b2d0bb427883a71292a5f57e5fee15231ff6299bc",
+      "sha256": "74bd126bf6211ca88af4d3108a0467ece5264ab4117d9745533a16b17654bea5",
       "status": "unverified",
       "evidence": [],
-      "note": "Default values now marked for generation from the Rust parameter registry; no new runtime sign-off."
+      "note": "Introduction shortened to remove repeated explanations; no implementation sign-off implied."
     },
     {
       "id": "DOC-introduction/WHITEPAPER-001",
