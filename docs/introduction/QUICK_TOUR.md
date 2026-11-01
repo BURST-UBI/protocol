@@ -77,7 +77,8 @@ its creation, even if it had changed hands many times. Passing it on cannot
 restart the clock.
 
 The default lifetime is 70 years, measured as 70 periods of 365 days from the
-money's effective origin date. The community can choose a different lifetime,
+money's effective origin date. (Yes, leap years exist. We're counting seconds,
+not birthdays.) The community can choose a different lifetime,
 including effectively unlimited, with consequences it must weigh. No setting
 promises stable prices or equal wealth.
 

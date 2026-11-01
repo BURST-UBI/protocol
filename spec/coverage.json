@@ -41,7 +41,7 @@
       "sha256": "d067f148ee5db9e0814f9e4f33f59dc1f57d053de0726bc4fa7f63b72531b6fa"
     },
     "docs/introduction/QUICK_TOUR.md": {
-      "sha256": "f8fd91d3e6b3b3d5978a5dd0ca46ccbe94b75f160c2a9727ac3c5fb6428c3d5a"
+      "sha256": "c9d413d74370da005bb4dcc653ed701dc29633ea68d330b2945044a63a807bf9"
     },
     "docs/introduction/WHITEPAPER.md": {
       "sha256": "4c92bf10d8bfc8621705fc5daf5a9ab062636af3e89c4d4c8d333119c0d6530d"
@@ -3877,7 +3877,7 @@
       "source": "docs/introduction/QUICK_TOUR.md",
       "line": 65,
       "title": "Why would someone accept TRST?",
-      "sha256": "8e057652204ec5db677efe633460d6c6080d8f99ebd24282619807771cefd949",
+      "sha256": "bc0c9faeb3ca8aa10d6c2a357c0890a059e8f30274deb25edbd7fca1f581f302",
       "status": "unverified",
       "evidence": [],
       "note": "User changed launch TRST lifetime to 70 years of 365 days. Source defaults updated; release candidate qualification not implied."
@@ -3885,7 +3885,7 @@
     {
       "id": "DOC-introduction/QUICK_TOUR-005",
       "source": "docs/introduction/QUICK_TOUR.md",
-      "line": 84,
+      "line": 85,
       "title": "One income for each person",
       "sha256": "26f76330fc1f87a4849675348e6af788a3656b8bc4ca5d4eeee2185ac660ac91",
       "status": "unverified",
@@ -3895,7 +3895,7 @@
     {
       "id": "DOC-introduction/QUICK_TOUR-006",
       "source": "docs/introduction/QUICK_TOUR.md",
-      "line": 112,
+      "line": 113,
       "title": "Who checks the payments?",
       "sha256": "243aea80ae84c3bf6b23089d43316ab09442ba0f4dd42062fb7bd9c5071ac8e1",
       "status": "unverified",
@@ -3905,7 +3905,7 @@
     {
       "id": "DOC-introduction/QUICK_TOUR-007",
       "source": "docs/introduction/QUICK_TOUR.md",
-      "line": 127,
+      "line": 128,
       "title": "Rules people choose together",
       "sha256": "2ee977f0957be65cb7638ba2f8806a57e6db5e1e4e4ae16918f7a85487413b36",
       "status": "unverified",
@@ -3915,7 +3915,7 @@
     {
       "id": "DOC-introduction/QUICK_TOUR-008",
       "source": "docs/introduction/QUICK_TOUR.md",
-      "line": 140,
+      "line": 141,
       "title": "Getting started, then giving up control",
       "sha256": "923829872536f5ec38a83ca35f0c237eeef3d69be16785aa9a23761c7856facc",
       "status": "unverified",
