@@ -41,7 +41,7 @@
       "sha256": "d067f148ee5db9e0814f9e4f33f59dc1f57d053de0726bc4fa7f63b72531b6fa"
     },
     "docs/introduction/QUICK_TOUR.md": {
-      "sha256": "c9d413d74370da005bb4dcc653ed701dc29633ea68d330b2945044a63a807bf9"
+      "sha256": "0d57d4475290ceaf09ef982d48daab66418a5baba8d4844c4df7d3e748dc09c4"
     },
     "docs/introduction/WHITEPAPER.md": {
       "sha256": "4c92bf10d8bfc8621705fc5daf5a9ab062636af3e89c4d4c8d333119c0d6530d"
@@ -3877,7 +3877,7 @@
       "source": "docs/introduction/QUICK_TOUR.md",
       "line": 65,
       "title": "Why would someone accept TRST?",
-      "sha256": "bc0c9faeb3ca8aa10d6c2a357c0890a059e8f30274deb25edbd7fca1f581f302",
+      "sha256": "2712af59a1a6441d529e03e12a6c956ece745b170a6177ae5cca99db8752c42c",
       "status": "unverified",
       "evidence": [],
       "note": "User changed launch TRST lifetime to 70 years of 365 days. Source defaults updated; release candidate qualification not implied."
