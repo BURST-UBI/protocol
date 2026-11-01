@@ -14,7 +14,7 @@ runtime acceptance. Nothing is published by this handoff.
 | [Release record](evidence/release-status-20261031.txt) | Frozen candidate and platform evidence | Match exact artifacts and requirements before reuse; newer source is not covered automatically. |
 | [Coverage index](README.md) | Current sections and unchanged historical requirements | Unsigned requirements remain unsigned. Inventory validity is not a test result. |
 
-## November 1 CI repairs
+## Earlier November 1 CI repairs
 
 Native workspace Clippy and the wallet-core/groups/web-runtime WASM Clippy check
 pass. The twelve failing network tests now pass in focused runs: two ingress and
@@ -42,10 +42,45 @@ Wallet and dashboard TypeScript and native test compilation pass. Their Node
 unit/driver checks pass 30 and 2 tests respectively. These app checks do not
 replace browser journeys, native signing journeys or platform package acceptance.
 
-The next release boundary remains private end-to-end qualification of an explicitly
-selected protocol, wallet and dashboard candidate. Follow [the validation workflow](VALIDATION_WORKFLOW.md),
-reuse unaffected evidence, and keep publication and production enablement gates closed.
-Website and video changes are outside this documentation pass.
+## November 1 candidate qualification
+
+The selected daemon source is `675bf08c6a46fda53b0b03e209e0d23e58a679fd`.
+Dashboard `247ec107c963e8f5851602c2e959239f8d582ae5` and wallet
+`2dbebe93aab4d33fd4ebfeb5f667a32095eb31ea` are pushed and their CI passes.
+The wallet's latest change is test-only. Dashboard `7e91452` subsequently fixes
+the native focus test; its focused Windows UI run and full MSI native suite pass.
+Protocol changes after the daemon selection repair test fixtures and CI scheduling;
+they do not change its binaries.
+
+| Evidence | Proven scope | Remaining action |
+| --- | --- | --- |
+| Linux package and native receipts | Exact Debian payloads installed; dashboard IPC/RPC/navigation; wallet security plus eight native journeys | Reuse within recorded inputs and assertions. |
+| Mac runs 41301897029, 41303701554, 41304084806, 41304394252, 41304895220 and 41305448181 | ARM and Intel builds, packages, signing/notarization and native wallet/dashboard checks; daemon identity/restart checks recorded separately | Artifacts archived; no further Mac run required for these scopes. |
+| Windows build, installer and native receipts | x64 daemon service checks; wallet and dashboard MSI/NSIS payloads and registration; native wallet-core and dashboard RPC/navigation/focus checks | Recorded scopes complete. Existing WebView2 only; first-time runtime download and public Windows signing remain unqualified. |
+| Protocol CI 41305069783 plus isolated 41307174117 | Full run completed with one stale-fixture failure; the corrected target passes at `65c54f9`, with all other checks retained | Test-only correction; composite evidence, not a new full-suite run. |
+
+Tauri JavaScript package versions now match the already locked Rust dependencies.
+All 49 frontend files remain byte-identical to the selected assets; the retained
+Linux packages are reused with an explicit dependency comparison, not relabelled
+as new builds. Mac native wallet checks cover keypair/backup guards; Windows
+wallet checks cover the existing fresh wallet-core journey. Neither scope implies
+the full Linux wallet lifecycle passed on every platform. Windows wallet MSI
+installation completed before its test used an obsolete product ID; package
+metadata, registration and exact payload were verified without reinstalling.
+Dashboard NSIS evidence combines the completed RPC/concurrent-read checks with
+a focused UI pass after fixing an immediate focus assertion. The MSI dashboard
+passes all three native drivers together. The existing focus wait deadline is
+unchanged; the test now waits for the dialog library's deferred restoration.
+
+The restart fixture used a positional-row reader after startup had migrated
+holdings to stable rows. It now uses the production storage reader, retaining
+independent outcome/identity revocation and corrupt-state rejection assertions.
+Governance fixtures separately check the default release-gate refusal and the
+experimental activation/replay path. No deadlines or production gates were relaxed.
+
+Follow [the validation workflow](VALIDATION_WORKFLOW.md) and the private receipt
+handoff before scheduling further work. Nothing is published; Live and physical
+retirement remain gated. Website and video changes are outside this task.
 
 ## Historical evidence
 
@@ -57,12 +92,12 @@ terminal result before treating an old open item as unfinished implementation.
 
 ## Remaining qualification boundaries
 
-The frozen packages and later source edits are different candidates. Select the
-next candidate, identify affected requirements, and reuse only evidence whose
-inputs still match. Private testing does not authorize publication or Live launch.
-Physical body retirement, production-parameter performance, package acceptance
-and unsigned requirements retain their separate gates. Further RAM optimization
-is deferred. A large synthetic ledger or isolated lookup does not establish
+The candidate above is frozen. Identify affected requirements before any further
+change, and reuse only evidence whose inputs and scope still match. Private testing
+does not authorize publication or Live launch.
+Public signing/distribution, physical body retirement, production-parameter
+performance and unsigned requirements retain their separate gates. Further RAM
+optimization is deferred. A large synthetic ledger or isolated lookup does not establish
 production throughput; fixtures must represent work, maturity, electorate and
 traffic settings. Fresh onboarding and resumed recovery remain separate checks.
 
