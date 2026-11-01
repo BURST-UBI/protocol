@@ -112,25 +112,41 @@ contribution must not silently add it to a new payment that never included it.
 Consider a separate example: 100 TRST made from 30 from origin A and 70 from
 origin B. Here, an origin is the BRN burn that created that contribution:
 
+### 1. Revocation separates the two contributions
+
+The original 100 becomes two holdings. Only A's 30 is revoked; B's 70 remains
+available, assuming it has not expired.
+
 ```mermaid
-flowchart TD
-    accTitle: Revocation and a later merge
-    accDescr: Revoking origin A separates its 30 units from 70 clean units of B. Merging B with 20 units of C excludes A. Restoring A makes its separated units valid again without adding them to the newer merge.
-    M["Original merge: 30 A + 70 B"] -->|A is revoked| R["30 A becomes revoked"]
-    M -->|A is revoked| B["Clean remainder: 70 B"]
-    B -->|Merge with 20 C| N["New merge: 70 B + 20 C"]
-    R -->|A is restored| A["Separated 30 A<br/>becomes valid again"]
-    N --> U["Still 70 B + 20 C<br/>No A was consumed"]
+flowchart LR
+    accTitle: Revocation splits a mixed holding
+    accDescr: A holding of 100 TRST contains 30 from A and 70 from B. Revoking A separates it into 30 revoked TRST from A and 70 unaffected TRST from B.
+    M["100 TRST<br/>30 from A + 70 from B"] -->|Revoke A| A["30 TRST from A<br/>Revoked, kept separately"]
+    M --> B["70 TRST from B<br/>Unaffected remainder"]
 ```
 
-Restoring A does not insert it into the newer merge. That merge consumed the clean
-remainder, whose recorded composition excluded A. If A is revoked again, the newer
-merge still has no A contribution to remove. Revoking B can affect it, because it
-actually consumed B's value.
+### 2. Reusing B does not bring A along
 
-To preserve this distinction, each holding records which version of the mixture
-it contains. The code calls this its **composition basis**: the original mixture,
-one separated contribution, or the remainder after a revocation.
+Bob merges the 70 B with 20 C. If A is later restored, its separate 30 becomes
+valid again. The newer merge still contains only B and C.
+
+```mermaid
+flowchart LR
+    accTitle: The clean remainder and revoked portion take separate paths
+    accDescr: The 70 TRST remainder from B merges with 20 from C to produce 90 TRST with no A contribution. Separately, restoring A makes its 30 TRST valid again. Restoration adds nothing to the 90 TRST merge.
+    B["70 TRST from B"] -->|Merge with 20 from C| N["90 TRST<br/>70 B + 20 C, no A"]
+    A["30 TRST from A<br/>Held separately, revoked"] -->|Restore A| R["30 TRST from A<br/>Valid again if unexpired"]
+```
+
+There is no transfer between those two paths. Restoring A does not add 30 to the
+90, and revoking A again does not subtract from it. Revoking B can affect the
+90, because that merge actually contains B's contribution.
+
+**Composition basis** is the code's name for a holding's record of **which
+contributions it represents**. In this example, the original holding represents
+the whole A+B mixture; the separated 30 represents A alone; and the remaining 70
+represents the mixture with A excluded. The new merge records that it consumed
+that B-only remainder, not the original A+B mixture.
 
 These composition records are shared references to the history of those changes. They avoid
 copying every excluded origin into each new holding, but checking a remainder can
