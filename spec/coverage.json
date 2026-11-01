@@ -32,7 +32,7 @@
       "sha256": "b306755bb324ad4b8428b124f5b9b542263f24dd2b08044b856ac7bdc4f93573"
     },
     "docs/introduction/ECONOMICS.md": {
-      "sha256": "22e46e5391d05072181802098f237228aa3fadfb79216f524ddc52e94c16dd24"
+      "sha256": "3e1530ae64fec84d4fab41a61278e47dbd4f6e617c481ef37e5130e223283ebd"
     },
     "docs/introduction/GLOSSARY.md": {
       "sha256": "c17cde3d3874fab4244d23766b375d54538338acbda2fb26b829c12ea50783a8"
@@ -3737,15 +3737,35 @@
       "source": "docs/introduction/ECONOMICS.md",
       "line": 106,
       "title": "Merging a clean remainder",
-      "sha256": "33143699103d0a95e78eab45e90d7e8becaf724e872e65d217d37d1664c76486",
+      "sha256": "981422c7b2b06fcb4e1a5fcf9e100886fc6e8df9e93c5f4ebe50c109079d35c9",
       "status": "unverified",
       "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
       "evidence": []
     },
     {
+      "status": "unverified",
+      "note": "Clarified revocation and restoration diagram; documentation only, no runtime sign-off.",
+      "evidence": [],
       "id": "DOC-introduction/ECONOMICS-006",
       "source": "docs/introduction/ECONOMICS.md",
-      "line": 145,
+      "line": 115,
+      "title": "1. Revocation separates the two contributions",
+      "sha256": "377fae1685d75fd08187a8fc7037cdf5ece524c670add8e825d432d3ceae2b39"
+    },
+    {
+      "status": "unverified",
+      "note": "Clarified revocation and restoration diagram; documentation only, no runtime sign-off.",
+      "evidence": [],
+      "id": "DOC-introduction/ECONOMICS-007",
+      "source": "docs/introduction/ECONOMICS.md",
+      "line": 128,
+      "title": "2. Reusing B does not bring A along",
+      "sha256": "ad0ffdcc89f3a4786b8f887a5cb1990cc40c98c1a2c0aff2b6e65cd0a6eb2d21"
+    },
+    {
+      "id": "DOC-introduction/ECONOMICS-008",
+      "source": "docs/introduction/ECONOMICS.md",
+      "line": 161,
       "title": "Expiry and reference value",
       "sha256": "5eb9c62f48ea2017580043939b689f9f0f48f24533060988fad2a4bd398b60c7",
       "status": "unverified",
@@ -3753,9 +3773,9 @@
       "note": "Current documentation section. Indexing does not establish implementation or release qualification."
     },
     {
-      "id": "DOC-introduction/ECONOMICS-007",
+      "id": "DOC-introduction/ECONOMICS-009",
       "source": "docs/introduction/ECONOMICS.md",
-      "line": 165,
+      "line": 181,
       "title": "Units for wallet developers",
       "sha256": "fb6752fbb3c66596c4d9a38ed9ef06ed5e9a5888b63f916f1bb3600a1564c356",
       "status": "unverified",
@@ -3763,9 +3783,9 @@
       "note": "Default values now marked for generation from the Rust parameter registry; no new runtime sign-off."
     },
     {
-      "id": "DOC-introduction/ECONOMICS-008",
+      "id": "DOC-introduction/ECONOMICS-010",
       "source": "docs/introduction/ECONOMICS.md",
-      "line": 182,
+      "line": 198,
       "title": "What the parameters mean",
       "sha256": "1caddda115bcca1944a458cf229522dcf616e8afe245d5602d41f69e85634c5d",
       "status": "unverified",
