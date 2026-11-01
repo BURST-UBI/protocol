@@ -7,7 +7,7 @@ voting instead of leaving them permanently fixed by the developer.
 
 There is a temporary exception while the network gets started: the creator can
 help verify the first participants and veto approved rule changes. These powers
-end permanently when the network reaches 50 verified people, including the
+end permanently when the network reaches <!-- default:live.bootstrap_exit_threshold -->50<!-- /default --> verified people, including the
 creator. After that, the creator participates under the same rules as everyone
 else.
 
@@ -23,7 +23,7 @@ the community revise them. A positive income rate gives people ongoing income;
 a zero rate stops new income. Currency can have a limited or effectively
 unlimited lifetime.
 
-The current defaults use ongoing income and a 70-year currency lifetime. Let's
+The current defaults use ongoing income and a <!-- default:live.trst_expiry_secs:years -->70<!-- /default -->-year currency lifetime. Let's
 follow a payment under those settings, then look at the problems
 that this creates and how BURST tries to address them.
 
@@ -31,7 +31,7 @@ that this creates and how BURST tries to address them.
 
 Once your account is verified, your personal balance grows over time. It is
 called **BRN**, from *burn*. At the default rate, each account that qualifies
-for income gains about one BRN per hour. You can save it until you need it;
+for income gains about <!-- default:live.brn_rate:hourly_approx -->1<!-- /default --> BRN per hour. You can save it until you need it;
 unused BRN has no expiry date.
 
 Nobody has to send you an hourly payment. Your wallet calculates your income
@@ -73,11 +73,11 @@ participating in the economy.
 Expiry is another choice people may disagree about. A limited lifetime lets the
 community decide how long earlier payments can keep circulating while new
 income continues to grow. But it also gives the recipient a deadline for using
-the money. With the default 70-year lifetime, Alice's payment expires 70 years after
+the money. With the default <!-- default:live.trst_expiry_secs:years -->70<!-- /default -->-year lifetime, Alice's payment expires <!-- default:live.trst_expiry_secs:years -->70<!-- /default --> years after
 its creation, even if it had changed hands many times. Passing it on cannot
 restart the clock.
 
-The default lifetime is 70 years, measured as 70 periods of 365 days from the
+The default lifetime is <!-- default:live.trst_expiry_secs:years -->70<!-- /default --> years, measured as <!-- default:live.trst_expiry_secs:years -->70<!-- /default --> periods of 365 days from the
 money's effective origin date. (Yes, we know leap years exist. For simplicity,
 a year here means 365 days.) The community can choose a different lifetime,
 including effectively unlimited, with consequences it must weigh. No setting
@@ -148,9 +148,9 @@ while the community is still small. The veto can stop a change before it takes
 effect; it cannot let the creator pass a change alone. An approved proposal goes
 ahead unless the creator explicitly vetoes it within that window.
 
-**At 50 verified people, those special powers end permanently.** The creator
-counts as one of the 50. The protocol can end bootstrap earlier, but it cannot
-extend it beyond that cap. A later fall below 50 does not bring the powers back.
+**At <!-- default:live.bootstrap_exit_threshold -->50<!-- /default --> verified people under the default settings, those special powers end permanently.** The creator
+counts toward that total. The protocol can end bootstrap earlier, but it cannot
+extend it beyond that cap. A later fall below the exit threshold does not bring the powers back.
 This is enforced by the protocol, not left to the creator's promise to step aside.
 
 From then on, the creator has no special verification rights, governance veto or

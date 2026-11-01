@@ -1,10 +1,10 @@
 name: Documentation website
 on:
   pull_request:
-    paths: ['docs/**', 'website/**', 'vercel.json', '.github/workflows/website.yml']
+    paths: ['docs/**', 'website/**', 'types/**', 'governance/**', 'tools/documentation-defaults*', 'Cargo.lock', 'vercel.json', '.github/workflows/website.yml']
   push:
     branches: [main]
-    paths: ['docs/**', 'website/**', 'vercel.json', '.github/workflows/website.yml']
+    paths: ['docs/**', 'website/**', 'types/**', 'governance/**', 'tools/documentation-defaults*', 'Cargo.lock', 'vercel.json', '.github/workflows/website.yml']
 permissions:
   contents: read
 concurrency:
@@ -21,6 +21,12 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: website/package-lock.json
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-11
+      - uses: Swatinem/rust-cache@v2
+      - run: node tools/documentation-defaults.mjs --verify
+      - run: node --test tools/documentation-defaults.test.mjs
       - run: npm ci
         working-directory: website
       - run: npm run build

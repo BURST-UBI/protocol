@@ -29,7 +29,7 @@ rejection and returns.
 
 ## BRN balance
 
-The default rate is about one BRN per hour while the account qualifies for
+The default rate is about <!-- default:live.brn_rate:hourly_approx -->1<!-- /default --> BRN per hour while the account qualifies for
 income. The balance grows with eligible time, not with the number of times a
 wallet connects or asks for its balance. Spending reduces it; stakes temporarily
 lock part of it.
@@ -173,7 +173,7 @@ For example, 2.5 TRST is `2500000000000000000` raw units. In JavaScript, keep th
 RPC string or convert it with `BigInt('2500000000000000000')`. Converting it
 through a floating-point `Number` can lose precision.
 
-The default TRST lifetime is 70 years of 365 days, or `2207520000` seconds,
+The default TRST lifetime is <!-- default:live.trst_expiry_secs:years -->70<!-- /default --> years of 365 days, or <!-- default:live.trst_expiry_secs:raw -->2207520000<!-- /default --> seconds,
 measured from the effective origin time. Governance can choose another duration,
 including `u64::MAX` for effectively unlimited lifetime. Read the
 connected node's `protocol_params` instead of assuming its settings still match

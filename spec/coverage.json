@@ -5,7 +5,7 @@
       "sha256": "84e258f1d54304fbc20ee03e4154ac87e98d0c5092c769db36d7a2178022cadb"
     },
     "docs/README.md": {
-      "sha256": "135793c5b728dc2482ce19918fd5ec3122cfa724e7271c3be285e0fd58ed2910"
+      "sha256": "0150468a77af29d61951b1c6c5a413fc59d4948ff9e8baf6b3d678ea1e1bf6e0"
     },
     "docs/SUMMARY.md": {
       "sha256": "990d6904cac10eeb591423b76c92b6829f794cd6825d1b08374c6853f9e5f9a5"
@@ -32,7 +32,7 @@
       "sha256": "b306755bb324ad4b8428b124f5b9b542263f24dd2b08044b856ac7bdc4f93573"
     },
     "docs/introduction/ECONOMICS.md": {
-      "sha256": "e5c2cbacdb8fb58f00ee5219c14f610c59c44dec25b3523313cebcd1da26f835"
+      "sha256": "22e46e5391d05072181802098f237228aa3fadfb79216f524ddc52e94c16dd24"
     },
     "docs/introduction/GLOSSARY.md": {
       "sha256": "c17cde3d3874fab4244d23766b375d54538338acbda2fb26b829c12ea50783a8"
@@ -41,10 +41,10 @@
       "sha256": "d067f148ee5db9e0814f9e4f33f59dc1f57d053de0726bc4fa7f63b72531b6fa"
     },
     "docs/introduction/QUICK_TOUR.md": {
-      "sha256": "4e273d265defa64b720664e6cf7ede6188fce57a6c7f77e2f66eaf5b7b04a159"
+      "sha256": "ba0a7ca3dc79fadefc97d6cbc26b5990ea47799ec0ca0da9a23218a3736ce71b"
     },
     "docs/introduction/WHITEPAPER.md": {
-      "sha256": "2ae5729dcff8c1e34c1ea27a797c8720d50cf411b109c785c39550ec512a3f0c"
+      "sha256": "2e2b3d4d5802eb3c3efa840f6df4b9db006df149b9861b92faed3b076b002168"
     },
     "docs/node/GROUP_SERVICES.md": {
       "sha256": "3b4f90fdfda208cf113387de28599eec939050454109ea6bae19102e1553a607"
@@ -77,10 +77,10 @@
       "sha256": "f471e8d44254a55201366cbbec934bfc6aa7572cef4f7a836ce6fe29bc72ad42"
     },
     "docs/protocol/PARAMETERS.md": {
-      "sha256": "2f537454149bb8de6cf50e3f2da168ad15b353c6d86460e42bdd491c9dd2fed8"
+      "sha256": "6d59604123b54299cc732d90f848916838cfd1ddd03af8f9b32e251ec78159e1"
     },
     "docs/protocol/VERIFICATION.md": {
-      "sha256": "100e448a763af721da9c8fdad1507938e30b4f6a653702771eaf91d4179d3bd9"
+      "sha256": "ab6fa4333d1dc1109cf4cc73d0652970f86467f40f4140c1093421a2d3d66e27"
     },
     "docs/release/CODE_SIGNING.md": {
       "sha256": "a740303b685d1936f849feb8e3d0c399a7460f6719a01776b66f23923e908e54"
@@ -3017,10 +3017,10 @@
       "source": "docs/README.md",
       "line": 1,
       "title": "BURST",
-      "sha256": "9b7466199e42378db56c4333dbc060ae39b3f616531c18a960b3f3a5483dd8b2",
+      "sha256": "554baaecaabcf5019a20aba24d8da8ed0980770a679d31be961e6a4b318618c2",
       "status": "unverified",
-      "note": "Clarified the 70-year launch default and aligned introductory examples; no runtime qualification implied.",
-      "evidence": []
+      "evidence": [],
+      "note": "Default values now marked for generation from the Rust parameter registry; no new runtime sign-off."
     },
     {
       "id": "DOC-README-002",
@@ -3707,10 +3707,10 @@
       "source": "docs/introduction/ECONOMICS.md",
       "line": 30,
       "title": "BRN balance",
-      "sha256": "723643d2f23287b9c41b95ad8c931f2e7893f690c24a32841d25a465330d25e2",
+      "sha256": "2b14ead9da266e93b73e2c86bafd8c87a6963b436b5c80c981ee2841d1c4f4b4",
       "status": "unverified",
-      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
-      "evidence": []
+      "evidence": [],
+      "note": "Default values now marked for generation from the Rust parameter registry; no new runtime sign-off."
     },
     {
       "id": "DOC-introduction/ECONOMICS-003",
@@ -3757,10 +3757,10 @@
       "source": "docs/introduction/ECONOMICS.md",
       "line": 165,
       "title": "Units for wallet developers",
-      "sha256": "7f2ae5705ee25b2618fdcc3bde9f52309f52a6984e5c8276118c9bcff75c4d29",
+      "sha256": "fb6752fbb3c66596c4d9a38ed9ef06ed5e9a5888b63f916f1bb3600a1564c356",
       "status": "unverified",
       "evidence": [],
-      "note": "User changed launch TRST lifetime to 70 years of 365 days. Source defaults updated; release candidate qualification not implied."
+      "note": "Default values now marked for generation from the Rust parameter registry; no new runtime sign-off."
     },
     {
       "id": "DOC-introduction/ECONOMICS-008",
@@ -3847,20 +3847,20 @@
       "source": "docs/introduction/QUICK_TOUR.md",
       "line": 1,
       "title": "What is BURST?",
-      "sha256": "86286a1d085e249ecd0a972a2b75c3a87c2df74b6fcf05a0ef507f2e0f0e13cb",
+      "sha256": "c59fe681a14899bb00ba4a5638bce3a9a4d1f6ab059aee1de83c03d5e96a9cff",
       "status": "unverified",
       "evidence": [],
-      "note": "Clarified the 70-year launch default and aligned introductory examples; no runtime qualification implied."
+      "note": "Default values now marked for generation from the Rust parameter registry; no new runtime sign-off."
     },
     {
       "id": "DOC-introduction/QUICK_TOUR-002",
       "source": "docs/introduction/QUICK_TOUR.md",
       "line": 30,
       "title": "An income of your own",
-      "sha256": "1e64593ac78351bab601dc4b8c3e93b41e1bacc4f00dae4a85802de1f5684484",
+      "sha256": "c72aabc46ac8fc44856a0349598e5f1cdddcbf3a35c3242946a101467ef11ce0",
       "status": "unverified",
-      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
-      "evidence": []
+      "evidence": [],
+      "note": "Default values now marked for generation from the Rust parameter registry; no new runtime sign-off."
     },
     {
       "id": "DOC-introduction/QUICK_TOUR-003",
@@ -3877,10 +3877,10 @@
       "source": "docs/introduction/QUICK_TOUR.md",
       "line": 66,
       "title": "Why would someone accept TRST?",
-      "sha256": "f15adfaeb044d92112f38c5e3be9046eb9714c4d90fd8397fbcf82268c1231f9",
+      "sha256": "fd47aa255a4173896dd349c64dc1f78369eba03be5f973a990068f1c173fac24",
       "status": "unverified",
       "evidence": [],
-      "note": "Clarified the 70-year launch default and aligned introductory examples; no runtime qualification implied."
+      "note": "Default values now marked for generation from the Rust parameter registry; no new runtime sign-off."
     },
     {
       "id": "DOC-introduction/QUICK_TOUR-005",
@@ -3917,10 +3917,10 @@
       "source": "docs/introduction/QUICK_TOUR.md",
       "line": 142,
       "title": "Getting started, then giving up control",
-      "sha256": "923829872536f5ec38a83ca35f0c237eeef3d69be16785aa9a23761c7856facc",
+      "sha256": "4e4a1b07ba27f6a15d212c7b2d0bb427883a71292a5f57e5fee15231ff6299bc",
       "status": "unverified",
       "evidence": [],
-      "note": "Introduction explains bootstrap purpose and permanent creator-authority exit; reviewed against bootstrap phase and veto admission code. No new runtime qualification."
+      "note": "Default values now marked for generation from the Rust parameter registry; no new runtime sign-off."
     },
     {
       "id": "DOC-introduction/WHITEPAPER-001",
@@ -3947,10 +3947,10 @@
       "source": "docs/introduction/WHITEPAPER.md",
       "line": 31,
       "title": "Parameterized money",
-      "sha256": "b673119fcd5f4d5af198155fa120d814fa55886525a461290fad171b000a9405",
+      "sha256": "beef49257a57db0307ef47b05bce31dcd90092ac133689340b81f9f53cb69649",
       "status": "unverified",
       "evidence": [],
-      "note": "User changed launch TRST lifetime to 70 years of 365 days. Source defaults updated; release candidate qualification not implied."
+      "note": "Default values now marked for generation from the Rust parameter registry; no new runtime sign-off."
     },
     {
       "id": "DOC-introduction/WHITEPAPER-004",
@@ -3967,10 +3967,10 @@
       "source": "docs/introduction/WHITEPAPER.md",
       "line": 77,
       "title": "BRN: your personal income",
-      "sha256": "a243c6f5ff89196117fd83ef9dcb14edc497c41ab32f9f220a39633f1262b480",
+      "sha256": "8c34cce98f05cf0428670ae1411b15d3dc0cf63e4a2635c6126f45ab89ef8279",
       "status": "unverified",
-      "note": "Explanatory documentation revised around the original whitepaper examples. No runtime or release sign-off transferred.",
-      "evidence": []
+      "evidence": [],
+      "note": "Default values now marked for generation from the Rust parameter registry; no new runtime sign-off."
     },
     {
       "id": "DOC-introduction/WHITEPAPER-006",
@@ -4007,10 +4007,10 @@
       "source": "docs/introduction/WHITEPAPER.md",
       "line": 150,
       "title": "Expiry",
-      "sha256": "286039e08dcdcdcb15f46bcb7c8c451e655bf54f58a3a0a0376c1b30d330a68e",
+      "sha256": "5c9f923db421f5080039777b483617be8839a617d6c5d8e67123fea09ec26e7c",
       "status": "unverified",
       "evidence": [],
-      "note": "Clarified the 70-year launch default and aligned introductory examples; no runtime qualification implied."
+      "note": "Default values now marked for generation from the Rust parameter registry; no new runtime sign-off."
     },
     {
       "id": "DOC-introduction/WHITEPAPER-010",
@@ -4037,10 +4037,10 @@
       "source": "docs/introduction/WHITEPAPER.md",
       "line": 221,
       "title": "Humanity verification",
-      "sha256": "6ff67d250f87b342c88ff5addbdf0dc0ac0b1e64ce303c5449588dc18e5454bc",
+      "sha256": "7d77cee0943e040962ab74e20df1df52969a8c9fe20f96d58842c1e5fc13257d",
       "status": "unverified",
-      "note": "Explanatory documentation revised around the original whitepaper examples. No runtime or release sign-off transferred.",
-      "evidence": []
+      "evidence": [],
+      "note": "Default values now marked for generation from the Rust parameter registry; no new runtime sign-off."
     },
     {
       "id": "DOC-introduction/WHITEPAPER-013",
@@ -4997,70 +4997,70 @@
       "source": "docs/protocol/PARAMETERS.md",
       "line": 1,
       "title": "Protocol parameters",
-      "sha256": "6c52c65cbcc6edb2785cb45ef8d6e72ad082bd17210a5c73f6c67fefe4ec9a7c",
+      "sha256": "ce06fdd16387f3dafb167178ccbd8aba5b83496cdb2dbf2dd4d79654e553ae1a",
       "status": "unverified",
-      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
-      "evidence": []
+      "evidence": [],
+      "note": "Generated default updated from ProtocolParams; no implementation sign-off implied."
     },
     {
       "id": "DOC-protocol/PARAMETERS-002",
       "source": "docs/protocol/PARAMETERS.md",
       "line": 29,
       "title": "Accrual and expiry",
-      "sha256": "5028d7db34fa69a8a7110daf00dff941e18134739333cacea4ad7a2dee922b16",
+      "sha256": "093f33201cd1b56794e555e28275d30f211455ae6fd704eab10b8a15a91025f3",
       "status": "unverified",
       "evidence": [],
-      "note": "User changed launch TRST lifetime to 70 years of 365 days. Source defaults updated; release candidate qualification not implied."
+      "note": "Generated default updated from ProtocolParams; no implementation sign-off implied."
     },
     {
       "id": "DOC-protocol/PARAMETERS-003",
       "source": "docs/protocol/PARAMETERS.md",
       "line": 49,
       "title": "Verification and challenges",
-      "sha256": "dd24a55616599550a8f87b731f6fac59324a53ad6f572f091a7c6e9ae375ce77",
+      "sha256": "0a1e357cb0625ad81eee9f6c8e4ca78573ad7ab5ea620dc47ac1a85bd240832f",
       "status": "unverified",
       "evidence": [],
-      "note": "Current documentation section. Indexing does not establish implementation or release qualification."
+      "note": "Generated default updated from ProtocolParams; no implementation sign-off implied."
     },
     {
       "id": "DOC-protocol/PARAMETERS-004",
       "source": "docs/protocol/PARAMETERS.md",
       "line": 79,
       "title": "Governance",
-      "sha256": "53bc8e620e75ea29298db832d53c1b13c0e07a1bd7dc27ada63796d8e6bb0baa",
+      "sha256": "04c34001af5d23cfa80ba0099f48c23b1a384d3485660d902e6de941d857970f",
       "status": "unverified",
       "evidence": [],
-      "note": "Current documentation section. Indexing does not establish implementation or release qualification."
+      "note": "Generated default updated from ProtocolParams; no implementation sign-off implied."
     },
     {
       "id": "DOC-protocol/PARAMETERS-005",
       "source": "docs/protocol/PARAMETERS.md",
       "line": 104,
       "title": "Inactive stored fields",
-      "sha256": "32c81366f479881901ec1b664c067994fe96fcff3c715259385c2532cab128ea",
+      "sha256": "622292f684f06f6211556d7e45983ace1ba7e0ca1715ab232268a8f3eca22215",
       "status": "unverified",
       "evidence": [],
-      "note": "Current documentation section. Indexing does not establish implementation or release qualification."
+      "note": "Generated default updated from ProtocolParams; no implementation sign-off implied."
     },
     {
       "id": "DOC-protocol/PARAMETERS-006",
       "source": "docs/protocol/PARAMETERS.md",
       "line": 117,
       "title": "Admission limits",
-      "sha256": "3cd5e473be738e897f568015bc1e758531aad7c80b1d0b5ac5cba530c95fc69d",
+      "sha256": "a07aeafe61002a731508ada12fc056312ea9c18f0238f2a24a11d87e2f1ad1b7",
       "status": "unverified",
       "evidence": [],
-      "note": "Current documentation section. Indexing does not establish implementation or release qualification."
+      "note": "Generated default updated from ProtocolParams; no implementation sign-off implied."
     },
     {
       "id": "DOC-protocol/PARAMETERS-007",
       "source": "docs/protocol/PARAMETERS.md",
       "line": 129,
       "title": "Test and Dev differences",
-      "sha256": "b24704d2fe2a27fb05378d51b4282b8105e9804ff66a03463aa7abd0f92748ec",
+      "sha256": "8cb8669c61bd2bbe97443e1a50939216a4874affa35622e383bb98cc761b797d",
       "status": "unverified",
       "evidence": [],
-      "note": "Current documentation section. Indexing does not establish implementation or release qualification."
+      "note": "Generated default updated from ProtocolParams; no implementation sign-off implied."
     },
     {
       "id": "DOC-protocol/PARAMETERS-008",
@@ -5107,10 +5107,10 @@
       "source": "docs/protocol/VERIFICATION.md",
       "line": 67,
       "title": "Votes and settlement",
-      "sha256": "c2c465e5109d14d849384513db44c2a0763e005082a91bd5054e3faaba75ed99",
+      "sha256": "bb9d57caa88fb8d03a11e01955dcddcd1921732267731ce52cd1d880cea1ca1d",
       "status": "unverified",
-      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
-      "evidence": []
+      "evidence": [],
+      "note": "Default values now marked for generation from the Rust parameter registry; no new runtime sign-off."
     },
     {
       "id": "DOC-protocol/VERIFICATION-005",

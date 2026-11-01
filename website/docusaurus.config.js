@@ -9,6 +9,7 @@ module.exports = {
   onBrokenLinks: 'throw',
   markdown: {
     format: 'md',
+    preprocessor: ({fileContent}) => fileContent.replace(/<!-- default:[\w.]+(?::[\w]+)? -->|<!-- \/default -->/g, ''),
     mermaid: true,
     hooks: {onBrokenMarkdownLinks: 'throw', onBrokenMarkdownImages: 'throw'},
   },

@@ -80,10 +80,10 @@ can trigger selection exclusion under a rolling assignment window. Neither is
 therefore distinct from both a substantive Illegitimate judgment and an ignored
 assignment.
 
-By default the window retains up to 100 assignments and the penalty triggers
-strictly above 50% Neither. There is no minimum sample size: one Neither on a
+By default the window retains up to <!-- default:live.neither_window_assignments -->100<!-- /default --> assignments and the penalty triggers
+strictly above <!-- default:live.neither_penalty_threshold_bps:percent -->50%<!-- /default --> Neither. There is no minimum sample size: one Neither on a
 first assignment already exceeds that threshold. Applying a penalty clears the
-history immediately and starts the selection cooldown, seven days by default.
+history immediately and starts the selection cooldown, <!-- default:live.neither_penalty_cooldown_secs -->7 days<!-- /default --> by default.
 The window counts assignments rather than days.
 
 If the required Legitimate share is not reached, the configured re-vote limit

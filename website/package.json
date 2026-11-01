@@ -4,7 +4,9 @@
   "scripts": {
     "start": "docusaurus start --host 127.0.0.1",
     "build": "docusaurus build",
-    "serve": "docusaurus serve --host 127.0.0.1"
+    "serve": "docusaurus serve --host 127.0.0.1",
+    "prebuild": "node ../tools/documentation-defaults.mjs --check",
+    "prestart": "node ../tools/documentation-defaults.mjs --check"
   },
   "engines": {
     "node": ">=22"

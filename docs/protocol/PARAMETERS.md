@@ -23,17 +23,17 @@ Governance changes only supported parameters and is subject to the current
 Amounts are stored as integer raw units: one BRN or TRST is `10^18` raw units.
 Durations use whole seconds. A basis point is 0.01%, so `9000` means 90%.
 Parameter RPC values use decimal strings to preserve integer precision.
-The rounded-up default hourly BRN rate accrues 800 raw units more than exactly
-one BRN in 3,600 seconds: `0.0000000000000008` BRN. Balances use integer arithmetic.
+The exact default hourly accrual is <!-- default:live.brn_rate:hourly -->1.0000000000000008<!-- /default --> BRN.
+Balances use integer arithmetic.
 
 ## Accrual and expiry
 
 | Field | Live default | Meaning |
 | --- | --- | --- |
-| `brn_rate` | 277,777,777,777,778 raw/second | Approximately 1 BRN/hour during eligible time. |
-| `trst_expiry_secs` | 2,207,520,000 seconds | 70 years of 365 days from the effective origin time. Transfers do not renew it. |
-| `new_wallet_spending_limit` | 0 | Cap on each Send or Burn amount; zero disables it. |
-| `new_wallet_limit_duration_secs` | 0 | Stored but not consulted by current node spending admission. |
+| `brn_rate` | <!-- default:live.brn_rate -->277,777,777,777,778 raw/second<!-- /default --> | Approximately <!-- default:live.brn_rate:hourly_approx -->1<!-- /default --> BRN/hour during eligible time. |
+| `trst_expiry_secs` | <!-- default:live.trst_expiry_secs -->70 years<!-- /default --> | <!-- default:live.trst_expiry_secs:years -->70<!-- /default --> years of 365 days from the effective origin time. Transfers do not renew it. |
+| `new_wallet_spending_limit` | <!-- default:live.new_wallet_spending_limit -->0 TRST<!-- /default --> | Cap on each Send or Burn amount; zero disables it. |
+| `new_wallet_limit_duration_secs` | <!-- default:live.new_wallet_limit_duration_secs -->0 seconds<!-- /default --> | Stored but not consulted by current node spending admission. |
 
 Changing the rate affects accrual over the corresponding rate-history intervals.
 Changing expiry affects the age comparison; a transfer does not reset origin age.
@@ -50,23 +50,23 @@ that metadata alone is therefore insufficient to infer enforcement.
 
 | Field | Live default | Meaning |
 | --- | --- | --- |
-| `endorsement_threshold` | 3 | Endorsements required for ordinary enrollment. |
-| `endorsement_burn_amount` | 336 BRN | Permanent burn per endorsement. |
-| `num_verifiers` | 7 | Selected panel size. |
-| `verification_threshold_bps` | 9000 | Required Legit share of the panel votes. |
-| `verifier_stake_amount` | 500 BRN | Stake for a substantive verifier vote. |
-| `max_revotes` | 3 | Maximum re-votes before verification fails. |
-| `verification_timeout_secs` | 7 days | Ordinary voting duration from certified panel activation. |
-| `min_verification_age_secs` | 30 days | Minimum verified age for selection. |
-| `min_verifier_brn_balance` | 50 BRN | Available balance required at selection, separate from vote stake. |
-| `neither_penalty_threshold_bps` | 5000 | Neither share must be strictly above this to trigger the penalty. |
-| `neither_window_assignments` | 100 | Completed assignments retained for Neither tracking; zero disables tracking. |
-| `neither_penalty_cooldown_secs` | 7 days | Selection exclusion after excessive Neither votes. |
-| `challenge_stake_amount` | 1000 BRN | Challenger's admission stake. |
-| `challenge_duration_secs` | 7 days | Challenge voting duration from certified activation. |
-| `challenge_reward_bps` | 100 | Challenger reward fraction of revoked TRST, subject to the cap. |
-| `challenge_reward_cap` | 2000 TRST | Maximum challenge reward. |
-| `bootstrap_exit_threshold` | 50 | Verified count that ends bootstrap; the effective threshold cannot exceed 50. |
+| `endorsement_threshold` | <!-- default:live.endorsement_threshold -->3<!-- /default --> | Endorsements required for ordinary enrollment. |
+| `endorsement_burn_amount` | <!-- default:live.endorsement_burn_amount -->336 BRN<!-- /default --> | Permanent burn per endorsement. |
+| `num_verifiers` | <!-- default:live.num_verifiers -->7<!-- /default --> | Selected panel size. |
+| `verification_threshold_bps` | <!-- default:live.verification_threshold_bps -->9000<!-- /default --> | Required Legit share of the panel votes. |
+| `verifier_stake_amount` | <!-- default:live.verifier_stake_amount -->500 BRN<!-- /default --> | Stake for a substantive verifier vote. |
+| `max_revotes` | <!-- default:live.max_revotes -->3<!-- /default --> | Maximum re-votes before verification fails. |
+| `verification_timeout_secs` | <!-- default:live.verification_timeout_secs -->7 days<!-- /default --> | Ordinary voting duration from certified panel activation. |
+| `min_verification_age_secs` | <!-- default:live.min_verification_age_secs -->30 days<!-- /default --> | Minimum verified age for selection. |
+| `min_verifier_brn_balance` | <!-- default:live.min_verifier_brn_balance -->50 BRN<!-- /default --> | Available balance required at selection, separate from vote stake. |
+| `neither_penalty_threshold_bps` | <!-- default:live.neither_penalty_threshold_bps -->5000<!-- /default --> | Neither share must be strictly above this to trigger the penalty. |
+| `neither_window_assignments` | <!-- default:live.neither_window_assignments -->100<!-- /default --> | Completed assignments retained for Neither tracking; zero disables tracking. |
+| `neither_penalty_cooldown_secs` | <!-- default:live.neither_penalty_cooldown_secs -->7 days<!-- /default --> | Selection exclusion after excessive Neither votes. |
+| `challenge_stake_amount` | <!-- default:live.challenge_stake_amount -->1000 BRN<!-- /default --> | Challenger's admission stake. |
+| `challenge_duration_secs` | <!-- default:live.challenge_duration_secs -->7 days<!-- /default --> | Challenge voting duration from certified activation. |
+| `challenge_reward_bps` | <!-- default:live.challenge_reward_bps -->100<!-- /default --> | Challenger reward fraction of revoked TRST, subject to the cap. |
+| `challenge_reward_cap` | <!-- default:live.challenge_reward_cap -->2000 TRST<!-- /default --> | Maximum challenge reward. |
+| `bootstrap_exit_threshold` | <!-- default:live.bootstrap_exit_threshold -->50<!-- /default --> | Verified count that ends bootstrap; the effective threshold cannot exceed 50. |
 
 Neither is distinct from Legit and Illegit. It does not support acceptance or
 receive a stake reward; missing votes become Neither at the deadline. The rolling
@@ -80,19 +80,19 @@ the population later falls or governance raises the threshold. See
 
 | Field | Live default | Meaning |
 | --- | --- | --- |
-| `governance_proposal_duration_secs` | 7 days | Ordinary endorsement window. |
-| `governance_proposal_endorsements` | 10 | Endorsements required to enter voting. |
-| `governance_proposal_cost` | 100 BRN | Burn per endorsement, not a proposal-submission fee. |
-| `governance_exploration_duration_secs` | 14 days | The single ordinary voting window. |
-| `governance_supermajority_bps` | 8000 | Required yea share among yea and nay votes. |
-| `governance_quorum_bps` | 3000 | Required participation share of the eligible population. |
-| `governance_propagation_buffer_secs` | 1 hour | Buffer between voting end and counting. |
-| `governance_cooldown_duration_secs` | 7 days | Preparation period after ordinary approval. |
-| `consti_supermajority_bps` | 9000 | Approval threshold for constitutional matters. |
-| `consti_quorum_bps` | 3000 | Participation threshold for constitutional matters. |
-| `emergency_voting_duration_secs` | 24 hours | Emergency voting window. |
-| `emergency_quorum_bps` | 9500 | Emergency participation threshold. |
-| `emergency_supermajority_bps` | 9500 | Emergency approval threshold. |
+| `governance_proposal_duration_secs` | <!-- default:live.governance_proposal_duration_secs -->7 days<!-- /default --> | Ordinary endorsement window. |
+| `governance_proposal_endorsements` | <!-- default:live.governance_proposal_endorsements -->10<!-- /default --> | Endorsements required to enter voting. |
+| `governance_proposal_cost` | <!-- default:live.governance_proposal_cost -->100 BRN<!-- /default --> | Burn per endorsement, not a proposal-submission fee. |
+| `governance_exploration_duration_secs` | <!-- default:live.governance_exploration_duration_secs -->14 days<!-- /default --> | The single ordinary voting window. |
+| `governance_supermajority_bps` | <!-- default:live.governance_supermajority_bps -->8000<!-- /default --> | Required yea share among yea and nay votes. |
+| `governance_quorum_bps` | <!-- default:live.governance_quorum_bps -->3000<!-- /default --> | Required participation share of the eligible population. |
+| `governance_propagation_buffer_secs` | <!-- default:live.governance_propagation_buffer_secs -->1 hour<!-- /default --> | Buffer between voting end and counting. |
+| `governance_cooldown_duration_secs` | <!-- default:live.governance_cooldown_duration_secs -->7 days<!-- /default --> | Preparation period after ordinary approval. |
+| `consti_supermajority_bps` | <!-- default:live.consti_supermajority_bps -->9000<!-- /default --> | Approval threshold for constitutional matters. |
+| `consti_quorum_bps` | <!-- default:live.consti_quorum_bps -->3000<!-- /default --> | Participation threshold for constitutional matters. |
+| `emergency_voting_duration_secs` | <!-- default:live.emergency_voting_duration_secs -->1 day<!-- /default --> | Emergency voting window. |
+| `emergency_quorum_bps` | <!-- default:live.emergency_quorum_bps -->9500<!-- /default --> | Emergency participation threshold. |
+| `emergency_supermajority_bps` | <!-- default:live.emergency_supermajority_bps -->9500<!-- /default --> | Emergency approval threshold. |
 
 Abstentions count toward participation, but not the approval denominator. An
 emergency change to either constitutional threshold uses the higher of the
@@ -109,10 +109,10 @@ does not restore the old behavior.
 
 | Field | Stored default | Current behavior |
 | --- | --- | --- |
-| `governance_promotion_duration_secs` | 14 days | No second voting phase. |
-| `governance_ema_participation_bps` | 5000 | Does not adjust quorum. |
-| `governance_max_rounds` | 3 | A failed proposal requires a new submission. |
-| `governance_proposal_window_secs` | 7 days | Ordinary proposals use their own proposal duration. |
+| `governance_promotion_duration_secs` | <!-- default:live.governance_promotion_duration_secs -->14 days<!-- /default --> | No second voting phase. |
+| `governance_ema_participation_bps` | <!-- default:live.governance_ema_participation_bps -->5000<!-- /default --> | Does not adjust quorum. |
+| `governance_max_rounds` | <!-- default:live.governance_max_rounds -->3<!-- /default --> | A failed proposal requires a new submission. |
+| `governance_proposal_window_secs` | <!-- default:live.governance_proposal_window_secs -->7 days<!-- /default --> | Ordinary proposals use their own proposal duration. |
 
 ## Admission limits
 
@@ -120,8 +120,8 @@ There is no per-account daily transaction quota.
 
 | Field | Live default | Meaning |
 | --- | --- | --- |
-| `min_work_difficulty` | `0xffff_fff8_0000_0000` | Minimum proof-of-work difficulty. |
-| `new_wallet_rate_limit_duration_secs` | 30 days | Used by the current spending-cap age check. |
+| `min_work_difficulty` | <!-- default:live.min_work_difficulty -->0xfffffff800000000<!-- /default --> | Minimum proof-of-work difficulty. |
+| `new_wallet_rate_limit_duration_secs` | <!-- default:live.new_wallet_rate_limit_duration_secs -->30 days<!-- /default --> | Used by the current spending-cap age check. |
 
 Proof of work, spending limits and queue policies serve different purposes. None
 adds voting weight or replaces signature and ledger validation.
@@ -129,9 +129,9 @@ adds voting weight or replaces signature and ledger validation.
 ## Test and Dev differences
 
 Dev keeps Live economic rules with easier proof of work. Test also shortens
-ordinary governance windows to 30 seconds for proposals, 60 seconds for voting,
-15 seconds for cooldown and a 5-second propagation buffer. It removes governance
-endorsement cost/count requirements, uses 0.01% quorum and 51% approval, and
+ordinary governance windows to <!-- default:test.governance_proposal_duration_secs -->30 seconds<!-- /default --> for proposals, <!-- default:test.governance_exploration_duration_secs -->1 minute<!-- /default --> for voting, and
+a cooldown of <!-- default:test.governance_cooldown_duration_secs -->15 seconds<!-- /default --> with <!-- default:test.governance_propagation_buffer_secs -->5 seconds<!-- /default --> for the propagation buffer. It removes governance
+endorsement cost/count requirements, uses <!-- default:test.governance_quorum_bps:percent -->0.01%<!-- /default --> quorum and <!-- default:test.governance_supermajority_bps:percent -->51%<!-- /default --> approval, and
 removes the verifier minimum-age requirement. These settings make interactive
 tests easier; they are not Live defaults.
 

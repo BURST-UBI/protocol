@@ -6,7 +6,7 @@ transferable currency lasts.
 
 Universal income is one configuration. The community can change the income rate,
 including setting it to zero, and choose a limited or effectively unlimited
-currency lifetime. The defaults are about 1 BRN per eligible hour and a 70-year
+currency lifetime. The defaults are about <!-- default:live.brn_rate:hourly_approx -->1<!-- /default --> BRN per eligible hour and a <!-- default:live.trst_expiry_secs:years -->70<!-- /default -->-year
 TRST lifetime. These choices use the same underlying payment system.
 
 Start with the [introduction](introduction/QUICK_TOUR.md). It follows a payment,

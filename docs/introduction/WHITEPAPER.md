@@ -47,8 +47,8 @@ mechanism. Here, the two central economic settings are:
 
 These choices use the same BRN/TRST mechanism. A community can change the
 settings through governance rather than adopt a different currency design for
-each combination. The source defaults are approximately one BRN per eligible
-hour and a 70-year TRST lifetime (70 periods of 365 days).
+each combination. The source defaults are approximately <!-- default:live.brn_rate:hourly_approx -->1<!-- /default --> BRN per eligible
+hour and a <!-- default:live.trst_expiry_secs:years -->70<!-- /default -->-year TRST lifetime (<!-- default:live.trst_expiry_secs:years -->70<!-- /default --> periods of 365 days).
 
 Changing a setting does not erase the past. A zero rate stops BRN from growing,
 but people can still spend previously earned allowances to create TRST. It also
@@ -77,9 +77,9 @@ features currently enabled on Live networks.
 ## BRN: your personal income
 
 Once your account is verified, BRN accumulates at the same rate as it does for
-other eligible accounts. At the current default rate, that is approximately one
-BRN per hour. After 50 eligible hours, you would have about 50 BRN, assuming you
-had not spent or staked any.
+other eligible accounts. At the current default rate, that is approximately <!-- default:live.brn_rate:hourly_approx -->1<!-- /default -->
+BRN per hour. For example, at a rate of 1 BRN/hour, 50 eligible hours give about 50 BRN,
+assuming you had not spent or staked any.
 
 BRN stays with you. You cannot send it to another account. When you use it for a
 payment, it is **burned**: the amount is deducted from your allowance and creates
@@ -149,7 +149,7 @@ its original creator is later found to have obtained verification fraudulently.
 
 ## Expiry
 
-TRST has a 70-year lifetime by default, measured as 70 periods of 365 days from
+TRST has a <!-- default:live.trst_expiry_secs:years -->70<!-- /default -->-year lifetime by default, measured as <!-- default:live.trst_expiry_secs:years -->70<!-- /default --> periods of 365 days from
 its effective origin time. Once that time has passed, it becomes unspendable,
 whoever holds it. Passing it to another account does not restart its age.
 
@@ -234,9 +234,9 @@ not count toward acceptance. Missing votes become Neither at the deadline.
 The protocol defines how much support is needed, whether another panel is tried,
 and how stakes are returned or forfeited.
 
-For example, the default panel has seven members and requires 90% Legitimate
-votes. Six out of seven is only about 85.7%, so all seven must support acceptance
-in that case. These requirements are governable parameters.
+The default panel has <!-- default:live.num_verifiers -->7<!-- /default --> members and requires <!-- default:live.verification_threshold_bps:percent -->90%<!-- /default --> Legitimate
+votes. For example, with seven members and a 90% threshold, six votes are only
+about 85.7%, so all seven must support acceptance. These requirements are governable.
 
 Panel selection must be reproducible. Nodes agree on the eligible pool before
 using a designated future randomness result from drand. Every node then uses the
