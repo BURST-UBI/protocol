@@ -149,12 +149,12 @@ its original creator is later found to have obtained verification fraudulently.
 
 ## Expiry
 
-The community can give TRST a finite lifetime. For example, with a 30-year
-lifetime, TRST becomes unspendable 30 years after its creation, whoever holds it
-then. Passing it to another account does not restart its age.
+TRST has a 70-year lifetime by default, measured as 70 periods of 365 days from
+its effective origin time. Once that time has passed, it becomes unspendable,
+whoever holds it. Passing it to another account does not restart its age.
 
-The current defaults use a 70-year lifetime. Other finite lifetimes
-in these examples illustrate a setting the community can choose.
+The community can change this duration through governance. Examples elsewhere
+that use shorter lifetimes illustrate those alternative settings.
 
 Expiry applies to TRST, not unused BRN. A person can keep their personal allowance
 until they need it; the currency created when they spend that allowance can have

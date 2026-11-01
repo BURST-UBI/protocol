@@ -6,7 +6,8 @@ transferable currency lasts.
 
 Universal income is one configuration. The community can change the income rate,
 including setting it to zero, and choose a limited or effectively unlimited
-currency lifetime. These choices use the same underlying payment system.
+currency lifetime. The defaults are about 1 BRN per eligible hour and a 70-year
+TRST lifetime. These choices use the same underlying payment system.
 
 Start with the [introduction](introduction/QUICK_TOUR.md). It follows a payment,
 explains why the rules exist, and discusses what they cannot guarantee. Then read

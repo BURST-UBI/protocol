@@ -5,7 +5,7 @@
       "sha256": "84e258f1d54304fbc20ee03e4154ac87e98d0c5092c769db36d7a2178022cadb"
     },
     "docs/README.md": {
-      "sha256": "b0e49f75fc8e0d6ea51daf8b0a8fc14cc7c81a886eac8fd144946d12392a6e31"
+      "sha256": "135793c5b728dc2482ce19918fd5ec3122cfa724e7271c3be285e0fd58ed2910"
     },
     "docs/SUMMARY.md": {
       "sha256": "990d6904cac10eeb591423b76c92b6829f794cd6825d1b08374c6853f9e5f9a5"
@@ -41,10 +41,10 @@
       "sha256": "d067f148ee5db9e0814f9e4f33f59dc1f57d053de0726bc4fa7f63b72531b6fa"
     },
     "docs/introduction/QUICK_TOUR.md": {
-      "sha256": "0d57d4475290ceaf09ef982d48daab66418a5baba8d4844c4df7d3e748dc09c4"
+      "sha256": "4e273d265defa64b720664e6cf7ede6188fce57a6c7f77e2f66eaf5b7b04a159"
     },
     "docs/introduction/WHITEPAPER.md": {
-      "sha256": "4c92bf10d8bfc8621705fc5daf5a9ab062636af3e89c4d4c8d333119c0d6530d"
+      "sha256": "2ae5729dcff8c1e34c1ea27a797c8720d50cf411b109c785c39550ec512a3f0c"
     },
     "docs/node/GROUP_SERVICES.md": {
       "sha256": "3b4f90fdfda208cf113387de28599eec939050454109ea6bae19102e1553a607"
@@ -3017,15 +3017,15 @@
       "source": "docs/README.md",
       "line": 1,
       "title": "BURST",
-      "sha256": "87ca4b9caec5e80663abc4172f9d8a37c181349fb3c04cacbd138843f66dc672",
+      "sha256": "9b7466199e42378db56c4333dbc060ae39b3f616531c18a960b3f3a5483dd8b2",
       "status": "unverified",
-      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
+      "note": "Clarified the 70-year launch default and aligned introductory examples; no runtime qualification implied.",
       "evidence": []
     },
     {
       "id": "DOC-README-002",
       "source": "docs/README.md",
-      "line": 21,
+      "line": 22,
       "title": "Build with BURST",
       "sha256": "3cec8d3899c76eaecbf02a5e775a6bda5f6708d714ecea8c4723a27a133c9c95",
       "status": "unverified",
@@ -3847,15 +3847,15 @@
       "source": "docs/introduction/QUICK_TOUR.md",
       "line": 1,
       "title": "What is BURST?",
-      "sha256": "d2d71e21fe49501c34650782f6e38ee7b1be730585fbfe4d443467c82cb6042e",
+      "sha256": "86286a1d085e249ecd0a972a2b75c3a87c2df74b6fcf05a0ef507f2e0f0e13cb",
       "status": "unverified",
       "evidence": [],
-      "note": "User changed launch TRST lifetime to 70 years of 365 days. Source defaults updated; release candidate qualification not implied."
+      "note": "Clarified the 70-year launch default and aligned introductory examples; no runtime qualification implied."
     },
     {
       "id": "DOC-introduction/QUICK_TOUR-002",
       "source": "docs/introduction/QUICK_TOUR.md",
-      "line": 29,
+      "line": 30,
       "title": "An income of your own",
       "sha256": "1e64593ac78351bab601dc4b8c3e93b41e1bacc4f00dae4a85802de1f5684484",
       "status": "unverified",
@@ -3865,7 +3865,7 @@
     {
       "id": "DOC-introduction/QUICK_TOUR-003",
       "source": "docs/introduction/QUICK_TOUR.md",
-      "line": 45,
+      "line": 46,
       "title": "Something worth paying for",
       "sha256": "9c8eb4346cc877987c7af50d274b4c561e916b2400b21c62885aad124ce29da2",
       "status": "unverified",
@@ -3875,17 +3875,17 @@
     {
       "id": "DOC-introduction/QUICK_TOUR-004",
       "source": "docs/introduction/QUICK_TOUR.md",
-      "line": 65,
+      "line": 66,
       "title": "Why would someone accept TRST?",
-      "sha256": "2712af59a1a6441d529e03e12a6c956ece745b170a6177ae5cca99db8752c42c",
+      "sha256": "f15adfaeb044d92112f38c5e3be9046eb9714c4d90fd8397fbcf82268c1231f9",
       "status": "unverified",
       "evidence": [],
-      "note": "User changed launch TRST lifetime to 70 years of 365 days. Source defaults updated; release candidate qualification not implied."
+      "note": "Clarified the 70-year launch default and aligned introductory examples; no runtime qualification implied."
     },
     {
       "id": "DOC-introduction/QUICK_TOUR-005",
       "source": "docs/introduction/QUICK_TOUR.md",
-      "line": 85,
+      "line": 86,
       "title": "One income for each person",
       "sha256": "26f76330fc1f87a4849675348e6af788a3656b8bc4ca5d4eeee2185ac660ac91",
       "status": "unverified",
@@ -3895,7 +3895,7 @@
     {
       "id": "DOC-introduction/QUICK_TOUR-006",
       "source": "docs/introduction/QUICK_TOUR.md",
-      "line": 113,
+      "line": 114,
       "title": "Who checks the payments?",
       "sha256": "243aea80ae84c3bf6b23089d43316ab09442ba0f4dd42062fb7bd9c5071ac8e1",
       "status": "unverified",
@@ -3905,7 +3905,7 @@
     {
       "id": "DOC-introduction/QUICK_TOUR-007",
       "source": "docs/introduction/QUICK_TOUR.md",
-      "line": 128,
+      "line": 129,
       "title": "Rules people choose together",
       "sha256": "2ee977f0957be65cb7638ba2f8806a57e6db5e1e4e4ae16918f7a85487413b36",
       "status": "unverified",
@@ -3915,7 +3915,7 @@
     {
       "id": "DOC-introduction/QUICK_TOUR-008",
       "source": "docs/introduction/QUICK_TOUR.md",
-      "line": 141,
+      "line": 142,
       "title": "Getting started, then giving up control",
       "sha256": "923829872536f5ec38a83ca35f0c237eeef3d69be16785aa9a23761c7856facc",
       "status": "unverified",
@@ -4007,10 +4007,10 @@
       "source": "docs/introduction/WHITEPAPER.md",
       "line": 150,
       "title": "Expiry",
-      "sha256": "84eb0b682c8170070d8f0d6c4593984fa19657f9f47c7ad86f022e90f9ec7bd3",
+      "sha256": "286039e08dcdcdcb15f46bcb7c8c451e655bf54f58a3a0a0376c1b30d330a68e",
       "status": "unverified",
       "evidence": [],
-      "note": "User changed launch TRST lifetime to 70 years of 365 days. Source defaults updated; release candidate qualification not implied."
+      "note": "Clarified the 70-year launch default and aligned introductory examples; no runtime qualification implied."
     },
     {
       "id": "DOC-introduction/WHITEPAPER-010",
