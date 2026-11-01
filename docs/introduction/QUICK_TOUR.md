@@ -23,8 +23,7 @@ the community revise them. A positive income rate gives people ongoing income;
 a zero rate stops new income. Currency can have a limited or effectively
 unlimited lifetime.
 
-The current defaults use ongoing income and an effectively unlimited currency
-lifetime. Let's follow a payment under those settings, then look at the problems
+The current defaults use ongoing income and a 70-year currency lifetime. Let's follow a payment under those settings, then look at the problems
 that this creates and how BURST tries to address them.
 
 ## An income of your own
@@ -77,8 +76,9 @@ the money. With a 30-year lifetime, Alice's payment would expire 30 years after
 its creation, even if it had changed hands many times. Passing it on cannot
 restart the clock.
 
-The default lifetime is effectively unlimited. A finite lifetime is an option
-the community can choose, with consequences it must weigh. Neither setting
+The default lifetime is 70 years, measured as 70 periods of 365 days from the
+money's effective origin date. The community can choose a different lifetime,
+including effectively unlimited, with consequences it must weigh. No setting
 promises stable prices or equal wealth.
 
 ## One income for each person

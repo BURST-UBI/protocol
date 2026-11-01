@@ -147,7 +147,7 @@ TRST uses `u128` raw units with the same scale as BRN: one TRST is 10^18 raw and
 
 ### 6.2 Default TRST expiry period (launch default)
 
-The default expiry period is `u64::MAX` seconds, providing no effective expiry on practical timescales. It is an integer parameter, not mathematical infinity. Governance can change it; the age-based reference-value helper treats this default as 100%.
+The default expiry period is 70 years of 365 days, or `2_207_520_000` seconds, measured from the holding's effective origin time. Governance can change it. The age-based reference value declines linearly over that period; the face amount does not decay.
 
 ### 6.3 TRST token ID generation
 
@@ -1807,7 +1807,7 @@ and genesis context.
 
 ### 27.5 Testnet TRST/BRN — accelerated parameters?
 
-Test defaults retain the Live BRN accrual rate and unlimited TRST lifetime;
+Test defaults retain the Live BRN accrual rate and 70-year TRST lifetime;
 they do not apply a 100× accrual multiplier or one-hour expiry. They reduce work
 difficulty and verifier minimum age, and shorten governance timings: 30-second
 proposal, 60-second voting, 15-second cooldown and five-second propagation buffer.
@@ -2176,8 +2176,8 @@ separate durable transitions.
 
 ### 33.3 What if TRST expiry is voted to infinity?
 
-`u64::MAX` represents unlimited TRST lifetime for ordinary timestamps and is the
-launch default. Deadline arithmetic saturates at that value; the generic expiry
+`u64::MAX` represents unlimited TRST lifetime for ordinary timestamps. Governance
+can choose it instead of the 70-year launch default. Deadline arithmetic saturates at that value; the generic expiry
 predicate would still report expiry if `now` itself reached `u64::MAX`.
 
 Unlimited expiry does not disable BRN accrual, revoke identity rules, or prevent

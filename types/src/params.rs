@@ -19,6 +19,7 @@ pub struct ProtocolParams {
 
     /// TRST expiry period in seconds from the holding's effective origin time.
     /// Merges use the oldest input's effective origin time.
+    /// Default: 70 years of 365 days. Governance may choose another duration.
     /// `u64::MAX` represents an unlimited lifetime for ordinary timestamps.
     pub trst_expiry_secs: u64,
 
@@ -183,8 +184,7 @@ impl ProtocolParams {
     pub fn burst_defaults() -> Self {
         Self {
             brn_rate: Self::BRN_RATE_1_PER_HOUR,
-            // Accrual is enabled; governance may later choose a finite expiry.
-            trst_expiry_secs: u64::MAX,
+            trst_expiry_secs: 70 * 365 * 24 * 3600,
 
             endorsement_threshold: 3,
             endorsement_burn_amount: 336 * BRN_UNIT,
@@ -275,7 +275,7 @@ mod spec_defaults_tests {
     fn live_defaults_match_explicit_launch_decisions() {
         let params = ProtocolParams::burst_defaults();
         assert_eq!(params.brn_rate, ProtocolParams::BRN_RATE_1_PER_HOUR);
-        assert_eq!(params.trst_expiry_secs, u64::MAX);
+        assert_eq!(params.trst_expiry_secs, 2_207_520_000);
         assert_eq!(params.min_work_difficulty, 0xffff_fff8_0000_0000);
         assert_eq!(params.governance_proposal_cost, 100 * BRN_UNIT);
         assert_eq!(params.endorsement_burn_amount, 336 * BRN_UNIT);
@@ -293,8 +293,8 @@ mod spec_defaults_tests {
     fn testing_overrides_do_not_change_live_defaults() {
         let dev = ProtocolParams::devnet_defaults();
         let test = ProtocolParams::testnet_defaults();
-        assert_eq!(dev.trst_expiry_secs, u64::MAX);
-        assert_eq!(test.trst_expiry_secs, u64::MAX);
+        assert_eq!(dev.trst_expiry_secs, 2_207_520_000);
+        assert_eq!(test.trst_expiry_secs, 2_207_520_000);
         assert_eq!(dev.min_work_difficulty, 0xffff_f000_0000_0000);
         assert_eq!(dev.governance_proposal_cost, 100 * BRN_UNIT);
         assert_eq!(dev.governance_exploration_duration_secs, 14 * 24 * 3600);

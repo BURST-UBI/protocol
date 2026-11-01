@@ -48,7 +48,7 @@ mechanism. Here, the two central economic settings are:
 These choices use the same BRN/TRST mechanism. A community can change the
 settings through governance rather than adopt a different currency design for
 each combination. The source defaults are approximately one BRN per eligible
-hour and an effectively unlimited TRST lifetime.
+hour and a 70-year TRST lifetime (70 periods of 365 days).
 
 Changing a setting does not erase the past. A zero rate stops BRN from growing,
 but people can still spend previously earned allowances to create TRST. It also
@@ -153,7 +153,7 @@ The community can give TRST a finite lifetime. For example, with a 30-year
 lifetime, TRST becomes unspendable 30 years after its creation, whoever holds it
 then. Passing it to another account does not restart its age.
 
-The current defaults use an effectively unlimited lifetime. The finite lifetimes
+The current defaults use a 70-year lifetime. Other finite lifetimes
 in these examples illustrate a setting the community can choose.
 
 Expiry applies to TRST, not unused BRN. A person can keep their personal allowance

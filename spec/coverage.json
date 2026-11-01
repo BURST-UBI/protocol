@@ -2,7 +2,7 @@
   "version": 1,
   "sources": {
     "IMPLEMENTATION_DECISIONS.md": {
-      "sha256": "aad2d398d7ffe13b52c0fa8ba4df38e8e823895c875af57595a04213e81ac1fa"
+      "sha256": "84e258f1d54304fbc20ee03e4154ac87e98d0c5092c769db36d7a2178022cadb"
     },
     "docs/README.md": {
       "sha256": "b0e49f75fc8e0d6ea51daf8b0a8fc14cc7c81a886eac8fd144946d12392a6e31"
@@ -32,7 +32,7 @@
       "sha256": "b306755bb324ad4b8428b124f5b9b542263f24dd2b08044b856ac7bdc4f93573"
     },
     "docs/introduction/ECONOMICS.md": {
-      "sha256": "e1803ac0950e0ef692a7a958f1375bd22c09bf68e07fda7186dd8d62abde827b"
+      "sha256": "e5c2cbacdb8fb58f00ee5219c14f610c59c44dec25b3523313cebcd1da26f835"
     },
     "docs/introduction/GLOSSARY.md": {
       "sha256": "c17cde3d3874fab4244d23766b375d54538338acbda2fb26b829c12ea50783a8"
@@ -41,10 +41,10 @@
       "sha256": "d067f148ee5db9e0814f9e4f33f59dc1f57d053de0726bc4fa7f63b72531b6fa"
     },
     "docs/introduction/QUICK_TOUR.md": {
-      "sha256": "6f1b0819499041f290204c68504f39b81d6ee6a2380a2a82e2b644c796929341"
+      "sha256": "f8fd91d3e6b3b3d5978a5dd0ca46ccbe94b75f160c2a9727ac3c5fb6428c3d5a"
     },
     "docs/introduction/WHITEPAPER.md": {
-      "sha256": "3a27365585f5e88f6b76aba8c698958e8a03d48b847e331d8a2f76f0c043ee1f"
+      "sha256": "4c92bf10d8bfc8621705fc5daf5a9ab062636af3e89c4d4c8d333119c0d6530d"
     },
     "docs/node/GROUP_SERVICES.md": {
       "sha256": "3b4f90fdfda208cf113387de28599eec939050454109ea6bae19102e1553a607"
@@ -77,7 +77,7 @@
       "sha256": "f471e8d44254a55201366cbbec934bfc6aa7572cef4f7a836ce6fe29bc72ad42"
     },
     "docs/protocol/PARAMETERS.md": {
-      "sha256": "23a0925cf8977bbf803ea424788c96389249d7e68d4e2fbc5914d4f0e69f7874"
+      "sha256": "2f537454149bb8de6cf50e3f2da168ad15b353c6d86460e42bdd491c9dd2fed8"
     },
     "docs/protocol/VERIFICATION.md": {
       "sha256": "100e448a763af721da9c8fdad1507938e30b4f6a653702771eaf91d4179d3bd9"
@@ -427,10 +427,10 @@
       "source": "IMPLEMENTATION_DECISIONS.md",
       "line": 148,
       "title": "6.2 Default TRST expiry period (launch default)",
-      "sha256": "c827e8688b95f96aae05645cae396b6c42c26837f21f147af3c96bdcf0a16bda",
+      "sha256": "4c5b4c2df4176a6ab8c6b011aca1267ac2f6804f7156a4ce4d26c0992e06a5a5",
       "status": "unverified",
       "evidence": [],
-      "note": "Source text changed. Earlier scope and evidence remain in spec/evidence/documentation-baseline/coverage.json; no sign-off transferred."
+      "note": "User changed launch TRST lifetime to 70 years of 365 days. Source defaults updated; release candidate qualification not implied."
     },
     {
       "id": "D-6.3",
@@ -2307,10 +2307,10 @@
       "source": "IMPLEMENTATION_DECISIONS.md",
       "line": 1808,
       "title": "27.5 Testnet TRST/BRN — accelerated parameters?",
-      "sha256": "4126ff3355312429f4d7bc05a7c662c7e4ae7a920e66b15c1db401d733686e38",
+      "sha256": "ea0f5635539c1f53149bccbdd4d8401dfc3f682c6e35b3fda98eaa4e26bf2f06",
       "status": "unverified",
       "evidence": [],
-      "note": "Source text changed. Earlier scope and evidence remain in spec/evidence/documentation-baseline/coverage.json; no sign-off transferred."
+      "note": "User changed launch TRST lifetime to 70 years of 365 days. Source defaults updated; release candidate qualification not implied."
     },
     {
       "id": "D-28.1",
@@ -2657,10 +2657,10 @@
       "source": "IMPLEMENTATION_DECISIONS.md",
       "line": 2177,
       "title": "33.3 What if TRST expiry is voted to infinity?",
-      "sha256": "5f8381d03da335827f2ede0ec549cb01d88ff269a3696ff41e39f36c3b31efe3",
+      "sha256": "3814a5e6f4f4c8819007dc34ca82aa423a1cf15969b2a4d281d05f178f31cbef",
       "status": "unverified",
       "evidence": [],
-      "note": "Source text changed. Earlier scope and evidence remain in spec/evidence/documentation-baseline/coverage.json; no sign-off transferred."
+      "note": "User changed launch TRST lifetime to 70 years of 365 days. Source defaults updated; release candidate qualification not implied."
     },
     {
       "id": "D-33.4",
@@ -3757,15 +3757,15 @@
       "source": "docs/introduction/ECONOMICS.md",
       "line": 165,
       "title": "Units for wallet developers",
-      "sha256": "60a94e073f6591fede23b0b21e0389345923994d67a40ca275eb71a2aec699db",
+      "sha256": "7f2ae5705ee25b2618fdcc3bde9f52309f52a6984e5c8276118c9bcff75c4d29",
       "status": "unverified",
-      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
-      "evidence": []
+      "evidence": [],
+      "note": "User changed launch TRST lifetime to 70 years of 365 days. Source defaults updated; release candidate qualification not implied."
     },
     {
       "id": "DOC-introduction/ECONOMICS-008",
       "source": "docs/introduction/ECONOMICS.md",
-      "line": 181,
+      "line": 182,
       "title": "What the parameters mean",
       "sha256": "1caddda115bcca1944a458cf229522dcf616e8afe245d5602d41f69e85634c5d",
       "status": "unverified",
@@ -3847,15 +3847,15 @@
       "source": "docs/introduction/QUICK_TOUR.md",
       "line": 1,
       "title": "What is BURST?",
-      "sha256": "c308ec978214f823a413bec00db382aee98246f4c96a2593bbee07ef50edd620",
+      "sha256": "d2d71e21fe49501c34650782f6e38ee7b1be730585fbfe4d443467c82cb6042e",
       "status": "unverified",
       "evidence": [],
-      "note": "Introduction explains bootstrap purpose and permanent creator-authority exit; reviewed against bootstrap phase and veto admission code. No new runtime qualification."
+      "note": "User changed launch TRST lifetime to 70 years of 365 days. Source defaults updated; release candidate qualification not implied."
     },
     {
       "id": "DOC-introduction/QUICK_TOUR-002",
       "source": "docs/introduction/QUICK_TOUR.md",
-      "line": 30,
+      "line": 29,
       "title": "An income of your own",
       "sha256": "1e64593ac78351bab601dc4b8c3e93b41e1bacc4f00dae4a85802de1f5684484",
       "status": "unverified",
@@ -3865,7 +3865,7 @@
     {
       "id": "DOC-introduction/QUICK_TOUR-003",
       "source": "docs/introduction/QUICK_TOUR.md",
-      "line": 46,
+      "line": 45,
       "title": "Something worth paying for",
       "sha256": "9c8eb4346cc877987c7af50d274b4c561e916b2400b21c62885aad124ce29da2",
       "status": "unverified",
@@ -3875,12 +3875,12 @@
     {
       "id": "DOC-introduction/QUICK_TOUR-004",
       "source": "docs/introduction/QUICK_TOUR.md",
-      "line": 66,
+      "line": 65,
       "title": "Why would someone accept TRST?",
-      "sha256": "b1f622b36501ecaf9b07b95039724eff9554af808548a9a521d6dd40d4e75e56",
+      "sha256": "8e057652204ec5db677efe633460d6c6080d8f99ebd24282619807771cefd949",
       "status": "unverified",
-      "note": "Documentation explains purpose before mechanism and preserves implementation constraints; no runtime sign-off inferred.",
-      "evidence": []
+      "evidence": [],
+      "note": "User changed launch TRST lifetime to 70 years of 365 days. Source defaults updated; release candidate qualification not implied."
     },
     {
       "id": "DOC-introduction/QUICK_TOUR-005",
@@ -3947,10 +3947,10 @@
       "source": "docs/introduction/WHITEPAPER.md",
       "line": 31,
       "title": "Parameterized money",
-      "sha256": "60c4d61ca3a241a0e2a2c409a08749f4b10c395fb9ef1cea46e306a76154fdf3",
+      "sha256": "b673119fcd5f4d5af198155fa120d814fa55886525a461290fad171b000a9405",
       "status": "unverified",
-      "note": "Restored parameterized framing; documentation review does not qualify runtime behavior.",
-      "evidence": []
+      "evidence": [],
+      "note": "User changed launch TRST lifetime to 70 years of 365 days. Source defaults updated; release candidate qualification not implied."
     },
     {
       "id": "DOC-introduction/WHITEPAPER-004",
@@ -4007,10 +4007,10 @@
       "source": "docs/introduction/WHITEPAPER.md",
       "line": 150,
       "title": "Expiry",
-      "sha256": "de4f59ab782554eac2ba63240126eaa0b084a8c99c0d3d64988853e95edbd6f8",
+      "sha256": "84eb0b682c8170070d8f0d6c4593984fa19657f9f47c7ad86f022e90f9ec7bd3",
       "status": "unverified",
-      "note": "Explanatory documentation revised around the original whitepaper examples. No runtime or release sign-off transferred.",
-      "evidence": []
+      "evidence": [],
+      "note": "User changed launch TRST lifetime to 70 years of 365 days. Source defaults updated; release candidate qualification not implied."
     },
     {
       "id": "DOC-introduction/WHITEPAPER-010",
@@ -5007,10 +5007,10 @@
       "source": "docs/protocol/PARAMETERS.md",
       "line": 29,
       "title": "Accrual and expiry",
-      "sha256": "e5613f9db6e0d3720938a40b5fc7068ba14376d14b76833b6d6b52bb2f2a2dc0",
+      "sha256": "5028d7db34fa69a8a7110daf00dff941e18134739333cacea4ad7a2dee922b16",
       "status": "unverified",
       "evidence": [],
-      "note": "Documentation paths updated; no new qualification."
+      "note": "User changed launch TRST lifetime to 70 years of 365 days. Source defaults updated; release candidate qualification not implied."
     },
     {
       "id": "DOC-protocol/PARAMETERS-003",

@@ -31,7 +31,7 @@ one BRN in 3,600 seconds: `0.0000000000000008` BRN. Balances use integer arithme
 | Field | Live default | Meaning |
 | --- | --- | --- |
 | `brn_rate` | 277,777,777,777,778 raw/second | Approximately 1 BRN/hour during eligible time. |
-| `trst_expiry_secs` | `u64::MAX` | Effectively unlimited lifetime; finite values set age at expiry. |
+| `trst_expiry_secs` | 2,207,520,000 seconds | 70 years of 365 days from the effective origin time. Transfers do not renew it. |
 | `new_wallet_spending_limit` | 0 | Cap on each Send or Burn amount; zero disables it. |
 | `new_wallet_limit_duration_secs` | 0 | Stored but not consulted by current node spending admission. |
 

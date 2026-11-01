@@ -173,8 +173,9 @@ For example, 2.5 TRST is `2500000000000000000` raw units. In JavaScript, keep th
 RPC string or convert it with `BigInt('2500000000000000000')`. Converting it
 through a floating-point `Number` can lose precision.
 
-The default TRST lifetime is `u64::MAX`, which effectively disables expiry.
-Finite-lifetime examples describe settings the community can choose. Read the
+The default TRST lifetime is 70 years of 365 days, or `2207520000` seconds,
+measured from the effective origin time. Governance can choose another duration,
+including `u64::MAX` for effectively unlimited lifetime. Read the
 connected node's `protocol_params` instead of assuming its settings still match
 the source defaults.
 
