@@ -5,6 +5,10 @@ use burst_store::{block::BlockStore, BrnStore};
 use burst_trst::{MergeNode, MergeSource, MergerGraph, TrstEngine};
 use burst_types::{NetworkId, Timestamp, TxHash};
 
+#[cfg(feature = "experimental-testnet")]
+#[path = "../support/running_node.rs"]
+mod running_node;
+
 fn hash(value: u8) -> TxHash {
     TxHash::new([value; 32])
 }
@@ -194,7 +198,7 @@ async fn genesis_preserves_orphaned_lifecycle_and_initializes_complete_snapshots
     }
 }
 
-fn broken_snapshot(mutation: u8) -> (&'static str, Vec<u8>, &'static str) {
+fn broken_snapshot(mutation: u8, expiry_secs: u64) -> (&'static str, Vec<u8>, &'static str) {
     if mutation < 2 {
         let mut graph = MergerGraph::new();
         graph.record_merge(MergeNode {
@@ -220,7 +224,7 @@ fn broken_snapshot(mutation: u8) -> (&'static str, Vec<u8>, &'static str) {
         )
     } else {
         let owner = burst_crypto::derive_address(&burst_crypto::keypair_from_seed(&[0; 32]).public);
-        let mut engine = TrstEngine::new();
+        let mut engine = TrstEngine::with_expiry(expiry_secs);
         let token = engine
             .mint(
                 hash(1),
@@ -259,6 +263,18 @@ fn broken_snapshot(mutation: u8) -> (&'static str, Vec<u8>, &'static str) {
     }
 }
 
+fn write_legacy_holdings(store: &burst_store_lmdb::LmdbStore, bytes: &[u8]) {
+    let mut batch = store.tx_begin_write().unwrap();
+    assert!(batch.uses_stable_trst_records().unwrap());
+    assert!(batch
+        .checkpoint_metadata(burst_trst::engine::holding_rows::PREFIX.as_bytes())
+        .unwrap()
+        .is_empty());
+    batch.delete_meta("trst_state_format").unwrap();
+    batch.put_meta(TrstEngine::meta_key(), bytes).unwrap();
+    batch.commit().unwrap();
+}
+
 #[tokio::test]
 async fn corrupt_economic_snapshots_fail_startup_and_remain_available_for_diagnosis() {
     for mutation in 0..6 {
@@ -275,11 +291,15 @@ async fn corrupt_economic_snapshots_fail_startup_and_remain_available_for_diagno
             bootstrap_peers: vec![],
             ..NodeConfig::default()
         };
-        let (key, bytes, expected) = broken_snapshot(mutation);
+        let (key, bytes, expected) = broken_snapshot(mutation, config.params.trst_expiry_secs);
         {
             let node = BurstNode::new(config.clone()).await.unwrap();
             node.initialize_genesis().unwrap();
-            node.store.meta_store().put_meta(key, &bytes).unwrap();
+            if key == TrstEngine::meta_key() {
+                write_legacy_holdings(&node.store, &bytes);
+            } else {
+                node.store.meta_store().put_meta(key, &bytes).unwrap();
+            }
         }
         for _ in 0..2 {
             let mut node = BurstNode::new(config.clone()).await.unwrap();
@@ -301,7 +321,7 @@ async fn corrupt_economic_snapshots_fail_startup_and_remain_available_for_diagno
 
 #[tokio::test]
 async fn initialized_ledgers_never_replace_missing_economic_snapshots_with_empty_state() {
-    for key in [TrstEngine::meta_key(), "merger_graph"] {
+    for key in [TrstEngine::meta_key(), "trst_state_format", "merger_graph"] {
         let directory = tempfile::tempdir().unwrap();
         let config = NodeConfig {
             network: NetworkId::Dev,
@@ -318,12 +338,13 @@ async fn initialized_ledgers_never_replace_missing_economic_snapshots_with_empty
         {
             let node = BurstNode::new(config.clone()).await.unwrap();
             node.initialize_genesis().unwrap();
-            assert!(node
-                .store
-                .meta_store()
-                .get_meta(TrstEngine::meta_key())
-                .is_ok());
-            assert!(node.store.meta_store().get_meta("merger_graph").is_ok());
+            if key == TrstEngine::meta_key() {
+                write_legacy_holdings(
+                    &node.store,
+                    &TrstEngine::with_expiry(config.params.trst_expiry_secs).save_wallets(),
+                );
+            }
+            assert!(node.store.meta_store().get_meta(key).is_ok());
             node.store.meta_store().delete_meta(key).unwrap();
         }
         for _ in 0..2 {
@@ -352,9 +373,9 @@ async fn initialized_ledgers_never_replace_missing_economic_snapshots_with_empty
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg(feature = "experimental-testnet")]
 async fn populated_legacy_governance_migrates_on_start_and_survives_second_restart() {
     use burst_store_lmdb::block_undo::UndoTable;
-    use burst_wallet_core::NodeClient;
     use serde_json::json;
     use std::time::Duration;
 
@@ -381,19 +402,12 @@ async fn populated_legacy_governance_migrates_on_start_and_survives_second_resta
     let mut proposal = None;
     let mut expected = None;
     for generation in 0..3 {
-        let mut node = BurstNode::new(config.clone()).await.unwrap();
-        let shutdown = node.shutdown.clone();
+        let node = running_node::RunningNode::launch(config.clone()).await;
         let store = node.store.clone();
-        let worker = tokio::spawn(async move {
-            node.start_with_services(burst_daemon::start_public_services)
-                .await
-                .unwrap();
-            node.stop().await.unwrap();
-        });
-        let client = NodeClient::new(format!("http://127.0.0.1:{port}")).unwrap();
+        let client = &node.client;
         let result = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
-                assert!(!worker.is_finished(), "startup exited before RPC readiness");
+                assert!(!node.is_finished(), "startup exited before RPC readiness");
                 if client.rpc_call("node_info", json!({})).await.is_ok() {
                     break;
                 }
@@ -437,11 +451,7 @@ async fn populated_legacy_governance_migrates_on_start_and_survives_second_resta
             expected = Some(actual);
         })
         .await;
-        shutdown.shutdown();
-        tokio::time::timeout(Duration::from_secs(20), worker)
-            .await
-            .unwrap()
-            .unwrap();
+        node.stop().await;
         result.expect("migration/restart session timed out");
         if generation == 0 {
             // Materialize the supported legacy layout from a real confirmed signed

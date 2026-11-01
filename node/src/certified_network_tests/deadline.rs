@@ -285,18 +285,16 @@ fn assert_governed_selection_state(
     assert_eq!(current.emergency_voting_duration_secs, 23);
     assert_eq!(current.emergency_quorum_bps, 7501);
     assert_eq!(current.emergency_supermajority_bps, 9001);
-    let snapshot = burst_verification::OrchestratorSnapshot::decode(
-        &store
-            .meta_store()
-            .get_meta(crate::endorsement_commit::SNAPSHOT_KEY)
-            .unwrap(),
-    )
-    .unwrap();
+    let state = {
+        let reader = store.tx_begin_read().unwrap();
+        let view = store.read_view(&reader).unwrap();
+        crate::verification_storage::load_view(&view).unwrap()
+    };
+    let snapshot = state.snapshot();
     assert!(!snapshot.penalized_verifiers.contains_key(absent));
     assert_eq!(snapshot.neither_tracker.retained_assignments(absent), 1);
     assert_eq!(snapshot.neither_tracker.neither_count(absent), 1);
     assert!(!snapshot.neither_tracker.exceeds_penalty_threshold(absent));
-    let state = burst_verification::VerificationOrchestrator::restore(snapshot);
     assert!(!state.is_penalized(absent, deadline + 6));
     assert!(!state.is_penalized(absent, deadline + 7));
     assert!(eligible_at(store, params, at).is_empty());
@@ -674,7 +672,10 @@ async fn deadline_journey(change_rules: bool) {
                 .unwrap();
             assert_eq!(status["status"], "verified");
             assert_eq!(status["verified_at"], completion.completed_at);
-            assert_eq!(status["selection_available"], false);
+            assert_eq!(
+                status["selection_available"],
+                cfg!(feature = "experimental-testnet")
+            );
             for account in &addresses[1..4] {
                 let components = client
                     .rpc_call("brn_components", json!({"account":account.as_str()}))

@@ -50,7 +50,7 @@ pub(crate) struct BlockValidationQueue {
     pub(crate) before_prepare: Option<Arc<dyn Fn() + Send + Sync>>,
     pending: VecDeque<JoinHandle<BlockAuthentication>>,
     #[cfg(test)]
-    before_authenticate: Option<Arc<dyn Fn() + Send + Sync>>,
+    pub(crate) before_authenticate: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl BlockValidationQueue {

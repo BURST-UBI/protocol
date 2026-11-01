@@ -314,6 +314,7 @@ mod tests {
 
     #[tokio::test]
     async fn payment_workers_release_writer_overlap_and_preserve_authentication() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::{Arc, Condvar, Mutex};
         use std::time::Duration;
         let fixture = Fixture::new();
@@ -364,10 +365,27 @@ mod tests {
             2,
         );
         validation.set_preparation(store.clone(), fixture.params.clone());
+        // Cache capture may skip a contended lock. Start the second capture only
+        // after the first has finished, then require both preparations to overlap.
+        let captured = Arc::new((Mutex::new(false), Condvar::new()));
+        let worker_captured = captured.clone();
+        let dispatched = AtomicUsize::new(0);
+        validation.before_authenticate = Some(Arc::new(move || {
+            if dispatched.fetch_add(1, Ordering::SeqCst) == 1 {
+                let captured = worker_captured.0.lock().unwrap();
+                let (captured, _) = worker_captured
+                    .1
+                    .wait_timeout_while(captured, Duration::from_secs(2), |captured| !*captured)
+                    .unwrap();
+                assert!(*captured, "first worker did not capture payment state");
+            }
+        }));
         let gate = Arc::new((Mutex::new(false), Condvar::new()));
         let worker_gate = gate.clone();
         let (started, mut observed) = tokio::sync::mpsc::unbounded_channel();
         validation.before_prepare = Some(Arc::new(move || {
+            *captured.0.lock().unwrap() = true;
+            captured.1.notify_all();
             started.send(()).unwrap();
             let ready = worker_gate.0.lock().unwrap();
             let (ready, _) = worker_gate

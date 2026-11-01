@@ -245,6 +245,13 @@ jobs:
           cd target/ci-node-tests
           sha256sum --check SHA256SUMS
           chmod +x burst-node-tests
+      - name: Restore signed electorate fixture
+        if: matrix.group == 'slow'
+        run: |
+          (cd node/tests/fixtures && sha256sum --check electorate-257.sha256)
+          mkdir "$RUNNER_TEMP/burst-electorate"
+          tar -xzf node/tests/fixtures/electorate-257.tar.gz -C "$RUNNER_TEMP/burst-electorate"
+          echo "BURST_ELECTORATE_PREPARED=$RUNNER_TEMP/burst-electorate" >> "$GITHUB_ENV"
       - run: bash tools/test-node.sh "${{ matrix.group }}"
         env:
           BURST_NODE_TEST_BINARY: ${{ github.workspace }}/target/ci-node-tests/burst-node-tests
@@ -366,5 +373,8 @@ jobs:
           cargo test -p burst-node --locked --no-fail-fast --test "$INTEGRATION_TARGET" -- --test-threads=1 || status=1
           if [[ "$INTEGRATION_TARGET" == '*' || "$INTEGRATION_TARGET" == 'confirmed_replay_network' ]]; then
             cargo test -p burst-node --locked --features experimental-testnet --test confirmed_replay_network certified_selection_catches_up_after_payment_replay -- --exact --test-threads=1 || status=1
+          fi
+          if [[ "$INTEGRATION_TARGET" == '*' || "$INTEGRATION_TARGET" == 'economic_snapshot_recovery' ]]; then
+            cargo test -p burst-node --locked --features experimental-testnet --test economic_snapshot_recovery populated_legacy_governance_migrates_on_start_and_survives_second_restart -- --exact --test-threads=1 || status=1
           fi
           exit "$status"
