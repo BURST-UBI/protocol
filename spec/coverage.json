@@ -41,7 +41,7 @@
       "sha256": "d067f148ee5db9e0814f9e4f33f59dc1f57d053de0726bc4fa7f63b72531b6fa"
     },
     "docs/introduction/QUICK_TOUR.md": {
-      "sha256": "1de8b0f26183cf258d8af80f64f4149dfa6c3fd91a77f565bc16f01443c7f6fb"
+      "sha256": "5b7d3946d9a7371cf5f5cedc850c23ff9f428235174b4f66c371daa1b86d0e73"
     },
     "docs/introduction/WHITEPAPER.md": {
       "sha256": "2e2b3d4d5802eb3c3efa840f6df4b9db006df149b9861b92faed3b076b002168"
@@ -3847,80 +3847,70 @@
       "source": "docs/introduction/QUICK_TOUR.md",
       "line": 1,
       "title": "What is BURST?",
-      "sha256": "284437a473629bcc623636e78e26037515915648bb9d32cfd5dfe67e20c4676e",
+      "sha256": "f12cc9e1783c3fc42aae40216cd99bb5dd7d6105004dd71519b1a60def91c2f2",
       "status": "unverified",
       "evidence": [],
-      "note": "Introduction shortened to remove repeated explanations; no implementation sign-off implied."
+      "note": "Earlier introduction restored with current defaults and one bootstrap paragraph; no implementation sign-off implied."
     },
     {
       "id": "DOC-introduction/QUICK_TOUR-002",
       "source": "docs/introduction/QUICK_TOUR.md",
-      "line": 15,
+      "line": 24,
       "title": "An income of your own",
-      "sha256": "0b61dfcfc9fc7be9993d490b566ecdad2a92d4104f8980a392b58e0748a82cd5",
+      "sha256": "c72aabc46ac8fc44856a0349598e5f1cdddcbf3a35c3242946a101467ef11ce0",
       "status": "unverified",
       "evidence": [],
-      "note": "Introduction shortened to remove repeated explanations; no implementation sign-off implied."
+      "note": "Earlier introduction restored with current defaults and one bootstrap paragraph; no implementation sign-off implied."
     },
     {
       "id": "DOC-introduction/QUICK_TOUR-003",
       "source": "docs/introduction/QUICK_TOUR.md",
-      "line": 26,
+      "line": 40,
       "title": "Something worth paying for",
-      "sha256": "5662dbc645cc7a2610724de0ac6fa334154675ec4438141be2fdc86db35e1a09",
+      "sha256": "9c8eb4346cc877987c7af50d274b4c561e916b2400b21c62885aad124ce29da2",
       "status": "unverified",
       "evidence": [],
-      "note": "Introduction shortened to remove repeated explanations; no implementation sign-off implied."
+      "note": "Earlier introduction restored with current defaults and one bootstrap paragraph; no implementation sign-off implied."
     },
     {
       "id": "DOC-introduction/QUICK_TOUR-004",
       "source": "docs/introduction/QUICK_TOUR.md",
-      "line": 42,
+      "line": 60,
       "title": "Why would someone accept TRST?",
-      "sha256": "e29dc1bbb0e7e16edebe6b0256f20c17980570a71d79ef019431f6d39a756a16",
+      "sha256": "8521ac046153c5c3552415880990652b7516d67efa3adc61a8ddf97a01da6d9b",
       "status": "unverified",
       "evidence": [],
-      "note": "Introduction shortened to remove repeated explanations; no implementation sign-off implied."
+      "note": "Earlier introduction restored with current defaults and one bootstrap paragraph; no implementation sign-off implied."
     },
     {
       "id": "DOC-introduction/QUICK_TOUR-005",
       "source": "docs/introduction/QUICK_TOUR.md",
-      "line": 55,
+      "line": 77,
       "title": "One income for each person",
-      "sha256": "e1d787c4d49479fda37663a13b9a616d1ffa0a85657e846f91a1699d894f5305",
+      "sha256": "26f76330fc1f87a4849675348e6af788a3656b8bc4ca5d4eeee2185ac660ac91",
       "status": "unverified",
       "evidence": [],
-      "note": "Introduction shortened to remove repeated explanations; no implementation sign-off implied."
+      "note": "Earlier introduction restored with current defaults and one bootstrap paragraph; no implementation sign-off implied."
     },
     {
       "id": "DOC-introduction/QUICK_TOUR-006",
       "source": "docs/introduction/QUICK_TOUR.md",
-      "line": 73,
+      "line": 105,
       "title": "Who checks the payments?",
-      "sha256": "2e8c2f526009ae45a0abd78da45a6333b38563275930afec2e978c65ed4d3574",
+      "sha256": "243aea80ae84c3bf6b23089d43316ab09442ba0f4dd42062fb7bd9c5071ac8e1",
       "status": "unverified",
       "evidence": [],
-      "note": "Introduction shortened to remove repeated explanations; no implementation sign-off implied."
+      "note": "Earlier introduction restored with current defaults and one bootstrap paragraph; no implementation sign-off implied."
     },
     {
       "id": "DOC-introduction/QUICK_TOUR-007",
       "source": "docs/introduction/QUICK_TOUR.md",
-      "line": 84,
+      "line": 120,
       "title": "Rules people choose together",
-      "sha256": "3a62b172481f5a761ae92f8877e44d14cb03c7b07621a822804e3015c128f334",
+      "sha256": "0d137bc1eecde00c80110a4e7e5a1746ed6c4b2345c897a11b4381ab58b24229",
       "status": "unverified",
       "evidence": [],
-      "note": "Introduction shortened to remove repeated explanations; no implementation sign-off implied."
-    },
-    {
-      "id": "DOC-introduction/QUICK_TOUR-008",
-      "source": "docs/introduction/QUICK_TOUR.md",
-      "line": 95,
-      "title": "Getting started, then giving up control",
-      "sha256": "74bd126bf6211ca88af4d3108a0467ece5264ab4117d9745533a16b17654bea5",
-      "status": "unverified",
-      "evidence": [],
-      "note": "Introduction shortened to remove repeated explanations; no implementation sign-off implied."
+      "note": "Earlier introduction restored with current defaults and one bootstrap paragraph; no implementation sign-off implied."
     },
     {
       "id": "DOC-introduction/WHITEPAPER-001",
