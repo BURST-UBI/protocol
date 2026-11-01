@@ -1,22 +1,14 @@
 //! Startup must retain private outcome causes, not just visible holdings.
 use burst_node::{BurstNode, NodeConfig};
-use burst_trst::{engine::WalletRecord, merger_graph::GraphRecord, TrstEngine};
+use burst_trst::{merger_graph::GraphRecord, TrstEngine};
 use burst_types::{BlockHash, NetworkId, Timestamp, TxHash, WalletAddress};
 use std::time::Duration;
 
 fn stored_engine(node: &BurstNode) -> TrstEngine {
     let batch = node.store.tx_begin_write().unwrap();
-    let mut engine = TrstEngine::from_wallet_records(
-        batch
-            .checkpoint_metadata_entries(WalletRecord::STORAGE_PREFIX.as_bytes())
-            .unwrap()
-            .map(|row| {
-                let (key, value) = row.map_err(|error| error.to_string())?;
-                WalletRecord::from_storage_entry(std::str::from_utf8(key).unwrap(), value)
-            }),
-        node.config.params.trst_expiry_secs,
-    )
-    .unwrap();
+    let mut engine = batch
+        .read_trst_holdings(node.config.params.trst_expiry_secs)
+        .unwrap();
     engine.merger_graph = burst_trst::MergerGraph::from_records(
         batch
             .checkpoint_metadata_entries(GraphRecord::STORAGE_PREFIX.as_bytes())
