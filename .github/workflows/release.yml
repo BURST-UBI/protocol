@@ -26,7 +26,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
       - run: node --test tools/check-spec-coverage.test.mjs
@@ -57,7 +57,7 @@ jobs:
         run: cargo build --locked --release -p burst-daemon --target x86_64-unknown-linux-musl
       - name: Verify
         run: file target/x86_64-unknown-linux-musl/release/burst-daemon
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - name: Exercise the release executable
@@ -120,7 +120,7 @@ jobs:
         run: cargo build --locked --release -p burst-daemon --target aarch64-apple-darwin
       - name: Verify
         run: file target/aarch64-apple-darwin/release/burst-daemon
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - name: Exercise the release executable
